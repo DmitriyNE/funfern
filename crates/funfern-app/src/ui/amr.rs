@@ -100,7 +100,7 @@ impl Playground {
         display: &WaveDisplay,
     ) {
         self.drain_background_amr();
-        if !self.amr_enabled {
+        if !self.editor.document.presentation.adaptation.enabled {
             self.cancel_background_amr();
             self.amr_indicator_job = None;
             self.amr_indicator_completed = None;
@@ -283,15 +283,28 @@ impl Playground {
             let target_revision = self.runtime.reserve_mesh_revision();
             let options = MeshAdaptationOptions {
                 meshing: MeshingOptions {
-                    curve_tolerance: (self.amr_minimum_edge * 0.02).min(1.5e-3),
-                    target_edge_length: self.amr_maximum_edge / 1.05,
+                    curve_tolerance: (self.editor.document.presentation.adaptation.minimum_edge
+                        * 0.02)
+                        .min(1.5e-3),
+                    target_edge_length: self.editor.document.presentation.adaptation.maximum_edge
+                        / 1.05,
                     minimum_angle_degrees: 12.0,
                     max_vertices: 50_000,
                     max_triangles: 100_000,
                     max_refinement_steps: 50_000,
                 },
-                minimum_target_edge_length: self.amr_minimum_edge,
-                maximum_target_edge_length: self.amr_maximum_edge,
+                minimum_target_edge_length: self
+                    .editor
+                    .document
+                    .presentation
+                    .adaptation
+                    .minimum_edge,
+                maximum_target_edge_length: self
+                    .editor
+                    .document
+                    .presentation
+                    .adaptation
+                    .maximum_edge,
                 collapse_ratio: AMR_COARSEN_EDGE_RATIO,
                 max_topology_changes: 512,
                 max_refinement_changes: if decision == AmrDecision::Refine {
@@ -349,7 +362,7 @@ impl Playground {
             return;
         }
         let step = display.snapshot_completed_steps;
-        if resident_filter_boundary(self.grid_scale_filter, step) {
+        if resident_filter_boundary(self.editor.document.presentation.grid_scale_filter, step) {
             // The resident filter is accepted at this same solver step and
             // flips the state lanes once more. At that instant the other lane
             // is the pre-filter state, not the endpoint one `dt` earlier.
@@ -454,10 +467,15 @@ impl Playground {
             active.bundle.model(),
             snapshot,
             SolutionIndicatorOptions {
-                minimum_edge_length: self.amr_minimum_edge,
-                maximum_edge_length: self.amr_maximum_edge,
+                minimum_edge_length: self.editor.document.presentation.adaptation.minimum_edge,
+                maximum_edge_length: self.editor.document.presentation.adaptation.maximum_edge,
                 relative_tolerance: self.amr_target_accuracy(),
-                elements_per_wavelength: self.amr_elements_per_wavelength,
+                elements_per_wavelength: self
+                    .editor
+                    .document
+                    .presentation
+                    .adaptation
+                    .elements_per_wavelength,
                 // The estimator's spectral scale is what the field oscillates
                 // at; only the size rule takes what the medium generates.
                 forcing_frequency_hz: highest_forcing_frequency(
@@ -506,7 +524,7 @@ mod tests {
             ..Playground::default()
         };
         let first = activate(&mut state);
-        state.amr_enabled = true;
+        state.editor.document.presentation.adaptation.enabled = true;
         state.amr_adaptation_job = Some(MeshAdaptationJob::new_topology(
             first.mesh.clone(),
             &first.bundle.plan,
@@ -550,7 +568,7 @@ mod tests {
             ..Playground::default()
         };
         let active = activate(&mut state);
-        state.amr_enabled = true;
+        state.editor.document.presentation.adaptation.enabled = true;
         state.amr_adaptation_job = Some(MeshAdaptationJob::new_topology(
             active.mesh.clone(),
             &active.bundle.plan,
@@ -682,7 +700,14 @@ mod tests {
             ..Playground::default()
         };
         assert_eq!(
-            amr_accuracy_preset_name(state.amr_accuracy_percent),
+            amr_accuracy_preset_name(
+                state
+                    .editor
+                    .document
+                    .presentation
+                    .adaptation
+                    .accuracy_percent
+            ),
             "Medium"
         );
         assert!((state.amr_target_accuracy() - 0.12).abs() < 1.0e-12);
@@ -726,11 +751,28 @@ mod tests {
         for (step, name) in WATCHED.into_iter().enumerate() {
             let before = state.amr_settings();
             match step {
-                0 => state.amr_enabled = !state.amr_enabled,
-                1 => state.amr_accuracy_percent = 24.0,
-                2 => state.amr_elements_per_wavelength = 9.0,
-                3 => state.amr_minimum_edge = 0.01,
-                _ => state.amr_maximum_edge = 0.2,
+                0 => {
+                    state.editor.document.presentation.adaptation.enabled =
+                        !state.editor.document.presentation.adaptation.enabled
+                }
+                1 => {
+                    state
+                        .editor
+                        .document
+                        .presentation
+                        .adaptation
+                        .accuracy_percent = 24.0
+                }
+                2 => {
+                    state
+                        .editor
+                        .document
+                        .presentation
+                        .adaptation
+                        .elements_per_wavelength = 9.0
+                }
+                3 => state.editor.document.presentation.adaptation.minimum_edge = 0.01,
+                _ => state.editor.document.presentation.adaptation.maximum_edge = 0.2,
             }
             assert_ne!(state.amr_settings(), before, "{name} is not watched");
         }

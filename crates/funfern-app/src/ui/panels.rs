@@ -110,7 +110,7 @@ impl Playground {
             ui.small("Blue where the estimate wants the finest elements, orange the coarsest");
             // The overlay has three ways of being empty and none of them used to
             // say anything, which is how it came to look broken.
-            if !self.amr_enabled {
+            if !p.adaptation.enabled {
                 ui.colored_label(GOLD, "Adaptation is off in Simulation");
             } else {
                 match &self.amr_indicator_result {
@@ -245,22 +245,25 @@ impl Playground {
             .width(ui.available_width())
             .selected_text(format!(
                 "{} · target edge {:.3}",
-                preset_name(self.mesh_edge),
-                self.mesh_edge
+                preset_name(self.editor.document.presentation.mesh_edge),
+                self.editor.document.presentation.mesh_edge
             ))
             .show_ui(ui, |ui| {
                 for (value, name) in PRESETS {
                     ui.selectable_value(
-                        &mut self.mesh_edge,
+                        &mut self.editor.document.presentation.mesh_edge,
                         value,
                         format!("{name} · h ≤ {value:.2}"),
                     );
                 }
             });
         let slider = ui.add(
-            egui::Slider::new(&mut self.mesh_edge, 0.02..=0.25)
-                .logarithmic(true)
-                .text("Target edge"),
+            egui::Slider::new(
+                &mut self.editor.document.presentation.mesh_edge,
+                0.02..=0.25,
+            )
+            .logarithmic(true)
+            .text("Target edge"),
         );
         self.mesh_edge_dragging = slider.dragged();
         ui.horizontal(|ui| {
@@ -274,39 +277,67 @@ impl Playground {
                 self.remesh_requested = true;
             }
             if let Some(active) = self.runtime.active()
-                && (active.meshing.target_edge_length - self.mesh_edge).abs() > 1.0e-9
+                && (active.meshing.target_edge_length - self.editor.document.presentation.mesh_edge)
+                    .abs()
+                    > 1.0e-9
             {
                 ui.small(format!(
                     "Active {:.3} · requested {:.3}",
-                    active.meshing.target_edge_length, self.mesh_edge
+                    active.meshing.target_edge_length, self.editor.document.presentation.mesh_edge
                 ));
             }
         });
         ui.separator();
         let before_amr = self.amr_settings();
-        ui.checkbox(&mut self.amr_enabled, "Adapt mesh to the wave");
-        ui.add_enabled_ui(self.amr_enabled, |ui| {
-            let preset = amr_accuracy_preset_name(self.amr_accuracy_percent);
+        ui.checkbox(
+            &mut self.editor.document.presentation.adaptation.enabled,
+            "Adapt mesh to the wave",
+        );
+        ui.add_enabled_ui(self.editor.document.presentation.adaptation.enabled, |ui| {
+            let preset = amr_accuracy_preset_name(
+                self.editor
+                    .document
+                    .presentation
+                    .adaptation
+                    .accuracy_percent,
+            );
             egui::ComboBox::from_id_salt("amr_accuracy")
                 .width(ui.available_width())
                 .selected_text(format!(
                     "{preset} · target accuracy {:.0}%",
-                    self.amr_accuracy_percent
+                    self.editor
+                        .document
+                        .presentation
+                        .adaptation
+                        .accuracy_percent
                 ))
                 .show_ui(ui, |ui| {
                     for (value, name) in AMR_ACCURACY_PRESETS {
                         ui.selectable_value(
-                            &mut self.amr_accuracy_percent,
+                            &mut self
+                                .editor
+                                .document
+                                .presentation
+                                .adaptation
+                                .accuracy_percent,
                             value,
                             format!("{name} · {value:.0}%"),
                         );
                     }
                 });
             ui.add(
-                egui::Slider::new(&mut self.amr_accuracy_percent, 2.0..=50.0)
-                    .logarithmic(true)
-                    .suffix("%")
-                    .text("Target accuracy"),
+                egui::Slider::new(
+                    &mut self
+                        .editor
+                        .document
+                        .presentation
+                        .adaptation
+                        .accuracy_percent,
+                    2.0..=50.0,
+                )
+                .logarithmic(true)
+                .suffix("%")
+                .text("Target accuracy"),
             )
             .on_hover_text(
                 "How much estimated error the whole field is allowed to carry. \
@@ -320,14 +351,16 @@ impl Playground {
             // while the accuracy target reads satisfied. It is a standing
             // condition rather than a passing one, so it may take its own line.
             if let Some(result) = &self.amr_indicator_result
-                && result.report.smallest_wavelength_target < self.amr_minimum_edge
+                && result.report.smallest_wavelength_target
+                    < self.editor.document.presentation.adaptation.minimum_edge
             {
                 ui.colored_label(
                     GOLD,
                     format!(
                         "The forcing wants elements of {:.3}, under the smallest allowed \
                          of {:.3}, so the mesh sits at its floor whatever the accuracy asks",
-                        result.report.smallest_wavelength_target, self.amr_minimum_edge,
+                        result.report.smallest_wavelength_target,
+                        self.editor.document.presentation.adaptation.minimum_edge,
                     ),
                 );
             }
@@ -416,16 +449,28 @@ impl Playground {
         match &self.amr_indicator_result {
             Some(result) if result.report.dormant => format!(
                 "Estimated error dormant · target {:.0}%",
-                self.amr_accuracy_percent
+                self.editor
+                    .document
+                    .presentation
+                    .adaptation
+                    .accuracy_percent
             ),
             Some(result) => format!(
                 "Estimated error {:.1}% · target {:.0}%",
                 100.0 * result.report.global_indicator,
-                self.amr_accuracy_percent,
+                self.editor
+                    .document
+                    .presentation
+                    .adaptation
+                    .accuracy_percent,
             ),
             None => format!(
                 "Estimated error — · target {:.0}%",
-                self.amr_accuracy_percent
+                self.editor
+                    .document
+                    .presentation
+                    .adaptation
+                    .accuracy_percent
             ),
         }
     }
@@ -433,7 +478,12 @@ impl Playground {
     /// The accuracy target as the estimate states it, rather than as the
     /// control shows it.
     pub(super) fn amr_target_accuracy(&self) -> f64 {
-        self.amr_accuracy_percent / 100.0
+        self.editor
+            .document
+            .presentation
+            .adaptation
+            .accuracy_percent
+            / 100.0
     }
 
     /// Everything an estimate is built from. A change to any of it drops the
@@ -442,11 +492,19 @@ impl Playground {
     /// too, and why this is compared after the whole panel has been drawn.
     pub(super) fn amr_settings(&self) -> (bool, f64, f64, f64, f64) {
         (
-            self.amr_enabled,
-            self.amr_accuracy_percent,
-            self.amr_elements_per_wavelength,
-            self.amr_minimum_edge,
-            self.amr_maximum_edge,
+            self.editor.document.presentation.adaptation.enabled,
+            self.editor
+                .document
+                .presentation
+                .adaptation
+                .accuracy_percent,
+            self.editor
+                .document
+                .presentation
+                .adaptation
+                .elements_per_wavelength,
+            self.editor.document.presentation.adaptation.minimum_edge,
+            self.editor.document.presentation.adaptation.maximum_edge,
         )
     }
 
@@ -459,12 +517,19 @@ impl Playground {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Adaptation");
-                ui.add_enabled_ui(self.amr_enabled, |ui| {
+                ui.add_enabled_ui(self.editor.document.presentation.adaptation.enabled, |ui| {
                     ui.add(
-                        egui::DragValue::new(&mut self.amr_elements_per_wavelength)
-                            .speed(0.1)
-                            .range(2.0..=16.0)
-                            .prefix("Elements per wavelength "),
+                        egui::DragValue::new(
+                            &mut self
+                                .editor
+                                .document
+                                .presentation
+                                .adaptation
+                                .elements_per_wavelength,
+                        )
+                        .speed(0.1)
+                        .range(2.0..=16.0)
+                        .prefix("Elements per wavelength "),
                     )
                     .on_hover_text(
                         "How finely a forced wave is carried, wherever a source or a \
@@ -474,29 +539,48 @@ impl Playground {
                     );
                     ui.horizontal(|ui| {
                         ui.add(
-                            egui::DragValue::new(&mut self.amr_minimum_edge)
-                                .speed(0.002)
-                                .range(0.005..=1.0)
-                                .prefix("Min "),
+                            egui::DragValue::new(
+                                &mut self.editor.document.presentation.adaptation.minimum_edge,
+                            )
+                            .speed(0.002)
+                            .range(0.005..=1.0)
+                            .prefix("Min "),
                         )
                         .on_hover_text("The smallest element adaptation may build");
                         ui.add(
-                            egui::DragValue::new(&mut self.amr_maximum_edge)
-                                .speed(0.005)
-                                .range(0.005..=1.0)
-                                .prefix("Max "),
+                            egui::DragValue::new(
+                                &mut self.editor.document.presentation.adaptation.maximum_edge,
+                            )
+                            .speed(0.005)
+                            .range(0.005..=1.0)
+                            .prefix("Max "),
                         )
                         .on_hover_text("The largest element adaptation may leave standing");
                     });
-                    self.amr_minimum_edge =
-                        self.amr_minimum_edge.min(self.amr_maximum_edge).max(0.005);
-                    self.amr_maximum_edge = self.amr_maximum_edge.max(self.amr_minimum_edge);
+                    self.editor.document.presentation.adaptation.minimum_edge = self
+                        .editor
+                        .document
+                        .presentation
+                        .adaptation
+                        .minimum_edge
+                        .min(self.editor.document.presentation.adaptation.maximum_edge)
+                        .max(0.005);
+                    self.editor.document.presentation.adaptation.maximum_edge = self
+                        .editor
+                        .document
+                        .presentation
+                        .adaptation
+                        .maximum_edge
+                        .max(self.editor.document.presentation.adaptation.minimum_edge);
                 });
                 ui.separator();
                 ui.label("Solver");
-                ui.checkbox(&mut self.grid_scale_filter, "Damp unresolvable detail")
-                    .on_hover_text(
-                        "The scheme does not dissipate at any wavelength, and the fastest \
+                ui.checkbox(
+                    &mut self.editor.document.presentation.grid_scale_filter,
+                    "Damp unresolvable detail",
+                )
+                .on_hover_text(
+                    "The scheme does not dissipate at any wavelength, and the fastest \
                          modes a mesh can hold barely travel, so a sharp event - deleting a \
                          wall the field had a step across, or a source narrower than a few \
                          nodes - leaves a speckle that stays put for the rest of the run. \
@@ -505,7 +589,7 @@ impl Playground {
                          It preserves constants and stationary force-free flux; it is not a \
                          terminal-silence or DC-removal control. \
                          Turn it off to see the untouched scheme.",
-                    );
+                );
             });
     }
 }

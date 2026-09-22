@@ -112,8 +112,8 @@ impl Playground {
             return;
         }
         let options = MeshingOptions {
-            target_edge_length: self.mesh_edge,
-            curve_tolerance: (self.mesh_edge * 0.02).min(5e-4),
+            target_edge_length: self.editor.document.presentation.mesh_edge,
+            curve_tolerance: (self.editor.document.presentation.mesh_edge * 0.02).min(5e-4),
             ..MeshingOptions::default()
         };
         // This revision is accounted for when a preparation is in flight for
@@ -126,7 +126,7 @@ impl Playground {
         // generation and does not come through here.
         if !self.remesh_requested
             && self.requested_revision == Some(self.editor.revision)
-            && self.requested_edge == self.mesh_edge
+            && self.requested_edge == self.editor.document.presentation.mesh_edge
             && (self.preparation_in_progress()
                 || self.runtime.active().is_some_and(|active| {
                     active.bundle.token.document_revision == self.editor.revision
@@ -146,7 +146,8 @@ impl Playground {
         if std::mem::take(&mut self.remesh_requested) {
             self.runtime.request_full_rebuild();
         }
-        self.runtime.set_preserve_adaptation(self.amr_enabled);
+        self.runtime
+            .set_preserve_adaptation(self.editor.document.presentation.adaptation.enabled);
         let require_solver_handoff = self.uploaded_time_step > 0.0
             && self.runtime.active().is_some_and(|active| {
                 let wanted = paced_time_step(
@@ -166,7 +167,7 @@ impl Playground {
         ) {
             Ok(_) => {
                 self.requested_revision = Some(self.editor.revision);
-                self.requested_edge = self.mesh_edge;
+                self.requested_edge = self.editor.document.presentation.mesh_edge;
                 self.reset_requested = false;
                 self.fresh_requested = false;
                 self.begin_handoff_timeline();
@@ -285,7 +286,7 @@ impl Playground {
         commands: &mut Commands,
         delta: f64,
     ) {
-        request.set_grid_scale_filter(self.grid_scale_filter);
+        request.set_grid_scale_filter(self.editor.document.presentation.grid_scale_filter);
         self.finish_source_commit(request);
         // Starting another preparation mid-upload clears `runtime.ready`, and
         // would make the accepted GPU generation impossible to publish under

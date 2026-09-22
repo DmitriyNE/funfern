@@ -38,13 +38,17 @@ impl Playground {
             && let Some(result) = &self.amr_indicator_result
             && result.element_targets.len() == mesh.triangles.len()
         {
-            let span = (self.amr_maximum_edge - self.amr_minimum_edge).max(f64::MIN_POSITIVE);
+            let span = (self.editor.document.presentation.adaptation.maximum_edge
+                - self.editor.document.presentation.adaptation.minimum_edge)
+                .max(f64::MIN_POSITIVE);
             let alpha = (presentation.material_overlay_opacity * 210.0).round() as u8;
             let mut targets = egui::Mesh::default();
             targets.reserve_vertices(mesh.triangles.len() * 3);
             targets.reserve_triangles(mesh.triangles.len());
             for (triangle, target) in mesh.triangles.iter().zip(&result.element_targets) {
-                let fraction = ((*target - self.amr_minimum_edge) / span).clamp(0.0, 1.0) as f32;
+                let fraction =
+                    ((*target - self.editor.document.presentation.adaptation.minimum_edge) / span)
+                        .clamp(0.0, 1.0) as f32;
                 let color = amr_target_color(fraction, alpha);
                 let first = targets.vertices.len() as u32;
                 for index in triangle.vertices {
@@ -357,7 +361,10 @@ impl Playground {
                 &mut samples,
                 completed_steps,
                 absolute_time,
-                resident_filter_boundary(self.grid_scale_filter, completed_steps),
+                resident_filter_boundary(
+                    self.editor.document.presentation.grid_scale_filter,
+                    completed_steps,
+                ),
             );
         } else {
             self.vector_overlay_ac_state.clear();

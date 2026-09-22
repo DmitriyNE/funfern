@@ -5,6 +5,35 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-23 — What the solver is told to do now survives a restart
+
+Reported while trying to run an experiment: adaptation cannot be turned off for
+a session, because its settings are not kept. The control exists, but every
+launch resets it, so "start without adaptation" was not expressible - which is
+also what blocked reproducing the report it was needed for.
+
+- The adaptation controls lived on the UI struct alone. They move into the
+  document's presentation, beside `simulation_speed`, which already worked that
+  way: `mesh_edge`, the `adaptation` block - enabled, accuracy, elements per
+  wavelength, minimum and maximum edge - and `grid_scale_filter`.
+- Moved rather than mirrored. A working copy synchronised against the document
+  would be two truths to keep in step, so the call sites read the document and
+  the duplicate fields are gone.
+- Every stored key carries a serde default taken from the real default, so a
+  file written before today opens with what the application used to start from
+  rather than being refused. The existing older-file test covers all seven.
+- `the_solver_settings_survive_a_round_trip` says what it is for: a session left
+  with adaptation off must open with it off.
+- Two judgement calls. `mesh_edge` and `grid_scale_filter` were not asked for,
+  and are included because they are the other settings that change what the
+  solver does rather than what is drawn - a reopened document meshing itself at
+  a different resolution is the same surprise as a changed coefficient. And
+  presentation travels with a share link, so these now travel with one too;
+  that seems right for a shared scene, but it does hand over the sender's
+  adaptation settings.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`.
+
 ## 2026-09-23 — The device held the assumption the host had just dropped
 
 Reported: loading the autosave and switching to a parametric pump on epsilon

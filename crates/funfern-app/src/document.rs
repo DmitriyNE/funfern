@@ -197,6 +197,54 @@ pub struct PresentationSettings {
     pub material_overlay_logarithmic: bool,
     pub material_overlay_manual_min: f64,
     pub material_overlay_manual_max: f64,
+    /// What the solver is asked to do, rather than what is drawn. These decide
+    /// the mesh a document is simulated on, so a reopened document that meshed
+    /// itself differently from the one that was saved is the same surprise as a
+    /// changed coefficient would be - and until they were kept here, starting a
+    /// session with adaptation off was not expressible at all.
+    pub mesh_edge: f64,
+    pub adaptation: AdaptationSettings,
+    pub grid_scale_filter: bool,
+}
+
+/// The adaptation controls, as the panel shows them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdaptationSettings {
+    pub enabled: bool,
+    /// Estimated error of the whole field the adaptation aims for, as a
+    /// percentage, held in the units the control shows so the presets are the
+    /// round numbers they read as.
+    pub accuracy_percent: f64,
+    pub elements_per_wavelength: f64,
+    pub minimum_edge: f64,
+    pub maximum_edge: f64,
+}
+
+impl AdaptationSettings {
+    pub fn valid(self) -> bool {
+        self.accuracy_percent.is_finite()
+            && (0.1..=50.0).contains(&self.accuracy_percent)
+            && self.elements_per_wavelength.is_finite()
+            && (2.0..=64.0).contains(&self.elements_per_wavelength)
+            && self.minimum_edge.is_finite()
+            && self.maximum_edge.is_finite()
+            && self.minimum_edge > 0.0
+            && self.minimum_edge <= self.maximum_edge
+    }
+}
+
+impl Default for AdaptationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            // The medium preset of `AMR_ACCURACY_PRESETS`, which the control
+            // reads back by value.
+            accuracy_percent: 12.0,
+            elements_per_wavelength: 6.0,
+            minimum_edge: 0.02,
+            maximum_edge: 0.16,
+        }
+    }
 }
 
 impl PresentationSettings {
@@ -213,6 +261,9 @@ impl PresentationSettings {
             && (0.05..=1.0).contains(&self.material_overlay_opacity)
             && self.material_overlay_manual_min.is_finite()
             && self.material_overlay_manual_max.is_finite()
+            && self.mesh_edge.is_finite()
+            && (0.005..=1.0).contains(&self.mesh_edge)
+            && self.adaptation.valid()
     }
 }
 
@@ -246,6 +297,9 @@ impl Default for PresentationSettings {
             material_overlay_logarithmic: false,
             material_overlay_manual_min: 0.0,
             material_overlay_manual_max: 1.0,
+            mesh_edge: 0.08,
+            adaptation: AdaptationSettings::default(),
+            grid_scale_filter: true,
         }
     }
 }

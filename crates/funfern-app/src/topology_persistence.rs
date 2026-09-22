@@ -6,8 +6,8 @@
 //! one file.
 
 use crate::document::{
-    MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty, PresentationSettings,
-    ProbeId, ProbeSamplingPreset, VectorOverlay,
+    AdaptationSettings, MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty,
+    PresentationSettings, ProbeId, ProbeSamplingPreset, VectorOverlay,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -1116,6 +1116,45 @@ struct StoredPresentation {
     material_overlay_logarithmic: bool,
     material_overlay_manual_min: f64,
     material_overlay_manual_max: f64,
+    /// The solver settings. Every one defaults, so a document written before
+    /// they were kept loads with the values the application used to start from
+    /// rather than being refused.
+    #[serde(default = "default_mesh_edge")]
+    mesh_edge: f64,
+    #[serde(default = "default_adaptation_enabled")]
+    adaptation_enabled: bool,
+    #[serde(default = "default_adaptation_accuracy_percent")]
+    adaptation_accuracy_percent: f64,
+    #[serde(default = "default_adaptation_elements_per_wavelength")]
+    adaptation_elements_per_wavelength: f64,
+    #[serde(default = "default_adaptation_minimum_edge")]
+    adaptation_minimum_edge: f64,
+    #[serde(default = "default_adaptation_maximum_edge")]
+    adaptation_maximum_edge: f64,
+    #[serde(default = "default_grid_scale_filter")]
+    grid_scale_filter: bool,
+}
+
+fn default_mesh_edge() -> f64 {
+    PresentationSettings::default().mesh_edge
+}
+fn default_adaptation_enabled() -> bool {
+    AdaptationSettings::default().enabled
+}
+fn default_adaptation_accuracy_percent() -> f64 {
+    AdaptationSettings::default().accuracy_percent
+}
+fn default_adaptation_elements_per_wavelength() -> f64 {
+    AdaptationSettings::default().elements_per_wavelength
+}
+fn default_adaptation_minimum_edge() -> f64 {
+    AdaptationSettings::default().minimum_edge
+}
+fn default_adaptation_maximum_edge() -> f64 {
+    AdaptationSettings::default().maximum_edge
+}
+fn default_grid_scale_filter() -> bool {
+    PresentationSettings::default().grid_scale_filter
 }
 
 const fn default_probe_labels() -> bool {
@@ -1780,6 +1819,13 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
         simulation_speed: settings.simulation_speed,
         field_gain: settings.field_gain,
         field_auto_exposure: settings.field_auto_exposure,
+        mesh_edge: settings.mesh_edge,
+        adaptation_enabled: settings.adaptation.enabled,
+        adaptation_accuracy_percent: settings.adaptation.accuracy_percent,
+        adaptation_elements_per_wavelength: settings.adaptation.elements_per_wavelength,
+        adaptation_minimum_edge: settings.adaptation.minimum_edge,
+        adaptation_maximum_edge: settings.adaptation.maximum_edge,
+        grid_scale_filter: settings.grid_scale_filter,
         vector_overlay: match settings.vector_overlay {
             VectorOverlay::Off => StoredVectorOverlay::Off,
             VectorOverlay::ComplementaryField => StoredVectorOverlay::ComplementaryField,
@@ -1833,6 +1879,15 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
         simulation_speed: stored.simulation_speed,
         field_gain: stored.field_gain,
         field_auto_exposure: stored.field_auto_exposure,
+        mesh_edge: stored.mesh_edge,
+        adaptation: AdaptationSettings {
+            enabled: stored.adaptation_enabled,
+            accuracy_percent: stored.adaptation_accuracy_percent,
+            elements_per_wavelength: stored.adaptation_elements_per_wavelength,
+            minimum_edge: stored.adaptation_minimum_edge,
+            maximum_edge: stored.adaptation_maximum_edge,
+        },
+        grid_scale_filter: stored.grid_scale_filter,
         vector_overlay: match stored.vector_overlay {
             StoredVectorOverlay::Off => VectorOverlay::Off,
             StoredVectorOverlay::ComplementaryField => VectorOverlay::ComplementaryField,
@@ -2343,6 +2398,15 @@ mod tests {
                 material_overlay_logarithmic: !flag,
                 material_overlay_manual_min: -2.5,
                 material_overlay_manual_max: 4.5,
+                mesh_edge: if flag { 0.07 } else { 0.11 },
+                adaptation: AdaptationSettings {
+                    enabled: !flag,
+                    accuracy_percent: if flag { 0.5 } else { 2.0 },
+                    elements_per_wavelength: if flag { 5.0 } else { 9.0 },
+                    minimum_edge: if flag { 0.015 } else { 0.03 },
+                    maximum_edge: if flag { 0.2 } else { 0.35 },
+                },
+                grid_scale_filter: flag,
             };
             document.model.probes = vec![TopologyProbeDefinition {
                 id: ProbeId(1),
@@ -2375,6 +2439,13 @@ mod tests {
         let presentation = value["presentation"].as_object_mut().unwrap();
         for key in [
             "adaptation_target",
+            "mesh_edge",
+            "adaptation_enabled",
+            "adaptation_accuracy_percent",
+            "adaptation_elements_per_wavelength",
+            "adaptation_minimum_edge",
+            "adaptation_maximum_edge",
+            "grid_scale_filter",
             "probe_labels",
             "field_auto_exposure",
             "simulation_speed",
@@ -2395,6 +2466,32 @@ mod tests {
         assert_eq!(
             migrated.presentation.material_overlay,
             MaterialOverlay::AdaptationTarget
+        );
+    }
+
+    /// The settings that decide what the solver does, not what is drawn.
+    ///
+    /// Until these were kept, starting a session with adaptation off was not
+    /// expressible: the control existed but reset to on at every launch, so a
+    /// document could not be opened the way it was left.
+    #[test]
+    fn the_solver_settings_survive_a_round_trip() {
+        let mut document = TopologyDocument::default();
+        document.presentation.mesh_edge = 0.045;
+        document.presentation.grid_scale_filter = false;
+        document.presentation.adaptation = AdaptationSettings {
+            enabled: false,
+            accuracy_percent: 6.0,
+            elements_per_wavelength: 9.0,
+            minimum_edge: 0.011,
+            maximum_edge: 0.29,
+        };
+        assert!(document.presentation.valid());
+        let decoded = parse_document(save(&document).unwrap().as_bytes()).unwrap();
+        assert_eq!(decoded.presentation, document.presentation);
+        assert!(
+            !decoded.presentation.adaptation.enabled,
+            "a session left with adaptation off must open with it off"
         );
     }
 

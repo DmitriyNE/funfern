@@ -414,7 +414,7 @@ impl Playground {
                         ui.small(format!(
                             "Whole field {:.2}% · target {:.0}% · {}",
                             100.0 * report.global_indicator,
-                            self.amr_accuracy_percent,
+                            self.editor.document.presentation.adaptation.accuracy_percent,
                             adaptation_decision(report, self.amr_target_accuracy()).label(),
                         ));
                     }

@@ -85,7 +85,6 @@ pub struct Playground {
     pub(super) example_opened: Option<usize>,
     pub(super) material_color_edit: Option<(MaterialId, [u8; 3])>,
     pub(super) new_separator_material: MaterialId,
-    pub(super) mesh_edge: f64,
     /// The slider produces a value per frame; the rebuild waits for release.
     pub(super) mesh_edge_dragging: bool,
     /// The Remesh button: rebuild at the current resolution even though
@@ -222,15 +221,6 @@ pub struct Playground {
     pub(super) material_overlay_job: Option<MaterialOverlayJob>,
     pub(super) material_overlay_snapshot: Option<MaterialOverlaySnapshot>,
     pub(super) material_overlay_error: Option<String>,
-    pub(super) amr_enabled: bool,
-    /// Estimated error of the whole field the adaptation aims for, as a
-    /// percentage. Held in the units the control shows so the presets are the
-    /// round numbers they read as.
-    pub(super) amr_accuracy_percent: f64,
-    pub(super) amr_elements_per_wavelength: f64,
-    pub(super) amr_minimum_edge: f64,
-    pub(super) amr_maximum_edge: f64,
-    pub(super) grid_scale_filter: bool,
     pub(super) amr_status: String,
     pub(super) amr_error: Option<String>,
     pub(super) amr_last_started: Option<Instant>,
@@ -328,7 +318,6 @@ impl Default for Playground {
             example_opened: Some(0),
             material_color_edit: None,
             new_separator_material: DEFAULT_MATERIAL,
-            mesh_edge: 0.08,
             mesh_edge_dragging: false,
             remesh_requested: false,
             requested_edge: f64::NAN,
@@ -420,12 +409,6 @@ impl Default for Playground {
             material_overlay_job: None,
             material_overlay_snapshot: None,
             material_overlay_error: None,
-            amr_enabled: true,
-            amr_accuracy_percent: AMR_ACCURACY_PRESETS[1].0,
-            amr_elements_per_wavelength: 6.0,
-            amr_minimum_edge: 0.02,
-            amr_maximum_edge: 0.16,
-            grid_scale_filter: true,
             amr_status: "waiting for solution".into(),
             amr_error: None,
             amr_last_started: None,
