@@ -2659,136 +2659,171 @@ mod tests {
     /// The scalar estimator's own material samples, which it takes from the
     /// scene rather than from the operator.
     ///
-    /// Two contracts. A uniform pump is exactly a scene whose coefficient was
-    /// authored at the pumped value, so every error term has to come out
-    /// identical to that scene's - that is what makes the instantaneous
-    /// samples a reconstruction of the medium rather than a correction to it.
-    /// And the wavelength limit has to stay on the authored speed, because a
-    /// limit that breathed with the drive would retarget the same element
-    /// every cycle.
+    /// Two contracts, checked on each constitutive row in turn. A uniform pump
+    /// is exactly a scene whose coefficient was authored at the pumped value,
+    /// so every error term has to come out identical to that scene's - that is
+    /// what makes the instantaneous samples a reconstruction of the medium
+    /// rather than a correction to it. And the wavelength limit has to stay on
+    /// the authored speed, because a limit that breathed with the drive would
+    /// retarget the same element every cycle.
+    ///
+    /// Running both rows is the point. They scale in opposite directions - the
+    /// primary row multiplies the mass, while the complementary row is
+    /// authored on the reciprocal stiffness, so its factor divides the
+    /// stiffness tensor - and a test on one row alone cannot see the other's
+    /// direction at all.
     #[test]
     fn instantaneous_samples_match_a_scene_authored_at_the_driven_value() {
         const BASE_MASS: f64 = 1.3;
-        let mut driven = Scene::default();
-        driven.materials[0].mass_density = ScalarField::constant(BASE_MASS);
-        driven.materials[0].stiffness = ScalarField::constant(0.7);
-        driven.materials[0].mass_law.drive = TimeDrive::ParametricPump {
-            depth: ScalarField::constant(0.2),
-            frequency_hz: ScalarField::constant(0.8),
-            phase_radians: ScalarField::constant(0.4),
-        };
-        let mut authored = driven.clone();
-        strip_temporal_laws(&mut authored.materials);
+        const BASE_STIFFNESS: f64 = 0.7;
+        for mass_row in [true, false] {
+            let mut driven = Scene::default();
+            driven.materials[0].mass_density = ScalarField::constant(BASE_MASS);
+            driven.materials[0].stiffness = ScalarField::constant(BASE_STIFFNESS);
+            let pump = TimeDrive::ParametricPump {
+                depth: ScalarField::constant(0.2),
+                frequency_hz: ScalarField::constant(0.8),
+                phase_radians: ScalarField::constant(0.4),
+            };
+            if mass_row {
+                driven.materials[0].mass_law.drive = pump;
+            } else {
+                driven.materials[0].stiffness_law.drive = pump;
+            }
+            let mut authored = driven.clone();
+            strip_temporal_laws(&mut authored.materials);
 
-        let mesh = std::sync::Arc::new(
-            mesh_scene(
-                &authored,
-                1,
-                MeshingOptions {
-                    target_edge_length: 0.3,
-                    ..MeshingOptions::default()
-                },
-            )
-            .unwrap(),
-        );
-        let quadratic = std::sync::Arc::new(
-            QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &authored,
-                OuterBoundaryCondition::Reflecting,
-            )
-            .unwrap(),
-        );
-        let temporal =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &driven, 1).unwrap();
-        let runtime = temporal.initial_runtime();
-        let time = 0.37;
-
-        // The pump is uniform in space, so the whole nodal mass moves by one
-        // factor. Reading it off the operator's two mass vectors derives the
-        // expectation from a path that is not the one under test.
-        let pumped = temporal.primary_mass_at(time, &runtime).unwrap();
-        let base = temporal.base().primary_mass();
-        let factor = pumped[0] / base[0];
-        assert!(factor.is_finite() && (factor - 1.0).abs() > 1.0e-3);
-        for (pumped, base) in pumped.iter().zip(base) {
-            assert!((pumped / base - factor).abs() < 1.0e-12);
-        }
-
-        let mut equivalent = authored.clone();
-        equivalent.materials[0].mass_density = ScalarField::constant(BASE_MASS * factor);
-
-        let count = quadratic.degrees_of_freedom();
-        let points = quadratic.node_points();
-        let snapshot = QuadraticSolutionSnapshot {
-            mesh_revision: mesh.mesh_revision,
-            displacement: points
-                .iter()
-                .map(|point| 0.08 * (1.7 * point.x - 1.1 * point.y).sin())
-                .collect(),
-            velocity: points
-                .iter()
-                .map(|point| 0.05 * (0.9 * point.x + 1.4 * point.y).cos())
-                .collect(),
-            acceleration: vec![0.0; count],
-            auxiliary: vec![0.0; count],
-            volume_acceleration: vec![0.0; count],
-            time,
-            time_step: 1.0e-3,
-        };
-        let options = SolutionIndicatorOptions {
-            resolved_frequency_hz: 2.0,
-            ..SolutionIndicatorOptions::default()
-        };
-        let report = |scene: &Scene, runtime: Option<&CanonicalMaterialRuntimeState>| {
-            let mut job = SolutionIndicatorJob::new(
-                mesh.clone(),
-                quadratic.clone(),
-                scene.clone(),
-                snapshot.clone(),
-                options,
+            let mesh = std::sync::Arc::new(
+                mesh_scene(
+                    &authored,
+                    1,
+                    MeshingOptions {
+                        target_edge_length: 0.3,
+                        ..MeshingOptions::default()
+                    },
+                )
+                .unwrap(),
             );
-            if let Some(runtime) = runtime {
-                job = job.with_instantaneous_materials(runtime.clone());
-            }
-            loop {
-                if let Some(result) = job.advance(8_192) {
-                    return result.unwrap().report;
+            let quadratic = std::sync::Arc::new(
+                QuadraticWaveOperator::assemble_scene(
+                    &mesh,
+                    &authored,
+                    OuterBoundaryCondition::Reflecting,
+                )
+                .unwrap(),
+            );
+            let temporal =
+                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &driven, 1)
+                    .unwrap();
+            let runtime = temporal.initial_runtime();
+            let time = 0.37;
+
+            // The pump is uniform in space, so the whole row moves by one
+            // factor. Reading it off the operator's own two evaluations of
+            // that row derives the expectation from a path that is not the one
+            // under test.
+            let factor = if mass_row {
+                let pumped = temporal.primary_mass_at(time, &runtime).unwrap();
+                let base = temporal.base().primary_mass();
+                let factor = pumped[0] / base[0];
+                for (pumped, base) in pumped.iter().zip(base) {
+                    assert!((pumped / base - factor).abs() < 1.0e-12);
                 }
+                factor
+            } else {
+                let probe =
+                    vec![Point2::new(1.0, 0.0); temporal.base().complementary_degrees_of_freedom()];
+                let pumped = temporal
+                    .complementary_field_at(&probe, time, &runtime)
+                    .unwrap();
+                let base = temporal.base().complementary_field(&probe).unwrap();
+                let factor = base[0].x / pumped[0].x;
+                for (pumped, base) in pumped.iter().zip(&base) {
+                    assert!((base.x / pumped.x - factor).abs() < 1.0e-12);
+                }
+                factor
+            };
+            assert!(factor.is_finite() && (factor - 1.0).abs() > 1.0e-3);
+
+            let mut equivalent = authored.clone();
+            if mass_row {
+                equivalent.materials[0].mass_density = ScalarField::constant(BASE_MASS * factor);
+            } else {
+                equivalent.materials[0].stiffness = ScalarField::constant(BASE_STIFFNESS / factor);
             }
-        };
 
-        let instantaneous = report(&driven, Some(&runtime));
-        let equivalent = report(&equivalent, None);
-        let close = |left: f64, right: f64| {
-            (left - right).abs() <= 1.0e-12 * left.abs().max(right.abs()).max(1.0)
-        };
-        assert!(close(instantaneous.total_energy, equivalent.total_energy));
-        assert!(close(
-            instantaneous.global_indicator,
-            equivalent.global_indicator
-        ));
-        assert!(close(
-            instantaneous.interior_jump_contribution,
-            equivalent.interior_jump_contribution
-        ));
-        assert!(close(
-            instantaneous.displacement_recovery_contribution,
-            equivalent.displacement_recovery_contribution
-        ));
+            let count = quadratic.degrees_of_freedom();
+            let points = quadratic.node_points();
+            let snapshot = QuadraticSolutionSnapshot {
+                mesh_revision: mesh.mesh_revision,
+                displacement: points
+                    .iter()
+                    .map(|point| 0.08 * (1.7 * point.x - 1.1 * point.y).sin())
+                    .collect(),
+                velocity: points
+                    .iter()
+                    .map(|point| 0.05 * (0.9 * point.x + 1.4 * point.y).cos())
+                    .collect(),
+                acceleration: vec![0.0; count],
+                auxiliary: vec![0.0; count],
+                volume_acceleration: vec![0.0; count],
+                time,
+                time_step: 1.0e-3,
+            };
+            let options = SolutionIndicatorOptions {
+                resolved_frequency_hz: 2.0,
+                ..SolutionIndicatorOptions::default()
+            };
+            let report = |scene: &Scene, runtime: Option<&CanonicalMaterialRuntimeState>| {
+                let mut job = SolutionIndicatorJob::new(
+                    mesh.clone(),
+                    quadratic.clone(),
+                    scene.clone(),
+                    snapshot.clone(),
+                    options,
+                );
+                if let Some(runtime) = runtime {
+                    job = job.with_instantaneous_materials(runtime.clone());
+                }
+                loop {
+                    if let Some(result) = job.advance(8_192) {
+                        return result.unwrap().report;
+                    }
+                }
+            };
 
-        // A pumped mass moves the wave speed, so the equivalent scene's
-        // wavelength target moved with it. The driven run's did not, because
-        // the limit reads the authored medium.
-        let inert = report(&authored, None);
-        assert!(close(
-            instantaneous.smallest_wavelength_target,
-            inert.smallest_wavelength_target
-        ));
-        assert!(!close(
-            instantaneous.smallest_wavelength_target,
-            equivalent.smallest_wavelength_target
-        ));
+            let instantaneous = report(&driven, Some(&runtime));
+            let equivalent = report(&equivalent, None);
+            let close = |left: f64, right: f64| {
+                (left - right).abs() <= 1.0e-12 * left.abs().max(right.abs()).max(1.0)
+            };
+            assert!(close(instantaneous.total_energy, equivalent.total_energy));
+            assert!(close(
+                instantaneous.global_indicator,
+                equivalent.global_indicator
+            ));
+            assert!(close(
+                instantaneous.interior_jump_contribution,
+                equivalent.interior_jump_contribution
+            ));
+            assert!(close(
+                instantaneous.displacement_recovery_contribution,
+                equivalent.displacement_recovery_contribution
+            ));
+
+            // A pumped row moves the wave speed, so the equivalent scene's
+            // wavelength target moved with it. The driven run's did not,
+            // because the limit reads the authored medium.
+            let inert = report(&authored, None);
+            assert!(close(
+                instantaneous.smallest_wavelength_target,
+                inert.smallest_wavelength_target
+            ));
+            assert!(!close(
+                instantaneous.smallest_wavelength_target,
+                equivalent.smallest_wavelength_target
+            ));
+        }
     }
 
     /// An inert medium must not notice the runtime at all, or the temporal

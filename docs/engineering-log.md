@@ -97,6 +97,16 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   mass consistently for the estimator's own reconstruction, or reporting only
   the canonical terms on a patterned mass row - and that is not a measurement
   commit's decision to make.
+- The equivalence test now runs on both constitutive rows, which it did not at
+  first. Pumping only the mass row left the complementary row's direction
+  untested, and the two scale opposite ways: the primary row multiplies the
+  mass, while the complementary row is authored on the reciprocal stiffness, so
+  its factor divides the stiffness tensor. Both rows now agree with a
+  hand-authored equivalent scene to `1e-12`, deriving each factor from the
+  operator's own two evaluations of that row rather than from the path under
+  test. That also settles the roles for the work ahead: the stored `b` is the
+  gradient-like variable and `S b` is the flux, so the analogue of the scalar
+  interior jump is a jump in `S b`, not in `b`.
 - Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
   -- -D warnings`, `cargo test --workspace --locked` (738 passed, 1 known
   ignored reproducer), `cargo build --release -p funfern-app --locked`.
