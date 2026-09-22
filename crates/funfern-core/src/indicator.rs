@@ -780,6 +780,26 @@ impl MeshSizeField for AdaptiveSizeField {
     }
 }
 
+/// What the driven estimate is multiplied by so that one accuracy target means
+/// one true accuracy on both paths.
+///
+/// The estimate changes shape under a material runtime: the gradient terms
+/// move onto the solver's own flux and the scalar displacement recovery leaves
+/// the total. That is what lets it survive a spatially patterned medium, and
+/// it also makes it read low. Measured by the `temporal_amr_calibration`
+/// example on a smooth reflecting-box problem, the production static
+/// estimator's efficiency index has a geometric mean of 1.38 over a refinement
+/// sequence, while the substituted estimate has 0.73 over seven media crossing
+/// driven row, spatial pattern and modulation wavenumber. This is their ratio.
+///
+/// It is a calibration and not a correction. Neither index is one, and the
+/// claim being made is only that the same target delivers the same true error
+/// whichever estimate produced it. Scaled, the driven index runs 1.21 to 1.62
+/// across those seven media, against 1.26 to 1.54 for the static estimator
+/// across three meshes on one medium, so the substituted estimate is no more
+/// scattered than the one it has to agree with.
+const DRIVEN_INDICATOR_CALIBRATION: f64 = 1.88;
+
 #[derive(Clone, Copy, Default)]
 struct Recovery {
     displacement: Point2,
@@ -1605,6 +1625,18 @@ impl SolutionIndicatorJob {
                 .is_some_and(|canonical| canonical.element_complementary_jump.is_some())
     }
 
+    /// The factor from raw residual to a number an accuracy target can name.
+    /// One on the static path, which is what the target was calibrated
+    /// against, and [`DRIVEN_INDICATOR_CALIBRATION`] once the gradient terms
+    /// have moved onto the flux.
+    fn indicator_calibration(&self) -> f64 {
+        if self.substitutes_canonical_gradients() {
+            DRIVEN_INDICATOR_CALIBRATION
+        } else {
+            1.0
+        }
+    }
+
     /// The coefficients every error term measures against. Under a runtime
     /// these are the instantaneous ones; the authored form survives only where
     /// a size limit needs it.
@@ -1961,7 +1993,7 @@ impl SolutionIndicatorJob {
         let indicator = if dormant {
             0.0
         } else {
-            (residual / (estimate.energy + floor)).sqrt()
+            self.indicator_calibration() * (residual / (estimate.energy + floor)).sqrt()
         };
         let scale = if indicator <= f64::MIN_POSITIVE {
             self.options.maximum_scale
@@ -2085,7 +2117,7 @@ impl SolutionIndicatorJob {
         // A field with no meaningful energy has no relative error to speak of,
         // whatever the residuals of its numerical dust add up to.
         self.report.global_indicator = if self.total_energy > 0.0 && !self.report.dormant {
-            (self.report.total_residual / self.total_energy).sqrt()
+            self.indicator_calibration() * (self.report.total_residual / self.total_energy).sqrt()
         } else {
             0.0
         };

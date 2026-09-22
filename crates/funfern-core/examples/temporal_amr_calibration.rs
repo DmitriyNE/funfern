@@ -62,14 +62,19 @@ fn main() {
     // Row crossed with spatial pattern. A sweep that changed both at once
     // cannot say which one the estimator is charging for, and the first
     // version of this study changed both.
-    for (label, scene) in [
-        ("inert", inert_scene()),
-        ("mass pumped", driven(true, None)),
-        ("mass travelling k=0.75", driven(true, Some(0.75))),
-        ("mass travelling k=3", driven(true, Some(3.0))),
-        ("stiffness pumped", driven(false, None)),
-        ("stiffness travelling k=3", driven(false, Some(3.0))),
-        ("both travelling k=3", both_scene()),
+    //
+    // The first row is the production static estimator on an inert medium,
+    // measured here rather than inherited, because the driven target is set
+    // against it. Two indices only compare if one study produced both.
+    for (label, scene, static_path) in [
+        ("static path, inert", inert_scene(), true),
+        ("inert", inert_scene(), false),
+        ("mass pumped", driven(true, None), false),
+        ("mass travelling k=0.75", driven(true, Some(0.75)), false),
+        ("mass travelling k=3", driven(true, Some(3.0)), false),
+        ("stiffness pumped", driven(false, None), false),
+        ("stiffness travelling k=3", driven(false, Some(3.0)), false),
+        ("both travelling k=3", both_scene(), false),
     ] {
         // The finest mesh sets the timestep every mesh in the sweep uses.
         let reference_edge = *EDGES.last().expect("one reference edge");
@@ -78,7 +83,7 @@ fn main() {
         let lattice = lattice_points();
         let solved = EDGES
             .iter()
-            .map(|edge| solve(&scene, *edge, time_step, &lattice))
+            .map(|edge| solve(&scene, *edge, time_step, &lattice, static_path))
             .collect::<Vec<_>>();
         let reference = solved.last().expect("a reference solution");
         println!("{label}: shared time step {time_step:.4e} from h={reference_edge}");
@@ -133,7 +138,12 @@ fn main() {
     println!(
         "An estimator worth reading as a percentage has an efficiency index bounded\n\
          and roughly constant under refinement. A drifting index means the number\n\
-         moves with the mesh."
+         moves with the mesh.\n\n\
+         The driven rows carry the calibration that makes one accuracy target mean\n\
+         one true accuracy on both paths, so they are directly comparable with the\n\
+         static row above them. This sweep is where that constant comes from: if\n\
+         the driven rows stop agreeing with the static one, it is the constant that\n\
+         is stale, not the estimator that is broken."
     );
 }
 
@@ -258,7 +268,13 @@ fn lattice_points() -> Vec<Point2> {
     points
 }
 
-fn solve(scene: &Scene, edge: f64, time_step: f64, lattice: &[Point2]) -> Solved {
+fn solve(
+    scene: &Scene,
+    edge: f64,
+    time_step: f64,
+    lattice: &[Point2],
+    static_path: bool,
+) -> Solved {
     let started = Instant::now();
     let (mesh, quadratic, operator) = build(scene, edge);
     let mut fixed = scene.clone();
@@ -314,6 +330,7 @@ fn solve(scene: &Scene, edge: f64, time_step: f64, lattice: &[Point2]) -> Solved
         &state,
         &previous,
         &previous_complementary,
+        static_path,
     );
     let breakdown = estimator.clone();
     Solved {
@@ -329,6 +346,8 @@ fn solve(scene: &Scene, edge: f64, time_step: f64, lattice: &[Point2]) -> Solved
     }
 }
 
+/// One estimate, by whichever of the two estimators the row names.
+#[allow(clippy::too_many_arguments)]
 fn estimate(
     mesh: &Arc<TriMesh>,
     quadratic: &Arc<QuadraticWaveOperator>,
@@ -337,6 +356,7 @@ fn estimate(
     state: &CanonicalTemporalWaveState,
     previous: &[f64],
     previous_complementary: &[Point2],
+    static_path: bool,
 ) -> Option<funfern_core::SolutionIndicatorReport> {
     let count = operator.base().degrees_of_freedom();
     let demand = operator.resolution_demand(0.0);
@@ -351,9 +371,22 @@ fn estimate(
         time: state.time(),
         time_step: state.time_step(),
     };
-    let supplement =
+    // The static path is the production estimator: the fixed supplement and no
+    // runtime, so the gradient terms stay on the reconstructed scalar field and
+    // the material samples stay authored. On an inert medium that is exactly
+    // what the application runs today.
+    let supplement = if static_path {
+        funfern_core::canonical_indicator_supplement(
+            mesh,
+            operator.base(),
+            &funfern_core::CanonicalForcing::none(operator.base()),
+            &snapshot,
+        )
+        .ok()?
+    } else {
         canonical_temporal_indicator_supplement(mesh, operator, &snapshot, state.runtime(), 0.0)
-            .ok()?;
+            .ok()?
+    };
     // Production zeroes acceleration on purpose, because the canonical
     // estimator excludes the scalar strong cell residual, but it does supply
     // a real rate: the energy denominator uses it. In a driven medium each
@@ -396,8 +429,10 @@ fn estimate(
             ..Default::default()
         },
     )
-    .with_canonical_supplement(supplement)
-    .with_instantaneous_materials(state.runtime().clone());
+    .with_canonical_supplement(supplement);
+    if !static_path {
+        job = job.with_instantaneous_materials(state.runtime().clone());
+    }
     loop {
         if let Some(result) = job.advance(8_192) {
             // A swallowed estimate reads as a missing number rather than a

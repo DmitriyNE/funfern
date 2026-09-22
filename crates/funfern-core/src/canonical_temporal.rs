@@ -3084,9 +3084,23 @@ mod tests {
             supplement.complementary_recovery_contribution
         ));
 
+        // The reported indicator is the calibrated one, and the calibration
+        // applies exactly where the substitution does. Checking it against the
+        // report's own residual and energy is what keeps the constant from
+        // drifting away from the number it is documented as.
+        let raw = |report: &crate::SolutionIndicatorReport| {
+            (report.total_residual / report.total_energy).sqrt()
+        };
+        let calibration = substituted.global_indicator / raw(&substituted);
+        assert!(
+            (calibration - 1.88).abs() < 1.0e-9,
+            "the driven estimate must carry its calibration, got {calibration}"
+        );
+
         // Same supplement, no runtime: the scalar terms keep the estimate and
         // the flux jump is not folded in on top of them.
         let scalar = report(supplement.clone(), false);
+        assert!((scalar.global_indicator / raw(&scalar) - 1.0).abs() < 1.0e-9);
         assert!(scalar.interior_jump_contribution > substituted.interior_jump_contribution);
         assert!(scalar.recovery_contribution > substituted.recovery_contribution);
 

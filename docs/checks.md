@@ -56,9 +56,13 @@ travelling pattern, one row at two wavenumbers, and both rows at once - because
 a sweep that changes the row and the pattern together cannot say which one the
 estimator is charging for. The index should be bounded and roughly constant;
 where it climbs with refinement the estimate cannot be read as a percentage.
-Every row currently spans at most 1.18x over 15x the unknowns, at a level near
-0.7 rather than 1, so a driven accuracy target has to be set against that
-constant rather than inheriting the static 6%.
+The first row is the production static estimator on an inert medium, and it is
+there because the driven estimate's calibration constant is the ratio of the two
+geometric means; two indices only compare if one study produced both. With that
+constant applied, every row reads 1.21 to 1.62 against the static row's 1.26 to
+1.54, so the same accuracy target means the same true error on either path. This
+sweep is where `DRIVEN_INDICATOR_CALIBRATION` comes from: if the driven rows stop
+agreeing with the static one, the constant is stale.
 
 `wave_boundary_reflection` sends finite Gaussian P2e packets at the outer box and
 compares first- and second-order residual-energy reflection at two angles and two

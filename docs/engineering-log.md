@@ -5,6 +5,62 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — One accuracy target, one true accuracy, on both estimator paths
+
+- The driven estimate is multiplied by `DRIVEN_INDICATOR_CALIBRATION = 1.88`
+  wherever the gradient terms have moved onto the solver's flux, so a single
+  accuracy number means the same true error on the static and the driven path.
+  The alternative was carrying two targets that deliver the same accuracy at
+  different numbers, which puts the burden on whoever reads the slider.
+- Measured the production static estimator on the same fixture before setting
+  the constant, rather than reusing the pre-substitution inert row as a stand-in
+  for it. The calibration example now runs `canonical_indicator_supplement` with
+  no runtime as its first row - which is exactly what the application runs
+  today - and it reads 1.538, 1.262, 1.360, matching the pre-substitution inert
+  row as the existing parity test says it must. Two indices only compare if one
+  study produced both.
+- The constant is the ratio of geometric means: 1.3820 static over 0.7339
+  driven, the latter over seven media crossing driven row, spatial pattern and
+  modulation wavenumber.
+- What it buys, per row, after scaling:
+
+  | Row | Index | Spread |
+  | --- | --- | --- |
+  | static path, inert | 1.54, 1.26, 1.36 | 1.22x |
+  | inert | 1.51, 1.28, 1.36 | 1.18x |
+  | mass pumped | 1.62, 1.37, 1.46 | 1.18x |
+  | mass travelling, `k=0.75` | 1.55, 1.36, 1.43 | 1.14x |
+  | mass travelling, `k=3` | 1.41, 1.24, 1.26 | 1.14x |
+  | stiffness pumped | 1.54, 1.30, 1.39 | 1.18x |
+  | stiffness travelling, `k=3` | 1.47, 1.32, 1.38 | 1.12x |
+  | both travelling, `k=3` | 1.35, 1.21, 1.25 | 1.12x |
+
+- On an inert medium the substituted estimate now reproduces the static one to
+  within 2 percent, which is the check that matters most: the two estimators
+  differ in which field they differentiate, and on a medium where that should
+  not matter they agree. Across all seven driven media the scaled index runs
+  1.21 to 1.62, against the static estimator's own 1.26 to 1.54 across three
+  meshes on one medium. The substituted estimate is no more scattered than the
+  one it has to agree with.
+- Called a calibration rather than a correction, deliberately. Neither index is
+  one. The static 6 percent target was set by watching a production run settle
+  and delivers about 4.4 percent true error; the claim here is only that the
+  driven path now delivers the same, not that either estimate is unbiased.
+- Guarded by a test that recomputes the factor from the report's own residual
+  and energy, so the constant cannot drift away from the number its
+  documentation cites without a failure.
+- The application still runs the static path, so nothing user-facing moves
+  today. That is also why this was worth doing now rather than at enablement:
+  an optimistic error estimate sitting in the core is a footgun for whoever
+  wires the driven path up, and the measurement is fresh.
+- Re-ran the device gate after the change: unchanged relative errors, with the
+  reported indicator now `1.689e-1` where it was `8.98e-2`, exactly the
+  constant.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (739 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`, and
+  `canonical_gpu_temporal_amr` on an M1 Max / Metal.
+
 ## 2026-09-22 — The estimate holds on a real device, and a refinement transfer moves the state more than expected
 
 - `crates/funfern-app/examples/canonical_gpu_temporal_amr.rs` runs the error
