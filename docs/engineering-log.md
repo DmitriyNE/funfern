@@ -5,6 +5,66 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — A first-order absorbing wall composes, and what freezing its impedance costs
+
+- Split the outgoing capability rather than taking it whole, after finding that
+  the expensive part is not the part that carries the physics question. The
+  172-line force-coupled outgoing kick belongs to the *second*-order boundary
+  and its pole currents. A **first-order** wall is a local damping term in the
+  same kick every other node already goes through - six lines - and it carries
+  the identical frozen-reference-impedance question. So first-order outgoing
+  composes now, and second-order stays refused until auxiliary state exists on
+  this path.
+- `boundary_loss` joins the accounting as its own lane. The admission predicate
+  narrowed again: `conservative_bulk_supported` now additionally requires an
+  undamped boundary, while `forced_composition_supported` allows one. The
+  admission test is renamed to what it has become - the bulk claim narrows as
+  each capability composes - and asserts both halves: a first-order wall steps,
+  a second-order one still has no state.
+- **The frozen impedance, measured.** A wall is assembled from the medium it
+  was built against and stays there, so a medium that has since moved leaves it
+  mistuned by that ratio. A Switch is the instrument, because it moves the mass
+  to a new constant value and the mismatch is steady rather than smeared over a
+  drive's cycle.
+- Two confounds had to be removed before any signal appeared, and both are
+  worth recording because either one alone produces a confident wrong answer.
+  Cumulative escaped energy says nothing at all: reflected energy simply leaves
+  on its next encounter, so over a long run a mistuned wall absorbs as much as
+  a matched one - measured `0.945` against `0.942` across a twofold mismatch.
+  And a heavier medium is slower by `sqrt(f)`, so comparing at a fixed clock
+  scores a wave that has not yet reached the wall as reflected; that artefact
+  alone produced an apparent fourfold effect at `f = 2.2`.
+- With both removed, and comparing residual energy after one encounter at equal
+  propagation distance:
+
+  | Mass factor | Residual | Excess over matched | `R^2` predicted |
+  | --- | --- | --- | --- |
+  | 1.0 | 0.108 | - | - |
+  | 2.2 | 0.112 | 0.003 | 0.038 |
+  | 6.0 | 0.193 | 0.085 | 0.177 |
+
+- So the approximation is **cheaper than the continuous normal-incidence
+  coefficient predicts**, by about an order of magnitude at a realistic
+  mismatch, and only approaches it at a sixfold one. That is the reassuring
+  direction, but the number is not calibrated and the test does not assert it.
+  A blob radiating into a square box is not a normal-incidence experiment, and
+  the matched wall's own residual - the first-order condition's angular
+  imperfection, `0.108` here - swamps a small mismatch. **Open**: a calibrated
+  curve needs packet tracking, which is what `wave_boundary_reflection` already
+  does for the fixed path.
+- Inert parity again as the guard: with nothing driven, the absorbing wall damps
+  exactly as `CanonicalWaveState::step_with_forcing` does, in the boundary lane
+  and in the final state, to `1e-12`.
+- A small finding on the way past: `QuadraticWaveOperator::assemble_regions`
+  takes `outer_coefficients`, validates it, and then never passes it to
+  `assemble_with_provider`. It is a dead parameter. That is also why the
+  frozen-impedance cost could not be measured the cheap way, by assembling a
+  wall tuned for one medium around another - there is no such knob, because the
+  boundary damping is derived from the same node coefficients as the interior.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (745 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-22 — Loss composes with a driven medium, and keeps second order doing it
 
 - The second boundary capability. A dissipating generation now has a state and

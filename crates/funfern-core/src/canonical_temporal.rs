@@ -1415,12 +1415,16 @@ impl CanonicalTemporalWaveOperator {
         // system is no longer the whole story and the bulk claim has to
         // exclude them. Loss, thin gaps, boundary damping and open boundaries
         // are excluded from both until each closes its own gate.
-        let passive_composition = base.thin_gap_samples().is_empty()
-            && base
-                .first_order_boundary_damping()
-                .iter()
-                .all(|value| *value == 0.0)
-            && base.outgoing_boundary().is_none();
+        // First-order outgoing is admitted here; it is a local damping term in
+        // the kick and nothing more. The second-order boundary carries pole
+        // currents of its own and stays refused until that state exists on
+        // this path, as do thin gaps.
+        let passive_composition =
+            base.thin_gap_samples().is_empty() && base.outgoing_boundary().is_none();
+        let undamped_boundary = base
+            .first_order_boundary_damping()
+            .iter()
+            .all(|value| *value == 0.0);
         let undriven_boundary = quadratic.dirichlet_signals().iter().all(Option::is_none)
             && quadratic
                 .normalized_neumann_weights()
@@ -1433,7 +1437,8 @@ impl CanonicalTemporalWaveOperator {
                 .flatten()
                 .all(|load| load.normalized_weight == 0.0);
         let forced_composition_supported = passive_composition;
-        let conservative_bulk_supported = passive_composition && !has_loss && undriven_boundary;
+        let conservative_bulk_supported =
+            passive_composition && undamped_boundary && !has_loss && undriven_boundary;
         Ok(Self {
             base,
             primary,
@@ -1813,6 +1818,8 @@ pub struct CanonicalTemporalStepAccounting {
     pub primary_loss: f64,
     /// Energy the complementary loss channel removed. Never negative.
     pub complementary_loss: f64,
+    /// Energy an absorbing wall carried out of the domain. Never negative.
+    pub boundary_loss: f64,
     /// Energy that crossed a prescribed node, either sign.
     ///
     /// A prescribed node holds `Q = M(t) g(t)`, so under modulation this is
@@ -2118,6 +2125,7 @@ impl CanonicalTemporalWaveState {
         let mut complementary = self.complementary_flux.clone();
         let mut source_work = 0.0;
         let mut prescribed_exchange = 0.0;
+        let mut boundary_loss = 0.0;
 
         // Strang: half the dissipation, the conservative core, half again.
         // Each half map is instantaneous at the step endpoint it sits on - so
@@ -2145,7 +2153,7 @@ impl CanonicalTemporalWaveState {
         // 0.99 before this was moved.
         let first_force = operator.force_at(&complementary, start_time, &self.runtime)?;
         let first_source = forcing.integrated_rate(start_time)?;
-        let (work, exchange) = forced_kick(
+        let (work, exchange, escaped) = forced_kick(
             operator,
             &mut primary,
             &first_force,
@@ -2157,6 +2165,7 @@ impl CanonicalTemporalWaveState {
         )?;
         source_work += work;
         prescribed_exchange += exchange;
+        boundary_loss += escaped;
         validate_finite(&primary)?;
 
         let (_, primary_rate_middle) =
@@ -2173,7 +2182,7 @@ impl CanonicalTemporalWaveState {
 
         let second_force = operator.force_at(&complementary, end_time, &self.runtime)?;
         let second_source = forcing.integrated_rate(end_time)?;
-        let (work, exchange) = forced_kick(
+        let (work, exchange, escaped) = forced_kick(
             operator,
             &mut primary,
             &second_force,
@@ -2185,6 +2194,7 @@ impl CanonicalTemporalWaveState {
         )?;
         source_work += work;
         prescribed_exchange += exchange;
+        boundary_loss += escaped;
         validate_finite(&primary)?;
 
         let (second_primary_loss, second_complementary_loss) = decay(
@@ -2208,16 +2218,19 @@ impl CanonicalTemporalWaveState {
             source_work,
             primary_loss,
             complementary_loss,
+            boundary_loss,
             prescribed_exchange,
             energy_change,
             splitting_residual: energy_change - temporal_work - source_work - prescribed_exchange
                 + primary_loss
-                + complementary_loss,
+                + complementary_loss
+                + boundary_loss,
         };
         if !accounting.temporal_work.is_finite()
             || !accounting.source_work.is_finite()
             || !accounting.primary_loss.is_finite()
             || !accounting.complementary_loss.is_finite()
+            || !accounting.boundary_loss.is_finite()
             || !accounting.prescribed_exchange.is_finite()
             || !accounting.energy_change.is_finite()
             || !accounting.splitting_residual.is_finite()
@@ -2296,20 +2309,30 @@ fn forced_kick(
     forcing: &CanonicalForcing,
     target_time: f64,
     runtime: &CanonicalMaterialRuntimeState,
-) -> Result<(f64, f64), WaveError> {
-    if !forcing.drives_any() {
+) -> Result<(f64, f64, f64), WaveError> {
+    let damping = operator.base().first_order_boundary_damping();
+    let damped = damping.iter().any(|value| *value != 0.0);
+    if !forcing.drives_any() && !damped {
         for (flux, force) in primary.iter_mut().zip(force) {
             *flux -= duration * force;
         }
-        return Ok((0.0, 0.0));
+        return Ok((0.0, 0.0, 0.0));
     }
     let mass = operator.primary_mass_at(target_time, runtime)?;
     let mut source_work = 0.0;
     let mut prescribed_exchange = 0.0;
+    let mut boundary_loss = 0.0;
     for node in 0..primary.len() {
         let old = primary[node];
         let mass = mass[node];
-        let unconstrained = old + duration * (source[node] - force[node]);
+        // The absorbing wall's admittance is `damping / mass`, and the mass is
+        // the instantaneous one while the damping is not: it was assembled
+        // from the authored medium and stays there. That is the frozen
+        // reference impedance the specification allows only as a documented,
+        // tested approximation, and this is the line it lives on.
+        let ratio = 0.5 * duration * damping[node] / mass;
+        let rhs = source[node] - force[node];
+        let unconstrained = ((1.0 - ratio) * old + duration * rhs) / (1.0 + ratio);
         let new = forcing.prescribed()[node]
             .map_or(unconstrained, |signal| mass * signal.value(target_time));
         if !new.is_finite() {
@@ -2318,15 +2341,18 @@ fn forced_kick(
         let midpoint_field = 0.5 * (old + new) / mass;
         let node_source_work = duration * midpoint_field * source[node];
         let node_force_work = duration * midpoint_field * force[node];
+        let node_boundary_loss = duration * damping[node] * midpoint_field * midpoint_field;
         source_work += node_source_work;
+        boundary_loss += node_boundary_loss;
         if forcing.prescribed()[node].is_some() {
             let energy_change = 0.5 * (new * new - old * old) / mass;
-            prescribed_exchange += energy_change - node_source_work + node_force_work;
+            prescribed_exchange +=
+                energy_change - node_source_work + node_force_work + node_boundary_loss;
         }
         primary[node] = new;
     }
-    if source_work.is_finite() && prescribed_exchange.is_finite() {
-        Ok((source_work, prescribed_exchange))
+    if source_work.is_finite() && prescribed_exchange.is_finite() && boundary_loss >= 0.0 {
+        Ok((source_work, prescribed_exchange, boundary_loss))
     } else {
         Err(WaveError::InvalidState)
     }
@@ -3804,6 +3830,202 @@ mod tests {
         }
     }
 
+    /// What the frozen reference impedance costs, as far as this fixture can
+    /// say.
+    ///
+    /// An absorbing wall is assembled from the medium it was built against and
+    /// stays there; a medium that has since moved leaves the wall mistuned by
+    /// exactly that ratio. The specification permits this only as a documented,
+    /// tested approximation, so the cost is measured rather than asserted.
+    ///
+    /// A Switch is the right instrument: it moves the mass to a new constant
+    /// value, so the mismatch is steady rather than smeared over a drive's
+    /// cycle. Two confounds had to be removed before the signal appeared at
+    /// all. Cumulative escape says nothing, because reflected energy simply
+    /// leaves on its next encounter; and a heavier medium is slower by
+    /// `sqrt(f)`, so a fixed clock scores a wave that has not yet reached the
+    /// wall as reflected.
+    #[test]
+    fn a_frozen_wall_reflects_more_as_the_medium_moves_away_from_it() {
+        let mut remaining = Vec::new();
+        for alternate in [1.0, 2.2, 6.0] {
+            let mut scene = Scene::default();
+            if alternate != 1.0 {
+                scene.materials[0].mass_law.alternate = Some(ScalarField::constant(alternate));
+            }
+            scene.materials[0].switch_ramp = 0.0;
+            let mut base_scene = scene.clone();
+            strip_temporal_laws(&mut base_scene.materials);
+            let mesh = mesh_scene(
+                &base_scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.22,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap();
+            let quadratic = QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &base_scene,
+                OuterBoundaryCondition::FirstOrderOutgoing,
+            )
+            .unwrap();
+            let operator =
+                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            assert!(
+                operator.forced_composition_supported(),
+                "an absorbing wall must be steppable"
+            );
+            let base = operator.base();
+            let forcing = CanonicalForcing::none(base);
+            let time_step = 0.4 * operator.maximum_time_step();
+
+            // A smooth blob in the middle, so what leaves is radiation rather
+            // than a boundary artefact.
+            let primary = base
+                .node_points()
+                .iter()
+                .map(|point| {
+                    let radius = point.norm();
+                    0.1 * (-12.0 * radius * radius).exp()
+                })
+                .collect::<Vec<_>>();
+            let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+            let mut state =
+                CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+                    .unwrap();
+            // Land the Switch immediately, so the medium is already at its new
+            // value while the wall still holds the old one.
+            if alternate != 1.0 {
+                let material = operator.initial_runtime().records()[0].material();
+                state
+                    .runtime_mut()
+                    .begin_switch(material, true, 0.0, 0.0)
+                    .unwrap();
+            }
+
+            let initial = state.energy(&operator).unwrap();
+            // One encounter, not many. Over a long run reflected energy simply
+            // leaves on its next pass, so cumulative escape says nothing about
+            // the reflection coefficient; what is still inside just after the
+            // wave has reached the wall does.
+            // Equal propagation distance, not equal time: a heavier medium is
+            // slower by `sqrt(f)`, and comparing at a fixed clock would score
+            // a wave that has not reached the wall yet as reflected energy.
+            let steps = (1.6 * alternate.sqrt() / time_step).round() as u64;
+            for _ in 0..steps {
+                let accounting = state.step_with_forcing(&operator, &forcing).unwrap();
+                assert!(accounting.boundary_loss >= 0.0, "a wall cannot inject");
+            }
+            remaining.push(state.energy(&operator).unwrap() / initial);
+        }
+
+        // A matched wall lets most of one encounter through; what stays is the
+        // first-order condition's own angular imperfection, which is large
+        // enough that it dominates a small mismatch.
+        assert!(
+            remaining[0] < 0.15,
+            "a matched wall should pass most of the wave, left {}",
+            remaining[0]
+        );
+        // The mismatch is real and grows with it. This deliberately does not
+        // assert the continuous normal-incidence coefficient: measured, a
+        // mismatch of `f = 2.2` leaves about `0.003` more behind against a
+        // predicted `R^2 = 0.038`, and only by `f = 6` does the excess
+        // (`0.085`) approach the predicted `0.177`. A blob radiating into a
+        // square box is not a normal-incidence experiment, and the matched
+        // wall's own residual swamps the moderate case; calibrating that curve
+        // needs packet tracking rather than this residual, and is recorded as
+        // open rather than asserted here.
+        for pair in remaining.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "a worse mismatch cannot keep less behind: {remaining:?}"
+            );
+        }
+        assert!(
+            remaining[2] > 1.5 * remaining[0],
+            "a sixfold mismatch must be unmistakable, {remaining:?}"
+        );
+    }
+
+    /// An absorbing wall must damp exactly as the fixed path's does when
+    /// nothing is driven, or the same scene would radiate differently
+    /// depending on which stepper ran it.
+    #[test]
+    fn an_inert_absorbing_wall_damps_exactly_as_the_fixed_path_does() {
+        let scene = Scene::default();
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::FirstOrderOutgoing,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let base = operator.base();
+        assert!(
+            base.first_order_boundary_damping()
+                .iter()
+                .any(|value| *value != 0.0),
+            "the fixture needs an absorbing wall"
+        );
+        let forcing = CanonicalForcing::none(base);
+        let time_step = 0.4 * operator.maximum_time_step();
+
+        let primary = base
+            .node_points()
+            .iter()
+            .map(|point| 0.06 * (1.4 * point.x - 0.8 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.03 * (0.9 * point.x + 1.2 * point.y).cos())
+            .collect::<Vec<_>>();
+        let complementary = base.compatible_flux(&potential).unwrap();
+        let mut temporal = CanonicalTemporalWaveState::new(
+            &operator,
+            time_step,
+            primary.clone(),
+            complementary.clone(),
+        )
+        .unwrap();
+        let mut fixed = CanonicalWaveState::new(base, time_step, primary, complementary).unwrap();
+
+        let mut escaped = 0.0;
+        for _ in 0..24 {
+            let temporal_accounting = temporal.step_with_forcing(&operator, &forcing).unwrap();
+            let fixed_accounting = fixed.step_with_forcing(base, &forcing).unwrap();
+            assert!(
+                (temporal_accounting.boundary_loss - fixed_accounting.boundary_loss).abs()
+                    < 1.0e-12
+            );
+            escaped += temporal_accounting.boundary_loss;
+        }
+        assert!(escaped > 1.0e-6, "the wall must actually radiate");
+        for (temporal, fixed) in temporal.primary_flux().iter().zip(fixed.primary_flux()) {
+            assert!((temporal - fixed).abs() < 1.0e-12);
+        }
+        for (temporal, fixed) in temporal
+            .complementary_flux()
+            .iter()
+            .zip(fixed.complementary_flux())
+        {
+            assert!((*temporal - *fixed).norm() < 1.0e-12);
+        }
+    }
+
     /// Two things the variable-coefficient supplement has to get right. On an
     /// inert medium it must reproduce the fixed one exactly, or the temporal
     /// path would report different errors for the same physics. And on a
@@ -4704,7 +4926,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_symplectic_state_rejects_open_boundaries_but_now_composes_loss() {
+    fn the_bulk_claim_narrows_as_each_capability_composes() {
         // Loss used to have no state here at all. It now steps as an accounted
         // dissipation lane, so what it loses is the conservative-bulk claim
         // rather than the ability to run.
@@ -4726,15 +4948,33 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        // A first-order wall is a local damping term in the kick and composes.
+        let first_order = QuadraticWaveOperator::assemble_scene(
             &mesh,
             &scene,
             OuterBoundaryCondition::FirstOrderOutgoing,
         )
         .unwrap();
+        let damped =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &first_order, &scene, 1).unwrap();
+        assert!(!damped.conservative_bulk_supported());
+        assert!(damped.forced_composition_supported());
+        assert!(
+            CanonicalTemporalWaveState::zero(&damped, 0.1 * damped.maximum_time_step()).is_ok()
+        );
+
+        // A second-order wall carries pole currents of its own, and there is
+        // no state for them on this path yet.
+        let second_order = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
         let open =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &second_order, &scene, 1).unwrap();
         assert!(!open.conservative_bulk_supported());
+        assert!(!open.forced_composition_supported());
         assert!(matches!(
             CanonicalTemporalWaveState::zero(&open, 0.1 * open.maximum_time_step()),
             Err(WaveError::InvalidCoefficients)
