@@ -11,13 +11,14 @@ cargo run -p funfern-core --release --example mesh_edit_timing -- --paced
 cargo run -p funfern-core --release --example wave_convergence
 cargo run -p funfern-core --release --example wave_boundary_reflection
 cargo run -p funfern-core --release --example temporal_amr_calibration
-cargo run -p funfern-app --release --locked -- --mesh-edit-benchmark
-cargo run -p funfern-app --release --locked -- --wave-gpu-check
-cargo run -p funfern-app --release --locked -- --wave-transfer-check
-cargo run -p funfern-app --release --locked -- --amr-check
 cargo run -p funfern-app --release --locked --example canonical_gpu_filter_boundary
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_work
+cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_amr
 ```
+
+The `funfern-app` examples open a window and read the autosave, so run them with
+`HOME` pointed at a scratch directory. Build with the real `HOME` first, or the
+toolchain is re-fetched into the scratch one.
 
 Set `PLAYWRIGHT_CHANNEL=chrome` to run the smoke test with an installed Google
 Chrome instead of Playwright's pinned Chromium.
@@ -49,10 +50,15 @@ at parent h=0.08 and h=0.04, with independent temporal refinement over one and
 five box-crossing times.
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
-reflecting-box problem. It sweeps an inert medium, a medium modulated
-uniformly in space, one modulated with a travelling spatial pattern, and both.
-The index should be bounded and roughly constant; where it climbs with
-refinement the estimate cannot be read as a percentage.
+reflecting-box problem. It crosses the driven constitutive row against the
+spatial pattern in it - inert, each row pumped uniformly, each row carrying a
+travelling pattern, one row at two wavenumbers, and both rows at once - because
+a sweep that changes the row and the pattern together cannot say which one the
+estimator is charging for. The index should be bounded and roughly constant;
+where it climbs with refinement the estimate cannot be read as a percentage.
+Every row currently spans at most 1.18x over 15x the unknowns, at a level near
+0.7 rather than 1, so a driven accuracy target has to be set against that
+constant rather than inheriting the static 6%.
 
 `wave_boundary_reflection` sends finite Gaussian P2e packets at the outer box and
 compares first- and second-order residual-energy reflection at two angles and two
@@ -60,25 +66,23 @@ wavelengths, alongside the ideal continuous plane-wave coefficients and a
 long-time finite-state check.
 Omit `--slices` for per-phase profiling.
 `mesh_edit_timing --paced` applies edits with 2 ms mesh slices at a simulated
-60 Hz schedule, excluding rendering. `--mesh-edit-benchmark` opens the real native
-app with eight obstacles and the production parent-h=0.08 overlay, applies three small control edits,
-prints edit-to-ready and active/scheduling times plus exact element reuse, then
-exits. Interactive editor input is disabled during this scripted run. It does not
-read or overwrite scene files. The native benchmark includes
-editor validation and rendering load; mesh-ready means the atomic simulation commit.
-`--wave-gpu-check` runs mixed harmonic Dirichlet and Neumann data on the outer box
-and both faces of a baffle, both outgoing orders, and a closed wall for 128 steps.
-It reads both time levels and boundary memory back, compares them to f64, reports
-solve-to-readback throughput, and exits. `--wave-transfer-check` injects a nonzero
-field, performs a real control-point edit, verifies transfer of all three state
-components, then verifies that a lower-order boundary transaction clears the
-auxiliary state, and finally checks a same-mesh material-coefficient transaction
-against f64.
-`--amr-check` first requires the normal automatic controller to finish an aligned
-GPU-to-host solution estimate, then evolves a nonzero field, moves a deterministic
-spatial refinement target, requires both refinement and coarsening, transfers all
-quadratic state with no exposed nodes, verifies mesh/operator revision agreement,
-and exits.
+60 Hz schedule, excluding rendering.
+
+The `--mesh-edit-benchmark`, `--wave-gpu-check`, `--wave-transfer-check` and
+`--amr-check` application flags no longer exist; the unified-topology cutover
+removed them and the hidden `canonical_gpu_*` examples took over what they
+covered.
+`canonical_gpu_temporal_amr` runs the error estimate against the f32 state a
+device actually produces, on a travelling mass modulation - the medium that used
+to take the efficiency index from 1.4 to 17.4 before the estimate moved onto the
+solver's own flux. The instantaneous coefficients come from the material runtime
+decoded out of the same buffer copy as the state. On the accepted generation it
+requires every term within `1e-4` of the f64 oracle, except the cell residual at
+`1e-3` and the worst element indicator at `1e-2`. It then refines where the
+estimate asks, hands the generation over on the device, steps the new one, and
+requires the flux terms within `1e-5` and the transferred state within `1e-3`.
+It deliberately does not bound the rate-sensitive terms across that transfer;
+see the log for why.
 The field view tessellates every quadratic parent triangle into six display
 triangles around its shared edge-midpoint and element bubble nodes.
 

@@ -5,6 +5,75 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The estimate holds on a real device, and a refinement transfer moves the state more than expected
+
+- `crates/funfern-app/examples/canonical_gpu_temporal_amr.rs` runs the error
+  estimate against the f32 state an M1 Max actually produces, on a travelling
+  mass modulation - the medium that used to take the efficiency index from 1.4
+  to 17.4 before the estimate moved onto the solver's own flux. The
+  instantaneous coefficients come from the material runtime decoded out of the
+  same buffer copy as the state, which is what the runtime bank travels in the
+  snapshot for.
+- On the accepted generation the estimate is device-proof, and the margins fall
+  exactly where the previous entry predicted they would:
+
+  | Term | f32 against the f64 oracle |
+  | --- | --- |
+  | interior jump (flux) | `1.2e-7` |
+  | recovery (flux) | `1.1e-7` |
+  | total energy | `3.0e-7` |
+  | global indicator | `4.6e-7` |
+  | boundary residual | `1.4e-6` |
+  | worst element indicator | `5.3e-4` |
+  | **cell residual** | **`1.7e-5`** |
+
+- The cell residual is the worst term by two orders, and it is the one term
+  that still differentiates the nodal primary quotient `Q/M` - twice, through a
+  Hessian. The previous entry named it as the remaining exposure before this
+  was measured. `canonical_primary_rate` has carried the same warning about f32
+  cancellation all along. The flux terms, which come straight from stored
+  complementary state, are the best-behaved things in the table.
+- **The transfer, not the estimator, is what a genuine refinement exposes.**
+  The gate then refines where the estimate asks - 605 elements to 1604, driven
+  by the estimator's own size field - hands the generation over on the device,
+  and steps the new one. The flux terms still agree with the f64 oracle to
+  `2e-6`. The rate-sensitive terms do not, and the reason is upstream of the
+  estimate: the device's transferred state differs from a host application of
+  the same transfer maps by `1.9e-4` on `Q` and `1.7e-5` on `b`, against
+  `2.7e-7` on the same lanes before the transfer. The transfer amplifies its
+  input difference by roughly seven hundredfold.
+- Ruled out before concluding that. The device clock agrees with the assumed
+  time to `1.8e-7` and the accepted step count is exactly `48 + 8`, so the
+  instantaneous coefficients are not being evaluated at the wrong instant. The
+  maps are literally the same objects the GPU plan was compiled from.
+- `canonical_gpu_temporal_handoff` could not have found this: it transfers
+  through an identity map on one mesh, so there is nothing to amplify. Whether
+  `1.9e-4` is the honest cost of an f32 interpolation with redistribution or a
+  defect in the transfer is open, and it belongs to the transfer path rather
+  than to this slice.
+- The gate therefore bounds, across the transfer, only the flux terms and the
+  transferred state itself, and says in the source why. Bounding the
+  rate-sensitive terms there would be asserting the transfer's precision under
+  the estimator's name. It does assert that refining where the estimate asked
+  lowers the estimate, `8.98e-2` to `6.83e-2`, because a size field that did
+  not would mean the indicator and the error term disagree about where the
+  error is.
+- One incidental defect the gate surfaced: the estimator's size bounds and the
+  adapter's have to agree, or the adapter rejects the size field outright
+  (`InvalidTarget` at a target of `0.037` against a floor of `0.045`). They now
+  read the same two constants in the fixture. Production carries the same
+  hazard wherever those two option sets are filled in independently.
+- `docs/checks.md` documented four application flags that do not exist -
+  `--mesh-edit-benchmark`, `--wave-gpu-check`, `--wave-transfer-check` and
+  `--amr-check`. The unified-topology cutover removed them and the doc was never
+  updated, so anyone following it ran four commands that cannot work. Corrected,
+  along with the `temporal_amr_calibration` description, which still described
+  four sweeps and the superseded conclusion.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (739 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`, and the
+  new gate on an M1 Max / Metal with `HOME` isolated from the live autosave.
+
 ## 2026-09-22 — The estimate reads the solver's own flux, and is calibrated on every medium tried
 
 - Under a material runtime the gradient-based error terms no longer
