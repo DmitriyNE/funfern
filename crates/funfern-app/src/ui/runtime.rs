@@ -116,13 +116,25 @@ impl Playground {
             curve_tolerance: (self.mesh_edge * 0.02).min(5e-4),
             ..MeshingOptions::default()
         };
+        // This revision is accounted for when a preparation is in flight for
+        // it, when it is already the accepted generation, or when preparing it
+        // has already failed. Without that last case a revision that cannot be
+        // prepared is retried every frame forever: the whole preparation runs
+        // again, the phase label churns, and the error it is reporting is
+        // replaced before it can be read. The next edit, a different mesh edge
+        // or an explicit remesh moves on; Reset publishes onto the accepted
+        // generation and does not come through here.
         if !self.remesh_requested
             && self.requested_revision == Some(self.editor.revision)
             && self.requested_edge == self.mesh_edge
             && (self.preparation_in_progress()
                 || self.runtime.active().is_some_and(|active| {
                     active.bundle.token.document_revision == self.editor.revision
-                }))
+                })
+                || self
+                    .runtime
+                    .last_error()
+                    .is_some_and(|failure| failure.token.document_revision == self.editor.revision))
         {
             return;
         }

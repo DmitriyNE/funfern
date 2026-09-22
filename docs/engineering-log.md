@@ -5,6 +5,47 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The driven handoff, and an error that could not be read
+
+Reported: changing a material fails with "canonical GPU handoff layouts do not
+match", and before it fails the phase label churns every frame so nothing can be
+followed.
+
+- `source_material_runtime_count` and `target_material_runtime_count` on a
+  transfer are set only by `with_temporal_material_runtime`, which had no
+  production caller. A driven handoff therefore described no runtime records
+  while both plans held one each, and `begin_handoff` refused the layout however
+  well the state mapped. The previous entry's fix is what made this reachable:
+  until then every preparation after the first came out inert, so a driven
+  handoff never ran.
+- `compile_gpu_upload` now rebuilds the source plan from the active generation's
+  temporal operator and installs the mapping. The plan is rebuilt rather than
+  kept because the request holds device buffers, not the plan they came from;
+  only its layout and its drives' identities are read, and both follow from the
+  operator and the forcing, so rebuilding recovers them exactly. It is packing
+  work on a worker thread.
+- This also closes the gap noted in the previous entry from the other side: a
+  pump's carrier phase and a Switch mid-ramp now survive an edit instead of
+  restarting from their authored anchors, and the lane-following correction made
+  earlier today is on a live path rather than only in its test.
+- `material_runtime_counts` exposes what the handoff compares, so the test can
+  make the same comparison. Without the mapping it reads `(0, 0)` against the
+  `(1, 1)` the plans hold.
+- **A failed preparation was retried every frame, forever.** Nothing recorded
+  that a revision had already failed, so the next frame ran the whole
+  preparation again - assembly included - and replaced the error message before
+  it could be read. That is why the report could not say what was happening. The
+  request guard now treats "already failed for this revision" as it treats
+  "already in flight" and "already accepted"; the next edit, a different mesh
+  edge or an explicit remesh moves on, and Reset publishes onto the accepted
+  generation without coming through that path.
+- Worth naming: this is the third defect in a row reachable only on a path the
+  previous fix opened. Authoring a drive was the first thing in the application
+  that could flip `driven()` against a running generation, and every stage of
+  the handoff it touches had been written but never executed.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`.
+
 ## 2026-09-22 — A driven medium stopped driving itself
 
 Reported after the previous fix: applying a material reset the field, and a

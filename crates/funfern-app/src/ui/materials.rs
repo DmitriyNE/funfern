@@ -839,9 +839,18 @@ mod second_preset_reproduction {
             [0; 4],
         )
         .expect("one driven generation hands off to another");
-        assert!(
-            packed.transfer.is_some(),
-            "two driven generations share a layout and transfer between them"
+        let transfer = packed
+            .transfer
+            .as_ref()
+            .expect("two driven generations share a layout and transfer between them");
+        // The handoff compares these against both plans. A transfer that never
+        // had the material runtime mapping installed reads `(0, 0)` while the
+        // plans hold a record each, and is refused with "canonical GPU handoff
+        // layouts do not match" however well its state maps.
+        assert_eq!(
+            transfer.material_runtime_counts(),
+            (1, 1),
+            "a driven handoff must describe the runtime records its plans hold"
         );
 
         let inert = apply(&mut state, "Linear");

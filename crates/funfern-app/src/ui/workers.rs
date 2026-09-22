@@ -682,6 +682,34 @@ pub(super) fn compile_gpu_upload(
         &runtime,
     )
     .map_err(|error| format!("{error:?}"))?;
+    // Two driven generations also carry a material runtime bank - each drive's
+    // carrier phase and each material's Switch trajectory - and the handoff
+    // checks that the transfer describes as many records as the plans hold. It
+    // is also what keeps a pump's phase and a Switch mid-ramp across an edit
+    // rather than restarting them from their authored anchors.
+    //
+    // The source plan is rebuilt rather than kept, because the request holds
+    // device buffers rather than the plan they came from. Only its layout and
+    // its drives' identities are read, and those follow from the operator and
+    // the forcing, so rebuilding recovers them exactly. It is packing work on a
+    // worker thread, not frame work.
+    let gpu_transfer = match &active.canonical_temporal_operator {
+        Some(temporal) => {
+            let state = CanonicalTemporalWaveState::zero(temporal, time_step)
+                .map_err(|error| error.to_string())?;
+            let source = CanonicalGpuPlan::compile_temporal(
+                temporal,
+                &state,
+                &active.canonical_forcing,
+                clock,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            gpu_transfer
+                .with_temporal_material_runtime(&source, &plan)
+                .map_err(|error| format!("{error:?}"))?
+        }
+        None => gpu_transfer,
+    };
     Ok(PreparedGpuUpload {
         plan,
         transfer: Some(gpu_transfer),

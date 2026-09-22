@@ -2190,6 +2190,18 @@ impl CanonicalGpuTransferPlan {
     /// transfer. This is deliberately explicit: a static/temporal conversion
     /// has no generally valid physical initialization and must not silently
     /// reset or invent carrier and Switch state.
+    /// How many material runtime records this transfer maps on each side.
+    ///
+    /// A handoff between driven generations checks these against its two plans,
+    /// so a transfer that never had the mapping installed reads `(0, 0)` and is
+    /// refused as a layout mismatch however well its state maps.
+    pub fn material_runtime_counts(&self) -> (usize, usize) {
+        (
+            self.source_material_runtime_count,
+            self.target_material_runtime_count,
+        )
+    }
+
     pub fn with_temporal_material_runtime(
         mut self,
         source: &CanonicalGpuPlan,
