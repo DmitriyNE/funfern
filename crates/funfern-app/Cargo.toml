@@ -16,7 +16,16 @@ workspace = true
 [dependencies]
 funfern-core = { path = "../funfern-core" }
 bevy = { version = "=0.19.1", default-features = false, features = ["std", "async_executor", "bevy_asset", "bevy_color", "bevy_core_pipeline", "bevy_render", "bevy_camera", "bevy_window", "bevy_winit", "bevy_log", "multi_threaded", "webgpu", "x11", "wayland"] }
-bevy_egui = { version = "=0.41.1", default-features = false, features = ["render", "default_fonts"] }
+# `manage_clipboard` is what hands egui's copied text to the operating
+# system. Without it `Context::copy_text` fills a buffer nothing reads and
+# every Copy button is silently inert on native. Its dependencies are
+# target-gated upstream: `arboard` excludes wasm, `smithay-clipboard` is
+# Linux only, so the browser build is unaffected.
+bevy_egui = { version = "=0.41.1", default-features = false, features = [
+    "render",
+    "default_fonts",
+    "manage_clipboard",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 rfd = { version = "0.17", features = ["file-handle-inner"] }

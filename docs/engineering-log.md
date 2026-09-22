@@ -5,6 +5,45 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-23 — The device held the assumption the host had just dropped
+
+Reported: loading the autosave and switching to a parametric pump on epsilon
+fails with "layout or transfer consistency check failed" - a device status code,
+so the shader rejected the transfer at runtime.
+
+- The transfer shader carried the same assumption lifted from the host an entry
+  ago: it refused unless *both* generations held a runtime bank, testing
+  `material_header.y == 0 || material_header.z == 0 ||
+  old_control.runtime_slots.w == 0 || new_control.runtime_slots.w == 0` - the
+  two record counts and each side's temporal-enabled flag. Enabling a drive
+  produces `(0, N)`, which is exactly what the host now builds.
+- A side is now only required to be a temporal generation when it claims
+  records. With none at the source every target record is written from its own
+  authored anchors; with none at the target there is nothing to write.
+- The lesson is the one the session keeps repeating from the other direction:
+  the host and the device hold the same contract in two places, and relaxing it
+  on one side without grepping the other leaves a rejection that only a real run
+  finds. This is the second time in a day.
+- **No device gate covers a handoff that changes drivenness.** It has broken
+  twice and a user found it both times, because `canonical_gpu_driven_document`
+  builds a single generation and never hands off. Extending it to go inert to
+  driven and back is the missing check.
+
+## 2026-09-23 — Copy never reached the clipboard
+
+- `bevy_egui` is declared `default-features = false` with `render` and
+  `default_fonts`, and `manage_clipboard` - the feature that pulls in `arboard`
+  and hands egui's copied text to the operating system - is in its default set
+  but was not enabled. `Context::copy_text` filled a buffer nothing read, so
+  every Copy button was inert on native.
+- The share-link copy already carried a `web_sys` fallback, which is why the
+  browser path worked and the native one never did; that fallback is the
+  evidence the gap had been half-noticed before.
+- Both of the feature's dependencies are target-gated upstream - `arboard`
+  excludes wasm, `smithay-clipboard` is Linux only - so the browser build is
+  unaffected, which `cargo check --target wasm32-unknown-unknown` confirms
+  rather than assumes.
+
 ## 2026-09-23 — A refusal that could not be told from a bad number
 
 Reported: switching a driven material to Linear failed with "wave coefficients
