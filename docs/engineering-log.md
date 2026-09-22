@@ -5,6 +5,52 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The outgoing refusal is about the trace, not the generation
+
+- The refusal landed in the previous entry was broader than the defect. The
+  stale factorization touches only the boundary trace: trace nodes are advanced
+  by the dense solve and skipped by the local kick, so no interior node sees
+  that matrix. An error confined to a few hundred trace nodes out of 3811 is
+  exactly what an `8.5e-3` whole-field norm looks like.
+- That does not make it safe to run - the boundary is where energy leaves, so a
+  wrong wall reaches the interior within a few crossing times - but it does
+  mean the test belongs on the trace. Nothing else in that system can move: the
+  diagonal is `damping / mass`, the couplings are `trace . trace / mass`, and
+  the damping and trace are assembled constants. A medium driven where the
+  boundary does not reach keeps a wall that is exactly what it was assembled
+  as.
+- `outgoing_trace_mass_is_static` is that test, and `compile_temporal` now asks
+  it instead of asking whether the generation is driven at all. A drive
+  confined to an interior inclusion compiles and runs.
+- The test for it needed a real two-material fixture, and the first version did
+  not have one: `Scene::initial()` carries a single material, so the case that
+  actually discriminates never ran and the test passed while proving less than
+  it claimed. It now builds a background and an inclusion and checks all four
+  combinations, including the one that matters - driven inclusion, inert
+  background, wall still valid.
+- **What reassembly would cost, measured rather than presumed.** At 8938 DOFs
+  the trace is 276 nodes and 825 auxiliary scalars, the factorization takes
+  `22.5 ms`, and a whole KDK step takes `1.5 ms`. Two refactorizations per step
+  is roughly `30x`, which agrees with the driven second-order row of the cost
+  table from the other direction. It also degrades with refinement: the trace
+  dimension grows like `O(sqrt(N))`, so a dense factorization is `O(N^1.5)`
+  against a step's `O(N)`.
+- **A third option worth deriving before choosing between the first two.** The
+  mass enters as a diagonal scaling of an otherwise fixed operator - the trace
+  system is `I + h K M^-1` with `K` fixed, equivalently `M (M + h K)^-1`. A
+  changing diagonal has no cheap update in general, but a drive that is
+  spatially uniform over the trace gives `M = m(t) M0`, and one eigendecomposition
+  of the symmetric `M0^-1/2 K M0^-1/2` turns each stage into a diagonal inverse
+  between two fixed matrices: `O(d^2)` rather than `O(d^3)`. A travelling
+  modulation that varies along the trace breaks that and would need the real
+  refactorization. This is traced by eye through `prepare`, not derived - the
+  auxiliary elimination folds terms into the trace block and that step has to
+  be checked before the structure can be relied on.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (752 passed, 1 known
+  ignored reproducer), and the end-to-end gate both ways - `2.46e-7` running,
+  and the refusal when the drive reaches the trace.
+
 ## 2026-09-22 — The end-to-end failure is the outgoing wall, and it is now refused rather than run
 
 - Bisected by configuration rather than by stage, because the intermediate GPU
