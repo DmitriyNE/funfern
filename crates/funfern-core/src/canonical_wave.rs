@@ -2882,7 +2882,12 @@ impl CanonicalAssemblyJob {
                     let legacy = self.quadratic.lumped_mass()[index];
                     if !canonical.is_finite() || canonical <= 0.0 {
                         self.phase = CanonicalAssemblyPhase::Done;
-                        return Some(Err(WaveError::InvalidCoefficients));
+                        // Not a material's fault: this is what the assembly
+                        // produced from them, so it says so rather than sharing
+                        // the message a bad authored coefficient uses.
+                        return Some(Err(WaveError::InvalidMesh(
+                            "an assembled nodal mass is not finite and positive",
+                        )));
                     }
                     let tolerance = 2.0e-12 * canonical.abs().max(legacy.abs()).max(1.0);
                     if (canonical - legacy).abs() > tolerance {
@@ -3112,7 +3117,8 @@ fn linear_material_sample(
             material: material.name.clone(),
             coefficient,
             point,
-            reason: "the fixed assembly cannot execute an authored law; a driven                      generation assembles from the stripped model instead"
+            reason: "the fixed assembly cannot execute an authored law; a driven \
+                     generation assembles from the stripped model instead"
                 .into(),
         });
     }
@@ -3150,7 +3156,12 @@ fn linear_material_sample(
         axis_ratio: evaluate(&material.axis_ratio, "axis ratio", true)?,
     };
     if properties.axis_ratio < 1.0 {
-        return Err(WaveError::InvalidCoefficients);
+        return Err(WaveError::MaterialEvaluation {
+            material: material.name.clone(),
+            coefficient: "axis ratio",
+            point,
+            reason: "value must be at least one; the ratio names the stiffer axis".into(),
+        });
     }
     let has_physical_loss = material.electric_loss.is_some() || material.magnetic_loss.is_some();
     if has_physical_loss && properties.damping != 0.0 {
