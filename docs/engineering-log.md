@@ -5,6 +5,57 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — A drive can be authored
+
+- The material editor grows a **Response** selector: the catalogue by
+  phenomenon, with the mathematical form in hover text, showing the matched
+  preset or Custom. Under it, the matched preset's variables as named
+  parameters with its own ranges; a Switch ramp whenever either row carries an
+  alternate, since that is one number on the material rather than a slot on a
+  row; and the effective-law text in the named register. Applying a preset
+  stages like any other material edit and commits on Apply, which is the one
+  undo step section 11 asks for.
+- That closes the loop: pick a pump, turn its depth up, Apply, and the document
+  compiles to a temporal plan and runs. Until now the only driven scenes in this
+  project were built in test and example code.
+- **One label changed on the strength of a measurement.** `wave_coefficients`
+  reciprocates the complementary slot for TM and TE but not for Mechanical,
+  while the solver divides the complementary coefficient by its law factor in
+  every skin. Working through all six (skin, row) pairs, five multiply the
+  coefficient stored beside them and mechanical stiffness does not: a law there
+  multiplies `s0 = 1/k0`. `a_pump_on_the_stiffness_row_lowers_the_mechanical_stiffness`
+  measures it - a crest of `1 + 0.5` divides the stiffness by exactly 1.5 - so
+  that row is named **Reciprocal stiffness s0** wherever a law touches it. A
+  depth slider beside a control called stiffness would have read backwards.
+- This also sizes the advanced view's honesty problem, which looked bigger than
+  it is. Only that one field differs between the two presentations; everywhere
+  else advanced and linear name the same quantity, so "advanced has to be
+  honest" costs one relabelled field rather than a second set of numbers.
+- **The panel did not work on the default document, and the end-to-end test is
+  what caught it.** Applying a pump and preparing the result failed in the
+  Assembling phase with "Point source placement is invalid: probe cannot use the
+  current mesh" - a message about the mesh, for a material law. Every probe
+  stencil, the far-field stencil and the volume-source compiler read
+  `bundle.model()`, the *authored* model, and `Material::evaluate` refuses a
+  law-carrying material on purpose; the probe then mapped that refusal onto its
+  own `InvalidMesh`. Five sites, all missed when the assemblies were taught to
+  build from the stripped model. They now take the stripped model too, which is
+  the same base coefficients both assemblies use and what a stencil's placement
+  belongs to - the drive is applied at stage time by the temporal path.
+- Worth naming how this was isolated: the same sequence with a colour-only edit
+  prepared cleanly, which separated "my test is wrong" from "a drive breaks
+  preparation" in one run. Without that the obvious reading was fixture
+  friction.
+- So a driven document previously prepared only when it had no enabled probe and
+  no volume source. `canonical_gpu_driven_document` has neither, which is why
+  the device gates never saw this.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`, plus a native
+  launch against an isolated `HOME`.
+- Next: the Advanced toggle in the Library header with the raw slot editors and
+  `s0` editable there, then moving the AMR estimate onto the decoded runtime
+  bank - which has to land before a Switch button exists - and then the Switch.
+
 ## 2026-09-22 — The preset catalogue, applied and recovered
 
 - `law_presets` in core: the named points in the law catalogue a user can put

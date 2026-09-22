@@ -726,6 +726,33 @@ const fn material_editor_labels(physics: PhysicsModel) -> MaterialEditorLabels {
     }
 }
 
+/// What a law on this row actually multiplies, named for the skin.
+///
+/// Every skin and row but one multiplies the stored coefficient directly. The
+/// mechanical stiffness row is the exception: the solver divides the
+/// complementary coefficient by the law's factor, while the mechanical adapter
+/// stores `k₀` rather than its reciprocal, so a law there multiplies
+/// `s₀ = 1/k₀`. Naming it stiffness would read backwards - a pump's depth
+/// going up while the stiffness goes down.
+const fn law_row_label(physics: PhysicsModel, row: LawPresetRow) -> &'static str {
+    match (physics, row) {
+        (PhysicsModel::Mechanical, LawPresetRow::Mass) => "Density ρ₀",
+        (PhysicsModel::Mechanical, _) => "Reciprocal stiffness s₀",
+        (PhysicsModel::Electromagnetic { .. }, LawPresetRow::Mass) => "Permittivity ε",
+        (PhysicsModel::Electromagnetic { .. }, _) => "Permeability μ",
+    }
+}
+
+/// A preset as the selector names it: the phenomenon, and the coefficient it
+/// acts on when that is one row rather than the pair.
+fn law_preset_label(preset: &LawPreset, physics: PhysicsModel) -> String {
+    match preset.row {
+        LawPresetRow::Both if preset.variables.is_empty() => preset.name.to_owned(),
+        LawPresetRow::Both => format!("{} (both rows)", preset.name),
+        row => format!("{} — {}", preset.name, law_row_label(physics, row)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn material_scalar_editor(
     ui: &mut egui::Ui,

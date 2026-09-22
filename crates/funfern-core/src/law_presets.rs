@@ -600,6 +600,67 @@ mod tests {
         );
     }
 
+    /// The one row in the matrix whose law does not multiply the coefficient
+    /// it sits beside. The solver divides the complementary coefficient by the
+    /// law's factor, and the mechanical adapter stores `k0` rather than its
+    /// reciprocal, so a pump on that row raises the compliance and *lowers*
+    /// the stiffness. The editor names it reciprocal stiffness for this
+    /// reason; this measures the sign rather than restating it.
+    #[test]
+    fn a_pump_on_the_stiffness_row_lowers_the_mechanical_stiffness() {
+        use crate::{
+            MaterialFrame, Point2, Region, RegionId,
+            canonical_temporal::CanonicalMaterialRuntimeState,
+            wave::evaluate_timed_directional_material_library_at,
+        };
+        let mut material = apply_law_preset(
+            preset("K-T2", "Parametric pump"),
+            &Material::default_medium(),
+        )
+        .unwrap();
+        // A still pump at zero phase sits at its crest, so the factor is
+        // exactly `1 + depth` and the comparison needs no tolerance argument.
+        for parameter in &mut material.parameters {
+            parameter.value = match parameter.name.as_str() {
+                "depth" => 0.5,
+                _ => 0.0,
+            };
+        }
+        let region = Region {
+            id: RegionId(1),
+            material: material.id,
+            frame: MaterialFrame::world(),
+        };
+        let materials = [material.clone()];
+        let runtime = CanonicalMaterialRuntimeState::authored(materials.iter().cloned()).unwrap();
+        let coefficients = evaluate_timed_directional_material_library_at(
+            PhysicsModel::Mechanical,
+            &materials,
+            &[region],
+            region.id,
+            Point2::new(0.0, 0.0),
+            0.0,
+            &runtime,
+        )
+        .unwrap();
+        let authored = coefficients.authored.stiffness.xx;
+        let instantaneous = coefficients.instantaneous.stiffness.xx;
+        assert!(
+            (instantaneous - authored / 1.5).abs() < 1.0e-12,
+            "a crest of `1 + 0.5` should divide the stiffness: {instantaneous} against {authored}"
+        );
+        assert!(
+            instantaneous < authored,
+            "the row a pump raises is the compliance, so the stiffness falls"
+        );
+        // The mass row has the opposite sense, which is why only one of the two
+        // is renamed.
+        assert_eq!(
+            coefficients.instantaneous.mass_density,
+            coefficients.authored.mass_density
+        );
+    }
+
     /// A preset's laws are the ones a physics skin change can carry, so
     /// switching skins in the preset view keeps working rather than reporting
     /// a material the user cannot see into.

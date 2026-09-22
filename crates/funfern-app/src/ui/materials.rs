@@ -418,6 +418,85 @@ impl Playground {
                 &mut self.material_formula_edits,
                 &mut self.material_formula_errors,
             );
+            // The law catalogue. A preset writes the slots and creates the
+            // parameters it exposes; after that the material stands on its own,
+            // so editing a slot by hand leaves it Custom rather than being
+            // refitted to the preset it came from.
+            ui.separator();
+            let physics = self.editor.document.model.draft.physics;
+            let matched = identify_law_preset(&material);
+            let mut chosen = None;
+            ui.horizontal(|ui| {
+                ui.label("Response");
+                egui::ComboBox::from_id_salt(("material-response", material.id.0))
+                    .selected_text(matched.as_ref().map_or_else(
+                        || "Custom".to_owned(),
+                        |found| law_preset_label(found.preset, physics),
+                    ))
+                    .show_ui(ui, |ui| {
+                        for preset in law_presets() {
+                            let current =
+                                matched.as_ref().is_some_and(|found| found.preset == preset);
+                            if ui
+                                .selectable_label(current, law_preset_label(preset, physics))
+                                .on_hover_text(preset.phenomenon)
+                                .clicked()
+                            {
+                                chosen = Some(preset);
+                            }
+                        }
+                    });
+            });
+            if let Some(preset) = chosen {
+                match apply_law_preset(preset, &material) {
+                    Ok(applied) => material = applied,
+                    Err(error) => self.notify(error.to_string()),
+                }
+            }
+            // Recomputed, because applying a preset above changed the material
+            // the rest of this section describes.
+            if let Some(found) = identify_law_preset(&material) {
+                for (variable, name) in found.preset.variables.iter().zip(&found.parameters) {
+                    let Some(parameter) = material
+                        .parameters
+                        .iter_mut()
+                        .find(|parameter| parameter.name == *name)
+                    else {
+                        continue;
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(variable.label);
+                        ui.add(
+                            egui::DragValue::new(&mut parameter.value)
+                                .speed(0.005)
+                                .range(variable.minimum..=variable.maximum)
+                                .update_while_editing(false),
+                        );
+                    });
+                }
+            }
+            // A Switch's ramp is one number on the material rather than a slot
+            // on a row, so it is edited here rather than exposed as a preset
+            // variable. Zero is a hard temporal interface.
+            if material.mass_law.alternate.is_some() || material.stiffness_law.alternate.is_some() {
+                ui.horizontal(|ui| {
+                    ui.label("Switch ramp");
+                    ui.add(
+                        egui::DragValue::new(&mut material.switch_ramp)
+                            .speed(0.01)
+                            .range(0.0..=60.0)
+                            .suffix(" s")
+                            .update_while_editing(false),
+                    );
+                });
+            }
+            // What the laws compose to, in the names the preset gave them.
+            for line in material_law_summary(&material, physics, LawSummaryDetail::Named)
+                .unwrap_or_default()
+            {
+                ui.small(format!("{} = {}", line.subject, line.response));
+            }
+
             ui.collapsing("Parameters", |ui| {
                 let mut remove = None;
                 let referenced_names = material
@@ -503,6 +582,89 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The claim the Response selector makes: choosing a preset and applying
+    /// it produces a document the solver compiles as a driven one. Everything
+    /// the panel does between those two points is tested in the core, but the
+    /// wiring from an authored material to a temporal operator is only true
+    /// end to end, and until now every driven scene in this project was built
+    /// in test code rather than authored.
+    #[test]
+    fn applying_a_pump_preset_prepares_a_driven_generation() {
+        let mut state = Playground::default();
+        let before = activate(&mut state);
+        assert!(!before.driven(), "the default document is not driven");
+
+        let material = state.editor.document.model.draft.materials[0].clone();
+        let pump = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Parametric pump" && preset.row == LawPresetRow::Mass)
+            .expect("the catalogue offers a pump");
+        let driven = apply_law_preset(pump, &material).unwrap();
+        assert_eq!(
+            identify_law_preset(&driven).unwrap().preset.name,
+            "Parametric pump",
+            "the selector must read back what it just applied"
+        );
+        state.editor.update_material(driven).unwrap();
+        settle(&mut state.editor);
+
+        let after = activate(&mut state);
+        assert!(
+            after.driven(),
+            "an authored pump must reach the solver as a temporal generation"
+        );
+        assert!(
+            after.recommended_time_step() < before.recommended_time_step(),
+            "and its coefficient trajectory must tighten the step bound"
+        );
+    }
+
+    #[test]
+    fn the_law_rows_are_named_for_what_their_laws_multiply() {
+        // Five of the six (skin, row) pairs multiply the coefficient stored
+        // beside them. The mechanical complementary row does not, which
+        // `a_pump_on_the_stiffness_row_lowers_the_mechanical_stiffness` in the
+        // core measures, so calling it stiffness would read backwards.
+        assert_eq!(
+            law_row_label(PhysicsModel::Mechanical, LawPresetRow::Mass),
+            "Density ρ₀"
+        );
+        assert_eq!(
+            law_row_label(PhysicsModel::Mechanical, LawPresetRow::Stiffness),
+            "Reciprocal stiffness s₀"
+        );
+        for polarization in [
+            ElectromagneticPolarization::Tm,
+            ElectromagneticPolarization::Te,
+        ] {
+            let physics = PhysicsModel::Electromagnetic { polarization };
+            assert_eq!(law_row_label(physics, LawPresetRow::Mass), "Permittivity ε");
+            assert_eq!(
+                law_row_label(physics, LawPresetRow::Stiffness),
+                "Permeability μ"
+            );
+        }
+
+        let named = |name: &str, row: LawPresetRow| {
+            law_presets()
+                .iter()
+                .find(|preset| preset.name == name && preset.row == row)
+                .map(|preset| law_preset_label(preset, PhysicsModel::Mechanical))
+                .expect(name)
+        };
+        // Linear names no coefficient, a one-row preset names the one it acts
+        // on, and the impedance-preserving pair says it takes both.
+        assert_eq!(named("Linear", LawPresetRow::Both), "Linear");
+        assert_eq!(
+            named("Parametric pump", LawPresetRow::Stiffness),
+            "Parametric pump — Reciprocal stiffness s₀"
+        );
+        assert_eq!(
+            named("Reflectionless time interface", LawPresetRow::Both),
+            "Reflectionless time interface (both rows)"
+        );
+    }
 
     #[test]
     fn material_editor_names_the_active_physical_coefficients() {

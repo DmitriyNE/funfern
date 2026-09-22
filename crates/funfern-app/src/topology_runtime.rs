@@ -1090,11 +1090,19 @@ impl TopologyPreparationJob {
         let measurements_started = Instant::now();
         let mesh = self.mesh.as_ref().unwrap().clone();
         let operator = self.operator.as_ref().unwrap().clone();
+        // Every stencil below places itself against the *base* coefficients,
+        // the same ones both assemblies were built from. Reading the authored
+        // model instead would refuse a law-carrying material outright - the
+        // probe's own error says the mesh is unusable, which it is not - so a
+        // document with a drive and an enabled probe or source could not be
+        // prepared at all.
+        self.ensure_stripped_model();
         let probes = compile_probes_reusing(
             &self.probes,
             &mesh,
             &operator,
             &self.bundle,
+            self.stripped_model(),
             self.operator_reused
                 .then_some(self.previous.as_deref())
                 .flatten(),
@@ -1119,7 +1127,7 @@ impl TopologyPreparationJob {
                         &mesh,
                         &operator,
                         &self.bundle.plan,
-                        self.bundle.model(),
+                        self.stripped_model(),
                         FarFieldCompileOptions {
                             inset: self.far_field.inset,
                             sample_count: FAR_FIELD_CONTOUR_POINTS,
@@ -1169,11 +1177,12 @@ impl TopologyPreparationJob {
         operator: Arc<QuadraticWaveOperator>,
     ) -> Result<(), String> {
         self.phase = TopologyPreparationPhase::CompilingSources;
+        self.ensure_stripped_model();
         let job = VolumeSourceCompileJob::new_topology(
             mesh,
             operator,
             &self.bundle.plan,
-            self.bundle.model(),
+            self.stripped_model(),
             &self.bundle.authored.volume_sources,
         )
         .map_err(|error| error.to_string())?;
@@ -1202,7 +1211,7 @@ impl TopologyPreparationJob {
             mesh,
             operator,
             &self.bundle.plan,
-            self.bundle.model(),
+            self.stripped_model(),
             self.point_source.position,
         )
         .map_err(|error| format!("Point source placement is invalid: {error}"))?;
@@ -1226,6 +1235,7 @@ impl TopologyPreparationJob {
             self.point_source_validation_count =
                 self.point_source_validation_count.saturating_add(1);
         }
+        self.ensure_stripped_model();
         self.validate_point_source(&mesh, &operator)?;
         self.point_source_validated = true;
         Ok(())
@@ -1589,6 +1599,7 @@ fn compile_probes(
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
     bundle: &AcceptedTopology,
+    model: TopologyWaveModel<'_>,
 ) -> Vec<CompiledTopologyProbe> {
     probes
         .iter()
@@ -1596,7 +1607,7 @@ fn compile_probes(
             let result = if !probe.enabled {
                 TopologyProbeCompilation::Disabled
             } else {
-                compile_probe(probe, mesh, operator, bundle)
+                compile_probe(probe, mesh, operator, bundle, model)
                     .map(Box::new)
                     .map(TopologyProbeCompilation::Ready)
                     .unwrap_or_else(TopologyProbeCompilation::Failed)
@@ -1614,6 +1625,7 @@ fn compile_probes_reusing(
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
     bundle: &AcceptedTopology,
+    model: TopologyWaveModel<'_>,
     previous: Option<&PreparedTopology>,
 ) -> Vec<CompiledTopologyProbe> {
     probes
@@ -1628,7 +1640,7 @@ fn compile_probes_reusing(
             {
                 return compiled.clone();
             }
-            compile_probes(std::slice::from_ref(probe), mesh, operator, bundle)
+            compile_probes(std::slice::from_ref(probe), mesh, operator, bundle, model)
                 .pop()
                 .expect("one probe compiles to one result")
         })
@@ -1640,8 +1652,8 @@ fn compile_probe(
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
     bundle: &AcceptedTopology,
+    model: TopologyWaveModel<'_>,
 ) -> Result<TopologyProbeStencil, String> {
-    let model = bundle.model();
     match &probe.target {
         TopologyProbeTarget::Point(point) => {
             QuadraticPointStencil::build_topology(mesh, operator, &bundle.plan, model, *point)

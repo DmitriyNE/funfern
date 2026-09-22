@@ -107,7 +107,9 @@ pub struct CanonicalMaterialRuntimeState {
 }
 
 impl CanonicalMaterialRuntimeState {
-    fn authored(materials: impl IntoIterator<Item = Material>) -> Result<Self, WaveError> {
+    pub(crate) fn authored(
+        materials: impl IntoIterator<Item = Material>,
+    ) -> Result<Self, WaveError> {
         let mut records = materials
             .into_iter()
             .map(|material| {
