@@ -5,6 +5,29 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — A third of the driven cost was a walk taken for gaps that were not there
+
+- The thin-gap composition reconstructed the midpoint primary field on every
+  step to drift the gap displacement. That reconstruction is a walk over every
+  node with a transcendental at each, and it ran whether or not the generation
+  had any gaps - which is the ordinary case. Guarded, the driven bulk goes from
+  `18.7x` the fixed bulk to `13.2x`, and the second-order wall from `37.5x` to
+  `34.2x`.
+- It was mine, introduced when gaps landed, and the cost measurement is what
+  exposed it. Worth stating plainly rather than folding into the optimization
+  work: taking the measurement immediately after the compositions found a
+  regression that a later, more general optimization pass would have absorbed
+  silently into its own improvement.
+- The remaining ratio is still redundancy rather than physics, and still in the
+  f64 CPU oracle rather than the production path. What has not been measured is
+  the one that decides whether any of it matters to a user: the f32 GPU core's
+  driven-versus-fixed cost. The shader reads its coefficients once per stage, so
+  there is reason to expect a much smaller factor there, but that is an
+  expectation and not a number.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (749 passed, 1 known
+  ignored reproducer).
+
 ## 2026-09-22 — The incremental cost is nineteen times, and most of it is redundant work
 
 - Stage 7's exit criterion asks for the actual-core incremental cost of a

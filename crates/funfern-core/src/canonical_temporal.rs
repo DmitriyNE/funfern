@@ -2239,14 +2239,20 @@ impl CanonicalTemporalWaveState {
         // same interval as the complementary flux does: both are the drift
         // subflow, and splitting them would break the exactness the local gap
         // split is admitted for.
-        let midpoint_field = operator.primary_field_at(&primary, middle_time, &self.runtime)?;
+        //
+        // Reconstructing that field is a walk over every node with a
+        // transcendental at each, so a generation without gaps must not pay
+        // for it. It did until this guard.
         let mut gap_jump = self.thin_gap_jump.clone();
-        for (sample, jump) in operator.base().thin_gap_samples().iter().zip(&mut gap_jump) {
-            *jump += duration
-                * (midpoint_field[sample.left_node as usize]
-                    - midpoint_field[sample.right_node as usize]);
+        if !gap_jump.is_empty() {
+            let midpoint_field = operator.primary_field_at(&primary, middle_time, &self.runtime)?;
+            for (sample, jump) in operator.base().thin_gap_samples().iter().zip(&mut gap_jump) {
+                *jump += duration
+                    * (midpoint_field[sample.left_node as usize]
+                        - midpoint_field[sample.right_node as usize]);
+            }
+            validate_finite(&gap_jump)?;
         }
-        validate_finite(&gap_jump)?;
         operator.drift_at(
             &mut complementary,
             &primary,
