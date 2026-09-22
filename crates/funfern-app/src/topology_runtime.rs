@@ -525,6 +525,22 @@ impl TopologyPreparationJob {
         let operator = operator_reused.then(|| previous.as_ref().unwrap().operator.clone());
         let canonical_operator =
             operator_reused.then(|| previous.as_ref().unwrap().canonical_operator.clone());
+        // The laws travel with the operator. `operator_scene_eq` compares whole
+        // materials, so a reused operator means the laws are the ones it was
+        // compiled against and the temporal operator built over it is still the
+        // right one. Dropping it here made every preparation after the first
+        // read as inert: the medium stopped being driven a moment after it
+        // started, and the two generations then shared no state to transfer, so
+        // the field was reset on the way through as well.
+        let canonical_temporal_operator = operator_reused
+            .then(|| {
+                previous
+                    .as_ref()
+                    .unwrap()
+                    .canonical_temporal_operator
+                    .clone()
+            })
+            .flatten();
         let point_source_validated = operator_reused
             && previous.as_ref().is_some_and(|previous| {
                 previous.point_source.enabled == document.model.source.enabled
@@ -584,7 +600,7 @@ impl TopologyPreparationJob {
             point_source_validation_count: 0,
             assembly_job: None,
             canonical_assembly_job: None,
-            canonical_temporal_operator: None,
+            canonical_temporal_operator,
             stripped_model: None,
             canonical_operator,
             transfer_job: None,

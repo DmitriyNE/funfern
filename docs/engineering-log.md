@@ -5,6 +5,46 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — A driven medium stopped driving itself
+
+Reported after the previous fix: applying a material reset the field, and a
+preset ran the driven medium for a second or two before reverting to a
+stationary one. Both are one defect.
+
+- A preparation that reuses its canonical operator was not reusing the temporal
+  operator built over it. That operator is only constructed on the assembly
+  path, so the first preparation after an edit was driven and every one after it
+  - the application prepares repeatedly while it runs - came out inert. The
+  medium stopped driving itself a moment after it started.
+- The field reset followed from that rather than being separate. Once drivenness
+  had changed, `compile_gpu_upload` returns no transfer, because the two
+  generations do not share a state layout, so the candidate was installed and
+  the field started from zero. Reverting to stationary and losing the field were
+  the same event.
+- The fix is to carry the previous temporal operator when the operator is
+  reused. That is sound because `operator_scene_eq` compares whole materials:
+  a reused operator means the laws are exactly the ones it was compiled
+  against. `a_driven_generation_stays_driven_across_repeated_preparations`
+  prepares the same unchanged driven document four times and requires every one
+  of them to stay driven; before the fix, round one was driven and rounds two
+  onward were not.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`.
+- Two gaps found while diagnosing this, neither fixed here.
+  **`with_temporal_material_runtime` has no production caller**: the function
+  that maps carrier phases and Switch trajectories across a handoff is reached
+  only from its tests, so every driven handoff restarts the material runtime
+  from authored anchors - a pump's phase jumps and a Switch mid-ramp is lost
+  whenever anything is edited. The lane-following correction made earlier today
+  is therefore exercised only by its test.
+  **Turning a drive on still resets the field**, because a change of drivenness
+  skips the transfer entirely. Nothing appears to be genuinely missing: `Q` and
+  `b` transfer either way, and authored anchors are the correct initial runtime
+  for a drive that was just switched on rather than an invention - which is also
+  what a driven handoff already lands on today, given the gap above. Whether the
+  rest of the transfer tolerates the differing state-word counts needs checking
+  rather than assuming.
+
 ## 2026-09-22 — Two defects the authoring panel exposed
 
 Reported from the running application: after a parametric pump applied, the next

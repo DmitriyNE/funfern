@@ -720,6 +720,63 @@ mod second_preset_reproduction {
     use super::super::workers::compile_gpu_upload;
     use super::*;
 
+    /// Reported from the running application: applying a preset ran the driven
+    /// medium and then, a second or two later, reverted to a stationary one
+    /// with the field reset.
+    ///
+    /// A preparation that reuses its operator has to reuse the temporal
+    /// operator built over it. `operator_scene_eq` compares whole materials, so
+    /// a reused operator means the laws are the ones it was compiled against -
+    /// but the temporal operator was rebuilt only on the assembly path, so
+    /// every preparation after the first read as inert. The medium stopped
+    /// being driven on its own, and because drivenness had changed the two
+    /// generations shared no state to transfer, which reset the field as well.
+    #[test]
+    fn a_driven_generation_stays_driven_across_repeated_preparations() {
+        let mut state = Playground::default();
+        activate(&mut state);
+        let material = state.editor.document.model.draft.materials[0].clone();
+        let pump = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Parametric pump")
+            .expect("catalogue entry");
+        state
+            .editor
+            .update_material(apply_law_preset(pump, &material).unwrap())
+            .unwrap();
+        settle(&mut state.editor);
+
+        // Nothing changes between rounds, so every one of them describes the
+        // same driven medium. The application prepares repeatedly while it
+        // runs, and it was the second round that undrove the scene.
+        for round in 0..4 {
+            let token = state
+                .runtime
+                .request(
+                    state.editor.revision,
+                    &state.editor.document,
+                    state.editor.compiled_accepted.clone(),
+                    MeshingOptions {
+                        target_edge_length: 0.18,
+                        ..MeshingOptions::default()
+                    },
+                    false,
+                )
+                .unwrap();
+            for _ in 0..1_000_000 {
+                if let Some(result) = state.runtime.advance(4096) {
+                    result.unwrap();
+                    break;
+                }
+            }
+            let prepared = state.runtime.commit_ready(token).unwrap();
+            assert!(
+                prepared.driven(),
+                "round {round} prepared a stationary medium from a driven document"
+            );
+        }
+    }
+
     /// Reported from the running application: the first parametric pump
     /// applied, the next preset never committed, the runtime sat at "Ready for
     /// GPU upload" and Reset did nothing.
