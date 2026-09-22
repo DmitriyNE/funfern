@@ -5,6 +5,40 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The application can hold a driven document
+
+- The assembly restructuring the previous entry identified. Both of the
+  application's assemblies - the scalar quadratic one and the canonical one -
+  are now given the law-stripped model, built once per preparation and kept,
+  and the temporal operator is built over the base the canonical assembly
+  produced rather than compiling a second one.
+- `OwnedTopologyWaveModel::without_temporal_laws` is the stripping, in core
+  where the gate it answers to lives. The temporal operator's base moved behind
+  an `Arc`, so the application holds one assembly rather than two copies of a
+  large operator; the test asserts pointer identity rather than taking that on
+  trust.
+- `PreparedTopology` carries `canonical_temporal_operator`, and `None` means
+  inert. Every document that existed before drives answers `None` and takes the
+  fixed path unchanged, which the same test pins down by preparing an inert
+  document first and requiring the absence.
+- The evidence is an application-level test that would have failed before this
+  for a reason worth restating: not that a drive was unsupported, but that the
+  document could not be *loaded*. It now prepares, carries its temporal
+  operator, shares one base, and reports the tighter trajectory timestep.
+- The non-resumable temporal compile is charged to the preparation's own
+  assembly timing rather than hidden, so if it ever costs a frame the existing
+  readout shows it. On the fixtures here it does not register against the
+  assembly it reuses, which is what the shape predicted: per-sample law
+  evaluation with no linear algebra.
+- Still to do before a driven document actually runs: the two plan sites switch
+  to `compile_temporal`, the timestep comes from the temporal ceiling, the
+  runtime bank decodes against the live epoch origin, a drive being added or
+  removed forces a fresh rebuild rather than a transfer, and AMR either takes
+  the temporal supplement or holds the mesh with a stated reason.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (751 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-22 — A law-carrying document cannot compile at all, which reshapes enablement
 
 - Started wiring the application to run a driven scene and found the premise

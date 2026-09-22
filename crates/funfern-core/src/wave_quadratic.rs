@@ -86,6 +86,19 @@ pub struct OwnedTopologyWaveModel {
 }
 
 impl OwnedTopologyWaveModel {
+    /// The same model with every temporal law removed.
+    ///
+    /// The fixed compilers refuse a law-carrying material outright - that is
+    /// the gate stopping a law from being executed as a static medium - so a
+    /// driven generation's base is assembled from this, with the laws kept for
+    /// the temporal operator built over that base. An application that holds a
+    /// document with a drive needs both.
+    pub fn without_temporal_laws(&self) -> Self {
+        let mut stripped = self.clone();
+        crate::canonical_temporal::strip_temporal_laws(&mut stripped.materials);
+        stripped
+    }
+
     pub fn as_model(&self) -> TopologyWaveModel<'_> {
         TopologyWaveModel {
             physics: self.physics,

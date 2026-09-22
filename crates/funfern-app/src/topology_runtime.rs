@@ -163,6 +163,10 @@ pub struct PreparedTopology {
     pub mesh: Arc<TriMesh>,
     pub operator: Arc<QuadraticWaveOperator>,
     pub canonical_operator: Arc<CanonicalWaveOperator>,
+    /// The time-driven operator over that same base, when the document carries
+    /// a material law. Absent means the generation is inert and the fixed path
+    /// runs it exactly as before.
+    pub canonical_temporal_operator: Option<Arc<CanonicalTemporalWaveOperator>>,
     pub canonical_forcing: Arc<CanonicalForcing>,
     pub canonical_transfer: Option<Arc<PreparedCanonicalTransfer>>,
     pub volume_sources: Arc<CompiledVolumeSources>,
@@ -300,6 +304,15 @@ pub struct TopologyPreparationJob {
     point_source_validation_count: u32,
     canonical_assembly_job: Option<CanonicalAssemblyJob>,
     canonical_operator: Option<Arc<CanonicalWaveOperator>>,
+    /// The time-driven operator over the same base, when the document carries
+    /// a material law. Absent means the generation is inert and the fixed
+    /// path runs it, which is every document that existed before drives.
+    canonical_temporal_operator: Option<Arc<CanonicalTemporalWaveOperator>>,
+    /// The authored model with its temporal laws removed, which is what both
+    /// assemblies must be given. The fixed compilers refuse a law-carrying
+    /// material outright, so this is not an optimization: it is the only thing
+    /// that compiles. Built once because both assemblies want it.
+    stripped_model: Option<OwnedTopologyWaveModel>,
     transfer_job: Option<QuadraticTransferJob>,
     transfer: Option<Arc<QuadraticTransferMap>>,
     source_job: Option<VolumeSourceCompileJob>,
@@ -321,6 +334,37 @@ pub struct TopologyPreparationJob {
 }
 
 impl TopologyPreparationJob {
+    /// Whether this document carries a material law at all. Every document
+    /// that existed before drives answers no and takes the fixed path
+    /// unchanged.
+    fn driven(&self) -> bool {
+        !self
+            .bundle
+            .model()
+            .materials
+            .iter()
+            .all(funfern_core::Material::time_invariant)
+    }
+
+    /// The authored model with its temporal laws removed, built once and kept.
+    ///
+    /// Both assemblies need this rather than the authored model: the fixed
+    /// compilers refuse a law-carrying material outright, by the gate that
+    /// stops a law being executed as a static medium. The laws are kept for
+    /// the temporal operator, which is built over the base these produce.
+    fn ensure_stripped_model(&mut self) {
+        if self.stripped_model.is_none() {
+            self.stripped_model = Some(self.bundle.model().to_owned().without_temporal_laws());
+        }
+    }
+
+    fn stripped_model(&self) -> TopologyWaveModel<'_> {
+        self.stripped_model
+            .as_ref()
+            .expect("the stripped model is built before either assembly")
+            .as_model()
+    }
+
     pub fn new(
         document_revision: u64,
         document: &TopologyDocument,
@@ -521,6 +565,8 @@ impl TopologyPreparationJob {
             point_source_validation_count: 0,
             assembly_job: None,
             canonical_assembly_job: None,
+            canonical_temporal_operator: None,
+            stripped_model: None,
             canonical_operator,
             transfer_job: None,
             transfer: None,
@@ -586,6 +632,8 @@ impl TopologyPreparationJob {
             point_source_validation_count: 0,
             assembly_job: None,
             canonical_assembly_job: None,
+            canonical_temporal_operator: None,
+            stripped_model: None,
             canonical_operator: None,
             transfer_job: None,
             transfer: None,
@@ -749,11 +797,10 @@ impl TopologyPreparationJob {
             let mesh = self.mesh.as_ref().unwrap().clone();
             if self.assembly_job.is_none() {
                 self.phase = TopologyPreparationPhase::Assembling;
-                match QuadraticAssemblyJob::new_topology(
-                    mesh.clone(),
-                    self.bundle.plan.clone(),
-                    self.bundle.model(),
-                ) {
+                self.ensure_stripped_model();
+                let plan = self.bundle.plan.clone();
+                match QuadraticAssemblyJob::new_topology(mesh.clone(), plan, self.stripped_model())
+                {
                     Ok(job) => self.assembly_job = Some(job),
                     Err(error) => return Some(Err(self.fail(error.to_string()))),
                 }
@@ -785,11 +832,13 @@ impl TopologyPreparationJob {
                     .previous
                     .as_ref()
                     .and_then(|previous| previous.canonical_operator.outgoing_boundary_handle());
+                self.ensure_stripped_model();
+                let revision = self.bundle.token.document_revision;
                 match CanonicalAssemblyJob::new_with_outgoing_reuse(
                     mesh,
                     operator,
-                    self.bundle.model(),
-                    self.bundle.token.document_revision,
+                    self.stripped_model(),
+                    revision,
                     previous_outgoing,
                 ) {
                     Ok(job) => self.canonical_assembly_job = Some(job),
@@ -806,7 +855,30 @@ impl TopologyPreparationJob {
             let result = result?;
             self.canonical_assembly_job = None;
             match result {
-                Ok(operator) => self.canonical_operator = Some(Arc::new(operator)),
+                Ok(operator) => {
+                    let operator = Arc::new(operator);
+                    // The laws the assembly was not given. Everything this adds
+                    // is per-sample law evaluation over the base just built, so
+                    // it is cheap next to the assembly it reuses - but it does
+                    // not yield, so it is measured rather than assumed.
+                    if self.driven() {
+                        let started = Instant::now();
+                        let temporal = CanonicalTemporalWaveOperator::from_base(
+                            operator.clone(),
+                            self.mesh.as_ref().unwrap(),
+                            self.operator.as_ref().unwrap(),
+                            self.bundle.model(),
+                        );
+                        self.timing.assembly_ms += elapsed_ms(started);
+                        match temporal {
+                            Ok(temporal) => {
+                                self.canonical_temporal_operator = Some(Arc::new(temporal))
+                            }
+                            Err(error) => return Some(Err(self.fail(error.to_string()))),
+                        }
+                    }
+                    self.canonical_operator = Some(operator);
+                }
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             }
             return None;
@@ -1048,6 +1120,7 @@ impl TopologyPreparationJob {
             mesh,
             operator,
             canonical_operator: self.canonical_operator.as_ref().unwrap().clone(),
+            canonical_temporal_operator: self.canonical_temporal_operator.clone(),
             canonical_forcing: self.canonical_forcing.as_ref().unwrap().clone(),
             canonical_transfer: self.canonical_transfer.take(),
             volume_sources: self.volume_sources.take().unwrap(),
@@ -1751,6 +1824,70 @@ mod tests {
             }
         }
         panic!("detached topology job did not finish");
+    }
+
+    /// A document carrying a material drive must prepare at all.
+    ///
+    /// Before both assemblies were given the law-stripped model this failed
+    /// outright: the fixed compilers refuse a law-carrying material, by the
+    /// gate that stops a law being executed as a static medium. So a pump was
+    /// not merely unsupported in the application - a document with one could
+    /// not be loaded.
+    #[test]
+    fn a_document_with_a_material_drive_prepares_and_carries_its_temporal_operator() {
+        let inert = {
+            let editor = TopologyEditor::default();
+            let mut runtime = TopologyRuntime::default();
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            prepare(&mut runtime).unwrap();
+            runtime.commit_ready(token).unwrap()
+        };
+        assert!(
+            inert.canonical_temporal_operator.is_none(),
+            "an inert document must take the fixed path unchanged"
+        );
+
+        let mut document = TopologyEditor::default().document;
+        let drive = funfern_core::TimeDrive::ParametricPump {
+            depth: funfern_core::ScalarField::constant(0.2),
+            frequency_hz: funfern_core::ScalarField::constant(1.0),
+            phase_radians: funfern_core::ScalarField::constant(0.25),
+        };
+        document.model.draft.materials[0].mass_law.drive = drive.clone();
+        document.model.accepted.materials[0].mass_law.drive = drive;
+        let editor = TopologyEditor::from_document(document).unwrap();
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        let driven = runtime.commit_ready(token).unwrap();
+
+        let temporal = driven
+            .canonical_temporal_operator
+            .as_ref()
+            .expect("a driven document must carry a temporal operator");
+        // The base is shared rather than copied: one assembly, held twice.
+        assert!(std::ptr::eq(
+            Arc::as_ptr(&driven.canonical_operator),
+            temporal.base() as *const CanonicalWaveOperator
+        ));
+        // And the drive is really in it, with the tighter trajectory bound.
+        assert!(temporal.maximum_time_step() < driven.canonical_operator.maximum_time_step());
     }
 
     #[test]

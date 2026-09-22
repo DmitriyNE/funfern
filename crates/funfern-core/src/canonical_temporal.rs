@@ -9,6 +9,7 @@
 use std::collections::BTreeSet;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::{
     CanonicalAreaContribution, CanonicalAreaSample, CanonicalForcing, CanonicalIndicatorSnapshot,
@@ -1298,7 +1299,9 @@ pub struct CanonicalTemporalLossRates {
 /// the production GPU solver until the remaining Stage 7 gates pass.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalTemporalWaveOperator {
-    base: CanonicalWaveOperator,
+    /// Shared, because an application that assembled this base through its own
+    /// resumable job holds it too and must not carry a second copy.
+    base: Arc<CanonicalWaveOperator>,
     primary: Vec<TemporalPrimarySample>,
     complementary: Vec<TemporalComplementarySample>,
     initial_runtime: CanonicalMaterialRuntimeState,
@@ -1338,7 +1341,7 @@ impl CanonicalTemporalWaveOperator {
             stripped.as_model(),
             constitutive_revision,
         )?;
-        Self::from_base(base, mesh, quadratic, model)
+        Self::from_base(Arc::new(base), mesh, quadratic, model)
     }
 
     /// The law samples alone, over a base someone else has already compiled.
@@ -1356,7 +1359,7 @@ impl CanonicalTemporalWaveOperator {
     /// stopping a law from being executed as a static medium - so the stripped
     /// model is not an optimization there, it is the only thing that compiles.
     pub fn from_base(
-        base: CanonicalWaveOperator,
+        base: Arc<CanonicalWaveOperator>,
         mesh: &TriMesh,
         quadratic: &QuadraticWaveOperator,
         model: TopologyWaveModel<'_>,
@@ -2529,7 +2532,7 @@ fn forced_kick(
     }
 }
 
-fn strip_temporal_laws(materials: &mut [Material]) {
+pub(crate) fn strip_temporal_laws(materials: &mut [Material]) {
     for material in materials {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
@@ -4593,8 +4596,9 @@ mod tests {
         // And an application that already built that stripped base reuses it
         // rather than compiling the assembly twice. The two routes must agree,
         // or the reuse would be a second definition of the operator.
-        let base =
-            crate::CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &stripped, 1).unwrap();
+        let base = std::sync::Arc::new(
+            crate::CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &stripped, 1).unwrap(),
+        );
         let reused = CanonicalTemporalWaveOperator::from_base(
             base,
             &mesh,
