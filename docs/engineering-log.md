@@ -5,6 +5,62 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — A driven medium can stand behind a second-order wall
+
+- Implements the previous entry. `prepare` no longer takes a nodal mass: it
+  builds `diag(D + Gamma)` plus `a_k - 1` per mode and the pole eliminations,
+  and `solve` receives the stage's mass. `DenseLu` is deleted; nothing in the
+  trace path factorizes any more.
+- The solve is a diagonal-preconditioned sweep. The pass count comes from the
+  factor's own `max_k |a_k - 1|`, refused above `OUTGOING_TRACE_SWEEP_LIMIT`, so
+  the gate is a computed statement about a generation rather than a rule about
+  driven media. `one_outgoing_preparation_solves_every_nodal_mass` holds it
+  against the dense generator at three masses - authored, a uniform `2.7x` pump,
+  an arbitrary non-uniform wobble - and three step fractions, and separately
+  requires each pass to decay at least as fast as the recorded bound.
+- A prescribed trace row is now held at its own right-hand side through the
+  sweep instead of rebuilding and re-inverting a constrained matrix.
+  `export_with_prescribed` is down to recording the pattern.
+- **CPU cost.** The driven second-order wall went from `27147` to `6373 us/step`
+  at `h=0.1`, `35x` the fixed path down to `8x` - now below the `13x` bulk floor
+  rather than far above it.
+- The first version of this regressed the *fixed* CPU path from `777` to
+  `1772 us/step`, because ten sweeps cannot match one triangular solve. A
+  generation whose mass cannot move now also inverts once, through
+  `prepare_static`, and picks that lane when the mass presented is the one it
+  inverted. The fixed column came back to `776 us/step`, unchanged. Both lanes
+  are held against the same dense oracle by the same test.
+- **Device.** The boundary buffer loses its dense `trace^2` inverse and carries
+  `trace + modes` scalars instead. The sweep's two halves are two kernels; the
+  barrier a pass needs between them is the one between dispatches.
+- The first version ran the whole solve in one workgroup so a pass could use a
+  real barrier, and read `6975 us/step` against `520` without the wall - `13x`.
+  One workgroup is one core with 128 threads and nothing to hide storage
+  latency behind. Spreading each half back over the boundary took it to
+  `1041 us/step`, `6.7x` better, against `833 us/step` for the same fixture
+  before any of this. So a second-order outgoing generation costs `1.26x`, and
+  driven and fixed read the same `~1045`: per step the drive is still free.
+- **The refusal is gone**, along with `outgoing_trace_mass_is_static` and the
+  test that existed only for it. `DRIVEN_WALLS=outgoing` on
+  `canonical_gpu_driven_document` now runs instead of asserting a refusal, and
+  `canonical_gpu_temporal_timing --outgoing` is where the wall's device cost is
+  read.
+- **A second defect surfaced on the way.** That run first read `1.263e-3`
+  against the bulk case's `2.46e-7`. The device was pinning a driven kick, and
+  reading its mass, half a step in - the fixed path's convention, which the CPU
+  reference had already moved off for exactly this reason. Correcting it took
+  the outgoing run to `3.31e-7`, and independently took
+  `canonical_gpu_temporal_forced` from `5.98e-6` to `2.42e-7`. Two examples
+  improving from one change is what makes this a cause rather than a coincidence.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked` (752 passing, 1
+  known ignored reproducer), `cargo build --release -p funfern-app --locked`.
+  Device gates on an M1 Max / Metal: driven document `2.457e-7` and, behind an
+  outgoing wall, `3.13e-7`; forced `2.415e-7`; temporal work within `2.0e-7`;
+  AMR within its documented bounds; filter boundary `4.14e-7` / `1.09e-6`.
+- Next: authoring UI (drives, Switch, presets), which is also what forces the
+  runtime-bank decode against the live epoch origin.
+
 ## 2026-09-22 — The outgoing trace system hides a mass-free operator
 
 - Paper work on `prepare`, before any implementation, to decide whether the

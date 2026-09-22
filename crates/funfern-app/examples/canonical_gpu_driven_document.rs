@@ -148,17 +148,16 @@ fn main() {
     let complementary = base.compatible_flux(&potential).expect("compatible flux");
     let seeded = CanonicalTemporalWaveState::new(&temporal, time_step, primary, complementary)
         .expect("seeded state");
-    let compiled =
-        CanonicalGpuPlan::compile_temporal(&temporal, &seeded, &prepared.canonical_forcing, clock);
-    if std::env::var("DRIVEN_WALLS").is_ok_and(|value| value == "outgoing") {
-        assert!(
-            compiled.is_err(),
-            "a driven medium behind a second-order wall must be refused, not run"
+    let plan =
+        CanonicalGpuPlan::compile_temporal(&temporal, &seeded, &prepared.canonical_forcing, clock)
+            .expect("temporal plan from the application's own generation");
+    if let Some(outgoing) = base.outgoing_boundary() {
+        println!(
+            "driven document: {} trace nodes solved in {} sweeps",
+            outgoing.trace_nodes().len(),
+            plan.trace_sweeps,
         );
-        println!("driven document: the outgoing combination is refused, as it must be");
-        return;
     }
-    let plan = compiled.expect("temporal plan from the application's own generation");
 
     let mut oracle = seeded;
     for _ in 0..steps() {

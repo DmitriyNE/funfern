@@ -18,7 +18,9 @@ cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_amr
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_forced
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --fixed
+cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --outgoing
 cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
+DRIVEN_WALLS=outgoing cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
 ```
 
 The `funfern-app` examples open a window and read the autosave, so run them with
@@ -55,11 +57,14 @@ at parent h=0.08 and h=0.04, with independent temporal refinement over one and
 five box-crossing times.
 `canonical_temporal_timing` records the actual-core incremental cost of a
 time-driven medium, per boundary composition, with the same mesh, operator,
-forcing and timestep on both sides. At `h=0.1` the driven bulk runs about `19x`
-the fixed bulk and the second-order outgoing wall about `38x`. The bulk ratio is
-the floor - the cost of recomputing a stage's coefficients in every helper that
-wants them - and the wall's excess over it is the separate, asymptotic cost of
-rebuilding the trace factorization every stage instead of once.
+forcing and timestep on both sides. At `h=0.1` the driven bulk runs about `13x`
+the fixed bulk, which is the floor: the cost of recomputing a stage's
+coefficients in every helper that wants them. The second-order outgoing wall
+used to sit at `35x`, well above that floor, because it rebuilt its trace
+factorization every stage. It now sits at `8x`, below the floor, because that
+system carries no nodal mass: one preparation serves every stage and the mass
+arrives at the solve. The fixed column is unchanged - a generation whose mass
+cannot move still inverts once and solves in a single pass.
 
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
@@ -93,9 +98,10 @@ covered.
 document with a material drive, meshed and assembled by the application's own
 resumable jobs, compiled into a temporal plan and stepped on the device against
 an f64 oracle. It reads `2.46e-7` over forty-eight steps. `DRIVEN_WALLS=outgoing`
-asks instead for the refusal of a driven medium behind a second-order outgoing
-wall, which is the document's default and cannot yet run; `DRIVEN_STEPS` and
-`DRIVEN_DEPTH` override the step count and the modulation depth.
+puts the drive behind a second-order outgoing wall - the document's default, and
+the combination that used to be refused - and reads `3.31e-7` over the same
+forty-eight. `DRIVEN_STEPS` and `DRIVEN_DEPTH` override the step count and the
+modulation depth.
 
 `canonical_gpu_temporal_timing` is the throughput comparison that decides
 whether a drive is affordable, run twice with and without `--fixed` on an
@@ -103,13 +109,22 @@ otherwise identical fixture. On an M1 Max at 15270 DOFs both read `517 us/step`:
 per step the drive is free on the production core. What it does cost is the
 timestep, because the CFL bound tightens with the coefficient trajectory, so a
 driven medium runs about `1.23x` the wall clock per simulated second.
+`--outgoing` swaps the first-order wall for a second-order one, the only
+composition whose stage does non-local work. Both runs then read about
+`1045 us/step` at a 328-node trace - still free per step - against `833 us/step`
+before the trace solve became a sweep. That `1.26x` is what buys a driven medium
+behind that wall at all, and it is confined to this composition. The sweep is
+two dispatches per pass and each stays as wide as the boundary; running it in
+one workgroup instead, so a pass could use a barrier rather than a dispatch
+boundary, read `6975 us/step`.
 
 `canonical_gpu_temporal_forced` runs a pumped medium with a volume source and
 an absorbing wall - three stages that each divide by the nodal mass - against
 the f64 reference, and requires both state lanes within `2e-4`. It exists
 because the plan compiler used to refuse that combination, so no stage had ever
 been exercised with a moving mass; the first run found the kick dividing by the
-authored mass and missing by `1.4e-2`.
+authored mass and missing by `1.4e-2`. It reads `2.42e-7`, down from `5.98e-6`
+once a driven stage stopped pinning half a step in.
 
 `canonical_gpu_temporal_amr` runs the error estimate against the f32 state a
 device actually produces, on a travelling mass modulation - the medium that used

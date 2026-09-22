@@ -72,8 +72,10 @@ fn main() {
     println!(
         "\nThe bulk ratio is the floor: it is what recomputing a stage's coefficients\n\
          in every helper that wants them costs, with no boundary capability involved.\n\
-         The second-order wall's excess over that floor is the separate, asymptotic\n\
-         cost of rebuilding the trace factorization at every stage rather than once."
+         The second-order wall now sits under that floor. Its trace system carries no\n\
+         nodal mass, so a driven generation prepares it once and sweeps it with the\n\
+         stage's own mass instead of refactorizing. A fixed generation still inverts\n\
+         once and solves in a single pass, which is why its column is unchanged."
     );
 }
 

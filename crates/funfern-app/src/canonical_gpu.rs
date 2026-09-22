@@ -65,6 +65,7 @@ pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 4;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
 pub const CANONICAL_GPU_WORKGROUP_SIZE: u32 = 128;
 pub const CANONICAL_GPU_MAX_TRACE: usize = 1024;
+
 const NO_INDEX: u32 = u32::MAX;
 const FORCE_KIND_GAP: u32 = 1;
 const MODE_WORDS: usize = 12;
@@ -875,6 +876,9 @@ pub struct CanonicalGpuPlan {
     pub auxiliary_count: usize,
     pub trace_count: usize,
     pub mode_count: usize,
+    /// Diagonal-preconditioned passes the trace solve runs, from the factor's
+    /// own contraction bound. Zero without an outgoing boundary.
+    pub trace_sweeps: usize,
     needs_loss_stages: bool,
     needs_accounting: bool,
     event_kind: u32,
@@ -967,22 +971,6 @@ impl CanonicalGpuPlan {
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "the temporal state, clock and operator must share one boundary",
-            ));
-        }
-        // A second-order outgoing wall's trace factorization is built from the
-        // nodal mass. The CPU reference rebuilds it at every stage for that
-        // reason; this plan compiles it once and has no mechanism to refresh
-        // it, so a drive that moves the mass *at the trace* leaves it solving a
-        // system the medium no longer has - measured end to end at `8.5e-3` in
-        // one step and `5.5e-2` in forty eight, growing with depth.
-        //
-        // The test is the trace rather than the generation. Nothing else in
-        // that system can move, so a medium driven anywhere the boundary does
-        // not touch keeps a wall that is exactly what it was assembled as, and
-        // refusing it would refuse a well-posed scene.
-        if !operator.outgoing_trace_mass_is_static() {
-            return Err(CanonicalGpuBuildError::InvalidLayout(
-                "a second-order outgoing boundary cannot yet follow a driven medium's mass",
             ));
         }
         if state.thin_gap_jump().iter().any(|jump| *jump != 0.0)
@@ -1399,6 +1387,7 @@ impl CanonicalGpuPlan {
             offsets: boundary_offsets,
             trace_count,
             mode_count,
+            trace_sweeps,
         } = compile_boundary(
             operator,
             state.outgoing_midpoint_factor(),
@@ -1512,7 +1501,7 @@ impl CanonicalGpuPlan {
         let dispatches_per_step = 4
             + usize::from(needs_loss_stages) * 2
             + usize::from(needs_accounting)
-            + usize::from(trace_count != 0) * 8;
+            + usize::from(trace_count != 0) * (6 + 4 * trace_sweeps as usize);
         let control = GpuCanonicalControl {
             counts_a: UVec4::new(
                 usize_u32(node_count)?,
@@ -1627,6 +1616,7 @@ impl CanonicalGpuPlan {
             auxiliary_count,
             trace_count,
             mode_count,
+            trace_sweeps: trace_sweeps as usize,
             needs_loss_stages,
             needs_accounting,
             event_kind: EVENT_NONE,
@@ -1750,7 +1740,7 @@ impl CanonicalGpuPlan {
         self.manifest.dispatches_per_step = 4
             + usize::from(self.needs_loss_stages) * 2
             + usize::from(self.needs_accounting)
-            + usize::from(self.trace_count != 0) * 8;
+            + usize::from(self.trace_count != 0) * (6 + 4 * self.trace_sweeps);
         Ok(())
     }
 
@@ -2353,6 +2343,11 @@ struct CompiledBoundary {
     offsets: (u32, u32, u32, u32),
     trace_count: usize,
     mode_count: usize,
+    /// How many diagonal-preconditioned sweeps the trace solve runs. The host
+    /// encodes that many dispatches, alternating two lanes, so the count is the
+    /// only thing the device needs to be told about it. Always even, so the
+    /// answer lands in the lane the rest of the pass reads.
+    trace_sweeps: u32,
 }
 
 fn compile_boundary(
@@ -2373,6 +2368,7 @@ fn compile_boundary(
             offsets: (0, 0, 0, 0),
             trace_count: 0,
             mode_count: 0,
+            trace_sweeps: 0,
         });
     };
     let factor = factor.ok_or(CanonicalGpuBuildError::InvalidLayout(
@@ -2482,11 +2478,20 @@ fn compile_boundary(
             .flat_map(|mode| mode.trace().iter().copied()),
         "outgoing trace matrix",
     )?;
-    let inverse_offset = words.len();
+    // The mass-free trace system: `D + Gamma` per trace row, then `a_k - 1` per
+    // mode. Both are divided by, or multiplied into, the stage's own mass on
+    // the device, so nothing here has to be rebuilt when a drive moves it.
+    // This replaces a dense `trace^2` inverse, so the boundary buffer shrinks
+    // from quadratic to linear in the trace as well.
+    let solve_offset = words.len();
     pack_scalars(
         &mut words,
-        export.inverse_schur.iter().copied(),
-        "outgoing inverse Schur factor",
+        export
+            .diagonal
+            .iter()
+            .copied()
+            .chain(export.modal_correction.iter().copied()),
+        "outgoing trace system",
     )?;
     pack_scalars(
         &mut words,
@@ -2501,10 +2506,11 @@ fn compile_boundary(
             usize_u32(trace_offset)?,
             usize_u32(mode_offset)?,
             usize_u32(trace_matrix_offset)?,
-            usize_u32(inverse_offset)?,
+            usize_u32(solve_offset)?,
         ),
         trace_count,
         mode_count: outgoing.modes().len(),
+        trace_sweeps: usize_u32(export.sweeps)?,
     })
 }
 
@@ -2912,6 +2918,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     scratch_count: u32,
     accounting_item_count: u32,
     trace_count: u32,
+    trace_sweeps: u32,
     drive_count: u32,
     material_runtime_count: u32,
     source_count: u32,
@@ -3082,6 +3089,7 @@ fn add_canonical_buffers(
     let gap_count = plan.control.counts_b.x;
     let state_count = plan.control.counts_a.w;
     let trace_count = plan.control.counts_b.y;
+    let trace_sweeps = plan.trace_sweeps as u32;
     let drive_count = plan.control.counts_c.z;
     let material_runtime_count = plan
         .manifest
@@ -3111,6 +3119,7 @@ fn add_canonical_buffers(
         scratch_count,
         accounting_item_count,
         trace_count,
+        trace_sweeps,
         drive_count,
         material_runtime_count,
         source_count,
@@ -4194,12 +4203,13 @@ struct CanonicalPipeline {
     kick_first: CachedComputePipelineId,
     boundary_prepare_first: CachedComputePipelineId,
     boundary_reduce_first: CachedComputePipelineId,
-    boundary_solve: CachedComputePipelineId,
+    boundary_sweep_modal: CachedComputePipelineId,
     boundary_finalize_first: CachedComputePipelineId,
     drift: CachedComputePipelineId,
     kick_second: CachedComputePipelineId,
     boundary_prepare_second: CachedComputePipelineId,
     boundary_reduce_second: CachedComputePipelineId,
+    boundary_sweep_trace: CachedComputePipelineId,
     boundary_finalize_second: CachedComputePipelineId,
     finish_loss_validate: CachedComputePipelineId,
     reduce_accounting: CachedComputePipelineId,
@@ -4278,12 +4288,13 @@ fn init_canonical_pipeline(
     let kick_first = queue("kick_first");
     let boundary_prepare_first = queue("boundary_prepare_first");
     let boundary_reduce_first = queue("boundary_reduce_first");
-    let boundary_solve = queue("boundary_solve");
+    let boundary_sweep_modal = queue("boundary_sweep_modal_pass");
     let boundary_finalize_first = queue("boundary_finalize_first");
     let drift = queue("drift");
     let kick_second = queue("kick_second");
     let boundary_prepare_second = queue("boundary_prepare_second");
     let boundary_reduce_second = queue("boundary_reduce_second");
+    let boundary_sweep_trace = queue("boundary_sweep_trace_pass");
     let boundary_finalize_second = queue("boundary_finalize_second");
     let finish_loss_validate = queue("finish_loss_validate");
     let reduce_accounting = queue("reduce_accounting");
@@ -4314,12 +4325,13 @@ fn init_canonical_pipeline(
         kick_first,
         boundary_prepare_first,
         boundary_reduce_first,
-        boundary_solve,
+        boundary_sweep_modal,
         boundary_finalize_first,
         drift,
         kick_second,
         boundary_prepare_second,
         boundary_reduce_second,
+        boundary_sweep_trace,
         boundary_finalize_second,
         finish_loss_validate,
         reduce_accounting,
@@ -4781,7 +4793,7 @@ fn compute_canonical_wave(
         pipeline.kick_first,
         pipeline.boundary_prepare_first,
         pipeline.boundary_reduce_first,
-        pipeline.boundary_solve,
+        pipeline.boundary_sweep_modal,
         pipeline.boundary_finalize_first,
         pipeline.drift,
         pipeline.kick_second,
@@ -4807,6 +4819,9 @@ fn compute_canonical_wave(
         pipeline.resident_filter_commit,
         pipeline.filter_temporal_gather,
         pipeline.filter_temporal_samples,
+        // Appended rather than placed beside its partner so every index below
+        // stays put.
+        pipeline.boundary_sweep_trace,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -5081,8 +5096,15 @@ fn compute_canonical_wave(
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
             pass.set_pipeline(pipelines[3]);
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
-            pass.set_pipeline(pipelines[4]);
-            pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            // One pair of dispatches per sweep. The barrier a pass needs
+            // between its two reductions is the one between dispatches, and
+            // going through it keeps each half as wide as the boundary is.
+            for _ in 0..handles.trace_sweeps {
+                pass.set_pipeline(pipelines[4]);
+                pass.dispatch_workgroups(handles.trace_count, 1, 1);
+                pass.set_pipeline(pipelines[30]);
+                pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            }
             pass.set_pipeline(pipelines[5]);
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
         }
@@ -5099,8 +5121,12 @@ fn compute_canonical_wave(
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
             pass.set_pipeline(pipelines[9]);
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
-            pass.set_pipeline(pipelines[4]);
-            pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            for _ in 0..handles.trace_sweeps {
+                pass.set_pipeline(pipelines[4]);
+                pass.dispatch_workgroups(handles.trace_count, 1, 1);
+                pass.set_pipeline(pipelines[30]);
+                pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            }
             pass.set_pipeline(pipelines[10]);
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
         }
@@ -5854,7 +5880,13 @@ mod tests {
         assert_eq!(plan.trace_count, plan.mode_count);
         assert!(plan.boundary.len() > plan.trace_count + plan.mode_count * MODE_WORDS);
         assert!(plan.trace_count <= CANONICAL_GPU_MAX_TRACE);
-        assert_eq!(plan.manifest.dispatches_per_step, 13);
+        // The sweep count comes from the factor's own contraction bound, and
+        // the encoder spends one pair of dispatches on each pass of each stage.
+        assert!(plan.trace_sweeps > 0);
+        assert_eq!(
+            plan.manifest.dispatches_per_step,
+            5 + 6 + 4 * plan.trace_sweeps
+        );
     }
 
     #[test]

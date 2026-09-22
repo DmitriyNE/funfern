@@ -1500,40 +1500,6 @@ impl CanonicalTemporalWaveOperator {
         self.initial_runtime.clone()
     }
 
-    /// Whether the nodal mass stays put everywhere an outgoing boundary's
-    /// trace touches.
-    ///
-    /// That boundary is advanced by a dense implicit solve over its trace and
-    /// pole currents, and the only thing in that system which a drive can move
-    /// is the nodal mass: the diagonal is `damping / mass` and the tangential
-    /// coupling is `trace . trace / mass`, with the damping and the trace
-    /// assembled constants. So a factorization built once is correct for as
-    /// long as the mass at those nodes is - and a drive confined to the
-    /// interior never touches them.
-    ///
-    /// This is deliberately about the trace and not about the generation. A
-    /// medium can be driven anywhere else and the wall remains exactly the
-    /// wall it was assembled as.
-    pub fn outgoing_trace_mass_is_static(&self) -> bool {
-        let Some(boundary) = self.base.outgoing_boundary() else {
-            return true;
-        };
-        let trace = boundary
-            .trace_nodes()
-            .iter()
-            .map(|node| *node as usize)
-            .collect::<BTreeSet<_>>();
-        self.base
-            .primary_contributions()
-            .iter()
-            .zip(&self.primary)
-            .filter(|(contribution, _)| trace.contains(&(contribution.node as usize)))
-            .all(|(_, sample)| {
-                sample.coefficient.law.drive == TimeDriveValues::None
-                    && sample.coefficient.law.alternate.is_none()
-            })
-    }
-
     pub fn has_temporal_laws(&self) -> bool {
         self.has_temporal_laws
     }
@@ -2520,7 +2486,6 @@ fn forced_kick(
         let factor = crate::canonical_wave::CanonicalOutgoingMidpointFactor::prepare(
             operator.base(),
             boundary,
-            &mass,
             duration,
         )?;
         let mut prescribed_cache = None;
@@ -4675,82 +4640,6 @@ mod tests {
             whole.primary_mass_at(0.3, &runtime).unwrap(),
             reused.primary_mass_at(0.3, &runtime).unwrap(),
             "the reused base must give the same instantaneous coefficients"
-        );
-    }
-
-    /// The trace test that decides whether a compiled outgoing wall is still
-    /// the wall it was assembled as.
-    ///
-    /// A medium driven where the boundary does not reach leaves that wall's
-    /// factorization exactly valid, so refusing the whole generation because a
-    /// drive exists somewhere would refuse well-posed scenes. The fixture
-    /// needs two materials for that to mean anything: an interior inclusion
-    /// the outer trace never touches, and the background the wall sits in.
-    #[test]
-    fn only_a_drive_that_reaches_the_trace_invalidates_an_outgoing_wall() {
-        let build = |background: bool, inclusion: bool| {
-            let mut scene = Scene::default();
-            let mut second = scene.materials[0].clone();
-            second.id = MaterialId(2);
-            second.name = "Inclusion".into();
-            if background {
-                scene.materials[0].mass_law.drive = pump(0.2, 1.0, 0.0);
-            }
-            if inclusion {
-                second.mass_law.drive = pump(0.2, 1.0, 0.0);
-            }
-            scene.materials.push(second);
-            scene.regions.push(Region {
-                id: RegionId(2),
-                material: MaterialId(2),
-                frame: MaterialFrame::world(),
-            });
-            scene.obstacles.push(Obstacle::with_role(
-                ObstacleId(1),
-                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.3),
-                LoopRole::MaterialInterface {
-                    exterior: BACKGROUND_REGION,
-                    interior: RegionId(2),
-                },
-            ));
-            let mut base_scene = scene.clone();
-            strip_temporal_laws(&mut base_scene.materials);
-            let mesh = mesh_scene(
-                &base_scene,
-                1,
-                MeshingOptions {
-                    target_edge_length: 0.18,
-                    ..MeshingOptions::default()
-                },
-            )
-            .unwrap();
-            let quadratic = QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &base_scene,
-                OuterBoundaryCondition::SecondOrderOutgoing,
-            )
-            .unwrap();
-            let operator =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
-            assert!(
-                operator.base().outgoing_boundary().is_some(),
-                "the fixture needs an outgoing wall to say anything"
-            );
-            operator.outgoing_trace_mass_is_static()
-        };
-
-        assert!(build(false, false), "an inert medium cannot move a trace");
-        assert!(
-            !build(true, false),
-            "a drive in the medium the wall sits in must invalidate it"
-        );
-        assert!(
-            build(false, true),
-            "a drive the boundary never touches must leave its wall valid"
-        );
-        assert!(
-            !build(true, true),
-            "and reaching the trace invalidates it however else the scene is driven"
         );
     }
 

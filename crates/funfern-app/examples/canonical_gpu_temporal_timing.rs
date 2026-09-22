@@ -8,6 +8,11 @@
 //!
 //! Pass `--fixed` for the comparison run; everything else about the fixture is
 //! identical, including the mesh, the operator and the timestep.
+//!
+//! `--outgoing` swaps the first-order wall for a second-order one, which is the
+//! only composition whose stage does non-local work. Its trace system carries
+//! no nodal mass, so a driven generation sweeps it with the stage's own mass
+//! rather than refactorizing, and this is where that sweep's cost is read.
 
 use std::time::{Duration, Instant};
 
@@ -43,6 +48,7 @@ struct Timing {
 
 fn main() {
     let driven = !std::env::args().any(|argument| argument == "--fixed");
+    let outgoing = std::env::args().any(|argument| argument == "--outgoing");
     let mut scene = Scene::initial();
     if driven {
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
@@ -76,7 +82,11 @@ fn main() {
     let scalar = QuadraticWaveOperator::assemble_scene(
         &mesh,
         &fixed_scene,
-        OuterBoundaryCondition::FirstOrderOutgoing,
+        if outgoing {
+            OuterBoundaryCondition::SecondOrderOutgoing
+        } else {
+            OuterBoundaryCondition::FirstOrderOutgoing
+        },
     )
     .expect("timing scalar operator");
     let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
@@ -105,6 +115,13 @@ fn main() {
     let plan = CanonicalGpuPlan::compile_temporal(&operator, &state, &forcing, clock)
         .expect("timing GPU plan");
 
+    if let Some(boundary) = base.outgoing_boundary() {
+        println!(
+            "gpu timing: {} trace nodes solved in {} sweeps",
+            boundary.trace_nodes().len(),
+            plan.trace_sweeps,
+        );
+    }
     let label = if driven { "driven" } else { "fixed" };
     println!(
         "gpu {label} timing: {} Q, {} b, dt {time_step:.4e}, {STEPS} steps",

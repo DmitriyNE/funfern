@@ -1108,15 +1108,6 @@ impl CanonicalWaveOperator {
     }
 }
 
-/// Owned synchronized direct state. Derived `u`, `v`, and forces are not
-/// authoritative and are reconstructed from these arrays.
-#[derive(Clone, Debug, PartialEq)]
-struct DenseLu {
-    values: Vec<f64>,
-    pivots: Vec<usize>,
-    count: usize,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct CachedAuxiliaryElimination {
     mode_index: usize,
@@ -1126,12 +1117,158 @@ struct CachedAuxiliaryElimination {
     solved_column_coefficient: [f64; 3],
 }
 
+/// The reduced outgoing midpoint solve, held in a form that carries no nodal
+/// mass.
+///
+/// The matrix this used to factorize is `I + (h/2) K M^-1`, and `K` does not
+/// depend on the mass: it is `diag(D + Gamma)` - the first-order impedance plus
+/// the second-order trace impedance - plus `sum_k (a_k - 1) t_k t_k^T` over the
+/// modes that carry a pole block. Eliminating those blocks never touches the
+/// mass either; it only rescales a mode's coefficient by a number built from
+/// the mode's decay and the step. So the whole preparation is mass-free and the
+/// stage supplies its own mass at the solve, which is what lets a driven
+/// generation reuse one preparation instead of refactorizing every stage.
+///
+/// The solve is a Jacobi iteration preconditioned by the diagonal, rather than
+/// a factorization, because the three-pole DtN residues `6/7, -8/7, 2/7` sum to
+/// zero: that forces `a_k - 1 = (1/7)(h decay_k)^2` to leading order, so the
+/// correction is a small perturbation of a diagonal and the iteration contracts
+/// by `max_k |a_k - 1|` per sweep whatever the mass is. It costs
+/// `sweeps * O(trace * modes)` and needs no cubic work at any point.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalOutgoingMidpointFactor {
     duration: f64,
     trace_count: usize,
-    schur: DenseLu,
+    /// `D + Gamma` per trace position, mass-free. Divided by the stage's mass
+    /// at the solve and never before.
+    diagonal: Vec<f64>,
+    /// `a_k - 1` per mode, zero on every mode without a pole block.
+    modal_correction: Vec<f64>,
+    /// `max_k |a_k - 1|`. An upper bound on the iteration's spectral radius for
+    /// every positive nodal mass and every prescribed pattern, because the
+    /// iteration matrix is similar to `Y^1/2 C Y^1/2` with
+    /// `0 < Y < diag(D + Gamma)^-1`, and restricting to the free rows is a
+    /// principal submatrix.
+    contraction: f64,
+    sweeps: usize,
+    /// A dense inverse of the trace system for one nodal mass, kept only by a
+    /// generation whose mass cannot move.
+    ///
+    /// The sweep is what makes a driven wall possible, but it is not free: it
+    /// costs `sweeps` passes over the modes where a triangular solve costs one
+    /// pass, and the fixed path has no reason to pay that. So a fixed state
+    /// still inverts once at construction, exactly as it always did, and the
+    /// sweep serves the path whose mass belongs to the stage. Both solve the
+    /// same system - the test holds both against the dense generator - and the
+    /// lane is chosen by whether the mass presented matches the one inverted.
+    direct: Option<CanonicalOutgoingDirectTrace>,
     eliminated: Vec<CachedAuxiliaryElimination>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CanonicalOutgoingDirectTrace {
+    trace_mass: Vec<f64>,
+    inverse: Vec<f64>,
+}
+
+impl CanonicalOutgoingDirectTrace {
+    fn apply(&self, reduced: &[f64]) -> Result<Vec<f64>, WaveError> {
+        let count = self.trace_mass.len();
+        if reduced.len() != count {
+            return Err(WaveError::InvalidState);
+        }
+        let solution = (0..count)
+            .map(|row| {
+                self.inverse[row * count..(row + 1) * count]
+                    .iter()
+                    .zip(reduced)
+                    .map(|(coefficient, value)| coefficient * value)
+                    .sum::<f64>()
+            })
+            .collect::<Vec<_>>();
+        finite_values(&solution)?;
+        Ok(solution)
+    }
+}
+
+/// Sweeps past this are refused rather than run. The bound is a property of the
+/// boundary and the step, so the refusal is a computed statement about this
+/// generation and not a blanket rule about driven media.
+const OUTGOING_TRACE_SWEEP_LIMIT: usize = 32;
+
+/// One diagonal-preconditioned Jacobi solve of `I + (h/2) K M^-1`, shared by the
+/// reference factor and the backend-neutral export so their agreement is
+/// structural. Prescribed rows are held at their own right-hand side and read
+/// by the others, which is what zeroing those rows of the matrix meant.
+#[allow(clippy::too_many_arguments)]
+fn solve_outgoing_trace(
+    boundary: &CanonicalOutgoingBoundary,
+    diagonal: &[f64],
+    modal_correction: &[f64],
+    sweeps: usize,
+    half_duration: f64,
+    mass: &[f64],
+    reduced: &[f64],
+    prescribed: &[bool],
+) -> Result<Vec<f64>, WaveError> {
+    let trace_count = boundary.trace_nodes.len();
+    if diagonal.len() != trace_count
+        || modal_correction.len() != boundary.modes.len()
+        || reduced.len() != trace_count
+        || (!prescribed.is_empty() && prescribed.len() != trace_count)
+    {
+        return Err(WaveError::InvalidState);
+    }
+    let mut scale = Vec::with_capacity(trace_count);
+    let mut inverse_mass = Vec::with_capacity(trace_count);
+    for (position, node) in boundary.trace_nodes.iter().copied().enumerate() {
+        let value = mass
+            .get(node as usize)
+            .copied()
+            .ok_or(WaveError::InvalidState)?;
+        if value <= 0.0 || !value.is_finite() {
+            return Err(WaveError::InvalidState);
+        }
+        inverse_mass.push(1.0 / value);
+        scale.push(1.0 / (1.0 + half_duration * diagonal[position] / value));
+    }
+    let held = |row: usize| prescribed.get(row).copied().unwrap_or(false);
+    let mut current = (0..trace_count)
+        .map(|row| if held(row) { reduced[row] } else { 0.0 })
+        .collect::<Vec<_>>();
+    let mut next = vec![0.0; trace_count];
+    let mut weighted = vec![0.0; trace_count];
+    for _ in 0..sweeps {
+        for ((weighted, value), inverse) in weighted.iter_mut().zip(&current).zip(&inverse_mass) {
+            *weighted = value * inverse;
+        }
+        next.copy_from_slice(reduced);
+        for (mode, correction) in boundary.modes.iter().zip(modal_correction) {
+            if *correction == 0.0 {
+                continue;
+            }
+            let modal = mode
+                .trace
+                .iter()
+                .zip(&weighted)
+                .map(|(trace, value)| trace * value)
+                .sum::<f64>();
+            let coefficient = half_duration * correction * modal;
+            for (value, trace) in next.iter_mut().zip(&mode.trace) {
+                *value -= coefficient * trace;
+            }
+        }
+        for (row, value) in next.iter_mut().enumerate() {
+            if held(row) {
+                *value = reduced[row];
+            } else {
+                *value *= scale[row];
+            }
+        }
+        std::mem::swap(&mut current, &mut next);
+    }
+    finite_values(&current)?;
+    Ok(current)
 }
 
 /// Backend-neutral data needed to apply the reduced outgoing midpoint solve.
@@ -1144,7 +1281,13 @@ pub struct CanonicalOutgoingFactorExport {
     pub trace_count: usize,
     pub energy_transform: [[f64; 3]; 3],
     pub inverse_energy_transform: [[f64; 3]; 3],
-    pub inverse_schur: Vec<f64>,
+    /// `D + Gamma` per trace position, mass-free.
+    pub diagonal: Vec<f64>,
+    /// `a_k - 1` per mode, zero wherever a mode carries no pole block.
+    pub modal_correction: Vec<f64>,
+    /// Sweep count for the diagonal-preconditioned solve. Always even, so a
+    /// backend ping-ponging two lanes finishes on the first.
+    pub sweeps: usize,
     pub eliminated: Vec<CanonicalOutgoingEliminationExport>,
     pub prescribed_trace: Vec<bool>,
 }
@@ -1165,7 +1308,7 @@ impl CanonicalOutgoingFactorExport {
                 .unwrap_or(0);
         if right.len() != dimension
             || boundary.trace_nodes.len() != self.trace_count
-            || self.inverse_schur.len() != self.trace_count * self.trace_count
+            || self.diagonal.len() != self.trace_count
             || self.prescribed_trace.len() != self.trace_count
         {
             return Err(WaveError::InvalidState);
@@ -1205,15 +1348,16 @@ impl CanonicalOutgoingFactorExport {
             }
             solved_right.push(solved);
         }
-        let trace = (0..self.trace_count)
-            .map(|row| {
-                self.inverse_schur[row * self.trace_count..(row + 1) * self.trace_count]
-                    .iter()
-                    .zip(&reduced)
-                    .map(|(coefficient, value)| coefficient * value)
-                    .sum::<f64>()
-            })
-            .collect::<Vec<_>>();
+        let trace = solve_outgoing_trace(
+            boundary,
+            &self.diagonal,
+            &self.modal_correction,
+            self.sweeps,
+            0.5 * self.duration,
+            mass,
+            &reduced,
+            &self.prescribed_trace,
+        )?;
         let mut solution = vec![0.0; dimension];
         solution[..self.trace_count].copy_from_slice(&trace);
         for (mode, mut auxiliary) in self.eliminated.iter().zip(solved_right) {
@@ -1280,11 +1424,11 @@ impl CanonicalWaveState {
         let boundary_cache = operator
             .outgoing_boundary()
             .map(|boundary| {
-                CanonicalOutgoingMidpointFactor::prepare(
+                CanonicalOutgoingMidpointFactor::prepare_static(
                     operator,
                     boundary,
-                    operator.primary_mass(),
                     0.5 * time_step,
+                    operator.primary_mass(),
                 )
                 .map(Arc::new)
             })
@@ -2235,17 +2379,33 @@ impl CanonicalOutgoingMidpointFactor {
     pub(crate) fn prepare(
         operator: &CanonicalWaveOperator,
         boundary: &CanonicalOutgoingBoundary,
-        mass: &[f64],
         duration: f64,
     ) -> Result<Self, WaveError> {
         let trace_count = boundary.trace_nodes.len();
         let half_duration = 0.5 * duration;
-        let mut schur = vec![0.0; trace_count * trace_count];
-        for (position, node) in boundary.trace_nodes.iter().copied().enumerate() {
-            let node = node as usize;
-            schur[position * trace_count + position] =
-                1.0 + half_duration * operator.first_order_boundary_damping[node] / mass[node];
+        // `sum_k t_k t_k^T` is `diag(Gamma)` exactly, because the modes are a
+        // complete orthonormal set scaled by `sqrt(Gamma)`. Summing it here
+        // rather than reading the authored trace impedance keeps the factor
+        // describable from the boundary alone.
+        let mut diagonal = boundary
+            .trace_nodes
+            .iter()
+            .map(|node| operator.first_order_boundary_damping[*node as usize])
+            .collect::<Vec<_>>();
+        for mode in &boundary.modes {
+            for (value, trace) in diagonal.iter_mut().zip(&mode.trace) {
+                *value += trace * trace;
+            }
         }
+        if diagonal
+            .iter()
+            .any(|value| *value <= 0.0 || !value.is_finite())
+        {
+            return Err(WaveError::InvalidMesh(
+                "an outgoing trace node has no positive impedance",
+            ));
+        }
+        let mut modal_correction = vec![0.0; boundary.modes.len()];
         let (energy_transform, inverse_energy_transform) = pole_energy_transform()?;
         let residues = [6.0 / 7.0, -8.0 / 7.0, 2.0 / 7.0];
         let residue_in_z: [f64; 3] = std::array::from_fn(|column| {
@@ -2255,15 +2415,9 @@ impl CanonicalOutgoingMidpointFactor {
         });
         let mut eliminated = Vec::new();
         for (mode_index, mode) in boundary.modes.iter().enumerate() {
+            // A mode with no pole block keeps its coefficient exactly, so it
+            // contributes nothing beyond the `Gamma` already in the diagonal.
             let Some(offset) = mode.auxiliary_offset else {
-                add_modal_outer_product(
-                    &mut schur,
-                    trace_count,
-                    mode,
-                    boundary,
-                    mass,
-                    half_duration,
-                );
                 continue;
             };
             let root_decay = mode.decay.sqrt();
@@ -2291,27 +2445,23 @@ impl CanonicalOutgoingMidpointFactor {
                     inverse[row][column] = solved[row];
                 }
             }
-            let aqz_coefficient =
-                residue_in_z.map(|coefficient| half_duration * root_decay * coefficient);
+            // Factored so the step divides out: the eliminated coefficient is
+            // `half_duration * unit_aqz . solved_column`, and what the trace
+            // system needs is that coefficient relative to `half_duration`.
+            // Taking the ratio by construction keeps a zero step from dividing.
+            let unit_aqz = residue_in_z.map(|coefficient| root_decay * coefficient);
+            let aqz_coefficient = unit_aqz.map(|coefficient| half_duration * coefficient);
             let azq_coefficient = input_gain.map(|coefficient| -half_duration * coefficient);
             let solved_column_coefficient: [f64; 3] = std::array::from_fn(|row| {
                 (0..3)
                     .map(|auxiliary| inverse[row][auxiliary] * azq_coefficient[auxiliary])
                     .sum()
             });
-            let schur_coefficient = aqz_coefficient
+            modal_correction[mode_index] = -unit_aqz
                 .iter()
                 .zip(solved_column_coefficient)
                 .map(|(left, right)| left * right)
                 .sum::<f64>();
-            add_modal_outer_product(
-                &mut schur,
-                trace_count,
-                mode,
-                boundary,
-                mass,
-                half_duration - schur_coefficient,
-            );
             eliminated.push(CachedAuxiliaryElimination {
                 mode_index,
                 offset,
@@ -2320,12 +2470,123 @@ impl CanonicalOutgoingMidpointFactor {
                 solved_column_coefficient,
             });
         }
+        let contraction = modal_correction
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0, f64::max);
+        if !contraction.is_finite() || contraction >= 1.0 {
+            return Err(WaveError::InvalidMesh(
+                "the outgoing trace system is too strongly coupled to solve by sweeps",
+            ));
+        }
+        // From zero the error after `n` sweeps is at most `contraction^n` of the
+        // answer. Two spare sweeps cover the bound's own slack, and an even
+        // count lets a backend ping-pong two lanes and land on the first.
+        let sweeps = if contraction <= f64::EPSILON {
+            2
+        } else {
+            let needed = (f64::EPSILON.ln() / contraction.ln()).ceil().max(1.0);
+            (needed as usize).saturating_add(2).next_multiple_of(2)
+        };
+        if sweeps > OUTGOING_TRACE_SWEEP_LIMIT {
+            return Err(WaveError::InvalidMesh(
+                "the outgoing trace system needs too many sweeps to solve",
+            ));
+        }
         Ok(Self {
             duration,
             trace_count,
-            schur: DenseLu::factor(schur, trace_count)?,
+            diagonal,
+            modal_correction,
+            contraction,
+            sweeps,
+            direct: None,
             eliminated,
         })
+    }
+
+    /// The same preparation for a generation whose nodal mass cannot move,
+    /// which additionally inverts the trace system once so its solves stay a
+    /// single pass. A driven generation has no such mass and uses `prepare`.
+    pub(crate) fn prepare_static(
+        operator: &CanonicalWaveOperator,
+        boundary: &CanonicalOutgoingBoundary,
+        duration: f64,
+        mass: &[f64],
+    ) -> Result<Self, WaveError> {
+        let mut factor = Self::prepare(operator, boundary, duration)?;
+        let trace_count = factor.trace_count;
+        let half_duration = 0.5 * duration;
+        let mut trace_mass = Vec::with_capacity(trace_count);
+        for node in boundary.trace_nodes.iter().copied() {
+            let value = mass
+                .get(node as usize)
+                .copied()
+                .ok_or(WaveError::InvalidState)?;
+            if value <= 0.0 || !value.is_finite() {
+                return Err(WaveError::InvalidState);
+            }
+            trace_mass.push(value);
+        }
+        let mut system = vec![0.0; trace_count * trace_count];
+        for row in 0..trace_count {
+            system[row * trace_count + row] =
+                1.0 + half_duration * factor.diagonal[row] / trace_mass[row];
+        }
+        for (mode, correction) in boundary.modes.iter().zip(&factor.modal_correction) {
+            if *correction == 0.0 {
+                continue;
+            }
+            for row in 0..trace_count {
+                let scaled = half_duration * correction * mode.trace[row];
+                for column in 0..trace_count {
+                    system[row * trace_count + column] +=
+                        scaled * mode.trace[column] / trace_mass[column];
+                }
+            }
+        }
+        let mut inverse = vec![0.0; trace_count * trace_count];
+        for column in 0..trace_count {
+            let mut basis = vec![0.0; trace_count];
+            basis[column] = 1.0;
+            let solved = solve_dense(system.clone(), basis, trace_count)?;
+            for (row, value) in solved.into_iter().enumerate() {
+                inverse[row * trace_count + column] = value;
+            }
+        }
+        finite_values(&inverse)?;
+        factor.direct = Some(CanonicalOutgoingDirectTrace {
+            trace_mass,
+            inverse,
+        });
+        Ok(factor)
+    }
+
+    /// The inverted lane, when this factor holds one and the mass presented is
+    /// the one it was inverted for. A generation that moves its mass falls
+    /// through to the sweep, which is the whole point of the split.
+    fn direct_trace(
+        &self,
+        boundary: &CanonicalOutgoingBoundary,
+        mass: &[f64],
+    ) -> Option<&CanonicalOutgoingDirectTrace> {
+        let direct = self.direct.as_ref()?;
+        boundary
+            .trace_nodes
+            .iter()
+            .zip(&direct.trace_mass)
+            .all(|(node, inverted)| mass.get(*node as usize) == Some(inverted))
+            .then_some(direct)
+    }
+
+    /// The per-sweep contraction bound, valid for every positive nodal mass.
+    pub fn contraction(&self) -> f64 {
+        self.contraction
+    }
+
+    /// How many sweeps the solve runs. Always even.
+    pub fn sweeps(&self) -> usize {
+        self.sweeps
     }
 
     pub fn dimension(&self) -> usize {
@@ -2379,7 +2640,19 @@ impl CanonicalOutgoingMidpointFactor {
             }
             solved_right.push(solved);
         }
-        let trace = self.schur.solve(&reduced)?;
+        let trace = match self.direct_trace(boundary, mass) {
+            Some(direct) => direct.apply(&reduced)?,
+            None => solve_outgoing_trace(
+                boundary,
+                &self.diagonal,
+                &self.modal_correction,
+                self.sweeps,
+                0.5 * self.duration,
+                mass,
+                &reduced,
+                &[],
+            )?,
+        };
         let mut solution = vec![0.0; dimension];
         solution[..self.trace_count].copy_from_slice(&trace);
         for (mode, mut auxiliary) in self.eliminated.iter().zip(solved_right) {
@@ -2401,8 +2674,7 @@ impl CanonicalOutgoingMidpointFactor {
     }
 
     pub fn estimated_bytes(&self) -> usize {
-        self.schur.values.len() * std::mem::size_of::<f64>()
-            + self.schur.pivots.len() * std::mem::size_of::<usize>()
+        (self.diagonal.len() + self.modal_correction.len()) * std::mem::size_of::<f64>()
             + self
                 .eliminated
                 .iter()
@@ -2411,25 +2683,18 @@ impl CanonicalOutgoingMidpointFactor {
     }
 
     /// Exports a backend-neutral parallel-solve representation. Preparation is
-    /// event work; evolution never reconstructs or refactors this matrix.
+    /// event work; evolution never reconstructs it, and because the export is
+    /// mass-free a driven generation reuses it across every stage.
     pub fn export(&self) -> Result<CanonicalOutgoingFactorExport, WaveError> {
         let (energy_transform, inverse_energy_transform) = pole_energy_transform()?;
-        let mut inverse_schur = vec![0.0; self.trace_count * self.trace_count];
-        for column in 0..self.trace_count {
-            let mut basis = vec![0.0; self.trace_count];
-            basis[column] = 1.0;
-            let solved = self.schur.solve(&basis)?;
-            for row in 0..self.trace_count {
-                inverse_schur[row * self.trace_count + column] = solved[row];
-            }
-        }
-        finite_values(&inverse_schur)?;
         Ok(CanonicalOutgoingFactorExport {
             duration: self.duration,
             trace_count: self.trace_count,
             energy_transform,
             inverse_energy_transform,
-            inverse_schur,
+            diagonal: self.diagonal.clone(),
+            modal_correction: self.modal_correction.clone(),
+            sweeps: self.sweeps,
             eliminated: self
                 .eliminated
                 .iter()
@@ -2448,6 +2713,10 @@ impl CanonicalOutgoingMidpointFactor {
     /// Exports the same reduced factor with prescribed trace rows replaced by
     /// exact ownership equations. The pattern is generation/runtime metadata;
     /// changing it prepares another immutable factor before acceptance.
+    ///
+    /// Zeroing a row of the matrix and putting one on its diagonal is what the
+    /// sweep does by holding that row at its own right-hand side, so the
+    /// pattern is now the whole representation and nothing is refactorized.
     pub fn export_with_prescribed(
         &self,
         prescribed_trace: &[bool],
@@ -2459,119 +2728,8 @@ impl CanonicalOutgoingMidpointFactor {
             });
         }
         let mut export = self.export()?;
-        if prescribed_trace.iter().all(|value| !value) {
-            return Ok(export);
-        }
-        // Recover the unfactored Schur matrix from its prepared inverse. This
-        // is one-time event work, not evolution work, and avoids retaining a
-        // second dense Nb² f64 matrix in every CPU reference state.
-        let mut schur = vec![0.0; self.trace_count * self.trace_count];
-        let inverse_factor = DenseLu::factor(export.inverse_schur.clone(), self.trace_count)?;
-        for column in 0..self.trace_count {
-            let mut basis = vec![0.0; self.trace_count];
-            basis[column] = 1.0;
-            let solved = inverse_factor.solve(&basis)?;
-            for (row, value) in solved.into_iter().enumerate() {
-                schur[row * self.trace_count + column] = value;
-            }
-        }
-        for (row, prescribed) in prescribed_trace.iter().copied().enumerate() {
-            if prescribed {
-                schur[row * self.trace_count..(row + 1) * self.trace_count].fill(0.0);
-                schur[row * self.trace_count + row] = 1.0;
-            }
-        }
         export.prescribed_trace.copy_from_slice(prescribed_trace);
-        let constrained_factor = DenseLu::factor(schur, self.trace_count)?;
-        for column in 0..self.trace_count {
-            let mut basis = vec![0.0; self.trace_count];
-            basis[column] = 1.0;
-            let solved = constrained_factor.solve(&basis)?;
-            for (row, value) in solved.into_iter().enumerate() {
-                export.inverse_schur[row * self.trace_count + column] = value;
-            }
-        }
-        finite_values(&export.inverse_schur)?;
         Ok(export)
-    }
-}
-
-fn add_modal_outer_product(
-    matrix: &mut [f64],
-    trace_count: usize,
-    mode: &CanonicalOutgoingMode,
-    boundary: &CanonicalOutgoingBoundary,
-    mass: &[f64],
-    coefficient: f64,
-) {
-    for row in 0..trace_count {
-        for (column, node) in boundary.trace_nodes.iter().copied().enumerate() {
-            matrix[row * trace_count + column] +=
-                coefficient * mode.trace[row] * mode.trace[column] / mass[node as usize];
-        }
-    }
-}
-
-impl DenseLu {
-    fn factor(mut values: Vec<f64>, count: usize) -> Result<Self, WaveError> {
-        if values.len() != count * count || values.iter().any(|value| !value.is_finite()) {
-            return Err(WaveError::InvalidState);
-        }
-        let mut pivots = Vec::with_capacity(count);
-        for pivot in 0..count {
-            let best = (pivot..count)
-                .max_by(|left, right| {
-                    values[*left * count + pivot]
-                        .abs()
-                        .total_cmp(&values[*right * count + pivot].abs())
-                })
-                .ok_or(WaveError::InvalidState)?;
-            if values[best * count + pivot].abs() <= 1.0e-14 {
-                return Err(WaveError::InvalidState);
-            }
-            pivots.push(best);
-            if best != pivot {
-                for column in 0..count {
-                    values.swap(pivot * count + column, best * count + column);
-                }
-            }
-            for row in pivot + 1..count {
-                values[row * count + pivot] /= values[pivot * count + pivot];
-                let factor = values[row * count + pivot];
-                for column in pivot + 1..count {
-                    values[row * count + column] -= factor * values[pivot * count + column];
-                }
-            }
-        }
-        Ok(Self {
-            values,
-            pivots,
-            count,
-        })
-    }
-
-    fn solve(&self, right: &[f64]) -> Result<Vec<f64>, WaveError> {
-        if right.len() != self.count || right.iter().any(|value| !value.is_finite()) {
-            return Err(WaveError::InvalidState);
-        }
-        let mut solution = right.to_vec();
-        for (pivot, best) in self.pivots.iter().copied().enumerate() {
-            if best != pivot {
-                solution.swap(pivot, best);
-            }
-            for row in pivot + 1..self.count {
-                solution[row] -= self.values[row * self.count + pivot] * solution[pivot];
-            }
-        }
-        for row in (0..self.count).rev() {
-            solution[row] = (solution[row]
-                - (row + 1..self.count)
-                    .map(|column| self.values[row * self.count + column] * solution[column])
-                    .sum::<f64>())
-                / self.values[row * self.count + row];
-        }
-        finite_values(&solution)?;
-        Ok(solution)
     }
 }
 
@@ -4535,17 +4693,15 @@ mod tests {
         );
     }
 
-    /// The trace system behind the outgoing midpoint solve is
-    /// `I + (h/2) K M^-1`, where `K` collects the first-order impedance
-    /// diagonal and the modal outer products, and does not depend on the nodal
-    /// mass at all: the three-pole blocks are eliminated by coefficients built
-    /// only from a mode's decay and the step, so they rescale a mode's
-    /// coefficient without touching the shape. This recovers `K` from
-    /// factorizations built against three different masses and requires them to
-    /// agree, because that invariance is the whole basis for letting a moving
-    /// mass reuse one preparation.
+    /// One preparation, any mass. `prepare` no longer takes a mass at all, so
+    /// the claim to test is that the sweep it runs instead still lands on the
+    /// matrix the dense generator describes, for masses that differ from the
+    /// authored one by a uniform pump and by an arbitrary non-uniform wobble -
+    /// the two shapes a time-driven medium actually produces. It also records
+    /// the contraction, because a bound that quietly drifted toward one would
+    /// still pass an accuracy check while costing every sweep it could.
     #[test]
-    fn the_outgoing_trace_system_hides_a_mass_free_operator() {
+    fn one_outgoing_preparation_solves_every_nodal_mass() {
         let mesh = square_with_outer_boundary();
         let scene = Scene::default();
         let quadratic = QuadraticWaveOperator::assemble_scene(
@@ -4556,34 +4712,10 @@ mod tests {
         .unwrap();
         let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 73).unwrap();
         let boundary = operator.outgoing_boundary().unwrap();
-        let trace_count = boundary.trace_nodes().len();
-        let kick = 0.5 * 0.08 * operator.maximum_time_step();
-        let half = 0.5 * kick;
-
-        let recover = |mass: &[f64]| {
-            let cache =
-                CanonicalOutgoingMidpointFactor::prepare(&operator, boundary, mass, kick).unwrap();
-            let mut inverse = vec![0.0; trace_count * trace_count];
-            for column in 0..trace_count {
-                let mut basis = vec![0.0; trace_count];
-                basis[column] = 1.0;
-                for (row, value) in cache.schur.solve(&basis).unwrap().into_iter().enumerate() {
-                    inverse[row * trace_count + column] = value;
-                }
-            }
-            let mut recovered = vec![0.0; trace_count * trace_count];
-            for column in 0..trace_count {
-                let mut basis = vec![0.0; trace_count];
-                basis[column] = 1.0;
-                let solved = solve_dense(inverse.clone(), basis, trace_count).unwrap();
-                let node = boundary.trace_nodes()[column] as usize;
-                for (row, value) in solved.into_iter().enumerate() {
-                    recovered[row * trace_count + column] =
-                        (value - f64::from(row == column)) * mass[node] / half;
-                }
-            }
-            recovered
-        };
+        let dimension = boundary.trace_nodes().len() + boundary.auxiliary_count();
+        let probe = (0..dimension)
+            .map(|index| (0.17 * index as f64 + 0.3).sin())
+            .collect::<Vec<_>>();
 
         let authored = operator.primary_mass().to_vec();
         let pumped = authored.iter().map(|value| 2.7 * value).collect::<Vec<_>>();
@@ -4593,31 +4725,85 @@ mod tests {
             .map(|(node, value)| value * (1.0 + 0.4 * (0.9 * node as f64).sin()))
             .collect::<Vec<_>>();
 
-        let reference = recover(&authored);
-        let scale = reference
-            .iter()
-            .map(|value| value.abs())
-            .fold(0.0, f64::max);
-        assert!(scale > 0.0);
-        for candidate in [recover(&pumped), recover(&travelling)] {
-            let difference = maximum_difference(&reference, &candidate);
+        for fraction in [0.08, 0.5, 1.0] {
+            let kick = 0.5 * fraction * operator.maximum_time_step();
+            let cache =
+                CanonicalOutgoingMidpointFactor::prepare(&operator, boundary, kick).unwrap();
             assert!(
-                difference < 1.0e-9 * scale,
-                "the recovered trace operator followed the mass by {difference:e}"
+                cache.contraction() < 0.05,
+                "contraction {:e} at {fraction} of the step bound",
+                cache.contraction()
             );
+            assert!(cache.sweeps().is_multiple_of(2));
+            for mass in [&authored, &pumped, &travelling] {
+                let dense = outgoing_generator(&operator, boundary, mass).unwrap();
+                let mut midpoint = vec![0.0; dimension * dimension];
+                for row in 0..dimension {
+                    for column in 0..dimension {
+                        midpoint[row * dimension + column] =
+                            f64::from(row == column) - 0.5 * kick * dense[row * dimension + column];
+                    }
+                }
+                let oracle = solve_dense(midpoint, probe.clone(), dimension).unwrap();
+                let swept = cache.solve(boundary, mass, &probe).unwrap();
+                let difference = maximum_difference(&swept, &oracle);
+                assert!(
+                    difference < 2.0e-11,
+                    "the swept solve missed the dense one by {difference:e} \
+                     at {fraction} of the step bound"
+                );
+            }
         }
 
-        let asymmetry = (0..trace_count)
-            .flat_map(|row| (0..row).map(move |column| (row, column)))
-            .map(|(row, column)| {
-                (reference[row * trace_count + column] - reference[column * trace_count + row])
-                    .abs()
-            })
-            .fold(0.0, f64::max);
-        assert!(
-            asymmetry < 1.0e-9 * scale,
-            "the recovered trace operator is not symmetric by {asymmetry:e}"
-        );
+        // The recorded contraction is what the sweep count is derived from, so
+        // it has to bound the decay the sweep actually achieves rather than
+        // merely be small. Halving the passes must leave an error no larger
+        // than the bound raised to the passes removed.
+        let kick = 0.5 * operator.maximum_time_step();
+        let cache = CanonicalOutgoingMidpointFactor::prepare(&operator, boundary, kick).unwrap();
+        let dense = outgoing_generator(&operator, boundary, &travelling).unwrap();
+        let mut midpoint = vec![0.0; dimension * dimension];
+        for row in 0..dimension {
+            for column in 0..dimension {
+                midpoint[row * dimension + column] =
+                    f64::from(row == column) - 0.5 * kick * dense[row * dimension + column];
+            }
+        }
+        let oracle = solve_dense(midpoint, probe.clone(), dimension).unwrap();
+        let magnitude = oracle.iter().map(|value| value.abs()).fold(0.0, f64::max);
+        // From zero the error before any pass is the answer itself.
+        let mut previous = magnitude;
+        for passes in 1..=cache.sweeps() {
+            let mut truncated = cache.clone();
+            truncated.sweeps = passes;
+            let swept = truncated.solve(boundary, &travelling, &probe).unwrap();
+            let error = maximum_difference(&swept, &oracle);
+            assert!(
+                error <= previous * cache.contraction() * 4.0 + 1.0e-14 * magnitude,
+                "pass {passes} left {error:e} against {previous:e}, a decay worse \
+                 than the recorded bound {:e}",
+                cache.contraction()
+            );
+            previous = error;
+        }
+
+        // A prescribed trace row owns its own value, which the sweep expresses
+        // by holding that row rather than by rebuilding a constrained matrix.
+        let mut prescribed_pattern = vec![false; boundary.trace_nodes().len()];
+        prescribed_pattern[0] = true;
+        let export = cache.export_with_prescribed(&prescribed_pattern).unwrap();
+        let mut constrained = vec![0.0; dimension * dimension];
+        for row in 0..dimension {
+            for column in 0..dimension {
+                constrained[row * dimension + column] =
+                    f64::from(row == column) - 0.5 * kick * dense[row * dimension + column];
+            }
+        }
+        constrained[0..dimension].fill(0.0);
+        constrained[0] = 1.0;
+        let oracle = solve_dense(constrained, probe.clone(), dimension).unwrap();
+        let swept = export.solve(&travelling, boundary, &probe).unwrap();
+        assert!(maximum_difference(&swept, &oracle) < 2.0e-11);
     }
 
     #[test]
@@ -4655,13 +4841,7 @@ mod tests {
         assert!(maximum_difference(&dense_product, &matrix_free) < 2.0e-12);
 
         let kick = 0.5 * dt;
-        let cache = CanonicalOutgoingMidpointFactor::prepare(
-            &operator,
-            boundary,
-            operator.primary_mass(),
-            kick,
-        )
-        .unwrap();
+        let cache = CanonicalOutgoingMidpointFactor::prepare(&operator, boundary, kick).unwrap();
         let mut midpoint_matrix = vec![0.0; dimension * dimension];
         for row in 0..dimension {
             for column in 0..dimension {

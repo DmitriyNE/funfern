@@ -1305,8 +1305,12 @@ fn kick_node(node: u32, second: bool) {
     }
     let duration = control.evolution.z;
     let source_time = control.clock_f32.y + select(0.0, control.clock_f32.x, second);
+    // A driven stage pins and reads its mass at its own endpoint, which is
+    // where the temporal-work quadrature has an integration point. The fixed
+    // path pins the first kick half a step in, which is free to choose when
+    // the mass is constant and is not free when it moves.
     let target_time = control.clock_f32.y
-        + select(duration, control.clock_f32.x, second);
+        + select(select(duration, 0.0, temporal_enabled()), control.clock_f32.x, second);
     let source = source_rate(node, source_time);
     let held_force = force(node, second);
     let net = source - held_force;
@@ -1367,17 +1371,43 @@ fn trace_coefficient(mode: u32, trace: u32) -> f32 {
 }
 
 fn trace_coefficient_transposed(trace: u32, mode: u32) -> f32 {
-    let scalar_count = control.counts_b.y * control.counts_b.z;
+    let scalar_count = control.counts_b.y + control.counts_b.z;
     let transposed_offset = control.boundary_offsets.y + (scalar_count + 3u) / 4u;
     return packed_boundary_scalar(
         transposed_offset,
         trace * control.counts_b.z + mode);
 }
 
-fn inverse_schur(row: u32, column: u32) -> f32 {
+// `D + Gamma` for a trace row: the mass-free diagonal of the trace system. The
+// stage divides it by its own nodal mass, which is what lets one preparation
+// serve a moving one.
+fn trace_diagonal(trace: u32) -> f32 {
+    return packed_boundary_scalar(control.boundary_offsets.y, trace);
+}
+
+// `a_k - 1` for a mode: everything the trace system holds beyond its diagonal.
+// Zero on modes with no pole block, and of order `(h decay)^2` on the rest,
+// because the three-pole residues sum to zero.
+fn modal_correction(mode: u32) -> f32 {
     return packed_boundary_scalar(
-        control.boundary_offsets.y,
-        row * control.counts_b.y + column);
+        control.boundary_offsets.y, control.counts_b.y + mode);
+}
+
+// The instant a boundary stage reads its nodal mass at, which is the one the
+// local kick pins and divides by at the same stage.
+fn boundary_instant(second: bool) -> f32 {
+    return control.clock_f32.y
+        + select(
+            select(control.evolution.z, 0.0, temporal_enabled()),
+            control.clock_f32.x,
+            second);
+}
+
+fn trace_inverse_mass(trace_word: vec4<u32>, instant: f32) -> f32 {
+    if temporal_enabled() {
+        return temporal_inverse_primary_mass(trace_word.x, instant);
+    }
+    return bitcast<f32>(trace_word.y);
 }
 
 fn reduce_boundary_scalar(local: u32, value: f32) -> f32 {
@@ -1415,13 +1445,14 @@ fn boundary_prepare(mode: u32, local: u32, second: bool) {
     let trace_count = control.counts_b.y;
     var partial_modal = 0.0;
     if participating {
+        let instant = boundary_instant(second);
         for (var trace = local; trace < trace_count; trace += WORKGROUP_SIZE) {
             let trace_word = boundary[control.table_offsets.z + trace].data;
             let node = trace_word.x;
             let current = select(
                 accepted_q(node), candidate_q(node), second || has_loss_stages());
             partial_modal += trace_coefficient(mode, trace)
-                * current * bitcast<f32>(trace_word.y);
+                * current * trace_inverse_mass(trace_word, instant);
         }
     }
     let modal = reduce_boundary_scalar(local, partial_modal);
@@ -1489,7 +1520,7 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
     let trace_word_index = control.table_offsets.z + trace;
     let trace_word = boundary[trace_word_index].data;
     let node = trace_word.x;
-    let inverse_mass = bitcast<f32>(trace_word.y);
+    let inverse_mass = trace_inverse_mass(trace_word, boundary_instant(second));
     let damping = bitcast<f32>(trace_word.z);
     let old = select(
         accepted_q(node), candidate_q(node), second || has_loss_stages());
@@ -1509,20 +1540,67 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
         reduced -= coupling.y;
     }
     boundary[trace_word_index].data.w = bitcast<u32>(reduced);
+    // Seed the trace solve while this row's mass is already in hand. A
+    // prescribed row owns its own value from the start, which is what replacing
+    // its row of the matrix by an identity row meant.
+    let held = nodes[node].boundary.z != 0u;
+    let scale = select(
+        1.0 / (1.0 + control.evolution.w * trace_diagonal(trace) * inverse_mass),
+        1.0,
+        held);
+    scratch[trace_solution_offset() + trace].values =
+        vec4<f32>(select(0.0, reduced, held), inverse_mass, scale, f32(held));
 }
 
-fn boundary_solve_row(row: u32, local: u32) {
-    let participating = !stopped() && row < control.counts_b.y;
+// The reduced trace system is `I + (h/2) K M^-1` with
+// `K = diag(D + Gamma) + sum_k (a_k - 1) t_k t_k^T`, and none of `K` depends on
+// the nodal mass: eliminating the pole blocks only rescales a mode by a number
+// built from its decay and the step. So one preparation serves every stage and
+// the mass arrives at the solve, which is what lets a driven medium sit behind
+// this wall at all.
+//
+// Solving it is a diagonal-preconditioned sweep rather than a factorization,
+// because the three-pole DtN residues `6/7, -8/7, 2/7` sum to zero: that makes
+// `a_k - 1` of order `(h decay_k)^2`, so the correction is a small perturbation
+// of the diagonal and the sweep contracts by `max_k |a_k - 1|` per pass
+// whatever the mass is. The host encoded one pair of dispatches per pass, from
+// a count it derived from that bound.
+//
+// A pass is two reductions with a barrier between them, and the only barrier
+// that spans the whole trace is the one between dispatches - so each half is
+// its own kernel, and each stays as wide as the boundary is. The two halves
+// read and write different arrays, so neither needs a second lane.
+fn boundary_sweep_modal(mode: u32, local: u32) {
+    let participating = !stopped() && mode < control.counts_b.z;
     var partial = 0.0;
     if participating {
-        for (var column = local; column < control.counts_b.y; column += WORKGROUP_SIZE) {
-            let reduced = bitcast<f32>(boundary[control.table_offsets.z + column].data.w);
-            partial += inverse_schur(row, column) * reduced;
+        for (var trace = local; trace < control.counts_b.y; trace += WORKGROUP_SIZE) {
+            let slot = scratch[trace_solution_offset() + trace].values;
+            partial += trace_coefficient(mode, trace) * slot.x * slot.y;
         }
     }
-    let result = reduce_boundary_scalar(local, partial);
+    let modal = reduce_boundary_scalar(local, partial);
     if participating && local == 0u {
-        scratch[trace_solution_offset() + row].values.x = result;
+        scratch[mode_modal_offset() + mode].values.z =
+            control.evolution.w * modal_correction(mode) * modal;
+    }
+}
+
+fn boundary_sweep_trace(trace: u32, local: u32) {
+    let participating = !stopped() && trace < control.counts_b.y;
+    var partial = 0.0;
+    if participating {
+        for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
+            partial += trace_coefficient_transposed(trace, mode)
+                * scratch[mode_modal_offset() + mode].values.z;
+        }
+    }
+    let coupled = reduce_boundary_scalar(local, partial);
+    if participating && local == 0u {
+        let slot = scratch[trace_solution_offset() + trace].values;
+        let reduced = bitcast<f32>(boundary[control.table_offsets.z + trace].data.w);
+        scratch[trace_solution_offset() + trace].values.x =
+            select((reduced - coupled) * slot.z, reduced, slot.w != 0.0);
     }
 }
 
@@ -1534,10 +1612,8 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
     var partial_modal = 0.0;
     if participating && i < mode_count {
         for (var trace = local; trace < trace_count; trace += WORKGROUP_SIZE) {
-            let trace_word = boundary[control.table_offsets.z + trace].data;
-            partial_modal += trace_coefficient(i, trace)
-                * scratch[trace_solution_offset() + trace].values.x
-                * bitcast<f32>(trace_word.y);
+            let slot = scratch[trace_solution_offset() + trace].values;
+            partial_modal += trace_coefficient(i, trace) * slot.x * slot.y;
         }
     }
     let new_modal = reduce_boundary_scalar(local, partial_modal);
@@ -1546,7 +1622,7 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
         let trace = i;
         let trace_word = boundary[control.table_offsets.z + trace].data;
         let node = trace_word.x;
-        let inverse_mass = bitcast<f32>(trace_word.y);
+        let inverse_mass = scratch[trace_solution_offset() + trace].values.y;
         let damping = bitcast<f32>(trace_word.z);
         let old = select(
             accepted_q(node), candidate_q(node), second || has_loss_stages());
@@ -1635,11 +1711,19 @@ fn boundary_reduce_first(
 }
 
 @compute @workgroup_size(128)
-fn boundary_solve(
+fn boundary_sweep_modal_pass(
     @builtin(workgroup_id) group: vec3<u32>,
     @builtin(local_invocation_id) local: vec3<u32>,
 ) {
-    boundary_solve_row(group.x, local.x);
+    boundary_sweep_modal(group.x, local.x);
+}
+
+@compute @workgroup_size(128)
+fn boundary_sweep_trace_pass(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    boundary_sweep_trace(group.x, local.x);
 }
 
 @compute @workgroup_size(128)
