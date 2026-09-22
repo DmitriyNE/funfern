@@ -5,6 +5,33 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-23 — The refusal named itself and the bug fell out in one run
+
+Finishing the sweep left `WaveError::InvalidCoefficients` with exactly one
+production site: the reference P1 `WaveOperator::assemble`, the one check the
+shared sentence actually describes, and one nothing the application prepares can
+reach. Everything else says which check it was.
+
+- The last six were the thin-gap orientation, two grid-filter strengths, the
+  operator's eigenvalue bound, the two grid-scale filter strengths, and three
+  combined guards in `canonical_temporal` that were split so each clause carries
+  its own words instead of five conditions sharing one.
+- That immediately answered the reported failure. Packing an upload rebuilds the
+  *source* plan to read its drives back, and does it at the **candidate's** time
+  step. A driven generation runs at the tighter step its coefficient trajectory
+  demands, so going pump to linear the candidate's step is the larger of the
+  two and the pump will not hold it: `CanonicalTemporalWaveState::zero` refuses
+  with "the time step exceeds what the time-driven trajectory holds stable" and
+  the whole upload dies. Nothing is wrong with either generation or with the
+  handoff maps - they just do not share a step, and only the source has to.
+- It is direction-asymmetric, which matches the report: enabling a drive tightens
+  the step, so the source always holds it; disabling one loosens it.
+- The existing both-directions test hid this by packing every direction at the
+  pump's step, the one step that always works. `undriving_packs_at_the_step_the
+  _host_actually_uses` packs at the step the host computes, and fails.
+- Three rounds of guessing, then one run once the message was specific. The cost
+  of a shared error variant is paid entirely by whoever is holding the report.
+
 ## 2026-09-23 — One sentence for forty different refusals
 
 A reported preparation failure - "wave coefficients must be finite with positive

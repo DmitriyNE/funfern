@@ -266,7 +266,9 @@ impl QuadraticWaveOperator {
         outer_boundaries: OuterBoundaryConditions,
     ) -> Result<Self, WaveError> {
         if !scene.structure_valid() {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "the scene's regions and materials are not self-consistent",
+            ));
         }
         Self::assemble_with_provider(
             mesh,
@@ -286,7 +288,9 @@ impl QuadraticWaveOperator {
         model: TopologyWaveModel<'_>,
     ) -> Result<Self, WaveError> {
         if !model.valid_for(plan) {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "the scene does not describe every region the mesh plan holds",
+            ));
         }
         Self::assemble_with_provider(
             mesh,
@@ -307,14 +311,18 @@ impl QuadraticWaveOperator {
     ) -> Result<Self, WaveError> {
         validate_coefficients(outer_coefficients)?;
         if !outer_boundaries.valid() {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "the outer boundary conditions are not a usable set",
+            ));
         }
         if coefficients_by_region
             .values()
             .copied()
             .any(|coefficients| validate_coefficients(coefficients).is_err())
         {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "a region's coefficients are not finite and positive",
+            ));
         }
         Self::assemble_with_provider(
             mesh,
@@ -598,7 +606,9 @@ impl QuadraticWaveOperator {
             });
         }
         if !strength.is_finite() || !(0.0..=GRID_SCALE_FILTER_LIMIT).contains(&strength) {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "the grid-scale filter strength is outside the fraction the scheme allows",
+            ));
         }
         if strength == 0.0 {
             return Ok(());
@@ -1107,7 +1117,9 @@ impl QuadraticWaveState {
     /// [`QuadraticWaveOperator::apply_grid_scale_filter`].
     pub fn set_grid_scale_filter(&mut self, strength: f64) -> Result<(), WaveError> {
         if !strength.is_finite() || !(0.0..=GRID_SCALE_FILTER_LIMIT).contains(&strength) {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "the grid-scale filter strength is outside the fraction the scheme allows",
+            ));
         }
         self.grid_scale_filter = strength;
         Ok(())
@@ -1150,7 +1162,9 @@ impl CoefficientProvider<'_> {
     fn at(self, region: RegionId, point: Point2) -> Result<DirectionalWaveCoefficients, WaveError> {
         let values = match self {
             Self::Constant(values) => {
-                let value = *values.get(&region).ok_or(WaveError::InvalidCoefficients)?;
+                let value = *values.get(&region).ok_or(WaveError::Unsupported(
+                    "a region has no compiled coefficients",
+                ))?;
                 DirectionalWaveCoefficients {
                     mass_density: value.mass_density,
                     stiffness: SymmetricTensor2::isotropic(value.stiffness),
@@ -1163,7 +1177,9 @@ impl CoefficientProvider<'_> {
                     .ok_or(WaveError::InvalidMesh("a triangle has an unknown region"))?;
                 let material = scene
                     .material(region.material)
-                    .ok_or(WaveError::InvalidCoefficients)?;
+                    .ok_or(WaveError::Unsupported(
+                        "a region names a material the scene does not hold",
+                    ))?;
                 evaluate_directional_material(scene.physics, material, *region, point)?
             }
             Self::Topology(model) => {
@@ -1173,7 +1189,9 @@ impl CoefficientProvider<'_> {
             }
         };
         if !values.valid() {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "a sampled coefficient is not finite with positive mass and stiffness",
+            ));
         }
         Ok(values)
     }
@@ -1839,7 +1857,9 @@ impl QuadraticAssemblyWork {
         physics: PhysicsModel,
     ) -> Result<Self, WaveError> {
         if !outer_boundaries.valid() {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "the outer boundary conditions are not a usable set",
+            ));
         }
         Ok(Self {
             phase: AssemblyPhase::Numbering(0),
@@ -2317,7 +2337,9 @@ impl QuadraticAssemblyJob {
         model: TopologyWaveModel<'_>,
     ) -> Result<Self, WaveError> {
         if !model.valid_for(&plan) {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "the scene does not describe every region the mesh plan holds",
+            ));
         }
         let work = QuadraticAssemblyWork::new(model.outer_boundaries, model.physics)?;
         Ok(Self {
@@ -2431,7 +2453,9 @@ fn validate_coefficients(coefficients: WaveCoefficients) -> Result<(), WaveError
         || !coefficients.damping.is_finite()
         || coefficients.damping < 0.0
     {
-        Err(WaveError::InvalidCoefficients)
+        Err(WaveError::Unsupported(
+            "a compiled coefficient is not finite with positive mass and stiffness",
+        ))
     } else {
         Ok(())
     }
@@ -4340,7 +4364,9 @@ mod tests {
         ] {
             assert_eq!(
                 operator.apply_grid_scale_filter(&mut current, &mut previous, strength),
-                Err(WaveError::InvalidCoefficients),
+                Err(WaveError::Unsupported(
+                    "the grid-scale filter strength is outside the fraction the scheme allows"
+                )),
                 "{strength} should not be accepted"
             );
         }
@@ -4348,7 +4374,9 @@ mod tests {
             QuadraticWaveState::zero(&operator, operator.recommended_time_step()).unwrap();
         assert_eq!(
             state.set_grid_scale_filter(GRID_SCALE_FILTER_LIMIT + 1.0),
-            Err(WaveError::InvalidCoefficients)
+            Err(WaveError::Unsupported(
+                "the grid-scale filter strength is outside the fraction the scheme allows"
+            ))
         );
         assert_eq!(state.grid_scale_filter(), 0.0);
     }
@@ -4677,7 +4705,9 @@ mod tests {
                     ..Default::default()
                 }
             ),
-            Err(WaveError::InvalidCoefficients)
+            Err(WaveError::Unsupported(
+                "a compiled coefficient is not finite with positive mass and stiffness"
+            ))
         ));
         let operator = QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()).unwrap();
         assert!(matches!(

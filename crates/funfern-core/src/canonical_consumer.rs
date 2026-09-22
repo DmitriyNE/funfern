@@ -81,9 +81,12 @@ impl CanonicalPointStencil {
                 .map_err(|_| WaveError::InvalidMesh("invalid complementary sample count"))?,
             stencil.barycentric,
         )?;
-        let complementary_reference = rotate_tensor(stencil.stiffness)
-            .inverse()
-            .ok_or(WaveError::InvalidCoefficients)?;
+        let complementary_reference =
+            rotate_tensor(stencil.stiffness)
+                .inverse()
+                .ok_or(WaveError::Unsupported(
+                    "a consumer asked for a region the generation does not hold",
+                ))?;
         Ok(Self {
             nodes: stencil.nodes,
             primary_weights: stencil.value_weights,

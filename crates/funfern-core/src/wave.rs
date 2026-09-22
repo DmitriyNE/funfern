@@ -661,13 +661,20 @@ impl OuterBoundaryConditions {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WaveError {
+    /// The one refusal the shared sentence actually describes: the reference
+    /// P1 operator was handed coefficients outside its domain. Nothing the
+    /// application prepares reaches it - it is the convergence example and the
+    /// tests - so a user who sees this text is running the reference, not a
+    /// scene. Every other refusal names itself through `Unsupported`.
     InvalidCoefficients,
     /// Something the solver will not accept, named at the point it was found.
     ///
-    /// `InvalidCoefficients` is a unit variant, so dozens of unrelated refusals
-    /// reach a user as one sentence about mass and stiffness - a source whose
-    /// weights miss their support reads as a bad material. Anything that can
-    /// surface while a generation is being prepared says which check it was.
+    /// This variant exists because `InvalidCoefficients` used to be shared by
+    /// dozens of unrelated checks, and they all reached a user as one sentence
+    /// about mass and stiffness - a source whose weights miss their support
+    /// read as a bad material, and a refusal could not be located from what the
+    /// user could see. Anything reachable while a generation is prepared says
+    /// which check it was.
     Unsupported(&'static str),
     MaterialEvaluation {
         material: String,

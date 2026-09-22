@@ -2104,13 +2104,25 @@ impl CanonicalTemporalWaveState {
         // wall and thin gaps are accounted lanes or local states of their own.
         // What the bulk claim still refuses - a second-order open boundary -
         // has no state here either.
-        if !operator.forced_composition_supported()
-            || !time_step.is_finite()
-            || time_step <= 0.0
-            || time_step > operator.maximum_time_step()
-            || !time.is_finite()
-        {
-            return Err(WaveError::InvalidCoefficients);
+        if !operator.forced_composition_supported() {
+            return Err(WaveError::Unsupported(
+                "the time-driven operator cannot compose a forced step for this scene",
+            ));
+        }
+        if !time_step.is_finite() || time_step <= 0.0 {
+            return Err(WaveError::Unsupported(
+                "the time-driven state was given a time step that is not positive and finite",
+            ));
+        }
+        if time_step > operator.maximum_time_step() {
+            return Err(WaveError::Unsupported(
+                "the time step exceeds what the time-driven trajectory holds stable",
+            ));
+        }
+        if !time.is_finite() {
+            return Err(WaveError::Unsupported(
+                "the time-driven state was given a start time that is not finite",
+            ));
         }
         if primary_flux.len() != operator.base().degrees_of_freedom() {
             return Err(WaveError::SizeMismatch {
@@ -2231,11 +2243,15 @@ impl CanonicalTemporalWaveState {
         operator: &CanonicalTemporalWaveOperator,
         strength: f64,
     ) -> Result<f64, WaveError> {
-        if !operator.conservative_bulk_supported()
-            || !strength.is_finite()
-            || !(0.0..=1.0).contains(&strength)
-        {
-            return Err(WaveError::InvalidCoefficients);
+        if !operator.conservative_bulk_supported() {
+            return Err(WaveError::Unsupported(
+                "the time-driven grid filter needs a conservative bulk this scene does not have",
+            ));
+        }
+        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+            return Err(WaveError::Unsupported(
+                "the time-driven grid filter strength is not a fraction between zero and one",
+            ));
         }
         if strength == 0.0 {
             return Ok(0.0);
@@ -2374,11 +2390,16 @@ impl CanonicalTemporalWaveState {
     ) -> Result<CanonicalTemporalStepAccounting, WaveError> {
         if !operator.forced_composition_supported()
             || forcing.prescribed().len() != operator.base().degrees_of_freedom()
-            || !duration.is_finite()
-            || duration == 0.0
-            || duration.abs() > operator.maximum_time_step()
         {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "the time-driven operator cannot compose the forcing it was handed",
+            ));
+        }
+        if !duration.is_finite() || duration == 0.0 || duration.abs() > operator.maximum_time_step()
+        {
+            return Err(WaveError::Unsupported(
+                "the signed step duration is outside what the time-driven trajectory allows",
+            ));
         }
         let start_time = self.time;
         let middle_time = start_time + 0.5 * duration;

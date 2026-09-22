@@ -1617,7 +1617,9 @@ impl CanonicalWaveState {
         orientation: f64,
     ) -> Result<(), WaveError> {
         if orientation != 1.0 && orientation != -1.0 {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "thin-gap history was matched with an orientation that is neither forward nor reversed",
+            ));
         }
         if operator.thin_gap_samples().is_empty() {
             return memory
@@ -1818,7 +1820,9 @@ impl CanonicalWaveState {
         strength: f64,
     ) -> Result<CanonicalStepAccounting, WaveError> {
         if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "the grid filter strength is not a fraction between zero and one",
+            ));
         }
         if strength == 0.0 {
             return Ok(CanonicalStepAccounting::default());
@@ -1826,7 +1830,9 @@ impl CanonicalWaveState {
         let before = self.energy(operator)?;
         let eigenvalue_bound = 4.0 / operator.maximum_time_step().powi(2);
         if !eigenvalue_bound.is_finite() || eigenvalue_bound <= 0.0 {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "the operator carries no finite positive eigenvalue bound for the grid filter",
+            ));
         }
 
         let old_primary = self.primary_flux.clone();
