@@ -720,6 +720,74 @@ mod second_preset_reproduction {
     use super::super::workers::compile_gpu_upload;
     use super::*;
 
+    /// Reported from the running application: with a driven medium the phase
+    /// label churned every frame, adaptation never ran, the frame rate fell and
+    /// handoffs piled up - the host was preparing the same generation over and
+    /// over.
+    ///
+    /// A driven generation runs at the tighter step its coefficient trajectory
+    /// demands, and the pacing check compared that against the *base* operator's
+    /// step instead. The two differ by more than the hysteresis, so every frame
+    /// asked for a step the upload would never choose and cleared the requested
+    /// revision, which is a full preparation per frame.
+    #[test]
+    fn pacing_does_not_re_request_a_generation_running_at_its_own_step() {
+        let mut state = Playground::default();
+        activate(&mut state);
+        let material = state.editor.document.model.draft.materials[0].clone();
+        let pump = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Parametric pump")
+            .expect("catalogue entry");
+        state
+            .editor
+            .update_material(apply_law_preset(pump, &material).unwrap())
+            .unwrap();
+        settle(&mut state.editor);
+        let token = state
+            .runtime
+            .request(
+                state.editor.revision,
+                &state.editor.document,
+                state.editor.compiled_accepted.clone(),
+                MeshingOptions {
+                    target_edge_length: 0.18,
+                    ..MeshingOptions::default()
+                },
+                false,
+            )
+            .unwrap();
+        for _ in 0..1_000_000 {
+            if let Some(result) = state.runtime.advance(4096) {
+                result.unwrap();
+                break;
+            }
+        }
+        let active = state.runtime.commit_ready(token).unwrap();
+        assert!(active.driven());
+
+        // The gap the old comparison saw. Without it this test would pass on a
+        // medium whose two bounds happen to agree, and prove nothing.
+        let driven = active.recommended_time_step();
+        let base = active.operator.recommended_time_step();
+        assert!(
+            (base / driven - 1.0).abs() > TIME_STEP_HYSTERESIS,
+            "a driven generation must run tighter than its base operator by more \
+             than the hysteresis for this to be the case it was reported as: \
+             {driven:e} against {base:e}"
+        );
+
+        state.uploaded_time_step =
+            paced_time_step(driven, state.editor.document.presentation.simulation_speed);
+        state.requested_revision = Some(state.editor.revision);
+        state.retime_for_speed();
+        assert_eq!(
+            state.requested_revision,
+            Some(state.editor.revision),
+            "a generation already running at its own step must not be re-requested"
+        );
+    }
+
     /// Reported from the running application: applying a preset ran the driven
     /// medium and then, a second or two later, reverted to a stationary one
     /// with the field reset.

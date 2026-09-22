@@ -5,6 +5,43 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-23 — The host was preparing the same generation every frame
+
+Reported with a driven medium running: the phase label churned every frame and
+was unreadable, adaptation never ran, handoffs piled up and the frame rate fell.
+The report's own guess - that the host was constantly doing something with the
+device - was right, and three of the four symptoms are one comparison.
+
+- `retime_for_speed` decides whether the running generation is at the timestep
+  the speed control wants. It compared against `active.operator`'s recommended
+  step - the base operator's, built from the stripped model - while the upload
+  uses the generation's own, which on a driven medium is tighter because the
+  coefficient trajectory tightens the CFL bound. The gap on the reported scene
+  is `8.78e-3` against `1.007e-2`, `14.7%` against a `10%` hysteresis, so every
+  frame decided the step was wrong, cleared the requested revision and prepared
+  the whole generation again: mesh, assembly, upload. The label churned because
+  a new preparation started every frame, adaptation never saw a settled
+  generation, and the frame rate went with the work.
+- It now compares against `PreparedTopology::recommended_time_step`, which is
+  what the upload chooses.
+- `pacing_does_not_re_request_a_generation_running_at_its_own_step` asserts the
+  two bounds differ by more than the hysteresis *before* checking the behaviour.
+  Without that it would pass on a medium whose bounds happen to agree and prove
+  nothing; with the old comparison it fails with the revision cleared.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`.
+- Still open, and its own slice: **enabling a drive resets the field**. A change
+  of drivenness skips the transfer. `Q` and `b` would map either way and
+  authored anchors are the right initial runtime for a drive just switched on,
+  but `with_temporal_material_runtime` requires both plans to be temporal and
+  the handoff compares each side's record count against its own plan, so the
+  asymmetric case needs a "target has records, source has none, leave the
+  target's authored values alone" mode in both the transfer plan and the
+  transfer shader.
+- Also worth measuring if handoffs still feel long: the previous entry made
+  every driven handoff rebuild the source plan. It is worker-thread packing
+  rather than frame work, but it is real and was not there before.
+
 ## 2026-09-22 — The driven handoff, and an error that could not be read
 
 Reported: changing a material fails with "canonical GPU handoff layouts do not

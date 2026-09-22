@@ -563,8 +563,15 @@ impl Playground {
         let Some(active) = self.runtime.active() else {
             return;
         };
+        // The step the generation actually runs at, which on a driven medium
+        // is the tighter one its coefficient trajectory demands rather than the
+        // base operator's. Comparing against the base asked for a step the
+        // upload would never choose, so every frame cleared the requested
+        // revision and prepared the whole generation again - the phase label
+        // churned, adaptation never got a settled generation to analyse, and
+        // the frame rate went with it.
         let wanted = paced_time_step(
-            active.operator.recommended_time_step(),
+            active.recommended_time_step(),
             self.editor.document.presentation.simulation_speed,
         );
         if (wanted / self.uploaded_time_step - 1.0).abs() > TIME_STEP_HYSTERESIS {
