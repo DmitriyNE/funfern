@@ -356,9 +356,16 @@ complement at every stage, where a fixed one factorizes once at construction;
 that is the first asymptotic difference between the two paths rather than a
 constant factor, and belongs in the incremental-cost measurement.
 
-Application enablement, a GPU path and device gate for the forced composition,
-a calibrated frozen-impedance reflection curve and the incremental-cost
-measurement remain.
+The GPU carries the forced composition too, and its device gate found the kick
+dividing by the authored nodal mass rather than the instantaneous one - a `1.4e-2`
+error that no fixture could previously reach, because the plan compiler refused
+that combination. The actual-core incremental cost is recorded: `18.7x` for a
+driven bulk and `37.5x` with a second-order wall, where the wall's excess is the
+per-stage trace refactorization and the floor is a stage's coefficients being
+recomputed by every helper that wants them.
+
+Application enablement, caching those stage coefficients, and a calibrated
+frozen-impedance reflection curve remain.
 
 Implement stage-time coefficient evaluation on both physical sides, harmonic/smoothed-square/travelling drives, Switch stamping, phase anchors, ramp reversal and trajectory bounds. Sample travelling phase in actual material frames at nodes/quadrature. Validate reciprocal factors as reciprocal trajectories, not newly interpolated endpoints.
 
