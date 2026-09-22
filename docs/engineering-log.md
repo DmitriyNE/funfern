@@ -49,6 +49,31 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - So a driven document previously prepared only when it had no enabled probe and
   no volume source. `canonical_gpu_driven_document` has neither, which is why
   the device gates never saw this.
+- The first arrangement read as two editors stacked, which the user called out.
+  The real duplication was that a preset's parameter had two controls - one
+  labelled in the response section, one raw in the Parameters list - and the
+  selector sat below the coefficients as though it were an extra feature rather
+  than the thing that decides what a material is. Now: name, Response, the base
+  coefficients, the preset's own values, the effective-law text, and a
+  Parameters list holding only what the user made.
+- The base coefficients stay a separate segment on purpose, and the reason is
+  not layout. They keep their Constant/Formula editor because a spatially graded
+  density is a real capability a preset must not take away, and they survive a
+  change of preset where a preset's own values are replaced by it. The separator
+  is that distinction rather than chrome.
+- Recorded so it is not assumed later: a **drive parameter cannot be spatially
+  varying**, and making one so is not a UI relaxation. `TimeDrive::evaluate`
+  resolves depth, frequency and phase through `evaluate_constant` into one
+  runtime record per material, and the device packs one record per material
+  rather than per node. The travelling modulation's `q·x` is the sanctioned
+  spatial dependence, which is why it is a drive variant instead of a spatial
+  depth. Base coefficients and field-law slots are spatial; drive parameters
+  would need per-sample drive data on both sides.
+- Uniformity between the two segments stays available and additive: the drive
+  slots are already `ScalarField`s, constrained to bare parameter references
+  only so the matcher can recognise them. Relaxing that to any expression over
+  parameters would give both segments the same widget, at the cost of widening
+  what structural match has to accept.
 - Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
   --locked -- -D warnings`, `cargo test --workspace --locked`, plus a native
   launch against an isolated `HOME`.

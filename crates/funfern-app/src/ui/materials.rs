@@ -377,6 +377,42 @@ impl Playground {
         if let Some(mut material) = self.material_edit.take() {
             ui.separator();
             ui.text_edit_singleline(&mut material.name);
+            // What kind of medium this is, which decides what follows. A preset
+            // writes the law slots and creates the parameters it exposes; after
+            // that the material stands on its own, so editing a slot by hand
+            // leaves it Custom rather than being refitted to the preset it came
+            // from.
+            let physics = self.editor.document.model.draft.physics;
+            let matched = identify_law_preset(&material);
+            let mut chosen = None;
+            ui.horizontal(|ui| {
+                ui.label("Response");
+                egui::ComboBox::from_id_salt(("material-response", material.id.0))
+                    .selected_text(matched.as_ref().map_or_else(
+                        || "Custom".to_owned(),
+                        |found| law_preset_label(found.preset, physics),
+                    ))
+                    .show_ui(ui, |ui| {
+                        for preset in law_presets() {
+                            let current =
+                                matched.as_ref().is_some_and(|found| found.preset == preset);
+                            if ui
+                                .selectable_label(current, law_preset_label(preset, physics))
+                                .on_hover_text(preset.phenomenon)
+                                .clicked()
+                            {
+                                chosen = Some(preset);
+                            }
+                        }
+                    });
+            });
+            if let Some(preset) = chosen {
+                match apply_law_preset(preset, &material) {
+                    Ok(applied) => material = applied,
+                    Err(error) => self.notify(error.to_string()),
+                }
+            }
+            ui.separator();
             let labels = material_editor_labels(self.editor.document.model.draft.physics);
             material_scalar_editor(
                 ui,
@@ -418,44 +454,22 @@ impl Playground {
                 &mut self.material_formula_edits,
                 &mut self.material_formula_errors,
             );
-            // The law catalogue. A preset writes the slots and creates the
-            // parameters it exposes; after that the material stands on its own,
-            // so editing a slot by hand leaves it Custom rather than being
-            // refitted to the preset it came from.
-            ui.separator();
-            let physics = self.editor.document.model.draft.physics;
+            // The preset's own values, below the base ones and separated from
+            // them, because the two behave differently: a base coefficient
+            // survives a change of preset, and these are replaced by it.
+            // Recomputed, because applying a preset above changed the material.
             let matched = identify_law_preset(&material);
-            let mut chosen = None;
-            ui.horizontal(|ui| {
-                ui.label("Response");
-                egui::ComboBox::from_id_salt(("material-response", material.id.0))
-                    .selected_text(matched.as_ref().map_or_else(
-                        || "Custom".to_owned(),
-                        |found| law_preset_label(found.preset, physics),
-                    ))
-                    .show_ui(ui, |ui| {
-                        for preset in law_presets() {
-                            let current =
-                                matched.as_ref().is_some_and(|found| found.preset == preset);
-                            if ui
-                                .selectable_label(current, law_preset_label(preset, physics))
-                                .on_hover_text(preset.phenomenon)
-                                .clicked()
-                            {
-                                chosen = Some(preset);
-                            }
-                        }
-                    });
-            });
-            if let Some(preset) = chosen {
-                match apply_law_preset(preset, &material) {
-                    Ok(applied) => material = applied,
-                    Err(error) => self.notify(error.to_string()),
-                }
+            let preset_owned = matched
+                .as_ref()
+                .map(|found| found.parameters.iter().cloned().collect::<BTreeSet<_>>())
+                .unwrap_or_default();
+            if matched
+                .as_ref()
+                .is_some_and(|found| !found.preset.variables.is_empty())
+            {
+                ui.separator();
             }
-            // Recomputed, because applying a preset above changed the material
-            // the rest of this section describes.
-            if let Some(found) = identify_law_preset(&material) {
+            if let Some(found) = &matched {
                 for (variable, name) in found.preset.variables.iter().zip(&found.parameters) {
                     let Some(parameter) = material
                         .parameters
@@ -497,6 +511,9 @@ impl Playground {
                 ui.small(format!("{} = {}", line.subject, line.response));
             }
 
+            // Only the parameters the user made. A preset's own are above,
+            // under the labels it gave them, and showing them again here was
+            // two controls for one number.
             ui.collapsing("Parameters", |ui| {
                 let mut remove = None;
                 let referenced_names = material
@@ -504,6 +521,9 @@ impl Playground {
                     .map(str::to_owned)
                     .collect::<BTreeSet<_>>();
                 for (index, parameter) in material.parameters.iter_mut().enumerate() {
+                    if preset_owned.contains(&parameter.name) {
+                        continue;
+                    }
                     let referenced = referenced_names.contains(&parameter.name);
                     ui.horizontal(|ui| {
                         ui.label(&parameter.name);
