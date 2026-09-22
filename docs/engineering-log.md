@@ -5,6 +5,52 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The preset catalogue, applied and recovered
+
+- `law_presets` in core: the named points in the law catalogue a user can put
+  on a material. Ten entries - Linear, and the four time-driven laws on each
+  constitutive row, plus the impedance-preserving pair that needs both.
+- A preset is a factory, not a binding. It creates named parameters and wires
+  the slots to formulas referring to them, and after that the material stands on
+  its own; the editor recovers which preset produced it by matching structure.
+  Editing a slot to a bare constant, or moving a drive to the other row, simply
+  stops it matching and the material reads as Custom rather than being refitted.
+- `apply_law_preset` and `identify_law_preset` are both written against one
+  private constructor, so a preset cannot be applied in a shape its own matcher
+  would not recognise. The round-trip test covers every entry, which is what
+  catches that class of disagreement.
+- Presets are named for the row rather than the physical quantity, because the
+  quantity depends on the skin: the mass row is the density in Mechanical and
+  the permittivity in the electromagnetic skins, and those are not the same
+  thing - the density pairs with the permeability. The editor takes the label
+  from the skin, so a pump stays a pump across a physics change while its label
+  follows the coefficient.
+- Only laws that run are listed, which section 11 asks for directly: a preset
+  behind an open design gate is unavailable rather than offered and refused.
+  A test asserts no preset writes a field law, a restoring law or a loss
+  channel, so the catalogue cannot drift ahead of the solver by accident.
+- Two behaviours worth naming. A parameter the user authored is never taken: a
+  preset wanting a name already in use gets the next free suffix, and the user's
+  value survives. Re-applying the preset a material already carries keeps the
+  values it has been tuned to, so the selector is not a reset button and does
+  not grow a second copy of every parameter.
+- `every_preset_survives_a_skin_change` ties this to the previous entry: every
+  catalogue preset converts Mechanical to TM and back to exactly itself, so the
+  preset view keeps working across a skin change instead of reporting a material
+  the user cannot see into.
+- A material carrying a restoring law or a loss channel reads as Custom even
+  when its constitutive rows are untouched. No preset reaches those slots, so
+  calling it Linear would name the medium after the half of it the selector
+  happens to inspect.
+- A material with no room for a preset's parameters is refused before anything
+  is written, under `MaterialError::ParameterLimit` rather than the misleading
+  unsupported-law error, so a failed application leaves the material alone.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`.
+- Next: the editor frame - the Advanced toggle in the Library header as
+  presentation state, the preset selector as an authored edit, and the
+  effective-law text above the controls in both non-linear views.
+
 ## 2026-09-22 — A driven medium can change its physics skin
 
 - A skin change swaps the two stored constitutive slots, because the mechanical

@@ -19,6 +19,8 @@ pub enum MaterialError {
     /// A law a physics skin change cannot carry, named by what blocks it so the
     /// editor can say which slot to clear.
     UnconvertibleMaterialLaw(&'static str),
+    /// A material already carries as many named parameters as it can hold.
+    ParameterLimit,
     InvalidValue,
 }
 
@@ -42,6 +44,12 @@ impl std::fmt::Display for MaterialError {
             }
             Self::UnconvertibleMaterialLaw(blocked) => {
                 write!(f, "{blocked} cannot cross a physics skin yet")
+            }
+            Self::ParameterLimit => {
+                write!(
+                    f,
+                    "a material holds at most {MAX_MATERIAL_PARAMETERS} parameters"
+                )
             }
             Self::InvalidValue => write!(f, "formula produced an invalid value"),
         }
