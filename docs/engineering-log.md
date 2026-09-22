@@ -5,6 +5,58 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — A driven medium can change its physics skin
+
+- A skin change swaps the two stored constitutive slots, because the mechanical
+  adapter is `s0 = eps = 1/k0` and `mu = rho` and neither slot holds the same
+  physical quantity in both skins. `convert_material` refused outright whenever
+  a material had any law, so one pumped material blocked the whole scene's
+  change - and `set_physics` is transactional across all materials, correctly,
+  so it blocked every other material with it.
+- A time drive and a Switch alternate do convert. They are multiplicative
+  factors on a coefficient, so the row that reciprocates carries its law
+  reciprocated, and `inverted` expresses exactly that: it divides by the whole
+  multiplier, which is the reciprocal of `drive * switch`. Nothing else moves -
+  depth, frequency, phase and wavevector are all in the material frame.
+  `CoefficientLaw::reciprocated` is the one-line law-level counterpart to the
+  `reciprocal()` already applied to the base expression.
+- A field law still does not convert, and now says so by name. Section 5.3:
+  a reciprocal nonlinear coefficient is not an inverse nonlinear constitutive
+  map, and the physical field the law reads changes with the skin. That is gate
+  C. Restoring laws have no counterpart to move to, and loss channels stay on
+  their own physical field with a rate conversion of their own, so both are
+  refused rather than guessed at. `UnconvertibleMaterialLaw` carries which one
+  blocked it, so the editor says which slot to clear instead of reporting an
+  unsupported material.
+- This is reachable now rather than after gate C because section 11 filters a
+  preset with an open design gate out of the selector, so a material authored in
+  the preset view can only carry the convertible laws.
+- The round trip is exact: two reciprocations cancel, and a law left carrying
+  only `inverted` normalizes away, so toggling skins does not accumulate flags
+  on a medium that never changed. The measurement is physical rather than
+  structural - the converted permittivity must equal one over the original
+  stiffness at twelve instants through a drive cycle with a Switch mid-ramp.
+- **Enabling it made a latent defect reachable.** Drive lanes in the material
+  runtime bank are ordered mass row then stiffness row, and the transfer
+  preserved a carrier phase only when the source and target lane *indices*
+  matched. A skin change moves a drive between lanes, so both carriers would
+  have silently reset to their authored anchor and the modulation would jump
+  phase at the switch - on a path section 4.4 says preserves its compiled maps.
+  The host now matches lanes by drive signature and names the source lane per
+  target lane in the mapping word; the shader reads the phase and frequency from
+  that lane. Unambiguous, because two lanes sharing a signature cannot be told
+  apart by phase either, and it reduces to the old test whenever nothing moved.
+- Both tests were checked against their own failure: dropping the reciprocation
+  breaks the physical equality, and restoring lane-for-lane matching breaks the
+  carrier mapping.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`.
+- Next: the preset table and structural match. Presets are named by phenomenon
+  and row rather than by slot, because the mass slot is `rho` in Mechanical and
+  `eps` in EM and those are not the same quantity - `rho` pairs with `mu`. The
+  row label comes from the skin, so a pump stays a pump across a change while
+  its label moves from density to permeability.
+
 ## 2026-09-22 — The law catalogue, written down and read back
 
 - The catalogue of material laws existed only in conversation. It is now

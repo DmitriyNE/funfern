@@ -16,6 +16,9 @@ pub enum MaterialError {
     TooComplex,
     MissingParameter(String),
     UnsupportedMaterialLaw,
+    /// A law a physics skin change cannot carry, named by what blocks it so the
+    /// editor can say which slot to clear.
+    UnconvertibleMaterialLaw(&'static str),
     InvalidValue,
 }
 
@@ -36,6 +39,9 @@ impl std::fmt::Display for MaterialError {
                     f,
                     "material law is authored but not executable by the legacy solver"
                 )
+            }
+            Self::UnconvertibleMaterialLaw(blocked) => {
+                write!(f, "{blocked} cannot cross a physics skin yet")
             }
             Self::InvalidValue => write!(f, "formula produced an invalid value"),
         }

@@ -195,6 +195,21 @@ impl CoefficientLaw {
 
     /// Removes representation-only state from an identity law. This keeps a
     /// reciprocal round trip from manufacturing an active `÷1` law.
+    /// The same law on the reciprocal of the coefficient it was authored
+    /// against.
+    ///
+    /// `inverted` divides by the whole multiplier, so toggling it is exactly
+    /// what happens to `g · h · s` when its coefficient is reciprocated.
+    /// Nothing else moves: a drive's depth, frequency, phase and wavevector
+    /// live in the material frame, and a Switch's alternate is a factor on a
+    /// coefficient that has just become its own reciprocal.
+    pub fn reciprocated(&self) -> Self {
+        Self {
+            inverted: !self.inverted,
+            ..self.clone()
+        }
+    }
+
     pub fn normalized(&self) -> Self {
         if self.is_linear() {
             Self::linear()

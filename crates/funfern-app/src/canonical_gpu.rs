@@ -2240,19 +2240,32 @@ impl CanonicalGpuTransferPlan {
                 self.words.push(transfer_word(NO_INDEX, 0, 0, 0));
                 continue;
             };
+            // A carrier follows its own drive, not the lane the drive used to
+            // sit in. A physics skin change moves one: the mass and stiffness
+            // rows swap when `k` and `ε` exchange places, so the lane a pump
+            // occupies changes while the pump does not. Matching on the drive
+            // signature is unambiguous - two lanes that share a signature
+            // cannot be told apart by phase either, so either pairing gives
+            // the same carrier - and it reduces to the old lane-for-lane test
+            // whenever nothing moved.
             let mut preserve_carrier = 0_u32;
-            for lane in 0..4 {
-                if source_signatures[source_index][lane].is_some()
-                    && source_signatures[source_index][lane]
-                        == target_signatures[target_index][lane]
-                {
-                    preserve_carrier |= 1 << lane;
-                }
+            let mut carrier_source = 0_u32;
+            for (lane, target) in target_signatures[target_index].iter().enumerate() {
+                let Some(signature) = *target else {
+                    continue;
+                };
+                let Some(source_lane) = (0..4).find(|candidate: &usize| {
+                    source_signatures[source_index][*candidate] == Some(signature)
+                }) else {
+                    continue;
+                };
+                preserve_carrier |= 1 << lane;
+                carrier_source |= usize_u32(source_lane)? << (2 * lane);
             }
             self.words.push(transfer_word(
                 usize_u32(source_index)?,
                 preserve_carrier,
-                0,
+                carrier_source,
                 0,
             ));
         }
@@ -6108,6 +6121,144 @@ mod tests {
 
         naga::front::wgsl::parse_str(include_str!("canonical_transfer.wgsl")).unwrap();
         naga::front::wgsl::parse_str(include_str!("canonical_transfer_runtime.wgsl")).unwrap();
+    }
+
+    /// A physics skin change swaps the mass and stiffness rows, so a drive
+    /// changes which runtime lane holds it while remaining the same drive. Its
+    /// carrier has to follow it, or the medium's modulation jumps phase the
+    /// moment a user switches skins mid-run. This builds both generations the
+    /// way the editor does - one scene, its materials converted - and requires
+    /// the transfer to preserve both carriers and to name the lane each came
+    /// from.
+    #[test]
+    fn a_skin_change_carries_each_drives_phase_into_its_new_lane() {
+        use funfern_core::{ElectromagneticPolarization, PhysicsModel};
+        let (scene, mesh, scalar, operator, state, source_plan) = temporal_plan();
+        let mechanical = PhysicsModel::Mechanical;
+        let target_physics = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let mut converted_scene = scene.clone();
+        converted_scene.physics = target_physics;
+        converted_scene.materials = scene
+            .materials
+            .iter()
+            .map(|material| {
+                mechanical
+                    .convert_material(target_physics, material)
+                    .unwrap()
+            })
+            .collect();
+        // The conversion moved each drive to the other row, which is the whole
+        // reason the lanes have to be matched by signature.
+        assert_eq!(
+            converted_scene.materials[0].stiffness_law.drive,
+            scene.materials[0].mass_law.drive
+        );
+        assert_eq!(
+            converted_scene.materials[0].mass_law.drive,
+            scene.materials[0].stiffness_law.drive
+        );
+
+        let mut fixed_scene = converted_scene.clone();
+        for material in &mut fixed_scene.materials {
+            material.mass_law = CoefficientLaw::linear();
+            material.stiffness_law = CoefficientLaw::linear();
+        }
+        let converted_scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &fixed_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let target_operator = CanonicalTemporalWaveOperator::compile_scene(
+            &mesh,
+            &converted_scalar,
+            &converted_scene,
+            32,
+        )
+        .unwrap();
+        let target_state = CanonicalTemporalWaveState::new(
+            &target_operator,
+            state.time_step(),
+            state.primary_flux().to_vec(),
+            state.complementary_flux().to_vec(),
+        )
+        .unwrap();
+        let target_plan = CanonicalGpuPlan::compile_temporal_bulk(
+            &target_operator,
+            &target_state,
+            CanonicalGpuClock::initial(state.time_step()).unwrap(),
+        )
+        .unwrap();
+
+        let interpolation =
+            QuadraticTransferMap::identity_on_mesh(&mesh, &scalar, &converted_scalar).unwrap();
+        let primary = CanonicalPrimaryTransferMap::prepare(
+            &interpolation,
+            operator.base(),
+            target_operator.base(),
+        )
+        .unwrap();
+        let vector = CanonicalVectorTransferMap::prepare(
+            &mesh,
+            operator.base(),
+            &mesh,
+            target_operator.base(),
+        )
+        .unwrap();
+        let gap = CanonicalThinGapHistoryTransferMap::prepare(
+            operator.base().thin_gap_samples(),
+            target_operator.base().thin_gap_samples(),
+        )
+        .unwrap();
+        let outgoing = CanonicalOutgoingHistoryTransferMap::prepare(
+            &interpolation,
+            operator.base(),
+            target_operator.base(),
+        )
+        .unwrap();
+        let source_forcing = CanonicalForcing::none(operator.base());
+        let target_forcing = CanonicalForcing::none(target_operator.base());
+        let runtime_transfer = CanonicalGpuRuntimeTransfer::identity(
+            operator.base(),
+            target_operator.base(),
+            &source_forcing,
+            &target_forcing,
+        )
+        .unwrap();
+        let transfer = CanonicalGpuTransferPlan::compile(
+            operator.base(),
+            target_operator.base(),
+            &source_forcing,
+            &target_forcing,
+            &primary,
+            &vector,
+            &gap,
+            &outgoing,
+            &runtime_transfer,
+        )
+        .unwrap()
+        .with_temporal_material_runtime(&source_plan, &target_plan)
+        .unwrap();
+
+        let mapping = transfer.words[transfer.words[8].data.x as usize].data;
+        assert_eq!(mapping.x, 0, "the material itself still maps across");
+        assert_eq!(
+            mapping.y & 0b11,
+            0b11,
+            "both carriers must survive the swap"
+        );
+        assert_eq!(
+            mapping.z & 0b11,
+            1,
+            "the mass lane now reads the old stiffness lane"
+        );
+        assert_eq!(
+            (mapping.z >> 2) & 0b11,
+            0,
+            "and the stiffness lane the old mass lane"
+        );
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    BACKGROUND_REGION, CanonicalMaterialRuntimeState, EvaluatedMaterial, FieldLawValues, Material,
-    MaterialError, MaterialFrame, OuterSide, Point2, Region, RegionId, SymmetricTensor2, TriMesh,
+    BACKGROUND_REGION, CanonicalMaterialRuntimeState, EvaluatedMaterial, FieldLaw, FieldLawValues,
+    Material, MaterialError, MaterialFrame, OuterSide, Point2, Region, RegionId, SymmetricTensor2,
+    TriMesh,
 };
 
 pub(crate) fn evaluate_material_library_at(
@@ -295,15 +296,40 @@ impl PhysicsModel {
         let crossing_to_mechanical =
             matches!(self, Self::Electromagnetic { .. }) && matches!(target, Self::Mechanical);
         if !crossing_to_em && !crossing_to_mechanical {
+            // TM and TE name the same electric and magnetic data; only which
+            // one the solver carries nodally differs, so there is nothing in
+            // the material to rewrite.
             return Ok(material.clone());
         }
 
-        // Physical nonlinear conversion needs field-role, scalar/vector and
-        // inverse-domain admission. Until that compiler is connected to the
-        // new core, refusing the conversion is safer than swapping authored
-        // rows and claiming equivalent physics.
-        if material.has_laws() {
-            return Err(MaterialError::UnsupportedMaterialLaw);
+        // The mechanical adapter is `s₀ = ε = 1/k₀` and `μ = ρ`, so the two
+        // stored slots hold different physical quantities in each skin and a
+        // law moves with the quantity it was authored against, not with the
+        // slot it happens to sit in. The row that reciprocates carries its law
+        // reciprocated, which `inverted` expresses exactly: that flag divides
+        // by the whole multiplier, and the reciprocal of `h·s` is what a
+        // reciprocated coefficient needs.
+        //
+        // A field law does not convert. A reciprocal nonlinear coefficient is
+        // not an inverse nonlinear constitutive map, and the physical field the
+        // law reads changes with the skin; that is design gate C. A restoring
+        // law has no counterpart to move to. Loss channels stay attached to
+        // their own physical field and their rate conversion is a contract of
+        // its own, so they are refused rather than guessed at.
+        for law in [&material.mass_law, &material.stiffness_law] {
+            if !matches!(law.field, FieldLaw::Linear) {
+                return Err(MaterialError::UnconvertibleMaterialLaw(
+                    "a field-dependent response",
+                ));
+            }
+        }
+        if !material.restoring.is_none() {
+            return Err(MaterialError::UnconvertibleMaterialLaw("a restoring law"));
+        }
+        if material.electric_loss.is_some() || material.magnetic_loss.is_some() {
+            return Err(MaterialError::UnconvertibleMaterialLaw(
+                "a named loss channel",
+            ));
         }
 
         let mut converted = material.clone();
@@ -311,11 +337,18 @@ impl PhysicsModel {
             converted.mass_density = material.stiffness.reciprocal()?;
             converted.stiffness = material.mass_density.clone();
             converted.damping = material.damping.divide(&material.mass_density)?;
+            converted.mass_law = material.stiffness_law.reciprocated();
+            converted.stiffness_law = material.mass_law.clone();
         } else {
             converted.mass_density = material.stiffness.clone();
             converted.stiffness = material.mass_density.reciprocal()?;
             converted.damping = material.damping.multiply(&material.stiffness)?;
+            converted.mass_law = material.stiffness_law.clone();
+            converted.stiffness_law = material.mass_law.reciprocated();
         }
+        // An otherwise linear law that only carries `inverted` is the multiplier
+        // one, so it normalizes away rather than accumulating across a round
+        // trip.
         converted.mass_law = converted.mass_law.normalized();
         converted.stiffness_law = converted.stiffness_law.normalized();
         Ok(converted)
@@ -1481,7 +1514,139 @@ mod tests {
         };
         assert_eq!(
             mechanical.convert_material(tm, &nonlinear),
-            Err(MaterialError::UnsupportedMaterialLaw)
+            Err(MaterialError::UnconvertibleMaterialLaw(
+                "a field-dependent response"
+            ))
+        );
+    }
+
+    /// A drive follows the physical coefficient it was authored against, not
+    /// the slot it sits in. Under the mechanical adapter `ε = 1/k₀` and `μ = ρ`,
+    /// so a law on the stiffness row lands on the permittivity row and has to
+    /// arrive reciprocated. This measures that: the converted material's
+    /// permittivity must be the reciprocal of the original's stiffness at every
+    /// instant, not merely carry the same drive somewhere.
+    #[test]
+    fn a_drive_crosses_a_skin_on_the_coefficient_it_was_authored_against() {
+        use crate::{
+            CoefficientLaw, MaterialCoordinates, MaterialSwitchRuntime, ScalarField, TimeDrive,
+            TimeDriveRuntime,
+        };
+        let mechanical = PhysicsModel::Mechanical;
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let origin = MaterialCoordinates {
+            x: 0.0,
+            y: 0.0,
+            r: 0.0,
+            theta: 0.0,
+        };
+        let pump = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.3),
+            frequency_hz: ScalarField::constant(1.7),
+            phase_radians: ScalarField::constant(0.4),
+        };
+
+        let mut material = Material::default_medium();
+        material.mass_density = ScalarField::constant(2.5);
+        material.stiffness = ScalarField::constant(4.0);
+        material.stiffness_law.drive = pump.clone();
+        material.stiffness_law.alternate = Some(ScalarField::constant(1.6));
+
+        let converted = mechanical.convert_material(tm, &material).unwrap();
+        // The law left the stiffness row entirely and arrived reciprocated.
+        assert_eq!(converted.stiffness_law, CoefficientLaw::linear());
+        assert!(converted.mass_law.inverted);
+        assert_eq!(converted.mass_law.drive, pump);
+
+        let coefficient = |field: &ScalarField, law: &CoefficientLaw, time: f64| {
+            let values = law.evaluate_at(origin, &material.parameters).unwrap();
+            let runtime = TimeDriveRuntime::authored(values.drive).unwrap();
+            // Mid-ramp at every sample below, so the alternate participates
+            // rather than sitting at a blend of zero where it cancels.
+            let switch = MaterialSwitchRuntime::restored(0.0, 1.0, 0.0, 2.0).unwrap();
+            field.evaluate(origin, &material.parameters).unwrap()
+                * values
+                    .temporal_factor(time, origin, runtime, switch)
+                    .unwrap()
+        };
+        for step in 0..12 {
+            let time = 0.07 * f64::from(step);
+            let stiffness = coefficient(&material.stiffness, &material.stiffness_law, time);
+            let permittivity = coefficient(&converted.mass_density, &converted.mass_law, time);
+            assert!(
+                (permittivity - 1.0 / stiffness).abs() < 1.0e-13,
+                "at t={time}: ε {permittivity:e} against 1/k {:e}",
+                1.0 / stiffness
+            );
+        }
+
+        // And the round trip is exact, so a user toggling skins does not
+        // accumulate reciprocal flags on a medium that never changed.
+        let returned = tm.convert_material(mechanical, &converted).unwrap();
+        assert_eq!(returned, material);
+    }
+
+    /// A drive on the row that does not reciprocate carries over untouched, and
+    /// the two skins that share their material data do not rewrite it at all.
+    #[test]
+    fn the_matched_row_carries_over_and_tm_te_rewrites_nothing() {
+        use crate::{ScalarField, TimeDrive};
+        let mechanical = PhysicsModel::Mechanical;
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let mut material = Material::default_medium();
+        material.mass_law.drive = TimeDrive::TimeCrystal {
+            depth: ScalarField::constant(0.25),
+            frequency_hz: ScalarField::constant(0.8),
+            phase_radians: ScalarField::constant(0.0),
+            sharpness: ScalarField::constant(3.0),
+        };
+        let converted = mechanical.convert_material(tm, &material).unwrap();
+        assert_eq!(converted.stiffness_law, material.mass_law);
+        assert!(!converted.stiffness_law.inverted);
+        assert_eq!(tm.convert_material(te, &converted).unwrap(), converted);
+    }
+
+    /// What a skin change still refuses, and why each one is named. The editor
+    /// prints these, so a user in the preset view learns which slot to clear
+    /// rather than being told a material is unsupported.
+    #[test]
+    fn a_skin_change_names_the_law_it_cannot_carry() {
+        use crate::{RestoringLaw, ScalarField};
+        let mechanical = PhysicsModel::Mechanical;
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let base = Material::default_medium();
+
+        let mut restoring = base.clone();
+        restoring.restoring = RestoringLaw::KleinGordon {
+            omega0: ScalarField::constant(2.0),
+        };
+        assert_eq!(
+            mechanical.convert_material(tm, &restoring),
+            Err(MaterialError::UnconvertibleMaterialLaw("a restoring law"))
+        );
+
+        let mut lossy = base;
+        lossy.electric_loss = Some(crate::LossChannel {
+            base_rate: ScalarField::constant(0.1),
+            law: crate::DampingLaw {
+                rate: crate::RateLaw::Constant,
+                drive: crate::TimeDrive::None,
+            },
+        });
+        assert_eq!(
+            mechanical.convert_material(tm, &lossy),
+            Err(MaterialError::UnconvertibleMaterialLaw(
+                "a named loss channel"
+            ))
         );
     }
 

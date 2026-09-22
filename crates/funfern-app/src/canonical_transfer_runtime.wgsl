@@ -203,9 +203,16 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
             let old_switch = bitcast<vec4<f32>>(old_tables[old_root + 1u].data);
             let old_frequency = bitcast<vec4<f32>>(old_tables[old_root + 2u].data);
             for (var lane = 0u; lane < 4u; lane += 1u) {
+                // The lane a drive occupies can move - a physics skin change
+                // swaps the mass and stiffness rows - so the carrier is taken
+                // from the lane that holds the same drive, which the host
+                // matched by signature. Without a move this is `lane` itself.
+                let source_lane = (mapping.z >> (2u * lane)) & 3u;
                 phase[lane] = select(
                     reduced_phase(target_phase[lane] + frequency[lane] * preparation_delta),
-                    reduced_phase(old_phase[lane] + old_frequency[lane] * old_control.clock_f32.y),
+                    reduced_phase(
+                        old_phase[source_lane]
+                            + old_frequency[source_lane] * old_control.clock_f32.y),
                     (mapping.y & (1u << lane)) != 0u);
             }
             switch_state = vec4<f32>(
