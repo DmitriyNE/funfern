@@ -1415,8 +1415,7 @@ impl CanonicalTemporalWaveOperator {
         // system is no longer the whole story and the bulk claim has to
         // exclude them. Loss, thin gaps, boundary damping and open boundaries
         // are excluded from both until each closes its own gate.
-        let passive_composition = !has_loss
-            && base.thin_gap_samples().is_empty()
+        let passive_composition = base.thin_gap_samples().is_empty()
             && base
                 .first_order_boundary_damping()
                 .iter()
@@ -1434,7 +1433,7 @@ impl CanonicalTemporalWaveOperator {
                 .flatten()
                 .all(|load| load.normalized_weight == 0.0);
         let forced_composition_supported = passive_composition;
-        let conservative_bulk_supported = passive_composition && undriven_boundary;
+        let conservative_bulk_supported = passive_composition && !has_loss && undriven_boundary;
         Ok(Self {
             base,
             primary,
@@ -1470,10 +1469,11 @@ impl CanonicalTemporalWaveOperator {
         self.conservative_bulk_supported
     }
 
-    /// Whether the stepper can compose prescribed data and volume sources with
-    /// this generation. Weaker than [`Self::conservative_bulk_supported`],
-    /// which additionally requires that nothing drives the boundary, because
-    /// an exchange lane is exactly stepped without being part of the freely
+    /// Whether the stepper can compose prescribed data, volume sources and
+    /// loss with this generation. Weaker than
+    /// [`Self::conservative_bulk_supported`], which additionally requires that
+    /// nothing drives the boundary and that nothing dissipates, because an
+    /// accounted exchange lane is stepped without being part of the freely
     /// evolving system.
     pub fn forced_composition_supported(&self) -> bool {
         self.forced_composition_supported
@@ -1809,6 +1809,10 @@ pub struct CanonicalTemporalStepAccounting {
     pub temporal_work: f64,
     /// Energy volume sources put into the field.
     pub source_work: f64,
+    /// Energy the primary loss channel removed. Never negative.
+    pub primary_loss: f64,
+    /// Energy the complementary loss channel removed. Never negative.
+    pub complementary_loss: f64,
     /// Energy that crossed a prescribed node, either sign.
     ///
     /// A prescribed node holds `Q = M(t) g(t)`, so under modulation this is
@@ -1856,7 +1860,11 @@ impl CanonicalTemporalWaveState {
         complementary_flux: Vec<Point2>,
         time: f64,
     ) -> Result<Self, WaveError> {
-        if !operator.conservative_bulk_supported()
+        // A state exists wherever the stepper can compose, which is now wider
+        // than the free bulk: loss, prescribed data and sources are accounted
+        // exchange lanes. What the bulk claim still refuses - thin gaps,
+        // boundary damping, open boundaries - has no state here either.
+        if !operator.forced_composition_supported()
             || !time_step.is_finite()
             || time_step <= 0.0
             || time_step > operator.maximum_time_step()
@@ -2085,9 +2093,7 @@ impl CanonicalTemporalWaveState {
         forcing: &CanonicalForcing,
         duration: f64,
     ) -> Result<CanonicalTemporalStepAccounting, WaveError> {
-        let driven = forcing.drives_any();
         if !operator.forced_composition_supported()
-            || (!driven && !operator.conservative_bulk_supported())
             || forcing.prescribed().len() != operator.base().degrees_of_freedom()
             || !duration.is_finite()
             || duration == 0.0
@@ -2112,6 +2118,22 @@ impl CanonicalTemporalWaveState {
         let mut complementary = self.complementary_flux.clone();
         let mut source_work = 0.0;
         let mut prescribed_exchange = 0.0;
+
+        // Strang: half the dissipation, the conservative core, half again.
+        // Each half map is instantaneous at the step endpoint it sits on - so
+        // the temporal-work quadrature between those endpoints is untouched -
+        // but it stands for evolution over its own half interval, so its rate
+        // is read at that interval's midpoint. Reading it at the endpoint
+        // instead would be first order for a driven loss.
+        let (first_primary_loss, first_complementary_loss) = decay(
+            operator,
+            &mut primary,
+            &mut complementary,
+            0.5 * duration,
+            start_time,
+            start_time + 0.25 * duration,
+            &self.runtime,
+        )?;
 
         // Both kicks pin and sample at their own stage instant, which is the
         // step's endpoints - the same two instants the autonomous extension
@@ -2164,6 +2186,19 @@ impl CanonicalTemporalWaveState {
         source_work += work;
         prescribed_exchange += exchange;
         validate_finite(&primary)?;
+
+        let (second_primary_loss, second_complementary_loss) = decay(
+            operator,
+            &mut primary,
+            &mut complementary,
+            0.5 * duration,
+            end_time,
+            start_time + 0.75 * duration,
+            &self.runtime,
+        )?;
+        let primary_loss = first_primary_loss + second_primary_loss;
+        let complementary_loss = first_complementary_loss + second_complementary_loss;
+
         let after = operator.energy_at(&primary, &complementary, end_time, &self.runtime)?;
         let temporal_work = duration
             * (0.5 * complementary_rate_start + primary_rate_middle + 0.5 * complementary_rate_end);
@@ -2171,12 +2206,18 @@ impl CanonicalTemporalWaveState {
         let accounting = CanonicalTemporalStepAccounting {
             temporal_work,
             source_work,
+            primary_loss,
+            complementary_loss,
             prescribed_exchange,
             energy_change,
-            splitting_residual: energy_change - temporal_work - source_work - prescribed_exchange,
+            splitting_residual: energy_change - temporal_work - source_work - prescribed_exchange
+                + primary_loss
+                + complementary_loss,
         };
         if !accounting.temporal_work.is_finite()
             || !accounting.source_work.is_finite()
+            || !accounting.primary_loss.is_finite()
+            || !accounting.complementary_loss.is_finite()
             || !accounting.prescribed_exchange.is_finite()
             || !accounting.energy_change.is_finite()
             || !accounting.splitting_residual.is_finite()
@@ -2188,6 +2229,54 @@ impl CanonicalTemporalWaveState {
         self.time = end_time;
         Ok(accounting)
     }
+}
+
+/// One half of the Strang dissipation map, and the energy it removed.
+///
+/// `stage_time` is where the map sits, which is what the energies are measured
+/// against; `rate_time` is the midpoint of the half interval it stands for,
+/// which is what the decay rate is read at. On a fixed rate the two choices
+/// coincide and this reduces to the fixed path's exponential exactly.
+fn decay(
+    operator: &CanonicalTemporalWaveOperator,
+    primary: &mut [f64],
+    complementary: &mut [Point2],
+    duration: f64,
+    stage_time: f64,
+    rate_time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<(f64, f64), WaveError> {
+    if !operator.has_loss {
+        return Ok((0.0, 0.0));
+    }
+    let rates = operator.loss_rates_at(rate_time, runtime)?;
+    let primary_before = operator
+        .primary_energy_and_rate(primary, stage_time, runtime)?
+        .0;
+    let complementary_before = operator
+        .complementary_energy_and_rate(complementary, stage_time, runtime)?
+        .0;
+    for (flux, rate) in primary.iter_mut().zip(&rates.primary) {
+        *flux *= (-duration * rate).exp();
+    }
+    for (flux, rate) in complementary.iter_mut().zip(&rates.complementary) {
+        *flux = *flux * (-duration * rate).exp();
+    }
+    validate_finite(primary)?;
+    let removed_primary = primary_before
+        - operator
+            .primary_energy_and_rate(primary, stage_time, runtime)?
+            .0;
+    let removed_complementary = complementary_before
+        - operator
+            .complementary_energy_and_rate(complementary, stage_time, runtime)?
+            .0;
+    // A passive channel cannot add energy. Anything else is a defect in the
+    // rate, not a small negative to be clamped away quietly.
+    if removed_primary < -1.0e-12 || removed_complementary < -1.0e-12 {
+        return Err(WaveError::InvalidState);
+    }
+    Ok((removed_primary.max(0.0), removed_complementary.max(0.0)))
 }
 
 /// One half kick with the source and any prescribed pin folded into it, as the
@@ -2640,10 +2729,10 @@ mod tests {
     use super::*;
     use crate::{
         BACKGROUND_REGION, CanonicalSource, CanonicalWaveState, ElectromagneticPolarization,
-        LoopRole, MaterialFrame, MeshingOptions, Obstacle, ObstacleId, OuterBoundaryCondition,
-        PeriodicCubicSpline, QuadraticSolutionSnapshot, Region, RegionId, ScalarField,
-        SolutionIndicatorJob, SolutionIndicatorOptions, SymmetricTensor2, TimeDrive, TimeSignal,
-        enriched_quadratic_basis, mesh_scene, sample_canonical_area,
+        LoopRole, LossChannel, MaterialFrame, MeshingOptions, Obstacle, ObstacleId,
+        OuterBoundaryCondition, PeriodicCubicSpline, QuadraticSolutionSnapshot, Region, RegionId,
+        ScalarField, SolutionIndicatorJob, SolutionIndicatorOptions, SymmetricTensor2, TimeDrive,
+        TimeSignal, enriched_quadratic_basis, mesh_scene, sample_canonical_area,
     };
 
     fn compile(scene: &Scene) -> Result<CanonicalTemporalWaveOperator, WaveError> {
@@ -3571,6 +3660,150 @@ mod tests {
         }
     }
 
+    /// A dissipating medium whose rate is itself driven.
+    ///
+    /// The specification concedes first-order accuracy for a varying loss rate
+    /// and keeps the second-order lossless step. That concession is about
+    /// resolving the *rate*, not about the accounting, so both are measured
+    /// rather than assumed: the composed step keeps a second-order energy
+    /// balance and the dissipation lanes stay passive.
+    #[test]
+    fn a_driven_loss_dissipates_passively_and_still_balances_to_second_order() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.25),
+            frequency_hz: ScalarField::constant(1.3),
+            phase_radians: ScalarField::constant(0.2),
+        };
+        scene.materials[0].electric_loss = Some(LossChannel {
+            base_rate: ScalarField::constant(0.6),
+            law: DampingLaw {
+                rate: RateLaw::Constant,
+                drive: TimeDrive::ParametricPump {
+                    depth: ScalarField::constant(0.5),
+                    frequency_hz: ScalarField::constant(0.8),
+                    phase_radians: ScalarField::constant(-0.3),
+                },
+            },
+        });
+        let operator = compile(&scene).unwrap();
+        assert!(
+            operator.forced_composition_supported(),
+            "a dissipating generation must still be steppable"
+        );
+        assert!(
+            !operator.conservative_bulk_supported(),
+            "but it is not a conservative bulk"
+        );
+        let base = operator.base();
+        let forcing = CanonicalForcing::none(base);
+
+        let ceiling = 0.4 * operator.maximum_time_step();
+        let target = 0.3;
+        let mut previous: Option<(f64, f64)> = None;
+        for refinement in [1.0, 0.5, 0.25] {
+            let steps = (target / (ceiling * refinement)).ceil() as u64;
+            let time_step = target / steps as f64;
+            let primary = base
+                .node_points()
+                .iter()
+                .map(|point| 0.07 * (1.5 * point.x - 1.1 * point.y).sin())
+                .collect::<Vec<_>>();
+            let potential = base
+                .node_points()
+                .iter()
+                .map(|point| 0.04 * (0.9 * point.x + 1.3 * point.y).cos())
+                .collect::<Vec<_>>();
+            let complementary = base.compatible_flux(&potential).unwrap();
+            let mut state =
+                CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+                    .unwrap();
+
+            let before = state.energy(&operator).unwrap();
+            let mut work = 0.0;
+            let mut removed = 0.0;
+            for _ in 0..steps {
+                let accounting = state.step_with_forcing(&operator, &forcing).unwrap();
+                assert!(
+                    accounting.primary_loss >= 0.0 && accounting.complementary_loss >= 0.0,
+                    "a passive channel cannot add energy"
+                );
+                work += accounting.temporal_work;
+                removed += accounting.primary_loss + accounting.complementary_loss;
+            }
+            let after = state.energy(&operator).unwrap();
+            assert!(removed > 1.0e-6, "the fixture must actually dissipate");
+
+            let residual = after - before - work + removed;
+            if let Some((coarse_step, coarse_residual)) = previous {
+                let order = (coarse_residual.abs() / residual.abs()).log2()
+                    / (coarse_step / time_step).log2();
+                assert!(
+                    order > 1.7,
+                    "the composed step must keep its second-order balance, measured \
+                     {order:.2} between dt {coarse_step:.3e} and {time_step:.3e}"
+                );
+            }
+            previous = Some((time_step, residual));
+        }
+    }
+
+    /// The dissipation map must reduce to the fixed path's exponential when
+    /// nothing is driven, or the same scene would decay differently depending
+    /// on which stepper ran it.
+    #[test]
+    fn an_inert_constant_loss_decays_exactly_as_the_fixed_path_does() {
+        let mut scene = Scene::default();
+        scene.materials[0].damping = ScalarField::constant(0.45);
+        let operator = compile(&scene).unwrap();
+        let base = operator.base();
+        let forcing = CanonicalForcing::none(base);
+        let time_step = 0.4 * operator.maximum_time_step();
+
+        let primary = base
+            .node_points()
+            .iter()
+            .map(|point| 0.05 * (1.2 * point.x + 0.7 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.03 * (1.1 * point.x - 0.6 * point.y).cos())
+            .collect::<Vec<_>>();
+        let complementary = base.compatible_flux(&potential).unwrap();
+        let mut temporal = CanonicalTemporalWaveState::new(
+            &operator,
+            time_step,
+            primary.clone(),
+            complementary.clone(),
+        )
+        .unwrap();
+        let mut fixed = CanonicalWaveState::new(base, time_step, primary, complementary).unwrap();
+
+        for _ in 0..24 {
+            let temporal_accounting = temporal.step_with_forcing(&operator, &forcing).unwrap();
+            let fixed_accounting = fixed.step_with_forcing(base, &forcing).unwrap();
+            assert!(
+                (temporal_accounting.primary_loss - fixed_accounting.primary_loss).abs() < 1.0e-12
+            );
+            assert!(
+                (temporal_accounting.complementary_loss - fixed_accounting.complementary_loss)
+                    .abs()
+                    < 1.0e-12
+            );
+        }
+        for (temporal, fixed) in temporal.primary_flux().iter().zip(fixed.primary_flux()) {
+            assert!((temporal - fixed).abs() < 1.0e-12);
+        }
+        for (temporal, fixed) in temporal
+            .complementary_flux()
+            .iter()
+            .zip(fixed.complementary_flux())
+        {
+            assert!((*temporal - *fixed).norm() < 1.0e-12);
+        }
+    }
+
     /// Two things the variable-coefficient supplement has to get right. On an
     /// inert medium it must reproduce the fixed one exactly, or the temporal
     /// path would report different errors for the same physics. And on a
@@ -4471,16 +4704,17 @@ mod tests {
     }
 
     #[test]
-    fn bulk_symplectic_state_rejects_loss_and_open_boundaries() {
+    fn bulk_symplectic_state_rejects_open_boundaries_but_now_composes_loss() {
+        // Loss used to have no state here at all. It now steps as an accounted
+        // dissipation lane, so what it loses is the conservative-bulk claim
+        // rather than the ability to run.
         let mut lossy_scene = Scene::initial();
         lossy_scene.materials[0].damping = ScalarField::constant(0.1);
         let lossy = compile(&lossy_scene).unwrap();
         assert!(lossy.has_loss());
         assert!(!lossy.conservative_bulk_supported());
-        assert!(matches!(
-            CanonicalTemporalWaveState::zero(&lossy, 0.1 * lossy.maximum_time_step()),
-            Err(WaveError::InvalidCoefficients)
-        ));
+        assert!(lossy.forced_composition_supported());
+        assert!(CanonicalTemporalWaveState::zero(&lossy, 0.1 * lossy.maximum_time_step()).is_ok());
 
         let scene = Scene::initial();
         let mesh = mesh_scene(

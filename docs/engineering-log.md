@@ -5,6 +5,46 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — Loss composes with a driven medium, and keeps second order doing it
+
+- The second boundary capability. A dissipating generation now has a state and
+  a step: the Strang dissipation map is composed around the conservative core
+  with instantaneous rates, and `primary_loss` and `complementary_loss` join
+  the accounting as their own lanes.
+- **The specification's concession turns out not to be needed.** It accepts
+  first-order accuracy for a varying loss rate, keeping second order only for
+  the lossless step, on the grounds that the exponential is exact only when the
+  rate is constant over the substep. That is true of the *rate*, but the
+  accuracy of the composition is a separate question and it was worth
+  measuring rather than inheriting: each half map sits at a step endpoint, so
+  the temporal-work quadrature between those endpoints is untouched, but it
+  stands for evolution over its own half interval, so its rate is read at that
+  interval's midpoint rather than at the endpoint. With a pumped mass and a
+  pumped loss rate the composed step's energy balance converges at **2.11 and
+  2.03** across two halvings. Reading the rate at the endpoint instead would
+  have been first order, and would have matched the concession.
+- The state's admission moved with the stepper's. A state now exists wherever
+  `forced_composition_supported` holds, which is anywhere without thin gaps,
+  boundary damping or an open boundary; loss no longer prevents one from
+  existing, it only costs the conservative-bulk claim.
+  `bulk_symplectic_state_rejects_loss_and_open_boundaries` is renamed and
+  narrowed to say that: it asserts the lossy generation now steps, and that the
+  open one still does not.
+- Passivity is checked per step rather than in aggregate - each lane must be
+  nonnegative every step - and a negative removal is an error rather than a
+  small number clamped to zero, because a passive channel adding energy is a
+  defect in the rate and not a rounding artifact.
+- Inert parity again, as the guard that the two paths mean the same thing: a
+  constant-rate loss on an inert medium decays exactly as
+  `CanonicalWaveState::step_with_forcing` does, in both lanes and in the final
+  state, to `1e-12`.
+- Still refused, each its own Gate B: thin gaps, first- and second-order
+  outgoing boundaries. The frozen reference impedance under modulation belongs
+  to the outgoing one and is next.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (743 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-22 — A driven medium can now be driven: prescribed data and sources compose
 
 - Until this, `CanonicalTemporalWaveState` had no forcing and no pulse. A scene
