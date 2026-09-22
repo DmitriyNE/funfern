@@ -5,6 +5,47 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The second-order outgoing boundary composes, and Stage 7's boundary work closes
+
+- The last refused capability. A driven medium can now carry a second-order
+  absorbing wall, with its pole currents as state and its energy in the total.
+  Every boundary capability Stage 7 named - prescribed data, volume sources,
+  loss, a first-order wall, thin gaps, a second-order wall - composes.
+- Taken by extraction rather than by porting. The force-coupled outgoing kick
+  is now a free function over explicit state - the flux, the pole currents, the
+  factorization, the mass - and the fixed path's method is a thin wrapper
+  around it. With the five map functions parameterized by mass in the previous
+  commit, that means one implementation of roughly 250 lines of dense linear
+  algebra serves both paths. Their agreement is structural rather than
+  something to keep testing for, and the whole suite passing unchanged through
+  both refactors is the evidence that neither changed behaviour.
+- **The cost the shape predicted is real.** A fixed generation factorizes its
+  Schur complement once, at construction, because the mass it is built from
+  never moves. A driven one rebuilds it at every stage - twice per step -
+  because the trace admittance, the modal couplings and the Schur complement
+  all scale with the nodal mass. That is the first place in this work where the
+  time-driven path is asymptotically more expensive than the fixed one rather
+  than a constant factor over it, and it belongs in the incremental-cost
+  measurement.
+- One combination stays refused, and named rather than implied: prescribed data
+  sitting on an outgoing trace. It is its own composition, it has had no tests,
+  and the fixed path's handling of it involves a second cached factorization
+  keyed by the prescribed pattern. Refusing it keeps the claim honest.
+- Evidence. Inert parity is the strong one and it now covers the only state on
+  this path that is neither a field nor a local spring: with nothing driven, a
+  second-order wall's flux, complementary flux, pole currents and boundary-loss
+  lane all match `CanonicalWaveState::step_with_forcing` to `1e-12` over a run
+  that actually radiates. And a pumped medium keeps its second-order energy
+  balance across two halvings with the wall carrying energy out, which is what
+  says the per-stage refactorization is correct and not merely expensive.
+- `conservative_bulk_supported` has now narrowed to exactly what its name says.
+  It began as a gate refusing everything and ends as a statement about the
+  absence of each exchange lane, with `forced_composition_supported` carrying
+  what the stepper can actually run.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (749 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-22 — The outgoing maps take their nodal mass as a parameter
 
 - Groundwork for the last refused capability, landed on its own because it

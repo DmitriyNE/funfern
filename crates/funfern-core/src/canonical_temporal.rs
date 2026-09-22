@@ -1422,7 +1422,18 @@ impl CanonicalTemporalWaveOperator {
         // Thin gaps are admitted: a gap is a local spring with its own
         // displacement, which the specification calls a cheap exact local
         // split, and it carries its own stored energy into the balance.
-        let passive_composition = base.outgoing_boundary().is_none();
+        // Every boundary capability composes now. What is left in the bulk
+        // claim is the absence of each, not the inability to run any. The one
+        // combination still refused is prescribed data sitting on an outgoing
+        // trace, which is its own composition and has had no tests.
+        let open = base.outgoing_boundary().is_some();
+        let prescribed_on_trace = base.outgoing_boundary().is_some_and(|boundary| {
+            boundary
+                .trace_nodes()
+                .iter()
+                .any(|node| quadratic.dirichlet_signals()[*node as usize].is_some())
+        });
+        let passive_composition = !prescribed_on_trace;
         let ungapped = base.thin_gap_samples().is_empty();
         let undamped_boundary = base
             .first_order_boundary_damping()
@@ -1441,7 +1452,7 @@ impl CanonicalTemporalWaveOperator {
                 .all(|load| load.normalized_weight == 0.0);
         let forced_composition_supported = passive_composition;
         let conservative_bulk_supported =
-            passive_composition && ungapped && undamped_boundary && !has_loss && undriven_boundary;
+            !open && ungapped && undamped_boundary && !has_loss && undriven_boundary;
         Ok(Self {
             base,
             primary,
@@ -1844,6 +1855,9 @@ pub struct CanonicalTemporalStepAccounting {
 pub struct CanonicalTemporalWaveState {
     primary_flux: Vec<f64>,
     complementary_flux: Vec<Point2>,
+    /// Pole currents for a second-order outgoing boundary, in the compiled
+    /// auxiliary order. Empty on any other generation.
+    outgoing_z: Vec<f64>,
     /// One integrated field jump per thin-gap sample. The gap is a spring
     /// across a trace with a displacement of its own, and it stores
     /// `stiffness * jump^2 / 2`, so it belongs to the state and to the energy
@@ -1910,6 +1924,13 @@ impl CanonicalTemporalWaveState {
             // A new generation's gaps start closed, which is the unexcited
             // physical history the specification asks for. A nonzero one needs
             // an explicit initializer rather than being implied by zero bulk.
+            outgoing_z: vec![
+                0.0;
+                operator
+                    .base()
+                    .outgoing_boundary()
+                    .map_or(0, |boundary| boundary.auxiliary_count())
+            ],
             thin_gap_jump: vec![0.0; operator.base().thin_gap_samples().len()],
             runtime: operator.initial_runtime(),
             time_step,
@@ -1953,14 +1974,24 @@ impl CanonicalTemporalWaveState {
         self.time
     }
 
-    /// Energy stored in the thin-gap springs, which is part of the state's
-    /// total and not reconstructible from the bulk fields.
-    fn gap_energy(&self, operator: &CanonicalTemporalWaveOperator) -> f64 {
-        self.thin_gap_jump
+    /// Energy stored in the thin-gap springs and the outgoing pole currents,
+    /// which is part of the state's total and not reconstructible from the
+    /// bulk fields. The pole currents are already in energy coordinates, which
+    /// is what the compiled transform is for, so their store is a plain sum of
+    /// squares.
+    fn history_energy(&self, operator: &CanonicalTemporalWaveOperator) -> f64 {
+        let gaps = self
+            .thin_gap_jump
             .iter()
             .zip(operator.base().thin_gap_samples())
             .map(|(jump, sample)| 0.5 * sample.stiffness * jump * jump)
-            .sum()
+            .sum::<f64>();
+        let poles = self
+            .outgoing_z
+            .iter()
+            .map(|value| 0.5 * value * value)
+            .sum::<f64>();
+        gaps + poles
     }
 
     pub fn thin_gap_jump(&self) -> &[f64] {
@@ -1973,7 +2004,7 @@ impl CanonicalTemporalWaveState {
             &self.complementary_flux,
             self.time,
             &self.runtime,
-        )? + self.gap_energy(operator))
+        )? + self.history_energy(operator))
     }
 
     /// Zero-duration paired grid filter with the material maps frozen at the
@@ -2150,6 +2181,7 @@ impl CanonicalTemporalWaveState {
 
         let mut primary = self.primary_flux.clone();
         let mut complementary = self.complementary_flux.clone();
+        let mut outgoing_z = self.outgoing_z.clone();
         let mut source_work = 0.0;
         let mut prescribed_exchange = 0.0;
         let mut boundary_loss = 0.0;
@@ -2184,6 +2216,7 @@ impl CanonicalTemporalWaveState {
         let (work, exchange, escaped) = forced_kick(
             operator,
             &mut primary,
+            &mut outgoing_z,
             &first_force,
             &first_source,
             0.5 * duration,
@@ -2226,6 +2259,7 @@ impl CanonicalTemporalWaveState {
         let (work, exchange, escaped) = forced_kick(
             operator,
             &mut primary,
+            &mut outgoing_z,
             &second_force,
             &second_source,
             0.5 * duration,
@@ -2281,6 +2315,7 @@ impl CanonicalTemporalWaveState {
         self.primary_flux = primary;
         self.complementary_flux = complementary;
         self.thin_gap_jump = gap_jump;
+        self.outgoing_z = outgoing_z;
         self.time = end_time;
         Ok(accounting)
     }
@@ -2366,6 +2401,7 @@ fn decay(
 fn forced_kick(
     operator: &CanonicalTemporalWaveOperator,
     primary: &mut [f64],
+    outgoing_z: &mut [f64],
     force: &[f64],
     source: &[f64],
     duration: f64,
@@ -2375,7 +2411,7 @@ fn forced_kick(
 ) -> Result<(f64, f64, f64), WaveError> {
     let damping = operator.base().first_order_boundary_damping();
     let damped = damping.iter().any(|value| *value != 0.0);
-    if !forcing.drives_any() && !damped {
+    if !forcing.drives_any() && !damped && operator.base().outgoing_boundary().is_none() {
         for (flux, force) in primary.iter_mut().zip(force) {
             *flux -= duration * force;
         }
@@ -2385,7 +2421,46 @@ fn forced_kick(
     let mut source_work = 0.0;
     let mut prescribed_exchange = 0.0;
     let mut boundary_loss = 0.0;
+
+    // A second-order wall is a nonlocal implicit solve over its trace and its
+    // pole currents, and the trace admittance, the modal couplings and the
+    // Schur complement all scale with the nodal mass. A fixed generation
+    // factorizes once at construction; a driven one cannot, because the mass
+    // it is built from belongs to the stage. The trace nodes it owns are then
+    // skipped by the local loop below, exactly as on the fixed path.
+    let mut trace_nodes = BTreeSet::new();
+    if let Some(boundary) = operator.base().outgoing_boundary() {
+        let factor = crate::canonical_wave::CanonicalOutgoingMidpointFactor::prepare(
+            operator.base(),
+            boundary,
+            &mass,
+            duration,
+        )?;
+        let mut prescribed_cache = None;
+        let (work, escaped, exchange) = crate::canonical_wave::force_coupled_outgoing_kick_with(
+            primary,
+            outgoing_z,
+            &mut prescribed_cache,
+            &factor,
+            operator.base(),
+            boundary,
+            &mass,
+            force,
+            source,
+            duration,
+            forcing,
+            target_time,
+        )?;
+        source_work += work;
+        boundary_loss += escaped;
+        prescribed_exchange += exchange;
+        trace_nodes.extend(boundary.trace_nodes().iter().map(|node| *node as usize));
+    }
+
     for node in 0..primary.len() {
+        if trace_nodes.contains(&node) {
+            continue;
+        }
         let old = primary[node];
         let mass = mass[node];
         // The absorbing wall's admittance is `damping / mass`, and the mass is
@@ -4089,6 +4164,164 @@ mod tests {
         }
     }
 
+    /// A second-order outgoing boundary in a driven medium.
+    ///
+    /// This is the wall whose factorization cannot be cached: the trace
+    /// admittance, the modal couplings and the Schur complement all scale with
+    /// the nodal mass, so a pumped medium rebuilds them at every stage. What
+    /// has to survive that is the balance - the pole currents store energy,
+    /// the wall carries some out, and the drive puts some in.
+    #[test]
+    fn a_driven_open_boundary_keeps_its_balance_second_order() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.18),
+            frequency_hz: ScalarField::constant(1.2),
+            phase_radians: ScalarField::constant(0.25),
+        };
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let base = operator.base();
+        let forcing = CanonicalForcing::none(base);
+
+        let ceiling = 0.4 * operator.maximum_time_step();
+        let target = 0.2;
+        let mut previous: Option<(f64, f64)> = None;
+        for refinement in [1.0, 0.5, 0.25] {
+            let steps = (target / (ceiling * refinement)).ceil() as u64;
+            let time_step = target / steps as f64;
+            let primary = base
+                .node_points()
+                .iter()
+                .map(|point| 0.05 * (1.5 * point.x - 0.9 * point.y).sin())
+                .collect::<Vec<_>>();
+            let potential = base
+                .node_points()
+                .iter()
+                .map(|point| 0.03 * (1.0 * point.x + 1.3 * point.y).cos())
+                .collect::<Vec<_>>();
+            let complementary = base.compatible_flux(&potential).unwrap();
+            let mut state =
+                CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+                    .unwrap();
+
+            let before = state.energy(&operator).unwrap();
+            let mut work = 0.0;
+            let mut escaped = 0.0;
+            for _ in 0..steps {
+                let accounting = state.step_with_forcing(&operator, &forcing).unwrap();
+                assert!(accounting.boundary_loss >= 0.0, "a wall cannot inject");
+                work += accounting.temporal_work;
+                escaped += accounting.boundary_loss;
+            }
+            let after = state.energy(&operator).unwrap();
+            assert!(escaped > 1.0e-6, "the wall must actually radiate");
+
+            let residual = after - before - work + escaped;
+            if let Some((coarse_step, coarse_residual)) = previous {
+                let order = (coarse_residual.abs() / residual.abs()).log2()
+                    / (coarse_step / time_step).log2();
+                assert!(
+                    order > 1.7,
+                    "a nonlocal wall must not cost the balance its order, measured \
+                     {order:.2} between dt {coarse_step:.3e} and {time_step:.3e}"
+                );
+            }
+            previous = Some((time_step, residual));
+        }
+    }
+
+    /// A second-order outgoing boundary, inert, must evolve exactly as the
+    /// fixed path's does - including its pole currents, which are the only
+    /// state on this path that is neither a field nor a local spring.
+    #[test]
+    fn an_inert_open_boundary_evolves_exactly_as_the_fixed_path_does() {
+        let scene = Scene::default();
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let base = operator.base();
+        assert!(base.outgoing_boundary().is_some());
+        assert!(operator.forced_composition_supported());
+        assert!(!operator.conservative_bulk_supported());
+        let forcing = CanonicalForcing::none(base);
+        let time_step = 0.4 * operator.maximum_time_step();
+
+        let primary = base
+            .node_points()
+            .iter()
+            .map(|point| 0.05 * (1.5 * point.x - 0.9 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.03 * (1.0 * point.x + 1.3 * point.y).cos())
+            .collect::<Vec<_>>();
+        let complementary = base.compatible_flux(&potential).unwrap();
+        let mut temporal = CanonicalTemporalWaveState::new(
+            &operator,
+            time_step,
+            primary.clone(),
+            complementary.clone(),
+        )
+        .unwrap();
+        let mut fixed = CanonicalWaveState::new(base, time_step, primary, complementary).unwrap();
+
+        let mut escaped = 0.0;
+        for _ in 0..24 {
+            let temporal_accounting = temporal.step_with_forcing(&operator, &forcing).unwrap();
+            let fixed_accounting = fixed.step_with_forcing(base, &forcing).unwrap();
+            assert!(
+                (temporal_accounting.boundary_loss - fixed_accounting.boundary_loss).abs()
+                    < 1.0e-12,
+                "boundary loss diverged"
+            );
+            escaped += temporal_accounting.boundary_loss;
+        }
+        assert!(escaped > 1.0e-6, "the wall must actually radiate");
+        for (temporal, fixed) in temporal.primary_flux().iter().zip(fixed.primary_flux()) {
+            assert!((temporal - fixed).abs() < 1.0e-12);
+        }
+        for (temporal, fixed) in temporal
+            .complementary_flux()
+            .iter()
+            .zip(fixed.complementary_flux())
+        {
+            assert!((*temporal - *fixed).norm() < 1.0e-12);
+        }
+    }
+
     /// The same gap, inert, must evolve exactly as the fixed path's does.
     #[test]
     fn an_inert_thin_gap_evolves_exactly_as_the_fixed_path_does() {
@@ -5228,8 +5461,8 @@ mod tests {
             CanonicalTemporalWaveState::zero(&damped, 0.1 * damped.maximum_time_step()).is_ok()
         );
 
-        // A second-order wall carries pole currents of its own, and there is
-        // no state for them on this path yet.
+        // A second-order wall carries pole currents of its own, and now has
+        // state for them.
         let second_order = QuadraticWaveOperator::assemble_scene(
             &mesh,
             &scene,
@@ -5239,11 +5472,8 @@ mod tests {
         let open =
             CanonicalTemporalWaveOperator::compile_scene(&mesh, &second_order, &scene, 1).unwrap();
         assert!(!open.conservative_bulk_supported());
-        assert!(!open.forced_composition_supported());
-        assert!(matches!(
-            CanonicalTemporalWaveState::zero(&open, 0.1 * open.maximum_time_step()),
-            Err(WaveError::InvalidCoefficients)
-        ));
+        assert!(open.forced_composition_supported());
+        assert!(CanonicalTemporalWaveState::zero(&open, 0.1 * open.maximum_time_step()).is_ok());
     }
 
     #[test]

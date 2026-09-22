@@ -1152,7 +1152,7 @@ pub struct CanonicalOutgoingFactorExport {
 impl CanonicalOutgoingFactorExport {
     fn solve(
         &self,
-        operator: &CanonicalWaveOperator,
+        mass: &[f64],
         boundary: &CanonicalOutgoingBoundary,
         right: &[f64],
     ) -> Result<Vec<f64>, WaveError> {
@@ -1222,9 +1222,7 @@ impl CanonicalOutgoingFactorExport {
                 .iter()
                 .zip(&boundary_mode.trace)
                 .zip(&boundary.trace_nodes)
-                .map(|((value, coefficient), node)| {
-                    value * coefficient / operator.primary_mass[*node as usize]
-                })
+                .map(|((value, coefficient), node)| value * coefficient / mass[*node as usize])
                 .sum::<f64>();
             for (value, coefficient) in auxiliary.iter_mut().zip(mode.solved_column_coefficient) {
                 *value -= coefficient * modal_trace;
@@ -1976,167 +1974,43 @@ impl CanonicalWaveState {
         forcing: &CanonicalForcing,
         target_time: f64,
     ) -> Result<(f64, f64, f64), WaveError> {
-        let trace_count = boundary.trace_nodes.len();
-        let auxiliary_count = boundary.auxiliary_count;
-        let dimension = trace_count + auxiliary_count;
-        let trace_position = boundary
-            .trace_nodes
-            .iter()
-            .enumerate()
-            .map(|(position, node)| (*node as usize, position))
-            .collect::<Vec<_>>();
-        let (_, inverse_energy_transform) = pole_energy_transform()?;
-        let old_z = match &self.auxiliaries {
-            CanonicalAuxiliaryState::None if auxiliary_count == 0 => Vec::new(),
+        let mut outgoing_z = match &self.auxiliaries {
+            CanonicalAuxiliaryState::None if boundary.auxiliary_count == 0 => Vec::new(),
             CanonicalAuxiliaryState::Linear(auxiliaries)
-                if auxiliaries.outgoing_z.len() == auxiliary_count =>
+                if auxiliaries.outgoing_z.len() == boundary.auxiliary_count =>
             {
                 auxiliaries.outgoing_z.clone()
             }
             _ => return Err(WaveError::InvalidState),
         };
-        let mut old = vec![0.0; dimension];
-        for &(node, position) in &trace_position {
-            old[position] = self.primary_flux[node];
-        }
-        old[trace_count..].copy_from_slice(&old_z);
-        let derivative =
-            apply_outgoing_generator(operator, boundary, operator.primary_mass(), &old)?;
-        let mut right = old
-            .iter()
-            .zip(derivative)
-            .map(|(old, derivative)| old + 0.5 * duration * derivative)
-            .collect::<Vec<_>>();
-        if right.len() != dimension {
-            return Err(WaveError::InvalidState);
-        }
-        let has_prescribed_trace = trace_position
-            .iter()
-            .any(|(node, _)| forcing.prescribed[*node].is_some());
-        let prescribed_trace = trace_position
-            .iter()
-            .map(|(node, _)| forcing.prescribed[*node].is_some())
-            .collect::<Vec<_>>();
-        for &(node, position) in &trace_position {
-            right[position] += duration * (source[node] - force[node]);
-        }
-        let new = if !has_prescribed_trace {
-            let cache = self
-                .boundary_cache
-                .as_ref()
-                .ok_or(WaveError::InvalidState)?;
-            if cache.duration != duration || cache.trace_count != trace_count {
-                return Err(WaveError::InvalidState);
-            }
-            cache.solve(boundary, operator.primary_mass(), &right)?
-        } else {
-            for &(node, position) in &trace_position {
-                if let Some(signal) = forcing.prescribed[node] {
-                    right[position] = operator.primary_mass[node] * signal.value(target_time);
-                }
-            }
-            let rebuild = self
-                .boundary_prescribed_cache
-                .as_ref()
-                .is_none_or(|(pattern, _)| pattern != &prescribed_trace);
-            if rebuild {
-                let factor = self
-                    .boundary_cache
-                    .as_ref()
-                    .ok_or(WaveError::InvalidState)?
-                    .export_with_prescribed(&prescribed_trace)?;
-                self.boundary_prescribed_cache = Some((prescribed_trace.clone(), Arc::new(factor)));
-            }
-            self.boundary_prescribed_cache
-                .as_ref()
-                .ok_or(WaveError::InvalidState)?
-                .1
-                .solve(operator, boundary, &right)?
-        };
-        for &(node, position) in &trace_position {
-            self.primary_flux[node] = new[position];
-        }
-        if auxiliary_count > 0 {
+        let cache = self
+            .boundary_cache
+            .as_ref()
+            .ok_or(WaveError::InvalidState)?
+            .clone();
+        let mut prescribed_cache = self.boundary_prescribed_cache.take();
+        let result = force_coupled_outgoing_kick_with(
+            &mut self.primary_flux,
+            &mut outgoing_z,
+            &mut prescribed_cache,
+            &cache,
+            operator,
+            boundary,
+            operator.primary_mass(),
+            force,
+            source,
+            duration,
+            forcing,
+            target_time,
+        );
+        self.boundary_prescribed_cache = prescribed_cache;
+        if boundary.auxiliary_count > 0 {
             let CanonicalAuxiliaryState::Linear(auxiliaries) = &mut self.auxiliaries else {
                 return Err(WaveError::InvalidState);
             };
-            auxiliaries.outgoing_z.copy_from_slice(&new[trace_count..]);
+            auxiliaries.outgoing_z.copy_from_slice(&outgoing_z);
         }
-
-        let mut source_work = 0.0;
-        let mut force_work = 0.0;
-        let mut first_order_loss = 0.0;
-        let mut primary_energy_change = 0.0;
-        let mut midpoint_field = vec![0.0; operator.degrees_of_freedom()];
-        let mut has_prescribed = false;
-        for &(node, position) in &trace_position {
-            let mass = operator.primary_mass[node];
-            let midpoint = 0.5 * (old[position] + new[position]) / mass;
-            midpoint_field[node] = midpoint;
-            source_work += duration * midpoint * source[node];
-            force_work += duration * midpoint * force[node];
-            first_order_loss +=
-                duration * operator.first_order_boundary_damping[node] * midpoint * midpoint;
-            primary_energy_change +=
-                0.5 * (new[position] * new[position] - old[position] * old[position]) / mass;
-            has_prescribed |= forcing.prescribed[node].is_some();
-        }
-        let auxiliary_energy_change =
-            0.5 * (dot(&new[trace_count..], &new[trace_count..]) - dot(&old_z, &old_z));
-        let midpoint_z = old_z
-            .iter()
-            .zip(&new[trace_count..])
-            .map(|(old, new)| 0.5 * (old + new))
-            .collect::<Vec<_>>();
-        let ell_b = (31.0_f64 / 7.0).sqrt();
-        let ell = [0.0, 1.0 - ell_b, 2.0 * ell_b - 4.0];
-        let mut outgoing_loss = 0.0;
-        for mode in &boundary.modes {
-            let w = mode
-                .trace
-                .iter()
-                .zip(&trace_position)
-                .map(|(trace, (node, _))| trace * midpoint_field[*node])
-                .sum::<f64>();
-            let memory = if let Some(offset) = mode.auxiliary_offset {
-                let mut x = [0.0; 3];
-                for pole in 0..3 {
-                    x[pole] = (0..3)
-                        .map(|column| {
-                            inverse_energy_transform[pole][column] * midpoint_z[offset + column]
-                        })
-                        .sum();
-                }
-                mode.decay.sqrt()
-                    * ell
-                        .iter()
-                        .zip(x)
-                        .map(|(coefficient, state)| coefficient * state)
-                        .sum::<f64>()
-            } else {
-                0.0
-            };
-            outgoing_loss += duration * (w + memory).powi(2);
-        }
-        let boundary_loss = first_order_loss + outgoing_loss;
-        let balance = primary_energy_change + auxiliary_energy_change - source_work
-            + force_work
-            + boundary_loss;
-        let scale = primary_energy_change
-            .abs()
-            .max(auxiliary_energy_change.abs())
-            .max(source_work.abs())
-            .max(force_work.abs())
-            .max(boundary_loss.abs())
-            .max(1.0);
-        if !has_prescribed && balance.abs() > 2.0e-10 * scale {
-            return Err(WaveError::InvalidState);
-        }
-        Ok((
-            source_work,
-            boundary_loss.max(0.0),
-            if has_prescribed { balance } else { 0.0 },
-        ))
+        result
     }
 
     fn add_thin_gap_force(
@@ -2193,8 +2067,172 @@ impl CanonicalWaveState {
     }
 }
 
+/// The force-coupled outgoing kick, over explicit state rather than a state's
+/// own fields.
+///
+/// Both paths run this one body. The fixed path hands it its cached
+/// factorization and the operator's nodal mass; a time-driven one hands it a
+/// factorization built for the stage's own mass, because the trace admittance
+/// and the modal couplings move with it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn force_coupled_outgoing_kick_with(
+    primary_flux: &mut [f64],
+    outgoing_z: &mut [f64],
+    prescribed_cache: &mut Option<(Vec<bool>, Arc<CanonicalOutgoingFactorExport>)>,
+    cache: &CanonicalOutgoingMidpointFactor,
+    operator: &CanonicalWaveOperator,
+    boundary: &CanonicalOutgoingBoundary,
+    mass: &[f64],
+    force: &[f64],
+    source: &[f64],
+    duration: f64,
+    forcing: &CanonicalForcing,
+    target_time: f64,
+) -> Result<(f64, f64, f64), WaveError> {
+    let trace_count = boundary.trace_nodes.len();
+    let auxiliary_count = boundary.auxiliary_count;
+    let dimension = trace_count + auxiliary_count;
+    let trace_position = boundary
+        .trace_nodes
+        .iter()
+        .enumerate()
+        .map(|(position, node)| (*node as usize, position))
+        .collect::<Vec<_>>();
+    let (_, inverse_energy_transform) = pole_energy_transform()?;
+    if outgoing_z.len() != auxiliary_count {
+        return Err(WaveError::InvalidState);
+    }
+    let old_z = outgoing_z.to_vec();
+    let mut old = vec![0.0; dimension];
+    for &(node, position) in &trace_position {
+        old[position] = primary_flux[node];
+    }
+    old[trace_count..].copy_from_slice(&old_z);
+    let derivative = apply_outgoing_generator(operator, boundary, mass, &old)?;
+    let mut right = old
+        .iter()
+        .zip(derivative)
+        .map(|(old, derivative)| old + 0.5 * duration * derivative)
+        .collect::<Vec<_>>();
+    if right.len() != dimension {
+        return Err(WaveError::InvalidState);
+    }
+    let has_prescribed_trace = trace_position
+        .iter()
+        .any(|(node, _)| forcing.prescribed[*node].is_some());
+    let prescribed_trace = trace_position
+        .iter()
+        .map(|(node, _)| forcing.prescribed[*node].is_some())
+        .collect::<Vec<_>>();
+    for &(node, position) in &trace_position {
+        right[position] += duration * (source[node] - force[node]);
+    }
+    let new = if !has_prescribed_trace {
+        if cache.duration != duration || cache.trace_count != trace_count {
+            return Err(WaveError::InvalidState);
+        }
+        cache.solve(boundary, mass, &right)?
+    } else {
+        for &(node, position) in &trace_position {
+            if let Some(signal) = forcing.prescribed[node] {
+                right[position] = mass[node] * signal.value(target_time);
+            }
+        }
+        let rebuild = prescribed_cache
+            .as_ref()
+            .is_none_or(|(pattern, _)| pattern != &prescribed_trace);
+        if rebuild {
+            let factor = cache.export_with_prescribed(&prescribed_trace)?;
+            *prescribed_cache = Some((prescribed_trace.clone(), Arc::new(factor)));
+        }
+        prescribed_cache
+            .as_ref()
+            .ok_or(WaveError::InvalidState)?
+            .1
+            .solve(mass, boundary, &right)?
+    };
+    for &(node, position) in &trace_position {
+        primary_flux[node] = new[position];
+    }
+    outgoing_z.copy_from_slice(&new[trace_count..]);
+
+    let mut source_work = 0.0;
+    let mut force_work = 0.0;
+    let mut first_order_loss = 0.0;
+    let mut primary_energy_change = 0.0;
+    let mut midpoint_field = vec![0.0; operator.degrees_of_freedom()];
+    let mut has_prescribed = false;
+    for &(node, position) in &trace_position {
+        let mass = mass[node];
+        let midpoint = 0.5 * (old[position] + new[position]) / mass;
+        midpoint_field[node] = midpoint;
+        source_work += duration * midpoint * source[node];
+        force_work += duration * midpoint * force[node];
+        first_order_loss +=
+            duration * operator.first_order_boundary_damping[node] * midpoint * midpoint;
+        primary_energy_change +=
+            0.5 * (new[position] * new[position] - old[position] * old[position]) / mass;
+        has_prescribed |= forcing.prescribed[node].is_some();
+    }
+    let auxiliary_energy_change =
+        0.5 * (dot(&new[trace_count..], &new[trace_count..]) - dot(&old_z, &old_z));
+    let midpoint_z = old_z
+        .iter()
+        .zip(&new[trace_count..])
+        .map(|(old, new)| 0.5 * (old + new))
+        .collect::<Vec<_>>();
+    let ell_b = (31.0_f64 / 7.0).sqrt();
+    let ell = [0.0, 1.0 - ell_b, 2.0 * ell_b - 4.0];
+    let mut outgoing_loss = 0.0;
+    for mode in &boundary.modes {
+        let w = mode
+            .trace
+            .iter()
+            .zip(&trace_position)
+            .map(|(trace, (node, _))| trace * midpoint_field[*node])
+            .sum::<f64>();
+        let memory = if let Some(offset) = mode.auxiliary_offset {
+            let mut x = [0.0; 3];
+            for pole in 0..3 {
+                x[pole] = (0..3)
+                    .map(|column| {
+                        inverse_energy_transform[pole][column] * midpoint_z[offset + column]
+                    })
+                    .sum();
+            }
+            mode.decay.sqrt()
+                * ell
+                    .iter()
+                    .zip(x)
+                    .map(|(coefficient, state)| coefficient * state)
+                    .sum::<f64>()
+        } else {
+            0.0
+        };
+        outgoing_loss += duration * (w + memory).powi(2);
+    }
+    let boundary_loss = first_order_loss + outgoing_loss;
+    let balance =
+        primary_energy_change + auxiliary_energy_change - source_work + force_work + boundary_loss;
+    let scale = primary_energy_change
+        .abs()
+        .max(auxiliary_energy_change.abs())
+        .max(source_work.abs())
+        .max(force_work.abs())
+        .max(boundary_loss.abs())
+        .max(1.0);
+    if !has_prescribed && balance.abs() > 2.0e-10 * scale {
+        return Err(WaveError::InvalidState);
+    }
+    Ok((
+        source_work,
+        boundary_loss.max(0.0),
+        if has_prescribed { balance } else { 0.0 },
+    ))
+}
+
 impl CanonicalOutgoingMidpointFactor {
-    fn prepare(
+    pub(crate) fn prepare(
         operator: &CanonicalWaveOperator,
         boundary: &CanonicalOutgoingBoundary,
         mass: &[f64],
@@ -4569,7 +4607,7 @@ mod tests {
         let constrained_export = cache
             .export_with_prescribed(&prescribed_pattern)
             .unwrap()
-            .solve(&operator, boundary, &probe)
+            .solve(operator.primary_mass(), boundary, &probe)
             .unwrap();
         assert!(maximum_difference(&constrained_export, &constrained_oracle) < 2.0e-11);
 
