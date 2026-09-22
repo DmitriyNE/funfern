@@ -969,6 +969,19 @@ impl CanonicalGpuPlan {
                 "the temporal state, clock and operator must share one boundary",
             ));
         }
+        // A second-order outgoing wall's trace factorization is built from the
+        // nodal mass, and a driven medium's mass moves. The CPU reference
+        // rebuilds it at every stage for exactly that reason; this plan
+        // compiles it once, from the authored mass, and there is no mechanism
+        // on the device to refresh it. Measured end to end, running the
+        // combination anyway costs `8.5e-3` in one step and `5.5e-2` in forty
+        // eight, growing with modulation depth. Refusing is the only honest
+        // option until the factorization can follow the mass.
+        if operator.has_temporal_laws() && operator.base().outgoing_boundary().is_some() {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a second-order outgoing boundary cannot yet follow a driven medium's mass",
+            ));
+        }
         if state.thin_gap_jump().iter().any(|jump| *jump != 0.0)
             || state.outgoing_pole_currents().iter().any(|z| *z != 0.0)
         {

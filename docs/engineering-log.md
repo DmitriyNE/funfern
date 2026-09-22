@@ -5,6 +5,50 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The end-to-end failure is the outgoing wall, and it is now refused rather than run
+
+- Bisected by configuration rather than by stage, because the intermediate GPU
+  state is not readable and guessing at the shader had already cost one wrong
+  suspect.
+- **First cut: modulation depth.** Keeping every piece of the temporal path
+  switched on but setting the depth to zero reads `4.47e-8`; at `0.05` it is
+  `2.04e-3` and at `0.24` it is `8.45e-3`, roughly linear. So the temporal path
+  is sound and a *moving* mass is what is mishandled. That one measurement
+  eliminated the whole assembly and plan pipeline.
+- **Second cut: the boundary.** The application's default document carries
+  second-order outgoing walls on all four sides, which no other driven fixture
+  had. Swapping them for reflecting ones, with everything else identical:
+
+  | walls | one step | forty-eight |
+  | --- | --- | --- |
+  | reflecting | `4.19e-8` | `2.46e-7` |
+  | second-order outgoing | `8.45e-3` | `5.49e-2` |
+
+- The mechanism was already on record from the CPU composition. A second-order
+  wall's trace factorization is built from the nodal mass, which is why the
+  reference rebuilds its Schur complement at every stage and why that showed up
+  as the one asymptotic cost in the timing table. The device plan compiles that
+  factorization once, from the authored mass, and has no mechanism to refresh
+  it. The two paths were never going to agree.
+- **Refused rather than approximated.** `compile_temporal` now rejects a driven
+  generation behind a second-order outgoing boundary, with the reason in the
+  message. Running it anyway is a five per cent error that grows with depth, and
+  the specification's rule against executing an authored law as something it is
+  not applies just as much to executing it against a wall that cannot follow it.
+- The end-to-end gate now runs reflecting walls and reads `2.46e-7`, and
+  `DRIVEN_WALLS=outgoing` asks for the refusal instead, so both halves are
+  checked. `DRIVEN_DEPTH` and `DRIVEN_STEPS` stay for the next investigation.
+- The product limitation this creates is real and worth naming: the default
+  document has outgoing walls, so a drive authored on a fresh document will be
+  refused until the factorization can follow the mass. Lifting it is a device
+  design change - rebuilding a dense trace factorization per stage, or
+  parameterizing it by the mass the way the CPU maps now are - and it belongs
+  before the authoring UI rather than after.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (751 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`, four
+  device gates passing.
+
 ## 2026-09-22 — The end-to-end run fails, and every piece of it passes separately
 
 - The check I said would be worth doing before the authoring UI, because it is

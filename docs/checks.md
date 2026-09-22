@@ -92,10 +92,10 @@ covered.
 `canonical_gpu_driven_document` is the only end-to-end run: an authored
 document with a material drive, meshed and assembled by the application's own
 resumable jobs, compiled into a temporal plan and stepped on the device against
-an f64 oracle. **It currently fails**, and is committed failing on purpose. `Q`
-misses by `8.45e-3` after one step and `5.49e-2` after forty-eight, on a
-mass-driven medium where every solver-level gate passes at `1e-6`. `DRIVEN_STEPS`
-overrides the step count for bisecting it.
+an f64 oracle. It reads `2.46e-7` over forty-eight steps. `DRIVEN_WALLS=outgoing`
+asks instead for the refusal of a driven medium behind a second-order outgoing
+wall, which is the document's default and cannot yet run; `DRIVEN_STEPS` and
+`DRIVEN_DEPTH` override the step count and the modulation depth.
 
 `canonical_gpu_temporal_timing` is the throughput comparison that decides
 whether a drive is affordable, run twice with and without `--fixed` on an

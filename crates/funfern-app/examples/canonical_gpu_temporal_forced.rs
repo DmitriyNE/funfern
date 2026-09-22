@@ -60,6 +60,11 @@ fn main() {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
     }
+    // `FORCED_BARE=1` strips the fixture back to a pumped medium inside
+    // reflecting walls with no source, which is the configuration the
+    // end-to-end driven-document run uses. It exists to tell a configuration
+    // difference apart from an assembly-path one.
+    let bare = std::env::var("FORCED_BARE").is_ok_and(|value| value == "1");
     let mesh = mesh_scene(
         &fixed_scene,
         1,
@@ -72,7 +77,11 @@ fn main() {
     let scalar = QuadraticWaveOperator::assemble_scene(
         &mesh,
         &fixed_scene,
-        OuterBoundaryCondition::FirstOrderOutgoing,
+        if bare {
+            OuterBoundaryCondition::Reflecting
+        } else {
+            OuterBoundaryCondition::FirstOrderOutgoing
+        },
     )
     .expect("forced temporal scalar operator");
     let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
@@ -83,23 +92,26 @@ fn main() {
         "the fixture must exercise the widened admission"
     );
     assert!(
-        base.first_order_boundary_damping()
+        bare || base
+            .first_order_boundary_damping()
             .iter()
             .any(|value| *value != 0.0),
         "the fixture needs an absorbing wall"
     );
 
     let mut forcing = CanonicalForcing::none(base);
-    forcing
-        .push_source(
-            CanonicalSource::direct(
-                base,
-                base.primary_mass().to_vec(),
-                TimeSignal::harmonic(0.0, 0.6, 1.4, 0.35),
+    if !bare {
+        forcing
+            .push_source(
+                CanonicalSource::direct(
+                    base,
+                    base.primary_mass().to_vec(),
+                    TimeSignal::harmonic(0.0, 0.6, 1.4, 0.35),
+                )
+                .expect("volume source"),
             )
-            .expect("volume source"),
-        )
-        .expect("push volume source");
+            .expect("push volume source");
+    }
 
     let time_step = 0.4 * operator.maximum_time_step();
     let primary = base
@@ -129,8 +141,14 @@ fn main() {
         escaped += accounting.boundary_loss;
         injected += accounting.source_work;
     }
-    assert!(escaped > 1.0e-9, "the wall must radiate in the fixture");
-    assert!(injected.abs() > 1.0e-9, "the source must drive the fixture");
+    assert!(
+        bare || escaped > 1.0e-9,
+        "the wall must radiate in the fixture"
+    );
+    assert!(
+        bare || injected.abs() > 1.0e-9,
+        "the source must drive the fixture"
+    );
 
     let clock = CanonicalGpuClock::initial(time_step).expect("forced temporal clock");
     let plan = CanonicalGpuPlan::compile_temporal(&operator, &state, &forcing, clock)

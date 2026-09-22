@@ -48,13 +48,33 @@ struct Expected {
 fn main() {
     // An authored document, exactly as the editor would hold one.
     let mut document = TopologyEditor::default().document;
+    // A zero depth keeps every piece of the temporal path switched on - the
+    // operator, the tables, the plan - while the mass stays where the authored
+    // coefficients put it. It separates "this path diverges" from "a moving
+    // mass is mishandled", which no amount of staring at the shader would.
+    let depth = std::env::var("DRIVEN_DEPTH")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0.24);
     let pump = TimeDrive::ParametricPump {
-        depth: ScalarField::constant(0.24),
+        depth: ScalarField::constant(depth),
         frequency_hz: ScalarField::constant(0.9),
         phase_radians: ScalarField::constant(0.2),
     };
     document.model.draft.materials[0].mass_law.drive = pump.clone();
     document.model.accepted.materials[0].mass_law.drive = pump;
+    // The document's default walls are second-order outgoing, which a driven
+    // medium cannot yet use: that boundary's trace factorization is built from
+    // the nodal mass and the device has no way to refresh it. The plan
+    // compiler refuses the combination, so this fixture runs reflecting walls
+    // and `DRIVEN_WALLS=outgoing` asks for the refusal instead.
+    if !std::env::var("DRIVEN_WALLS").is_ok_and(|value| value == "outgoing") {
+        let walls = funfern_core::OuterBoundaryConditions::uniform(
+            funfern_core::OuterBoundaryCondition::Reflecting,
+        );
+        document.model.draft.outer_boundaries = walls;
+        document.model.accepted.outer_boundaries = walls;
+    }
     let editor = TopologyEditor::from_document(document).expect("authored document");
 
     // The application's own preparation: meshing, both assemblies from the
@@ -84,8 +104,23 @@ fn main() {
         .expect("an authored drive must produce a temporal operator");
     let time_step = prepared.recommended_time_step();
     assert!(
-        time_step < prepared.canonical_operator.recommended_time_step(),
-        "a driven generation must take the tighter trajectory step"
+        time_step <= prepared.canonical_operator.recommended_time_step(),
+        "a driven generation cannot take a looser step than the fixed one"
+    );
+    println!(
+        "driven document: outer {:?}, bulk {}, gaps {}, damped {}, prescribed {}",
+        editor.document.model.accepted.outer_boundaries,
+        temporal.conservative_bulk_supported(),
+        !base_of(&temporal).thin_gap_samples().is_empty(),
+        base_of(&temporal)
+            .first_order_boundary_damping()
+            .iter()
+            .any(|value| *value != 0.0),
+        prepared
+            .operator
+            .dirichlet_signals()
+            .iter()
+            .any(Option::is_some),
     );
     println!(
         "driven document: {} DOFs, {} elements, dt {time_step:.4e} against a fixed {:.4e}",
@@ -113,9 +148,17 @@ fn main() {
     let complementary = base.compatible_flux(&potential).expect("compatible flux");
     let seeded = CanonicalTemporalWaveState::new(&temporal, time_step, primary, complementary)
         .expect("seeded state");
-    let plan =
-        CanonicalGpuPlan::compile_temporal(&temporal, &seeded, &prepared.canonical_forcing, clock)
-            .expect("temporal plan from the application's own generation");
+    let compiled =
+        CanonicalGpuPlan::compile_temporal(&temporal, &seeded, &prepared.canonical_forcing, clock);
+    if std::env::var("DRIVEN_WALLS").is_ok_and(|value| value == "outgoing") {
+        assert!(
+            compiled.is_err(),
+            "a driven medium behind a second-order wall must be refused, not run"
+        );
+        println!("driven document: the outgoing combination is refused, as it must be");
+        return;
+    }
+    let plan = compiled.expect("temporal plan from the application's own generation");
 
     let mut oracle = seeded;
     for _ in 0..steps() {
@@ -217,6 +260,12 @@ fn drive(
     if primary > 2.0e-4 || complementary > 2.0e-4 {
         expected.failed = true;
     }
+}
+
+fn base_of(
+    temporal: &funfern_core::CanonicalTemporalWaveOperator,
+) -> &funfern_core::CanonicalWaveOperator {
+    temporal.base()
 }
 
 fn relative_l2(
