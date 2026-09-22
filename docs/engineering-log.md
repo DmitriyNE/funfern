@@ -5,6 +5,51 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The incremental cost is nineteen times, and most of it is redundant work
+
+- Stage 7's exit criterion asks for the actual-core incremental cost of a
+  time-driven medium to be recorded. `canonical_temporal_timing` records it per
+  boundary composition, with the same mesh, operator, forcing and timestep on
+  both sides so the only difference measured is the coefficient work.
+
+  | Composition | Fixed us/step | Driven us/step | Ratio |
+  | --- | --- | --- | --- |
+  | bulk | 304 | 5679 | 18.7x |
+  | bulk + source | 316 | 5937 | 18.8x |
+  | thin gap | 310 | 5725 | 18.5x |
+  | first-order wall | 333 | 6294 | 18.9x |
+  | second-order wall | 942 | 35317 | 37.5x |
+
+- The prediction was half right and the half that was wrong is the one that
+  matters. The second-order wall does cost about twice the others' ratio, which
+  is the per-stage Schur refactorization the previous entry called out, and that
+  part is asymptotic rather than a constant. But the **floor is nineteen
+  times**, before any boundary capability is involved, and that was not
+  anticipated - the expectation recorded when the compositions landed was "a
+  constant factor" in the sense of something small.
+- The cause is not that evaluating a drive is expensive. It is that the same
+  instantaneous factor is recomputed from scratch by every helper that wants
+  it. One step calls `energy`, `complementary_energy_and_rate` twice,
+  `force_at` twice, `primary_mass_at` at least three times,
+  `primary_energy_and_rate`, `drift_at` and `energy_at`: roughly a dozen full
+  walks over every primary contribution and every complementary sample, each
+  evaluating a transcendental per entry, where the fixed path reads a table.
+  Nothing about the physics requires that; the stage times repeat.
+- **Reported, not fixed.** Caching a stage's factors once and passing them down
+  changes the signature of most of the temporal operator's evaluation surface,
+  and it is a performance change that wants its own before-and-after on this
+  harness rather than being folded into the measurement that motivated it.
+  The number to beat is on record now, which is the point of taking the
+  measurement before the optimization rather than after.
+- Worth keeping in proportion: this is the f64 CPU reference, which is an
+  oracle rather than the production path. The app runs the f32 GPU core, where
+  the shader reads its coefficients once per stage already. The cost that
+  matters for interactivity is the GPU one, and that is a separate measurement
+  this does not make.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (749 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-22 — The GPU carries the forced composition, and the gate caught the kick dividing by the wrong mass
 
 - The GPU work was not the port it looked like. `canonical_wave.wgsl` is one

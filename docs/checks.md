@@ -11,6 +11,7 @@ cargo run -p funfern-core --release --example mesh_edit_timing -- --paced
 cargo run -p funfern-core --release --example wave_convergence
 cargo run -p funfern-core --release --example wave_boundary_reflection
 cargo run -p funfern-core --release --example temporal_amr_calibration
+cargo run -p funfern-core --release --example canonical_temporal_timing
 cargo run -p funfern-app --release --locked --example canonical_gpu_filter_boundary
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_work
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_amr
@@ -49,6 +50,14 @@ These are meshing timings. `wave_convergence` separately measures the analytic
 reflecting-box mode for P1 at h=0.04 and h=0.02 and enriched quadratic triangles
 at parent h=0.08 and h=0.04, with independent temporal refinement over one and
 five box-crossing times.
+`canonical_temporal_timing` records the actual-core incremental cost of a
+time-driven medium, per boundary composition, with the same mesh, operator,
+forcing and timestep on both sides. At `h=0.1` the driven bulk runs about `19x`
+the fixed bulk and the second-order outgoing wall about `38x`. The bulk ratio is
+the floor - the cost of recomputing a stage's coefficients in every helper that
+wants them - and the wall's excess over it is the separate, asymptotic cost of
+rebuilding the trace factorization every stage instead of once.
+
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
 reflecting-box problem. It crosses the driven constitutive row against the
