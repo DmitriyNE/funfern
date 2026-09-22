@@ -324,8 +324,22 @@ only where the solver owns one, which is what a Stage 8 nonlinear law needs.
 And recorders that difference the two state lanes step past a resident filter
 commit, where the spare lane holds the pre-filter value at the same instant.
 
-Application enablement, modulation-aware AMR, supported boundary compositions
-and the incremental-cost measurement remain.
+Modulation-aware AMR now closes on the estimator side. The mesh-size rule
+accounts for drive sidebands and for the spatial pattern a travelling
+modulation writes into the coefficients; every material sample is evaluated at
+the instant the snapshot belongs to; and under a runtime the gradient-based
+error terms read the solver's own complementary flux rather than
+differentiating the reconstructed scalar field. That last change is what makes
+the estimate hold up: measured across seven media crossing driven row against
+spatial pattern, the efficiency index spans at most 1.18x over 15x the
+unknowns, where a travelling mass modulation used to take it from 7.5 to 17.4.
+The index sits near 0.7 rather than near 1, so a driven accuracy target must be
+set against that number instead of inheriting the static 6%; the refinement
+controller itself remains untouched.
+
+A driven accuracy target, application enablement, supported boundary
+compositions, a real-device gate over an adaptive run on a modulated scene and
+the incremental-cost measurement remain.
 
 Implement stage-time coefficient evaluation on both physical sides, harmonic/smoothed-square/travelling drives, Switch stamping, phase anchors, ramp reversal and trajectory bounds. Sample travelling phase in actual material frames at nodes/quadrature. Validate reciprocal factors as reciprocal trajectories, not newly interpolated endpoints.
 
