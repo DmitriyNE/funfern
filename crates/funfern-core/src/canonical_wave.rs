@@ -45,7 +45,9 @@ impl CanonicalRateDrive {
         signal
             .valid()
             .then_some(Self::Direct(signal))
-            .ok_or(WaveError::InvalidCoefficients)
+            .ok_or(WaveError::Unsupported(
+                "a source signal is not a valid waveform",
+            ))
     }
 
     pub fn legacy(signal: TimeSignal, anchor_time: f64) -> Result<Self, WaveError> {
@@ -64,7 +66,9 @@ impl CanonicalRateDrive {
                 rate_anchor,
             })
         } else {
-            Err(WaveError::InvalidCoefficients)
+            Err(WaveError::Unsupported(
+                "a source rate anchor is not a valid waveform",
+            ))
         }
     }
 
@@ -142,7 +146,9 @@ impl CanonicalSource {
                 .zip(&support)
                 .any(|(weight, supported)| *weight != 0.0 && !supported)
         {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "a source drives a node its own support does not cover",
+            ));
         }
         Ok(Self {
             weights,
@@ -208,7 +214,9 @@ impl CanonicalForcing {
         if prescribed.len() != operator.degrees_of_freedom()
             || prescribed.iter().flatten().any(|signal| !signal.valid())
         {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "prescribed boundary data does not match the generation",
+            ));
         }
         Ok(Self {
             sources: Vec::new(),
@@ -388,7 +396,9 @@ impl CanonicalForcing {
         anchor_time: f64,
     ) -> Result<CanonicalSource, WaveError> {
         if !source.valid() || membership.len() != operator.degrees_of_freedom() {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "a volume source does not match the generation it drives",
+            ));
         }
         let variance = source.width * source.width;
         let weights = operator
@@ -2868,7 +2878,9 @@ impl CanonicalAssemblyJob {
                         self.phase = CanonicalAssemblyPhase::Elements(index + 1);
                     } else if self.samples.len() != self.mesh.triangles.len() * QUADRATURE_SAMPLES {
                         self.phase = CanonicalAssemblyPhase::Done;
-                        return Some(Err(WaveError::InvalidCoefficients));
+                        return Some(Err(WaveError::Unsupported(
+                            "the assembly produced the wrong number of quadrature samples",
+                        )));
                     } else {
                         self.phase = CanonicalAssemblyPhase::ValidateMass(0);
                     }

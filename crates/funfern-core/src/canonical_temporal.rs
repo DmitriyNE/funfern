@@ -128,7 +128,9 @@ impl CanonicalMaterialRuntimeState {
             .windows(2)
             .any(|pair| pair[0].material == pair[1].material)
         {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "one material holds two runtime records",
+            ));
         }
         Ok(Self { records })
     }
@@ -2728,12 +2730,14 @@ fn temporal_material_sample(
     point: Point2,
     primary: bool,
 ) -> Result<CompiledTemporalMaterialSample, WaveError> {
-    let region = model
-        .region(region_id)
-        .ok_or(WaveError::InvalidCoefficients)?;
+    let region = model.region(region_id).ok_or(WaveError::Unsupported(
+        "a compiled element names a region the scene does not hold",
+    ))?;
     let material = model
         .material(region.material)
-        .ok_or(WaveError::InvalidCoefficients)?;
+        .ok_or(WaveError::Unsupported(
+            "a region names a material the scene does not hold",
+        ))?;
     if !material.switch_ramp.is_finite() || material.switch_ramp < 0.0 {
         return material_error(
             material,
@@ -3051,7 +3055,9 @@ fn validate_positive(values: &[f64]) -> Result<(), WaveError> {
         .iter()
         .all(|value| value.is_finite() && *value > 0.0)
         .then_some(())
-        .ok_or(WaveError::InvalidCoefficients)
+        .ok_or(WaveError::Unsupported(
+            "a driven medium's instantaneous mass is not finite and positive",
+        ))
 }
 
 fn validate_nonnegative(values: &[f64]) -> Result<(), WaveError> {
@@ -3059,7 +3065,9 @@ fn validate_nonnegative(values: &[f64]) -> Result<(), WaveError> {
         .iter()
         .all(|value| value.is_finite() && *value >= 0.0)
         .then_some(())
-        .ok_or(WaveError::InvalidCoefficients)
+        .ok_or(WaveError::Unsupported(
+            "a driven medium's instantaneous loss rate is negative or not finite",
+        ))
 }
 
 fn validate_finite(values: &[f64]) -> Result<(), WaveError> {

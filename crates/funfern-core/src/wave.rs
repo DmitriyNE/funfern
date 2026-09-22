@@ -662,6 +662,13 @@ impl OuterBoundaryConditions {
 #[derive(Clone, Debug, PartialEq)]
 pub enum WaveError {
     InvalidCoefficients,
+    /// Something the solver will not accept, named at the point it was found.
+    ///
+    /// `InvalidCoefficients` is a unit variant, so dozens of unrelated refusals
+    /// reach a user as one sentence about mass and stiffness - a source whose
+    /// weights miss their support reads as a bad material. Anything that can
+    /// surface while a generation is being prepared says which check it was.
+    Unsupported(&'static str),
     MaterialEvaluation {
         material: String,
         coefficient: &'static str,
@@ -687,6 +694,7 @@ impl std::fmt::Display for WaveError {
                 f,
                 "Wave coefficients must be finite with positive mass and stiffness and nonnegative damping"
             ),
+            Self::Unsupported(reason) => write!(f, "{reason}"),
             Self::MaterialEvaluation {
                 material,
                 coefficient,

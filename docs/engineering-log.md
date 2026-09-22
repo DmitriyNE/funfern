@@ -5,6 +5,34 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-23 — One sentence for forty different refusals
+
+A reported preparation failure - "wave coefficients must be finite with positive
+mass and stiffness and nonnegative damping" - could not be reproduced across
+three attempts, because that sentence is `WaveError::InvalidCoefficients`, a
+unit variant that around forty unrelated checks return. A source whose weights
+miss their support reads as a bad material.
+
+- Reproducing the reported sequence exactly - load the inert document, apply the
+  pump, return to linear, driving the real `request_runtime` at the reported
+  mesh edge - passes at every step. So the document and the request path are not
+  it, and guessing which check fired was never going to converge.
+- `WaveError::Unsupported(&'static str)` names a refusal where it is found.
+  Every one reachable while a generation is prepared now carries its own words:
+  a source signal or rate anchor that is not a valid waveform, a source driving
+  a node outside its support, prescribed data that does not match the
+  generation, a volume source that does not, the wrong number of quadrature
+  samples, a driven medium's instantaneous mass or loss rate, an element naming
+  a region the scene does not hold, a region naming a missing material, and one
+  material holding two runtime records.
+- With the three named earlier - the law a fixed assembly cannot execute, the
+  axis ratio, and the assembled nodal mass - the message a user sees now
+  identifies the check rather than a category.
+- The lesson is about diagnosis rather than physics. Three rounds went into
+  guessing which of forty checks a user had hit, when one mechanical change made
+  the question answer itself. A shared unit error variant is a diagnostic debt
+  that is only paid by whoever is holding the report.
+
 ## 2026-09-23 — What the solver is told to do now survives a restart
 
 Reported while trying to run an experiment: adaptation cannot be turned off for
