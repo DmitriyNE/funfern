@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::collections::BTreeMap;
 
 use crate::{
-    CanonicalAreaContribution, CanonicalAreaSample, CanonicalIndicatorSnapshot,
+    CanonicalAreaContribution, CanonicalAreaSample, CanonicalForcing, CanonicalIndicatorSnapshot,
     CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil,
     CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, DampingLaw, DampingLawValues,
     ElectromagneticPolarization, FieldLaw, LossChannel, Material, MaterialCoordinates,
@@ -1305,6 +1305,7 @@ pub struct CanonicalTemporalWaveOperator {
     has_temporal_laws: bool,
     has_loss: bool,
     conservative_bulk_supported: bool,
+    forced_composition_supported: bool,
     maximum_time_step: f64,
 }
 
@@ -1407,14 +1408,21 @@ impl CanonicalTemporalWaveOperator {
         // losses and auxiliary memories keep their existing passive or
         // transactional compositions; they do not justify a global solve just
         // to attach a full-system symplectic label.
-        let conservative_bulk_supported = !has_loss
+        // What the stepper can compose, and what the conservative-bulk claim
+        // covers, are two different questions. Prescribed data and sources are
+        // stepped exactly - each is an accounted exchange lane of its own - but
+        // they put energy in and take it out, so the freely evolving Poisson
+        // system is no longer the whole story and the bulk claim has to
+        // exclude them. Loss, thin gaps, boundary damping and open boundaries
+        // are excluded from both until each closes its own gate.
+        let passive_composition = !has_loss
             && base.thin_gap_samples().is_empty()
             && base
                 .first_order_boundary_damping()
                 .iter()
                 .all(|value| *value == 0.0)
-            && base.outgoing_boundary().is_none()
-            && quadratic.dirichlet_signals().iter().all(Option::is_none)
+            && base.outgoing_boundary().is_none();
+        let undriven_boundary = quadratic.dirichlet_signals().iter().all(Option::is_none)
             && quadratic
                 .normalized_neumann_weights()
                 .iter()
@@ -1425,6 +1433,8 @@ impl CanonicalTemporalWaveOperator {
                 .iter()
                 .flatten()
                 .all(|load| load.normalized_weight == 0.0);
+        let forced_composition_supported = passive_composition;
+        let conservative_bulk_supported = passive_composition && undriven_boundary;
         Ok(Self {
             base,
             primary,
@@ -1433,6 +1443,7 @@ impl CanonicalTemporalWaveOperator {
             has_temporal_laws,
             has_loss,
             conservative_bulk_supported,
+            forced_composition_supported,
             maximum_time_step,
         })
     }
@@ -1457,6 +1468,15 @@ impl CanonicalTemporalWaveOperator {
     /// lossy, forced, prescribed-boundary, or auxiliary subsystem.
     pub fn conservative_bulk_supported(&self) -> bool {
         self.conservative_bulk_supported
+    }
+
+    /// Whether the stepper can compose prescribed data and volume sources with
+    /// this generation. Weaker than [`Self::conservative_bulk_supported`],
+    /// which additionally requires that nothing drives the boundary, because
+    /// an exchange lane is exactly stepped without being part of the freely
+    /// evolving system.
+    pub fn forced_composition_supported(&self) -> bool {
+        self.forced_composition_supported
     }
 
     /// Conservative spatial CFL bound over the entire authored coefficient
@@ -1785,8 +1805,20 @@ impl CanonicalTemporalWaveOperator {
 /// `splitting_residual` is the remaining discrete defect.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CanonicalTemporalStepAccounting {
+    /// Energy the medium's own modulation put into the field.
     pub temporal_work: f64,
+    /// Energy volume sources put into the field.
+    pub source_work: f64,
+    /// Energy that crossed a prescribed node, either sign.
+    ///
+    /// A prescribed node holds `Q = M(t) g(t)`, so under modulation this is
+    /// nonzero even when `g` is constant: holding a field fixed while the
+    /// medium's inertia breathes takes work, and it arrives from outside the
+    /// domain rather than from the drive.
+    pub prescribed_exchange: f64,
     pub energy_change: f64,
+    /// What the three lanes above fail to account for. The splitting's own
+    /// error and nothing else.
     pub splitting_residual: f64,
 }
 
@@ -1981,6 +2013,60 @@ impl CanonicalTemporalWaveState {
         self.step_by(operator, self.time_step)
     }
 
+    /// A state whose prescribed nodes already hold `Q = M(t) g(t)`.
+    ///
+    /// Anything else is not a state of the constrained system, and stepping it
+    /// charges the difference to the boundary on the first step alone.
+    pub fn pinned(
+        mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+    ) -> Result<Self, WaveError> {
+        if forcing.prescribed().len() != operator.base().degrees_of_freedom() {
+            return Err(WaveError::SizeMismatch {
+                expected: operator.base().degrees_of_freedom(),
+                actual: forcing.prescribed().len(),
+            });
+        }
+        let mass = operator.primary_mass_at(self.time, &self.runtime)?;
+        for (node, signal) in forcing.prescribed().iter().enumerate() {
+            if let Some(signal) = signal {
+                self.primary_flux[node] = mass[node] * signal.value(self.time);
+            }
+        }
+        validate_finite(&self.primary_flux)?;
+        Ok(self)
+    }
+
+    /// One step with prescribed data and volume sources composed into it.
+    ///
+    /// The ordering is the fixed path's, stage for stage, so the two can be
+    /// compared directly and an inert generation reproduces
+    /// `CanonicalWaveState::step_with_forcing` exactly. What changes is that
+    /// every place the fixed path multiplies by the nodal mass, this one
+    /// multiplies by the mass in force at that stage's own instant.
+    ///
+    /// That is the whole content of the composition. A prescribed node pins
+    /// `Q = M(t) g(t)`, so a constant `g` over a breathing `M` still moves
+    /// flux across the boundary, and the accounting has to call that
+    /// prescribed exchange rather than temporal work. Sources integrate at the
+    /// two endpoints as they do on the fixed path, which is what preserves a
+    /// run's frozen startup envelope through a material edit.
+    ///
+    /// Initialization is a requirement, not a convenience: a prescribed node's
+    /// initial flux must already satisfy `Q = M(t0) g(t0)`. The fixed path
+    /// hides a violation by pinning before its first kick and charging the
+    /// correction to prescribed exchange; this one pins at the stage, so an
+    /// inconsistent start shows up as a first step that does not balance.
+    /// [`Self::pinned`] builds a consistent state.
+    pub fn step_with_forcing(
+        &mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+    ) -> Result<CanonicalTemporalStepAccounting, WaveError> {
+        self.step_with_forcing_by(operator, forcing, self.time_step)
+    }
+
     /// Signed stepping is exposed for the reversibility gate. Production uses
     /// `step`; a negative duration applies the exact inverse composition.
     pub fn step_by(
@@ -1988,7 +2074,21 @@ impl CanonicalTemporalWaveState {
         operator: &CanonicalTemporalWaveOperator,
         duration: f64,
     ) -> Result<CanonicalTemporalStepAccounting, WaveError> {
-        if !operator.conservative_bulk_supported()
+        let forcing = CanonicalForcing::none(operator.base());
+        self.step_with_forcing_by(operator, &forcing, duration)
+    }
+
+    /// Signed stepping with forcing, for the reversibility gate.
+    pub fn step_with_forcing_by(
+        &mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+        duration: f64,
+    ) -> Result<CanonicalTemporalStepAccounting, WaveError> {
+        let driven = forcing.drives_any();
+        if !operator.forced_composition_supported()
+            || (!driven && !operator.conservative_bulk_supported())
+            || forcing.prescribed().len() != operator.base().degrees_of_freedom()
             || !duration.is_finite()
             || duration == 0.0
             || duration.abs() > operator.maximum_time_step()
@@ -2010,10 +2110,31 @@ impl CanonicalTemporalWaveState {
 
         let mut primary = self.primary_flux.clone();
         let mut complementary = self.complementary_flux.clone();
+        let mut source_work = 0.0;
+        let mut prescribed_exchange = 0.0;
+
+        // Both kicks pin and sample at their own stage instant, which is the
+        // step's endpoints - the same two instants the autonomous extension
+        // stages at and the same two the temporal-work quadrature integrates
+        // between. The fixed path instead pins the first kick half a step in,
+        // which is free to choose when the mass is constant. It is not free
+        // here: a pin at an instant the work quadrature does not know about
+        // leaves a first-order hole in the energy balance, measured at order
+        // 0.99 before this was moved.
         let first_force = operator.force_at(&complementary, start_time, &self.runtime)?;
-        for (flux, force) in primary.iter_mut().zip(first_force) {
-            *flux -= 0.5 * duration * force;
-        }
+        let first_source = forcing.integrated_rate(start_time)?;
+        let (work, exchange) = forced_kick(
+            operator,
+            &mut primary,
+            &first_force,
+            &first_source,
+            0.5 * duration,
+            forcing,
+            start_time,
+            &self.runtime,
+        )?;
+        source_work += work;
+        prescribed_exchange += exchange;
         validate_finite(&primary)?;
 
         let (_, primary_rate_middle) =
@@ -2029,9 +2150,19 @@ impl CanonicalTemporalWaveState {
             operator.complementary_energy_and_rate(&complementary, end_time, &self.runtime)?;
 
         let second_force = operator.force_at(&complementary, end_time, &self.runtime)?;
-        for (flux, force) in primary.iter_mut().zip(second_force) {
-            *flux -= 0.5 * duration * force;
-        }
+        let second_source = forcing.integrated_rate(end_time)?;
+        let (work, exchange) = forced_kick(
+            operator,
+            &mut primary,
+            &second_force,
+            &second_source,
+            0.5 * duration,
+            forcing,
+            end_time,
+            &self.runtime,
+        )?;
+        source_work += work;
+        prescribed_exchange += exchange;
         validate_finite(&primary)?;
         let after = operator.energy_at(&primary, &complementary, end_time, &self.runtime)?;
         let temporal_work = duration
@@ -2039,10 +2170,14 @@ impl CanonicalTemporalWaveState {
         let energy_change = after - before;
         let accounting = CanonicalTemporalStepAccounting {
             temporal_work,
+            source_work,
+            prescribed_exchange,
             energy_change,
-            splitting_residual: energy_change - temporal_work,
+            splitting_residual: energy_change - temporal_work - source_work - prescribed_exchange,
         };
         if !accounting.temporal_work.is_finite()
+            || !accounting.source_work.is_finite()
+            || !accounting.prescribed_exchange.is_finite()
             || !accounting.energy_change.is_finite()
             || !accounting.splitting_residual.is_finite()
         {
@@ -2052,6 +2187,59 @@ impl CanonicalTemporalWaveState {
         self.complementary_flux = complementary;
         self.time = end_time;
         Ok(accounting)
+    }
+}
+
+/// One half kick with the source and any prescribed pin folded into it, as the
+/// fixed path's `force_coupled_kick` does with boundary damping and open
+/// boundaries excluded - both are refused by `forced_composition_supported`.
+///
+/// The mass is the one in force at `target_time`, which is the instant the
+/// prescribed signal is sampled at, so a pinned node's `Q` and the `M` it is
+/// pinned against belong to the same moment.
+#[allow(clippy::too_many_arguments)]
+fn forced_kick(
+    operator: &CanonicalTemporalWaveOperator,
+    primary: &mut [f64],
+    force: &[f64],
+    source: &[f64],
+    duration: f64,
+    forcing: &CanonicalForcing,
+    target_time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<(f64, f64), WaveError> {
+    if !forcing.drives_any() {
+        for (flux, force) in primary.iter_mut().zip(force) {
+            *flux -= duration * force;
+        }
+        return Ok((0.0, 0.0));
+    }
+    let mass = operator.primary_mass_at(target_time, runtime)?;
+    let mut source_work = 0.0;
+    let mut prescribed_exchange = 0.0;
+    for node in 0..primary.len() {
+        let old = primary[node];
+        let mass = mass[node];
+        let unconstrained = old + duration * (source[node] - force[node]);
+        let new = forcing.prescribed()[node]
+            .map_or(unconstrained, |signal| mass * signal.value(target_time));
+        if !new.is_finite() {
+            return Err(WaveError::InvalidState);
+        }
+        let midpoint_field = 0.5 * (old + new) / mass;
+        let node_source_work = duration * midpoint_field * source[node];
+        let node_force_work = duration * midpoint_field * force[node];
+        source_work += node_source_work;
+        if forcing.prescribed()[node].is_some() {
+            let energy_change = 0.5 * (new * new - old * old) / mass;
+            prescribed_exchange += energy_change - node_source_work + node_force_work;
+        }
+        primary[node] = new;
+    }
+    if source_work.is_finite() && prescribed_exchange.is_finite() {
+        Ok((source_work, prescribed_exchange))
+    } else {
+        Err(WaveError::InvalidState)
     }
 }
 
@@ -2451,10 +2639,10 @@ fn material_error<T>(
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, CanonicalWaveState, ElectromagneticPolarization, LoopRole,
-        MaterialFrame, MeshingOptions, Obstacle, ObstacleId, OuterBoundaryCondition,
+        BACKGROUND_REGION, CanonicalSource, CanonicalWaveState, ElectromagneticPolarization,
+        LoopRole, MaterialFrame, MeshingOptions, Obstacle, ObstacleId, OuterBoundaryCondition,
         PeriodicCubicSpline, QuadraticSolutionSnapshot, Region, RegionId, ScalarField,
-        SolutionIndicatorJob, SolutionIndicatorOptions, SymmetricTensor2, TimeDrive,
+        SolutionIndicatorJob, SolutionIndicatorOptions, SymmetricTensor2, TimeDrive, TimeSignal,
         enriched_quadratic_basis, mesh_scene, sample_canonical_area,
     };
 
@@ -3184,6 +3372,203 @@ mod tests {
             }
         };
         assert_eq!(report(Some(&runtime)), report(None));
+    }
+
+    /// The composition's own falsifier, with every other physics removed.
+    ///
+    /// Hold the whole field at one constant value through prescribed nodes
+    /// everywhere and pump the mass. The truth is known without a solver: the
+    /// field is that constant, the complementary flux stays zero, no wave ever
+    /// moves, and the energy is `0.5 M(t) g^2`, which breathes because `M`
+    /// does. Every joule that moves came across the prescribed boundary.
+    ///
+    /// This is what separates the two accounting lanes. Charging that breathing
+    /// to temporal work would make the balance close for entirely the wrong
+    /// reason, and no fixture with a real wave in it could tell the difference.
+    #[test]
+    fn a_constant_prescribed_field_over_a_pumped_mass_is_all_boundary_exchange() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.3),
+            frequency_hz: ScalarField::constant(1.1),
+            phase_radians: ScalarField::constant(0.35),
+        };
+        let operator = compile(&scene).unwrap();
+        let base = operator.base();
+        const HELD: f64 = 0.4;
+
+        // Every node prescribed, so nothing is free to evolve.
+        let prescribed = vec![
+            Some(TimeSignal::Harmonic {
+                offset: HELD,
+                amplitude: 0.0,
+                frequency_hz: 0.0,
+                phase_radians: 0.0,
+            });
+            base.degrees_of_freedom()
+        ];
+        let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+
+        let runtime = operator.initial_runtime();
+        let ceiling = 0.4 * operator.maximum_time_step();
+        let target = 0.35;
+        let mut previous: Option<(f64, f64)> = None;
+        for refinement in [1.0, 0.5, 0.25] {
+            let steps = (target / (ceiling * refinement)).ceil() as u64;
+            let time_step = target / steps as f64;
+            let primary = operator
+                .primary_mass_at(0.0, &runtime)
+                .unwrap()
+                .iter()
+                .map(|mass| mass * HELD)
+                .collect::<Vec<_>>();
+            let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+            let mut state =
+                CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+                    .unwrap();
+            let before = state.energy(&operator).unwrap();
+            let mut exchange = 0.0;
+            let mut work = 0.0;
+            for _ in 0..steps {
+                let accounting = state.step_with_forcing(&operator, &forcing).unwrap();
+                exchange += accounting.prescribed_exchange;
+                work += accounting.temporal_work;
+            }
+            let after = state.energy(&operator).unwrap();
+
+            // The field never moved, so nothing radiated and it is still held.
+            assert!(
+                state
+                    .complementary_flux()
+                    .iter()
+                    .all(|flux| flux.norm() < 1.0e-12),
+                "a held field must not radiate"
+            );
+            let mass = operator.primary_mass_at(state.time(), &runtime).unwrap();
+            for (flux, mass) in state.primary_flux().iter().zip(&mass) {
+                assert!((flux / mass - HELD).abs() < 1.0e-12);
+            }
+
+            // Both lanes are genuinely active, and in the ratio the stage
+            // equations predict: holding `u` fixed while `M` breathes gives
+            // the drive `-M' g^2 / 2` and the boundary `+M' g^2`.
+            assert!(work.abs() > 1.0e-3, "the fixture must pump, got {work}");
+            assert!(
+                (exchange + 2.0 * work).abs() < 2.0e-2 * work.abs(),
+                "exchange should be twice the drive and opposite, got {exchange} against {work}"
+            );
+
+            let residual = after - before - work - exchange;
+            if let Some((coarse_step, coarse_residual)) = previous {
+                let order = (coarse_residual.abs() / residual.abs()).log2()
+                    / (coarse_step / time_step).log2();
+                assert!(
+                    order > 1.7,
+                    "the unaccounted remainder must be the splitting's own, which is second \
+                     order; measured {order:.2} between dt {coarse_step:.3e} and {time_step:.3e}"
+                );
+            }
+            previous = Some((time_step, residual));
+        }
+    }
+
+    /// An inert generation must step a source and a prescribed wall exactly as
+    /// the fixed path does, or the two paths mean different things by the same
+    /// scene and no comparison between them is worth anything.
+    ///
+    /// One deliberate difference is checked rather than hidden: the fixed path
+    /// samples a prescribed signal half a step in on the first kick, and the
+    /// temporal path samples it at the stage. With a constant signal the two
+    /// coincide exactly, which is what this pins down; a varying signal differs
+    /// at second order, which is the accuracy both paths already claim.
+    #[test]
+    fn an_inert_generation_steps_forcing_exactly_as_the_fixed_path_does() {
+        let scene = Scene::default();
+        let operator = compile(&scene).unwrap();
+        let base = operator.base();
+        let count = base.degrees_of_freedom();
+
+        // A wall of prescribed nodes on one side, at a constant value.
+        let mut prescribed = vec![None; count];
+        for (node, point) in base.node_points().iter().enumerate() {
+            if point.x < -0.999 {
+                prescribed[node] = Some(TimeSignal::Harmonic {
+                    offset: 0.17,
+                    amplitude: 0.0,
+                    frequency_hz: 0.0,
+                    phase_radians: 0.0,
+                });
+            }
+        }
+        assert!(
+            prescribed.iter().any(Option::is_some),
+            "the fixture needs a prescribed wall"
+        );
+        let mut forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+        // And a volume source, so both exchange lanes are exercised at once.
+        forcing
+            .push_source(
+                CanonicalSource::direct(
+                    base,
+                    base.primary_mass().to_vec(),
+                    TimeSignal::harmonic(0.0, 0.9, 1.7, 0.4),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let time_step = 0.4 * operator.maximum_time_step();
+        let primary = base
+            .node_points()
+            .iter()
+            .map(|point| 0.06 * (1.3 * point.x - 0.9 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.03 * (0.8 * point.x + 1.2 * point.y).cos())
+            .collect::<Vec<_>>();
+        let complementary = base.compatible_flux(&potential).unwrap();
+
+        // Both paths start from a state that already satisfies the constraint,
+        // which is what the constrained system's initial condition means. The
+        // fixed path would otherwise absorb the violation into its first step.
+        let temporal =
+            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary.clone())
+                .unwrap();
+        let mut temporal = temporal.pinned(&operator, &forcing).unwrap();
+        let mut fixed = CanonicalWaveState::new(
+            base,
+            time_step,
+            temporal.primary_flux().to_vec(),
+            complementary,
+        )
+        .unwrap();
+
+        for _ in 0..24 {
+            let temporal_accounting = temporal.step_with_forcing(&operator, &forcing).unwrap();
+            let fixed_accounting = fixed.step_with_forcing(base, &forcing).unwrap();
+            assert!(
+                (temporal_accounting.source_work - fixed_accounting.source_work).abs() < 1.0e-12
+            );
+            assert!(
+                (temporal_accounting.prescribed_exchange - fixed_accounting.prescribed_exchange)
+                    .abs()
+                    < 1.0e-12
+            );
+            // An inert medium does no temporal work, whatever else it does.
+            assert!(temporal_accounting.temporal_work.abs() < 1.0e-12);
+        }
+        for (temporal, fixed) in temporal.primary_flux().iter().zip(fixed.primary_flux()) {
+            assert!((temporal - fixed).abs() < 1.0e-12);
+        }
+        for (temporal, fixed) in temporal
+            .complementary_flux()
+            .iter()
+            .zip(fixed.complementary_flux())
+        {
+            assert!((*temporal - *fixed).norm() < 1.0e-12);
+        }
     }
 
     /// Two things the variable-coefficient supplement has to get right. On an

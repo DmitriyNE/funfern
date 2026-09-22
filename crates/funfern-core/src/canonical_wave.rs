@@ -220,6 +220,12 @@ impl CanonicalForcing {
         &self.sources
     }
 
+    /// Whether anything here puts energy in or takes it out. A composition
+    /// that does not is the free bulk, and steppers take their cheap path.
+    pub fn drives_any(&self) -> bool {
+        !self.sources.is_empty() || self.prescribed.iter().any(Option::is_some)
+    }
+
     pub fn prescribed(&self) -> &[Option<TimeSignal>] {
         &self.prescribed
     }

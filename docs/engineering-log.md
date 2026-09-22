@@ -5,6 +5,68 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — A driven medium can now be driven: prescribed data and sources compose
+
+- Until this, `CanonicalTemporalWaveState` had no forcing and no pulse. A scene
+  could author a pump, a time crystal, a travelling modulation and a Switch,
+  and then had no way to put any energy into the medium: the stepper refused
+  anything but a closed conservative bulk. `step_with_forcing` composes
+  prescribed data and volume sources, which is the first of the boundary
+  capabilities Gate B lists and the one that makes a driven scene do anything
+  at all.
+- Admission is split in two, because what the stepper can compose and what the
+  conservative-bulk claim covers are different questions. `forced_composition_supported`
+  allows prescribed data and sources; `conservative_bulk_supported` additionally
+  requires that nothing drives the boundary, and keeps its current meaning for
+  the energy claim and the AMR supplement. Loss, thin gaps, boundary damping and
+  open boundaries stay refused by both until each closes its own gate.
+- **The stage equations, which is what this slice is really about.** A
+  prescribed node pins `Q = M(t) g(t)`. Under modulation that means a constant
+  `g` still moves flux, because the mass it is pinned against breathes. Holding
+  `u` fixed while `M` varies gives the drive `-M' g^2 / 2` at fixed `Q` and the
+  boundary `+M' g^2`, so the two lanes are both active and do not cancel; the
+  measured ratio is `-2.00` as derived. The accounting therefore carries
+  `temporal_work`, `source_work` and `prescribed_exchange` separately, and
+  `splitting_residual` is what the three of them fail to explain.
+- The falsifier earned its place again. Hold the whole field at one constant
+  value through prescribed nodes everywhere, pump the mass, and the truth is
+  known without a solver: the field is that constant, nothing radiates, and the
+  energy is `0.5 M(t) g^2`. The first composition left `6.3e-6` per step
+  unaccounted against an energy of `2.3e-1`. That could have been the
+  second-order splitting remainder the field is named for, so the test measures
+  the order rather than guessing a tolerance - and it came out at **0.99**,
+  first order, which is a defect and not a remainder.
+- The cause was a stage-instant mismatch. The fixed path pins a prescribed node
+  half a step into the first kick, which is free to choose when the mass is
+  constant. It is not free here: the temporal-work quadrature integrates
+  between the step's endpoints, so a pin at an instant it does not know about
+  leaves a first-order hole. Pinning at the stage instants - the same two the
+  autonomous extension stages at - takes the order to **2.01** across two
+  halvings.
+- That change has a consequence worth stating rather than hiding: a prescribed
+  node's initial flux must already satisfy `Q = M(t0) g(t0)`. The fixed path
+  conceals a violation by pinning before its first kick and charging the
+  correction to prescribed exchange. This one pins at the stage, so an
+  inconsistent start shows up as a first step that does not balance.
+  `CanonicalTemporalWaveState::pinned` builds a consistent state, and the
+  requirement is in the doc comment rather than left to be discovered.
+- Gate B evidence, kept to what the gate names rather than gold-plated. Stage
+  equations and initialization are documented above. Passivity is the existing
+  bulk suite, which now runs through the composed path with an empty forcing and
+  is unchanged. Transient and fixed-CFL refinement are the order sweep. And the
+  strongest one is cheap: an inert generation with a prescribed wall *and* a
+  volume source reproduces `CanonicalWaveState::step_with_forcing` to `1e-12`,
+  in both accounting lanes and in the final state, so the two paths mean the
+  same thing by the same scene.
+- Still refused, each its own gate: loss, thin gaps, first- and second-order
+  outgoing boundaries. The frozen reference impedance under modulation belongs
+  to the outgoing one, where the plan already allows it only as a documented,
+  tested approximation. This is the f64 CPU reference only; the GPU path and its
+  device gate follow.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (741 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-22 — The transfer was never wrong; the oracle watching it was, twice
 
 - **Correcting the entry two below.** It reported that a refinement transfer
