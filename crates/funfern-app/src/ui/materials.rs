@@ -713,3 +713,93 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod second_preset_reproduction {
+    use super::super::test_support::{activate, settle};
+    use super::super::workers::compile_gpu_upload;
+    use super::*;
+
+    /// Reported from the running application: the first parametric pump
+    /// applied, the next preset never committed, the runtime sat at "Ready for
+    /// GPU upload" and Reset did nothing.
+    ///
+    /// This walks the reported sequence the way the application does - editing
+    /// against a generation that is already running, so the candidates are not
+    /// fresh. Two driven generations share a layout and hand off; a generation
+    /// that stops being driven shares nothing and is installed instead. Which
+    /// of those happened decides the generation the upload waits for, and
+    /// reading the candidate's `fresh` flag instead left it waiting forever
+    /// with Reset gated behind the upload it was stuck in.
+    #[test]
+    fn a_preset_that_undrives_a_generation_is_installed_rather_than_handed_off() {
+        let mut state = Playground::default();
+        activate(&mut state);
+
+        let apply = |state: &mut Playground, name: &str| {
+            let material = state.editor.document.model.draft.materials[0].clone();
+            let preset = law_presets()
+                .iter()
+                .find(|preset| preset.name == name)
+                .expect("catalogue entry");
+            state
+                .editor
+                .update_material(apply_law_preset(preset, &material).unwrap())
+                .unwrap();
+            settle(&mut state.editor);
+            let token = state
+                .runtime
+                .request(
+                    state.editor.revision,
+                    &state.editor.document,
+                    state.editor.compiled_accepted.clone(),
+                    MeshingOptions {
+                        target_edge_length: 0.18,
+                        ..MeshingOptions::default()
+                    },
+                    false,
+                )
+                .unwrap();
+            for _ in 0..1_000_000 {
+                if let Some(result) = state.runtime.advance(4096) {
+                    result.unwrap();
+                    return state.runtime.commit_ready(token).unwrap();
+                }
+            }
+            panic!("preparation did not finish");
+        };
+
+        let pumped = apply(&mut state, "Parametric pump");
+        assert!(pumped.driven() && !pumped.fresh);
+        let step = pumped.recommended_time_step();
+
+        let crystal = apply(&mut state, "Time crystal");
+        assert!(crystal.driven() && !crystal.fresh);
+        let packed = compile_gpu_upload(
+            PreparedTopology::clone(&crystal),
+            Some(pumped),
+            step,
+            [0; 4],
+        )
+        .expect("one driven generation hands off to another");
+        assert!(
+            packed.transfer.is_some(),
+            "two driven generations share a layout and transfer between them"
+        );
+
+        let inert = apply(&mut state, "Linear");
+        assert!(!inert.driven(), "Linear must undrive the generation");
+        assert!(
+            !inert.fresh,
+            "an edit against a running generation does not start from zero"
+        );
+        let packed =
+            compile_gpu_upload(PreparedTopology::clone(&inert), Some(crystal), step, [0; 4])
+                .expect("undriving a generation still packs");
+        assert!(
+            packed.transfer.is_none(),
+            "a generation that stops being driven carries nothing across, so it \
+             is installed - and an install publishes its generation at once"
+        );
+    }
+}

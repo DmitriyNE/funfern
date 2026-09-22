@@ -5,6 +5,43 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — Two defects the authoring panel exposed
+
+Reported from the running application: after a parametric pump applied, the next
+preset never committed, the runtime sat at "Ready for GPU upload" and Reset did
+nothing. Reproducing it against the autosave found two unrelated faults, neither
+of them in the preset code.
+
+- **The upload waited for a generation that never arrives.** `ui/runtime.rs`
+  chose which generation to wait for from `candidate.fresh`, while the path
+  taken is chosen by whether a transfer exists. `install` publishes its
+  generation synchronously and `begin_handoff` publishes on completion, so the
+  `+1` belongs to a handoff and not to an install. Those agreed only while a
+  fresh candidate meant an install - and `compile_gpu_upload` returns no
+  transfer whenever `active.driven() != candidate.driven()`, because the two
+  generations share no state to map. So an edit that starts or stops a drive
+  installs while not being fresh, and the upload waited for a generation one
+  past the one that arrived. Reset is gated behind `uploading.is_none()`, so it
+  could not clear it either: one cause, both symptoms. The expectation now
+  follows the path actually taken.
+- This is latent in the drivenness rule rather than new. Nothing in the
+  application could author a drive before today, so no edit had ever flipped
+  `driven()` against a running generation.
+- **A preset did not take its parameters with it.** Applying one over another
+  left the old preset's parameters behind: a pump then Linear left `depth`,
+  `pump_hz` and `pump_phase` with no law referring to them, which is exactly
+  what the reported autosave held, and a pump then a time crystal reached seven
+  of the eight a material can hold - after which the next choice was refused and
+  the selector appeared to do nothing. `apply_law_preset` now retires the
+  outgoing preset's parameters, keeping any the user pointed at from another
+  slot, and a test chains the whole catalogue three times over without
+  accumulating.
+- The reported symptom named the second application, but the fault was the
+  transition *out* of driven - the user had switched back to Linear before
+  reporting, which is the same flip in the other direction.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`.
+
 ## 2026-09-22 — A drive can be authored
 
 - The material editor grows a **Response** selector: the catalogue by

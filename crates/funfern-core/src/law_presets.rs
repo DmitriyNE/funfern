@@ -272,8 +272,33 @@ pub fn apply_law_preset(
     preset: &'static LawPreset,
     material: &Material,
 ) -> Result<Material, MaterialError> {
-    let existing = identify_law_preset(material).filter(|found| found.preset == preset);
+    let outgoing = identify_law_preset(material);
+    let existing = outgoing
+        .as_ref()
+        .filter(|found| found.preset == preset)
+        .cloned();
     let mut applied = material.clone();
+    if existing.is_none()
+        && let Some(outgoing) = &outgoing
+    {
+        // A preset owns the parameters it created, so the one being replaced
+        // takes its own with it. Leaving them behind orphans a value with no
+        // law referring to it and, four presets later, exhausts the material's
+        // parameter budget so the next choice is refused outright.
+        //
+        // The laws go first, so a parameter is judged against the material it
+        // is leaving rather than the one it arrived in, and anything the user
+        // pointed at from a base coefficient or another slot stays.
+        applied.mass_law = CoefficientLaw::linear();
+        applied.stiffness_law = CoefficientLaw::linear();
+        let referenced = applied
+            .parameter_names()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        applied.parameters.retain(|parameter| {
+            !outgoing.parameters.contains(&parameter.name) || referenced.contains(&parameter.name)
+        });
+    }
     let mut names = Vec::with_capacity(preset.variables.len());
     for (index, variable) in preset.variables.iter().enumerate() {
         if let Some(found) = &existing {
@@ -560,6 +585,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Switching preset retires the parameters of the one being replaced.
+    ///
+    /// Reported from the running application: a pump applied, then Linear
+    /// chosen, left `depth`, `pump_hz` and `pump_phase` behind with no law
+    /// referring to them - and chaining presets reached seven of eight
+    /// parameters, after which the next choice was refused and the selector
+    /// appeared to do nothing.
+    #[test]
+    fn switching_preset_takes_the_old_parameters_with_it() {
+        let pump = preset("M-T2", "Parametric pump");
+        let pumped = apply_law_preset(pump, &Material::default_medium()).unwrap();
+        let names = |material: &Material| {
+            material
+                .parameters
+                .iter()
+                .map(|parameter| parameter.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&pumped), ["depth", "pump_hz", "pump_phase"]);
+
+        // Every onward choice ends with exactly its own parameters, whatever
+        // it is replacing, so chaining presets cannot exhaust the budget.
+        for (id, name, expected) in [
+            ("", "Linear", &[][..]),
+            (
+                "M-T4",
+                "Time crystal",
+                &["depth", "pump_hz", "pump_phase", "edge"][..],
+            ),
+            (
+                "K-T2",
+                "Parametric pump",
+                &["depth", "pump_hz", "pump_phase"][..],
+            ),
+            (
+                "M-T3",
+                "Travelling modulation",
+                &["depth", "pump_hz", "pump_phase", "wavenumber", "wave_angle"][..],
+            ),
+        ] {
+            let switched = apply_law_preset(preset(id, name), &pumped).unwrap();
+            assert_eq!(names(&switched), expected, "{name}");
+            assert!(switched.valid(), "{name} left an invalid material");
+            if !expected.is_empty() {
+                assert_eq!(identify_law_preset(&switched).unwrap().preset.name, name);
+            }
+        }
+
+        // Chaining the whole catalogue never accumulates.
+        let mut chained = Material::default_medium();
+        for entry in PRESETS.iter().cycle().take(PRESETS.len() * 3) {
+            chained = apply_law_preset(entry, &chained)
+                .unwrap_or_else(|error| panic!("{}: {error}", entry.name));
+            assert_eq!(
+                chained.parameters.len(),
+                entry.variables.len(),
+                "{}",
+                entry.name
+            );
+        }
+    }
+
+    /// A parameter the user pointed at from somewhere else is not the outgoing
+    /// preset's to take, even when the preset created it.
+    #[test]
+    fn a_parameter_another_slot_uses_survives_the_switch() {
+        let pump = preset("M-T2", "Parametric pump");
+        let mut pumped = apply_law_preset(pump, &Material::default_medium()).unwrap();
+        pumped.mass_density = ScalarField::formula("2 + depth").unwrap();
+        let linear = apply_law_preset(preset("", "Linear"), &pumped).unwrap();
+        assert_eq!(
+            linear
+                .parameters
+                .iter()
+                .map(|parameter| parameter.name.as_str())
+                .collect::<Vec<_>>(),
+            ["depth"],
+            "the density still refers to it"
+        );
+        assert!(linear.valid());
     }
 
     /// A material carrying a law no preset writes is Custom, even when its

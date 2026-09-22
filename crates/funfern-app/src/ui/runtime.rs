@@ -418,8 +418,10 @@ impl Playground {
             else {
                 return;
             };
+            let mut handed_off = false;
             let upload = job.result.take().unwrap().and_then(|prepared| {
                 if let Some(transfer) = prepared.transfer {
+                    handed_off = true;
                     request
                         .begin_handoff(assets, commands, prepared.plan, transfer)
                         .map_err(str::to_owned)
@@ -434,10 +436,21 @@ impl Playground {
                     self.handoff_upload = Some(Instant::now());
                     self.uploading = Some(Uploading {
                         token,
-                        generation: if candidate.fresh {
-                            request.generation()
-                        } else {
+                        // Which generation to wait for follows the path just
+                        // taken, not whether the candidate starts from zero.
+                        // An install publishes its generation immediately; a
+                        // handoff publishes on completion, so the one to wait
+                        // for is the next. Those agreed only while a fresh
+                        // candidate meant an install - and a candidate whose
+                        // medium starts or stops being driven now installs
+                        // too, because the two generations share no state to
+                        // transfer. Reading `fresh` here left such an edit
+                        // waiting for a generation that never arrives, with
+                        // Reset gated behind the upload it was stuck in.
+                        generation: if handed_off {
                             request.generation().wrapping_add(1).max(1)
+                        } else {
+                            request.generation()
                         },
                         fresh: candidate.fresh,
                         degrees_of_freedom: candidate.canonical_operator.degrees_of_freedom(),
