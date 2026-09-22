@@ -3030,8 +3030,9 @@ impl CanonicalAssemblyJob {
                 barycentric,
                 point,
                 integration_weight: area * reference_weight,
-                complementary_reference: inverse_tensor(complementary_inverse)
-                    .ok_or(WaveError::InvalidCoefficients)?,
+                complementary_reference: inverse_tensor(complementary_inverse).ok_or(
+                    WaveError::Unsupported("an element's complementary tensor cannot be inverted"),
+                )?,
                 complementary_inverse,
                 curls: enriched_quadratic_basis_gradients(barycentric, barycentric_gradients)
                     .map(rotate_vector),
@@ -3103,12 +3104,14 @@ fn linear_material_sample(
     region_id: crate::RegionId,
     point: Point2,
 ) -> Result<(DirectionalWaveCoefficients, f64, f64), WaveError> {
-    let region = model
-        .region(region_id)
-        .ok_or(WaveError::InvalidCoefficients)?;
+    let region = model.region(region_id).ok_or(WaveError::Unsupported(
+        "an element names a region the scene does not hold",
+    ))?;
     let material = model
         .material(region.material)
-        .ok_or(WaveError::InvalidCoefficients)?;
+        .ok_or(WaveError::Unsupported(
+            "a region names a material the scene does not hold",
+        ))?;
     // Naming the slot matters more than it looks. This shares its error with a
     // coefficient that is genuinely not positive and finite, and the two read
     // identically in the application - "wave coefficients must be finite with
@@ -3737,7 +3740,9 @@ pub(crate) fn pole_energy_transform() -> Result<(Matrix3, Matrix3), WaveError> {
                     .sum::<f64>();
             lower[row][column] = if row == column {
                 if remainder <= 0.0 || !remainder.is_finite() {
-                    return Err(WaveError::InvalidCoefficients);
+                    return Err(WaveError::Unsupported(
+                        "a compiled element matrix is not positive definite",
+                    ));
                 }
                 remainder.sqrt()
             } else {

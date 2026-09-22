@@ -630,7 +630,10 @@ pub fn canonical_temporal_indicator_supplement(
     resolved_frequency_hz: f64,
 ) -> Result<CanonicalIndicatorSupplement, WaveError> {
     if !operator.indicator_supplement_supported() {
-        return Err(WaveError::InvalidCoefficients);
+        return Err(WaveError::Unsupported(
+            "no adaptive estimate for a driven medium carrying loss, a damped \
+             boundary or prescribed boundary data",
+        ));
     }
     let base = operator.base();
     let node_count = base.degrees_of_freedom();
@@ -690,7 +693,9 @@ pub fn canonical_temporal_indicator_supplement(
     {
         let factor = coefficient_factor(temporal.coefficient, time, runtime)?;
         if !factor.is_finite() || factor <= 0.0 {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "a driven medium's instantaneous complementary factor is not positive",
+            ));
         }
         inverses.push(SymmetricTensor2::new(
             sample.complementary_inverse.xx / factor,
@@ -868,7 +873,9 @@ pub fn canonical_temporal_indicator_supplement(
                     if mean.is_finite() && mean > 0.0 {
                         mean
                     } else {
-                        return Err(WaveError::InvalidCoefficients);
+                        return Err(WaveError::Unsupported(
+                            "an element's mean constitutive inverse is not positive",
+                        ));
                     }
                 };
                 let _ = points;
@@ -1287,7 +1294,9 @@ pub fn canonical_temporal_energy_breakdown(
     runtime: &CanonicalMaterialRuntimeState,
 ) -> Result<CanonicalTemporalEnergyBreakdown, WaveError> {
     if !operator.conservative_bulk_supported() {
-        return Err(WaveError::InvalidCoefficients);
+        return Err(WaveError::Unsupported(
+            "no energy breakdown for a generation beyond the conservative bulk",
+        ));
     }
     let (primary, primary_rate) = operator.primary_energy_and_rate(primary_flux, time, runtime)?;
     let (complementary, complementary_rate) =
@@ -1569,7 +1578,9 @@ impl CanonicalTemporalWaveOperator {
         let maximum_time_step = base.maximum_time_step()
             * (minimum_primary_factor * minimum_complementary_factor).sqrt();
         if !maximum_time_step.is_finite() || maximum_time_step <= 0.0 {
-            return Err(WaveError::InvalidCoefficients);
+            return Err(WaveError::Unsupported(
+                "a driven medium's coefficient trajectory leaves no usable timestep",
+            ));
         }
         // This reference state deliberately covers only the freely evolving
         // bulk Poisson system. Open boundaries, imposed fields, sources,
