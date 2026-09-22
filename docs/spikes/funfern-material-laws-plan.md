@@ -419,7 +419,10 @@ Store the direct constitutive coefficient as authoritative material data: mechan
 
 Spatial expressions remain `ScalarField` expressions evaluated in the region's material frame, including field-law, loss-law, and restoring coefficients. Time drives are a separate type; do not add an unrestricted time variable to the spatial expression grammar. Material-drive types are siblings of the source `TimeSignal` type.
 
-Retain:
+Retain the slots below. The catalogue of named laws in each, with their
+phenomena and current execution status, is
+[docs/material-law-catalogue.md](../material-law-catalogue.md); this table is
+the schema it is drawn against.
 
 | Slot | Intended forms |
 | --- | --- |

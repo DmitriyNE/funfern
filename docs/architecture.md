@@ -1051,7 +1051,10 @@ step backlog from the transferred clock. A rejected target leaves the continuing
 source authoritative. The [material-law Stage 4](spikes/funfern-material-laws-stage4-report.md),
 [Stage 5](spikes/funfern-material-laws-stage5-report.md) and
 [Stage 6](spikes/funfern-material-laws-stage6-report.md) reports contain the equations,
-layouts, transfer contracts and measured acceptance results.
+layouts, transfer contracts and measured acceptance results. Which laws a material
+can carry, what each does to a wave and which of them run today is the
+[material law catalogue](material-law-catalogue.md); its slot IDs are the names
+the preset selector and the engineering log use.
 
 ## Legacy scalar evolution model
 

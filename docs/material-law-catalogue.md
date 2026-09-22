@@ -1,0 +1,122 @@
+# The material law catalogue
+
+Every law a material can carry, what it does to a wave, how it is stored, and
+whether it runs today. This is the shared vocabulary: the preset selector names
+these rows, the engineering log refers to them by ID, and section 5.1 of
+[the material-laws plan](spikes/funfern-material-laws-plan.md) is the contract
+they are built against.
+
+A coefficient composes as `c(x,t,field) = c0(x) · g_field · h_drive · h_switch`,
+with at most one of each per row. `inverted` makes the whole multiplier divide
+instead of multiply.
+
+Status is one of:
+
+- **runs** - authored, compiled and stepped, with a gate in `docs/checks.md`.
+- **authored** - the type and its persistence exist and round-trip, but
+  assembly refuses a material carrying it, so a document using it does not run.
+- **gated** - not admitted until the named design gate closes.
+
+## Slot M — mass multiplier, `m -> m·g`
+
+Per node, exact, stepped as `q = m·u`. Stored as `Material::mass_law`.
+
+### Time-driven
+
+| ID | Law | Phenomenon | Stored as | Status |
+| --- | --- | --- | --- | --- |
+| M-T1 | step `1 -> 1+Δ` at `t0`, optional ramp `τ` | temporal refraction, time reflection | `alternate` + `switch_ramp` | runs |
+| M-T2 | harmonic `1 + A sin(2πft + φ)` | parametric amplification at `f ≈ 2f0`, time-crystal band gaps | `TimeDrive::ParametricPump` | runs |
+| M-T3 | travelling `1 + A sin(2πft − q·x + φ)` | non-reciprocity, one-way bands, indirect frequency conversion | `TimeDrive::TravellingModulation` | runs |
+| M-T4 | smoothed square / pulse train | the Floquet-standard modulation; sharper gaps than a sinusoid | `TimeDrive::TimeCrystal` | runs |
+
+M-T1's `t0` is not authored. A Switch is stamped by the GPU at its own commit
+boundary, so the material carries the shape and the runtime carries the moment;
+`MaterialSwitchRuntime` is what a consumer reads back.
+
+M-T3 needs only a two-float wavevector, and node positions are already in the
+node table, so it costs no buffer.
+
+The variant named `TimeCrystal` is M-T4, the smoothed square. Band gaps are
+M-T2's phenomenon. Controls must use the phenomenon names in this table rather
+than the Rust variant names.
+
+### Field-driven
+
+| ID | Law | Phenomenon | Stored as | Status |
+| --- | --- | --- | --- | --- |
+| M-F1 | Kerr `1 + χu²` | self-focusing, filamentation, self-phase modulation | `FieldLaw::Polynomial` with `chi1 = 0` | gated (C) |
+| M-F2 | saturable Kerr `1 + χu²/(1 + u²/u_s²)` | stable filaments without collapse - the right default | `FieldLaw::Saturable` | gated (C) |
+| M-F3 | quadratic `1 + χu` | asymmetric steepening into shocks, second-harmonic generation | `FieldLaw::Polynomial` with `chi2 = 0` | gated (C) |
+
+Note the sign luck: self-focusing needs the permittivity to rise where the field
+is strong, so `m` rises, so the local speed falls, and the CFL bound moves the
+safe way. The flagship nonlinear demonstration cannot destabilize the step.
+`χ < 0` and M-F3 can, and need a positivity guard and an amplitude monitor -
+which is what `FieldLaw::Polynomial::amplitude_bound` is for.
+
+## Slot K — stiffness multiplier, `K -> K·h`
+
+Stored as `Material::stiffness_law`, the same `CoefficientLaw` shape as slot M.
+
+**The time-driven half of this slot is not deferred; Stage 7 shipped it.**
+`canonical_temporal.rs` evaluates `stiffness_law.drive` and
+`temporal_amr_calibration` crosses a driven mass row against a driven stiffness
+row against both. K-T1 to K-T4 are M-T1 to M-T4 on this row, and all run.
+
+That makes the one thing only this slot can do available now. A time interface
+in `m` alone changes both the speed and the impedance `Z = √(mK)`; modulating
+`m` and `K` together so `Z` is unchanged gives a **reflectionless time
+interface**, the direct contrast against M-T1's reflecting one. The pairing is
+expressible with one drive on each row and `inverted` on one of them, and the
+claim is falsifiable: reflection off the interface must measure zero where M-T1
+alone measures the reflecting coefficient.
+
+The field-driven half is gated (C) with slot M's. A field-dependent `h` also
+needs a symmetric flux argument `h((u_i + u_j)/2)`, because the coefficient is
+no longer per node.
+
+## Slot R — additive restoring term, `+= −V'(u)/m`
+
+Pointwise, the cheapest slot, landing in the same line as the sources. Stored as
+`Material::restoring`, default `None`. Assembly refuses any other value today.
+
+| ID | Law | Phenomenon | Stored as | Status |
+| --- | --- | --- | --- | --- |
+| R1 | Klein-Gordon `ω0²u` (linear) | dispersion `ω² = c²k² + ω0²`, cutoff frequency | `RestoringLaw::KleinGordon` | gated (O) |
+| R2 | sine-Gordon `ω0² sin u` | kinks, antikinks, breathers - the soliton showcase | `RestoringLaw::SineGordon` | gated (O) |
+| R3 | `φ⁴`: `λ(u³ − u)` | domain walls, bubble nucleation | `RestoringLaw::Phi4` | gated (O) |
+
+R1 is linear and its dispersion relation is exact, so it is the verification
+stepping-stone that proves the slot before any nonlinearity enters. R2's `V''`
+is bounded, so its CFL contribution is known up front; R3's is not, and needs
+the monitor.
+
+## Slot D — damping multiplier, `d -> d·w`
+
+Per node, as cheap as M. Stored as `Material::electric_loss` and
+`magnetic_loss`, independent channels, each a `LossChannel { base_rate, law }`
+whose `DampingLaw` carries a rate law and its own time drive.
+
+| ID | Law | Phenomenon | Stored as | Status |
+| --- | --- | --- | --- | --- |
+| D1 | time-modulated loss | loss-driven parametric effects, PT-symmetry-flavoured pairs with gain | `DampingLaw::drive` over `RateLaw::Constant` | authored |
+| D2 | saturable absorption `1/(1 + u²/u_s²)` | self-limiting, passive mode-locking flavour | `RateLaw::SaturableAbsorption` | gated (C) |
+| D3 | van der Pol `−(1 − u²)` | self-oscillation, spontaneous pattern formation | `RateLaw::VanDerPol` | gated (O) |
+
+A constant loss channel with no drive runs on the fixed path. D1 does not,
+because the time-driven evaluator refuses a material carrying any loss channel -
+that composition is the next thing this slot needs, not a gate.
+
+D3 is a deliberate instability and stays behind something explicit even once
+gate O closes.
+
+## Where the refusals live
+
+| Path | Refuses |
+| --- | --- |
+| `canonical_wave.rs`, `linear_material_sample` | a non-linear `mass_law` or `stiffness_law`, and any restoring law. Admits loss channels. `is_linear()` includes `drive.is_none()`, which is why a driven generation assembles from a stripped model and compiles its laws separately. |
+| `wave.rs`, `evaluate_timed_directional_material_library_at` | any loss channel, any restoring law, and any non-`Linear` field law. |
+
+A preset whose law is not **runs** is filtered out of the selector rather than
+offered and refused, so every document a user can author assembles.
