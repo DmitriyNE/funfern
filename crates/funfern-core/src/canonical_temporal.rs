@@ -1530,6 +1530,23 @@ impl CanonicalTemporalWaveOperator {
         self.maximum_time_step
     }
 
+    /// The step a caller should actually take, carrying the fixed path's
+    /// safety margin onto the trajectory bound.
+    ///
+    /// A driven generation's ceiling is the tighter of the two, because the
+    /// bound covers every phase the coefficients reach rather than one set of
+    /// them. That is where a drive's cost lands: measured on the GPU core it
+    /// is free per step and about `1.23x` per simulated second, and this is
+    /// the factor.
+    pub fn recommended_time_step(&self) -> f64 {
+        let base = self.base.maximum_time_step();
+        if base > 0.0 {
+            self.base.recommended_time_step() * (self.maximum_time_step / base)
+        } else {
+            self.maximum_time_step
+        }
+    }
+
     pub fn primary_coefficient_samples(
         &self,
     ) -> impl ExactSizeIterator<Item = CanonicalTemporalCoefficientSample> + '_ {

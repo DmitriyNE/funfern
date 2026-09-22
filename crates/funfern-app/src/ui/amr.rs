@@ -475,6 +475,7 @@ impl Playground {
             job,
             active.mesh.clone(),
             active.canonical_operator.clone(),
+            active.canonical_temporal_operator.clone(),
             active.canonical_forcing.clone(),
             canonical_snapshot,
         );

@@ -5,6 +5,42 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — A driven document runs
+
+- The plumbing the previous entry listed, all of it. Both plan sites - the
+  background upload and the reset - compile a temporal plan when the generation
+  is driven and the fixed one otherwise. The timestep comes from
+  `PreparedTopology::recommended_time_step`, which reads the temporal ceiling
+  when there is one, so every caller gets the trajectory bound rather than the
+  fixed operator's; that is the `1.23x` the GPU timing measured, and it is now
+  where the drive's cost actually lands.
+- `CanonicalTemporalWaveOperator::recommended_time_step` carries the fixed
+  path's safety margin onto the trajectory bound rather than inventing a second
+  one, so the two differ only by the ratio of their ceilings.
+- **A drive added or removed forces a fresh start rather than a transfer.** The
+  two generations do not share a state layout, so there is nothing to carry
+  across; a transfer would have to invent the half that is missing. Refusing is
+  the honest outcome and it is stated where the decision is made.
+- AMR now takes the temporal supplement and the instantaneous materials on a
+  driven generation, which is the whole point of that arc: the fixed
+  supplement's residual, energy and recovery read authored coefficients, and on
+  a driven medium that charges the estimator for the medium's own modulation.
+  The size rule's `resolved_frequency_hz` and `coefficient_wavelength` were
+  already wired from the earlier work, and the `1.88` calibration lives in the
+  core, so one accuracy target still means one true accuracy.
+- One limitation stated rather than discovered: the estimate uses the
+  operator's authored runtime. That is correct while nothing has stamped a
+  Switch or re-anchored a carrier, which nothing in the application can do yet.
+  When drive authoring lands it has to become the bank decoded from the
+  accepted state against the live epoch origin - the hazard reported after the
+  AMR device gate, now with a named place where it will bite.
+- Every document that existed before drives is untouched: no temporal operator,
+  the fixed plan, the fixed timestep, the fixed supplement. The whole driven
+  path is behind one `Option` being `Some`.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (751 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-22 — The application can hold a driven document
 
 - The assembly restructuring the previous entry identified. Both of the

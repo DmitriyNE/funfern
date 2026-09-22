@@ -157,6 +157,24 @@ fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 
+impl PreparedTopology {
+    /// The step this generation should run at. A driven one is bounded over
+    /// its whole coefficient trajectory rather than one set of coefficients,
+    /// so its ceiling is the tighter of the two and every caller must read it
+    /// from here rather than from the fixed operator.
+    pub fn recommended_time_step(&self) -> f64 {
+        match &self.canonical_temporal_operator {
+            Some(temporal) => temporal.recommended_time_step(),
+            None => self.canonical_operator.recommended_time_step(),
+        }
+    }
+
+    /// Whether this generation carries a material drive.
+    pub fn driven(&self) -> bool {
+        self.canonical_temporal_operator.is_some()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PreparedTopology {
     pub bundle: Arc<AcceptedTopology>,
@@ -167,6 +185,7 @@ pub struct PreparedTopology {
     /// a material law. Absent means the generation is inert and the fixed path
     /// runs it exactly as before.
     pub canonical_temporal_operator: Option<Arc<CanonicalTemporalWaveOperator>>,
+
     pub canonical_forcing: Arc<CanonicalForcing>,
     pub canonical_transfer: Option<Arc<PreparedCanonicalTransfer>>,
     pub volume_sources: Arc<CompiledVolumeSources>,

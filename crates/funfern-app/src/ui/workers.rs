@@ -213,6 +213,11 @@ pub(super) enum BackgroundAmrKind {
 pub(super) struct CanonicalAmrPreparation {
     pub(super) mesh: Arc<TriMesh>,
     pub(super) operator: Arc<CanonicalWaveOperator>,
+    /// Present when the generation is driven, in which case the estimate is
+    /// built from it instead: the fixed supplement's residual, energy and
+    /// recovery all read authored coefficients, and on a driven medium that
+    /// charges the estimator for the medium's own modulation.
+    pub(super) temporal: Option<Arc<CanonicalTemporalWaveOperator>>,
     pub(super) forcing: Arc<CanonicalForcing>,
     pub(super) snapshot: CanonicalIndicatorSnapshot,
 }
@@ -227,6 +232,7 @@ impl AmrIndicatorJob {
         job: SolutionIndicatorJob,
         mesh: Arc<TriMesh>,
         operator: Arc<CanonicalWaveOperator>,
+        temporal: Option<Arc<CanonicalTemporalWaveOperator>>,
         forcing: Arc<CanonicalForcing>,
         snapshot: CanonicalIndicatorSnapshot,
     ) -> Self {
@@ -235,6 +241,7 @@ impl AmrIndicatorJob {
             canonical: Some(CanonicalAmrPreparation {
                 mesh,
                 operator,
+                temporal,
                 forcing,
                 snapshot,
             }),
@@ -256,22 +263,47 @@ impl AmrIndicatorJob {
         budget: usize,
     ) -> Option<Result<SolutionIndicatorResult, AmrIndicatorError>> {
         if let Some(canonical) = self.canonical.take() {
-            let supplement = match canonical_indicator_supplement(
-                &canonical.mesh,
-                &canonical.operator,
-                &canonical.forcing,
-                &canonical.snapshot,
-            ) {
+            // The runtime is the operator's authored one. That is correct
+            // while nothing has stamped a Switch or re-anchored a carrier,
+            // which nothing in the application can do yet; when drive
+            // authoring lands this has to become the bank decoded from the
+            // accepted state, against the live epoch origin.
+            let runtime = canonical
+                .temporal
+                .as_ref()
+                .map(|temporal| temporal.initial_runtime());
+            let supplement = match (&canonical.temporal, &runtime) {
+                (Some(temporal), Some(runtime)) => canonical_temporal_indicator_supplement(
+                    &canonical.mesh,
+                    temporal,
+                    &canonical.snapshot,
+                    runtime,
+                    // The spectral scale the supplement's own recovery uses.
+                    // Zero is what the calibration sweep validated; the size
+                    // rule's frequency is a separate option on the job.
+                    0.0,
+                ),
+                _ => canonical_indicator_supplement(
+                    &canonical.mesh,
+                    &canonical.operator,
+                    &canonical.forcing,
+                    &canonical.snapshot,
+                ),
+            };
+            let supplement = match supplement {
                 Ok(supplement) => supplement,
                 Err(error) => {
                     self.job = None;
                     return Some(Err(AmrIndicatorError::Canonical(error)));
                 }
             };
-            self.job = self
-                .job
-                .take()
-                .map(|job| job.with_canonical_supplement(supplement));
+            self.job = self.job.take().map(|job| {
+                let job = job.with_canonical_supplement(supplement);
+                match runtime {
+                    Some(runtime) => job.with_instantaneous_materials(runtime),
+                    None => job,
+                }
+            });
         }
         self.job
             .as_mut()
@@ -583,15 +615,30 @@ pub(super) fn compile_gpu_upload(
     time_step: f64,
     runtime_serials: [u32; 4],
 ) -> Result<PreparedGpuUpload, String> {
-    let state = CanonicalWaveState::zero(&candidate.canonical_operator, time_step)
-        .map_err(|error| error.to_string())?;
-    let plan = CanonicalGpuPlan::compile_with_quadratic(
-        &candidate.canonical_operator,
-        &candidate.operator,
-        &state,
-        &candidate.canonical_forcing,
-        CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?,
-    )
+    let clock = CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?;
+    let plan = match &candidate.canonical_temporal_operator {
+        Some(temporal) => {
+            let state = CanonicalTemporalWaveState::zero(temporal, time_step)
+                .map_err(|error| error.to_string())?;
+            CanonicalGpuPlan::compile_temporal(
+                temporal,
+                &state,
+                &candidate.canonical_forcing,
+                clock,
+            )
+        }
+        None => {
+            let state = CanonicalWaveState::zero(&candidate.canonical_operator, time_step)
+                .map_err(|error| error.to_string())?;
+            CanonicalGpuPlan::compile_with_quadratic(
+                &candidate.canonical_operator,
+                &candidate.operator,
+                &state,
+                &candidate.canonical_forcing,
+                clock,
+            )
+        }
+    }
     .map_err(|error| format!("{error:?}"))?;
     if candidate.fresh || active.is_none() {
         return Ok(PreparedGpuUpload {
@@ -600,6 +647,16 @@ pub(super) fn compile_gpu_upload(
         });
     }
     let active = active.unwrap();
+    // Adding or removing a drive changes what the state buffer carries, so the
+    // generations do not share a layout and there is nothing to transfer
+    // between. A fresh start is the honest outcome rather than a transfer that
+    // would have to invent the missing half.
+    if active.driven() != candidate.driven() {
+        return Ok(PreparedGpuUpload {
+            plan,
+            transfer: None,
+        });
+    }
     let transfer = candidate
         .canonical_transfer
         .as_ref()
@@ -862,6 +919,7 @@ mod tests {
             ),
             mesh,
             canonical,
+            None,
             forcing,
             canonical_snapshot,
         );

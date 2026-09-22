@@ -138,7 +138,7 @@ impl Playground {
         let require_solver_handoff = self.uploaded_time_step > 0.0
             && self.runtime.active().is_some_and(|active| {
                 let wanted = paced_time_step(
-                    active.canonical_operator.recommended_time_step(),
+                    active.recommended_time_step(),
                     self.editor.document.presentation.simulation_speed,
                 );
                 (wanted - self.uploaded_time_step).abs()
@@ -255,7 +255,7 @@ impl Playground {
             return false;
         }
         let wanted = paced_time_step(
-            candidate.canonical_operator.recommended_time_step(),
+            candidate.recommended_time_step(),
             self.editor.document.presentation.simulation_speed,
         );
         (wanted - self.uploaded_time_step).abs()
@@ -299,7 +299,7 @@ impl Playground {
             && let Some(candidate) = self.runtime.ready().cloned()
         {
             let dt = paced_time_step(
-                candidate.canonical_operator.recommended_time_step(),
+                candidate.recommended_time_step(),
                 self.editor.document.presentation.simulation_speed,
             );
             let token = candidate.bundle.token;
@@ -517,20 +517,35 @@ impl Playground {
         if self.reset_requested && self.uploading.is_none() && self.source_commit.is_none() {
             if let Some(active) = self.runtime.active() {
                 let dt = paced_time_step(
-                    active.canonical_operator.recommended_time_step(),
+                    active.recommended_time_step(),
                     self.editor.document.presentation.simulation_speed,
                 );
-                let reset = CanonicalWaveState::zero(&active.canonical_operator, dt)
-                    .map_err(|error| error.to_string())
-                    .and_then(|state| {
-                        CanonicalGpuPlan::compile_with_quadratic(
-                            &active.canonical_operator,
-                            &active.operator,
-                            &state,
-                            &active.canonical_forcing,
-                            CanonicalGpuClock::initial(dt).map_err(|error| format!("{error:?}"))?,
-                        )
-                        .map_err(|error| format!("{error:?}"))
+                let reset = CanonicalGpuClock::initial(dt)
+                    .map_err(|error| format!("{error:?}"))
+                    .and_then(|clock| match &active.canonical_temporal_operator {
+                        Some(temporal) => CanonicalTemporalWaveState::zero(temporal, dt)
+                            .map_err(|error| error.to_string())
+                            .and_then(|state| {
+                                CanonicalGpuPlan::compile_temporal(
+                                    temporal,
+                                    &state,
+                                    &active.canonical_forcing,
+                                    clock,
+                                )
+                                .map_err(|error| format!("{error:?}"))
+                            }),
+                        None => CanonicalWaveState::zero(&active.canonical_operator, dt)
+                            .map_err(|error| error.to_string())
+                            .and_then(|state| {
+                                CanonicalGpuPlan::compile_with_quadratic(
+                                    &active.canonical_operator,
+                                    &active.operator,
+                                    &state,
+                                    &active.canonical_forcing,
+                                    clock,
+                                )
+                                .map_err(|error| format!("{error:?}"))
+                            }),
                     });
                 if let Ok(plan) = reset {
                     request.install(assets, commands, plan);
