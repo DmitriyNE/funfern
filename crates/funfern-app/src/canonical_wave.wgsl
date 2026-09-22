@@ -1303,12 +1303,21 @@ fn kick_node(node: u32, second: bool) {
     }
     let old = select(
         accepted_q(node), candidate_q(node), second || has_loss_stages());
-    let inverse_mass = nodes[node].mass_loss.y;
+    // The wall's admittance, the prescribed pin and both energy lanes divide
+    // by the nodal mass, and a driven medium's mass moves. The damping itself
+    // stays as assembled: that is the frozen reference impedance, which is a
+    // documented approximation rather than an oversight.
+    var mass = nodes[node].mass_loss.x;
+    var inverse_mass = nodes[node].mass_loss.y;
+    if temporal_enabled() {
+        mass = temporal_primary_mass(node, target_time);
+        inverse_mass = 1.0 / mass;
+    }
     let damping = nodes[node].damping_support.x;
     let ratio = 0.5 * duration * damping * inverse_mass;
     var next = ((1.0 - ratio) * old + duration * net) / (1.0 + ratio);
     if nodes[node].boundary.z != 0u {
-        next = nodes[node].mass_loss.x * harmonic_value(nodes[node].prescribed, target_time);
+        next = mass * harmonic_value(nodes[node].prescribed, target_time);
     }
     let midpoint = 0.5 * (old + next) * inverse_mass;
     let source_work = duration * midpoint * source;

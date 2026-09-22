@@ -5,6 +5,48 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The GPU carries the forced composition, and the gate caught the kick dividing by the wrong mass
+
+- The GPU work was not the port it looked like. `canonical_wave.wgsl` is one
+  program that has carried sources, prescribed data, loss stages, thin gaps and
+  both outgoing orders since the fixed path, and it already knows how to read
+  an instantaneous coefficient. `compile_temporal_bulk` simply called the full
+  static compiler with empty forcing and gated on the conservative bulk. So
+  what was needed was an admission, not an implementation: `compile_temporal`
+  takes a `CanonicalForcing` and gates on `forced_composition_supported`.
+- That widening is also what made the defect reachable. Until it landed, a
+  driven medium and a source, a wall or a gap could not be asked for together,
+  so no stage had ever run with a moving nodal mass. A stage dividing by the
+  authored mass is correct on every fixture that existed and wrong the moment
+  the two meet.
+- **The device gate found one on its first run.** `canonical_gpu_temporal_forced`
+  puts a pumped medium, a volume source and an absorbing wall on the device and
+  compares both state lanes against the f64 reference. First result: `Q` off by
+  `1.439e-2`, `b` exact. Percent-level is the signature of a mass mismatch at a
+  modulation depth of `0.24`, and `b` being exact localized it to the primary
+  update rather than the drift.
+- It was `kick_node`, reading `nodes[node].mass_loss.y` - the authored inverse
+  mass - for the absorbing wall's admittance, the prescribed pin and both
+  energy lanes. Those are the same three places the CPU composition had to make
+  instantaneous, which is a useful corroboration: the same derivation, found
+  independently on the two sides. Under `temporal_enabled()` the kick now takes
+  the mass at the stage's own instant. The damping itself stays as assembled,
+  which is the frozen reference impedance and a documented approximation rather
+  than an oversight.
+- After the fix, `Q` reads `5.978e-6` against the same oracle - a factor of
+  2400 - and `b` is still exact. The change is guarded by `temporal_enabled()`,
+  so the fixed path is untouched, and the two existing temporal device gates
+  are unchanged: the work gate still reports `2e-7` on its Switch anchors and
+  `1e-8` on its energies, and the AMR gate still reports a `4.6e-7` global
+  indicator and `2.7e-7` state lanes.
+- Histories start unexcited on a compiled generation, and that is refused
+  explicitly rather than silently dropped: a nonzero thin-gap or pole-current
+  history needs an initializer on this path.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (749 passed, 1 known
+  ignored reproducer), and three device gates on an M1 Max / Metal with `HOME`
+  isolated from the live autosave.
+
 ## 2026-09-22 — The second-order outgoing boundary composes, and Stage 7's boundary work closes
 
 - The last refused capability. A driven medium can now carry a second-order

@@ -931,13 +931,49 @@ impl CanonicalGpuPlan {
         state: &CanonicalTemporalWaveState,
         clock: CanonicalGpuClock,
     ) -> Result<Self, CanonicalGpuBuildError> {
+        Self::compile_temporal(
+            operator,
+            state,
+            &CanonicalForcing::none(operator.base()),
+            clock,
+        )
+    }
+
+    /// Compiles a time-driven generation with its forcing composed in.
+    ///
+    /// The pipeline behind this is the fixed one: sources, prescribed data,
+    /// loss stages, thin gaps and both outgoing orders are already compiled
+    /// and already in the shader. What this widens is the admission - from the
+    /// conservative bulk to everything the CPU reference now composes - and
+    /// what it therefore exposes is whether each of those stages reads the
+    /// instantaneous nodal mass or the authored one. The device gate against
+    /// the CPU reference is what answers that; a stage that quietly uses the
+    /// frozen mass is correct today only because this combination could not be
+    /// compiled.
+    ///
+    /// Histories start unexcited, as a new generation's do. A nonzero thin-gap
+    /// or pole-current history needs an explicit initializer on this path
+    /// rather than being carried in implicitly.
+    pub fn compile_temporal(
+        operator: &CanonicalTemporalWaveOperator,
+        state: &CanonicalTemporalWaveState,
+        forcing: &CanonicalForcing,
+        clock: CanonicalGpuClock,
+    ) -> Result<Self, CanonicalGpuBuildError> {
         let scale = state.time().abs().max(clock.time().abs()).max(1.0);
-        if !operator.conservative_bulk_supported()
+        if !operator.forced_composition_supported()
             || state.time_step() != clock.time_step
             || (state.time() - clock.time()).abs() > 16.0 * f64::EPSILON * scale
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
-                "the temporal state, clock and conservative operator must share one boundary",
+                "the temporal state, clock and operator must share one boundary",
+            ));
+        }
+        if state.thin_gap_jump().iter().any(|jump| *jump != 0.0)
+            || state.outgoing_pole_currents().iter().any(|z| *z != 0.0)
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a compiled generation starts from unexcited gap and outgoing histories",
             ));
         }
         let fixed_state = CanonicalWaveState::new(
@@ -946,12 +982,7 @@ impl CanonicalGpuPlan {
             state.primary_flux().to_vec(),
             state.complementary_flux().to_vec(),
         )?;
-        let mut plan = Self::compile(
-            operator.base(),
-            &fixed_state,
-            &CanonicalForcing::none(operator.base()),
-            clock,
-        )?;
+        let mut plan = Self::compile(operator.base(), &fixed_state, forcing, clock)?;
         plan.attach_temporal_bulk(operator, state, clock)?;
         Ok(plan)
     }

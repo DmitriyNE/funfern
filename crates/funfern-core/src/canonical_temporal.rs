@@ -1998,6 +1998,10 @@ impl CanonicalTemporalWaveState {
         &self.thin_gap_jump
     }
 
+    pub fn outgoing_pole_currents(&self) -> &[f64] {
+        &self.outgoing_z
+    }
+
     pub fn energy(&self, operator: &CanonicalTemporalWaveOperator) -> Result<f64, WaveError> {
         Ok(operator.energy_at(
             &self.primary_flux,

@@ -14,6 +14,7 @@ cargo run -p funfern-core --release --example temporal_amr_calibration
 cargo run -p funfern-app --release --locked --example canonical_gpu_filter_boundary
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_work
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_amr
+cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_forced
 ```
 
 The `funfern-app` examples open a window and read the autosave, so run them with
@@ -76,6 +77,13 @@ The `--mesh-edit-benchmark`, `--wave-gpu-check`, `--wave-transfer-check` and
 `--amr-check` application flags no longer exist; the unified-topology cutover
 removed them and the hidden `canonical_gpu_*` examples took over what they
 covered.
+`canonical_gpu_temporal_forced` runs a pumped medium with a volume source and
+an absorbing wall - three stages that each divide by the nodal mass - against
+the f64 reference, and requires both state lanes within `2e-4`. It exists
+because the plan compiler used to refuse that combination, so no stage had ever
+been exercised with a moving mass; the first run found the kick dividing by the
+authored mass and missing by `1.4e-2`.
+
 `canonical_gpu_temporal_amr` runs the error estimate against the f32 state a
 device actually produces, on a travelling mass modulation - the medium that used
 to take the efficiency index from 1.4 to 17.4 before the estimate moved onto the
