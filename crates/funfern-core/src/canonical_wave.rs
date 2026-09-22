@@ -625,7 +625,7 @@ impl CanonicalOutgoingBoundary {
         let mut state = Vec::with_capacity(trace_primary_flux.len() + normalized_memory.len());
         state.extend_from_slice(trace_primary_flux);
         state.extend_from_slice(normalized_memory);
-        apply_outgoing_generator(operator, self, &state)
+        apply_outgoing_generator(operator, self, operator.primary_mass(), &state)
     }
 
     pub fn physical_memory(
@@ -1282,8 +1282,13 @@ impl CanonicalWaveState {
         let boundary_cache = operator
             .outgoing_boundary()
             .map(|boundary| {
-                CanonicalOutgoingMidpointFactor::prepare(operator, boundary, 0.5 * time_step)
-                    .map(Arc::new)
+                CanonicalOutgoingMidpointFactor::prepare(
+                    operator,
+                    boundary,
+                    operator.primary_mass(),
+                    0.5 * time_step,
+                )
+                .map(Arc::new)
             })
             .transpose()?;
         Ok(Self {
@@ -1995,7 +2000,8 @@ impl CanonicalWaveState {
             old[position] = self.primary_flux[node];
         }
         old[trace_count..].copy_from_slice(&old_z);
-        let derivative = apply_outgoing_generator(operator, boundary, &old)?;
+        let derivative =
+            apply_outgoing_generator(operator, boundary, operator.primary_mass(), &old)?;
         let mut right = old
             .iter()
             .zip(derivative)
@@ -2022,7 +2028,7 @@ impl CanonicalWaveState {
             if cache.duration != duration || cache.trace_count != trace_count {
                 return Err(WaveError::InvalidState);
             }
-            cache.solve(operator, boundary, &right)?
+            cache.solve(boundary, operator.primary_mass(), &right)?
         } else {
             for &(node, position) in &trace_position {
                 if let Some(signal) = forcing.prescribed[node] {
@@ -2191,6 +2197,7 @@ impl CanonicalOutgoingMidpointFactor {
     fn prepare(
         operator: &CanonicalWaveOperator,
         boundary: &CanonicalOutgoingBoundary,
+        mass: &[f64],
         duration: f64,
     ) -> Result<Self, WaveError> {
         let trace_count = boundary.trace_nodes.len();
@@ -2198,9 +2205,8 @@ impl CanonicalOutgoingMidpointFactor {
         let mut schur = vec![0.0; trace_count * trace_count];
         for (position, node) in boundary.trace_nodes.iter().copied().enumerate() {
             let node = node as usize;
-            schur[position * trace_count + position] = 1.0
-                + half_duration * operator.first_order_boundary_damping[node]
-                    / operator.primary_mass[node];
+            schur[position * trace_count + position] =
+                1.0 + half_duration * operator.first_order_boundary_damping[node] / mass[node];
         }
         let (energy_transform, inverse_energy_transform) = pole_energy_transform()?;
         let residues = [6.0 / 7.0, -8.0 / 7.0, 2.0 / 7.0];
@@ -2217,7 +2223,7 @@ impl CanonicalOutgoingMidpointFactor {
                     trace_count,
                     mode,
                     boundary,
-                    operator,
+                    mass,
                     half_duration,
                 );
                 continue;
@@ -2265,7 +2271,7 @@ impl CanonicalOutgoingMidpointFactor {
                 trace_count,
                 mode,
                 boundary,
-                operator,
+                mass,
                 half_duration - schur_coefficient,
             );
             eliminated.push(CachedAuxiliaryElimination {
@@ -2296,8 +2302,8 @@ impl CanonicalOutgoingMidpointFactor {
 
     pub fn solve(
         &self,
-        operator: &CanonicalWaveOperator,
         boundary: &CanonicalOutgoingBoundary,
+        mass: &[f64],
         right: &[f64],
     ) -> Result<Vec<f64>, WaveError> {
         let dimension = self.dimension();
@@ -2344,7 +2350,7 @@ impl CanonicalOutgoingMidpointFactor {
                 .iter()
                 .zip(&boundary_mode.trace)
                 .zip(&boundary.trace_nodes)
-                .map(|((value, trace), node)| value * trace / operator.primary_mass[*node as usize])
+                .map(|((value, trace), node)| value * trace / mass[*node as usize])
                 .sum::<f64>();
             for (value, coefficient) in auxiliary.iter_mut().zip(mode.solved_column_coefficient) {
                 *value -= coefficient * modal_trace;
@@ -2457,14 +2463,13 @@ fn add_modal_outer_product(
     trace_count: usize,
     mode: &CanonicalOutgoingMode,
     boundary: &CanonicalOutgoingBoundary,
-    operator: &CanonicalWaveOperator,
+    mass: &[f64],
     coefficient: f64,
 ) {
     for row in 0..trace_count {
         for (column, node) in boundary.trace_nodes.iter().copied().enumerate() {
             matrix[row * trace_count + column] +=
-                coefficient * mode.trace[row] * mode.trace[column]
-                    / operator.primary_mass[node as usize];
+                coefficient * mode.trace[row] * mode.trace[column] / mass[node as usize];
         }
     }
 }
@@ -3177,9 +3182,18 @@ impl CanonicalOutgoingBoundaryJob {
 }
 
 #[cfg(test)]
+/// The nodal mass these outgoing maps are built against.
+///
+/// It is a parameter rather than read from the operator because a time-driven
+/// generation's mass moves: the trace admittance, the modal couplings and the
+/// Schur complement all scale with it, so a driven path passes the mass in
+/// force at the stage while the fixed path passes the operator's own. One
+/// implementation serves both, which is what makes their agreement structural
+/// instead of something to test for.
 fn outgoing_generator(
     operator: &CanonicalWaveOperator,
     boundary: &CanonicalOutgoingBoundary,
+    mass: &[f64],
 ) -> Result<Vec<f64>, WaveError> {
     let trace_count = boundary.trace_nodes.len();
     let dimension = trace_count + boundary.auxiliary_count;
@@ -3187,7 +3201,7 @@ fn outgoing_generator(
     for (position, node) in boundary.trace_nodes.iter().copied().enumerate() {
         let node = node as usize;
         generator[position * dimension + position] -=
-            operator.first_order_boundary_damping[node] / operator.primary_mass[node];
+            operator.first_order_boundary_damping[node] / mass[node];
     }
     let (energy_transform, inverse_energy_transform) = pole_energy_transform()?;
     let residues = [6.0 / 7.0, -8.0 / 7.0, 2.0 / 7.0];
@@ -3196,7 +3210,7 @@ fn outgoing_generator(
             let row_trace = mode.trace[row];
             for (column, column_node) in boundary.trace_nodes.iter().copied().enumerate() {
                 generator[row * dimension + column] -=
-                    row_trace * mode.trace[column] / operator.primary_mass[column_node as usize];
+                    row_trace * mode.trace[column] / mass[column_node as usize];
             }
         }
         let Some(offset) = mode.auxiliary_offset else {
@@ -3220,7 +3234,7 @@ fn outgoing_generator(
             let input_gain = root_decay * transform_row.iter().sum::<f64>();
             for (column, node) in boundary.trace_nodes.iter().copied().enumerate() {
                 generator[z_row * dimension + column] +=
-                    input_gain * mode.trace[column] / operator.primary_mass[node as usize];
+                    input_gain * mode.trace[column] / mass[node as usize];
             }
             for auxiliary_column in 0..3 {
                 generator[z_row * dimension + trace_count + offset + auxiliary_column] += (0..3)
@@ -3242,6 +3256,7 @@ fn outgoing_generator(
 fn apply_outgoing_generator(
     operator: &CanonicalWaveOperator,
     boundary: &CanonicalOutgoingBoundary,
+    mass: &[f64],
     state: &[f64],
 ) -> Result<Vec<f64>, WaveError> {
     let trace_count = boundary.trace_nodes.len();
@@ -3252,8 +3267,8 @@ fn apply_outgoing_generator(
     let mut derivative = vec![0.0; dimension];
     for (position, node) in boundary.trace_nodes.iter().copied().enumerate() {
         let node = node as usize;
-        derivative[position] -= operator.first_order_boundary_damping[node] * state[position]
-            / operator.primary_mass[node];
+        derivative[position] -=
+            operator.first_order_boundary_damping[node] * state[position] / mass[node];
     }
     let (energy_transform, inverse_energy_transform) = pole_energy_transform()?;
     let residues = [6.0 / 7.0, -8.0 / 7.0, 2.0 / 7.0];
@@ -3263,9 +3278,7 @@ fn apply_outgoing_generator(
             .iter()
             .zip(&boundary.trace_nodes)
             .enumerate()
-            .map(|(position, (trace, node))| {
-                trace * state[position] / operator.primary_mass[*node as usize]
-            })
+            .map(|(position, (trace, node))| trace * state[position] / mass[*node as usize])
             .sum::<f64>();
         for (row, trace) in mode.trace.iter().copied().enumerate() {
             derivative[row] -= trace * modal_field;
@@ -4506,7 +4519,7 @@ mod tests {
         let probe = (0..dimension)
             .map(|index| (0.17 * index as f64 + 0.3).sin())
             .collect::<Vec<_>>();
-        let dense = outgoing_generator(&operator, boundary).unwrap();
+        let dense = outgoing_generator(&operator, boundary, operator.primary_mass()).unwrap();
         let dense_product = (0..dimension)
             .map(|row| {
                 (0..dimension)
@@ -4514,11 +4527,18 @@ mod tests {
                     .sum::<f64>()
             })
             .collect::<Vec<_>>();
-        let matrix_free = apply_outgoing_generator(&operator, boundary, &probe).unwrap();
+        let matrix_free =
+            apply_outgoing_generator(&operator, boundary, operator.primary_mass(), &probe).unwrap();
         assert!(maximum_difference(&dense_product, &matrix_free) < 2.0e-12);
 
         let kick = 0.5 * dt;
-        let cache = CanonicalOutgoingMidpointFactor::prepare(&operator, boundary, kick).unwrap();
+        let cache = CanonicalOutgoingMidpointFactor::prepare(
+            &operator,
+            boundary,
+            operator.primary_mass(),
+            kick,
+        )
+        .unwrap();
         let mut midpoint_matrix = vec![0.0; dimension * dimension];
         for row in 0..dimension {
             for column in 0..dimension {
@@ -4526,7 +4546,9 @@ mod tests {
                     f64::from(row == column) - 0.5 * kick * dense[row * dimension + column];
             }
         }
-        let cached = cache.solve(&operator, boundary, &probe).unwrap();
+        let cached = cache
+            .solve(boundary, operator.primary_mass(), &probe)
+            .unwrap();
         let oracle = solve_dense(midpoint_matrix, probe.clone(), dimension).unwrap();
         assert!(maximum_difference(&cached, &oracle) < 2.0e-11);
 

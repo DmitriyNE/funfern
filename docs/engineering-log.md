@@ -5,6 +5,34 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The outgoing maps take their nodal mass as a parameter
+
+- Groundwork for the last refused capability, landed on its own because it
+  changes no behaviour and the whole suite says so.
+- The second-order outgoing boundary's maps - the dense generator, its
+  matrix-free application, the Schur-complement midpoint factorization and its
+  solve - read `operator.primary_mass` in eight places. A time-driven
+  generation's mass moves, so the trace admittance, the modal couplings and the
+  Schur complement all move with it. Those five functions now take the mass as
+  a parameter instead.
+- The point is to avoid a second implementation. Porting roughly 250 lines of
+  dense linear algebra to the temporal path would have left two copies of the
+  same derivation to keep in step, and the agreement between them would have
+  been something to test for. Parameterized, the fixed path passes
+  `operator.primary_mass()` and a driven one will pass the mass in force at the
+  stage, and their agreement is structural.
+- No behaviour change, and the full suite is the evidence: 747 tests pass
+  unchanged.
+- What remains for the capability itself: the force-coupled outgoing kick is
+  still a method on the fixed state, reading its own flux, auxiliaries and
+  cached factor. It gets the same treatment next, and then the temporal state
+  needs its own pole currents. One cost is already visible from the shape - the
+  fixed path prepares its factorization once at construction, and a driven one
+  cannot, because the mass it is built from changes every stage.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (747 passed, 1 known
+  ignored reproducer).
+
 ## 2026-09-22 — Thin gaps compose, and the gap's own store joins the energy
 
 - The fourth boundary capability, and the smallest: a thin gap is a spring

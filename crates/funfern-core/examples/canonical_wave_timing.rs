@@ -47,7 +47,11 @@ fn main() {
         let mut checksum = 0.0;
         for _ in 0..repetitions {
             checksum += factor
-                .solve(&operator, operator.outgoing_boundary().unwrap(), &right)
+                .solve(
+                    operator.outgoing_boundary().unwrap(),
+                    operator.primary_mass(),
+                    &right,
+                )
                 .expect("trace solve")[0];
         }
         (
