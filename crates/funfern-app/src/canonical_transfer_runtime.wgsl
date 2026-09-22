@@ -252,11 +252,16 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
     new_control.accepted_accounting_b = old_control.accepted_accounting_b;
     new_control.candidate_accounting_a = old_control.accepted_accounting_a;
     new_control.candidate_accounting_b = old_control.accepted_accounting_b;
+    // A side carries no runtime bank when its medium does not move, and a
+    // medium can start or stop moving across a handoff. So zero records on
+    // either side is legitimate: with none at the source every target record is
+    // written from its own authored anchors, and with none at the target there
+    // is nothing to write. What still has to hold is that a side claiming
+    // records is a temporal generation that has them.
     if source_drives > old_control.counts_c.z
         || (material_header.w != 0u
-            && (material_header.y == 0u || material_header.z == 0u
-                || old_control.runtime_slots.w == 0u
-                || new_control.runtime_slots.w == 0u))
+            && ((material_header.y != 0u && old_control.runtime_slots.w == 0u)
+                || (material_header.z != 0u && new_control.runtime_slots.w == 0u)))
         || !all(current_origin >= vec2<f32>(-MAX_FINITE))
         || !all(current_origin <= vec2<f32>(MAX_FINITE)) {
         reject(STATUS_LAYOUT);
