@@ -337,9 +337,28 @@ The index sits near 0.7 rather than near 1, so a driven accuracy target must be
 set against that number instead of inheriting the static 6%; the refinement
 controller itself remains untouched.
 
-A driven accuracy target, application enablement, supported boundary
-compositions, a real-device gate over an adaptive run on a modulated scene and
-the incremental-cost measurement remain.
+Supported boundary compositions under modulation are now closed on the CPU
+reference. Prescribed data, volume sources, loss, a first-order absorbing wall,
+thin gaps and a second-order outgoing boundary each compose with a driven
+medium, each with its own accounting lane, and each verified two ways: an inert
+generation reproduces the fixed path exactly, and a driven one keeps a
+second-order energy balance under refinement. `conservative_bulk_supported` has
+narrowed from a gate refusing everything into a statement about the absence of
+each exchange lane, with `forced_composition_supported` carrying what the
+stepper runs. One combination stays refused and named: prescribed data on an
+outgoing trace.
+
+Two results belong to the cost and accuracy records rather than to a gate. The
+specification's concession of first-order accuracy for a varying loss rate is
+not needed - reading each Strang half map's rate at its own interval midpoint
+keeps second order. And a driven generation must rebuild the outgoing Schur
+complement at every stage, where a fixed one factorizes once at construction;
+that is the first asymptotic difference between the two paths rather than a
+constant factor, and belongs in the incremental-cost measurement.
+
+Application enablement, a GPU path and device gate for the forced composition,
+a calibrated frozen-impedance reflection curve and the incremental-cost
+measurement remain.
 
 Implement stage-time coefficient evaluation on both physical sides, harmonic/smoothed-square/travelling drives, Switch stamping, phase anchors, ramp reversal and trajectory bounds. Sample travelling phase in actual material frames at nodes/quadrature. Validate reciprocal factors as reciprocal trajectories, not newly interpolated endpoints.
 
