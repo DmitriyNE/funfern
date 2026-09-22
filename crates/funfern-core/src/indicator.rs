@@ -49,11 +49,17 @@ pub struct CanonicalIndicatorSnapshot {
 pub struct CanonicalIndicatorSupplement {
     pub mesh_revision: u64,
     pub element_complementary_recovery: Vec<f64>,
+    /// The face jump of the solver's own flux, when this supplement carries
+    /// one. `None` says it does not, which is what the fixed path returns, and
+    /// is what keeps a runtime paired with a fixed supplement from silently
+    /// replacing the scalar jump with nothing.
+    pub element_complementary_jump: Option<Vec<f64>>,
     pub element_cell_residual: Vec<f64>,
     pub element_boundary_residual: Vec<f64>,
     pub element_energy: Vec<f64>,
     pub drift_contribution: f64,
     pub complementary_recovery_contribution: f64,
+    pub complementary_jump_contribution: f64,
     pub thin_gap_contribution: f64,
     pub outgoing_contribution: f64,
 }
@@ -431,11 +437,13 @@ pub fn canonical_indicator_supplement(
     Ok(CanonicalIndicatorSupplement {
         mesh_revision: mesh.mesh_revision,
         element_complementary_recovery,
+        element_complementary_jump: None,
         element_cell_residual,
         element_boundary_residual,
         element_energy,
         drift_contribution,
         complementary_recovery_contribution,
+        complementary_jump_contribution: 0.0,
         thin_gap_contribution,
         outgoing_contribution,
     })
@@ -542,6 +550,10 @@ pub struct SolutionIndicatorReport {
     pub displacement_recovery_contribution: f64,
     pub velocity_recovery_contribution: f64,
     pub complementary_recovery_contribution: f64,
+    /// Measured on the temporal path and summed into nothing, so the candidate
+    /// term can be compared against the scalar jump it would replace before
+    /// anything depends on it.
+    pub complementary_jump_contribution: f64,
     pub cell_residual_contribution: f64,
     pub interior_jump_contribution: f64,
     pub boundary_residual_contribution: f64,
@@ -584,6 +596,7 @@ impl Default for SolutionIndicatorReport {
             displacement_recovery_contribution: 0.0,
             velocity_recovery_contribution: 0.0,
             complementary_recovery_contribution: 0.0,
+            complementary_jump_contribution: 0.0,
             cell_residual_contribution: 0.0,
             interior_jump_contribution: 0.0,
             boundary_residual_contribution: 0.0,
@@ -1158,12 +1171,17 @@ impl SolutionIndicatorJob {
         if self.canonical.as_ref().is_some_and(|supplement| {
             supplement.mesh_revision != self.mesh.mesh_revision
                 || supplement.element_complementary_recovery.len() != self.mesh.triangles.len()
+                || supplement
+                    .element_complementary_jump
+                    .as_ref()
+                    .is_some_and(|jump| jump.len() != self.mesh.triangles.len())
                 || supplement.element_cell_residual.len() != self.mesh.triangles.len()
                 || supplement.element_boundary_residual.len() != self.mesh.triangles.len()
                 || supplement.element_energy.len() != self.mesh.triangles.len()
                 || supplement
                     .element_complementary_recovery
                     .iter()
+                    .chain(supplement.element_complementary_jump.iter().flatten())
                     .chain(&supplement.element_cell_residual)
                     .chain(&supplement.element_boundary_residual)
                     .chain(&supplement.element_energy)
@@ -1568,6 +1586,25 @@ impl SolutionIndicatorJob {
         ])
     }
 
+    /// Whether the gradient-based error terms read the solver's own flux
+    /// instead of a gradient of the reconstructed scalar field.
+    ///
+    /// Only under a runtime, and only when the supplement actually carries the
+    /// flux jump. The scalar terms differentiate the nodal primary quotient
+    /// `Q/M`, and a spatially patterned mass makes that quotient carry a
+    /// lumping error patterned at the modulation wavenumber - invisible in the
+    /// field's own norm, and dominant in anything that differentiates it
+    /// across a face. Measured on a travelling mass modulation, the scalar
+    /// interior jump converges at `h^1.2` and the scalar displacement recovery
+    /// at `h^1.5`, while the flux terms converge at `h^4` on the same runs.
+    fn substitutes_canonical_gradients(&self) -> bool {
+        self.runtime.is_some()
+            && self
+                .canonical
+                .as_ref()
+                .is_some_and(|canonical| canonical.element_complementary_jump.is_some())
+    }
+
     /// The coefficients every error term measures against. Under a runtime
     /// these are the instantaneous ones; the authored form survives only where
     /// a size limit needs it.
@@ -1692,8 +1729,12 @@ impl SolutionIndicatorJob {
             let displacement_recovery =
                 weight * geometry.area * (flux_u - recovered_u).dot(flux_u - recovered_u)
                     / stiffness_scale;
+            // Still reported when it is not used, because the breakdown is
+            // what shows the substitution doing its job.
             estimate.displacement_recovery += displacement_recovery;
-            estimate.recovery += displacement_recovery;
+            if !self.substitutes_canonical_gradients() {
+                estimate.recovery += displacement_recovery;
+            }
             if self.canonical.is_none() {
                 let grad_v = gradient(&self.snapshot.velocity, nodes, gradients);
                 let recovered_v = recovered[0].1 * barycentric[0]
@@ -1723,8 +1764,15 @@ impl SolutionIndicatorJob {
         }
         self.total_energy += estimate.energy;
         self.total_area += estimate.area;
+        let substitutes = self.substitutes_canonical_gradients();
         if let Some(canonical) = &self.canonical {
             estimate.recovery += canonical.element_complementary_recovery[index];
+            // Only where the scalar jump stepped aside for it. A supplement
+            // can carry the term without the estimator having substituted,
+            // and adding both would count one defect twice.
+            if substitutes && let Some(jump) = &canonical.element_complementary_jump {
+                estimate.interior_jump += jump[index];
+            }
             estimate.cell_residual += canonical.element_cell_residual[index];
             estimate.boundary_residual += canonical.element_boundary_residual[index];
             estimate.energy += canonical.element_energy[index];
@@ -1741,7 +1789,7 @@ impl SolutionIndicatorJob {
             return Ok(());
         }
         let (edge, sides) = &self.edge_list[index];
-        if sides.len() == 2 {
+        if sides.len() == 2 && !self.substitutes_canonical_gradients() {
             let points = [
                 self.mesh.vertices[edge.0].point,
                 self.mesh.vertices[edge.1].point,
@@ -2028,6 +2076,7 @@ impl SolutionIndicatorJob {
             self.report.canonical_drift_contribution = canonical.drift_contribution;
             self.report.complementary_recovery_contribution =
                 canonical.complementary_recovery_contribution;
+            self.report.complementary_jump_contribution = canonical.complementary_jump_contribution;
             self.report.thin_gap_history_contribution = canonical.thin_gap_contribution;
             self.report.outgoing_history_contribution = canonical.outgoing_contribution;
         }

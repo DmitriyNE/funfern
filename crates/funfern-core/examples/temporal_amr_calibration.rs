@@ -110,6 +110,13 @@ fn main() {
                     report.canonical_drift_contribution,
                     report.boundary_residual_contribution
                 );
+                // The candidate that would replace the scalar jump, printed
+                // beside it and summed into nothing. What decides the switch
+                // is whether this column converges where that one stalls.
+                println!(
+                    "       candidate complementary jump {:.3e}",
+                    report.complementary_jump_contribution
+                );
             }
         }
         let spread = indices.iter().copied().fold(0.0_f64, f64::max)

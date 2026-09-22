@@ -5,6 +5,87 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The estimate reads the solver's own flux, and is calibrated on every medium tried
+
+- Under a material runtime the gradient-based error terms no longer
+  differentiate the reconstructed scalar field. The interior flux jump and the
+  displacement recovery step aside for the complementary flux jump and the
+  complementary recovery, both taken from the state the solver actually stores.
+  Without a runtime nothing changes, so the static path keeps its behaviour and
+  its `6%` target untouched.
+- Built the falsifier first and it did its job twice. The first version
+  measured the jump in `(S b) . n` and read `1e-32` against a scalar jump of
+  `1e-5` - structural zero, not a small error. The direct state keeps its
+  complementary variable in a quarter-turn-rotated frame, the reference map
+  being `rotate_tensor(stiffness)`, and `b` evolves from the curl of the
+  primary field, so `(S b) . n` across a face is a tangential derivative of a
+  single-valued edge trace and is identical from both sides by construction.
+  The informative component is the tangential one, which is the scalar
+  `[[A grad(u) . n]]` carried through that rotation.
+- With the component fixed, the decision rule set in advance was met. The
+  candidate converges at `h^4` on every medium, including the two where the
+  scalar jump stalls:
+
+  | Medium | Scalar jump | Flux jump |
+  | --- | --- | --- |
+  | inert | `h^4.26` | `h^4.19` |
+  | mass travelling, `k=3` | `h^1.19` | `h^4.00` |
+  | both travelling, `k=3` | `h^1.46` | `h^3.96` |
+
+- After the substitution the efficiency index is near enough medium-independent
+  over 15x the unknowns, which it has never been before:
+
+  | Medium | Index | Spread |
+  | --- | --- | --- |
+  | inert | 0.80, 0.68, 0.73 | 1.18x |
+  | mass pumped | 0.86, 0.73, 0.78 | 1.18x |
+  | mass travelling, `k=0.75` | 0.82, 0.72, 0.76 | 1.14x |
+  | mass travelling, `k=3` | 0.75, 0.66, 0.67 | 1.14x |
+  | stiffness pumped | 0.82, 0.69, 0.74 | 1.18x |
+  | stiffness travelling, `k=3` | 0.78, 0.70, 0.74 | 1.12x |
+  | both travelling, `k=3` | 0.72, 0.64, 0.67 | 1.12x |
+
+- Every spread is now tighter than the inert control's own 1.22x was before,
+  and the drift with refinement is gone. That drift was the real damage: a
+  fixed target used to map to a different true error at every mesh, so a
+  controller would have refined at the modulation pattern and never settled.
+- **The level moved and the constant is no longer near one.** The index sits
+  around 0.7 rather than around 1.4, so the estimate now reads about 1.4x
+  optimistic where it used to read pessimistic. That is a consequence of
+  dropping the scalar displacement recovery, which carried real magnitude on
+  the inert control too. It is a calibration constant, not a drift: it is the
+  same 0.64 to 0.86 across seven media that differ in driven row, spatial
+  pattern and wavenumber. A driven accuracy target has to be set against this
+  number rather than inheriting the static `6%`, and until that target is
+  chosen the driven estimate is optimistic, which is the opposite of the
+  direction the previous entry could claim.
+- Chose this over the two alternatives for a reason that outlives the defect.
+  `S b` at an element's own six samples is exactly the form a Stage 8 nonlinear
+  constitutive inverse can produce; `A grad(u)` at an interpolated point is not,
+  which is why the consumers were realigned in the first place. Inverting the
+  mass consistently would have made the estimator measure a field the solver
+  does not have, and reporting only the canonical terms on a patterned mass row
+  would have made one number mean different things on different scenes.
+- The substitution is gated on the supplement declaring it carries a flux jump,
+  not merely on a runtime being present. `element_complementary_jump` is an
+  `Option`, `None` on the fixed path. A runtime paired with a fixed supplement
+  therefore keeps the scalar terms rather than silently replacing them with
+  zeros, and a supplement carrying the term without a runtime does not get it
+  counted on top of the scalar jump. Both directions are tested.
+- The scalar displacement recovery is still computed and still reported in the
+  breakdown while excluded from the total, because that column is what shows
+  the substitution actually happened.
+- Still open, and unchanged by this: the strong cell residual continues to
+  differentiate the nodal quotient `Q/M`. It is small on these fixtures - the
+  drift column runs `1e-16` against a jump of `1e-7` - so it does not bind
+  here, but it is the same construction that broke the other two terms and it
+  would bind on a medium that excites it.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (739 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`. The
+  temporal path is still dormant in the app, so no production estimate changes
+  with this.
+
 ## 2026-09-22 — The estimator samples the instant, and what breaks it is narrower than reported
 
 - Landed the approved fix: the scalar estimator's material samples are now

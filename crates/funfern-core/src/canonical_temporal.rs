@@ -748,6 +748,127 @@ pub fn canonical_temporal_indicator_supplement(
     }
     let complementary_recovery_contribution = element_complementary_recovery.iter().sum();
 
+    // Candidate replacement for the scalar interior flux jump, measured here
+    // but summed into nothing: whether it converges is the question that
+    // decides whether the estimator should switch to it.
+    //
+    // The direct state keeps its complementary variable in a frame rotated by
+    // a quarter turn - the reference map is `rotate_tensor(stiffness)` - and
+    // `b` evolves from the curl of the primary field. So `(S b) . n` across a
+    // face is a tangential derivative of a single-valued edge trace and is
+    // identical from both sides by construction: measured, that jump is `1e-32`
+    // against a scalar jump of `1e-5`, which is structural zero, not a small
+    // error. The informative component is the tangential one, which is the
+    // scalar `[[A grad(u) . n]]` carried through that rotation.
+    //
+    // What makes it a candidate at all is where it comes from. The scalar term
+    // differentiates the nodal primary quotient `Q/M`, and a spatially
+    // patterned mass makes that quotient carry a patterned lumping error. This
+    // one reads a variable the solver stores independently per element and
+    // inverts at that element's own six samples, so no nodal mass enters it.
+    let mut element_complementary_jump = vec![0.0; element_count];
+    let mut faces = BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (element, triangle) in mesh.triangles.iter().enumerate() {
+        for local in 0..3 {
+            let start = triangle.vertices[local];
+            let end = triangle.vertices[(local + 1) % 3];
+            faces
+                .entry((start.min(end), start.max(end)))
+                .or_default()
+                .push(element);
+        }
+    }
+    for ((start_vertex, end_vertex), sides) in &faces {
+        let [left, right] = sides[..] else {
+            continue;
+        };
+        let ends = [
+            mesh.vertices[*start_vertex].point,
+            mesh.vertices[*end_vertex].point,
+        ];
+        let length = (ends[1] - ends[0]).norm();
+        if !length.is_finite() || length <= 0.0 {
+            return Err(WaveError::InvalidMesh("invalid temporal indicator face"));
+        }
+        let mut integrals = [0.0; 2];
+        for (fraction, weight) in [
+            (0.112_701_665_379_258_3, 5.0 / 18.0),
+            (0.5, 8.0 / 18.0),
+            (0.887_298_334_620_741_7, 5.0 / 18.0),
+        ] {
+            let mut difference = Point2::default();
+            let mut scales = [0.0; 2];
+            for (side, element) in [left, right].into_iter().enumerate() {
+                let triangle = mesh.triangles[element];
+                let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+                // The point sits on one of this element's own edges, so its
+                // barycentric coordinates are exact rather than solved for.
+                let local_start = triangle
+                    .vertices
+                    .iter()
+                    .position(|vertex| vertex == start_vertex)
+                    .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
+                let local_end = triangle
+                    .vertices
+                    .iter()
+                    .position(|vertex| vertex == end_vertex)
+                    .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
+                let mut barycentric = [0.0; 3];
+                barycentric[local_start] = 1.0 - fraction;
+                barycentric[local_end] = fraction;
+                let interpolation =
+                    complementary_interpolation_weights(sample_points, barycentric)?;
+                let start = element * 6;
+                let mut flux = Point2::default();
+                let mut map = SymmetricTensor2::default();
+                for (sample, weight) in interpolation.into_iter().enumerate() {
+                    let inverse = inverses[start + sample];
+                    flux =
+                        flux + inverse.apply(snapshot.complementary_flux[start + sample]) * weight;
+                    map = SymmetricTensor2::new(
+                        map.xx + inverse.xx * weight,
+                        map.xy + inverse.xy * weight,
+                        map.yy + inverse.yy * weight,
+                    );
+                }
+                // The interpolated map normalizes the jump exactly as the
+                // scalar term's pointwise stiffness does. An extrapolating
+                // weight can leave it indefinite, which the six-sample mean
+                // cannot, and the two differ by `O(h)` in a smooth medium.
+                let scale = map.determinant().sqrt();
+                scales[side] = if scale.is_finite() && scale > 0.0 {
+                    scale
+                } else {
+                    let mean =
+                        (start..start + 6).fold(SymmetricTensor2::default(), |sum, index| {
+                            SymmetricTensor2::new(
+                                sum.xx + inverses[index].xx / 6.0,
+                                sum.xy + inverses[index].xy / 6.0,
+                                sum.yy + inverses[index].yy / 6.0,
+                            )
+                        });
+                    let mean = mean.determinant().sqrt();
+                    if mean.is_finite() && mean > 0.0 {
+                        mean
+                    } else {
+                        return Err(WaveError::InvalidCoefficients);
+                    }
+                };
+                let _ = points;
+                difference = difference + flux * if side == 0 { 1.0 } else { -1.0 };
+            }
+            let tangent = (ends[1] - ends[0]) / length;
+            let jump = difference.dot(tangent);
+            for (integral, scale) in integrals.iter_mut().zip(scales) {
+                *integral += weight * length * jump * jump / scale;
+            }
+        }
+        for (element, integral) in [left, right].into_iter().zip(integrals) {
+            element_complementary_jump[element] += 0.5 * length * integral;
+        }
+    }
+    let complementary_jump_contribution = element_complementary_jump.iter().sum();
+
     // Primary energy uses the mass in force now, so a modulated element is
     // not credited with the storage its authored coefficient would have.
     let mass = operator.primary_mass_at(time, runtime)?;
@@ -791,11 +912,13 @@ pub fn canonical_temporal_indicator_supplement(
     Ok(CanonicalIndicatorSupplement {
         mesh_revision: mesh.mesh_revision,
         element_complementary_recovery,
+        element_complementary_jump: Some(element_complementary_jump),
         element_cell_residual,
         element_boundary_residual,
         element_energy,
         drift_contribution,
         complementary_recovery_contribution,
+        complementary_jump_contribution,
         // The conservative bulk carries neither, by the contract checked
         // above; they are zero rather than unreported.
         thin_gap_contribution: 0.0,
@@ -2824,6 +2947,159 @@ mod tests {
                 equivalent.smallest_wavelength_target
             ));
         }
+    }
+
+    /// The substitution that makes the estimate survive a patterned medium:
+    /// under a runtime the gradient-based terms read the solver's own flux
+    /// instead of differentiating the reconstructed scalar field.
+    ///
+    /// Three things have to hold at once. The scalar interior jump has to step
+    /// aside entirely, or its stalling term would still dominate. The scalar
+    /// displacement recovery has to leave the total while staying in the
+    /// breakdown, because that is what shows the substitution happened. And a
+    /// runtime paired with a supplement that carries no flux jump must change
+    /// nothing at all, or a caller could silently replace the scalar terms
+    /// with nothing.
+    #[test]
+    fn a_runtime_moves_the_gradient_terms_onto_the_solver_flux() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
+            depth: ScalarField::constant(0.22),
+            frequency_hz: ScalarField::constant(0.9),
+            phase_radians: ScalarField::constant(0.15),
+            wavenumber: ScalarField::constant(3.0),
+            angle_radians: ScalarField::constant(0.3),
+        };
+        let mut authored = scene.clone();
+        strip_temporal_laws(&mut authored.materials);
+
+        let mesh = std::sync::Arc::new(
+            mesh_scene(
+                &authored,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.3,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap(),
+        );
+        let quadratic = std::sync::Arc::new(
+            QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &authored,
+                OuterBoundaryCondition::Reflecting,
+            )
+            .unwrap(),
+        );
+        let temporal =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let runtime = temporal.initial_runtime();
+        let base = temporal.base();
+        let time_step = 0.4 * temporal.maximum_time_step();
+        let primary = base
+            .node_points()
+            .iter()
+            .map(|point| 0.07 + 0.04 * (1.9 * point.x - 1.2 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.03 * (1.4 * point.x + 1.1 * point.y).cos())
+            .collect::<Vec<_>>();
+        let state =
+            CanonicalWaveState::from_primary_and_potential(base, time_step, &primary, &potential)
+                .unwrap();
+        let mut next = state.clone();
+        next.step(base).unwrap();
+        let snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            primary_flux: next.primary_flux().to_vec(),
+            previous_primary_flux: state.primary_flux().to_vec(),
+            complementary_flux: next.complementary_flux().to_vec(),
+            previous_complementary_flux: state.complementary_flux().to_vec(),
+            auxiliary: vec![],
+            previous_auxiliary: vec![],
+            time: time_step,
+            time_step,
+        };
+        let supplement =
+            canonical_temporal_indicator_supplement(&mesh, &temporal, &snapshot, &runtime, 0.0)
+                .unwrap();
+        assert!(supplement.element_complementary_jump.is_some());
+        assert!(supplement.complementary_jump_contribution > 0.0);
+
+        let count = quadratic.degrees_of_freedom();
+        let field = temporal
+            .primary_field_at(&snapshot.primary_flux, snapshot.time, &runtime)
+            .unwrap();
+        let scalar_snapshot = QuadraticSolutionSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            displacement: field,
+            velocity: vec![0.0; count],
+            acceleration: vec![0.0; count],
+            auxiliary: vec![0.0; count],
+            volume_acceleration: vec![0.0; count],
+            time: snapshot.time,
+            time_step,
+        };
+        let options = SolutionIndicatorOptions::default();
+        let report = |supplement: CanonicalIndicatorSupplement, driven: bool| {
+            let mut job = SolutionIndicatorJob::new(
+                mesh.clone(),
+                quadratic.clone(),
+                if driven {
+                    scene.clone()
+                } else {
+                    authored.clone()
+                },
+                scalar_snapshot.clone(),
+                options,
+            )
+            .with_canonical_supplement(supplement);
+            if driven {
+                job = job.with_instantaneous_materials(runtime.clone());
+            }
+            loop {
+                if let Some(result) = job.advance(8_192) {
+                    return result.unwrap().report;
+                }
+            }
+        };
+
+        let substituted = report(supplement.clone(), true);
+        // The scalar jump contributed nothing, so the whole interior jump is
+        // the flux one.
+        let close = |left: f64, right: f64| {
+            (left - right).abs() <= 1.0e-12 * left.abs().max(right.abs()).max(1.0)
+        };
+        assert!(close(
+            substituted.interior_jump_contribution,
+            substituted.complementary_jump_contribution
+        ));
+        // Measured but not counted.
+        assert!(substituted.displacement_recovery_contribution > 0.0);
+        assert!(close(
+            substituted.recovery_contribution,
+            supplement.complementary_recovery_contribution
+        ));
+
+        // Same supplement, no runtime: the scalar terms keep the estimate and
+        // the flux jump is not folded in on top of them.
+        let scalar = report(supplement.clone(), false);
+        assert!(scalar.interior_jump_contribution > substituted.interior_jump_contribution);
+        assert!(scalar.recovery_contribution > substituted.recovery_contribution);
+
+        // A runtime with a supplement that carries no flux jump must not
+        // substitute, or the estimate would silently lose its gradient terms.
+        let mut without = supplement.clone();
+        without.element_complementary_jump = None;
+        let unsubstituted = report(without, true);
+        assert!(unsubstituted.interior_jump_contribution > substituted.interior_jump_contribution);
+        assert!(unsubstituted.displacement_recovery_contribution > 0.0);
+        assert!(
+            unsubstituted.recovery_contribution > supplement.complementary_recovery_contribution
+        );
     }
 
     /// An inert medium must not notice the runtime at all, or the temporal
