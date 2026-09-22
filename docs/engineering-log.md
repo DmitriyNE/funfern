@@ -38,13 +38,27 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   rather than stored ("presets are snapshots, not hidden live bindings"), and a
   preset whose law is not implemented is filtered out of the selector rather
   than offered and refused. So every document a user can author assembles.
-- Open, and flagged rather than decided: section 5.1 makes the direct
-  constitutive coefficient authoritative - mechanical `s0 = 1/k0` corresponds to
-  epsilon - while the code stores `k0` and the editor labels it that way. The
-  advanced mechanical view needs that settled, because it is specified to
-  present `s0` and to round-trip a spatial `k0` without expression growth.
-  Nothing in this entry depends on it; the summary names the rows as the editor
-  does today.
+- The `s0` question was already settled, and I first recorded it as an open
+  divergence in error. There is no storage conflict: the two stored slots are
+  skin-relative and `convert_material` is the ground truth for what they mean -
+  crossing to EM sets `mass_density = 1/stiffness` and `stiffness = mass_density`,
+  so mechanical `s0 = 1/k0` is epsilon and mechanical `rho` is mu, exactly as
+  section 5.1 says, and both editor labels are right.
+- What the decision actually covers is Kerr. Orthodox Kerr is a law on the
+  *direct* coefficient, `D = eps (1 + chi |E|^2) E`. In EM that is the stored
+  mass slot, so it is ordinary; in Mechanical the same medium's epsilon is
+  `s0 = 1/k0` while the stored slot is `k0`, and writing `1 + chi u^2` on `k0`
+  gives `s = s0/(1 + chi u^2)`, a different medium. So: author on the direct
+  coefficient, keep `k0` as a derived editing view, and where a reciprocal law
+  is genuinely wanted express it with explicit `inverted` semantics as its own
+  map. Section 5.4 validates the two separately, which is the proof they differ
+  - the direct polynomial's tangent is `1 + 2 chi1 u + 3 chi2 u^2` and the
+  reciprocal's numerator is `1 - chi2 u^2`, and direct Saturable admits
+  `a > -8/9` where reciprocal Saturable admits `a < 8` or `a > -1`.
+- What remains is only the advanced mechanical *presentation* of `s0`, not a
+  storage change. `ScalarField::reciprocal` goes through `simplify`, whose
+  `simplify_once` carries a `1/(1/x) -> x` rule, so opening and closing that
+  view already round-trips a spatial `k0` without expression growth.
 - Loss channels are not in the summary yet. Their slot is authored but no path
   executes a driven one, and naming the two channels in the mechanical skin is a
   question for the advanced view rather than for this function.
