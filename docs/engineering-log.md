@@ -5,6 +5,54 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The law catalogue, written down and read back
+
+- The catalogue of material laws existed only in conversation. It is now
+  [docs/material-law-catalogue.md](material-law-catalogue.md), by slot and ID,
+  with what each law does to a wave, how it is stored, and whether it runs.
+  Linked from architecture and from section 5.1 of the material-laws plan,
+  whose slot table is the schema it is drawn against.
+- Writing it out turned up that **slot K's time-driven half is not deferred**.
+  The catalogue had it as future work; `canonical_temporal.rs` evaluates
+  `stiffness_law.drive` and `temporal_amr_calibration` crosses a driven mass row
+  against a driven stiffness row against both. K-T1 to K-T4 run. That makes the
+  reflectionless time interface - modulate `m` and `K` so `Z = sqrt(mK)` holds
+  still - available now, expressible as one drive per row with `inverted` on
+  one, and falsifiable against M-T1's reflecting interface.
+- Also: the variant named `TimeCrystal` is M-T4, the smoothed square, while band
+  gaps are M-T2's phenomenon. Controls must carry the catalogue's phenomenon
+  names, not the Rust variant names, or the selector points at the wrong law.
+- What runs today: the whole time-driven row of M and K, plus M-T1's Switch.
+  Everything field-driven sits behind gate C, the restoring row and van der Pol
+  behind gate O, and a driven loss channel behind a composition the timed
+  evaluator refuses outright. The refusals are in `linear_material_sample` and
+  `evaluate_timed_directional_material_library_at`; the catalogue names both.
+- First piece of the authoring UI: `law_summary` in core, the effective-law
+  text. One line per coefficient a law modifies and nothing for one left alone,
+  in two registers - authored names for the preset view, evaluated numbers for
+  the advanced one. It lives in core because it has to stay true to what the
+  solver evaluates: every match is exhaustive, so a new catalogue entry cannot
+  be added without saying what it reads as.
+- Section 11 of the plan specifies this UI in more detail than I had planned it,
+  and corrected two things: preset identity is recovered by structural match
+  rather than stored ("presets are snapshots, not hidden live bindings"), and a
+  preset whose law is not implemented is filtered out of the selector rather
+  than offered and refused. So every document a user can author assembles.
+- Open, and flagged rather than decided: section 5.1 makes the direct
+  constitutive coefficient authoritative - mechanical `s0 = 1/k0` corresponds to
+  epsilon - while the code stores `k0` and the editor labels it that way. The
+  advanced mechanical view needs that settled, because it is specified to
+  present `s0` and to round-trip a spatial `k0` without expression growth.
+  Nothing in this entry depends on it; the summary names the rows as the editor
+  does today.
+- Loss channels are not in the summary yet. Their slot is authored but no path
+  executes a driven one, and naming the two channels in the mechanical skin is a
+  question for the advanced view rather than for this function.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`.
+- Next: the three-way editor mode - Linear, presets, Advanced - with the
+  summary above the controls in the latter two.
+
 ## 2026-09-22 — A driven medium can stand behind a second-order wall
 
 - Implements the previous entry. `prepare` no longer takes a nodal mass: it
