@@ -2566,6 +2566,21 @@ above:
 
 ## Current TODOs
 
+Outgoing-boundary construction, not urgent:
+
+- [ ] The second-order outgoing assembly is the dominant reassembly cost -
+  `280.88 ms` against `4.99 ms` without that boundary on an 8938-DOF mesh, about
+  ninety-eight per cent of the compile, and it is a dense symmetric
+  eigendecomposition of the tangential operator over the trace. Worth attacking
+  on its own terms rather than only as a prerequisite for driven media. One
+  shape suggested: start from the first-order approximation, which needs no
+  decomposition at all, and improve the boundary while the simulation runs -
+  a Krylov process producing the dominant modes first. It would fit the
+  existing structure, which is already a truncated modal rational
+  approximation with fixed residues and already drops modes whose decay falls
+  below a threshold; whether the accuracy can be raised mid-run without
+  disturbing the accepted history is the part to check first.
+
 Found while pacing the solver, not yet diagnosed:
 
 - [ ] `simulated_time()` runs backwards for a frame or two at a handoff. The
