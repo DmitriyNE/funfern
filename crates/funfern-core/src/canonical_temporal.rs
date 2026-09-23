@@ -1,10 +1,12 @@
-//! Dormant f64 reference for Stage 7 time-driven, field-linear media.
+//! f64 reference for time-driven and field-dependent media.
 //!
-//! The accepted production operator remains the fixed linear
-//! [`CanonicalWaveOperator`]. This wrapper compiles exact material-frame law
-//! samples beside that operator and evaluates them at synchronized stage
-//! times. Keeping the paths separate until the temporal gates close prevents
-//! a valid authored drive from being silently executed as a static material.
+//! The fixed linear [`CanonicalWaveOperator`] stays the base. This wrapper
+//! compiles exact material-frame law samples beside it and evaluates them at
+//! synchronized stage times. Time-driven, field-linear generations run on the
+//! device from this contract (Stage 7). Field-dependent ones (Kerr and
+//! saturable, Stage 8) run here only: each stage inverts the assembled nodal
+//! map and the radial quadrature map with a bracketed solve, and the device
+//! refuses them until Stage 9 ports that solve.
 
 use std::collections::BTreeSet;
 
@@ -14,13 +16,13 @@ use std::sync::Arc;
 use crate::{
     CanonicalAreaContribution, CanonicalAreaSample, CanonicalForcing, CanonicalIndicatorSnapshot,
     CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil,
-    CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, DampingLaw, DampingLawValues,
-    ElectromagneticPolarization, FieldLaw, LossChannel, Material, MaterialCoordinates,
-    MaterialError, MaterialId, MaterialSwitchRuntime, PhysicsModel, Point2, QuadraticAreaElement,
-    QuadraticAreaStencil, QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues,
-    RegionId, RestoringLaw, Scene, SymmetricTensor2, TimeDriveRuntime, TimeDriveValues,
-    TopologyWaveModel, TriMesh, WaveError, canonical_area_contribution,
-    complementary_interpolation_weights,
+    CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, ConstitutiveInverseError,
+    ConstitutiveSite, ConstitutiveTerm, DampingLaw, DampingLawValues, ElectromagneticPolarization,
+    FieldLawValues, LossChannel, Material, MaterialCoordinates, MaterialError, MaterialId,
+    MaterialSwitchRuntime, PhysicsModel, Point2, QuadraticAreaElement, QuadraticAreaStencil,
+    QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues, RegionId, RestoringLaw,
+    Scene, SymmetricTensor2, TimeDriveRuntime, TimeDriveValues, TopologyWaveModel, TriMesh,
+    WaveError, canonical_area_contribution, complementary_interpolation_weights,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +251,12 @@ impl CanonicalMaterialRuntimeState {
     }
 }
 
+/// Probe and area consumers interpolate linear maps. On a field-dependent
+/// medium they would read the wrong field without a word, so they refuse
+/// until they are ported onto the solver-site inverses.
+const CONSUMER_FIELD_LAWS: &str =
+    "probes and area readouts are not yet ported to field-dependent media";
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TemporalCoefficientSample {
     material: MaterialId,
@@ -349,6 +357,9 @@ impl CanonicalTemporalPointStencil {
         stencil: QuadraticPointStencil,
         operator: &CanonicalTemporalWaveOperator,
     ) -> Result<Self, WaveError> {
+        if operator.has_field_laws {
+            return Err(WaveError::Unsupported(CONSUMER_FIELD_LAWS));
+        }
         let fixed = CanonicalPointStencil::from_quadratic(stencil, operator.base())?;
         let element = stencil.element as usize;
         let start = element
@@ -546,6 +557,9 @@ impl CanonicalTemporalAreaContribution {
         element: QuadraticAreaElement,
         operator: &CanonicalTemporalWaveOperator,
     ) -> Result<Self, WaveError> {
+        if operator.has_field_laws {
+            return Err(WaveError::Unsupported(CONSUMER_FIELD_LAWS));
+        }
         let fixed = canonical_area_contribution(element, operator.base())?;
         let parent = element.element as usize;
         let start = parent
@@ -1337,6 +1351,9 @@ pub fn sample_temporal_canonical_area(
     {
         return Err(WaveError::InvalidState);
     }
+    if operator.has_field_laws {
+        return Err(WaveError::Unsupported(CONSUMER_FIELD_LAWS));
+    }
     // The assembled nodal map at this instant. Every node's inverse mass is
     // the one the solver itself would use for a step at `time`.
     let mass = operator.primary_mass_at(time, runtime)?;
@@ -1445,8 +1462,10 @@ pub struct CanonicalTemporalLossRates {
     pub complementary: Vec<f64>,
 }
 
-/// A field-linear, time-driven f64 oracle. It is deliberately not accepted by
-/// the production GPU solver until the remaining Stage 7 gates pass.
+/// The time-driven and field-dependent f64 oracle. The kick/drift split is
+/// unchanged by a field law, because the Hamiltonian stays separable,
+/// `H_Q(Q, t) + H_b(b, t)`: only the two observables `U(Q)` and `v(b)` become
+/// inverses of nonlinear maps.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalTemporalWaveOperator {
     /// Shared, because an application that assembled this base through its own
@@ -1456,6 +1475,15 @@ pub struct CanonicalTemporalWaveOperator {
     complementary: Vec<TemporalComplementarySample>,
     initial_runtime: CanonicalMaterialRuntimeState,
     has_temporal_laws: bool,
+    /// Whether any sample's coefficient follows its own field. Such a
+    /// generation inverts its constitutive maps by the bracketed solve at
+    /// every stage; without one, every map is the linear division it was.
+    has_field_laws: bool,
+    /// Primary contributions grouped by node, in contribution order, so each
+    /// node's assembled nonlinear map is one contiguous run of terms. Empty
+    /// when no law follows the field.
+    node_contribution_offsets: Vec<usize>,
+    node_contributions: Vec<u32>,
     has_loss: bool,
     conservative_bulk_supported: bool,
     indicator_supplement_supported: bool,
@@ -1556,6 +1584,17 @@ impl CanonicalTemporalWaveOperator {
                 loss: temporal.loss,
             });
         }
+        let has_field_laws = primary
+            .iter()
+            .map(|sample| sample.coefficient)
+            .chain(complementary.iter().map(|sample| sample.coefficient))
+            .any(|coefficient| coefficient.law.field != FieldLawValues::Linear);
+        let (node_contribution_offsets, node_contributions) = if has_field_laws {
+            nonlinear_admission(&base, &primary, &complementary, authored)?;
+            group_by_node(base.primary_contributions(), base.degrees_of_freedom())
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let initial_runtime = CanonicalMaterialRuntimeState::authored(
             authored
                 .materials
@@ -1638,13 +1677,19 @@ impl CanonicalTemporalWaveOperator {
         // a damped boundary and prescribed boundary data are not: each puts a
         // term in the evolution that the defect would otherwise charge to the
         // mesh, and none has been derived here.
-        let indicator_supplement_supported = undamped_boundary && !has_loss && undriven_boundary;
+        // A field-dependent medium's estimator reads its tangent maps, which
+        // are not derived yet.
+        let indicator_supplement_supported =
+            undamped_boundary && !has_loss && undriven_boundary && !has_field_laws;
         Ok(Self {
             base,
             primary,
             complementary,
             initial_runtime,
             has_temporal_laws,
+            has_field_laws,
+            node_contribution_offsets,
+            node_contributions,
             has_loss,
             conservative_bulk_supported,
             indicator_supplement_supported,
@@ -1667,6 +1712,13 @@ impl CanonicalTemporalWaveOperator {
 
     pub fn has_loss(&self) -> bool {
         self.has_loss
+    }
+
+    /// Whether any coefficient follows its own field, so that the maps are
+    /// inverted by the bracketed solve. The device does not execute such a
+    /// generation yet.
+    pub fn has_field_laws(&self) -> bool {
+        self.has_field_laws
     }
 
     /// Whether the exact kick/drift bulk split can run without composing any
@@ -1742,7 +1794,7 @@ impl CanonicalTemporalWaveOperator {
         time: f64,
         runtime: &CanonicalMaterialRuntimeState,
     ) -> Result<(Vec<f64>, Vec<f64>), WaveError> {
-        if !self.has_temporal_laws {
+        if !self.has_temporal_laws && !self.has_field_laws {
             return Ok((
                 self.base.primary_mass().to_vec(),
                 vec![0.0; self.base.degrees_of_freedom()],
@@ -1769,7 +1821,7 @@ impl CanonicalTemporalWaveOperator {
         time: f64,
         runtime: &CanonicalMaterialRuntimeState,
     ) -> Result<Vec<f64>, WaveError> {
-        if !self.has_temporal_laws {
+        if !self.has_temporal_laws && !self.has_field_laws {
             return self.base.primary_field(primary_flux);
         }
         if primary_flux.len() != self.base.degrees_of_freedom() {
@@ -1777,6 +1829,16 @@ impl CanonicalTemporalWaveOperator {
                 expected: self.base.degrees_of_freedom(),
                 actual: primary_flux.len(),
             });
+        }
+        if self.has_field_laws {
+            let (terms, _) = self.primary_terms_at(time, runtime)?;
+            let field = primary_flux
+                .iter()
+                .enumerate()
+                .map(|(node, flux)| self.primary_inverse(&terms, node, *flux, runtime))
+                .collect::<Result<Vec<_>, _>>()?;
+            validate_finite(&field)?;
+            return Ok(field);
         }
         let mass = self.primary_mass_at(time, runtime)?;
         let field = primary_flux
@@ -1788,13 +1850,129 @@ impl CanonicalTemporalWaveOperator {
         Ok(field)
     }
 
+    /// Every primary contribution's constitutive term at `time`, in the
+    /// node-grouped order of `node_contributions`, with each coefficient's
+    /// explicit time derivative beside it.
+    fn primary_terms_at(
+        &self,
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(Vec<ConstitutiveTerm>, Vec<f64>), WaveError> {
+        let contributions = self.base.primary_contributions();
+        let mut terms = Vec::with_capacity(self.node_contributions.len());
+        let mut rates = Vec::with_capacity(self.node_contributions.len());
+        for index in &self.node_contributions {
+            let contribution = &contributions[*index as usize];
+            let temporal = &self.primary[*index as usize];
+            let (factor, factor_rate) =
+                coefficient_factor_and_rate(temporal.coefficient, time, runtime)?;
+            let reference = contribution.geometric_weight * contribution.reference_coefficient;
+            terms.push(ConstitutiveTerm {
+                coefficient: reference * factor,
+                law: temporal.coefficient.law.field,
+            });
+            rates.push(reference * factor_rate);
+        }
+        Ok((terms, rates))
+    }
+
+    fn primary_range(&self, node: usize) -> std::ops::Range<usize> {
+        self.node_contribution_offsets[node]..self.node_contribution_offsets[node + 1]
+    }
+
+    /// The field at one node from its flux, through the node's assembled map.
+    fn primary_inverse(
+        &self,
+        terms: &[ConstitutiveTerm],
+        node: usize,
+        flux: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<f64, WaveError> {
+        let range = self.primary_range(node);
+        let site = ConstitutiveSite::new(&terms[range.clone()]);
+        signed_inverse(site, flux).map_err(|error| {
+            let contribution = self.node_contributions[range.start] as usize;
+            let coefficient = self.primary[contribution].coefficient;
+            inverse_error(error, coefficient, runtime)
+        })
+    }
+
+    /// The flux a node holds at `field`, and the energy it stores there: the
+    /// forward map a prescribed value or a field pulse is written through.
+    ///
+    /// A field past a declared amplitude bound is refused, as the inverse
+    /// refuses the flux that would hold it.
+    fn primary_flux_and_energy_of_field(
+        &self,
+        terms: &[ConstitutiveTerm],
+        node: usize,
+        field: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(f64, f64), WaveError> {
+        let range = self.primary_range(node);
+        let site = ConstitutiveSite::new(&terms[range.clone()]);
+        if !field.is_finite()
+            || site
+                .amplitude_bound()
+                .is_some_and(|bound| field.abs() > bound)
+        {
+            let contribution = self.node_contributions[range.start] as usize;
+            return Err(inverse_error(
+                ConstitutiveInverseError::OutsideDomain,
+                self.primary[contribution].coefficient,
+                runtime,
+            ));
+        }
+        let magnitude = site.value(field.abs());
+        Ok((
+            magnitude.copysign(field),
+            site.energy(magnitude, field.abs()),
+        ))
+    }
+
+    /// Energy stored at one node holding `flux`.
+    fn primary_node_energy(
+        &self,
+        terms: &[ConstitutiveTerm],
+        node: usize,
+        flux: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<f64, WaveError> {
+        let field = self.primary_inverse(terms, node, flux, runtime)?;
+        let site = ConstitutiveSite::new(&terms[self.primary_range(node)]);
+        Ok(site.energy(flux.abs(), field.abs()))
+    }
+
+    /// One nonlinear complementary sample's map at `time`: the direct
+    /// coefficient over the isotropic reference inverse, `|b| = (c/j)·ḡ(r)·r`,
+    /// with that coefficient's time derivative.
+    fn complementary_term_at(
+        &self,
+        index: usize,
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(ConstitutiveTerm, f64), WaveError> {
+        let temporal = self.complementary[index].coefficient;
+        let (factor, factor_rate) = coefficient_factor_and_rate(temporal, time, runtime)?;
+        let reference = self.base.constitutive_samples()[index]
+            .complementary_inverse
+            .xx;
+        Ok((
+            ConstitutiveTerm {
+                coefficient: factor / reference,
+                law: temporal.law.field,
+            },
+            factor_rate / reference,
+        ))
+    }
+
     pub fn complementary_field_at(
         &self,
         complementary_flux: &[Point2],
         time: f64,
         runtime: &CanonicalMaterialRuntimeState,
     ) -> Result<Vec<Point2>, WaveError> {
-        if !self.has_temporal_laws {
+        if !self.has_temporal_laws && !self.has_field_laws {
             return self.base.complementary_field(complementary_flux);
         }
         if complementary_flux.len() != self.base.complementary_degrees_of_freedom() {
@@ -1804,13 +1982,19 @@ impl CanonicalTemporalWaveOperator {
             });
         }
         let mut field = Vec::with_capacity(complementary_flux.len());
-        for ((base, temporal), flux) in self
+        for (index, ((base, temporal), flux)) in self
             .base
             .constitutive_samples()
             .iter()
             .zip(&self.complementary)
             .zip(complementary_flux)
+            .enumerate()
         {
+            if temporal.coefficient.law.field != FieldLawValues::Linear {
+                let (term, _) = self.complementary_term_at(index, time, runtime)?;
+                field.push(radial_inverse(term, *flux, temporal.coefficient, runtime)?);
+                continue;
+            }
             let factor = coefficient_factor(temporal.coefficient, time, runtime)?;
             field.push(base.complementary_inverse.apply(*flux) / factor);
         }
@@ -1827,7 +2011,7 @@ impl CanonicalTemporalWaveOperator {
         time: f64,
         runtime: &CanonicalMaterialRuntimeState,
     ) -> Result<Vec<f64>, WaveError> {
-        if !self.has_temporal_laws {
+        if !self.has_temporal_laws && !self.has_field_laws {
             return self.base.force(complementary_flux);
         }
         let fields = self.complementary_field_at(complementary_flux, time, runtime)?;
@@ -1854,7 +2038,7 @@ impl CanonicalTemporalWaveOperator {
         time: f64,
         runtime: &CanonicalMaterialRuntimeState,
     ) -> Result<CanonicalTemporalLossRates, WaveError> {
-        if !self.has_temporal_laws {
+        if !self.has_temporal_laws && !self.has_field_laws {
             return Ok(CanonicalTemporalLossRates {
                 primary: self.base.primary_loss_rate().to_vec(),
                 complementary: self.base.complementary_loss_rate().to_vec(),
@@ -1939,6 +2123,27 @@ impl CanonicalTemporalWaveOperator {
                 actual: primary_flux.len(),
             });
         }
+        if self.has_field_laws {
+            // `T = Σ ∫₀^Q U`, and at fixed Q its explicit rate is minus the
+            // co-energy's: `∂T/∂t = −Σ ṁᵢ Gᵢ(U)`.
+            let (terms, term_rates) = self.primary_terms_at(time, runtime)?;
+            let mut energy = 0.0;
+            let mut rate = 0.0;
+            for (node, flux) in primary_flux.iter().enumerate() {
+                let field = self.primary_inverse(&terms, node, *flux, runtime)?;
+                let range = self.primary_range(node);
+                let site = ConstitutiveSite::new(&terms[range.clone()]);
+                energy += site.energy(flux.abs(), field.abs());
+                for (term, term_rate) in terms[range.clone()].iter().zip(&term_rates[range]) {
+                    rate -= term_rate * term.law.coenergy(field.abs());
+                }
+            }
+            return if energy.is_finite() && rate.is_finite() {
+                Ok((energy, rate))
+            } else {
+                Err(WaveError::InvalidState)
+            };
+        }
         let (mass, mass_rate) = self.primary_mass_and_rate_at(time, runtime)?;
         let mut energy = 0.0;
         let mut rate = 0.0;
@@ -1967,13 +2172,24 @@ impl CanonicalTemporalWaveOperator {
         }
         let mut energy = 0.0;
         let mut rate = 0.0;
-        for ((base, temporal), flux) in self
+        for (index, ((base, temporal), flux)) in self
             .base
             .constitutive_samples()
             .iter()
             .zip(&self.complementary)
             .zip(complementary_flux)
+            .enumerate()
         {
+            if temporal.coefficient.law.field != FieldLawValues::Linear {
+                let (term, term_rate) = self.complementary_term_at(index, time, runtime)?;
+                let field = radial_inverse(term, *flux, temporal.coefficient, runtime)?;
+                let (target, r) = (flux.norm(), field.norm());
+                let site_terms = [term];
+                let site = ConstitutiveSite::new(&site_terms);
+                energy += base.integration_weight * site.energy(target, r);
+                rate -= base.integration_weight * term_rate * term.law.coenergy(r);
+                continue;
+            }
             let (factor, factor_rate) =
                 coefficient_factor_and_rate(temporal.coefficient, time, runtime)?;
             let reference =
@@ -2140,6 +2356,14 @@ impl CanonicalTemporalWaveState {
         if complementary_flux.iter().any(|value| !value.finite()) {
             return Err(WaveError::InvalidState);
         }
+        if operator.has_field_laws() {
+            // A state has to be one the maps can hold: a flux past a declared
+            // amplitude bound has no field, and is refused here rather than
+            // on the first step.
+            let runtime = operator.initial_runtime();
+            operator.primary_field_at(&primary_flux, time, &runtime)?;
+            operator.complementary_field_at(&complementary_flux, time, &runtime)?;
+        }
         Ok(Self {
             primary_flux,
             complementary_flux,
@@ -2262,6 +2486,29 @@ impl CanonicalTemporalWaveState {
         {
             return Err(WaveError::InvalidState);
         }
+        if operator.has_field_laws {
+            // The increment is to the field, so on a nonlinear node it lands
+            // through the map: `Q ← P(U(Q) + δ)`, not `Q + m·δ`.
+            let (terms, _) = operator.primary_terms_at(self.time, &self.runtime)?;
+            let mut next = self.primary_flux.clone();
+            for (node, (flux, increment)) in next.iter_mut().zip(field_increment).enumerate() {
+                if forcing.prescribed()[node].is_some() {
+                    continue;
+                }
+                let field = operator.primary_inverse(&terms, node, *flux, &self.runtime)?;
+                *flux = operator
+                    .primary_flux_and_energy_of_field(
+                        &terms,
+                        node,
+                        field + increment,
+                        &self.runtime,
+                    )?
+                    .0;
+            }
+            validate_finite(&next)?;
+            self.primary_flux = next;
+            return Ok(());
+        }
         let mass = operator.primary_mass_at(self.time, &self.runtime)?;
         let mut next = self.primary_flux.clone();
         for (node, (flux, (increment, mass))) in next
@@ -2287,6 +2534,11 @@ impl CanonicalTemporalWaveState {
         if !operator.conservative_bulk_supported() {
             return Err(WaveError::Unsupported(
                 "the time-driven grid filter needs a conservative bulk this scene does not have",
+            ));
+        }
+        if operator.has_field_laws {
+            return Err(WaveError::Unsupported(
+                "the grid filter is not derived for a field-dependent medium (gate F)",
             ));
         }
         if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
@@ -2373,9 +2625,22 @@ impl CanonicalTemporalWaveState {
             });
         }
         let mass = operator.primary_mass_at(self.time, &self.runtime)?;
+        let terms = if operator.has_field_laws {
+            Some(operator.primary_terms_at(self.time, &self.runtime)?.0)
+        } else {
+            None
+        };
         for (node, signal) in forcing.prescribed().iter().enumerate() {
             if let Some(signal) = signal {
-                self.primary_flux[node] = mass[node] * signal.value(self.time);
+                let value = signal.value(self.time);
+                self.primary_flux[node] = match terms.as_deref() {
+                    Some(terms) => {
+                        operator
+                            .primary_flux_and_energy_of_field(terms, node, value, &self.runtime)?
+                            .0
+                    }
+                    None => mass[node] * value,
+                };
             }
         }
         validate_finite(&self.primary_flux)?;
@@ -2700,6 +2965,11 @@ fn forced_kick(
         return Ok((0.0, 0.0, 0.0));
     }
     let mass = operator.primary_mass_at(target_time, runtime)?;
+    let nonlinear = if operator.has_field_laws {
+        Some(operator.primary_terms_at(target_time, runtime)?.0)
+    } else {
+        None
+    };
     let mut source_work = 0.0;
     let mut prescribed_exchange = 0.0;
     let mut boundary_loss = 0.0;
@@ -2743,6 +3013,47 @@ fn forced_kick(
             continue;
         }
         let old = primary[node];
+        if let Some(terms) = nonlinear.as_deref()
+            && !ConstitutiveSite::new(&terms[operator.primary_range(node)]).is_linear()
+        {
+            // Admission keeps absorbing walls off a nonlinear node, so the
+            // kick is explicit here. Its work is charged through the discrete
+            // gradient `ū = ΔT/ΔQ`, the one field whose work across the kick
+            // is exactly the stored-energy change; the midpoint field the
+            // linear path uses is that same quotient only for a quadratic `T`.
+            let old_energy = operator.primary_node_energy(terms, node, old, runtime)?;
+            let (new, new_energy) = match forcing.prescribed()[node] {
+                Some(signal) => operator.primary_flux_and_energy_of_field(
+                    terms,
+                    node,
+                    signal.value(target_time),
+                    runtime,
+                )?,
+                None => {
+                    let new = old + duration * (source[node] - force[node]);
+                    (
+                        new,
+                        operator.primary_node_energy(terms, node, new, runtime)?,
+                    )
+                }
+            };
+            if !new.is_finite() {
+                return Err(WaveError::InvalidState);
+            }
+            let gradient = if new != old {
+                (new_energy - old_energy) / (new - old)
+            } else {
+                operator.primary_inverse(terms, node, old, runtime)?
+            };
+            let node_source_work = duration * gradient * source[node];
+            let node_force_work = duration * gradient * force[node];
+            source_work += node_source_work;
+            if forcing.prescribed()[node].is_some() {
+                prescribed_exchange += new_energy - old_energy - node_source_work + node_force_work;
+            }
+            primary[node] = new;
+            continue;
+        }
         let mass = mass[node];
         // The absorbing wall's admittance is `damping / mass`, and the mass is
         // the instantaneous one while the damping is not: it was assembled
@@ -2837,14 +3148,6 @@ fn temporal_material_sample(
             "authored drive, alternate, or response is invalid",
         );
     }
-    if !matches!(law.field, FieldLaw::Linear) {
-        return material_error(
-            material,
-            "field law",
-            point,
-            "field-dependent response remains gated until Stage 8",
-        );
-    }
     let law = law
         .evaluate_at(coordinates, &material.parameters)
         .map_err(|error| WaveError::MaterialEvaluation {
@@ -2853,6 +3156,9 @@ fn temporal_material_sample(
             point,
             reason: error.to_string(),
         })?;
+    if let Err(refusal) = law.field.executable(law.inverted) {
+        return material_error(material, "field law", point, refusal.reason());
+    }
     let (minimum_tangent, maximum_tangent) =
         law.tangent_range()
             .ok_or_else(|| WaveError::MaterialEvaluation {
@@ -3161,6 +3467,141 @@ fn stable_difference(value: f64, reference: f64) -> f64 {
     }
 }
 
+/// `U = P⁻¹(Q)` at a scalar site. Every executed law is even, so the map is
+/// odd and the solve runs on `|Q|`.
+fn signed_inverse(site: ConstitutiveSite<'_>, flux: f64) -> Result<f64, ConstitutiveInverseError> {
+    site.invert(flux.abs(), f64::NAN)
+        .map(|field| field.copysign(flux))
+}
+
+/// `v` from independent `b` at one isotropic quadrature sample: the radius
+/// from the scalar solve, the direction from `b` itself, and the zero vector
+/// explicitly.
+fn radial_inverse(
+    term: ConstitutiveTerm,
+    flux: Point2,
+    coefficient: TemporalCoefficientSample,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<Point2, WaveError> {
+    let magnitude = flux.norm();
+    if magnitude == 0.0 {
+        return Ok(Point2::default());
+    }
+    let terms = [term];
+    let radius = ConstitutiveSite::new(&terms)
+        .invert(magnitude, f64::NAN)
+        .map_err(|error| inverse_error(error, coefficient, runtime))?;
+    Ok(flux * (radius / magnitude))
+}
+
+fn inverse_error(
+    error: ConstitutiveInverseError,
+    coefficient: TemporalCoefficientSample,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> WaveError {
+    let reason = match error {
+        ConstitutiveInverseError::OutsideDomain => {
+            "the field has left the law's declared amplitude bound"
+        }
+        ConstitutiveInverseError::NotConverged => "the constitutive inverse did not converge",
+        ConstitutiveInverseError::InvalidInput => "the constitutive map is not positive and finite",
+    };
+    WaveError::MaterialEvaluation {
+        material: runtime
+            .record(coefficient.material)
+            .map_or_else(|_| String::new(), |record| record.material_name.clone()),
+        coefficient: "field response",
+        point: coefficient.point,
+        reason: reason.into(),
+    }
+}
+
+/// What a field-dependent generation composes today, checked once at
+/// compile time so an unsupported combination is refused with its material
+/// rather than stepped.
+///
+/// - A nonlinear complementary law needs an isotropic reference tensor: the
+///   radial map `|b| = c·ḡ(|v|)·|v|/j` is the whole vector law only there.
+///   Nonlinear anisotropy is Gate C's.
+/// - A nonlinear primary map at an outgoing trace or an absorbing wall needs
+///   the force-coupled discrete-gradient kick, which is not derived yet.
+fn nonlinear_admission(
+    base: &CanonicalWaveOperator,
+    primary: &[TemporalPrimarySample],
+    complementary: &[TemporalComplementarySample],
+    model: TopologyWaveModel<'_>,
+) -> Result<(), WaveError> {
+    let name = |material: MaterialId| {
+        model
+            .material(material)
+            .map_or_else(String::new, |material| material.name.clone())
+    };
+    for (sample, temporal) in base.constitutive_samples().iter().zip(complementary) {
+        let coefficient = temporal.coefficient;
+        if coefficient.law.field == FieldLawValues::Linear {
+            continue;
+        }
+        let tensor = sample.complementary_inverse;
+        let scale = tensor.xx.abs().max(tensor.yy.abs());
+        if tensor.xy.abs() > 1e-12 * scale || (tensor.xx - tensor.yy).abs() > 1e-12 * scale {
+            return Err(WaveError::MaterialEvaluation {
+                material: name(coefficient.material),
+                coefficient: "field law",
+                point: coefficient.point,
+                reason: "a field response on an anisotropic medium awaits its vector law \
+                         (Gate C)"
+                    .into(),
+            });
+        }
+    }
+    let mut walled = vec![false; base.degrees_of_freedom()];
+    if let Some(boundary) = base.outgoing_boundary() {
+        for node in boundary.trace_nodes() {
+            walled[*node as usize] = true;
+        }
+    }
+    for (node, damping) in base.first_order_boundary_damping().iter().enumerate() {
+        walled[node] |= *damping != 0.0;
+    }
+    for (contribution, temporal) in base.primary_contributions().iter().zip(primary) {
+        let coefficient = temporal.coefficient;
+        if coefficient.law.field != FieldLawValues::Linear && walled[contribution.node as usize] {
+            return Err(WaveError::MaterialEvaluation {
+                material: name(coefficient.material),
+                coefficient: "field law",
+                point: coefficient.point,
+                reason: "a field response on an open or absorbing wall awaits its boundary \
+                         kick"
+                    .into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Contribution indices grouped by node, stable within each node, as CSR
+/// offsets and entries.
+fn group_by_node(
+    contributions: &[crate::LinearPrimaryContribution],
+    node_count: usize,
+) -> (Vec<usize>, Vec<u32>) {
+    let mut offsets = vec![0usize; node_count + 1];
+    for contribution in contributions {
+        offsets[contribution.node as usize + 1] += 1;
+    }
+    for node in 0..node_count {
+        offsets[node + 1] += offsets[node];
+    }
+    let mut cursor = offsets.clone();
+    let mut entries = vec![0u32; contributions.len()];
+    for (index, contribution) in contributions.iter().enumerate() {
+        let slot = &mut cursor[contribution.node as usize];
+        entries[*slot] = index as u32;
+        *slot += 1;
+    }
+    (offsets, entries)
+}
+
 fn material_error<T>(
     material: &Material,
     coefficient: &'static str,
@@ -3180,7 +3621,7 @@ mod tests {
     use super::*;
     use crate::{
         BACKGROUND_REGION, CanonicalSource, CanonicalWaveState, ElectromagneticPolarization,
-        LoopRole, LossChannel, MaterialFrame, MeshingOptions, Obstacle, ObstacleId,
+        FieldLaw, LoopRole, LossChannel, MaterialFrame, MeshingOptions, Obstacle, ObstacleId,
         OuterBoundaryCondition, PeriodicCubicSpline, QuadraticSolutionSnapshot, Region, RegionId,
         ScalarField, SolutionIndicatorJob, SolutionIndicatorOptions, SymmetricTensor2, TimeDrive,
         TimeSignal, enriched_quadratic_basis, mesh_scene, sample_canonical_area,
@@ -5738,50 +6179,6 @@ mod tests {
     }
 
     #[test]
-    fn nonlinear_response_and_loss_remain_rejected_by_the_stage_seven_oracle() {
-        let mut scene = Scene::initial();
-        scene.materials[0].mass_law.field = FieldLaw::Saturable {
-            chi: ScalarField::constant(0.2),
-            saturation: ScalarField::constant(1.0),
-        };
-        assert!(matches!(
-            compile(&scene),
-            Err(WaveError::MaterialEvaluation {
-                coefficient: "field law",
-                ..
-            })
-        ));
-
-        scene.materials[0].mass_law = CoefficientLaw::linear();
-        scene.materials[0].electric_loss = Some(LossChannel {
-            base_rate: ScalarField::constant(0.1),
-            law: DampingLaw {
-                rate: RateLaw::SaturableAbsorption {
-                    saturation: ScalarField::constant(1.0),
-                },
-                drive: TimeDrive::None,
-            },
-        });
-        assert!(matches!(
-            compile(&scene),
-            Err(WaveError::MaterialEvaluation {
-                coefficient: "loss law",
-                ..
-            })
-        ));
-
-        scene.materials[0].electric_loss = None;
-        scene.materials[0].mass_law.drive = pump(1.0, 1.0, 0.0);
-        assert!(matches!(
-            compile(&scene),
-            Err(WaveError::MaterialEvaluation {
-                coefficient: "coefficient law",
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn ordinary_production_compiler_still_rejects_a_driven_material() {
         let mut scene = Scene::initial();
         scene.materials[0].mass_law.drive = pump(0.2, 1.0, 0.0);
@@ -6007,5 +6404,600 @@ mod tests {
         };
         assert!((scaled.xx / scaled.yy - tensor.xx / tensor.yy).abs() < 1.0e-12);
         assert!((scaled.xy / scaled.yy - tensor.xy / tensor.yy).abs() < 1.0e-12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 8: field-dependent response
+    // -----------------------------------------------------------------------
+
+    fn kerr(chi2: f64) -> FieldLaw {
+        FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(chi2),
+            amplitude_bound: None,
+        }
+    }
+
+    fn bounded_kerr(chi2: f64, bound: f64) -> FieldLaw {
+        FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(chi2),
+            amplitude_bound: Some(ScalarField::constant(bound)),
+        }
+    }
+
+    fn saturable_law(chi: f64, saturation: f64) -> FieldLaw {
+        FieldLaw::Saturable {
+            chi: ScalarField::constant(chi),
+            saturation: ScalarField::constant(saturation),
+        }
+    }
+
+    /// Reference fluxes scaled to an amplitude where the laws below move the
+    /// maps by tens of percent.
+    fn strong_fluxes(
+        operator: &CanonicalTemporalWaveOperator,
+        amplitude: f64,
+    ) -> (Vec<f64>, Vec<Point2>) {
+        let (primary, complementary) = reference_fluxes(operator);
+        (
+            primary.into_iter().map(|flux| amplitude * flux).collect(),
+            complementary
+                .into_iter()
+                .map(|flux| flux * amplitude)
+                .collect(),
+        )
+    }
+
+    fn kerr_scene() -> Scene {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = kerr(0.8);
+        scene.materials[0].stiffness_law.field = kerr(20.0);
+        scene
+    }
+
+    fn field_law_refusal(scene: &Scene) -> Option<String> {
+        match compile(scene) {
+            Err(WaveError::MaterialEvaluation {
+                coefficient: "field law",
+                reason,
+                ..
+            }) => Some(reason),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn field_responses_compile_where_executed_and_refuse_their_gates() {
+        let operator = compile(&kerr_scene()).unwrap();
+        assert!(operator.has_field_laws());
+        assert!(!operator.has_temporal_laws());
+        // Self-focusing Kerr never tightens the step: its weakest tangent is
+        // the linear one, at rest.
+        assert_eq!(
+            operator.maximum_time_step(),
+            operator.base().maximum_time_step()
+        );
+        let mut scene = Scene::initial();
+        scene.materials[0].stiffness_law.field = saturable_law(-0.2, 2.0);
+        let operator = compile(&scene).unwrap();
+        let expected = operator.base().maximum_time_step() * (1.0_f64 + 9.0 * -0.8 / 8.0).sqrt();
+        assert!((operator.maximum_time_step() - expected).abs() < 1e-14 * expected);
+
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.3),
+            chi2: ScalarField::constant(0.8),
+            amplitude_bound: None,
+        };
+        assert!(field_law_refusal(&scene).unwrap().contains("Gate C"));
+        scene.materials[0].mass_law.field = bounded_kerr(0.8, 0.5);
+        scene.materials[0].mass_law.inverted = true;
+        assert!(field_law_refusal(&scene).unwrap().contains("Gate C"));
+        scene.materials[0].mass_law.inverted = false;
+        scene.materials[0].mass_law.field = kerr(-0.2);
+        // Rejected at authoring validation already: an unbounded defocusing
+        // Kerr law has no positive tangent.
+        assert!(compile(&scene).is_err());
+
+        // Nonlinear anisotropy is Gate C's; a nonlinear mass row on an
+        // anisotropic medium is fine, because the primary map is a scalar.
+        let mut scene = Scene::initial();
+        scene.materials[0].axis_ratio = ScalarField::constant(1.6);
+        scene.materials[0].mass_law.field = kerr(0.8);
+        assert!(compile(&scene).unwrap().has_field_laws());
+        scene.materials[0].stiffness_law.field = kerr(0.8);
+        assert!(
+            field_law_refusal(&scene)
+                .unwrap()
+                .contains("anisotropic medium")
+        );
+
+        // Field-dependent loss stays gated.
+        let mut scene = Scene::initial();
+        scene.materials[0].electric_loss = Some(LossChannel {
+            base_rate: ScalarField::constant(0.1),
+            law: DampingLaw {
+                rate: RateLaw::SaturableAbsorption {
+                    saturation: ScalarField::constant(1.0),
+                },
+                drive: TimeDrive::None,
+            },
+        });
+        assert!(matches!(
+            compile(&scene),
+            Err(WaveError::MaterialEvaluation {
+                coefficient: "loss law",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_nonlinear_primary_map_on_a_wall_waits_for_its_boundary_kick() {
+        for condition in [
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        ] {
+            let mut scene = Scene::default();
+            let mesh = mesh_scene(
+                &scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.3,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap();
+            let quadratic =
+                QuadraticWaveOperator::assemble_scene(&mesh, &scene, condition).unwrap();
+            scene.materials[0].stiffness_law.field = kerr(0.8);
+            // The complementary map alone leaves the trace solve linear.
+            let operator =
+                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            assert!(operator.has_field_laws());
+            scene.materials[0].mass_law.field = kerr(0.8);
+            match CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1) {
+                Err(WaveError::MaterialEvaluation { reason, .. }) => {
+                    assert!(reason.contains("boundary kick"), "{reason}")
+                }
+                other => panic!("{condition:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_nonlinear_generation_refuses_the_consumers_not_yet_ported() {
+        let operator = compile(&kerr_scene()).unwrap();
+        let mut state =
+            CanonicalTemporalWaveState::zero(&operator, 0.5 * operator.maximum_time_step())
+                .unwrap();
+        assert!(matches!(
+            state.apply_grid_filter(&operator, 0.5),
+            Err(WaveError::Unsupported(reason)) if reason.contains("gate F")
+        ));
+        assert!(!operator.indicator_supplement_supported());
+    }
+
+    #[test]
+    fn a_zero_response_steps_as_the_linear_medium_does() {
+        // χ = 0 takes every nonlinear code path (inverse, discrete energy,
+        // forward map) and must reproduce the linear division.
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = kerr(0.0);
+        scene.materials[0].stiffness_law.field = saturable_law(0.0, 1.0);
+        let nonlinear = compile(&scene).unwrap();
+        assert!(nonlinear.has_field_laws());
+        let linear = compile(&Scene::initial()).unwrap();
+        let time_step = 0.4 * linear.maximum_time_step();
+        let (primary, complementary) = strong_fluxes(&linear, 6.0);
+        let mut left = CanonicalTemporalWaveState::new(
+            &linear,
+            time_step,
+            primary.clone(),
+            complementary.clone(),
+        )
+        .unwrap();
+        let mut right =
+            CanonicalTemporalWaveState::new(&nonlinear, time_step, primary, complementary).unwrap();
+        for _ in 0..20 {
+            left.step(&linear).unwrap();
+            right.step(&nonlinear).unwrap();
+        }
+        let scale = left
+            .primary_flux()
+            .iter()
+            .fold(0.0_f64, |a, b| a.max(b.abs()));
+        for (a, b) in left.primary_flux().iter().zip(right.primary_flux()) {
+            assert!((a - b).abs() <= 1e-13 * scale);
+        }
+        let energy = left.energy(&linear).unwrap();
+        assert!((energy - right.energy(&nonlinear).unwrap()).abs() <= 1e-13 * energy);
+    }
+
+    #[test]
+    fn the_stored_energy_is_the_potential_of_both_observables() {
+        // The Hamiltonian pairing the split relies on: ∂H/∂Q = U and
+        // ∂H/∂b = W·v, with the nonlinear maps.
+        let operator = compile(&kerr_scene()).unwrap();
+        let runtime = operator.initial_runtime();
+        let (primary, complementary) = strong_fluxes(&operator, 6.0);
+        let field = operator.primary_field_at(&primary, 0.0, &runtime).unwrap();
+        let vector = operator
+            .complementary_field_at(&complementary, 0.0, &runtime)
+            .unwrap();
+        let energy = |p: &[f64], c: &[Point2]| operator.energy_at(p, c, 0.0, &runtime).unwrap();
+        for node in [0, 3, primary.len() / 2, primary.len() - 1] {
+            let h = 1e-6 * primary[node].abs().max(1e-6);
+            let mut plus = primary.clone();
+            let mut minus = primary.clone();
+            plus[node] += h;
+            minus[node] -= h;
+            let slope =
+                (energy(&plus, &complementary) - energy(&minus, &complementary)) / (2.0 * h);
+            assert!((slope - field[node]).abs() <= 1e-6 * field[node].abs().max(1e-3));
+        }
+        for sample in [0, 7, complementary.len() - 1] {
+            let weight = operator.base().constitutive_samples()[sample].integration_weight;
+            let h = 1e-4;
+            let mut plus = complementary.clone();
+            let mut minus = complementary.clone();
+            plus[sample].x += h;
+            minus[sample].x -= h;
+            let slope = (energy(&primary, &plus) - energy(&primary, &minus)) / (2.0 * h);
+            assert!(
+                (slope - weight * vector[sample].x).abs()
+                    <= 1e-6 * weight * vector[sample].norm() + 1e-12
+            );
+        }
+        // And the maps really are nonlinear at this amplitude.
+        let linear = operator.base().primary_field(&primary).unwrap();
+        let departure = field
+            .iter()
+            .zip(&linear)
+            .map(|(a, b)| (a - b).abs() / b.abs().max(1e-12))
+            .fold(0.0_f64, f64::max);
+        assert!(departure > 0.1, "{departure}");
+    }
+
+    #[test]
+    fn a_kerr_bulk_conserves_its_energy_to_second_order() {
+        let operator = compile(&kerr_scene()).unwrap();
+        let (primary, complementary) = strong_fluxes(&operator, 6.0);
+        let deviation = |fraction: f64, steps: usize| {
+            let time_step = fraction * operator.maximum_time_step();
+            let mut state = CanonicalTemporalWaveState::new(
+                &operator,
+                time_step,
+                primary.clone(),
+                complementary.clone(),
+            )
+            .unwrap();
+            let initial = state.energy(&operator).unwrap();
+            let mut worst = 0.0_f64;
+            for _ in 0..steps {
+                let accounting = state.step(&operator).unwrap();
+                assert_eq!(accounting.temporal_work, 0.0);
+                worst = worst.max((state.energy(&operator).unwrap() - initial).abs() / initial);
+            }
+            worst
+        };
+        let coarse = deviation(0.5, 200);
+        let fine = deviation(0.25, 400);
+        assert!(coarse < 2e-4, "{coarse:e}");
+        assert!(fine < 0.35 * coarse, "coarse {coarse:e}, fine {fine:e}");
+    }
+
+    #[test]
+    fn a_driven_kerr_bulk_is_reversible_and_balances_its_temporal_work() {
+        let mut scene = kerr_scene();
+        scene.materials[0].mass_law.drive = pump(0.24, 0.8, 0.31);
+        scene.materials[0].stiffness_law.drive = pump(0.17, 0.6, -0.23);
+        let operator = compile(&scene).unwrap();
+        assert!(operator.has_field_laws() && operator.has_temporal_laws());
+        let (primary, complementary) = strong_fluxes(&operator, 6.0);
+
+        let time_step = 0.35 * operator.maximum_time_step();
+        let mut state = CanonicalTemporalWaveState::new(
+            &operator,
+            time_step,
+            primary.clone(),
+            complementary.clone(),
+        )
+        .unwrap();
+        state.step_by(&operator, time_step).unwrap();
+        state.step_by(&operator, -time_step).unwrap();
+        let scale = primary.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+        for (actual, expected) in state.primary_flux().iter().zip(&primary) {
+            assert!((actual - expected).abs() < 1e-13 * scale);
+        }
+
+        // The explicit rate at fixed state is the time derivative of H.
+        let runtime = operator.initial_runtime();
+        let (_, rate) = operator
+            .energy_and_rate_at(&primary, &complementary, 0.37, &runtime)
+            .unwrap();
+        let epsilon = 1e-6;
+        let numerical = (operator
+            .energy_at(&primary, &complementary, 0.37 + epsilon, &runtime)
+            .unwrap()
+            - operator
+                .energy_at(&primary, &complementary, 0.37 - epsilon, &runtime)
+                .unwrap())
+            / (2.0 * epsilon);
+        assert!(
+            (rate - numerical).abs() < 2e-8 * rate.abs().max(1e-6),
+            "{rate} {numerical}"
+        );
+
+        let residual = |fraction: f64, steps: usize| {
+            let mut state = CanonicalTemporalWaveState::new(
+                &operator,
+                fraction * operator.maximum_time_step(),
+                primary.clone(),
+                complementary.clone(),
+            )
+            .unwrap();
+            (0..steps)
+                .map(|_| state.step(&operator).unwrap().splitting_residual)
+                .sum::<f64>()
+                .abs()
+        };
+        let coarse = residual(0.6, 16);
+        let fine = residual(0.3, 32);
+        assert!(coarse > 1e-12);
+        assert!(fine < 0.35 * coarse, "coarse {coarse:e}, fine {fine:e}");
+    }
+
+    #[test]
+    fn a_junction_node_holds_the_sum_of_its_materials_maps() {
+        let mut scene = Scene::default();
+        let mut second = scene.materials[0].clone();
+        second.id = MaterialId(2);
+        second.name = "Second".into();
+        second.mass_density = ScalarField::constant(2.5);
+        scene.materials[0].mass_law.field = kerr(0.8);
+        second.mass_law.field = saturable_law(1.5, 0.3);
+        scene.materials.push(second);
+        scene.regions.push(Region {
+            id: RegionId(2),
+            material: MaterialId(2),
+            frame: MaterialFrame::world(),
+        });
+        scene.obstacles.push(Obstacle::with_role(
+            ObstacleId(1),
+            PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.2),
+            LoopRole::MaterialInterface {
+                exterior: BACKGROUND_REGION,
+                interior: RegionId(2),
+            },
+        ));
+        let operator = compile(&scene).unwrap();
+        let runtime = operator.initial_runtime();
+        let (primary, complementary) = strong_fluxes(&operator, 6.0);
+        let field = operator.primary_field_at(&primary, 0.0, &runtime).unwrap();
+        let mut assembled = vec![0.0; primary.len()];
+        let mut owners = vec![BTreeSet::new(); primary.len()];
+        for (contribution, sample) in operator
+            .base()
+            .primary_contributions()
+            .iter()
+            .zip(&operator.primary)
+        {
+            let node = contribution.node as usize;
+            let u = field[node];
+            assembled[node] += contribution.geometric_weight
+                * contribution.reference_coefficient
+                * sample.coefficient.law.field.multiplier(u.abs())
+                * u;
+            owners[node].insert(sample.coefficient.material);
+        }
+        let mut shared = 0;
+        for node in 0..primary.len() {
+            shared += usize::from(owners[node].len() == 2);
+            assert!(
+                (assembled[node] - primary[node]).abs() <= 1e-14 * primary[node].abs().max(1e-12)
+            );
+        }
+        assert!(shared >= 3);
+        let time_step = 0.4 * operator.maximum_time_step();
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary).unwrap();
+        let initial = state.energy(&operator).unwrap();
+        for _ in 0..50 {
+            state.step(&operator).unwrap();
+        }
+        assert!((state.energy(&operator).unwrap() - initial).abs() < 1e-3 * initial);
+    }
+
+    #[test]
+    fn tm_and_te_exchange_electric_and_magnetic_laws() {
+        // Duality: an electric law in TM and the same magnetic law in TE put
+        // the identical map on the primary row, so the two evolve alike; the
+        // same law on the same slot does not.
+        let skin = |polarization| {
+            let mut scene = Scene::initial();
+            scene.physics = PhysicsModel::Electromagnetic { polarization };
+            scene
+        };
+        let mut tm = skin(ElectromagneticPolarization::Tm);
+        tm.materials[0].mass_law.field = kerr(0.8);
+        let mut te = skin(ElectromagneticPolarization::Te);
+        te.materials[0].stiffness_law.field = kerr(0.8);
+        let tm = compile(&tm).unwrap();
+        let te_operator = compile(&te).unwrap();
+        assert_eq!(tm.base().primary_mass(), te_operator.base().primary_mass());
+        // TE runs the curl with the opposite orientation, so the dual state
+        // carries the opposite complementary flux: `(Q, b) ↦ (Q, −b)` maps
+        // one evolution onto the other because every executed map is odd.
+        assert_eq!(tm.base().orientation(), -te_operator.base().orientation());
+        let run = |operator: &CanonicalTemporalWaveOperator| {
+            let (primary, complementary) = strong_fluxes(operator, 6.0);
+            let orientation = operator.base().orientation();
+            let complementary = complementary
+                .into_iter()
+                .map(|flux| flux * orientation)
+                .collect();
+            let mut state = CanonicalTemporalWaveState::new(
+                operator,
+                0.4 * operator.maximum_time_step(),
+                primary,
+                complementary,
+            )
+            .unwrap();
+            for _ in 0..30 {
+                state.step(operator).unwrap();
+            }
+            state.primary_flux().to_vec()
+        };
+        let reference = run(&tm);
+        let dual = run(&te_operator);
+        let scale = reference.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+        for (a, b) in reference.iter().zip(&dual) {
+            assert!((a - b).abs() <= 1e-12 * scale);
+        }
+        te.materials[0].stiffness_law.field = FieldLaw::Linear;
+        te.materials[0].mass_law.field = kerr(0.8);
+        let swapped = run(&compile(&te).unwrap());
+        let difference = reference
+            .iter()
+            .zip(&swapped)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(difference > 1e-4 * scale);
+    }
+
+    #[test]
+    fn a_flux_past_a_declared_bound_is_refused_and_leaves_the_state_intact() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = bounded_kerr(-0.2, 1.0);
+        let operator = compile(&scene).unwrap();
+        let mass = operator.base().primary_mass().to_vec();
+        let time_step = 0.4 * operator.maximum_time_step();
+        // P(1) = m·0.8: a field of 0.9 is inside, a flux of 0.9·m is not.
+        let mut outside = vec![0.0; mass.len()];
+        outside[4] = 0.9 * mass[4];
+        let empty = vec![Point2::default(); operator.base().complementary_degrees_of_freedom()];
+        assert!(matches!(
+            CanonicalTemporalWaveState::new(&operator, time_step, outside, empty.clone()),
+            Err(WaveError::MaterialEvaluation {
+                coefficient: "field response",
+                ..
+            })
+        ));
+        // Q = P(0.3) = m·(1 − 0.2·0.09)·0.3 everywhere.
+        let inside = mass
+            .iter()
+            .map(|m| m * (1.0 - 0.2 * 0.09) * 0.3)
+            .collect::<Vec<_>>();
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, time_step, inside, empty).unwrap();
+        let forcing = CanonicalForcing::none(operator.base());
+        let before = state.clone();
+        let mut pulse = vec![0.0; mass.len()];
+        pulse[4] = 0.8;
+        assert!(
+            state
+                .apply_primary_pulse(&operator, &forcing, &pulse)
+                .is_err()
+        );
+        assert_eq!(state, before);
+        // A pulse the domain holds lands through the map: the field moves by
+        // exactly the increment.
+        pulse[4] = 0.5;
+        state
+            .apply_primary_pulse(&operator, &forcing, &pulse)
+            .unwrap();
+        let runtime = operator.initial_runtime();
+        let field = operator
+            .primary_field_at(state.primary_flux(), 0.0, &runtime)
+            .unwrap();
+        assert!((field[4] - 0.8).abs() < 1e-14, "{}", field[4]);
+        assert!((field[5] - 0.3).abs() < 1e-14);
+    }
+
+    #[test]
+    fn kerr_departs_from_its_linear_control_at_the_square_of_the_amplitude() {
+        // The leading nonlinear effect of a cubic law on a fixed-time
+        // trajectory is third order in the amplitude, so its departure from
+        // the linear control, relative to the trajectory, grows as A².
+        let nonlinear = compile(&kerr_scene()).unwrap();
+        let linear = compile(&Scene::initial()).unwrap();
+        let time_step = 0.4 * linear.maximum_time_step();
+        let departure = |amplitude: f64| {
+            let run = |operator: &CanonicalTemporalWaveOperator| {
+                let (primary, complementary) = strong_fluxes(&linear, amplitude);
+                let mut state =
+                    CanonicalTemporalWaveState::new(operator, time_step, primary, complementary)
+                        .unwrap();
+                for _ in 0..60 {
+                    state.step(operator).unwrap();
+                }
+                state.primary_flux().to_vec()
+            };
+            let control = run(&linear);
+            let actual = run(&nonlinear);
+            let norm = control
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .sqrt();
+            control
+                .iter()
+                .zip(&actual)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f64>()
+                .sqrt()
+                / norm
+        };
+        let small = departure(0.25);
+        let double = departure(0.5);
+        let ratio = double / small;
+        assert!((ratio - 4.0).abs() < 0.2, "ratio {ratio}");
+    }
+
+    #[test]
+    fn a_saturated_medium_behaves_as_its_limiting_linear_one() {
+        // Far above saturation `ḡ → 1 + χσ²`, so a very strong field runs as
+        // a linear medium with that coefficient: the response stays bounded.
+        let (chi, saturation) = (0.6, 0.002);
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field =
+            saturable_law(chi / (saturation * saturation), saturation);
+        let saturated = compile(&scene).unwrap();
+        let mut limit = Scene::initial();
+        limit.materials[0].mass_density = ScalarField::constant(
+            limit.materials[0].mass_density.constant_value().unwrap() * (1.0 + chi),
+        );
+        let limit = compile(&limit).unwrap();
+        let time_step = 0.4 * saturated.maximum_time_step().min(limit.maximum_time_step());
+        let (primary, complementary) = strong_fluxes(&limit, 30.0);
+        let run = |operator: &CanonicalTemporalWaveOperator| {
+            let mut state = CanonicalTemporalWaveState::new(
+                operator,
+                time_step,
+                primary.clone(),
+                complementary.clone(),
+            )
+            .unwrap();
+            for _ in 0..60 {
+                state.step(operator).unwrap();
+            }
+            state.primary_flux().to_vec()
+        };
+        let expected = run(&limit);
+        let actual = run(&saturated);
+        let norm = expected
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
+        let difference = expected
+            .iter()
+            .zip(&actual)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>()
+            .sqrt();
+        assert!(difference < 2e-3 * norm, "{}", difference / norm);
     }
 }

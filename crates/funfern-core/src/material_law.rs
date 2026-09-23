@@ -1785,9 +1785,10 @@ fn smootherstep_slope(value: f64) -> f64 {
 }
 
 impl CoefficientLawValues {
-    /// Field-independent coefficient factor at one accepted solver stage.
-    /// Stage 7 uses this only when `field == Linear`; Stage 8 composes the
-    /// field multiplier and inversion against the physical field itself.
+    /// Field-independent coefficient factor at one accepted solver stage: the
+    /// drive, Switch and reciprocal parts. A field law composes on top of it
+    /// as a [`ConstitutiveTerm`] whose coefficient is this factor times the
+    /// base, inverted against the physical field by [`ConstitutiveSite`].
     pub fn temporal_factor(
         self,
         time: f64,

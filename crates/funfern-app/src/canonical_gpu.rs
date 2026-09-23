@@ -1026,6 +1026,13 @@ impl CanonicalGpuPlan {
         state: &CanonicalTemporalWaveState,
         clock: CanonicalGpuClock,
     ) -> Result<(), CanonicalGpuBuildError> {
+        if operator.has_field_laws() {
+            // The tables below carry coefficient factors; a field law would
+            // be dropped and the medium run as a linear one.
+            return Err(CanonicalGpuBuildError::Unrepresentable(
+                "field-dependent response is not executed on the device yet",
+            ));
+        }
         self.grid_filter_admitted = operator.conservative_bulk_supported();
         let primary_samples = operator.primary_coefficient_samples().collect::<Vec<_>>();
         let complementary_samples = operator

@@ -10502,3 +10502,56 @@ until Stage 9. This first step is the per-site constitutive kernel in
   - domain refusal at a junction's tightest bound;
   - the co-energy derivative across its series switch;
   - a convex stored energy whose gradient is the field, reducing to `Q²/2m`.
+
+## 2026-09-24 — Kerr and saturable media step on the CPU reference
+
+Stage 8.2–8.3. The temporal operator now compiles and steps field-dependent
+media. The device still refuses them, and so does the app.
+
+- **Admission.** The Stage 7 "field law" gate becomes
+  `FieldLawValues::executable`: direct Kerr and saturable on either row compile.
+  - Still refused by name: signed χ₁ and reciprocal laws (Gate C), an
+    unbounded defocusing Kerr, and field-dependent loss.
+  - A nonlinear complementary law on an anisotropic reference tensor is refused
+    (Gate C). A nonlinear mass row on an anisotropic medium is fine.
+  - A nonlinear primary map on an outgoing trace or a damped node waits for
+    the boundary kick (8.5). A complementary law beside a wall compiles,
+    because the trace solve stays linear.
+- **Maps.**
+  - Nodal: `U = P⁻¹(Q)`, where `P` is every material's term at the node,
+    grouped once at compile time.
+  - Quadrature: `v = r·b/|b|` from `|b| = (c/j)·ḡ(r)·r`, with an explicit zero
+    case.
+  - Energy: the Legendre dual of the co-energy. Its explicit rate is
+    `−Σ ṁ·G(U)`, so temporal work composes unchanged.
+- **Timestep.** The trajectory bound already took the minimum tangent, so for
+  χ > 0 Kerr it is the linear bound, and for saturable `a < 0` it is
+  `√(1 + 9a/8)` times it.
+- **Kick accounting.** A forced kick on a nonlinear node charges source and
+  prescribed work through the discrete gradient `ΔT/ΔQ`. A prescribed value
+  and a field pulse are written through the forward map, `Q = P(g)` and
+  `Q ← P(U + δ)`.
+- **Domain.**
+  - Past a declared bound, the inverse and the forward map both refuse; so
+    does state construction.
+  - A refused pulse leaves the state byte-identical.
+  - A step already commits only at its end.
+- **Gated.** The grid filter (gate F), the estimator supplement, and the probe
+  and area consumers refuse field-dependent generations rather than read
+  linear maps.
+- **App.** `topology_runtime` fails preparation with
+  `FIELD_LAWS_AWAIT_THE_DEVICE`, and `attach_temporal_bulk` refuses as well,
+  so loosening the core gate cannot run a Kerr law as a linear medium on the
+  GPU. Covered by `a_field_dependent_document_prepares_no_generation`.
+- **Measured** on `Scene::initial` at amplitudes where the maps depart from the
+  linear ones by over 10%:
+  - Energy deviation: 1.88e-4 at 0.5·dt_max (200 steps), 4.64e-5 at
+    0.25·dt_max (400 steps), a ratio of 4.06.
+  - A pumped Kerr bulk's `ΔH − W` residual: 1.82e-5 → 4.49e-6 on halving.
+    Reversible to 1e-13.
+  - Kerr against its linear control at fixed time: departure 3.93e-3 at A, and
+    1.50e-2 at 2A, a ratio of 3.81 against the cubic law's 4.
+  - A field 30 times the reference over a saturation of 0.002 tracks the
+    `1 + χσ²` linear limit within 2e-3.
+  - TM ε-Kerr and TE μ-Kerr evolve identically to 1e-12 under `b ↦ −b` (TE
+    flips the curl orientation). The same law on the swapped slot does not.
