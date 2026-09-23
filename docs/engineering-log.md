@@ -10363,3 +10363,25 @@ before any of the pacing work.
   Rollback, live-event, handoff-failure and live-source examples reproduce
   their earlier figures.
 
+## 2026-09-24 — Stage 7 closed, with three defects found on the way out
+
+Written up in the [Stage 7 report](spikes/funfern-material-laws-stage7-report.md).
+The plan's stage table marks Stage 7 complete and points its handoff section at
+the report.
+
+- The exit gate is met for the enabled drives. Not closed, and carried forward:
+  the temporal-reflection, parametric-growth and asymmetry fixtures, and the
+  calibrated frozen-impedance curve.
+- Three defects were found by reading the code while assembling the report, and
+  have not yet been reproduced in a running scene:
+  - the far-field exterior refusal cannot fire, because the app builds the
+    stencil from the law-stripped model;
+  - the device grid filter is not gated on the conservative bulk the CPU
+    reference requires;
+  - app AMR reads the authored runtime rather than the accepted bank.
+
+  They are to be fixed before Stage 8.
+- `canonical_gpu_temporal_timing` on the current build: driven 349.7 µs/step
+  bulk and 800.0 µs behind a second-order wall; fixed wall 698.7 µs. That
+  fixture packs a backend state, so its fixed run sweeps too.
+
