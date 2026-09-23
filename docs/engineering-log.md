@@ -9922,3 +9922,43 @@ reported `b -0.000e0` for exactly that reason and now reports `4.825e-7`;
 wait for both lanes. `canonical_gpu_handoff` uses the same length test for a
 different purpose - a phase-ordering assertion rather than a readiness wait - and
 is left alone.
+
+## 2026-09-23 — A source-only preparation is a promise the driven path cannot keep
+
+Reported straight after the last fix: disabling the source fails with "Canonical
+handoff maps are not prepared".
+
+A source-only preparation deliberately builds none of the handoff maps a packed
+generation needs - `prepared_solver_update` returning anything but `FullHandoff`
+skips them - because the edit is going to be delivered as a live patch instead.
+That is a promise, and on a driven generation it cannot be kept: the patch kinds
+that carry a source edit have not had their composition with a moving medium
+closed, so the accepted generation refuses them. Yesterday's fallback then sent
+the candidate to be packed, and packing wants the maps that were skipped on the
+strength of the promise. Refused as a patch, unpackable as a generation.
+
+So the decision moves to where it is knowable. `prepared_solver_update` now
+answers `FullHandoff` whenever the medium is driven, using the `driven()`
+predicate that already exists on the preparation job - the same condition that
+gives the generation its runtime material bank and therefore its refusal. The
+edit is prepared as a whole generation from the start, with its maps, and the
+patch path is never attempted. The cost is the same prepared generation the
+fallback was paying for; it is now paid deliberately rather than discovered at
+upload.
+
+The fallback is kept, and made truthful: it packs only a candidate that actually
+carries maps and otherwise refuses with a message naming both causes, rather
+than failing further on with one that names neither.
+
+Verified headlessly against the reported autosave - disable and re-enable both
+prepare `FullHandoff` with maps present - and then in the app, with
+`reject_ready` itself instrumented rather than a log string: twelve injected
+source toggles, twelve committed generations, no rejection.
+
+Which is the correction this entry owes. The previous fix was reported as
+verified end to end on the strength of grepping an instrumented run's stderr for
+"Preparation failed" and finding none. That string is an in-app event-log label
+and never goes to stderr, so the search could only ever find nothing. What was
+actually confirmed was that the fallback branch was taken, not that what
+followed it worked - and it did not. A check that cannot fail is worth no more
+here than a test that cannot fail.

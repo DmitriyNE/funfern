@@ -383,9 +383,20 @@ impl Playground {
                                     self.source_commit =
                                         Some(PendingSourceCommit { token, serial });
                                 }
-                                Err(error) => match live_event_fallback(&error) {
+                                Err(error) => match live_event_fallback(
+                                    &error,
+                                    candidate.canonical_transfer.is_some(),
+                                ) {
                                     LiveEventFallback::Retry => {}
                                     LiveEventFallback::Pack => needs_gpu_pack = true,
+                                    LiveEventFallback::Refuse => {
+                                        let refusal = format!(
+                                            "{error}, and this edit was prepared without the \
+                                             handoff maps a packed generation needs"
+                                        );
+                                        self.runtime.reject_ready(token, refusal.clone());
+                                        self.message = refusal;
+                                    }
                                 },
                             }
                         }
@@ -820,6 +831,10 @@ enum LiveEventFallback {
     /// whole prepared generation instead, which is what it did before the patch
     /// existed.
     Pack,
+    /// The generation cannot take the patch and the edit was not prepared in a
+    /// form that can be packed either. Nothing can carry it, so say so rather
+    /// than fail further on with a reason that names neither cause.
+    Refuse,
 }
 
 /// A refused live patch is a reason to take the slow path, never a reason to
@@ -834,14 +849,20 @@ enum LiveEventFallback {
 /// dropped the edit. Neither change is wrong on its own.
 ///
 /// Packing is the fallback because it is the path these edits took before the
-/// patch existed, and it is known to carry them. It costs a prepared generation
-/// per edit on a driven medium until the gate closes for source patches, which
-/// is a cost rather than a defect.
-fn live_event_fallback(error: &str) -> LiveEventFallback {
+/// patch existed - but only for a candidate prepared with the handoff maps a
+/// pack needs. A source-only preparation deliberately builds none of them, on
+/// the promise that a live patch will carry the edit; where that promise cannot
+/// be kept, the preparation now makes a whole generation instead, so the last
+/// case should not arise. It is kept truthful rather than trusted, because what
+/// it replaced failed later on with a reason that named neither the refusal nor
+/// the missing maps.
+fn live_event_fallback(error: &str, packable: bool) -> LiveEventFallback {
     if error == "another canonical transaction is pending" {
         LiveEventFallback::Retry
-    } else {
+    } else if packable {
         LiveEventFallback::Pack
+    } else {
+        LiveEventFallback::Refuse
     }
 }
 
@@ -857,7 +878,10 @@ mod tests {
         // The gate a driven generation puts on patch kinds it has not composed
         // with yet, verbatim from `queue_live_event`.
         assert_eq!(
-            live_event_fallback("this event has not passed its Stage 7 temporal composition gate"),
+            live_event_fallback(
+                "this event has not passed its Stage 7 temporal composition gate",
+                true
+            ),
             LiveEventFallback::Pack
         );
         // Anything else the generation will not take is equally a reason to
@@ -869,8 +893,15 @@ mod tests {
             "canonical GPU is not installed",
         ] {
             assert_eq!(
-                live_event_fallback(refusal),
+                live_event_fallback(refusal, true),
                 LiveEventFallback::Pack,
+                "{refusal}"
+            );
+            // The same refusal on an edit that was never prepared to be packed
+            // says so, rather than failing later on missing handoff maps.
+            assert_eq!(
+                live_event_fallback(refusal, false),
+                LiveEventFallback::Refuse,
                 "{refusal}"
             );
         }
@@ -878,10 +909,12 @@ mod tests {
         // Except a generation that is merely busy: the same patch is worth
         // trying again next frame, and packing would throw away a fast path
         // that is about to be available.
-        assert_eq!(
-            live_event_fallback("another canonical transaction is pending"),
-            LiveEventFallback::Retry
-        );
+        for packable in [true, false] {
+            assert_eq!(
+                live_event_fallback("another canonical transaction is pending", packable),
+                LiveEventFallback::Retry
+            );
+        }
     }
 
     /// Handover generations preserve the accepted-step total. Their first

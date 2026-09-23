@@ -1269,6 +1269,15 @@ impl TopologyPreparationJob {
         };
         if forcing.as_ref() == previous.canonical_forcing.as_ref() {
             PreparedSolverUpdate::MeasurementsOnly
+        } else if self.driven() {
+            // A source-only update is a promise that the edit can be delivered
+            // as a live patch, and the promise is kept by preparing none of the
+            // handoff maps a packed generation needs. A driven generation
+            // cannot take those patches - their composition with a moving
+            // medium has not been closed - so on one the promise cannot be
+            // made. Discovering that at upload time instead left the edit with
+            // no way through: refused as a patch, unpackable as a generation.
+            PreparedSolverUpdate::FullHandoff
         } else if forcing_layout_eq(forcing, &previous.canonical_forcing) {
             PreparedSolverUpdate::SourceDrivesOnly
         } else if forcing_sparse_layout_eq(forcing, &previous.canonical_forcing) {
