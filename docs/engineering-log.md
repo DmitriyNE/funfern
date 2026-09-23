@@ -3387,6 +3387,30 @@ above:
 
 ## Current TODOs
 
+Submitting solver work outside the render graph, worth investigating:
+
+- [ ] `compute_canonical_wave` is a system in the `RenderGraph` schedule ordered
+  `.before(camera_driver)`, so every step the solver takes is encoded into the
+  same command buffer as that frame's drawing. The renderer already samples a
+  GPU buffer the compute wrote in place, so there is no field state being copied
+  and nothing a double buffer would decouple - what is shared is the single
+  per-frame submission and the queue behind it. The whole batch-ceiling
+  controller exists to bound that shared submission, and it can only ever bound
+  it in whole frames.
+  Worth investigating whether the solver can submit on its own cadence, from its
+  own encoder, so that the simulation advances continuously instead of in one
+  lump a frame. Note what it would not buy: this is a single-queue device, so
+  sim work and draw work still serialize whichever thread encoded them, and
+  something would still have to bound how much sim work may sit ahead of a
+  present - in milliseconds rather than in steps. The cost is a submission path
+  outside Bevy's render graph with its own fences, and the handoff and
+  live-event ordering that graph ordering guarantees for free would need
+  explicit synchronization. Probes are already on sim time rather than frame
+  time (`probe_sample_due(step_after, stride)`, inside the per-step loop, with
+  the readback separately paced to one in flight), so the only change there is
+  that the sample ring would need sizing for how far the solver can run ahead of
+  a readback, where today the per-frame step ceiling bounds that implicitly.
+
 Outgoing-boundary construction, not urgent:
 
 - [ ] The second-order outgoing assembly is the dominant reassembly cost -
@@ -9668,3 +9692,38 @@ deltas this app actually measured (`measured-frame-deltas.txt`), presented
 through a model that pays for overrun a refresh period at a time with one frame
 of pipeline slack. That model reproduces the reported linear operating point to
 within 8 % without being fitted to it.
+
+## 2026-09-23 — A ceiling nothing is pressing against
+
+Reported after the cadence fix: the simulated rate now oscillates visibly. It
+did — measured at a threefold swing in steps a frame, p10 7 against p90 20, with
+a backoff every 0.57 s, which is a 2 Hz wobble in the animation's own time step.
+
+The batch delivered matched the requested speed on average, so this was not the
+solver failing to keep up. It was the controller. Additive recovery raised the
+ceiling every frame that came in on time, whether or not the ceiling was what
+limited the batch — and with room to spare it is the accumulated simulated time
+that limits it, so the extra ceiling bought no steps at all. What it did buy was
+a larger catch-up burst: the retained backlog is capped at `ceiling x dt`, so a
+ceiling climbing to four times the batch in use let one late frame spend four
+times the batch at once. That burst overran, took the cut, starved the frames
+behind it, and the backlog rebuilt.
+
+So growth is now gated on the ceiling actually being the constraint, which
+`steps_for_frame` reports as `FrameBatch::ceiling_bound`, and an overrun cuts
+`min(budget, batch)` rather than the ceiling — cutting a ceiling the batch never
+reached takes several frames to bite and the display waits through all of them.
+A frame that ran no steps is no longer read as an overrun at all, which also
+covers paused frames and the ones a handoff withholds stepping on.
+
+Gating paid for a recovery five times faster, because the probing it was tuned
+to suppress only happened where the ceiling was not binding. Measured on the
+reported scene, before and after: 120 fps either way, but the swing falls from
+3.0x to 1.4x, the ceiling parks at 13.2 instead of running to 39, and throughput
+rises slightly, 1178 to 1226 steps a second. In simulation over the recorded
+jitter the requested rate goes from 0.76x to 1.00x where the solver has headroom.
+
+Where it genuinely has none this is a trade rather than a gain — about six
+frames a second bought for a fifth more simulated speed — and the right answer
+there is to govern the rate down smoothly rather than clamp it per frame, so
+that falling behind looks like slow motion instead of stutter. Not done yet.

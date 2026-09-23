@@ -295,8 +295,15 @@ impl Playground {
         // the solver. Both readings are of this frame, before anything is asked
         // for, so a batch is always sized by an outcome rather than a guess.
         self.display_cadence.observe(delta);
-        self.frame_budget =
-            frame_step_budget(self.frame_budget, delta, self.display_cadence.seconds());
+        // Taken, so that a frame which asked for nothing - paused, or with a
+        // handoff withholding steps - is not read as the solver's doing.
+        let batch = core::mem::take(&mut self.last_batch);
+        self.frame_budget = frame_step_budget(
+            self.frame_budget,
+            delta,
+            self.display_cadence.seconds(),
+            batch,
+        );
         if self.uploading.is_none()
             && self.source_commit.is_none()
             && self.gpu_upload_preparation.is_none()
@@ -670,7 +677,7 @@ impl Playground {
             let fresh_upload = self.uploading.as_ref().is_some_and(|upload| upload.fresh);
             if !canonical_steps_withheld(packed_candidate_waiting, fresh_upload) {
                 if self.wave_running {
-                    let steps = steps_for_frame(
+                    let batch = steps_for_frame(
                         &mut self.accumulator,
                         delta,
                         self.editor.document.presentation.simulation_speed,
@@ -680,11 +687,15 @@ impl Playground {
                     let admitted = steps_with_gpu_backpressure(
                         request.stats().completed_steps(),
                         request.requested_steps(),
-                        steps,
+                        batch.steps,
                     );
                     if admitted > 0 {
                         request.request_steps(admitted);
                     }
+                    self.last_batch = FrameBatch {
+                        steps: admitted,
+                        ceiling_bound: batch.ceiling_bound,
+                    };
                     self.display_cadence.record_batch(admitted);
                 } else if self.wave_step {
                     request.request_steps(1);

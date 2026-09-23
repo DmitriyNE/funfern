@@ -62,21 +62,44 @@ pub(super) fn steps_for_frame(
     speed: f64,
     time_step: f64,
     budget: f64,
-) -> u64 {
+) -> FrameBatch {
     if !time_step.is_finite() || time_step <= 0.0 || !speed.is_finite() || speed <= 0.0 {
-        return 0;
+        return FrameBatch::default();
     }
     const DISPLAY_INTERVAL: f64 = 1.0 / 60.0;
     let ceiling = budget.clamp(1.0, MAX_STEPS_PER_FRAME as f64);
     *accumulator += delta.clamp(0.0, DISPLAY_INTERVAL) * speed;
-    let steps = (*accumulator / time_step).floor().clamp(0.0, ceiling) as u64;
+    let wanted = (*accumulator / time_step).floor().max(0.0);
+    let steps = wanted.min(ceiling) as u64;
     *accumulator -= steps as f64 * time_step;
     // Backlog is held only up to what a frame may actually spend. Holding more
     // would saturate every following frame trying to catch up, which is the
     // opposite of the contract: the shortfall is what gives, and it is
     // reported rather than queued.
     *accumulator = accumulator.min(ceiling * time_step);
-    steps
+    FrameBatch {
+        steps,
+        ceiling_bound: wanted >= ceiling,
+    }
+}
+
+/// What a frame asked the solver for, and whether the ceiling is what decided
+/// it.
+#[derive(Clone, Copy, Default)]
+pub(super) struct FrameBatch {
+    pub(super) steps: u64,
+    /// True when the batch ceiling, rather than the simulated time the frame
+    /// had accumulated, is what limited the batch.
+    ///
+    /// The distinction is the difference between a solver that wants more room
+    /// and one that has all it needs. Raising a ceiling nothing is pressing
+    /// against buys no steps at all - the accumulator still decides - but it
+    /// does let a single late frame spend a much larger catch-up burst later,
+    /// and that burst is what overruns and takes the cut. Left ungated, the
+    /// budget climbed to four times the batch in use and the simulated rate
+    /// swung threefold at about 2 Hz, which is visible as the picture speeding
+    /// up and slowing down.
+    pub(super) ceiling_bound: bool,
 }
 
 /// How much longer than the display's own cadence a frame may run before the
@@ -100,18 +123,24 @@ const FRAME_BUDGET_TOLERANCE: f64 = 1.5;
 /// batch has to come down within a few frames rather than a few hundred.
 const FRAME_BUDGET_BACKOFF: f64 = 0.75;
 
-/// What a frame inside the cadence adds back to it.
+/// What a frame inside the cadence adds back to it, while the ceiling is what
+/// the batch is pressing against.
 ///
-/// Deliberately much smaller than the backoff. The controller can only find the
-/// edge by crossing it, and every crossing costs one presented frame, so the
-/// ratio of these two constants is the steady-state rate of dropped frames:
-/// roughly `recovery / (budget x (1 - backoff) + recovery)`. At the measured
-/// operating point - 8827 dofs, 0.93 ms a step, a batch settling near six -
-/// `0.5` probes on a quarter of all frames and holds 100 fps of a 120 Hz
-/// display, where `0.05` probes on three per cent and holds 117. The cost is
-/// that a batch climbs back slowly, about a second from one step to six, which
-/// is paid only when the cost of a step falls.
-const FRAME_BUDGET_RECOVERY: f64 = 0.05;
+/// Smaller than the backoff, because the controller can only find the edge by
+/// crossing it and every crossing costs a presented frame. But it no longer has
+/// to be tiny: growth happens only while [`FrameBatch::ceiling_bound`], so the
+/// budget stops climbing the moment it is no longer the constraint, and the
+/// probing that used to continue past that point is gone. Raising it from the
+/// `0.05` that needed costs nothing where the solver has headroom and recovers
+/// the requested rate in full: at the measured operating point the simulated
+/// rate goes from 0.76x of what was asked for to 1.00x, at the same 119 fps,
+/// with the spread of steps across frames narrowing from 5..11 to 8..12.
+///
+/// Where the solver genuinely cannot keep up it is a trade rather than a gain -
+/// about six frames a second bought for a fifth more simulated speed - and the
+/// right answer there is to govern the rate smoothly rather than to clamp it,
+/// which this does not yet do.
+const FRAME_BUDGET_RECOVERY: f64 = 0.25;
 
 /// How many display-only frames the cadence is the median of.
 ///
@@ -220,15 +249,29 @@ impl DisplayCadence {
 /// Multiplicative backoff and additive recovery rather than a cost model: it
 /// needs no estimate of what a step costs, and it converges on the largest
 /// batch that still ships frames at the cadence.
-pub(super) fn frame_step_budget(budget: f64, frame_seconds: f64, cadence: f64) -> f64 {
+pub(super) fn frame_step_budget(
+    budget: f64,
+    frame_seconds: f64,
+    cadence: f64,
+    batch: FrameBatch,
+) -> f64 {
     if !frame_seconds.is_finite() || frame_seconds <= 0.0 || !cadence.is_finite() || cadence <= 0.0
     {
         return budget;
     }
-    let next = if frame_seconds > cadence * FRAME_BUDGET_TOLERANCE {
-        budget * FRAME_BUDGET_BACKOFF
-    } else {
+    let next = if batch.steps > 0 && frame_seconds > cadence * FRAME_BUDGET_TOLERANCE {
+        // Cut what the frame actually ran, not a ceiling it never reached. A
+        // ceiling well above the batch in use would take several cuts before it
+        // began to bite, and the display waits through every one of them.
+        // A frame that ran no steps is not the solver's to answer for.
+        budget.min(batch.steps as f64) * FRAME_BUDGET_BACKOFF
+    } else if batch.ceiling_bound {
         budget + FRAME_BUDGET_RECOVERY
+    } else {
+        // The simulated time the frame had accumulated, not the ceiling, is
+        // what limited the batch. More ceiling buys no steps and costs the
+        // oscillation described on [`FrameBatch::ceiling_bound`].
+        budget
     };
     next.clamp(1.0, MAX_STEPS_PER_FRAME as f64)
 }
@@ -348,13 +391,14 @@ mod tests {
         let mut cadence = DisplayCadence::new();
         let mut budget = 1.0;
         let mut frame = display.refresh;
+        let mut asked = FrameBatch::default();
         let (mut frames, mut steps, mut elapsed, mut warm) = (0u32, 0u64, 0.0, 0.0);
         while elapsed < 4.0 {
             cadence.observe(frame);
             if budgeted {
-                budget = frame_step_budget(budget, frame, cadence.seconds());
+                budget = frame_step_budget(budget, frame, cadence.seconds(), asked);
             }
-            let asked = steps_for_frame(
+            asked = steps_for_frame(
                 &mut accumulator,
                 frame,
                 1.0,
@@ -365,15 +409,15 @@ mod tests {
                     MAX_STEPS_PER_FRAME as f64
                 },
             );
-            cadence.record_batch(asked);
-            frame = display.present(OVERHEAD + asked as f64 * per_step);
+            cadence.record_batch(asked.steps);
+            frame = display.present(OVERHEAD + asked.steps as f64 * per_step);
             if warm < 1.0 {
                 warm += frame;
                 continue;
             }
             elapsed += frame;
             frames += 1;
-            steps += asked;
+            steps += asked.steps;
         }
         (
             f64::from(frames) / elapsed,
@@ -509,34 +553,105 @@ mod tests {
     fn the_batch_ceiling_follows_what_frames_actually_cost() {
         let cadence = 1.0 / 120.0;
         let budget = MAX_STEPS_PER_FRAME as f64;
+        let pressing = |steps| FrameBatch {
+            steps,
+            ceiling_bound: true,
+        };
 
-        let overran = frame_step_budget(budget, cadence * 2.0, cadence);
+        let overran = frame_step_budget(budget, cadence * 2.0, cadence, pressing(64));
         assert!(overran < budget, "an overrunning frame kept its batch");
-        let recovered = frame_step_budget(overran, cadence, cadence);
+        let recovered = frame_step_budget(overran, cadence, cadence, pressing(48));
         assert!(recovered > overran, "a cheap frame did not give any back");
 
         // It bottoms out at one rather than at zero: a solver that cannot fit
         // a step inside a frame still advances, one step at a time.
         let mut starved = budget;
         for _ in 0..200 {
-            starved = frame_step_budget(starved, cadence * 10.0, cadence);
+            starved = frame_step_budget(starved, cadence * 10.0, cadence, pressing(64));
         }
         assert_eq!(starved, 1.0);
 
-        // And it climbs back to the ceiling rather than staying shy of it -
-        // slowly, which is the price of probing for the edge only rarely.
+        // And it climbs back to the ceiling rather than staying shy of it.
         let mut recovering = starved;
-        for _ in 0..1300 {
-            recovering = frame_step_budget(recovering, cadence * 0.5, cadence);
+        for _ in 0..300 {
+            recovering = frame_step_budget(recovering, cadence * 0.5, cadence, pressing(64));
         }
         assert_eq!(recovering, MAX_STEPS_PER_FRAME as f64);
 
         // A frame just inside the tolerance is not held responsible.
-        assert!(frame_step_budget(budget, cadence * 1.02, cadence) >= budget);
+        assert!(frame_step_budget(budget, cadence * 1.02, cadence, pressing(64)) >= budget);
 
         // Nonsense leaves it alone.
-        assert_eq!(frame_step_budget(budget, f64::NAN, cadence), budget);
-        assert_eq!(frame_step_budget(budget, cadence, 0.0), budget);
+        assert_eq!(
+            frame_step_budget(budget, f64::NAN, cadence, pressing(64)),
+            budget
+        );
+        assert_eq!(
+            frame_step_budget(budget, cadence, 0.0, pressing(64)),
+            budget
+        );
+    }
+
+    /// The reported oscillation: with room to spare the batch is decided by the
+    /// simulated time a frame accumulated, not by the ceiling, and a ceiling
+    /// nothing is pressing against must stop climbing. Left to climb it banks a
+    /// catch-up burst that one late frame then spends all at once, which
+    /// overruns, takes the cut, starves the frames after it and bursts again -
+    /// measured at a threefold swing in the simulated rate every 0.57 s.
+    #[test]
+    fn a_ceiling_nothing_is_pressing_against_stops_climbing() {
+        let cadence = 1.0 / 120.0;
+        let slack = FrameBatch {
+            steps: 11,
+            ceiling_bound: false,
+        };
+        let mut budget = 15.0;
+        for _ in 0..600 {
+            budget = frame_step_budget(budget, cadence, cadence, slack);
+        }
+        assert_eq!(
+            budget, 15.0,
+            "the ceiling climbed with nothing asking for it"
+        );
+
+        // A frame that is pressing on it still moves it.
+        let pressed = frame_step_budget(
+            budget,
+            cadence,
+            cadence,
+            FrameBatch {
+                steps: 15,
+                ceiling_bound: true,
+            },
+        );
+        assert!(pressed > budget);
+    }
+
+    /// An overrun is answered by cutting the batch that actually ran. Cutting a
+    /// ceiling the batch never reached would take several frames to bite, and
+    /// the display waits through all of them.
+    #[test]
+    fn an_overrun_cuts_the_batch_that_ran_not_the_ceiling_above_it() {
+        let cadence = 1.0 / 120.0;
+        let cut = frame_step_budget(
+            60.0,
+            cadence * 2.0,
+            cadence,
+            FrameBatch {
+                steps: 12,
+                ceiling_bound: false,
+            },
+        );
+        assert!(
+            cut < 12.0,
+            "the cut did not reach the batch that overran: {cut}"
+        );
+
+        // A frame that ran nothing is not the solver's to answer for.
+        assert_eq!(
+            frame_step_budget(60.0, cadence * 4.0, cadence, FrameBatch::default()),
+            60.0
+        );
     }
 
     /// Backlog is held only up to what a frame may spend. Holding a full ceiling
@@ -624,7 +739,9 @@ mod tests {
                             speed,
                             step,
                             MAX_STEPS_PER_FRAME as f64,
-                        ) == 0
+                        )
+                        .steps
+                            == 0
                     })
                     .count();
                 assert_eq!(
@@ -646,10 +763,12 @@ mod tests {
         let mut quiet = 0.0;
         let (mut full_total, mut half_total, mut quiet_total) = (0, 0, 0);
         for _ in 0..60 {
-            full_total += steps_for_frame(&mut full, frame, 1.0, step, MAX_STEPS_PER_FRAME as f64);
-            half_total += steps_for_frame(&mut half, frame, 0.5, step, MAX_STEPS_PER_FRAME as f64);
+            full_total +=
+                steps_for_frame(&mut full, frame, 1.0, step, MAX_STEPS_PER_FRAME as f64).steps;
+            half_total +=
+                steps_for_frame(&mut half, frame, 0.5, step, MAX_STEPS_PER_FRAME as f64).steps;
             quiet_total +=
-                steps_for_frame(&mut quiet, frame, 0.02, step, MAX_STEPS_PER_FRAME as f64);
+                steps_for_frame(&mut quiet, frame, 0.02, step, MAX_STEPS_PER_FRAME as f64).steps;
         }
         // A second of frames at one millisecond a step.
         assert_eq!(full_total, 960);
@@ -671,16 +790,18 @@ mod tests {
             1.0,
             step,
             MAX_STEPS_PER_FRAME as f64,
-        );
+        )
+        .steps;
         assert_eq!(
-            steps_for_frame(&mut late, 1.0, 1.0, step, MAX_STEPS_PER_FRAME as f64),
+            steps_for_frame(&mut late, 1.0, 1.0, step, MAX_STEPS_PER_FRAME as f64).steps,
             expected
         );
         assert!((late - on_time).abs() < 1.0e-12);
 
         let mut accumulator = 0.0;
         let steps = steps_for_frame(&mut accumulator, 1.0, 8.0, step, MAX_STEPS_PER_FRAME as f64);
-        assert_eq!(steps, MAX_STEPS_PER_FRAME);
+        assert_eq!(steps.steps, MAX_STEPS_PER_FRAME);
+        assert!(steps.ceiling_bound, "the ceiling was what limited it");
         assert!(
             accumulator <= MAX_STEPS_PER_FRAME as f64 * step + 1.0e-12,
             "the leftover built a backlog: {accumulator}"
@@ -694,15 +815,15 @@ mod tests {
         // Nonsense asks for nothing rather than panicking or racing.
         let mut idle = 0.0;
         assert_eq!(
-            steps_for_frame(&mut idle, 0.016, 1.0, 0.0, MAX_STEPS_PER_FRAME as f64),
+            steps_for_frame(&mut idle, 0.016, 1.0, 0.0, MAX_STEPS_PER_FRAME as f64).steps,
             0
         );
         assert_eq!(
-            steps_for_frame(&mut idle, 0.016, 0.0, 1.0e-3, MAX_STEPS_PER_FRAME as f64),
+            steps_for_frame(&mut idle, 0.016, 0.0, 1.0e-3, MAX_STEPS_PER_FRAME as f64).steps,
             0
         );
         assert_eq!(
-            steps_for_frame(&mut idle, -1.0, 1.0, 1.0e-3, MAX_STEPS_PER_FRAME as f64),
+            steps_for_frame(&mut idle, -1.0, 1.0, 1.0e-3, MAX_STEPS_PER_FRAME as f64).steps,
             0
         );
     }

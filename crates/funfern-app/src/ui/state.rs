@@ -112,6 +112,9 @@ pub struct Playground {
     /// frames are readings of the display rather than of the solver.
     /// See [`super::pacing::frame_step_budget`].
     pub(super) frame_budget: f64,
+    /// What the previous frame asked the solver for, which is what the batch
+    /// ceiling is steered by. See [`super::pacing::FrameBatch`].
+    pub(super) last_batch: FrameBatch,
     /// Frame interval the display is actually reaching, measured rather than
     /// assumed. See [`DisplayCadence`].
     pub(super) display_cadence: DisplayCadence,
@@ -339,6 +342,7 @@ impl Default for Playground {
             fresh_requested: false,
             accumulator: 0.0,
             frame_budget: 1.0,
+            last_batch: FrameBatch::default(),
             display_cadence: DisplayCadence::new(),
             sim_time_offset: 0.0,
             completed_steps: 0,
