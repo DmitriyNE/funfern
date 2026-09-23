@@ -21,10 +21,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use funfern_core::{
-    CanonicalIndicatorSnapshot, CanonicalTemporalPointStencil, CanonicalTemporalWaveOperator,
-    CanonicalTemporalWaveState, CoefficientLaw, MeshingOptions, OuterBoundaryCondition, Point2,
-    QuadraticPointStencil, QuadraticSolutionSnapshot, QuadraticWaveOperator, ScalarField, Scene,
-    SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive, TriMesh,
+    BACKGROUND_REGION, CanonicalIndicatorSnapshot, CanonicalTemporalPointStencil,
+    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, LoopRole, Material,
+    MaterialFrame, MaterialId, MeshingOptions, OuterBoundaryCondition, Point2,
+    QuadraticPointStencil, QuadraticSolutionSnapshot, QuadraticWaveOperator, Region, RegionId,
+    ScalarField, Scene, SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive, TriMesh,
     canonical_temporal_indicator_supplement, mesh_scene,
 };
 
@@ -75,6 +76,9 @@ fn main() {
         ("stiffness pumped", driven(false, None), false),
         ("stiffness travelling k=3", driven(false, Some(3.0)), false),
         ("both travelling k=3", both_scene(), false),
+        ("static path, interface", interface_scene(false), true),
+        ("interface, inert", interface_scene(false), false),
+        ("interface, mass pumped", interface_scene(true), false),
     ] {
         // The finest mesh sets the timestep every mesh in the sweep uses.
         let reference_edge = *EDGES.last().expect("one reference edge");
@@ -191,6 +195,55 @@ fn driven(mass: bool, wavenumber: Option<f64>) -> Scene {
 
 /// Both rows patterned at once, to check the two effects compose rather than
 /// cancel.
+/// A material interface, which is what an authored scene has and the smooth
+/// box does not.
+///
+/// The substituted estimate measures the solver's own complementary flux
+/// instead of recovering a gradient from the scalar field. Across a material
+/// interface that flux is continuous by construction while the scalar gradient
+/// is not, so a term built on the flux may see very little of a defect that
+/// lives exactly there. Every fixture above is a single medium, so none of
+/// them can tell.
+///
+/// The reference mesh is only twice as fine as the finest tested one and the
+/// solution is kinked here rather than smooth, so the measured true error is
+/// contaminated downward by the reference's own error. That inflates the
+/// efficiency index, which makes a low index conservative: it cannot be an
+/// artefact of the reference.
+fn interface_scene(driven: bool) -> Scene {
+    let mut scene = Scene::initial();
+    let interior = RegionId(2);
+    scene.obstacles[0].role = LoopRole::MaterialInterface {
+        exterior: BACKGROUND_REGION,
+        interior,
+    };
+    scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Interface interior".into(),
+        mass_density: ScalarField::constant(1.0),
+        // A contrast worth resolving: the wave speed steps by 1.6.
+        stiffness: ScalarField::constant(2.5),
+        damping: ScalarField::constant(0.0),
+        axis_ratio: ScalarField::constant(1.0),
+        parameters: vec![],
+        color: [80, 120, 160],
+        ..Material::default_medium()
+    });
+    scene.regions.push(Region {
+        id: interior,
+        material: MaterialId(2),
+        frame: MaterialFrame::world(),
+    });
+    if driven {
+        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.22),
+            frequency_hz: ScalarField::constant(0.9),
+            phase_radians: ScalarField::constant(0.15),
+        };
+    }
+    scene
+}
+
 fn both_scene() -> Scene {
     let mut scene = driven(true, Some(3.0));
     let stiffness = driven(false, Some(3.0));
