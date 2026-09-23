@@ -1224,7 +1224,7 @@ mod tests {
         let (world_spacing, visible_bins) =
             vector_overlay_lattice(state.scale, spacing, state.center, viewport).unwrap();
         let points = vector_overlay_layout(
-            &active.bundle.authored,
+            active.fixed_model(),
             &active.mesh,
             &active.operator,
             world_spacing,
@@ -1255,7 +1255,7 @@ mod tests {
             vector_overlay_lattice(state.scale, spacing, shifted_center, viewport).unwrap();
         assert_eq!(shifted_spacing, world_spacing);
         let shifted = vector_overlay_layout(
-            &active.bundle.authored,
+            active.fixed_model(),
             &active.mesh,
             &active.operator,
             shifted_spacing,
@@ -1286,6 +1286,55 @@ mod tests {
         let before = interior(&points);
         assert!(!before.is_empty());
         assert_eq!(before, interior(&shifted));
+    }
+
+    /// The authored model refuses a law-carrying material, so a lattice that
+    /// evaluated it dropped every element of a driven region and drew no arrow
+    /// there. It reads the base the operator was compiled against instead.
+    #[test]
+    fn a_driven_region_gets_its_arrows() {
+        let mut document = TopologyEditor::default().document;
+        let drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(1.0),
+            phase_radians: ScalarField::constant(0.25),
+        };
+        document.model.draft.materials[0].mass_law.drive = drive.clone();
+        document.model.accepted.materials[0].mass_law.drive = drive;
+        let mut state = Playground {
+            editor: TopologyEditor::from_document(document).unwrap(),
+            ..Playground::default()
+        };
+        let active = activate_at(&mut state, 0.08);
+        assert!(active.driven());
+        let (world_spacing, visible_bins) =
+            vector_overlay_lattice(state.scale, 28.0, state.center, viewport()).unwrap();
+        let points = vector_overlay_layout(
+            active.fixed_model(),
+            &active.mesh,
+            &active.operator,
+            world_spacing,
+            visible_bins,
+        );
+        let regions = |elements: &mut dyn Iterator<Item = usize>| {
+            elements
+                .map(|element| active.mesh.triangles[element].region)
+                .collect::<BTreeSet<_>>()
+        };
+        let meshed = regions(&mut (0..active.mesh.triangles.len()));
+        let covered = regions(&mut points.iter().map(|point| point.element as usize));
+        assert!(!points.is_empty());
+        assert_eq!(covered, meshed, "every meshed region carries arrows");
+        // The coefficients are the base ones the operator was built from.
+        let base = active.bundle.model().to_owned().without_temporal_laws();
+        for point in &points {
+            let expected = base
+                .as_model()
+                .directional_material_at(point.stencil.region, point.point)
+                .unwrap();
+            assert_eq!(point.stencil.mass_density, expected.mass_density);
+            assert_eq!(point.stencil.stiffness, expected.stiffness);
+        }
     }
 
     #[test]

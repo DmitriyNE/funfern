@@ -173,6 +173,18 @@ impl PreparedTopology {
     pub fn driven(&self) -> bool {
         self.canonical_temporal_operator.is_some()
     }
+
+    /// The model this generation's operator and probe stencils were compiled
+    /// against: the authored one with its temporal laws removed. Anything that
+    /// evaluates a coefficient for this mesh has to read it here, because the
+    /// authored model refuses a law-carrying material and the drive is applied
+    /// on top of these base values by the temporal tables.
+    pub fn fixed_model(&self) -> TopologyWaveModel<'_> {
+        match &self.stripped_model {
+            Some(model) => model.as_model(),
+            None => self.bundle.model(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -185,6 +197,9 @@ pub struct PreparedTopology {
     /// a material law. Absent means the generation is inert and the fixed path
     /// runs it exactly as before.
     pub canonical_temporal_operator: Option<Arc<CanonicalTemporalWaveOperator>>,
+    /// The authored model with its temporal laws removed, on a driven
+    /// generation. Read through [`Self::fixed_model`].
+    stripped_model: Option<Arc<OwnedTopologyWaveModel>>,
 
     pub canonical_forcing: Arc<CanonicalForcing>,
     pub canonical_transfer: Option<Arc<PreparedCanonicalTransfer>>,
@@ -1158,12 +1173,17 @@ impl TopologyPreparationJob {
         self.timing.measurements_ms += elapsed_ms(measurements_started);
         self.done = true;
         self.phase = TopologyPreparationPhase::Ready;
+        let stripped_model = self.driven().then(|| {
+            self.ensure_stripped_model();
+            Arc::new(self.stripped_model.clone().expect("built just above"))
+        });
         Some(Ok(PreparedTopology {
             bundle: self.bundle.clone(),
             mesh,
             operator,
             canonical_operator: self.canonical_operator.as_ref().unwrap().clone(),
             canonical_temporal_operator: self.canonical_temporal_operator.clone(),
+            stripped_model,
             canonical_forcing: self.canonical_forcing.as_ref().unwrap().clone(),
             canonical_transfer: self.canonical_transfer.take(),
             volume_sources: self.volume_sources.take().unwrap(),

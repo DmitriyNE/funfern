@@ -10022,3 +10022,33 @@ pairing has its own test.
 In the app, against a copy of the autosave (a pumped material, one point probe)
 with the overlay switched on: 1544 of 1544 point samples finite by 13.7 s, and
 306 of 306 arrows carrying flow from the second readback on.
+
+## 2026-09-23 — The arrow lattice dropped every driven element
+
+Reported straight after the recorder fix: driven regions draw no arrows. The
+recorders were not the cause. `vector_overlay_layout` evaluated each lattice
+point's coefficients with `Material::evaluate`, which refuses a law-carrying
+material by design, and its `.ok()?` turned the refusal into "skip this point".
+Every element of a driven material left the lattice before a stencil was built.
+On the reported autosave, region 1 (inert) had 238 points and region 2 (pumped)
+none.
+
+Probe stencils never had this, because the runtime compiles them against the
+authored model with its temporal laws stripped - the base the operator is built
+over, which the temporal tables then scale. The lattice was the one consumer
+that skipped that step. `PreparedTopology::fixed_model()` now carries that
+stripped model out of preparation, and the lattice reads coefficients through
+`directional_material_at` on it: the same path, and so the same values, as the
+probe stencils.
+
+`a_driven_region_gets_its_arrows` builds the lattice over a fully driven
+document and asserts every meshed region is covered, with base coefficients
+matching the stripped model point by point. Pointed back at the authored model
+it fails with an empty lattice. In the app, per region on the autosave copy:
+region 2 now has 14 lattice points, 12 drawn above the 1.5% cutoff.
+
+The previous entry reported "306 of 306 arrows carrying flow" as evidence the
+overlay worked. That count was taken over the points the lattice had kept and
+could not see the ones it had dropped; it was never split by region. The
+recorder fix it verified is correct, but "the overlay works on a driven
+document" was a claim the measurement did not support.

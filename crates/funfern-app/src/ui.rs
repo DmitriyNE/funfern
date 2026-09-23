@@ -1723,7 +1723,7 @@ fn vector_overlay_lattice(
 }
 
 fn vector_overlay_layout(
-    scene: &TopologyScene,
+    model: TopologyWaveModel<'_>,
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
     world_spacing: f64,
@@ -1763,12 +1763,9 @@ fn vector_overlay_layout(
     bins.into_iter()
         .filter_map(|(_key, (element, centroid, _))| {
             let triangle = &mesh.triangles[element];
-            let region = scene.region(triangle.region)?;
-            let material = scene.material(region.material)?;
-            let raw = material.evaluate(region.frame, centroid).ok()?;
-            let coefficients = scene
-                .physics
-                .directional_wave_coefficients(raw, region.frame);
+            let coefficients = model
+                .directional_material_at(triangle.region, centroid)
+                .ok()?;
             let stencil = QuadraticPointStencil {
                 element: element as u32,
                 barycentric: [1.0 / 3.0; 3],

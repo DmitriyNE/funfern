@@ -272,7 +272,7 @@ impl Playground {
             self.vector_overlay_previous_layout = Some(previous);
         }
         let points = vector_overlay_layout(
-            &active.bundle.authored,
+            active.fixed_model(),
             &active.mesh,
             &active.operator,
             key.world_spacing,
