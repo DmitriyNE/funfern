@@ -3387,19 +3387,35 @@ above:
 
 ## Current TODOs
 
-Pacing measurement, found while trying to steady the simulated clock:
+Pacing is fenced twice against a clock that arrives three frames late:
 
-- [ ] `steps_with_gpu_backpressure` throttles against a counter that lags by
-  about three frames. `completed_steps` is reported through a paced readback,
-  not read from the queue, so the outstanding lead it computes is mostly
-  reporting latency rather than a real backlog: measured at a median of 39 and a
-  p90 of 54 against a cap of 64, on a scene requesting only 11 steps a frame.
-  The lead it thinks exists is roughly `readback latency x request rate`. It cut
-  the batch on 9.7 % of frames and dropped 2.1 % of requested steps, all of it
-  for a backlog that had already been executed. Worth either reading a
-  queue-side figure or subtracting the known readback latency. Benign today,
-  but it is a second unmodelled clamp on the batch and it confounds any
-  measurement of pacing.
+- [ ] Both step fences measure against `completed_steps`, which is reported
+  through a paced readback rather than read from the queue, so the lead each
+  computes is largely its own reporting latency. Measured on a scene asking for
+  11 steps a frame: the host's lead ran to a median of 39 and a **max of 99
+  against a cap of 64**, so on those frames the host was clamped to zero steps
+  and the simulation froze outright; the render world's own fence
+  (`MAX_ENCODED_STEP_LEAD`, also 64) was left about 28 steps of real headroom
+  after latency, which is why the completion counter sits at zero on 62 % of
+  frames and then jumps by 33 - encoding happens in bursts gated by readback
+  arrivals, not by the GPU.
+
+  Three repairs were tried and all three measured worse than what is there.
+  Publishing the render world's own `encoded_steps` and pacing the host against
+  it does remove the phantom clamp - 9.7 % of frames down to 0.2 %, and 2.1 % of
+  requested steps dropped down to none - but it takes away a brake the render
+  fence was relying on, and throughput fell to 0.33x of the requested rate in
+  two runs. Opening the render fence to 256 to cover the round trip then let
+  batches through at 12..22 steps a frame and took the display to 60 fps. The
+  two fences are load-bearing against each other, and both are steering on a
+  signal that is mostly latency.
+
+  The repair this actually needs is a timely completion signal - counting
+  submissions retired through `Queue::on_submitted_work_done`, or any queue-side
+  figure - after which both fences can be sized against real queue depth. That
+  is a design change, not a constant, and it should not be tuned by experiment
+  on a machine whose run-to-run variation is larger than the effects being
+  measured.
 
 - [ ] No way to measure, from the host, how evenly the drawn state advances.
   The requested stream is measurable and the completed counter is not usable for
@@ -9790,3 +9806,36 @@ throttles against a readback-lagged counter, and there is no host-side view of
 how evenly the drawn state actually advances. Both are filed above. The second
 one is the blocker - until the drawn cadence can be seen, this is being tuned
 against a proxy.
+
+
+## 2026-09-23 — The pacing fences are steering on their own latency
+
+Set out to fix the backpressure clamp that throttles against a readback-lagged
+counter. The diagnosis held up and got worse on inspection: the host's lead
+reached 99 against a cap of 64, which clamps the batch to zero and freezes the
+simulation for that frame, and the render world's own fence is left about 28
+steps of genuine headroom out of 64 once latency is subtracted.
+
+The fix did not. Publishing `encoded_steps` from the render world and pacing the
+host against it works exactly as intended in isolation - the phantom clamp goes
+from 9.7 % of frames to 0.2 %, and from 2.1 % of requested steps to three steps
+in seven thousand - but the throughput then collapsed to a third of the
+requested rate, twice. The host clamp had been holding `desired_steps` close
+enough that the render world's fence rarely bound; without it the fence binds
+instead, and since it is fenced on the same lagged clock it stops encoding until
+a readback lands and then encodes a burst. Sizing that fence to cover the round
+trip in turn let batches through at twice the size and took the display to
+60 fps.
+
+So the two fences are load-bearing against each other, and neither is measuring
+what it is supposed to. All of it is reverted. What it needs is a completion
+signal that does not go through a readback - retired submissions from
+`Queue::on_submitted_work_done` would do - after which both fences can be sized
+against real queue depth rather than against latency. Filed above.
+
+Worth recording separately: three of the eight measurement runs this took were
+contaminated by whatever else the machine was doing, and that was only visible
+because each run carries its own control - the same frame times paced with no
+ceiling at all, which should sit near 1 % and read 4.4 %, 7.3 %, 9.8 % and
+11.7 % on the bad ones. Without that control two of those runs would have been
+read as results.
