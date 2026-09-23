@@ -1,7 +1,7 @@
 # Where a solver step goes — 23 September 2026
 
-**Status: lever 1 implemented; lever 2 not implemented and worth building
-again.** The "floor" the lever 1 measurement found, and the downward revision
+**Status: levers 1 and 2 implemented and measured.** Lever 2 took second-order
+steps from 0.35-0.51 to 0.21-0.31 ms, 1.5-1.7x; see its section. The "floor" the lever 1 measurement found, and the downward revision
 of lever 2 it prompted, were the harness's own step fence, not the device; see
 [the floor was the fence](#the-floor-was-the-fence). Frame pacing, a separate
 defect found in the same investigation, is described at the end and has since
@@ -182,6 +182,15 @@ roughly 10-15 % of that; the rest is real in-flight work, which the fence is
 there to bound (engineering log, 23 September).
 
 ## Lever 2 - a static-mass generation should not sweep at all
+
+**Implemented 23 September 2026.** A fixed generation packs its trace inverse
+and applies it in one dispatch a stage; driven generations and walls with a
+prescribed trace row keep the sweep. 35 dispatches a step became 13, and the
+step went from 0.350-0.369 to 0.206-0.248 ms at 8.9k dofs and from 0.477-0.513
+to 0.303-0.307 at 21.9k. The cost moved to preparation: the inversion was redone
+as a Cholesky factor of `M + (h/2) K`, 7.6 ms at 276 trace nodes and 61 ms at
+560, where the pivoted elimination took 31 and 285. The text below is the
+proposal as written.
 
 The CPU already splits this. `direct_trace` applies a precomputed dense inverse
 when the trace mass matches what the factor was inverted for, and falls through

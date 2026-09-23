@@ -1623,6 +1623,35 @@ fn boundary_sweep_trace(trace: u32, local: u32) {
     }
 }
 
+// A fixed generation's trace inverse, packed straight after the transposed
+// trace matrix. Only a generation whose mass cannot move carries one, and only
+// when no trace row is prescribed, so the seeded right-hand side is the whole
+// of what it acts on.
+fn direct_trace_offset() -> u32 {
+    let scalar_count = control.counts_b.y + control.counts_b.z;
+    let transposed_offset = control.boundary_offsets.y + (scalar_count + 3u) / 4u;
+    return transposed_offset + (control.counts_b.y * control.counts_b.z + 3u) / 4u;
+}
+
+// One row of `(I + (h/2) K M^-1)^-1` against the reduced right-hand side that
+// `boundary_reduce` left in each trace word: the sweeps' answer in one pass.
+fn boundary_direct_trace(trace: u32, local: u32) {
+    let trace_count = control.counts_b.y;
+    let participating = !stopped() && trace < trace_count;
+    var partial = 0.0;
+    if participating {
+        let row = trace * trace_count;
+        for (var column = local; column < trace_count; column += WORKGROUP_SIZE) {
+            let reduced = bitcast<f32>(boundary[control.table_offsets.z + column].data.w);
+            partial += packed_boundary_scalar(direct_trace_offset(), row + column) * reduced;
+        }
+    }
+    let solved = reduce_boundary_scalar(local, partial);
+    if participating && local == 0u {
+        scratch[trace_solution_offset() + trace].values.x = solved;
+    }
+}
+
 fn boundary_finalize(i: u32, local: u32, second: bool) {
     let trace_count = control.counts_b.y;
     let mode_count = control.counts_b.z;
@@ -1743,6 +1772,14 @@ fn boundary_sweep_trace_pass(
     @builtin(local_invocation_id) local: vec3<u32>,
 ) {
     boundary_sweep_trace(group.x, local.x);
+}
+
+@compute @workgroup_size(128)
+fn boundary_direct_trace_pass(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    boundary_direct_trace(group.x, local.x);
 }
 
 @compute @workgroup_size(128)

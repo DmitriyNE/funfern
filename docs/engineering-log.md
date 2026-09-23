@@ -3387,6 +3387,18 @@ above:
 
 ## Current TODOs
 
+- [ ] `canonical_gpu_timing --failure` times out, on `main` (52fc4e3) as well
+  as now, so it predates the pacing work. After `clear_failure` the host asks
+  again from the accepted clock (16 -> 17), but the render world's
+  `CanonicalBindGroup` kept `encoded_steps` at 17 through the revision bump,
+  because it preserves the count across revisions within a generation. The
+  failed step it encoded never committed, so `desired - encoded` stays zero and
+  nothing is encoded again. Examples only - the app never calls
+  `clear_failure`; `canonical_gpu_temporal_rollback` and `canonical_gpu_handoff
+  --failure` recover through event and handoff rejection and pass. The fix is to
+  rewind the encoded count (and `retired_steps`) to the accepted clock when a
+  failure is cleared.
+
 - [ ] No way to measure, from the host, how evenly the drawn state advances.
   The requested stream is measurable and the completed counter is not usable for
   it - the counter is zero on 62 % of frames and then jumps by 33, which is the
@@ -10296,4 +10308,50 @@ the app is fence-bound at all, on a copy of the autosave in a scratch HOME.
 - Also found: the app accepts speeds only in 0.02-2.0, and a document outside
   that range resets presentation to defaults. Intended, but a measurement at
   8x silently ran at 1x until the reset was noticed.
+
+## 2026-09-23 — A fixed wall applies its inverse instead of sweeping
+
+Lever 2 of the throughput spike, built once the unfenced harness showed the
+sweeps are about 45 % of a second-order step.
+
+- The backend export now carries the trace system's inverse when the factor has
+  one, and `compile_boundary` packs it straight after the transposed trace
+  matrix, where `direct_trace_offset()` finds it. `boundary_direct_trace_pass`
+  applies one row per workgroup to the right-hand side `boundary_reduce` already
+  seeds, and the encoder dispatches it in place of the `2 x sweeps` passes. 35
+  dispatches a step become 13 at 6 sweeps.
+- Only a fixed generation gets it. The app's fixed plans build with
+  `CanonicalWaveState::zero`, which inverts; a driven generation packs
+  `for_backend`, whose export has no inverse, so its wall keeps the sweep. A
+  plan with any prescribed trace row also keeps the sweep, because the
+  unconstrained inverse does not hold such a row at its own value. The
+  source plan a driven handoff rebuilds only for its layout skips the
+  inversion (`TraceLane::Sweep`); nothing reads its boundary.
+- Why it is constant for a whole generation: `evolution.w = dt/4` is set at
+  plan time and no shader writes it, no shader writes the prescribed flag, a
+  linear law patch changes bulk loss rates rather than the wall's damping, and
+  the boundary solve runs only in the step loop.
+- Device cost, unfenced, 3000 steps, interleaved against 089ce90: 8.9k dofs
+  0.350-0.369 -> 0.206-0.248 ms/step, 21.9k 0.477-0.513 -> 0.303-0.307, so
+  1.5-1.7x on second-order scenes. Q error over 3000 steps 3.819e-5 against
+  3.784e-5. In the app on the edge-0.04 copy at 2x: 1072-1168 sps at 112 fps
+  against 713-736 at 109 fps for the previous build.
+- The inversion is paid on the preparation worker for every fixed generation,
+  and the pivoted Gauss-Jordan the host already had took 31, 122 and 285 ms at
+  276, 426 and 560 trace nodes - against a material edit measured at 489 ms end
+  to end. `S = M + (h/2) K` is symmetric positive definite (`K >= (1 - c)
+  Gamma`), so the inverse is now `M S^-1` through a Cholesky factor with every
+  inner loop along a row: 7.6, 27 and 61 ms for the same traces, with the
+  existing inversion tests unchanged apart from the indefinite case they now
+  also refuse.
+- Validation: `canonical_gpu_timing` with the second-order wall plain, pulse,
+  filter, periodic filter, law patch, clock rebase and vector overlay all match
+  the host oracle; `--forcing --loss` holds prescribed trace rows and keeps the
+  sweep at 37 dispatches. `canonical_gpu_handoff --second-order` commits and
+  rolls back byte-exactly with direct lanes on both sides, across same-mesh,
+  source, thin-gap, prescribed, advance-during-upload and
+  continue-through-settlement. All thirteen other canonical examples pass,
+  `canonical_gpu_temporal_live_source` bit-for-bit.
+- Found while validating, filed above rather than fixed here:
+  `canonical_gpu_timing --failure` times out, and did on `main` already.
 

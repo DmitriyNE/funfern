@@ -582,20 +582,18 @@ impl Playground {
                                 )
                                 .map_err(|error| format!("{error:?}"))
                             }),
-                        None => {
-                            CanonicalWaveState::zero_for_backend(&active.canonical_operator, dt)
-                                .map_err(|error| error.to_string())
-                                .and_then(|state| {
-                                    CanonicalGpuPlan::compile_with_quadratic(
-                                        &active.canonical_operator,
-                                        &active.operator,
-                                        &state,
-                                        &active.canonical_forcing,
-                                        clock,
-                                    )
-                                    .map_err(|error| format!("{error:?}"))
-                                })
-                        }
+                        None => CanonicalWaveState::zero(&active.canonical_operator, dt)
+                            .map_err(|error| error.to_string())
+                            .and_then(|state| {
+                                CanonicalGpuPlan::compile_with_quadratic(
+                                    &active.canonical_operator,
+                                    &active.operator,
+                                    &state,
+                                    &active.canonical_forcing,
+                                    clock,
+                                )
+                                .map_err(|error| format!("{error:?}"))
+                            }),
                     });
                 if let Ok(plan) = reset {
                     request.install(assets, commands, plan);

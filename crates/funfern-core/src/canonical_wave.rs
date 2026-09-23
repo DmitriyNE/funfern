@@ -1332,6 +1332,13 @@ pub struct CanonicalOutgoingFactorExport {
     /// The same, converged only to f32 precision, for a backend that holds
     /// f32. Always even and never more than `sweeps`.
     pub device_sweeps: usize,
+    /// The trace system's inverse at the authored mass, row-major, when the
+    /// factor holds one: a generation whose mass cannot move. A backend can
+    /// apply it in one pass where the sweep takes `2 x device_sweeps`. It is
+    /// the unconstrained inverse, so it is withheld whenever a trace row is
+    /// prescribed and the sweep, which holds such a row at its own value,
+    /// serves instead.
+    pub direct_inverse: Option<Vec<f64>>,
     pub eliminated: Vec<CanonicalOutgoingEliminationExport>,
     pub prescribed_trace: Vec<bool>,
 }
@@ -1456,14 +1463,16 @@ impl CanonicalWaveState {
         Self::assemble(operator, time_step, primary_flux, complementary_flux, true)
     }
 
-    /// The same state without the inverted trace lane, for a generation that
-    /// will be compiled for a backend rather than stepped here.
+    /// The same state without the inverted trace lane, for a generation whose
+    /// backend will sweep the trace rather than apply an inverse.
     ///
-    /// The export a backend consumes is mass-free - the diagonal, the modal
-    /// corrections, the sweep count and the eliminated modes - and never the
-    /// inverse, so a state built only to be packed pays a dense inversion that
-    /// is then discarded. Stepping one of these is correct and takes the
-    /// sweep, which is the general lane a driven generation uses anyway.
+    /// That is a driven generation: its mass moves, so an inverse at the
+    /// authored mass is never the system its stages solve, and the export it
+    /// packs is the mass-free part alone - the diagonal, the modal
+    /// corrections, the sweep count and the eliminated modes. A fixed
+    /// generation builds with [`Self::new`] or [`Self::zero`] instead, whose
+    /// export carries the inverse its backend applies in one pass. Stepping
+    /// one of these is correct and takes the sweep.
     pub fn for_backend(
         operator: &CanonicalWaveOperator,
         time_step: f64,
@@ -2624,10 +2633,16 @@ impl CanonicalOutgoingMidpointFactor {
             }
             trace_mass.push(value);
         }
+        // The trace system `I + (h/2) K M^-1` is `S M^-1` with
+        // `S = M + (h/2) K`, and `S` is symmetric positive definite: `K` is
+        // `diag(D + Gamma)` plus modal corrections no larger than the
+        // contraction times `Gamma`. So the inverse is `M S^-1`, taken through
+        // a Cholesky factor with no pivoting, and only the lower triangle of
+        // `S` is ever built.
         let mut system = vec![0.0; trace_count * trace_count];
         for row in 0..trace_count {
             system[row * trace_count + row] =
-                1.0 + half_duration * factor.diagonal[row] / trace_mass[row];
+                trace_mass[row] + half_duration * factor.diagonal[row];
         }
         for (mode, correction) in boundary.modes.iter().zip(&factor.modal_correction) {
             if *correction == 0.0 {
@@ -2635,13 +2650,18 @@ impl CanonicalOutgoingMidpointFactor {
             }
             for row in 0..trace_count {
                 let scaled = half_duration * correction * mode.trace[row];
-                for column in 0..trace_count {
-                    system[row * trace_count + column] +=
-                        scaled * mode.trace[column] / trace_mass[column];
+                let lower = &mut system[row * trace_count..row * trace_count + row + 1];
+                for (entry, trace) in lower.iter_mut().zip(&mode.trace) {
+                    *entry += scaled * trace;
                 }
             }
         }
-        let inverse = invert_dense(system, trace_count)?;
+        let mut inverse = invert_symmetric_positive(system, trace_count)?;
+        for (row, mass) in trace_mass.iter().enumerate() {
+            for entry in &mut inverse[row * trace_count..(row + 1) * trace_count] {
+                *entry *= mass;
+            }
+        }
         factor.direct = Some(CanonicalOutgoingDirectTrace {
             trace_mass,
             inverse,
@@ -2789,6 +2809,7 @@ impl CanonicalOutgoingMidpointFactor {
             modal_correction: self.modal_correction.clone(),
             sweeps: self.sweeps,
             device_sweeps: self.device_sweeps,
+            direct_inverse: self.direct.as_ref().map(|direct| direct.inverse.clone()),
             eliminated: self
                 .eliminated
                 .iter()
@@ -2823,6 +2844,9 @@ impl CanonicalOutgoingMidpointFactor {
         }
         let mut export = self.export()?;
         export.prescribed_trace.copy_from_slice(prescribed_trace);
+        if prescribed_trace.iter().any(|held| *held) {
+            export.direct_inverse = None;
+        }
         Ok(export)
     }
 }
@@ -3846,54 +3870,79 @@ pub(crate) fn pole_energy_transform() -> Result<(Matrix3, Matrix3), WaveError> {
 ///
 /// Pivoting, the singularity threshold and the finiteness check match
 /// [`solve_dense`], so a system either function rejects is rejected by both.
-fn invert_dense(mut matrix: Vec<f64>, count: usize) -> Result<Vec<f64>, WaveError> {
+/// Inverts a symmetric positive-definite matrix through its Cholesky factor,
+/// reading only the lower triangle. Every inner loop runs along a row, which
+/// is what keeps a trace of several hundred nodes to tens of milliseconds: the
+/// pivoted elimination this replaced walked columns of the inverse in its back
+/// substitution and took several times as long for the same answer.
+fn invert_symmetric_positive(mut matrix: Vec<f64>, count: usize) -> Result<Vec<f64>, WaveError> {
     if matrix.len() != count * count || matrix.iter().any(|value| !value.is_finite()) {
         return Err(WaveError::InvalidState);
     }
+    let dot = |left: &[f64], right: &[f64]| {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| left * right)
+            .sum::<f64>()
+    };
+    // `L` overwrites the lower triangle, row by row.
+    for row in 0..count {
+        for column in 0..=row {
+            let (above, current) = matrix.split_at_mut(row * count);
+            let prefix = if column == row {
+                dot(&current[..column], &current[..column])
+            } else {
+                dot(
+                    &current[..column],
+                    &above[column * count..column * count + column],
+                )
+            };
+            let value = current[column] - prefix;
+            if column == row {
+                if !value.is_finite() || value <= 1.0e-14 * current[column].abs().max(1.0) {
+                    return Err(WaveError::InvalidState);
+                }
+                current[column] = value.sqrt();
+            } else {
+                current[column] = value / above[column * count + column];
+            }
+        }
+    }
+    // `Y = L^-1`, lower triangular, one row from the rows above it.
     let mut inverse = vec![0.0; count * count];
-    for index in 0..count {
-        inverse[index * count + index] = 1.0;
-    }
-    for pivot in 0..count {
-        let best = (pivot..count)
-            .max_by(|left, right| {
-                matrix[*left * count + pivot]
-                    .abs()
-                    .total_cmp(&matrix[*right * count + pivot].abs())
-            })
-            .ok_or(WaveError::InvalidState)?;
-        let scale = matrix[best * count + pivot].abs();
-        if !scale.is_finite() || scale <= 1.0e-14 {
-            return Err(WaveError::InvalidState);
-        }
-        if best != pivot {
-            for column in 0..count {
-                matrix.swap(pivot * count + column, best * count + column);
-                inverse.swap(pivot * count + column, best * count + column);
+    for row in 0..count {
+        let (above, current) = inverse.split_at_mut(row * count);
+        current[row] = 1.0;
+        for index in 0..row {
+            let factor = matrix[row * count + index];
+            if factor != 0.0 {
+                let source = &above[index * count..index * count + index + 1];
+                for (target, value) in current[..=index].iter_mut().zip(source) {
+                    *target -= factor * value;
+                }
             }
         }
-        for row in pivot + 1..count {
-            let factor = matrix[row * count + pivot] / matrix[pivot * count + pivot];
-            matrix[row * count + pivot] = 0.0;
-            if factor == 0.0 {
-                continue;
-            }
-            for column in pivot + 1..count {
-                matrix[row * count + column] -= factor * matrix[pivot * count + column];
-            }
-            for column in 0..count {
-                inverse[row * count + column] -= factor * inverse[pivot * count + column];
-            }
-        }
-    }
-    for row in (0..count).rev() {
         let diagonal = matrix[row * count + row];
-        for column in 0..count {
-            let residual = inverse[row * count + column]
-                - (row + 1..count)
-                    .map(|index| matrix[row * count + index] * inverse[index * count + column])
-                    .sum::<f64>();
-            inverse[row * count + column] = residual / diagonal;
+        for value in &mut current[..=row] {
+            *value /= diagonal;
+        }
+    }
+    // `S^-1 = L^-T Y`, one row from the rows below it.
+    for row in (0..count).rev() {
+        let (current, below) = inverse.split_at_mut((row + 1) * count);
+        let current = &mut current[row * count..];
+        for index in row + 1..count {
+            let factor = matrix[index * count + row];
+            if factor != 0.0 {
+                let source = &below[(index - row - 1) * count..(index - row) * count];
+                for (target, value) in current.iter_mut().zip(source) {
+                    *target -= factor * value;
+                }
+            }
+        }
+        let diagonal = matrix[row * count + row];
+        for value in current.iter_mut() {
+            *value /= diagonal;
         }
     }
     finite_values(&inverse)?;
@@ -4085,7 +4134,7 @@ mod tests {
         ScalarField, TimeDrive, VolumeSourceContribution, VolumeSourceNode,
     };
 
-    /// The one elimination has to give what the per-column solves gave, on a
+    /// The one inversion has to give what the per-column solves gave, on a
     /// system with the shape `prepare_static` builds: a dominant diagonal plus
     /// a few rank-one modal corrections, sized like a real trace.
     #[test]
@@ -4116,7 +4165,7 @@ mod tests {
                 per_column[row * count + column] = value;
             }
         }
-        let once = invert_dense(system.clone(), count).unwrap();
+        let once = invert_symmetric_positive(system.clone(), count).unwrap();
         for (left, right) in once.iter().zip(&per_column) {
             assert!(
                 (left - right).abs() < 1.0e-12 * left.abs().max(1.0),
@@ -4139,29 +4188,28 @@ mod tests {
         }
     }
 
-    /// A singular system is refused rather than inverted, on the same threshold
-    /// the per-column path used.
+    /// A singular or indefinite system is refused rather than inverted.
     #[test]
     fn a_singular_system_has_no_inverse() {
-        let count = 4;
-        let mut system = vec![0.0; count * count];
-        for row in 0..count {
-            system[row * count + row] = 1.0;
-        }
-        // Two identical rows.
-        for column in 0..count {
-            system[3 * count + column] = system[column];
-        }
+        // Rank one: every entry one.
         assert_eq!(
-            invert_dense(system, count),
+            invert_symmetric_positive(vec![1.0; 9], 3),
             Err(WaveError::InvalidState),
             "a singular trace system has no direct lane"
         );
         assert_eq!(
-            invert_dense(vec![f64::NAN; 4], 2),
+            invert_symmetric_positive(vec![1.0, 2.0, 2.0, 1.0], 2),
+            Err(WaveError::InvalidState),
+            "an indefinite one has none either"
+        );
+        assert_eq!(
+            invert_symmetric_positive(vec![f64::NAN; 4], 2),
             Err(WaveError::InvalidState)
         );
-        assert_eq!(invert_dense(vec![1.0; 3], 2), Err(WaveError::InvalidState));
+        assert_eq!(
+            invert_symmetric_positive(vec![1.0; 3], 2),
+            Err(WaveError::InvalidState)
+        );
     }
 
     fn square() -> TriMesh {
@@ -4885,10 +4933,10 @@ mod tests {
         assert!(state.energy(&operator).unwrap() < before);
     }
 
-    /// What a backend consumes is mass-free, so the state built for one and the
-    /// state built to step here must export the same factor. This is the whole
-    /// licence for skipping the dense inversion when a generation is only going
-    /// to be packed - if the export could tell them apart, it would not hold.
+    /// The mass-free part of the export is the same whichever way the state was
+    /// built, so a driven generation can pack a state that skipped the dense
+    /// inversion. The inverse itself is exported only by the state that paid
+    /// for it, and it is the same solve the sweep converges to.
     #[test]
     fn a_backend_state_exports_what_a_stepping_state_exports() {
         let mesh = Arc::new(square_with_outer_boundary());
@@ -4908,10 +4956,57 @@ mod tests {
         let backend = CanonicalWaveState::zero_for_backend(&operator, step).unwrap();
         let stepping_factor = stepping.outgoing_midpoint_factor().unwrap();
         let backend_factor = backend.outgoing_midpoint_factor().unwrap();
+        let mut stepping_export = stepping_factor.export().unwrap();
+        let backend_export = backend_factor.export().unwrap();
+        assert!(backend_export.direct_inverse.is_none());
+        let inverse = stepping_export
+            .direct_inverse
+            .take()
+            .expect("a fixed state exports its inverse");
         assert_eq!(
-            stepping_factor.export().unwrap(),
-            backend_factor.export().unwrap(),
-            "the backend export must not see the inverted lane"
+            stepping_export, backend_export,
+            "the mass-free export must not depend on the inverted lane"
+        );
+
+        // Applied to a right-hand side, the exported inverse is the sweep's
+        // answer - the whole of what a backend may substitute it for.
+        let boundary = operator.outgoing_boundary().unwrap();
+        let trace_count = boundary.trace_nodes.len();
+        let reduced = (0..trace_count)
+            .map(|trace| (0.37 * trace as f64).sin() + 0.2)
+            .collect::<Vec<_>>();
+        let swept = solve_outgoing_trace(
+            boundary,
+            &backend_export.diagonal,
+            &backend_export.modal_correction,
+            backend_export.sweeps,
+            0.5 * backend_export.duration,
+            operator.primary_mass(),
+            &reduced,
+            &[],
+        )
+        .unwrap();
+        let scale = swept.iter().map(|value| value.abs()).fold(0.0, f64::max);
+        for (row, expected) in swept.iter().enumerate() {
+            let direct = inverse[row * trace_count..(row + 1) * trace_count]
+                .iter()
+                .zip(&reduced)
+                .map(|(coefficient, value)| coefficient * value)
+                .sum::<f64>();
+            assert!(
+                (direct - expected).abs() <= 1.0e-12 * scale,
+                "row {row}: {direct} against {expected}"
+            );
+        }
+        // A held trace row is outside what the unconstrained inverse solves.
+        let mut held = vec![false; trace_count];
+        held[0] = true;
+        assert!(
+            stepping_factor
+                .export_with_prescribed(&held)
+                .unwrap()
+                .direct_inverse
+                .is_none()
         );
 
         // And the one that skipped it really did skip it, rather than the two

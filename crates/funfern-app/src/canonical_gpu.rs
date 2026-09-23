@@ -897,6 +897,10 @@ pub struct CanonicalGpuPlan {
     /// Diagonal-preconditioned passes the trace solve runs, from the factor's
     /// own contraction bound. Zero without an outgoing boundary.
     pub trace_sweeps: usize,
+    /// Whether the trace solve applies a packed inverse in one pass instead of
+    /// sweeping: a generation whose mass cannot move and whose wall holds no
+    /// prescribed row.
+    pub trace_direct: bool,
     needs_loss_stages: bool,
     needs_accounting: bool,
     event_kind: u32,
@@ -1409,6 +1413,7 @@ impl CanonicalGpuPlan {
             trace_count,
             mode_count,
             trace_sweeps,
+            trace_direct,
         } = compile_boundary(
             operator,
             state.outgoing_midpoint_factor(),
@@ -1522,7 +1527,7 @@ impl CanonicalGpuPlan {
         let dispatches_per_step = 4
             + usize::from(needs_loss_stages) * 2
             + usize::from(needs_accounting)
-            + usize::from(trace_count != 0) * (6 + 4 * trace_sweeps as usize);
+            + trace_dispatches(trace_count, trace_sweeps as usize, trace_direct);
         let control = GpuCanonicalControl {
             counts_a: UVec4::new(
                 usize_u32(node_count)?,
@@ -1638,6 +1643,7 @@ impl CanonicalGpuPlan {
             trace_count,
             mode_count,
             trace_sweeps: trace_sweeps as usize,
+            trace_direct,
             needs_loss_stages,
             needs_accounting,
             event_kind: EVENT_NONE,
@@ -1757,7 +1763,7 @@ impl CanonicalGpuPlan {
         self.manifest.dispatches_per_step = 4
             + usize::from(self.needs_loss_stages) * 2
             + usize::from(self.needs_accounting)
-            + usize::from(self.trace_count != 0) * (6 + 4 * self.trace_sweeps);
+            + trace_dispatches(self.trace_count, self.trace_sweeps, self.trace_direct);
         Ok(())
     }
 
@@ -2398,6 +2404,19 @@ struct CompiledBoundary {
     /// only thing the device needs to be told about it. Always even, so the
     /// answer lands in the lane the rest of the pass reads.
     trace_sweeps: u32,
+    /// Whether a dense inverse follows the transposed trace matrix, in which
+    /// case the host encodes one pass in place of the sweeps.
+    trace_direct: bool,
+}
+
+/// Boundary dispatches a step encodes: prepare, reduce and finalize at each of
+/// the two kicks, and between them either one inverse pass or two passes a
+/// sweep.
+fn trace_dispatches(trace_count: usize, sweeps: usize, direct: bool) -> usize {
+    if trace_count == 0 {
+        return 0;
+    }
+    6 + 2 * if direct { 1 } else { 2 * sweeps }
 }
 
 fn compile_boundary(
@@ -2419,6 +2438,7 @@ fn compile_boundary(
             trace_count: 0,
             mode_count: 0,
             trace_sweeps: 0,
+            trace_direct: false,
         });
     };
     let factor = factor.ok_or(CanonicalGpuBuildError::InvalidLayout(
@@ -2530,9 +2550,9 @@ fn compile_boundary(
     )?;
     // The mass-free trace system: `D + Gamma` per trace row, then `a_k - 1` per
     // mode. Both are divided by, or multiplied into, the stage's own mass on
-    // the device, so nothing here has to be rebuilt when a drive moves it.
-    // This replaces a dense `trace^2` inverse, so the boundary buffer shrinks
-    // from quadratic to linear in the trace as well.
+    // the device, so nothing here has to be rebuilt when a drive moves it. A
+    // driven generation's boundary buffer is therefore linear in the trace; a
+    // fixed one adds its `trace^2` inverse below.
     let solve_offset = words.len();
     pack_scalars(
         &mut words,
@@ -2549,6 +2569,26 @@ fn compile_boundary(
             .flat_map(|trace| outgoing.modes().iter().map(move |mode| mode.trace()[trace])),
         "transposed outgoing trace matrix",
     )?;
+    // A fixed generation's inverse, where the shader finds it without being
+    // told: straight after the transposed matrix. With it the solve is one
+    // pass of `trace^2` against the sweep's `2 x sweeps x trace x modes`, and
+    // the dispatch count drops by the same factor.
+    let trace_direct = match &export.direct_inverse {
+        Some(inverse) => {
+            if inverse.len() != trace_count * trace_count {
+                return Err(CanonicalGpuBuildError::InvalidLayout(
+                    "the outgoing trace inverse does not match the trace",
+                ));
+            }
+            pack_scalars(
+                &mut words,
+                inverse.iter().copied(),
+                "outgoing trace inverse",
+            )?;
+            true
+        }
+        None => false,
+    };
     Ok(CompiledBoundary {
         words,
         trace_positions: positions,
@@ -2561,6 +2601,7 @@ fn compile_boundary(
         trace_count,
         mode_count: outgoing.modes().len(),
         trace_sweeps: usize_u32(export.device_sweeps)?,
+        trace_direct,
     })
 }
 
@@ -2988,6 +3029,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     accounting_item_count: u32,
     trace_count: u32,
     trace_sweeps: u32,
+    trace_direct: bool,
     drive_count: u32,
     material_runtime_count: u32,
     source_count: u32,
@@ -3191,6 +3233,7 @@ fn add_canonical_buffers(
         accounting_item_count,
         trace_count,
         trace_sweeps,
+        trace_direct: plan.trace_direct,
         drive_count,
         material_runtime_count,
         source_count,
@@ -4305,6 +4348,7 @@ struct CanonicalPipeline {
     boundary_prepare_second: CachedComputePipelineId,
     boundary_reduce_second: CachedComputePipelineId,
     boundary_sweep_trace: CachedComputePipelineId,
+    boundary_direct_trace: CachedComputePipelineId,
     boundary_finalize_second: CachedComputePipelineId,
     finish_loss_validate: CachedComputePipelineId,
     reduce_accounting: CachedComputePipelineId,
@@ -4390,6 +4434,7 @@ fn init_canonical_pipeline(
     let boundary_prepare_second = queue("boundary_prepare_second");
     let boundary_reduce_second = queue("boundary_reduce_second");
     let boundary_sweep_trace = queue("boundary_sweep_trace_pass");
+    let boundary_direct_trace = queue("boundary_direct_trace_pass");
     let boundary_finalize_second = queue("boundary_finalize_second");
     let finish_loss_validate = queue("finish_loss_validate");
     let reduce_accounting = queue("reduce_accounting");
@@ -4427,6 +4472,7 @@ fn init_canonical_pipeline(
         boundary_prepare_second,
         boundary_reduce_second,
         boundary_sweep_trace,
+        boundary_direct_trace,
         boundary_finalize_second,
         finish_loss_validate,
         reduce_accounting,
@@ -4882,6 +4928,26 @@ fn prepare_canonical_live_event_bind_group(
     });
 }
 
+/// The trace solve between a kick's reduce and finalize: the packed inverse in
+/// one pass when the generation has one, or the sweeps.
+fn encode_trace_solve(
+    pass: &mut bevy::render::render_resource::ComputePass,
+    pipelines: &[&bevy::render::render_resource::ComputePipeline],
+    handles: &CanonicalGpuBufferHandles,
+) {
+    if handles.trace_direct {
+        pass.set_pipeline(pipelines[31]);
+        pass.dispatch_workgroups(handles.trace_count, 1, 1);
+        return;
+    }
+    for _ in 0..handles.trace_sweeps {
+        pass.set_pipeline(pipelines[4]);
+        pass.dispatch_workgroups(handles.trace_count, 1, 1);
+        pass.set_pipeline(pipelines[30]);
+        pass.dispatch_workgroups(handles.trace_count, 1, 1);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compute_canonical_wave(
     mut render_context: RenderContext,
@@ -4944,6 +5010,7 @@ fn compute_canonical_wave(
         // Appended rather than placed beside its partner so every index below
         // stays put.
         pipeline.boundary_sweep_trace,
+        pipeline.boundary_direct_trace,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -5224,13 +5291,9 @@ fn compute_canonical_wave(
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
             // One pair of dispatches per sweep. The barrier a pass needs
             // between its two reductions is the one between dispatches, and
-            // going through it keeps each half as wide as the boundary is.
-            for _ in 0..handles.trace_sweeps {
-                pass.set_pipeline(pipelines[4]);
-                pass.dispatch_workgroups(handles.trace_count, 1, 1);
-                pass.set_pipeline(pipelines[30]);
-                pass.dispatch_workgroups(handles.trace_count, 1, 1);
-            }
+            // going through it keeps each half as wide as the boundary is. A
+            // fixed generation applies its inverse instead, in one pass.
+            encode_trace_solve(&mut pass, &pipelines, handles);
             pass.set_pipeline(pipelines[5]);
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
         }
@@ -5247,12 +5310,7 @@ fn compute_canonical_wave(
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
             pass.set_pipeline(pipelines[9]);
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
-            for _ in 0..handles.trace_sweeps {
-                pass.set_pipeline(pipelines[4]);
-                pass.dispatch_workgroups(handles.trace_count, 1, 1);
-                pass.set_pipeline(pipelines[30]);
-                pass.dispatch_workgroups(handles.trace_count, 1, 1);
-            }
+            encode_trace_solve(&mut pass, &pipelines, handles);
             pass.set_pipeline(pipelines[10]);
             pass.dispatch_workgroups(handles.trace_count, 1, 1);
         }
@@ -5771,6 +5829,12 @@ mod tests {
     }
 
     fn plan(boundary: OuterBoundaryCondition) -> CanonicalGpuPlan {
+        plan_with_trace_lane(boundary, true)
+    }
+
+    /// `inverted` builds the state a fixed generation packs; without it, the
+    /// state a driven one packs, whose trace the device sweeps.
+    fn plan_with_trace_lane(boundary: OuterBoundaryCondition, inverted: bool) -> CanonicalGpuPlan {
         let scene = Scene::initial();
         let mesh = mesh_scene(
             &scene,
@@ -5784,7 +5848,12 @@ mod tests {
         let scalar = QuadraticWaveOperator::assemble_scene(&mesh, &scene, boundary).unwrap();
         let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 7).unwrap();
         let dt = 0.8 * operator.maximum_time_step();
-        let state = CanonicalWaveState::zero(&operator, dt).unwrap();
+        let state = if inverted {
+            CanonicalWaveState::zero(&operator, dt)
+        } else {
+            CanonicalWaveState::zero_for_backend(&operator, dt)
+        }
+        .unwrap();
         let mut forcing = CanonicalForcing::none(&operator);
         forcing
             .push_source(
@@ -6041,12 +6110,24 @@ mod tests {
         assert_eq!(plan.trace_count, plan.mode_count);
         assert!(plan.boundary.len() > plan.trace_count + plan.mode_count * MODE_WORDS);
         assert!(plan.trace_count <= CANONICAL_GPU_MAX_TRACE);
-        // The sweep count comes from the factor's own contraction bound, and
-        // the encoder spends one pair of dispatches on each pass of each stage.
-        assert!(plan.trace_sweeps > 0);
+        // A fixed generation applies its packed inverse in one pass a stage,
+        // and the inverse follows the transposed trace matrix in full.
+        assert!(plan.trace_direct);
+        assert_eq!(plan.manifest.dispatches_per_step, 5 + 6 + 2);
+        let square = plan.trace_count * plan.trace_count;
+        let swept = plan_with_trace_lane(OuterBoundaryCondition::SecondOrderOutgoing, false);
         assert_eq!(
-            plan.manifest.dispatches_per_step,
-            5 + 6 + 4 * plan.trace_sweeps
+            plan.boundary.len(),
+            swept.boundary.len() + square.div_ceil(4)
+        );
+        // Without the inverse the sweep count comes from the factor's own
+        // contraction bound, and the encoder spends one pair of dispatches on
+        // each pass of each stage.
+        assert!(!swept.trace_direct);
+        assert!(swept.trace_sweeps > 0);
+        assert_eq!(
+            swept.manifest.dispatches_per_step,
+            5 + 6 + 4 * swept.trace_sweeps
         );
     }
 

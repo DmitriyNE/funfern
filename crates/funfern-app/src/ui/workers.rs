@@ -625,7 +625,7 @@ pub(super) fn compile_gpu_upload(
     runtime_serials: [u32; 4],
 ) -> Result<PreparedGpuUpload, String> {
     let clock = CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?;
-    let plan = compile_generation_plan(&candidate, time_step, clock)?;
+    let plan = compile_generation_plan(&candidate, time_step, clock, TraceLane::Direct)?;
     if candidate.fresh || active.is_none() {
         return Ok(PreparedGpuUpload {
             plan,
@@ -686,7 +686,7 @@ pub(super) fn compile_gpu_upload(
         let source_step = active.recommended_time_step();
         let source_clock =
             CanonicalGpuClock::initial(source_step).map_err(|error| format!("{error:?}"))?;
-        let source = compile_generation_plan(&active, source_step, source_clock)?;
+        let source = compile_generation_plan(&active, source_step, source_clock, TraceLane::Sweep)?;
         gpu_transfer
             .with_temporal_material_runtime(&source, &plan)
             .map_err(|error| format!("{error:?}"))?
@@ -699,6 +699,15 @@ pub(super) fn compile_gpu_upload(
     })
 }
 
+/// Whether a fixed generation's plan carries its trace inverse. A plan that will
+/// be installed does; one rebuilt only so its layout can be read does not pay
+/// for an inversion that nothing reads. A driven generation sweeps either way.
+#[derive(Clone, Copy)]
+enum TraceLane {
+    Direct,
+    Sweep,
+}
+
 /// The device plan for one prepared generation, driven or not.
 ///
 /// The source plan is rebuilt rather than kept, because the request holds
@@ -709,6 +718,7 @@ fn compile_generation_plan(
     prepared: &PreparedTopology,
     time_step: f64,
     clock: CanonicalGpuClock,
+    lane: TraceLane,
 ) -> Result<CanonicalGpuPlan, String> {
     match &prepared.canonical_temporal_operator {
         Some(temporal) => {
@@ -716,10 +726,18 @@ fn compile_generation_plan(
                 .map_err(|error| error.to_string())?;
             CanonicalGpuPlan::compile_temporal(temporal, &state, &prepared.canonical_forcing, clock)
         }
+        // A fixed generation inverts its trace system here, once, so the device
+        // applies it in one pass where a driven one has to sweep.
         None => {
-            let state =
-                CanonicalWaveState::zero_for_backend(&prepared.canonical_operator, time_step)
-                    .map_err(|error| error.to_string())?;
+            let state = match lane {
+                TraceLane::Direct => {
+                    CanonicalWaveState::zero(&prepared.canonical_operator, time_step)
+                }
+                TraceLane::Sweep => {
+                    CanonicalWaveState::zero_for_backend(&prepared.canonical_operator, time_step)
+                }
+            }
+            .map_err(|error| error.to_string())?;
             CanonicalGpuPlan::compile_with_quadratic(
                 &prepared.canonical_operator,
                 &prepared.operator,
