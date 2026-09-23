@@ -381,6 +381,21 @@ impl Playground {
             self.amr_status = "monitoring solution".into();
             return;
         }
+        // A driven estimate is taken under the runtime the solver stepped the
+        // field with, decoded from the same snapshot. Until a snapshot and a
+        // clock agree on its epoch there is nothing safe to decode it against.
+        let temporal = match &active.canonical_temporal_operator {
+            Some(operator) => {
+                match canonical.accepted_material_runtime(&operator.initial_runtime()) {
+                    Some(runtime) => Some((operator.clone(), runtime)),
+                    None => {
+                        self.amr_status = "waiting for aligned readback".into();
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
         let dt = self.solver_time_step();
         let time = canonical.clock.map_or(self.simulated_time(), |clock| {
             clock.absolute_seconds + (step as f64 - f64::from(clock.accepted_steps)) * dt
@@ -493,7 +508,7 @@ impl Playground {
             job,
             active.mesh.clone(),
             active.canonical_operator.clone(),
-            active.canonical_temporal_operator.clone(),
+            temporal,
             active.canonical_forcing.clone(),
             canonical_snapshot,
         );

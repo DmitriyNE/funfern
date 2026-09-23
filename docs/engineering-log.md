@@ -10432,3 +10432,35 @@ time-driven filter, `canonical_gpu_temporal`, is a conservative bulk.
 - Carried forward: deriving the time-driven filter for open walls, gaps and loss,
   which is what re-admitting those compositions needs.
 
+## 2026-09-24 — Driven AMR estimates under the runtime the field was stepped with
+
+Stage 7 closeout defect 3. App AMR evaluated the driven supplement and the
+size rule's instantaneous materials under `initial_runtime()`, with a comment
+saying nothing in the app re-anchors a carrier. Handoffs have done so since
+the runtime bank moved into the snapshot: a drive edit's handoff keeps the old
+carrier's phase at the commit, as `canonical_gpu_temporal_handoff`'s oracle,
+which the device matches, does by construction.
+
+- Measured on the existing supplement fixture: a frequency edit of 0.9 Hz
+  committed 0.3 s before the snapshot moves the estimator's total energy from
+  1.825e-2 to 2.113e-2 (15.8 %), and its worst element by 20.5 %. The core test
+  now asserts that the supplement depends on the runtime it is given.
+- `CanonicalGpuDisplay::accepted_material_runtime(authored)` decodes the bank
+  from the full snapshot against the clock's epoch origin, and only when no
+  clock rebase can lie between the two readbacks: the snapshot is no later
+  than the clock and inside the clock's current epoch. Otherwise it returns
+  `None`. This replaces the separate epoch-origin argument that the 22
+  September entry flagged as a hazard, for the app's use; the examples keep
+  `material_runtime`.
+- `CanonicalAmrPreparation` now pairs the temporal operator with that runtime
+  in one `Option`, so a driven estimate without a bank cannot be built. When
+  the readbacks do not agree, AMR waits ("waiting for aligned readback").
+- In the app on a pumped, reflecting, adaptive copy: 15 driven estimates in
+  45 s against 18 for the previous build, one run each. The wait costs at most
+  a readback.
+- Tests: `the_accepted_runtime_waits_for_readbacks_that_share_an_epoch`
+  (aligned decodes and anchors at the origin; a snapshot ahead of the clock or
+  across a rebase waits) and the extended
+  `temporal_supplement_matches_the_fixed_one_when_inert_and_departs_when_driven`.
+  `canonical_gpu_temporal_amr`, `_work` and `_handoff` reproduce their figures.
+

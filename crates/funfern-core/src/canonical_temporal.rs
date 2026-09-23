@@ -5110,6 +5110,39 @@ mod tests {
                 .iter()
                 .all(|value| value.is_finite() && *value >= 0.0)
         );
+
+        // And it reads the runtime it is given. A frequency edit committed
+        // some time before the snapshot keeps the old carrier's phase at the
+        // commit, so by the snapshot the carrier has drifted from the authored
+        // anchor by the frequency change times the elapsed time - here about
+        // 1.7 rad. A caller passing the authored runtime estimates a field
+        // under a coefficient the solver never used.
+        let mut carried = runtime.clone();
+        let old_drive = pump(0.35, 1.7, 0.4)
+            .evaluate(&driven_scene.materials[0].parameters)
+            .unwrap();
+        carried
+            .preserve_carrier(
+                driven_scene.materials[0].id,
+                CanonicalMaterialDrive::MassCoefficient,
+                old_drive,
+                -0.3,
+            )
+            .unwrap();
+        let carried_supplement = canonical_temporal_indicator_supplement(
+            &mesh,
+            &driven,
+            &CanonicalForcing::none(driven.base()),
+            &snapshot,
+            &carried,
+            0.0,
+        )
+        .unwrap();
+        let carried_energy: f64 = carried_supplement.element_energy.iter().sum();
+        assert!(
+            (carried_energy - energy).abs() > 1.0e-3 * energy.abs(),
+            "the carried phase must move the estimate: {carried_energy} against {energy}"
+        );
     }
 
     /// End to end: a travelling modulation must actually shrink the mesh the

@@ -3756,6 +3756,29 @@ impl CanonicalGpuRequest {
 }
 
 impl CanonicalGpuDisplay {
+    /// The accepted material runtime from the latest full snapshot, decoded
+    /// against the epoch that snapshot belongs to.
+    ///
+    /// The bank arrives with the state, the epoch origin with the continuous
+    /// control readback, and the two can describe different steps. The origin
+    /// moves only at a clock rebase, so the pair is trusted only when the
+    /// snapshot is no later than the clock and inside the clock's current
+    /// epoch - no rebase can lie between them. Otherwise this returns `None`
+    /// and a caller waits a readback rather than decoding against the wrong
+    /// origin.
+    pub fn accepted_material_runtime(
+        &self,
+        authored: &CanonicalMaterialRuntimeState,
+    ) -> Option<CanonicalMaterialRuntimeState> {
+        let clock = self.clock?;
+        let snapshot = u32::try_from(self.raw_state_completed_steps).ok()?;
+        let behind = clock.accepted_steps.checked_sub(snapshot)?;
+        if clock.step_in_epoch < behind {
+            return None;
+        }
+        self.material_runtime(authored, clock.epoch_origin_seconds)
+    }
+
     /// The accepted material runtime from the latest full snapshot.
     ///
     /// `authored` supplies the material set, its IDs and its names as the
@@ -5861,6 +5884,59 @@ mod tests {
         assert_eq!(stats.retired_steps(), 40);
         stats.completed_steps.store(50, Ordering::Relaxed);
         assert_eq!(stats.retired_steps(), 50);
+    }
+
+    /// The bank comes with the state snapshot and the epoch origin with the
+    /// control readback, so a decode is trusted only when no clock rebase can
+    /// lie between the two readbacks.
+    #[test]
+    fn the_accepted_runtime_waits_for_readbacks_that_share_an_epoch() {
+        let (_, _, _, operator, _, _) = temporal_plan();
+        let authored = operator.initial_runtime();
+        let mut display = CanonicalGpuDisplay {
+            raw_material_runtime: vec![
+                GpuCanonicalStateWord::default();
+                authored.records().len() * TEMPORAL_RUNTIME_WORDS_PER_SLOT
+            ],
+            raw_state_completed_steps: 90,
+            ..Default::default()
+        };
+        let clock = |accepted_steps: u32, step_in_epoch: u32| CanonicalGpuDisplayClock {
+            epoch: 3,
+            epoch_origin_seconds: 12.5,
+            absolute_seconds: 12.5,
+            step_in_epoch,
+            accepted_steps,
+            local_seconds: 0.0,
+            time_step: 1.0e-3,
+            event_serial: 0,
+        };
+        assert!(
+            display.accepted_material_runtime(&authored).is_none(),
+            "no clock yet"
+        );
+        display.clock = Some(clock(100, 50));
+        let decoded = display
+            .accepted_material_runtime(&authored)
+            .expect("the snapshot sits inside the clock's epoch");
+        assert_eq!(decoded.records().len(), authored.records().len());
+        assert_eq!(
+            decoded.records()[0]
+                .drive(CanonicalMaterialDrive::MassCoefficient)
+                .anchor_time(),
+            12.5,
+            "decoded carriers are anchored at the clock's epoch origin"
+        );
+        display.clock = Some(clock(85, 40));
+        assert!(
+            display.accepted_material_runtime(&authored).is_none(),
+            "a snapshot ahead of the clock may have crossed a rebase the clock has not"
+        );
+        display.clock = Some(clock(100, 5));
+        assert!(
+            display.accepted_material_runtime(&authored).is_none(),
+            "the clock's epoch began after the snapshot was taken"
+        );
     }
 
     #[test]

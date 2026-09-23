@@ -217,7 +217,16 @@ pub(super) struct CanonicalAmrPreparation {
     /// built from it instead: the fixed supplement's residual, energy and
     /// recovery all read authored coefficients, and on a driven medium that
     /// charges the estimator for the medium's own modulation.
-    pub(super) temporal: Option<Arc<CanonicalTemporalWaveOperator>>,
+    ///
+    /// It travels with the runtime the accepted state was stepped under -
+    /// carrier phases and Switch trajectories as the solver holds them - not
+    /// the operator's authored one. A handoff carries a live carrier's phase
+    /// into the new generation and re-anchors it, so after a drive edit the
+    /// authored anchors describe a coefficient the field never saw.
+    pub(super) temporal: Option<(
+        Arc<CanonicalTemporalWaveOperator>,
+        CanonicalMaterialRuntimeState,
+    )>,
     pub(super) forcing: Arc<CanonicalForcing>,
     pub(super) snapshot: CanonicalIndicatorSnapshot,
 }
@@ -232,7 +241,10 @@ impl AmrIndicatorJob {
         job: SolutionIndicatorJob,
         mesh: Arc<TriMesh>,
         operator: Arc<CanonicalWaveOperator>,
-        temporal: Option<Arc<CanonicalTemporalWaveOperator>>,
+        temporal: Option<(
+            Arc<CanonicalTemporalWaveOperator>,
+            CanonicalMaterialRuntimeState,
+        )>,
         forcing: Arc<CanonicalForcing>,
         snapshot: CanonicalIndicatorSnapshot,
     ) -> Self {
@@ -263,17 +275,12 @@ impl AmrIndicatorJob {
         budget: usize,
     ) -> Option<Result<SolutionIndicatorResult, AmrIndicatorError>> {
         if let Some(canonical) = self.canonical.take() {
-            // The runtime is the operator's authored one. That is correct
-            // while nothing has stamped a Switch or re-anchored a carrier,
-            // which nothing in the application can do yet; when drive
-            // authoring lands this has to become the bank decoded from the
-            // accepted state, against the live epoch origin.
             let runtime = canonical
                 .temporal
                 .as_ref()
-                .map(|temporal| temporal.initial_runtime());
+                .map(|(_, runtime)| runtime.clone());
             let supplement = match (&canonical.temporal, &runtime) {
-                (Some(temporal), Some(runtime)) => canonical_temporal_indicator_supplement(
+                (Some((temporal, _)), Some(runtime)) => canonical_temporal_indicator_supplement(
                     &canonical.mesh,
                     temporal,
                     &canonical.forcing,

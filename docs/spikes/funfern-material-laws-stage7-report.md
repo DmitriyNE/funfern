@@ -131,7 +131,8 @@ cfbf92e):
 | spatially varying drive parameters | by authoring design |
 | nonzero initial gap or pole history in a new temporal generation | needs an explicit initializer |
 | fixed recorder stencils on temporal plans | a fixed stencil would read the wrong coefficients |
-| a time-varying far-field exterior | policy e54b2a8, not currently enforced in the app (defect 1) |
+| a time-varying far-field exterior | policy e54b2a8, enforced in the app since defect 1 was fixed |
+| the resident grid filter outside a conservative driven bulk | not derived for open walls, gaps or loss; the checkbox says so (defect 2) |
 | AMR on a driven medium with loss, a damped boundary or prescribed data | not yet calibrated for those |
 
 **Not built:** there is no UI trigger for a live Switch or a live temporal law
@@ -163,8 +164,13 @@ Stage 10.
 
 ## Defects found at closeout
 
-Found by reading the code while assembling this report, and confirmed there.
-None has been reproduced in a running scene yet.
+Found by reading the code while assembling this report. **All three were fixed
+on 24 September, before Stage 8** (engineering log, same date):
+
+- defect 1 in efa60ff, reproduced by a failing test first;
+- defect 2 in 6206dbb, now gated on plan admission;
+- defect 3 on the `stage7-closeout-defects` branch. The estimate moves 15.8% under
+  a carried phase.
 
 1. **The far-field exterior refusal cannot fire in the application.**
    `topology_runtime.rs` builds the far-field stencil from the law-stripped
