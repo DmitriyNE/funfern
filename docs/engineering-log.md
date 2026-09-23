@@ -10253,3 +10253,33 @@ reaches the budget found none, so the rejection stays and the TODO is closed.
   correction followed by reinversion (plan section 7.2), and that is where the
   choice between degrading and refusing gets a real failure case. The probe was
   deleted.
+
+## 2026-09-23 — The step floor was the harness waiting on its own readback
+
+The throughput spike had found a floor of 0.4-0.53 ms a step that dispatch
+count did not explain, and had revised the direct trace lane down because of
+it. That floor was the render world's encoded-lead fence. It allows 64 steps
+beyond the last completion the CPU has seen, and the CPU sees completion only
+through a readback one or two frames later. A harness asking for 3000 steps
+therefore ran 64 steps a round trip.
+
+- The signature is quantization to whole frames. At 8.9k dofs a fence of 16
+  gives 1.08 ms/step, 16 steps a 16.7 ms frame; 64 gives 0.267 first order (one
+  frame) and 0.528 second order (two); 1024 gives 0.139 and 0.428.
+- `CanonicalGpuRequest::set_unfenced_stepping` lifts it, leaving the per-frame
+  ceiling as the bound. Both timing harnesses use it; `canonical_gpu_timing
+  --fenced` keeps production pacing. The app never calls it. Error lanes are
+  bit-identical either way.
+- Device cost, 3000-6000 steps: 8.9k dofs 0.133-0.145 ms first order and
+  0.429-0.435 second; 21.9k 0.208-0.217 and 0.506-0.698. The load average sat at
+  12-14 throughout, hence ranges.
+- Forcing the sweeps to 2 now matters: 0.435 -> 0.242 ms at 8.9k, 0.698 -> 0.348
+  at 21.9k. The direct lane for fixed-mass generations is worth building again.
+  Q error at 2 sweeps matched 6 over 6000 steps, 5.4e-5 against 5.5e-5.
+- A smaller artifact remains and is documented rather than fixed: the clock
+  stops on a lagged readback, which is most of a 128-step run - 0.395 ms/step
+  there against 0.14 over 3000. Throughput is read from `--steps=3000` or more.
+- Not established here: whether the app's own throughput is fence-bound. The
+  app has the same fence and a filed repair, a completion signal that does not
+  go through a readback; that is the next measurement.
+

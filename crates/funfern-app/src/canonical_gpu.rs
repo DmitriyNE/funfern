@@ -3052,6 +3052,7 @@ pub struct CanonicalGpuRequest {
     status_readback_entity: Option<Entity>,
     full_state_readback_entity: Option<Entity>,
     continuous_full_state_readback: bool,
+    unfenced_stepping: bool,
     grid_scale_filter: bool,
     handoff: Option<CanonicalGpuHandoffHandles>,
     handoff_outcome: CanonicalGpuHandoffOutcome,
@@ -3071,6 +3072,7 @@ impl Default for CanonicalGpuRequest {
             status_readback_entity: None,
             full_state_readback_entity: None,
             continuous_full_state_readback: false,
+            unfenced_stepping: false,
             grid_scale_filter: false,
             handoff: None,
             handoff_outcome: CanonicalGpuHandoffOutcome::None,
@@ -3332,6 +3334,16 @@ impl CanonicalGpuRequest {
         }
         self.continuous_full_state_readback = enabled;
         Ok(())
+    }
+
+    /// Timing harnesses measure what a step costs the device. The encoded-lead
+    /// fence counts against a completion the CPU only learns of through a
+    /// readback, so under it a harness measures that round trip instead - 64
+    /// steps per one or two frames, whatever the steps cost. Lifting it leaves
+    /// the per-frame ceiling as the only bound on a batch. The interactive app
+    /// keeps the fence, which is what stops it queueing unbounded work.
+    pub fn set_unfenced_stepping(&mut self, enabled: bool) {
+        self.unfenced_stepping = enabled;
     }
 
     /// Queues one full physical-state snapshot without changing the continuous
@@ -4904,7 +4916,11 @@ fn compute_canonical_wave(
         .desired_steps
         .saturating_sub(group.encoded_steps)
         .min(MAX_STEPS_PER_FRAME)
-        .min(MAX_ENCODED_STEP_LEAD.saturating_sub(encoded_lead));
+        .min(if request.unfenced_stepping {
+            u64::MAX
+        } else {
+            MAX_ENCODED_STEP_LEAD.saturating_sub(encoded_lead)
+        });
     let live_event = request.live_event.as_ref().filter(|event| {
         event.serial != group.encoded_live_event
             && live_group

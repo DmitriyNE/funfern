@@ -1,9 +1,11 @@
 # Where a solver step goes — 23 September 2026
 
-**Status: lever 1 implemented and measured (23 September 2026); lever 2 not
-implemented, and its estimate below is revised down by that measurement.** Frame
-pacing, a separate defect found in the same investigation, is described at the
-end and has since been fixed.
+**Status: lever 1 implemented; lever 2 not implemented and worth building
+again.** The "floor" the lever 1 measurement found, and the downward revision
+of lever 2 it prompted, were the harness's own step fence, not the device; see
+[the floor was the fence](#the-floor-was-the-fence). Frame pacing, a separate
+defect found in the same investigation, is described at the end and has since
+been fixed.
 
 ## What prompted it
 
@@ -124,13 +126,57 @@ it. In the app on the driven autosave at 2x speed the new build averaged 793
 steps/s against 697 over three interleaved pairs, one of them tied, under a
 load average near 20; indicative only.
 
-### The step is not bound by dispatch count
+### ~~The step is not bound by dispatch count~~ - superseded
 
 Forcing the device count on the 8.9k scene, 3000 steps: 10 sweeps 0.78 ms/step,
 8 sweeps 0.58, and 6, 4 and 2 sweeps all 0.527 ms/step to within 0.1%. The
-first-order boundary, at 5 dispatches a step, costs 0.39 ms. So there is a floor
-of roughly 0.4-0.5 ms a step that dispatch count does not explain, and the
-6.6 us-per-dispatch model above does not hold below about 35 dispatches.
+first-order boundary, at 5 dispatches a step, costs 0.39 ms. This was read as a
+floor of 0.4-0.5 ms that dispatch count does not explain. It was the fence
+below: 0.527 ms is 64 steps in two 60 Hz frames. The figures in the lever 1
+table above were taken at 128 steps under the same fence and with the clock
+stopped by a lagged readback, so their direction stands but the 1.40x is not a
+clean ratio.
+
+## The floor was the fence
+
+The render world encodes at most `MAX_ENCODED_STEP_LEAD = 64` steps beyond the
+last step the CPU has seen complete, and it sees completion only through a
+readback that lands one or two frames later. A harness asking for thousands of
+steps therefore runs 64 steps per readback round trip, whatever a step costs.
+The signature is quantization to whole frames, 8.9k dofs, 3000 steps:
+
+| fence | first order | second order |
+| --- | --- | --- |
+| 16 | 1.08 ms/step (16 steps a 16.7 ms frame) | 1.21 |
+| 64, production | 0.267 (one frame) | 0.528 (two frames) |
+| 1024 | 0.139 | 0.428 |
+
+The timing harnesses now step unfenced through
+`CanonicalGpuRequest::set_unfenced_stepping`, leaving the per-frame ceiling of
+256 as the only bound; `canonical_gpu_timing --fenced` restores production
+pacing. Error lanes are bit-identical either way. A second, smaller artifact
+remains: the clock stops when a readback reports the last step, one to three
+frames late, which is most of a 128-step run - first order reads 0.395 ms/step
+there against 0.14 over 3000. Time with `--steps=3000` or more.
+
+What a step costs the device, 3000 to 6000 steps, load average 12-14 so ranges
+across runs:
+
+| dofs | first order | second order, 6 sweeps | second order, 2 sweeps |
+| --- | --- | --- | --- |
+| 8.9k | 0.133-0.145 ms | 0.429-0.435 | 0.242 |
+| 21.9k | 0.208-0.217 | 0.506-0.698 | 0.348 |
+
+So the step is work bound, not launch bound. The bulk costs about 6 ns a dof.
+The sweeps are about 0.19 ms of the 0.435 at 8.9k and 0.35 of the 0.70 at
+21.9k, growing roughly with the square of the trace count, which is what a
+dense trace-by-trace reduction per sweep predicts. The 2-sweep runs matched the
+6-sweep Q error against the host oracle, 5.4e-5 against 5.5e-5 over 6000 steps;
+that is an observation about the precision target, not a reason to change it.
+
+The interactive app runs under the same fence, and it is already filed: pace on
+a completion signal that does not go through a readback. Whether it caps the
+app's throughput is measured there, not here.
 
 ## Lever 2 - a static-mass generation should not sweep at all
 
@@ -140,11 +186,11 @@ to the sweep when the mass has moved. The device has only the sweep.
 
 Packing the inverse for undriven generations turns `3 + 2 x sweeps` dispatches
 per half-kick into 2, so the boundary nearly disappears from a linear scene's
-step. **Revised after lever 1:** removing the remaining 6 sweeps
-did not move the step at all when tried by forcing the count down to 2, so on
-the measured scenes the direct lane can at most close the gap to the
-first-order floor - about 0.14 ms of 0.53 - and may close less. Find what sets
-the floor before building it. Cost is `trace^2` floats: 332 KB at 288 trace nodes.
+step. ~~**Revised after lever 1:** removing the remaining 6 sweeps did not move the
+step at all...~~ That revision was read under the fence. Unfenced, the sweeps are
+about 45% of a second-order step, and one dense apply in their place would save
+roughly 0.16 ms of 0.435 at 8.9k and 0.3 ms of 0.70 at 21.9k - the apply is
+itself `trace^2`, so not the whole sweep cost. Cost is `trace^2` floats: 332 KB at 288 trace nodes.
 
 This partly reverses `CanonicalWaveState::for_backend`, which skips building the
 inverse because the export does not read it - correct as of today, and what took

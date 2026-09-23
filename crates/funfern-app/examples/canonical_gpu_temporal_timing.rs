@@ -13,6 +13,9 @@
 //! only composition whose stage does non-local work. Its trace system carries
 //! no nodal mass, so a driven generation sweeps it with the stage's own mass
 //! rather than refactorizing, and this is where that sweep's cost is read.
+//!
+//! Stepping is unfenced, so the figure is what a step costs the device rather
+//! than the readback round trip the interactive lead fence waits on.
 
 use std::time::{Duration, Instant};
 
@@ -160,6 +163,7 @@ fn install(
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut canonical: ResMut<CanonicalGpuRequest>,
 ) {
+    canonical.set_unfenced_stepping(true);
     canonical.install(
         &mut assets,
         &mut commands,

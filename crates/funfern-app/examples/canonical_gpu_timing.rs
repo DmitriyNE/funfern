@@ -1,6 +1,13 @@
 //! Full render-graph validation/timing harness for the production canonical GPU
 //! solver. This runs the same plugin, buffers, shader and atomic commit path as
 //! the application; it is not an isolated kernel benchmark.
+//!
+//! Stepping is unfenced by default, so the timing is what the steps cost the
+//! device. `--fenced` restores the interactive lead fence, under which the
+//! figure is the readback round trip instead: 64 steps per one or two frames.
+//! The clock stops when a readback reports the last step, one to three frames
+//! after the device finished it, so the default 128 steps validate but do not
+//! time: read throughput from `--steps=3000` or more.
 
 use std::time::{Duration, Instant};
 
@@ -41,6 +48,7 @@ struct Expected {
     initial_step: u64,
     failure_test: bool,
     primary_readback: bool,
+    fenced: bool,
     periodic_filter: bool,
     overlay_operator: CanonicalWaveOperator,
     overlay_stencils: Vec<QuadraticPointStencil>,
@@ -90,6 +98,7 @@ fn main() {
     };
     let failure_test = std::env::args().any(|argument| argument == "--failure");
     let primary_readback = std::env::args().any(|argument| argument == "--primary-readback");
+    let fenced = std::env::args().any(|argument| argument == "--fenced");
     let periodic_filter = std::env::args().any(|argument| argument == "--periodic-filter");
     let vector_overlay_samples = std::env::args()
         .find_map(|argument| {
@@ -414,6 +423,7 @@ fn main() {
         initial_step,
         failure_test,
         primary_readback,
+        fenced,
         periodic_filter,
         overlay_operator: operator,
         overlay_stencils,
@@ -488,6 +498,7 @@ fn install(
             .expect("select validation readback mode");
     }
     request.set_grid_scale_filter(expected.periodic_filter);
+    request.set_unfenced_stepping(!expected.fenced);
     request.install(
         &mut assets,
         &mut commands,
@@ -671,9 +682,15 @@ fn finish_when_ready(
             .flat_map(|(complementary, flow)| [complementary.x, complementary.y, flow.x, flow.y]),
     );
     println!(
-        "{} accepted steps in {:.2} ms: {:.2} simulated seconds/wall second; Q error {:.3e}, b error {:.3e}, auxiliary error {:.3e} relative/{:.3e} RMS, energy residual {:.3e}, vector-overlay error {:.3e}; {} dispatches",
+        "{} accepted steps in {:.2} ms ({:.3} ms/step, {}): {:.2} simulated seconds/wall second; Q error {:.3e}, b error {:.3e}, auxiliary error {:.3e} relative/{:.3e} RMS, energy residual {:.3e}, vector-overlay error {:.3e}; {} dispatches",
         expected.steps,
         elapsed * 1_000.0,
+        elapsed * 1_000.0 / expected.steps as f64,
+        if expected.fenced {
+            "fenced"
+        } else {
+            "unfenced"
+        },
         expected.time_step * expected.steps as f64 / elapsed,
         q_error,
         b_error,
