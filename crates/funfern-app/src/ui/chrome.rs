@@ -154,6 +154,29 @@ impl Playground {
                         );
                         ui.radio_value(&mut self.closed_purpose, ClosedPurpose::Hole, "Hole");
                     });
+                    if self.closed_purpose == ClosedPurpose::Subdomain {
+                        let selected = self.resolved_material_selection();
+                        let materials = self
+                            .editor
+                            .document
+                            .model
+                            .draft
+                            .materials
+                            .iter()
+                            .map(|material| (material.id, material.name.clone()))
+                            .collect::<Vec<_>>();
+                        let selected_name = materials
+                            .iter()
+                            .find(|(id, _)| *id == selected)
+                            .map_or("Missing", |(_, name)| name.as_str());
+                        egui::ComboBox::from_label("Material")
+                            .selected_text(selected_name)
+                            .show_ui(ui, |ui| {
+                                for (id, name) in &materials {
+                                    ui.selectable_value(&mut self.material_selection, *id, name);
+                                }
+                            });
+                    }
                     ui.horizontal(|ui| {
                         for (tool, label) in [
                             (DrawTool::Circle, "Circle"),

@@ -9,6 +9,26 @@ use std::collections::BTreeSet;
 use super::*;
 
 impl Playground {
+    /// The material a drawn subdomain is given. The selection outlives the
+    /// document it was made in - a scene load, an undo past the material's
+    /// creation - so it is resolved against the draft each time it is used
+    /// rather than trusted: the default material if the draft has it,
+    /// otherwise its first.
+    pub(super) fn resolved_material_selection(&mut self) -> MaterialId {
+        let materials = &self.editor.document.model.draft.materials;
+        if !materials
+            .iter()
+            .any(|material| material.id == self.material_selection)
+        {
+            self.material_selection = materials
+                .iter()
+                .find(|material| material.id == DEFAULT_MATERIAL)
+                .or_else(|| materials.first())
+                .map_or(DEFAULT_MATERIAL, |material| material.id);
+        }
+        self.material_selection
+    }
+
     pub(super) fn materials_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Materials");
         ui.horizontal(|ui| {

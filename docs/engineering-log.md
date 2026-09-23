@@ -3465,10 +3465,6 @@ Outgoing-boundary construction, not urgent:
 
 Reported 2026-09-23, not yet reproduced or diagnosed:
 
-- [ ] The material selector is gone from the Draw panel. A drawn face is then
-  assigned whatever material id the tool last held, and after a scene switch or
-  a material deletion that id may not exist, so the operation is rejected with a
-  non-existing-material error and there is no control to pick another.
 - [ ] Adding a hole with a Draw operation sometimes fails to assemble:
   `Preparation failed: Canonical GPU handoff rejected: stability or
   conservative-transfer tolerance failed (failure code 2); accepted generation
@@ -10140,3 +10136,26 @@ not explain: 6, 4 and 2 sweeps all run 0.527 ms a step, and the first-order
 boundary at 5 dispatches runs 0.39. That caps lever 2 - a direct lane for
 static-mass generations - at the gap to that floor, about 0.14 ms, and the spike
 now says so. What sets the floor is the question to answer before lever 2.
+
+## 2026-09-23 — Draw names a material that exists
+
+Reported: the material selector had vanished from the Draw panel, and a drawn
+subdomain was then refused with "Choose an existing material" after a scene
+switch or a material deletion.
+
+The selector went in the unified-topology cutover (`eddad77`): the creation
+window before it (`d85e096`) had an "Interior material" combo box bound to
+`material_selection`, and the rebuilt Draw window did not. A drawn subdomain
+kept taking `material_selection`, which had become in effect the Materials
+panel's highlight, and nothing ever checked it against the document: only the
+panel's own clicks and its delete button wrote it. A scene load, or an undo past
+a material's creation, left it naming nothing.
+
+`resolved_material_selection` now resolves it against the draft wherever it is
+used - both draw sites and the restored "Material" combo box, shown in Draw
+while the closed-curve purpose is Subdomain - falling back to the default
+material, or to the draft's first if a loaded scene lacks the default.
+`a_subdomain_drawn_after_its_material_vanished_takes_the_default` adds a
+material, selects it, undoes its creation and draws: the subdomain lands on the
+default, and a selection that does exist is kept. Pointed back at the raw
+selection it fails with the reported message.

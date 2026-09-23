@@ -40,7 +40,7 @@ impl Playground {
             let spline = PeriodicCubicSpline::rounded(point, 0.15);
             let purpose = match self.closed_purpose {
                 ClosedPurpose::Subdomain => ClosedCurvePurpose::Subdomain {
-                    material: self.material_selection,
+                    material: self.resolved_material_selection(),
                 },
                 ClosedPurpose::Hole => ClosedCurvePurpose::Hole,
             };
@@ -133,7 +133,7 @@ impl Playground {
     pub(super) fn create_closed(&mut self, spline: PeriodicCubicSpline) -> Result<CurveId, String> {
         let purpose = match self.closed_purpose {
             ClosedPurpose::Subdomain => ClosedCurvePurpose::Subdomain {
-                material: self.material_selection,
+                material: self.resolved_material_selection(),
             },
             ClosedPurpose::Hole => ClosedCurvePurpose::Hole,
         };
@@ -352,6 +352,57 @@ impl Playground {
 mod tests {
     use super::*;
     use funfern_app::topology_editor::{TopologyAcceptance, TopologyEditor};
+
+    /// A selection made in one document is not a material of the next. An
+    /// undo past the material's creation leaves the Materials panel pointing
+    /// at nothing, and the subdomain drawn next was refused with no control in
+    /// Draw to pick another. It now falls back to the default material, and a
+    /// selection that does exist is kept.
+    #[test]
+    fn a_subdomain_drawn_after_its_material_vanished_takes_the_default() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            closed_purpose: ClosedPurpose::Subdomain,
+            ..Playground::default()
+        };
+        let added = state.editor.add_material().unwrap();
+        state.material_selection = added;
+        assert!(state.editor.undo(), "the material's creation is undone");
+        assert!(state.editor.document.model.draft.material(added).is_none());
+
+        state
+            .create_closed(PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.1))
+            .expect("the subdomain is drawn with a material that exists");
+        let draft = &state.editor.document.model.draft;
+        let materials = draft
+            .regions
+            .iter()
+            .map(|region| region.material)
+            .collect::<Vec<_>>();
+        assert!(
+            materials
+                .iter()
+                .all(|material| draft.material(*material).is_some())
+        );
+        assert_eq!(state.material_selection, DEFAULT_MATERIAL);
+
+        let kept = state.editor.add_material().unwrap();
+        state.material_selection = kept;
+        state
+            .create_closed(PeriodicCubicSpline::rounded(Point2::new(-0.5, -0.5), 0.1))
+            .unwrap();
+        assert_eq!(state.material_selection, kept);
+        assert!(
+            state
+                .editor
+                .document
+                .model
+                .draft
+                .regions
+                .iter()
+                .any(|region| region.material == kept)
+        );
+    }
 
     /// Two subdomains selected and deleted in one gesture. Asking curve by
     /// curve asked about the first one only, closed the history entry to ask,
