@@ -451,10 +451,12 @@ impl CanonicalGpuLiveEvent {
                 "a live pulse must cover every primary node",
             ));
         }
+        // Uploaded as the authored field increment. The device scales it by
+        // the nodal mass at the boundary the event lands on, which is the only
+        // place a driven medium's mass is known. See `live_event_stage`.
         let values = field_increment
             .iter()
-            .zip(operator.primary_mass())
-            .map(|(increment, mass)| finite_f32(increment * mass, "live primary pulse"))
+            .map(|increment| finite_f32(*increment, "live primary pulse"))
             .collect::<Result<Vec<_>, _>>()?;
         Self::scalar_payload(EVENT_PRIMARY_PULSE, serial, 5, &values, 0)
     }
@@ -1648,19 +1650,15 @@ impl CanonicalGpuPlan {
                 "a GPU pulse must cover every primary node",
             ));
         }
-        let integrated = field_increment
+        // Staged as the authored field increment, matching what a live pulse
+        // uploads: the device scales by the nodal mass at the boundary.
+        let staged = field_increment
             .iter()
             .copied()
-            .enumerate()
-            .map(|(node, increment)| {
-                finite_f32(
-                    increment * self.nodes[node].mass_loss.x as f64,
-                    "primary pulse",
-                )
-            })
+            .map(|increment| finite_f32(increment, "primary pulse"))
             .collect::<Result<Vec<_>, _>>()?;
         self.begin_event(EVENT_PRIMARY_PULSE, serial, 4)?;
-        for (node, increment) in integrated.into_iter().enumerate() {
+        for (node, increment) in staged.into_iter().enumerate() {
             self.scratch[node].values.x = increment;
         }
         Ok(())
@@ -1777,7 +1775,9 @@ impl CanonicalGpuPlan {
         serial: u32,
         dispatches: usize,
     ) -> Result<(), CanonicalGpuBuildError> {
-        if self.manifest.temporal.is_some() && kind != EVENT_GRID_FILTER {
+        if self.manifest.temporal.is_some()
+            && !matches!(kind, EVENT_PRIMARY_PULSE | EVENT_GRID_FILTER)
+        {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "Stage 7 temporal event admission is not closed",
             ));
@@ -3414,7 +3414,10 @@ impl CanonicalGpuRequest {
         if handles.material_runtime_count != 0
             && !matches!(
                 event.kind,
-                EVENT_GRID_FILTER | EVENT_TEMPORAL_SWITCH | EVENT_TEMPORAL_LAW_PATCH
+                EVENT_PRIMARY_PULSE
+                    | EVENT_GRID_FILTER
+                    | EVENT_TEMPORAL_SWITCH
+                    | EVENT_TEMPORAL_LAW_PATCH
             )
         {
             return Err("this event has not passed its Stage 7 temporal composition gate");

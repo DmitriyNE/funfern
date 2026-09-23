@@ -2238,6 +2238,47 @@ impl CanonicalTemporalWaveState {
     /// linear polynomial: every `M^-1` and `J` application uses the same
     /// instantaneous coefficients, while the trajectory-wide CFL bound keeps
     /// the polynomial contract valid for every authored phase and Switch.
+    /// A pulse authored as a field increment, added at the mass the medium has
+    /// right now.
+    ///
+    /// The canonical state is the integrated nodal flux, so a field increment
+    /// becomes a flux increment only once it is scaled by the nodal mass. On a
+    /// time-driven medium that mass is the one at this instant, and it is not
+    /// the authored one: a pump whose factor bottoms near a fifth of its
+    /// authored value would take a pulse several times too large or too small
+    /// if the authored mass were used. Nothing here can be deferred to the
+    /// caller, because the caller does not know when the pulse will land.
+    ///
+    /// Free primary nodes only. A pinned node's flux is whatever its prescribed
+    /// data says it is, so a pulse cannot move it.
+    pub fn apply_primary_pulse(
+        &mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+        field_increment: &[f64],
+    ) -> Result<(), WaveError> {
+        if field_increment.len() != operator.base().degrees_of_freedom()
+            || field_increment.iter().any(|value| !value.is_finite())
+        {
+            return Err(WaveError::InvalidState);
+        }
+        let mass = operator.primary_mass_at(self.time, &self.runtime)?;
+        let mut next = self.primary_flux.clone();
+        for (node, (flux, (increment, mass))) in next
+            .iter_mut()
+            .zip(field_increment.iter().zip(&mass))
+            .enumerate()
+        {
+            if forcing.prescribed()[node].is_some() {
+                continue;
+            }
+            *flux += increment * mass;
+        }
+        validate_finite(&next)?;
+        self.primary_flux = next;
+        Ok(())
+    }
+
     pub fn apply_grid_filter(
         &mut self,
         operator: &CanonicalTemporalWaveOperator,

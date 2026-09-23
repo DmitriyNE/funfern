@@ -843,7 +843,26 @@ fn event_simple_stage(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     if i < control.counts_a.x {
         if operation == 1u || operation == 4u {
-            var next = accepted_q(i) + scratch[i].values.x;
+            // A pulse is authored as a field increment, and the canonical state
+            // is the integrated nodal flux, so it is scaled by the nodal mass
+            // here rather than by the host. The event lands at a complete-step
+            // boundary that the host cannot see ahead to, and a driven medium's
+            // mass has moved by then: on a pump whose factor bottoms near a
+            // fifth, an amplitude scaled by the authored mass arrives several
+            // times too large or too small depending on the phase it meets.
+            // A maintenance correction is already integrated and is added as is.
+            var increment = scratch[i].values.x;
+            if operation == 1u {
+                var mass = nodes[i].mass_loss.x;
+                if temporal_enabled() {
+                    mass = temporal_primary_mass(i, control.clock_f32.y);
+                }
+                if !finite_scalar(mass) || mass <= 0.0 {
+                    reject(STATUS_INVERSE_DOMAIN);
+                }
+                increment = mass * increment;
+            }
+            var next = accepted_q(i) + increment;
             if nodes[i].boundary.z != 0u {
                 next = accepted_q(i);
             }

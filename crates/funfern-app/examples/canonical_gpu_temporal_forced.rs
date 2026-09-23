@@ -226,7 +226,11 @@ fn drive(
     if !request.request_full_state_readback(&mut commands) && display.full_readbacks == 0 {
         return;
     }
-    if display.primary_flux.len() != expected.primary.len() {
+    // Both lanes, or the complementary comparison below runs before the
+    // readback has populated that lane and passes by measuring nothing.
+    if display.primary_flux.len() != expected.primary.len()
+        || display.complementary_flux.len() != expected.complementary.len()
+    {
         return;
     }
     let primary = relative_l2(

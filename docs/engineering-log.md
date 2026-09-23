@@ -9881,3 +9881,44 @@ so the injected amplitude would be wrong by up to about fourfold depending on
 where the pump sat when the event landed. The fix is the one the Switch event
 already uses: upload the increment and let the GPU scale it at the boundary it
 applies to.
+
+## 2026-09-23 — The pulse is stamped where it lands
+
+A pulse is authored as a field increment, and the canonical state is the
+integrated nodal flux, so the increment has to be scaled by the nodal mass
+before it can be added. The host was doing that, with the operator's *authored*
+mass. On a driven medium the mass at the boundary the event lands on is the
+authored one times a factor the host cannot see ahead to, so the amplitude
+arrived wrong by the modulation depth. That is why the pulse was gated on
+temporal generations rather than merely untested.
+
+It is now scaled on the device, the way the Switch event is already stamped at
+the boundary it takes effect on. The host uploads the authored increment; the
+event stage multiplies by `temporal_primary_mass` at the accepted clock, or by
+the assembled nodal mass where there is no trajectory, which is the same single
+path for both kinds of generation. Both gates on the pulse - the live-event
+admission and the plan's `begin_event` - are lifted, and a maintenance
+correction still goes in unscaled because it is already integrated.
+
+The CPU gained the matching `CanonicalTemporalWaveState::apply_primary_pulse`,
+which is the oracle the device is checked against and the honest API for a
+driven medium either way.
+
+Gated by a new hidden example, `canonical_gpu_temporal_pulse`. Its fixture is a
+zero state with no source inside reflecting walls, so everything the readback
+holds came from the pulse and a wrongly scaled amplitude is a relative error of
+the whole state. It refuses to run unless the two candidate masses are far
+enough apart to tell apart - measured at `1.588e-1`, against a `2.0e-4`
+tolerance. The device matches the f64 oracle at `Q 2.505e-7, b 6.313e-6`; with
+the instantaneous lookup taken back out, deliberately, it reads `1.370e-1` on
+both lanes, so the gate discriminates by about six hundred times its tolerance.
+The existing static-medium pulse gate is unchanged at `Q 3.171e-7`.
+
+Found while writing it: three of these harnesses compared the complementary lane
+before the readback had populated it, so the comparison ran over an empty
+iterator and passed by measuring nothing. `canonical_gpu_temporal_forced`
+reported `b -0.000e0` for exactly that reason and now reports `4.825e-7`;
+`canonical_gpu_driven_document` is the same and now reports `5.067e-7`. Both now
+wait for both lanes. `canonical_gpu_handoff` uses the same length test for a
+different purpose - a phase-ordering assertion rather than a readiness wait - and
+is left alone.
