@@ -901,6 +901,10 @@ pub struct CanonicalGpuPlan {
     /// sweeping: a generation whose mass cannot move and whose wall holds no
     /// prescribed row.
     pub trace_direct: bool,
+    /// Whether the resident grid filter is validated for this generation. A
+    /// fixed one is; a driven one only on a conservative bulk, which is all
+    /// the time-driven filter has been derived and tested for.
+    grid_filter_admitted: bool,
     needs_loss_stages: bool,
     needs_accounting: bool,
     event_kind: u32,
@@ -1022,6 +1026,7 @@ impl CanonicalGpuPlan {
         state: &CanonicalTemporalWaveState,
         clock: CanonicalGpuClock,
     ) -> Result<(), CanonicalGpuBuildError> {
+        self.grid_filter_admitted = operator.conservative_bulk_supported();
         let primary_samples = operator.primary_coefficient_samples().collect::<Vec<_>>();
         let complementary_samples = operator
             .complementary_coefficient_samples()
@@ -1644,6 +1649,7 @@ impl CanonicalGpuPlan {
             mode_count,
             trace_sweeps: trace_sweeps as usize,
             trace_direct,
+            grid_filter_admitted: true,
             needs_loss_stages,
             needs_accounting,
             event_kind: EVENT_NONE,
@@ -1696,6 +1702,11 @@ impl CanonicalGpuPlan {
         if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "grid-filter strength must be in [0, 1]",
+            ));
+        }
+        if !self.grid_filter_admitted {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "the grid filter is not validated for this time-driven scene",
             ));
         }
         let dispatches = if self.manifest.temporal.is_some() {
@@ -3030,6 +3041,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     trace_count: u32,
     trace_sweeps: u32,
     trace_direct: bool,
+    grid_filter_admitted: bool,
     drive_count: u32,
     material_runtime_count: u32,
     source_count: u32,
@@ -3238,6 +3250,7 @@ fn add_canonical_buffers(
         trace_count,
         trace_sweeps,
         trace_direct: plan.trace_direct,
+        grid_filter_admitted: plan.grid_filter_admitted,
         drive_count,
         material_runtime_count,
         source_count,
@@ -3364,6 +3377,18 @@ impl CanonicalGpuRequest {
         self.grid_scale_filter
     }
 
+    /// Whether the filter is asked for but the installed generation does not
+    /// admit it, so it is not run. A driven medium behind an open wall, with a
+    /// gap, loss or a driven boundary is outside what the time-driven filter
+    /// has been derived for; the CPU reference refuses the same compositions.
+    pub fn grid_scale_filter_refused(&self) -> bool {
+        self.grid_scale_filter
+            && self
+                .buffers
+                .as_ref()
+                .is_some_and(|handles| !handles.grid_filter_admitted)
+    }
+
     pub fn caught_up(&self) -> bool {
         self.stats.completed_steps() >= self.desired_steps || self.stats.failure() != 0
     }
@@ -3466,6 +3491,9 @@ impl CanonicalGpuRequest {
             return Err("live canonical event serial is stale or the solver has failed");
         }
         let handles = self.buffers.as_ref().expect("checked installed buffers");
+        if event.kind == EVENT_GRID_FILTER && !handles.grid_filter_admitted {
+            return Err("the grid filter is not validated for this time-driven scene");
+        }
         let payload_valid = match event.kind {
             EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE => {
                 event.upload.len() == handles.node_count as usize + 1
@@ -5285,6 +5313,7 @@ fn compute_canonical_wave(
                 )
             })
     });
+    let resident_filter = request.grid_scale_filter && handles.grid_filter_admitted;
     let mut rebases = 0_u64;
     let mut resident_filters = 0_u64;
     for offset in 0..pending {
@@ -5352,7 +5381,7 @@ fn compute_canonical_wave(
         pass.set_pipeline(pipelines[13]);
         pass.dispatch_workgroups(1, 1, 1);
         let step_after = group.encoded_steps + offset + 1;
-        if request.grid_scale_filter && step_after.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
+        if resident_filter && step_after.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
             if handles.needs_accounting {
                 // Per-step contributions live in a lane-paired scratch bank.
                 // Consolidate them before the zero-duration event flips the
@@ -5403,7 +5432,7 @@ fn compute_canonical_wave(
         // rate, so they step past a filter commit; the others read only the
         // accepted lane and sample on their own cadence.
         if let Some((handles, bind_group, Some(consumer))) = point_recorder
-            && differencing_sample_due(step_after, handles.sample_stride, request.grid_scale_filter)
+            && differencing_sample_due(step_after, handles.sample_stride, resident_filter)
         {
             pass.set_bind_group(0, &bind_group.bind_group, &[]);
             pass.set_pipeline(consumer);
@@ -5441,7 +5470,7 @@ fn compute_canonical_wave(
             pass.set_bind_group(0, &group.bind_group, &[]);
         }
         if let Some((handles, bind_group, Some(sample), Some(project))) = far_recorder
-            && differencing_sample_due(step_after, handles.sample_stride, request.grid_scale_filter)
+            && differencing_sample_due(step_after, handles.sample_stride, resident_filter)
         {
             pass.set_bind_group(0, &bind_group.bind_group, &[]);
             pass.set_pipeline(sample);
@@ -6160,6 +6189,82 @@ mod tests {
             let actual =
                 packed_temporal_factor(&plan, plan.samples[sample].nodes_b.w as usize, probe);
             assert!((actual - expected).abs() < 3.0e-6 * expected.abs().max(1.0));
+        }
+    }
+
+    fn pumped_plan(boundary: OuterBoundaryCondition) -> CanonicalGpuPlan {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(0.9),
+            phase_radians: ScalarField::constant(0.1),
+        };
+        let mut fixed_scene = scene.clone();
+        fixed_scene.materials[0].mass_law = CoefficientLaw::linear();
+        let mesh = mesh_scene(
+            &fixed_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.24,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, boundary).unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
+        let time_step = 0.4 * operator.maximum_time_step();
+        let state = CanonicalTemporalWaveState::zero(&operator, time_step).unwrap();
+        CanonicalGpuPlan::compile_temporal(
+            &operator,
+            &state,
+            &CanonicalForcing::none(operator.base()),
+            CanonicalGpuClock::initial(time_step).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// The resident filter runs where it has been validated: every fixed
+    /// generation, and a driven one only on the conservative bulk the CPU
+    /// reference itself requires.
+    #[test]
+    fn a_driven_open_scene_does_not_admit_the_grid_filter() {
+        assert!(plan(OuterBoundaryCondition::SecondOrderOutgoing).grid_filter_admitted);
+        assert!(pumped_plan(OuterBoundaryCondition::Reflecting).grid_filter_admitted);
+        for open in [
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        ] {
+            let mut refused = pumped_plan(open);
+            assert!(!refused.grid_filter_admitted, "{open:?}");
+            assert!(refused.stage_grid_filter(0.5, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn the_request_reports_a_filter_its_generation_refuses() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        for (installed, refused) in [
+            (
+                pumped_plan(OuterBoundaryCondition::SecondOrderOutgoing),
+                true,
+            ),
+            (plan(OuterBoundaryCondition::SecondOrderOutgoing), false),
+        ] {
+            let mut request = CanonicalGpuRequest::default();
+            request.set_grid_scale_filter(true);
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                request.install(&mut assets, &mut commands, installed);
+            });
+            assert_eq!(request.grid_scale_filter_refused(), refused);
+            request.set_grid_scale_filter(false);
+            assert!(
+                !request.grid_scale_filter_refused(),
+                "nothing asked, nothing refused"
+            );
         }
     }
 

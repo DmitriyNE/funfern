@@ -590,6 +590,16 @@ impl Playground {
                          terminal-silence or DC-removal control. \
                          Turn it off to see the untouched scheme.",
                 );
+                if self.grid_filter_refused {
+                    ui.label(
+                        egui::RichText::new(
+                            "Off for this driven scene: the time-driven filter is derived only \
+                             for a closed, lossless domain without gaps or a driven boundary.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
             });
     }
 }

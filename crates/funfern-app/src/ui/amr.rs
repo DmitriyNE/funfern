@@ -362,7 +362,7 @@ impl Playground {
             return;
         }
         let step = display.snapshot_completed_steps;
-        if resident_filter_boundary(self.editor.document.presentation.grid_scale_filter, step) {
+        if resident_filter_boundary(self.grid_filter_running(), step) {
             // The resident filter is accepted at this same solver step and
             // flips the state lanes once more. At that instant the other lane
             // is the pre-filter state, not the endpoint one `dt` earlier.

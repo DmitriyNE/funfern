@@ -10402,3 +10402,33 @@ the domain, far field on, built a stencil.
   behind a static exterior (driven, and built). It fails with the stripped model
   and passes with the authored one.
 
+## 2026-09-24 — The grid filter runs only where it has been derived
+
+Stage 7 closeout defect 2. The CPU reference refuses the time-driven grid
+filter unless the bulk is conservative - closed, ungapped, lossless, with no
+damped or driven boundary - but the host set the filter from the document every
+frame and the encoder ran it whenever it was set. So any driven scene behind an
+outgoing wall with "Damp unresolvable detail" on, which is the autosave's own
+setup, ran a composition no test covers. The only device gate for the
+time-driven filter, `canonical_gpu_temporal`, is a conservative bulk.
+
+- The plan records `grid_filter_admitted`: always for a fixed generation, and
+  `conservative_bulk_supported()` for a driven one. The buffer handles carry it,
+  and the encoder runs the resident filter, and times its probe samples around
+  it, only when it is both asked for and admitted.
+- A staged or live filter event on a plan that does not admit it is refused.
+  Neither is sent by the app, but both were open.
+- `CanonicalGpuRequest::grid_scale_filter_refused` feeds the UI. AMR's
+  post-filter wait and the arrows' AC coupling follow the filter that actually
+  runs. The checkbox keeps the user's setting and says, under it, that the
+  filter is off for this driven scene and why.
+- Tests: `a_driven_open_scene_does_not_admit_the_grid_filter` (fixed and
+  reflecting-driven admitted; first- and second-order driven refused, including
+  a staged event), and `the_request_reports_a_filter_its_generation_refuses`
+  through a real `install`. `canonical_gpu_temporal`,
+  `canonical_gpu_filter_boundary` (both modes), `canonical_gpu_live_events` and
+  the fixed harness with `--filter` and `--periodic-filter` reproduce their
+  figures exactly.
+- Carried forward: deriving the time-driven filter for open walls, gaps and loss,
+  which is what re-admitting those compositions needs.
+

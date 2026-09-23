@@ -512,6 +512,13 @@ impl Playground {
         self.probe_upload_previous = None;
     }
     /// The step the GPU is actually running at.
+    /// Whether the resident grid filter actually runs: asked for, and admitted
+    /// by the generation. Anything timed against its commits - the lane flip
+    /// it leaves at each cadence step - follows this rather than the setting.
+    pub(super) fn grid_filter_running(&self) -> bool {
+        self.editor.document.presentation.grid_scale_filter && !self.grid_filter_refused
+    }
+
     pub(super) fn solver_time_step(&self) -> f64 {
         if self.uploaded_time_step > 0.0 {
             return self.uploaded_time_step;

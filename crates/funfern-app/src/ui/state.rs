@@ -251,6 +251,9 @@ pub struct Playground {
     pub(super) amr_pending_state: Option<MeshAdaptationState>,
     pub(super) amr_report: Option<MeshAdaptationReport>,
     pub(super) gpu_status: &'static str,
+    /// The grid filter is asked for but the running generation does not admit
+    /// it; see [`funfern_app::canonical_gpu::CanonicalGpuRequest::grid_scale_filter_refused`].
+    pub(super) grid_filter_refused: bool,
     pub(super) gpu_dispatches: u64,
     pub(super) canonical_gpu_bytes: Option<usize>,
     pub(super) step_backlog: u64,
@@ -440,6 +443,7 @@ impl Default for Playground {
             amr_pending_state: None,
             amr_report: None,
             gpu_status: "loading",
+            grid_filter_refused: false,
             gpu_dispatches: 0,
             canonical_gpu_bytes: None,
             step_backlog: 0,

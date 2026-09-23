@@ -361,10 +361,7 @@ impl Playground {
                 &mut samples,
                 completed_steps,
                 absolute_time,
-                resident_filter_boundary(
-                    self.editor.document.presentation.grid_scale_filter,
-                    completed_steps,
-                ),
+                resident_filter_boundary(self.grid_filter_running(), completed_steps),
             );
         } else {
             self.vector_overlay_ac_state.clear();

@@ -718,6 +718,7 @@ impl Playground {
         }
         self.completed_steps = request.stats().completed_steps();
         self.gpu_status = request.stats().status();
+        self.grid_filter_refused = request.grid_scale_filter_refused();
         self.gpu_dispatches = request.stats().dispatches();
         let processed_event = request.stats().processed_event();
         if processed_event != self.canonical_event_observed {
