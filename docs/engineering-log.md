@@ -3470,9 +3470,6 @@ Reported 2026-09-23, not yet reproduced or diagnosed:
   conservative-transfer tolerance failed (failure code 2); accepted generation
   was retained`. Intermittent; reproduce against the autosave and capture which
   tolerance the device reports before guessing at the transfer.
-- [ ] Moving a whole subdomain should carry its material frame with it. Today the
-  frame stays where it was, so a spatially varying or anisotropic material slides
-  through the moved region instead of travelling with it.
 
 Found while pacing the solver, not yet diagnosed:
 
@@ -10159,3 +10156,37 @@ material, or to the draft's first if a loaded scene lacks the default.
 material, selects it, undoes its creation and draws: the subdomain lands on the
 default, and a selection that does exist is kept. Pointed back at the raw
 selection it fails with the reported message.
+
+## 2026-09-23 — A moved subdomain carries its frame
+
+Reported: moving a whole subdomain left its material frame behind, so a varying
+or anisotropic material slid through the moved region.
+
+The behaviour existed before the unified-topology cutover and did not survive
+it. The loop editor (`050a97f`) created every subdomain frame as `FollowRegion`
+and, when a loop's controls moved by one similarity, carried such a frame
+through it. After the cutover `face_frame` seeded `World` - pinned by a test -
+and `apply_transform_updates` never looked at a frame; `FollowRegion` survived
+only as a stored value, a combo box and a validation rule.
+
+Both are back. New subdomains follow their region. `followed_frames` finds, for
+each following region that owns exactly one face, the curves on that face's
+outer cycle; if none of them is an outer-domain edge and their controls moved
+by one translation, rotation and uniform scale (the old fit and its 1e-8
+residual), the frame's origin goes through the same map and the rotation adds to
+its angle. A reshape, a world frame, a region touching the outer boundary or one
+spread over several faces is left alone. Only the outer cycle counts, so a hole
+inside the subdomain need not move with it.
+
+One thing the port had to get right that the old editor did not face: every
+drag gesture in `ui/input.rs` puts the geometry back to its start each frame and
+applies the whole transform again, and it does not put frames back. Fitting from
+the current draft moved the frame once per frame - five frames of a 0.1 drag
+carried the origin 0.30 in x (0.02 + 0.04 + ... + 0.10) instead of 0.10. The fit therefore reads both geometry
+and frame from the edit session's start (`before`), which gives the same answer
+however many times a gesture re-applies. `a_moved_subdomain_carries_its_frame`
+covers a rotation plus translation about an offset origin, the drag replay, a
+one-control reshape, a world frame and undo; each part fails with the
+corresponding piece removed.
+
+Saved scenes are not migrated: there are none outside development autosaves.

@@ -2380,9 +2380,116 @@ impl TopologyEditor {
         if geometry == self.document.model.draft.geometry {
             return Ok(());
         }
-        self.document.model.draft.geometry = geometry;
+        let followed = self.followed_frames(&geometry);
+        let draft = &mut self.document.model.draft;
+        for (region, frame) in followed {
+            if let Some(region) = draft.regions.iter_mut().find(|item| item.id == region) {
+                region.frame = frame;
+            }
+        }
+        draft.geometry = geometry;
         self.changed();
         Ok(())
+    }
+
+    /// The frames that travel with a transform. A region whose frame follows
+    /// it moves with its subdomain when the whole outer boundary of the face it
+    /// owns has moved by one similarity - a translation, rotation or uniform
+    /// scale - and stays where it is otherwise: a reshaped subdomain has no
+    /// motion to follow, and one touching the outer domain cannot move whole.
+    /// Only the outer cycle counts, so a hole inside the subdomain does not
+    /// have to move with it.
+    ///
+    /// Both the motion and the frame are taken from where the edit began. A
+    /// drag puts the geometry back to its start every frame and applies the
+    /// whole transform again, but it does not put the frames back, so a frame
+    /// moved from where it had got to would be moved once per frame.
+    fn followed_frames(&self, moved: &TopologyGeometry) -> Vec<(RegionId, MaterialFrame)> {
+        let topology = &self
+            .compiled_draft
+            .as_ref()
+            .unwrap_or(&self.compiled_accepted)
+            .topology;
+        let draft = self
+            .before
+            .as_ref()
+            .map_or(&self.document.model.draft, |before| &before.draft);
+        let mut owners = BTreeMap::<RegionId, usize>::new();
+        for assignment in &draft.face_assignments {
+            if let Some(region) = assignment.region {
+                *owners.entry(region).or_default() += 1;
+            }
+        }
+        let controls = |geometry: &TopologyGeometry, curve: CurveId| {
+            geometry
+                .curves
+                .iter()
+                .find(|candidate| candidate.id == curve)
+                .map(|curve| match &curve.spline {
+                    CurveSpline::Closed(spline) => spline.controls().to_vec(),
+                    CurveSpline::Open(spline) => spline.controls().to_vec(),
+                })
+        };
+        let mut followed = Vec::new();
+        for assignment in &draft.face_assignments {
+            let Some(region) = assignment.region.and_then(|region| draft.region(region)) else {
+                continue;
+            };
+            // A region spread over several faces has no single boundary whose
+            // motion it could follow.
+            if region.frame.attachment != MaterialFrameAttachment::FollowRegion
+                || owners.get(&region.id) != Some(&1)
+            {
+                continue;
+            }
+            let Some(face) = assignment
+                .anchor
+                .resolve(topology)
+                .ok()
+                .and_then(|face| topology.face(face))
+            else {
+                continue;
+            };
+            let Some(outer) = face.boundaries.first() else {
+                continue;
+            };
+            let curves = outer
+                .iter()
+                .map(|step| topology.edges.get(step.edge).and_then(|edge| edge.curve))
+                .collect::<Option<BTreeSet<_>>>();
+            let Some(curves) = curves else { continue };
+            let (mut old, mut new) = (Vec::new(), Vec::new());
+            for curve in curves {
+                let (Some(before), Some(after)) =
+                    (controls(&draft.geometry, curve), controls(moved, curve))
+                else {
+                    old.clear();
+                    break;
+                };
+                old.extend(before);
+                new.extend(after);
+            }
+            if old.is_empty() || old == new {
+                continue;
+            }
+            let Some((old_center, new_center, a, b)) = similarity(&old, &new) else {
+                continue;
+            };
+            let relative = region.frame.origin - old_center;
+            followed.push((
+                region.id,
+                MaterialFrame {
+                    origin: new_center
+                        + Point2::new(
+                            a * relative.x - b * relative.y,
+                            b * relative.x + a * relative.y,
+                        ),
+                    angle_radians: region.frame.angle_radians + b.atan2(a),
+                    attachment: region.frame.attachment,
+                },
+            ));
+        }
+        followed
     }
 
     pub fn apply_transform_updates(
@@ -4878,11 +4985,60 @@ fn drop_region_dependents(model: &mut TopologyDocumentModel, region: RegionId) {
     });
 }
 
+/// The similarity `new = new_center + [a -b; b a] (old - old_center)` that maps
+/// one point set onto another, when there is one to within rounding: a
+/// translation, a rotation and a uniform scale, nothing that shears or bends.
+fn similarity(old: &[Point2], new: &[Point2]) -> Option<(Point2, Point2, f64, f64)> {
+    if old.len() != new.len() || old.len() < 2 {
+        return None;
+    }
+    let old_center = old.iter().copied().reduce(|a, b| a + b)? / old.len() as f64;
+    let new_center = new.iter().copied().reduce(|a, b| a + b)? / new.len() as f64;
+    let (mut denominator, mut dot, mut cross) = (0.0, 0.0, 0.0);
+    for (old, new) in old.iter().zip(new) {
+        let old = *old - old_center;
+        let new = *new - new_center;
+        denominator += old.dot(old);
+        dot += old.dot(new);
+        cross += old.cross(new);
+    }
+    if !denominator.is_finite() || denominator <= f64::EPSILON {
+        return None;
+    }
+    let (a, b) = (dot / denominator, cross / denominator);
+    if !a.is_finite() || !b.is_finite() || a.hypot(b) <= 1.0e-8 {
+        return None;
+    }
+    let scale = old
+        .iter()
+        .chain(new)
+        .map(|point| point.norm())
+        .fold(1.0_f64, f64::max);
+    let residual = old
+        .iter()
+        .zip(new)
+        .map(|(old, new)| {
+            let relative = *old - old_center;
+            let predicted = new_center
+                + Point2::new(
+                    a * relative.x - b * relative.y,
+                    b * relative.x + a * relative.y,
+                );
+            (predicted - *new).norm()
+        })
+        .fold(0.0_f64, f64::max);
+    (residual <= 1.0e-8 * scale).then_some((old_center, new_center, a, b))
+}
+
 /// Seeds a new subdomain's local frame at the centre of the face it owns, so a
 /// region-local profile or source starts somewhere inside the region rather than
-/// at the world origin.
+/// at the world origin. It follows the subdomain, so moving the subdomain
+/// carries the profile with it.
 fn face_frame(topology: &TopologySnapshot, face: Option<FaceId>) -> MaterialFrame {
-    let mut frame = MaterialFrame::world();
+    let mut frame = MaterialFrame {
+        attachment: MaterialFrameAttachment::FollowRegion,
+        ..MaterialFrame::world()
+    };
     if let Some(origin) = face
         .and_then(|face| topology.face(face))
         .and_then(CompiledFace::centroid)
@@ -8412,6 +8568,157 @@ mod tests {
         assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
     }
 
+    /// A subdomain's frame travels with it. Moving and turning the whole curve
+    /// carries the origin through the same similarity and adds the turn to the
+    /// angle; reshaping the curve leaves the frame where it was, and so does a
+    /// frame attached to the world.
+    #[test]
+    fn a_moved_subdomain_carries_its_frame() {
+        let mut editor = TopologyEditor::default();
+        let centre = Point2::new(-0.42, 0.31);
+        let curve = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(centre, 0.18),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let region = editor
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .find(|region| region.id != BACKGROUND_REGION)
+            .unwrap()
+            .id;
+        let frame =
+            |editor: &TopologyEditor| editor.document.model.draft.region(region).unwrap().frame;
+        let controls = |editor: &TopologyEditor| match &editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|candidate| candidate.id == curve)
+            .unwrap()
+            .spline
+        {
+            CurveSpline::Closed(spline) => spline.controls().to_vec(),
+            CurveSpline::Open(_) => unreachable!("the subdomain curve is closed"),
+        };
+        // An offset origin, so a rotation about the curve's centre has to move it.
+        let mut authored = frame(&editor);
+        authored.origin = centre + Point2::new(0.05, -0.02);
+        authored.angle_radians = 0.2;
+        editor.set_region_frame(region, authored).unwrap();
+
+        let turn = 0.6_f64;
+        let shift = Point2::new(0.3, -0.25);
+        let pivot = controls(&editor)
+            .iter()
+            .copied()
+            .reduce(|a, b| a + b)
+            .unwrap()
+            / controls(&editor).len() as f64;
+        let rotate = |point: Point2| {
+            let relative = point - pivot;
+            pivot
+                + shift
+                + Point2::new(
+                    turn.cos() * relative.x - turn.sin() * relative.y,
+                    turn.sin() * relative.x + turn.cos() * relative.y,
+                )
+        };
+        let updates = controls(&editor)
+            .iter()
+            .enumerate()
+            .map(|(control, point)| TopologyTransformUpdate::Control {
+                curve,
+                control,
+                point: rotate(*point),
+            })
+            .collect::<Vec<_>>();
+        editor.apply_transform_updates(&updates).unwrap();
+        let moved = frame(&editor);
+        assert!(
+            (moved.origin - rotate(authored.origin)).norm() < 1.0e-9,
+            "the origin went to {:?}, not {:?}",
+            moved.origin,
+            rotate(authored.origin)
+        );
+        assert!((moved.angle_radians - (authored.angle_radians + turn)).abs() < 1.0e-9);
+        assert_eq!(moved.attachment, MaterialFrameAttachment::FollowRegion);
+
+        // A drag puts the geometry back to its start every frame and applies
+        // the whole transform so far. The frame must land where one transform
+        // puts it, not be moved once per frame.
+        let start = editor.document.model.draft.geometry.clone();
+        let base = controls(&editor);
+        let origin = frame(&editor).origin;
+        editor.begin();
+        for step in 1..=5 {
+            editor.document.model.draft.geometry = start.clone();
+            let offset = Point2::new(0.02 * step as f64, 0.01 * step as f64);
+            let updates = base
+                .iter()
+                .enumerate()
+                .map(|(control, point)| TopologyTransformUpdate::Control {
+                    curve,
+                    control,
+                    point: *point + offset,
+                })
+                .collect::<Vec<_>>();
+            editor
+                .apply_transform_updates_during_edit(&updates)
+                .unwrap();
+        }
+        editor.commit();
+        assert!(
+            (frame(&editor).origin - (origin + Point2::new(0.1, 0.05))).norm() < 1.0e-9,
+            "five drag frames moved the origin to {:?}",
+            frame(&editor).origin
+        );
+        editor.undo();
+        let moved = frame(&editor);
+
+        // Reshaping moves one control only: nothing to follow.
+        let nudged = controls(&editor)[0] + Point2::new(0.03, 0.0);
+        editor
+            .apply_transform_updates(&[TopologyTransformUpdate::Control {
+                curve,
+                control: 0,
+                point: nudged,
+            }])
+            .unwrap();
+        assert_eq!(frame(&editor), moved);
+
+        // A world frame stays in the world.
+        let mut world = moved;
+        world.attachment = MaterialFrameAttachment::World;
+        editor.set_region_frame(region, world).unwrap();
+        let updates = controls(&editor)
+            .iter()
+            .enumerate()
+            .map(|(control, point)| TopologyTransformUpdate::Control {
+                curve,
+                control,
+                point: *point + Point2::new(-0.1, 0.1),
+            })
+            .collect::<Vec<_>>();
+        editor.apply_transform_updates(&updates).unwrap();
+        assert_eq!(frame(&editor), world);
+
+        // Undo takes the frame back with the curve.
+        let mut before_world = moved;
+        before_world.attachment = MaterialFrameAttachment::World;
+        assert!(editor.undo());
+        assert_eq!(frame(&editor), before_world);
+    }
+
     /// A region-local profile is unusable if its frame starts at the world    /// A region-local profile is unusable if its frame starts at the world
     /// origin while the region sits somewhere else.
     #[test]
@@ -8442,7 +8749,10 @@ mod tests {
             region.frame.origin
         );
         assert_eq!(region.frame.angle_radians, 0.0);
-        assert_eq!(region.frame.attachment, MaterialFrameAttachment::World);
+        assert_eq!(
+            region.frame.attachment,
+            MaterialFrameAttachment::FollowRegion
+        );
 
         // The background keeps the frame it was authored with.
         let background = editor
