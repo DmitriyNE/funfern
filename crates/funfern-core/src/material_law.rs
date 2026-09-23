@@ -1354,6 +1354,297 @@ fn inverted_polynomial_stationary_points(chi1: f64, chi2: f64, bound: f64) -> Ve
     roots
 }
 
+// ---------------------------------------------------------------------------
+// Executed field response: the Stage 8 constitutive maps and their inverses
+// ---------------------------------------------------------------------------
+
+/// Why a field law is not executed by the canonical solver. Each names the
+/// gate that owns the missing derivation, so a refusal reads as "not yet"
+/// rather than "invalid".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldResponseRefusal {
+    /// A nonzero `χ₁` has a signed argument that no isotropic vector law
+    /// shares (Gate C).
+    SignedPolynomial,
+    /// A reciprocal coefficient is not an inverse constitutive map (Gate C).
+    Reciprocal,
+    /// The tangent leaves zero over the admitted amplitudes, so the map has
+    /// no single inverse there.
+    NotMonotone,
+}
+
+impl FieldResponseRefusal {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::SignedPolynomial => "a signed χ₁ response awaits its vector law (Gate C)",
+            Self::Reciprocal => "a reciprocal field response awaits its inverse map (Gate C)",
+            Self::NotMonotone => "the response is not monotone over its admitted amplitudes",
+        }
+    }
+}
+
+impl FieldLawValues {
+    /// Whether the canonical solver executes this law: linear, Kerr
+    /// (`χ₁ = 0`) and saturable, on the direct coefficient, with a tangent
+    /// that stays positive over every amplitude the law admits.
+    ///
+    /// Every executed law is even in its argument, so it depends on the field
+    /// through `r = |field|` alone. That is what lets one map serve a nodal
+    /// scalar and a quadrature vector: `ḡ(r)` is the secant response, the
+    /// tangential one for a vector, and `ḡ + rḡ′` the radial one. For these
+    /// forms the radial tangent is the smaller whenever it is below one, so
+    /// the scalar [`Self::tangent_range`] bounds both.
+    pub fn executable(self, inverted: bool) -> Result<(), FieldResponseRefusal> {
+        match self {
+            Self::Linear => return Ok(()),
+            Self::Polynomial { chi1, .. } if chi1 != 0.0 => {
+                return Err(FieldResponseRefusal::SignedPolynomial);
+            }
+            Self::Polynomial { .. } | Self::Saturable { .. } => {}
+        }
+        if inverted {
+            return Err(FieldResponseRefusal::Reciprocal);
+        }
+        match self.tangent_range(false) {
+            Some((low, _)) if low > 0.0 && low.is_finite() => Ok(()),
+            _ => Err(FieldResponseRefusal::NotMonotone),
+        }
+    }
+
+    /// `∫₀ʳ ḡ(s)·s ds`, the co-energy of the unit-coefficient map at the
+    /// field amplitude `r`. The stored energy is its Legendre dual,
+    /// `r·P(r) − ∫₀ʳ P`, which [`ConstitutiveSite::energy`] assembles.
+    pub fn coenergy(self, r: f64) -> f64 {
+        let square = r * r;
+        match self {
+            Self::Linear => 0.5 * square,
+            Self::Polynomial { chi1, chi2, .. } => {
+                0.5 * square + chi1 * square * r / 3.0 + 0.25 * chi2 * square * square
+            }
+            Self::Saturable { chi, saturation } => {
+                // `∫₀ʳ s³/(1 + s²/σ²) ds = σ⁴ (x − ln(1 + x)) / 2` with
+                // `x = r²/σ²`; the bracket cancels for small `x`, so it takes
+                // its series there.
+                let sigma2 = saturation * saturation;
+                let x = square / sigma2;
+                let excess = if x < 1e-3 {
+                    x * x * (0.5 - x * (1.0 / 3.0 - x * (0.25 - x / 5.0)))
+                } else {
+                    x - x.ln_1p()
+                };
+                0.5 * square + 0.5 * chi * sigma2 * sigma2 * excess
+            }
+        }
+    }
+
+    /// The smallest secant response `ḡ` over the admitted amplitudes, which
+    /// bounds the inverse from above: `r ≤ P/(m·ḡ_min)`.
+    fn minimum_multiplier(self) -> f64 {
+        match self {
+            Self::Linear => 1.0,
+            Self::Polynomial {
+                chi2,
+                amplitude_bound,
+                ..
+            } => {
+                if chi2 >= 0.0 {
+                    1.0
+                } else {
+                    // Admitted only with a bound (the tangent would otherwise
+                    // reach zero), and positive there since the tangent is.
+                    amplitude_bound.map_or(0.0, |bound| 1.0 + chi2 * bound * bound)
+                }
+            }
+            Self::Saturable { chi, saturation } => (1.0 + chi * saturation * saturation).min(1.0),
+        }
+    }
+}
+
+/// Relative residual an f64 inverse is accepted at: a few ulps of the target.
+pub const F64_INVERSE_TOLERANCE: f64 = 8.0 * f64::EPSILON;
+
+/// The criterion the f32 device port is held to, in the same relative units:
+/// a residual below what one f32 rounding of the conserved variable already
+/// introduces, so an accepted root is indistinguishable from the exact one in
+/// the state it produces.
+pub const F32_INVERSE_TOLERANCE: f64 = 4.0 * f32::EPSILON as f64;
+
+/// A bounded solve that failed. Neither variant carries a best guess: an
+/// unconverged or out-of-domain root must never become state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstitutiveInverseError {
+    /// The conserved variable needs a field beyond a law's declared
+    /// amplitude bound.
+    OutsideDomain,
+    /// The safeguarded iteration hit its cap without meeting the residual.
+    NotConverged,
+    /// A non-finite or negative input, or a map that is not positive.
+    InvalidInput,
+}
+
+/// One contribution `m·ḡ(r)·r` to a site's constitutive map. The coefficient
+/// is the linear one at this instant: geometric weight, base coefficient,
+/// drive and Switch already applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConstitutiveTerm {
+    pub coefficient: f64,
+    pub law: FieldLawValues,
+}
+
+/// The complete constitutive map at one solver site, `P(r) = Σ mᵢ ḡᵢ(r) r`.
+/// A node where several materials meet holds all of their terms, and is
+/// inverted as one map: the specification's junction contract.
+#[derive(Clone, Copy, Debug)]
+pub struct ConstitutiveSite<'a> {
+    terms: &'a [ConstitutiveTerm],
+}
+
+/// Iteration cap for the safeguarded solve. Bisection alone halves the
+/// bracket each step; Newton normally finishes in a handful.
+const INVERSE_ITERATIONS: usize = 200;
+
+impl<'a> ConstitutiveSite<'a> {
+    pub fn new(terms: &'a [ConstitutiveTerm]) -> Self {
+        Self { terms }
+    }
+
+    pub fn is_linear(&self) -> bool {
+        self.terms
+            .iter()
+            .all(|term| term.law == FieldLawValues::Linear)
+    }
+
+    /// `Σ mᵢ`, the map's slope at rest.
+    pub fn linear_coefficient(&self) -> f64 {
+        self.terms.iter().map(|term| term.coefficient).sum()
+    }
+
+    /// `P(r)` for `r ≥ 0`.
+    pub fn value(&self, r: f64) -> f64 {
+        self.terms
+            .iter()
+            .map(|term| term.coefficient * term.law.multiplier(r) * r)
+            .sum()
+    }
+
+    /// `P′(r)`, the radial tangent.
+    pub fn tangent(&self, r: f64) -> f64 {
+        self.terms
+            .iter()
+            .map(|term| term.coefficient * term.law.tangent(r, false))
+            .sum()
+    }
+
+    /// `P(r)/r`, the secant response: the tangential tangent of a vector law.
+    pub fn secant(&self, r: f64) -> f64 {
+        self.terms
+            .iter()
+            .map(|term| term.coefficient * term.law.multiplier(r))
+            .sum()
+    }
+
+    /// `∫₀ʳ P`, the co-energy at field amplitude `r`.
+    pub fn coenergy(&self, r: f64) -> f64 {
+        self.terms
+            .iter()
+            .map(|term| term.coefficient * term.law.coenergy(r))
+            .sum()
+    }
+
+    /// Stored energy `∫₀^{|Q|} P⁻¹` at the conserved amplitude `target`,
+    /// given its inverse `r = P⁻¹(target)`: the Legendre dual of the
+    /// co-energy.
+    pub fn energy(&self, target: f64, r: f64) -> f64 {
+        target * r - self.coenergy(r)
+    }
+
+    /// The largest amplitude every term admits: the tightest declared bound.
+    pub fn amplitude_bound(&self) -> Option<f64> {
+        self.terms
+            .iter()
+            .filter_map(|term| term.law.amplitude_bound())
+            .reduce(f64::min)
+    }
+
+    /// `r = P⁻¹(target)` for `target ≥ 0`, to [`F64_INVERSE_TOLERANCE`].
+    pub fn invert(&self, target: f64, guess: f64) -> Result<f64, ConstitutiveInverseError> {
+        self.invert_to(target, guess, F64_INVERSE_TOLERANCE)
+    }
+
+    /// The safeguarded Newton solve behind [`Self::invert`], at an explicit
+    /// relative residual.
+    ///
+    /// The root is bracketed from the start: `P` is increasing with
+    /// `P(0) = 0`, and `P(r) ≥ r·Σ mᵢ ḡᵢ,min`, so it lies in
+    /// `[0, target/Σ mᵢ ḡᵢ,min]`, cut to the declared amplitude bound. A
+    /// target the bound cannot reach is outside the domain and is refused, not
+    /// clipped to the bound. Newton runs from `guess` (a cached field) and
+    /// falls back to bisection whenever its step would leave the bracket or
+    /// fails to halve it, so the iteration cannot diverge; the cap turns a
+    /// pathological case into a detected failure rather than an accepted
+    /// approximation.
+    pub fn invert_to(
+        &self,
+        target: f64,
+        guess: f64,
+        tolerance: f64,
+    ) -> Result<f64, ConstitutiveInverseError> {
+        if !target.is_finite() || target < 0.0 || tolerance.is_nan() || tolerance <= 0.0 {
+            return Err(ConstitutiveInverseError::InvalidInput);
+        }
+        if target == 0.0 {
+            return Ok(0.0);
+        }
+        let floor = self
+            .terms
+            .iter()
+            .map(|term| term.coefficient * term.law.minimum_multiplier())
+            .sum::<f64>();
+        if !floor.is_finite() || floor <= 0.0 {
+            return Err(ConstitutiveInverseError::InvalidInput);
+        }
+        let mut high = target / floor;
+        if let Some(bound) = self.amplitude_bound()
+            && high > bound
+        {
+            if self.value(bound) < target * (1.0 - tolerance) {
+                return Err(ConstitutiveInverseError::OutsideDomain);
+            }
+            high = bound;
+        }
+        if self.is_linear() {
+            return Ok(target / floor);
+        }
+        let mut low = 0.0;
+        let mut r = if guess.is_finite() && guess > low && guess < high {
+            guess
+        } else {
+            0.5 * (low + high)
+        };
+        for _ in 0..INVERSE_ITERATIONS {
+            let residual = self.value(r) - target;
+            if residual.abs() <= tolerance * target {
+                return Ok(r);
+            }
+            if residual < 0.0 {
+                low = r;
+            } else {
+                high = r;
+            }
+            if high - low <= f64::EPSILON * high {
+                return Ok(0.5 * (low + high));
+            }
+            let newton = r - residual / self.tangent(r);
+            r = if newton > low && newton < high {
+                newton
+            } else {
+                0.5 * (low + high)
+            };
+        }
+        Err(ConstitutiveInverseError::NotConverged)
+    }
+}
+
 impl TimeDriveValues {
     /// The multiplier at time `t` and at a point of the material frame.
     pub fn multiplier(self, time: f64, coordinates: MaterialCoordinates) -> f64 {
@@ -2982,6 +3273,262 @@ mod tests {
             Err(MaterialError::UnsupportedMaterialLaw)
         );
         assert_eq!(material.uniform(), None);
+    }
+
+    fn kerr_values(chi2: f64, amplitude_bound: Option<f64>) -> FieldLawValues {
+        FieldLawValues::Polynomial {
+            chi1: 0.0,
+            chi2,
+            amplitude_bound,
+        }
+    }
+
+    fn saturable_values(chi: f64, saturation: f64) -> FieldLawValues {
+        FieldLawValues::Saturable { chi, saturation }
+    }
+
+    fn one_term(coefficient: f64, law: FieldLawValues) -> [ConstitutiveTerm; 1] {
+        [ConstitutiveTerm { coefficient, law }]
+    }
+
+    #[test]
+    fn only_isotropic_direct_kerr_and_saturable_responses_execute() {
+        assert_eq!(FieldLawValues::Linear.executable(false), Ok(()));
+        assert_eq!(kerr_values(0.8, None).executable(false), Ok(()));
+        assert_eq!(saturable_values(0.8, 1.0).executable(false), Ok(()));
+        assert_eq!(
+            FieldLawValues::Polynomial {
+                chi1: 0.1,
+                chi2: 0.8,
+                amplitude_bound: None,
+            }
+            .executable(false),
+            Err(FieldResponseRefusal::SignedPolynomial)
+        );
+        assert_eq!(
+            kerr_values(0.8, Some(0.5)).executable(true),
+            Err(FieldResponseRefusal::Reciprocal)
+        );
+        assert_eq!(
+            saturable_values(0.8, 1.0).executable(true),
+            Err(FieldResponseRefusal::Reciprocal)
+        );
+        // Defocusing Kerr needs a bound, and the bound needs the radial
+        // tangent 1 + 3χB² to stay positive: B² < 1/(3|χ|).
+        assert_eq!(
+            kerr_values(-0.2, None).executable(false),
+            Err(FieldResponseRefusal::NotMonotone)
+        );
+        let edge = (1.0_f64 / 0.6).sqrt();
+        assert_eq!(
+            kerr_values(-0.2, Some(edge * 0.999)).executable(false),
+            Ok(())
+        );
+        assert_eq!(
+            kerr_values(-0.2, Some(edge * 1.001)).executable(false),
+            Err(FieldResponseRefusal::NotMonotone)
+        );
+        // Defocusing saturation: positive radial tangent needs a > -8/9,
+        // although a positive coefficient only needs a > -1.
+        let saturation = 2.0;
+        let chi_at = |a: f64| a / (saturation * saturation);
+        assert_eq!(
+            saturable_values(chi_at(-8.0 / 9.0 + 1e-6), saturation).executable(false),
+            Ok(())
+        );
+        assert_eq!(
+            saturable_values(chi_at(-8.0 / 9.0 - 1e-6), saturation).executable(false),
+            Err(FieldResponseRefusal::NotMonotone)
+        );
+        assert_eq!(
+            saturable_values(chi_at(-0.95), saturation).executable(false),
+            Err(FieldResponseRefusal::NotMonotone)
+        );
+    }
+
+    #[test]
+    fn the_radial_tangent_bounds_the_tangential_one_for_every_executed_law() {
+        // A vector law needs both f > 0 and f + r f′ > 0. For the executed
+        // forms the minimum of the pair is the radial one wherever either
+        // falls below one, so the scalar tangent range is the vector's too.
+        let laws = [
+            kerr_values(0.8, None),
+            kerr_values(-0.2, Some(1.2)),
+            saturable_values(0.8, 1.0),
+            saturable_values(-0.2, 2.0),
+        ];
+        for law in laws {
+            let (low, _) = law.tangent_range(false).unwrap();
+            let bound = law.amplitude_bound().unwrap_or(20.0);
+            for step in 0..=400 {
+                let r = bound * step as f64 / 400.0;
+                let tangential = law.multiplier(r);
+                let radial = law.tangent(r, false);
+                assert!(tangential.min(radial) >= low - 1e-12, "{law:?} at {r}");
+                assert!(tangential > 0.0 && radial > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn the_coenergy_is_the_integral_of_the_map_across_its_series_switch() {
+        let laws = [
+            FieldLawValues::Linear,
+            kerr_values(0.8, None),
+            kerr_values(-0.2, Some(1.2)),
+            saturable_values(0.8, 1.0),
+            saturable_values(-0.2, 2.0),
+            saturable_values(3.0, 0.05),
+        ];
+        for law in laws {
+            let map = |r: f64| law.multiplier(r) * r;
+            for r in [1e-6_f64, 1e-3, 0.0316, 0.04, 0.3, 1.0, 1.19] {
+                let h = 1e-6 * r.max(1e-3);
+                let derivative = (law.coenergy(r + h) - law.coenergy(r - h)) / (2.0 * h);
+                assert!(
+                    (derivative - map(r)).abs() <= 1e-7 * map(r).abs().max(1e-12),
+                    "{law:?} at {r}: {derivative} against {}",
+                    map(r)
+                );
+            }
+        }
+        // The series and the closed form meet at x = 1e-3 without a step.
+        let law = saturable_values(0.8, 1.0);
+        let r = 1e-3_f64.sqrt();
+        let (below, above) = (r * (1.0 - 1e-9), r * (1.0 + 1e-9));
+        let excess = |r: f64| law.coenergy(r) - 0.5 * r * r;
+        let expected = 0.8 * r * r * r / (1.0 + r * r) * (above - below);
+        let jump = excess(above) - excess(below);
+        assert!(
+            (jump - expected).abs() <= 1e-3 * expected,
+            "{jump} against {expected}"
+        );
+    }
+
+    #[test]
+    fn the_bracketed_inverse_meets_its_residual_across_every_decade() {
+        let laws = [
+            FieldLawValues::Linear,
+            kerr_values(0.8, None),
+            kerr_values(40.0, None),
+            saturable_values(0.8, 1.0),
+            saturable_values(-0.22, 2.0),
+            // The weakest admitted tangent, 1 + 9a/8 at v = 3.
+            saturable_values(-0.888 / 4.0, 2.0),
+        ];
+        for law in laws {
+            let terms = one_term(1.7, law);
+            let site = ConstitutiveSite::new(&terms);
+            for exponent in -12..=6 {
+                let target = 3.0_f64.powi(exponent) * 0.37;
+                for guess in [f64::NAN, 0.0, 1e30, target] {
+                    let r = site.invert(target, guess).unwrap();
+                    let residual = (site.value(r) - target).abs();
+                    assert!(
+                        residual <= F64_INVERSE_TOLERANCE * target,
+                        "{law:?}: target {target}, residual {residual}"
+                    );
+                }
+                let coarse = site
+                    .invert_to(target, f64::NAN, F32_INVERSE_TOLERANCE)
+                    .unwrap();
+                assert!((site.value(coarse) - target).abs() <= F32_INVERSE_TOLERANCE * target);
+            }
+            assert_eq!(site.invert(0.0, 1.0), Ok(0.0));
+            assert_eq!(
+                site.invert(-1.0, 0.0),
+                Err(ConstitutiveInverseError::InvalidInput)
+            );
+            assert_eq!(
+                site.invert(f64::NAN, 0.0),
+                Err(ConstitutiveInverseError::InvalidInput)
+            );
+        }
+    }
+
+    #[test]
+    fn a_junction_inverts_the_sum_of_its_materials_not_their_average() {
+        let terms = [
+            ConstitutiveTerm {
+                coefficient: 0.4,
+                law: kerr_values(1.5, None),
+            },
+            ConstitutiveTerm {
+                coefficient: 1.1,
+                law: saturable_values(-0.1, 1.5),
+            },
+            ConstitutiveTerm {
+                coefficient: 0.25,
+                law: FieldLawValues::Linear,
+            },
+        ];
+        let site = ConstitutiveSite::new(&terms);
+        let target = 2.3;
+        let r = site.invert(target, 0.0).unwrap();
+        let assembled = 0.4 * (1.0 + 1.5 * r * r) * r
+            + 1.1 * saturable_values(-0.1, 1.5).multiplier(r) * r
+            + 0.25 * r;
+        assert!((assembled - target).abs() <= F64_INVERSE_TOLERANCE * target);
+        let h = 1e-6;
+        let tangent = (site.value(r + h) - site.value(r - h)) / (2.0 * h);
+        assert!((tangent - site.tangent(r)).abs() <= 1e-7 * tangent);
+        assert_eq!(site.linear_coefficient(), 1.75);
+    }
+
+    #[test]
+    fn a_bounded_law_refuses_a_target_beyond_its_bound_instead_of_clipping() {
+        let law = kerr_values(-0.2, Some(1.2));
+        let terms = one_term(2.0, law);
+        let site = ConstitutiveSite::new(&terms);
+        let reachable = site.value(1.2);
+        let r = site.invert(reachable * (1.0 - 1e-12), 0.5).unwrap();
+        assert!(r <= 1.2 && r > 1.19);
+        assert_eq!(
+            site.invert(reachable * (1.0 + 1e-9), 0.5),
+            Err(ConstitutiveInverseError::OutsideDomain)
+        );
+        // At a junction the tightest bound is the domain.
+        let terms = [
+            ConstitutiveTerm {
+                coefficient: 2.0,
+                law,
+            },
+            ConstitutiveTerm {
+                coefficient: 1.0,
+                law: kerr_values(0.5, Some(0.8)),
+            },
+        ];
+        let site = ConstitutiveSite::new(&terms);
+        assert_eq!(site.amplitude_bound(), Some(0.8));
+        assert_eq!(
+            site.invert(site.value(0.8) * 1.01, 0.0),
+            Err(ConstitutiveInverseError::OutsideDomain)
+        );
+    }
+
+    #[test]
+    fn the_stored_energy_is_convex_and_its_gradient_is_the_field() {
+        for law in [
+            kerr_values(0.8, None),
+            saturable_values(0.8, 1.0),
+            saturable_values(-0.2, 2.0),
+        ] {
+            let terms = one_term(1.3, law);
+            let site = ConstitutiveSite::new(&terms);
+            let energy = |q: f64| site.energy(q, site.invert(q, 0.0).unwrap());
+            let mut previous_slope = 0.0;
+            for q in [1e-4, 0.01, 0.2, 1.0, 3.0, 9.0] {
+                let h = 1e-5 * q;
+                let slope = (energy(q + h) - energy(q - h)) / (2.0 * h);
+                let field = site.invert(q, 0.0).unwrap();
+                assert!((slope - field).abs() <= 1e-6 * field, "{law:?} at {q}");
+                assert!(slope > previous_slope);
+                previous_slope = slope;
+            }
+            // In the small-signal limit it is the linear store Q²/2m.
+            let q = 1e-5;
+            assert!((energy(q) - q * q / 2.6).abs() <= 1e-9 * q * q);
+        }
     }
 
     #[test]

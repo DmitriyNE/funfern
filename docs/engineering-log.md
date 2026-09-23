@@ -10464,3 +10464,41 @@ which the device matches, does by construction.
   `temporal_supplement_matches_the_fixed_one_when_inert_and_departs_when_driven`.
   `canonical_gpu_temporal_amr`, `_work` and `_handoff` reproduce their figures.
 
+
+## 2026-09-24 — Stage 8 begins with the constitutive kernels
+
+Stage 8 plan: CPU nonlinear maps for Kerr and saturable response, then bulk
+evolution, composition, the nonlinear primary trace, gate F, AMR and skin
+conversion, each enabled only once its tests pass. The GPU path stays gated
+until Stage 9. This first step is the per-site constitutive kernel in
+`material_law.rs`, with no solver wiring yet.
+
+- `FieldLawValues::executable(inverted)` is the executed subset: linear, Kerr
+  (`χ₁ = 0`) and saturable on the direct coefficient, with a positive tangent
+  over the admitted amplitudes. A refusal names its gate:
+  `SignedPolynomial` and `Reciprocal` (Gate C), `NotMonotone` (no single
+  inverse).
+- Every executed law is even, so one map serves the nodal scalar and the
+  quadrature vector through `r = |field|`. For these forms the radial tangent
+  `ḡ + rḡ′` is the smaller of the pair wherever either drops below one, so the
+  existing scalar `tangent_range` is also the vector bound. This is checked
+  over the range, not assumed.
+- `ConstitutiveSite` holds every `m·ḡ(r)·r` term at a site, so a junction node
+  inverts its assembled sum. It provides the value, radial and secant
+  tangents, co-energy `∫P` (closed form; the saturable log uses its series
+  below `x = 1e-3`), and the stored energy `r·Q − ∫P`.
+- `invert_to` is safeguarded Newton inside the analytic bracket
+  `[0, Q/Σ m·ḡ_min]`, cut to the tightest declared amplitude bound.
+  - A target beyond the bound is `OutsideDomain`, never clipped.
+  - The iteration cap is `NotConverged`.
+  - Neither returns a best guess.
+- Tolerances: `F64_INVERSE_TOLERANCE = 8ε₆₄` relative. The device criterion is
+  fixed now: `F32_INVERSE_TOLERANCE = 4ε₃₂`.
+- Tests:
+  - both sides of the Kerr bound `B² < 1/(3|χ|)` and of saturable `a = −8/9`;
+  - residuals across 19 decades from four initial guesses, including NaN and
+    1e30;
+  - a three-material junction;
+  - domain refusal at a junction's tightest bound;
+  - the co-energy derivative across its series switch;
+  - a convex stored energy whose gradient is the field, reducing to `Q²/2m`.
