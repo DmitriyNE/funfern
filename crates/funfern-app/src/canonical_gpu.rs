@@ -3114,6 +3114,9 @@ pub struct CanonicalGpuRequest {
     full_state_readback_entity: Option<Entity>,
     continuous_full_state_readback: bool,
     unfenced_stepping: bool,
+    /// Counts cleared failures, so the render world knows to rewind what it
+    /// has encoded to the accepted clock rather than carry it across.
+    cleared_failures: u32,
     grid_scale_filter: bool,
     handoff: Option<CanonicalGpuHandoffHandles>,
     handoff_outcome: CanonicalGpuHandoffOutcome,
@@ -3134,6 +3137,7 @@ impl Default for CanonicalGpuRequest {
             full_state_readback_entity: None,
             continuous_full_state_readback: false,
             unfenced_stepping: false,
+            cleared_failures: 0,
             grid_scale_filter: false,
             handoff: None,
             handoff_outcome: CanonicalGpuHandoffOutcome::None,
@@ -3679,7 +3683,15 @@ impl CanonicalGpuRequest {
         if self.buffers.is_none() {
             return Err("canonical GPU is not installed");
         }
+        // Steps encoded after the one that failed ran against a latched status
+        // and committed nothing, so the accepted clock is where encoding
+        // resumes - for the host's request, the render world's count and the
+        // queue's.
         self.desired_steps = self.stats.completed_steps();
+        self.stats
+            .retired_steps
+            .store(self.stats.completed_steps(), Ordering::Relaxed);
+        self.cleared_failures = self.cleared_failures.wrapping_add(1);
         self.stats.failure.store(0, Ordering::Relaxed);
         self.stats.status.store(0, Ordering::Relaxed);
         self.replace_status(assets, commands, GpuCanonicalStatus::default());
@@ -4635,6 +4647,7 @@ fn init_canonical_pipeline(
 struct CanonicalBindGroup {
     generation: u64,
     revision: u64,
+    cleared_failures: u32,
     encoded_steps: u64,
     encoded_local_step: u32,
     encoded_event: bool,
@@ -4697,9 +4710,29 @@ fn prepare_canonical_bind_group(
             buffers[7].buffer.as_entire_buffer_binding(),
         )),
     );
+    // A revision within one generation carries the encoded clock across, since
+    // steps are in flight. A cleared failure does not: what was encoded after
+    // the failure never committed.
     let (encoded_steps, encoded_local_step, encoded_event, encoded_live_event) = existing
         .as_ref()
         .filter(|group| group.generation == request.generation)
+        .map(|group| {
+            if group.cleared_failures == request.cleared_failures {
+                (
+                    group.encoded_steps,
+                    group.encoded_local_step,
+                    group.encoded_event,
+                    group.encoded_live_event,
+                )
+            } else {
+                (
+                    request.stats.completed_steps(),
+                    request.stats.local_step(),
+                    group.encoded_event,
+                    group.encoded_live_event,
+                )
+            }
+        })
         .map_or(
             (
                 request.stats.completed_steps(),
@@ -4707,18 +4740,12 @@ fn prepare_canonical_bind_group(
                 false,
                 request.stats.processed_event(),
             ),
-            |group| {
-                (
-                    group.encoded_steps,
-                    group.encoded_local_step,
-                    group.encoded_event,
-                    group.encoded_live_event,
-                )
-            },
+            |encoded| encoded,
         );
     commands.insert_resource(CanonicalBindGroup {
         generation: request.generation,
         revision: request.revision,
+        cleared_failures: request.cleared_failures,
         encoded_steps,
         encoded_local_step,
         encoded_event,
@@ -5805,6 +5832,39 @@ mod tests {
         assert_eq!(stats.retired_steps(), 40);
         stats.completed_steps.store(50, Ordering::Relaxed);
         assert_eq!(stats.retired_steps(), 50);
+    }
+
+    #[test]
+    fn a_cleared_failure_resumes_from_the_accepted_clock() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            request.install(
+                &mut assets,
+                &mut commands,
+                plan(OuterBoundaryCondition::Reflecting),
+            );
+            let accepted = request.stats().completed_steps();
+            // Three steps encoded and reported retired, the first of them
+            // failed; none committed.
+            request.request_steps(3);
+            request.stats().retire(accepted + 3);
+            request
+                .stats()
+                .failure
+                .store(CANONICAL_FAILURE_NON_FINITE, Ordering::Relaxed);
+            let cleared = request.cleared_failures;
+            request.clear_failure(&mut assets, &mut commands).unwrap();
+            assert_eq!(request.requested_steps(), accepted);
+            assert_eq!(request.stats().retired_steps(), accepted);
+            assert_ne!(
+                request.cleared_failures, cleared,
+                "the render world must rewind too"
+            );
+        });
     }
 
     #[test]

@@ -3387,18 +3387,6 @@ above:
 
 ## Current TODOs
 
-- [ ] `canonical_gpu_timing --failure` times out, on `main` (52fc4e3) as well
-  as now, so it predates the pacing work. After `clear_failure` the host asks
-  again from the accepted clock (16 -> 17), but the render world's
-  `CanonicalBindGroup` kept `encoded_steps` at 17 through the revision bump,
-  because it preserves the count across revisions within a generation. The
-  failed step it encoded never committed, so `desired - encoded` stays zero and
-  nothing is encoded again. Examples only - the app never calls
-  `clear_failure`; `canonical_gpu_temporal_rollback` and `canonical_gpu_handoff
-  --failure` recover through event and handoff rejection and pass. The fix is to
-  rewind the encoded count (and `retired_steps`) to the accepted clock when a
-  failure is cleared.
-
 - [ ] No way to measure, from the host, how evenly the drawn state advances.
   The requested stream is measurable and the completed counter is not usable for
   it - the counter is zero on 62 % of frames and then jumps by 33, which is the
@@ -10354,4 +10342,24 @@ sweeps are about 45 % of a second-order step.
   `canonical_gpu_temporal_live_source` bit-for-bit.
 - Found while validating, filed above rather than fixed here:
   `canonical_gpu_timing --failure` times out, and did on `main` already.
+
+## 2026-09-24 — A cleared failure resumes from the accepted clock
+
+The `canonical_gpu_timing --failure` hang filed yesterday, broken on `main`
+before any of the pacing work.
+
+- The render world keeps `encoded_steps` across revisions within a generation,
+  which is right while steps are in flight and wrong after a failure: the steps
+  encoded after the failed one ran against a latched status and committed
+  nothing, so the count sat ahead of the accepted clock for good and `desired -
+  encoded` never went positive again.
+- `clear_failure` now counts cleared failures on the request, and
+  `prepare_canonical_bind_group` rewinds the encoded step and local step to the
+  accepted clock when the count it holds differs; events keep what they had.
+  `retired_steps` is reset to the accepted clock at the same moment.
+- `canonical_gpu_timing --failure` passes on both wall orders, fenced and
+  unfenced: the recovery step commits and matches the host oracle (Q 1.57e-7).
+  `a_cleared_failure_resumes_from_the_accepted_clock` covers the request side.
+  Rollback, live-event, handoff-failure and live-source examples reproduce
+  their earlier figures.
 
