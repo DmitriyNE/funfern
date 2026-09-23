@@ -118,9 +118,31 @@ const FRAME_BUDGET_TOLERANCE: f64 = 1.5;
 
 /// What an overrunning frame multiplies the batch ceiling by.
 ///
-/// Sharp, and multiplicative, because this is the direction that protects the
-/// display: when the cost of a step jumps - a finer mesh, a driven medium - the
-/// batch has to come down within a few frames rather than a few hundred.
+/// Multiplicative, because this is the direction that protects the display:
+/// when the cost of a step jumps - a finer mesh, a driven medium - the batch
+/// has to come down in a few frames rather than a few hundred.
+///
+/// Sharp, because whenever the ceiling is the constraint the batch *is* the
+/// ceiling, and the display has to be given back its cadence within a few
+/// frames rather than a few hundred.
+///
+/// That sharpness is also the amplitude of the sawtooth the controller leaves
+/// in the animation's own clock, so it was measured against a gentler `0.9`.
+/// In the harness below, `0.9` is clearly better - the spread of simulated
+/// seconds per wall second over eight-frame windows falls from 18.3 % to 7.9 %
+/// where the solver has headroom and from 16.6 % to 7.8 % where it has none,
+/// at no cost in frame rate in the first case and about nine frames a second in
+/// the second. On the machine it could not be told apart from noise: two runs
+/// of each build on the reported scene gave a controller-attributable spread of
+/// 15.0 % and 20.2 % at `0.75` against 16.6 % and 18.1 % at `0.9`, run to run
+/// variation larger than the effect. Left at `0.75` until there is a
+/// measurement that can resolve it.
+///
+/// An earlier version of this comment justified `0.75` on the grounds that the
+/// cut was the only thing producing a frame faster than the last, and so the
+/// only way the cadence estimate learned what the display could do. That
+/// stopped being true when the cadence moved to measuring frames the solver was
+/// not loading; see [`DisplayCadence`].
 const FRAME_BUDGET_BACKOFF: f64 = 0.75;
 
 /// What a frame inside the cadence adds back to it, while the ceiling is what
@@ -379,19 +401,31 @@ mod tests {
         }
     }
 
-    /// Four seconds of paced frames after a second of warm-up: frames a second,
-    /// simulated seconds a wall second, and the batch a frame settled on.
-    fn paced(
-        display: &mut Display,
-        time_step: f64,
-        per_step: f64,
-        budgeted: bool,
-    ) -> (f64, f64, f64) {
+    /// What four seconds of paced frames came to.
+    struct Paced {
+        /// Frames a second.
+        fps: f64,
+        /// Simulated seconds a wall second, over the whole run.
+        speed: f64,
+        /// Steps a frame, averaged.
+        per_frame: f64,
+        /// How unevenly the simulated clock ran, as the relative spread of
+        /// simulated seconds per wall second over eight-frame windows.
+        ///
+        /// This is the one the eye reads. A run can hold its frame rate and
+        /// deliver the requested speed on average while still visibly speeding
+        /// up and slowing down, which is exactly what was reported.
+        wobble: f64,
+    }
+
+    /// Four seconds of paced frames after a second of warm-up.
+    fn paced(display: &mut Display, time_step: f64, per_step: f64, budgeted: bool) -> Paced {
         let mut accumulator = 0.0;
         let mut cadence = DisplayCadence::new();
         let mut budget = 1.0;
         let mut frame = display.refresh;
         let mut asked = FrameBatch::default();
+        let mut run: Vec<(u64, f64)> = Vec::new();
         let (mut frames, mut steps, mut elapsed, mut warm) = (0u32, 0u64, 0.0, 0.0);
         while elapsed < 4.0 {
             cadence.observe(frame);
@@ -418,12 +452,30 @@ mod tests {
             elapsed += frame;
             frames += 1;
             steps += asked.steps;
+            run.push((asked.steps, frame));
         }
-        (
-            f64::from(frames) / elapsed,
-            steps as f64 * time_step / elapsed,
-            steps as f64 / f64::from(frames).max(1.0),
-        )
+
+        // The simulated clock's rate over each eight-frame window - about a
+        // fifteenth of a second, which is roughly what the eye integrates.
+        const WINDOW: usize = 8;
+        let rates: Vec<f64> = run
+            .windows(WINDOW)
+            .map(|window| {
+                let advanced = window.iter().map(|(steps, _)| *steps).sum::<u64>() as f64;
+                let wall = window.iter().map(|(_, frame)| *frame).sum::<f64>();
+                advanced * time_step / wall
+            })
+            .collect();
+        let mean = rates.iter().sum::<f64>() / rates.len().max(1) as f64;
+        let variance =
+            rates.iter().map(|rate| (rate - mean).powi(2)).sum::<f64>() / rates.len().max(1) as f64;
+
+        Paced {
+            fps: f64::from(frames) / elapsed,
+            speed: steps as f64 * time_step / elapsed,
+            per_frame: steps as f64 / f64::from(frames).max(1.0),
+            wobble: variance.sqrt() / mean.max(f64::MIN_POSITIVE),
+        }
     }
 
     /// The first reported defect: selecting a driven material took the frame
@@ -440,29 +492,92 @@ mod tests {
 
         // Unbudgeted and linear, the step is loose enough that the batch fits:
         // 110 fps and 739 steps a second here against 120 and 750 reported.
-        let (fps, speed, _) = paced(&mut Display::measured(refresh), 1.34e-3, 0.93e-3, false);
-        assert!(fps > 105.0, "linear was not display-bound: {fps}");
-        assert!(speed > 0.9, "linear did not keep up: {speed}");
+        let linear = paced(&mut Display::measured(refresh), 1.34e-3, 0.93e-3, false);
+        assert!(
+            linear.fps > 105.0,
+            "linear was not display-bound: {}",
+            linear.fps
+        );
+        assert!(
+            linear.speed > 0.9,
+            "linear did not keep up: {}",
+            linear.speed
+        );
 
         // Unbudgeted and driven, the reported regression. It lands below the
         // reported 65 fps because nothing here models the GPU backpressure that
         // caps outstanding lead; the direction and the cause are the point.
-        let (fps, _, _) = paced(&mut Display::measured(refresh), 6.27e-4, 0.93e-3, false);
-        assert!(fps < 80.0, "the reported drop did not reproduce: {fps}");
+        let unbudgeted = paced(&mut Display::measured(refresh), 6.27e-4, 0.93e-3, false);
+        assert!(
+            unbudgeted.fps < 80.0,
+            "the reported drop did not reproduce: {}",
+            unbudgeted.fps
+        );
 
         // Budgeted, the display is served and the shortfall is what gives.
-        let (fps, speed, per_frame) =
-            paced(&mut Display::measured(refresh), 6.27e-4, 0.93e-3, true);
+        let driven = paced(&mut Display::measured(refresh), 6.27e-4, 0.93e-3, true);
         assert!(
-            fps > 110.0,
-            "the display is still held behind the solver: {fps}"
+            driven.fps > 110.0,
+            "the display is still held behind the solver: {}",
+            driven.fps
         );
-        assert!(speed > 0.3, "the solver barely advanced: {speed}");
+        assert!(
+            driven.speed > 0.3,
+            "the solver barely advanced: {}",
+            driven.speed
+        );
         // And it stays a simulation: several steps between one frame and the
         // next, so every frame has a new configuration to draw.
         assert!(
-            per_frame > 2.0,
-            "the batch collapsed to a step a frame: {per_frame}"
+            driven.per_frame > 2.0,
+            "the batch collapsed to a step a frame: {}",
+            driven.per_frame
+        );
+    }
+
+    /// How evenly the simulated clock runs, which is not the same question as
+    /// whether the frame rate holds or whether the requested speed is reached
+    /// on average. A run can do both and still visibly speed up and slow down.
+    ///
+    /// Whenever the ceiling is the constraint the batch is the ceiling, so the
+    /// controller's sawtooth lands directly in the animation's clock: the
+    /// spread here is [`FRAME_BUDGET_BACKOFF`] transmitted, against about 1 %
+    /// for a pacer with no ceiling at all on the same frames. These bounds are
+    /// a ratchet on what is currently reached - 18.3 % with room to spare and
+    /// 16.6 % without - not a statement that this is good enough. Reducing it
+    /// means a gentler cut, which measured better here and could not be
+    /// distinguished from run-to-run variation on the machine.
+    #[test]
+    fn the_simulated_clock_runs_evenly_in_both_regimes() {
+        let refresh = 1.0 / 120.0;
+
+        // Headroom: a step cheap enough that the ceiling sits above demand.
+        let easy = paced(&mut Display::measured(refresh), 8.13e-4, 0.4e-3, true);
+        assert!(easy.fps > 110.0, "{}", easy.fps);
+        assert!(
+            easy.speed > 0.9,
+            "it did not reach the requested rate: {}",
+            easy.speed
+        );
+        assert!(
+            easy.wobble < 0.20,
+            "the simulated clock got less even with room to spare: {:.1} %",
+            easy.wobble * 100.0
+        );
+
+        // And where the solver cannot keep up, falling behind should look like
+        // slow motion rather than stutter: a lower rate, but no less even.
+        let hard = paced(&mut Display::measured(refresh), 8.13e-4, 0.8e-3, true);
+        assert!(hard.fps > 105.0, "{}", hard.fps);
+        assert!(
+            hard.speed < 0.95,
+            "this operating point is meant to fall short: {}",
+            hard.speed
+        );
+        assert!(
+            hard.wobble < 0.20,
+            "falling behind got stuttery rather than slow: {:.1} %",
+            hard.wobble * 100.0
         );
     }
 
@@ -536,14 +651,16 @@ mod tests {
     /// one, which is the failure the fixed estimate had to avoid.
     #[test]
     fn a_slower_display_is_believed_rather_than_accused() {
-        let (fps, _, per_frame) = paced(&mut Display::measured(1.0 / 60.0), 6.27e-4, 0.93e-3, true);
+        let slow = paced(&mut Display::measured(1.0 / 60.0), 6.27e-4, 0.93e-3, true);
         assert!(
-            fps > 55.0,
-            "a 60 Hz display did not hold its own rate: {fps}"
+            slow.fps > 55.0,
+            "a 60 Hz display did not hold its own rate: {}",
+            slow.fps
         );
         assert!(
-            per_frame > 4.0,
-            "the batch collapsed on a slower display: {per_frame}"
+            slow.per_frame > 4.0,
+            "the batch collapsed on a slower display: {}",
+            slow.per_frame
         );
     }
 

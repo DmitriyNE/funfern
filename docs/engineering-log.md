@@ -3387,6 +3387,27 @@ above:
 
 ## Current TODOs
 
+Pacing measurement, found while trying to steady the simulated clock:
+
+- [ ] `steps_with_gpu_backpressure` throttles against a counter that lags by
+  about three frames. `completed_steps` is reported through a paced readback,
+  not read from the queue, so the outstanding lead it computes is mostly
+  reporting latency rather than a real backlog: measured at a median of 39 and a
+  p90 of 54 against a cap of 64, on a scene requesting only 11 steps a frame.
+  The lead it thinks exists is roughly `readback latency x request rate`. It cut
+  the batch on 9.7 % of frames and dropped 2.1 % of requested steps, all of it
+  for a backlog that had already been executed. Worth either reading a
+  queue-side figure or subtracting the known readback latency. Benign today,
+  but it is a second unmodelled clamp on the batch and it confounds any
+  measurement of pacing.
+
+- [ ] No way to measure, from the host, how evenly the drawn state advances.
+  The requested stream is measurable and the completed counter is not usable for
+  it - the counter is zero on 62 % of frames and then jumps by 33, which is the
+  readback arriving, not the solver running. The drawn field is a GPU buffer the
+  compute writes in place each frame, so what the eye sees is neither series.
+  Until there is a way to see it, smoothness work is being tuned against a proxy.
+
 Submitting solver work outside the render graph, worth investigating:
 
 - [ ] `compute_canonical_wave` is a system in the `RenderGraph` schedule ordered
@@ -9727,3 +9748,45 @@ Where it genuinely has none this is a trade rather than a gain — about six
 frames a second bought for a fifth more simulated speed — and the right answer
 there is to govern the rate down smoothly rather than clamp it per frame, so
 that falling behind looks like slow motion instead of stutter. Not done yet.
+
+
+## 2026-09-23 — Trying to steady the simulated clock, and not shipping it
+
+The clock's unevenness is real and measurable: on the reported scene the spread
+of simulated seconds per wall second over eight-frame windows was 15.9 %, where
+the same frame times paced without any ceiling give 0.8 %. So essentially all of
+it is the ceiling, and specifically the ceiling's own sawtooth - whenever the
+ceiling is the constraint the batch is the ceiling, and its relative spread
+(16.2 %) matched the clock's (16.0 %) one for one.
+
+Four shapes were tried against the recorded jitter. A governor on the playback
+rate - the thing that was proposed - locks up: governing the speed down reduces
+demand, which stops the ceiling being the constraint, which stops the controller
+raising it, which keeps the speed down. It measured 0.295x against a requested
+1.05x. Integral control on the overrun rate and proportional cuts sized by the
+overrun were both worse than what is there. A token bucket letting a frame burst
+above the sustained ceiling looked excellent on a replay and bad closed-loop:
+with frame times fixed a burst is free, and when they are not it is used on 30
+to 70 % of frames and drives long frames from nothing to 14 %.
+
+What did work in simulation was simply cutting less hard on an overrun. At `0.9`
+instead of `0.75` the spread falls from 18.3 % to 7.9 % with headroom and from
+16.6 % to 7.8 % without, costing no frame rate in the first case and about nine
+frames a second in the second. The justification for the sharp cut had also
+expired: it was sharp so that it would overshoot and let the cadence estimate
+see a fast frame, and the cadence has not been learned that way since it moved
+to measuring frames the solver was not loading.
+
+It is not shipped, because the machine cannot confirm it. Two runs of each build
+on the same scene gave a controller-attributable spread of 15.0 % and 20.2 % at
+`0.75` against 16.6 % and 18.1 % at `0.9` - run-to-run variation larger than the
+effect being measured. One earlier run was contaminated outright, which only
+showed up because its no-ceiling floor came out at 7.3 % instead of 0.8 %.
+
+Two things did come out of it. The harness now measures the spread and gates it
+as a ratchet, so this cannot quietly get worse. And the reason the machine is so
+hard to measure turned out to be worth its own entry: the backpressure clamp
+throttles against a readback-lagged counter, and there is no host-side view of
+how evenly the drawn state actually advances. Both are filed above. The second
+one is the blocker - until the drawn cadence can be seen, this is being tuned
+against a proxy.
