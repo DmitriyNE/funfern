@@ -1154,11 +1154,15 @@ impl TopologyPreparationJob {
             .map(|previous| previous.far_field.clone())
             .unwrap_or_else(|| {
                 self.far_field.enabled.then(|| {
+                    // The authored model, not the stripped one the fixed
+                    // assembly reads: the projection has to see a drive on
+                    // the exterior to refuse it, and the stripped model has
+                    // none by construction.
                     QuadraticFarFieldStencil::build_topology(
                         &mesh,
                         &operator,
                         &self.bundle.plan,
-                        self.stripped_model(),
+                        self.bundle.model(),
                         FarFieldCompileOptions {
                             inset: self.far_field.inset,
                             sample_count: FAR_FIELD_CONTOUR_POINTS,
@@ -2638,6 +2642,93 @@ mod tests {
     #[test]
     fn a_driven_medium_takes_source_edits_as_patches() {
         point_source_edits_patch_the_running_generation(true);
+    }
+
+    fn pumped(material: &mut funfern_core::Material) {
+        material.mass_law.drive = funfern_core::TimeDrive::ParametricPump {
+            depth: funfern_core::ScalarField::constant(0.2),
+            frequency_hz: funfern_core::ScalarField::constant(1.0),
+            phase_radians: funfern_core::ScalarField::constant(0.25),
+        };
+    }
+
+    /// Prepares and commits `document`, returning whether the generation is
+    /// driven and what became of its far field.
+    fn far_field_of(
+        runtime: &mut TopologyRuntime,
+        revision: u64,
+        document: &TopologyDocument,
+        fresh: bool,
+    ) -> (bool, Result<(), String>) {
+        let token = runtime
+            .request(
+                revision,
+                document,
+                document.model.accepted.compile(revision).unwrap(),
+                options(),
+                fresh,
+            )
+            .unwrap();
+        prepare(runtime).unwrap();
+        let active = runtime.commit_ready(token).unwrap();
+        let far_field = active
+            .far_field
+            .clone()
+            .expect("the far field was asked for");
+        (active.driven(), far_field.map(|_| ()))
+    }
+
+    /// The projection integrates a time-invariant exterior, so a drive out
+    /// there is refused - including one that arrives by editing a static
+    /// document - while a driven subdomain inside the contour is not.
+    #[test]
+    fn the_far_field_refuses_a_driven_exterior_but_not_a_driven_interior() {
+        let mut editor = TopologyEditor::default();
+        editor.document.model.far_field.enabled = true;
+        editor.document.model.far_field.inset = 0.08;
+
+        let mut exterior = editor.document.clone();
+        pumped(&mut exterior.model.draft.materials[0]);
+        pumped(&mut exterior.model.accepted.materials[0]);
+        let (driven, refused) = far_field_of(&mut TopologyRuntime::default(), 1, &exterior, true);
+        assert!(driven);
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.contains("time-invariant")),
+            "{refused:?}"
+        );
+
+        let mut runtime = TopologyRuntime::default();
+        let mut edited = editor.document.clone();
+        far_field_of(&mut runtime, 1, &edited, true).1.unwrap();
+        pumped(&mut edited.model.draft.materials[0]);
+        pumped(&mut edited.model.accepted.materials[0]);
+        assert!(far_field_of(&mut runtime, 2, &edited, false).1.is_err());
+
+        let material = editor.add_material().unwrap();
+        editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.3),
+                ClosedCurvePurpose::Subdomain { material },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let mut interior = editor.document.clone();
+        for materials in [
+            &mut interior.model.draft.materials,
+            &mut interior.model.accepted.materials,
+        ] {
+            pumped(
+                materials
+                    .iter_mut()
+                    .find(|entry| entry.id == material)
+                    .unwrap(),
+            );
+        }
+        let (driven, built) = far_field_of(&mut TopologyRuntime::default(), 1, &interior, true);
+        assert!(driven, "the subdomain's drive must reach the generation");
+        built.unwrap();
     }
 
     fn point_source_edits_patch_the_running_generation(driven: bool) {

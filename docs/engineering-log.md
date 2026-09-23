@@ -10385,3 +10385,20 @@ the report.
   bulk and 800.0 µs behind a second-order wall; fixed wall 698.7 µs. That
   fixture packs a backend state, so its fixed run sweeps too.
 
+## 2026-09-24 — The far field sees the exterior's drive
+
+Stage 7 closeout defect 1. The projection refuses a time-varying exterior
+(`FarFieldCompileError::TimeVaryingExterior`), but the prepared topology built
+its stencil from the law-stripped model the fixed assembly reads, so the
+exterior always looked time-invariant. Reproduced: a pumped medium covering
+the domain, far field on, built a stencil.
+
+- The stencil is now built from the authored model. The builder reads nothing
+  else from it a drive could change; its point stencils check only region
+  validity.
+- `the_far_field_refuses_a_driven_exterior_but_not_a_driven_interior` covers a
+  driven exterior (refused), a static document edited to driven without a fresh
+  preparation (refused; the stale stencil is not reused), and a pumped subdomain
+  behind a static exterior (driven, and built). It fails with the stripped model
+  and passes with the authored one.
+
