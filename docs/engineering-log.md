@@ -5,6 +5,41 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-23 — A dense inverse nobody read, built one column at a time
+
+Reported: after a material change the status sits at "Ready for GPU upload" for
+a long time, and it scales with the mesh. That phase covers packing and the
+device upload, so the pack was timed at two mesh sizes, in release.
+
+- Every millisecond of it was one call. Packing the plan is 15-19 ms and the
+  transfer machinery is 1-2 ms; constructing the state was 165 ms at 206 trace
+  nodes and 613 ms at 288.
+- `prepare_static` inverted the dense trace system by calling `solve_dense` once
+  per column, each call cloning and re-factorizing the whole matrix. That is
+  `O(trace^4)`. The 206 to 288 ratio predicts `(288/206)^4 = 3.8x`; the measured
+  ratio was 3.7. Trace count grows as the square root of the mesh, so this was
+  quadratic in the degrees of freedom - the scaling that was reported.
+- `invert_dense` eliminates once and carries the identity along: 613 ms to 33 ms.
+- Then the second half. The export a backend consumes is mass-free - diagonal,
+  modal corrections, sweep count, eliminated modes - and never the inverse. A
+  state built only to be compiled into a device plan was paying a dense
+  inversion that was then discarded. `for_backend` skips it, and the three pack
+  sites and `compile_temporal` use it: 33 ms to 0.4 ms.
+- At 41k dofs, end to end: state construction 613 ms to 0.4 ms, a linear pack
+  600 ms to 22 ms, a driven pack 1273 ms to 118 ms.
+- `a_backend_state_exports_what_a_stepping_state_exports` is the licence for the
+  second half: if the export could tell the two constructions apart, skipping
+  the inversion would be wrong. It also steps both and compares.
+- Left standing: a driven pack still rebuilds the whole source plan (about 95 ms
+  of `attach_temporal_bulk`) to read back drive signatures and material ids that
+  the mapping consumes in 1 ms. That is the next lever, and it is a plumbing
+  change rather than an algorithmic one.
+- Also found, unrelated to speed: `update_temporal_canonical_point_probes`,
+  `_vector_overlay`, `_curve_probes` and `_area_probes` are never called. The
+  viewport always takes the fixed variants, so probes and the vector overlay on
+  a driven medium reconstruct from authored rather than instantaneous
+  coefficients. Wrong numbers, not slow ones; not yet addressed.
+
 ## 2026-09-23 — The refusal named itself and the bug fell out in one run
 
 Finishing the sweep left `WaveError::InvalidCoefficients` with exactly one

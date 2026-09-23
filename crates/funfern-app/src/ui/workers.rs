@@ -704,8 +704,9 @@ fn compile_generation_plan(
             CanonicalGpuPlan::compile_temporal(temporal, &state, &prepared.canonical_forcing, clock)
         }
         None => {
-            let state = CanonicalWaveState::zero(&prepared.canonical_operator, time_step)
-                .map_err(|error| error.to_string())?;
+            let state =
+                CanonicalWaveState::zero_for_backend(&prepared.canonical_operator, time_step)
+                    .map_err(|error| error.to_string())?;
             CanonicalGpuPlan::compile_with_quadratic(
                 &prepared.canonical_operator,
                 &prepared.operator,

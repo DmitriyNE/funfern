@@ -980,7 +980,10 @@ impl CanonicalGpuPlan {
                 "a compiled generation starts from unexcited gap and outgoing histories",
             ));
         }
-        let fixed_state = CanonicalWaveState::new(
+        // A driven generation's device path solves the trace by sweeping,
+        // because its mass moves; the inverted lane a stepping state carries
+        // could not be used even if it were built.
+        let fixed_state = CanonicalWaveState::for_backend(
             operator.base(),
             state.time_step(),
             state.primary_flux().to_vec(),

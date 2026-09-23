@@ -1438,6 +1438,48 @@ impl CanonicalWaveState {
         validate_time_step(operator, time_step)?;
         operator.validate_primary(&primary_flux)?;
         operator.validate_complementary(&complementary_flux)?;
+        Self::assemble(operator, time_step, primary_flux, complementary_flux, true)
+    }
+
+    /// The same state without the inverted trace lane, for a generation that
+    /// will be compiled for a backend rather than stepped here.
+    ///
+    /// The export a backend consumes is mass-free - the diagonal, the modal
+    /// corrections, the sweep count and the eliminated modes - and never the
+    /// inverse, so a state built only to be packed pays a dense inversion that
+    /// is then discarded. Stepping one of these is correct and takes the
+    /// sweep, which is the general lane a driven generation uses anyway.
+    pub fn for_backend(
+        operator: &CanonicalWaveOperator,
+        time_step: f64,
+        primary_flux: Vec<f64>,
+        complementary_flux: Vec<Point2>,
+    ) -> Result<Self, WaveError> {
+        validate_time_step(operator, time_step)?;
+        operator.validate_primary(&primary_flux)?;
+        operator.validate_complementary(&complementary_flux)?;
+        Self::assemble(operator, time_step, primary_flux, complementary_flux, false)
+    }
+
+    pub fn zero_for_backend(
+        operator: &CanonicalWaveOperator,
+        time_step: f64,
+    ) -> Result<Self, WaveError> {
+        Self::for_backend(
+            operator,
+            time_step,
+            vec![0.0; operator.degrees_of_freedom()],
+            vec![Point2::default(); operator.complementary_degrees_of_freedom()],
+        )
+    }
+
+    fn assemble(
+        operator: &CanonicalWaveOperator,
+        time_step: f64,
+        primary_flux: Vec<f64>,
+        complementary_flux: Vec<Point2>,
+        invert_trace: bool,
+    ) -> Result<Self, WaveError> {
         let outgoing_count = operator
             .outgoing_boundary
             .as_ref()
@@ -1453,12 +1495,16 @@ impl CanonicalWaveState {
         let boundary_cache = operator
             .outgoing_boundary()
             .map(|boundary| {
-                CanonicalOutgoingMidpointFactor::prepare_static(
-                    operator,
-                    boundary,
-                    0.5 * time_step,
-                    operator.primary_mass(),
-                )
+                if invert_trace {
+                    CanonicalOutgoingMidpointFactor::prepare_static(
+                        operator,
+                        boundary,
+                        0.5 * time_step,
+                        operator.primary_mass(),
+                    )
+                } else {
+                    CanonicalOutgoingMidpointFactor::prepare(operator, boundary, 0.5 * time_step)
+                }
                 .map(Arc::new)
             })
             .transpose()?;
@@ -2580,16 +2626,7 @@ impl CanonicalOutgoingMidpointFactor {
                 }
             }
         }
-        let mut inverse = vec![0.0; trace_count * trace_count];
-        for column in 0..trace_count {
-            let mut basis = vec![0.0; trace_count];
-            basis[column] = 1.0;
-            let solved = solve_dense(system.clone(), basis, trace_count)?;
-            for (row, value) in solved.into_iter().enumerate() {
-                inverse[row * trace_count + column] = value;
-            }
-        }
-        finite_values(&inverse)?;
+        let inverse = invert_dense(system, trace_count)?;
         factor.direct = Some(CanonicalOutgoingDirectTrace {
             trace_mass,
             inverse,
@@ -3775,6 +3812,72 @@ pub(crate) fn pole_energy_transform() -> Result<(Matrix3, Matrix3), WaveError> {
     Ok((transform, inverse))
 }
 
+/// The inverse of a dense column-major-agnostic `count x count` system, by one
+/// elimination rather than one per column.
+///
+/// Solving for each basis vector separately re-factorizes the same matrix
+/// `count` times, which is `O(count^4)`; the trace count grows as the square
+/// root of the mesh, so that is quadratic in the degrees of freedom and it was
+/// the whole cost of packing a generation - 613 ms at 288 trace nodes, against
+/// 19 ms for the packing it was preparing. Eliminating once and carrying the
+/// identity along is the same arithmetic in `O(count^3)`.
+///
+/// Pivoting, the singularity threshold and the finiteness check match
+/// [`solve_dense`], so a system either function rejects is rejected by both.
+fn invert_dense(mut matrix: Vec<f64>, count: usize) -> Result<Vec<f64>, WaveError> {
+    if matrix.len() != count * count || matrix.iter().any(|value| !value.is_finite()) {
+        return Err(WaveError::InvalidState);
+    }
+    let mut inverse = vec![0.0; count * count];
+    for index in 0..count {
+        inverse[index * count + index] = 1.0;
+    }
+    for pivot in 0..count {
+        let best = (pivot..count)
+            .max_by(|left, right| {
+                matrix[*left * count + pivot]
+                    .abs()
+                    .total_cmp(&matrix[*right * count + pivot].abs())
+            })
+            .ok_or(WaveError::InvalidState)?;
+        let scale = matrix[best * count + pivot].abs();
+        if !scale.is_finite() || scale <= 1.0e-14 {
+            return Err(WaveError::InvalidState);
+        }
+        if best != pivot {
+            for column in 0..count {
+                matrix.swap(pivot * count + column, best * count + column);
+                inverse.swap(pivot * count + column, best * count + column);
+            }
+        }
+        for row in pivot + 1..count {
+            let factor = matrix[row * count + pivot] / matrix[pivot * count + pivot];
+            matrix[row * count + pivot] = 0.0;
+            if factor == 0.0 {
+                continue;
+            }
+            for column in pivot + 1..count {
+                matrix[row * count + column] -= factor * matrix[pivot * count + column];
+            }
+            for column in 0..count {
+                inverse[row * count + column] -= factor * inverse[pivot * count + column];
+            }
+        }
+    }
+    for row in (0..count).rev() {
+        let diagonal = matrix[row * count + row];
+        for column in 0..count {
+            let residual = inverse[row * count + column]
+                - (row + 1..count)
+                    .map(|index| matrix[row * count + index] * inverse[index * count + column])
+                    .sum::<f64>();
+            inverse[row * count + column] = residual / diagonal;
+        }
+    }
+    finite_values(&inverse)?;
+    Ok(inverse)
+}
+
 fn solve_dense(
     mut matrix: Vec<f64>,
     mut right: Vec<f64>,
@@ -3959,6 +4062,85 @@ mod tests {
         MeshQuality, MeshTriangle, MeshVertex, OuterBoundaryCondition, QuadraticWaveState, RateLaw,
         ScalarField, TimeDrive, VolumeSourceContribution, VolumeSourceNode,
     };
+
+    /// The one elimination has to give what the per-column solves gave, on a
+    /// system with the shape `prepare_static` builds: a dominant diagonal plus
+    /// a few rank-one modal corrections, sized like a real trace.
+    #[test]
+    fn one_elimination_inverts_what_per_column_solves_did() {
+        let count = 48;
+        let mut system = vec![0.0; count * count];
+        for row in 0..count {
+            system[row * count + row] = 1.0 + 0.37 * (row as f64 + 1.0);
+        }
+        for mode in 0..3 {
+            let trace = (0..count)
+                .map(|index| ((index * (mode + 2)) as f64 * 0.19).sin())
+                .collect::<Vec<_>>();
+            let correction = 0.21 * (mode as f64 + 1.0);
+            for row in 0..count {
+                for column in 0..count {
+                    system[row * count + column] += correction * trace[row] * trace[column];
+                }
+            }
+        }
+
+        let mut per_column = vec![0.0; count * count];
+        for column in 0..count {
+            let mut basis = vec![0.0; count];
+            basis[column] = 1.0;
+            let solved = solve_dense(system.clone(), basis, count).unwrap();
+            for (row, value) in solved.into_iter().enumerate() {
+                per_column[row * count + column] = value;
+            }
+        }
+        let once = invert_dense(system.clone(), count).unwrap();
+        for (left, right) in once.iter().zip(&per_column) {
+            assert!(
+                (left - right).abs() < 1.0e-12 * left.abs().max(1.0),
+                "{left} against {right}"
+            );
+        }
+
+        // And it is an inverse, not merely the same answer as before.
+        for row in 0..count {
+            for column in 0..count {
+                let entry = (0..count)
+                    .map(|index| system[row * count + index] * once[index * count + column])
+                    .sum::<f64>();
+                let expected = f64::from(row == column);
+                assert!(
+                    (entry - expected).abs() < 1.0e-10,
+                    "{row},{column}: {entry}"
+                );
+            }
+        }
+    }
+
+    /// A singular system is refused rather than inverted, on the same threshold
+    /// the per-column path used.
+    #[test]
+    fn a_singular_system_has_no_inverse() {
+        let count = 4;
+        let mut system = vec![0.0; count * count];
+        for row in 0..count {
+            system[row * count + row] = 1.0;
+        }
+        // Two identical rows.
+        for column in 0..count {
+            system[3 * count + column] = system[column];
+        }
+        assert_eq!(
+            invert_dense(system, count),
+            Err(WaveError::InvalidState),
+            "a singular trace system has no direct lane"
+        );
+        assert_eq!(
+            invert_dense(vec![f64::NAN; 4], 2),
+            Err(WaveError::InvalidState)
+        );
+        assert_eq!(invert_dense(vec![1.0; 3], 2), Err(WaveError::InvalidState));
+    }
 
     fn square() -> TriMesh {
         TriMesh {
@@ -4679,6 +4861,53 @@ mod tests {
             .unwrap();
         assert!(accounting.boundary_loss > 0.0);
         assert!(state.energy(&operator).unwrap() < before);
+    }
+
+    /// What a backend consumes is mass-free, so the state built for one and the
+    /// state built to step here must export the same factor. This is the whole
+    /// licence for skipping the dense inversion when a generation is only going
+    /// to be packed - if the export could tell them apart, it would not hold.
+    #[test]
+    fn a_backend_state_exports_what_a_stepping_state_exports() {
+        let mesh = Arc::new(square_with_outer_boundary());
+        let scene = Scene::default();
+        let quadratic = Arc::new(
+            QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &scene,
+                OuterBoundaryCondition::SecondOrderOutgoing,
+            )
+            .unwrap(),
+        );
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 72).unwrap();
+        let step = operator.recommended_time_step();
+
+        let stepping = CanonicalWaveState::zero(&operator, step).unwrap();
+        let backend = CanonicalWaveState::zero_for_backend(&operator, step).unwrap();
+        let stepping_factor = stepping.outgoing_midpoint_factor().unwrap();
+        let backend_factor = backend.outgoing_midpoint_factor().unwrap();
+        assert_eq!(
+            stepping_factor.export().unwrap(),
+            backend_factor.export().unwrap(),
+            "the backend export must not see the inverted lane"
+        );
+
+        // And the one that skipped it really did skip it, rather than the two
+        // having quietly converged on the same construction.
+        assert!(
+            backend_factor.estimated_bytes() <= stepping_factor.estimated_bytes(),
+            "the backend factor carries no more than the stepping one"
+        );
+
+        // Stepping a backend state is correct; it takes the sweep instead.
+        let forcing = CanonicalForcing::none(&operator);
+        let mut swept = backend;
+        let mut inverted = stepping;
+        swept.step_with_forcing(&operator, &forcing).unwrap();
+        inverted.step_with_forcing(&operator, &forcing).unwrap();
+        for (left, right) in swept.primary_flux().iter().zip(inverted.primary_flux()) {
+            assert!((left - right).abs() < 1.0e-12, "{left} against {right}");
+        }
     }
 
     #[test]
