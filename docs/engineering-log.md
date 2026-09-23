@@ -10108,3 +10108,35 @@ copy of the driven autosave: seventeen injected moves, toggles and frequency
 changes, seventeen live patches committed, no packed generation after startup,
 no rejection, device failure code 0 throughout. The `Refuse` fallback stays, for
 an edit a future gate turns away.
+
+## 2026-09-23 — The device sweeps to the precision it holds
+
+Throughput lever 1. The outgoing trace solve sized its sweep count to converge
+to f64 precision, and the device holds f32. `CanonicalOutgoingMidpointFactor`
+now also records `device_sweeps` - the same contraction bound at
+`f32::EPSILON`, two spare, even - and exports it; the GPU plan reads it. The
+host solve keeps the f64 count, so no host path or oracle moves.
+
+The spike had costed this at "roughly half" on the assumption that the solve
+sat at the 32-sweep ceiling. It does not: measured counts are 8 on the driven
+autosave and 10 on the timing harness, each dropping to 6. On the harness's
+8.9k-dof second-order scene, interleaved against a baseline build, 128 steps
+take 82.6-83.4 ms against 116.3-117.0 (1.40x), with forcing and loss alike;
+21.9k dofs gains 1.15-1.3x; the driven 15.3k-dof harness about 5%. Every error
+lane is identical to four digits, which is the f32 argument holding. The app
+figure (793 against 697 steps/s at 2x on the autosave) was taken under a load
+average near 20 and is indicative only.
+
+`the_device_sweeps_stop_at_f32_precision` checks the count is even, no larger
+than the host's, meets the bound, and that a solve truncated to it lands on the
+dense one to f32 precision for the authored, pumped and travelling masses; and
+that at the step bound it is strictly the smaller, so the split is not
+vacuous. The device gates that touch the outgoing boundary or the driven path -
+temporal forced, driven document, live events, temporal pulse, temporal live
+source, temporal consumer, handoff - reproduce their earlier errors to the digit.
+
+Forcing the count down further showed the step has a floor dispatch count does
+not explain: 6, 4 and 2 sweeps all run 0.527 ms a step, and the first-order
+boundary at 5 dispatches runs 0.39. That caps lever 2 - a direct lane for
+static-mass generations - at the gap to that floor, about 0.14 ms, and the spike
+now says so. What sets the floor is the question to answer before lever 2.

@@ -1180,6 +1180,8 @@ pub struct CanonicalOutgoingMidpointFactor {
     /// principal submatrix.
     contraction: f64,
     sweeps: usize,
+    /// The count an f32 backend runs; see [`Self::device_sweeps`].
+    device_sweeps: usize,
     /// A dense inverse of the trace system for one nodal mass, kept only by a
     /// generation whose mass cannot move.
     ///
@@ -1224,6 +1226,16 @@ impl CanonicalOutgoingDirectTrace {
 /// boundary and the step, so the refusal is a computed statement about this
 /// generation and not a blanket rule about driven media.
 const OUTGOING_TRACE_SWEEP_LIMIT: usize = 32;
+
+/// Sweeps from zero until `contraction^n` falls below `precision`, plus two
+/// spare for the bound's own slack, rounded up to an even count.
+fn sweeps_to(contraction: f64, precision: f64) -> usize {
+    if contraction <= precision {
+        return 2;
+    }
+    let needed = (precision.ln() / contraction.ln()).ceil().max(1.0);
+    (needed as usize).saturating_add(2).next_multiple_of(2)
+}
 
 /// One diagonal-preconditioned Jacobi solve of `I + (h/2) K M^-1`, shared by the
 /// reference factor and the backend-neutral export so their agreement is
@@ -1317,6 +1329,9 @@ pub struct CanonicalOutgoingFactorExport {
     /// Sweep count for the diagonal-preconditioned solve. Always even, so a
     /// backend ping-ponging two lanes finishes on the first.
     pub sweeps: usize,
+    /// The same, converged only to f32 precision, for a backend that holds
+    /// f32. Always even and never more than `sweeps`.
+    pub device_sweeps: usize,
     pub eliminated: Vec<CanonicalOutgoingEliminationExport>,
     pub prescribed_trace: Vec<bool>,
 }
@@ -2563,12 +2578,11 @@ impl CanonicalOutgoingMidpointFactor {
         // From zero the error after `n` sweeps is at most `contraction^n` of the
         // answer. Two spare sweeps cover the bound's own slack, and an even
         // count lets a backend ping-pong two lanes and land on the first.
-        let sweeps = if contraction <= f64::EPSILON {
-            2
-        } else {
-            let needed = (f64::EPSILON.ln() / contraction.ln()).ceil().max(1.0);
-            (needed as usize).saturating_add(2).next_multiple_of(2)
-        };
+        let sweeps = sweeps_to(contraction, f64::EPSILON);
+        // A device holding f32 cannot use convergence past its own rounding,
+        // and every sweep past it costs two dispatches a half-kick for
+        // nothing. The host solve keeps the f64 count.
+        let device_sweeps = sweeps_to(contraction, f64::from(f32::EPSILON));
         if sweeps > OUTGOING_TRACE_SWEEP_LIMIT {
             return Err(WaveError::InvalidMesh(
                 "the outgoing trace system needs too many sweeps to solve",
@@ -2581,6 +2595,7 @@ impl CanonicalOutgoingMidpointFactor {
             modal_correction,
             contraction,
             sweeps,
+            device_sweeps,
             direct: None,
             eliminated,
         })
@@ -2659,6 +2674,12 @@ impl CanonicalOutgoingMidpointFactor {
     /// How many sweeps the solve runs. Always even.
     pub fn sweeps(&self) -> usize {
         self.sweeps
+    }
+
+    /// How many sweeps an f32 backend runs: convergence to its own precision.
+    /// Always even and never more than [`Self::sweeps`].
+    pub fn device_sweeps(&self) -> usize {
+        self.device_sweeps
     }
 
     pub fn dimension(&self) -> usize {
@@ -2767,6 +2788,7 @@ impl CanonicalOutgoingMidpointFactor {
             diagonal: self.diagonal.clone(),
             modal_correction: self.modal_correction.clone(),
             sweeps: self.sweeps,
+            device_sweeps: self.device_sweeps,
             eliminated: self
                 .eliminated
                 .iter()
@@ -4990,6 +5012,81 @@ mod tests {
             state
                 .maintain_component_totals(&operator, &forcing, &[0.0])
                 .is_err()
+        );
+    }
+
+    /// The device count stops where f32 does. It has to be the fewer sweeps -
+    /// otherwise it buys nothing - and still land on the dense solve to the
+    /// precision the device holds, for every mass a driven medium produces.
+    #[test]
+    fn the_device_sweeps_stop_at_f32_precision() {
+        let mesh = square_with_outer_boundary();
+        let scene = Scene::default();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 73).unwrap();
+        let boundary = operator.outgoing_boundary().unwrap();
+        let dimension = boundary.trace_nodes().len() + boundary.auxiliary_count();
+        let probe = (0..dimension)
+            .map(|index| (0.17 * index as f64 + 0.3).sin())
+            .collect::<Vec<_>>();
+        let authored = operator.primary_mass().to_vec();
+        let pumped = authored.iter().map(|value| 2.7 * value).collect::<Vec<_>>();
+        let travelling = authored
+            .iter()
+            .enumerate()
+            .map(|(node, value)| value * (1.0 + 0.4 * (0.9 * node as f64).sin()))
+            .collect::<Vec<_>>();
+        let precision = f64::from(f32::EPSILON);
+
+        for fraction in [0.08, 0.5, 1.0] {
+            let kick = 0.5 * fraction * operator.maximum_time_step();
+            let cache =
+                CanonicalOutgoingMidpointFactor::prepare(&operator, boundary, kick).unwrap();
+            let device = cache.device_sweeps();
+            assert!(device.is_multiple_of(2) && device <= cache.sweeps());
+            assert_eq!(cache.export().unwrap().device_sweeps, device);
+            // Two of the sweeps are spare, so the rest already meet the bound.
+            assert!(cache.contraction().powi(device as i32 - 2) <= precision);
+            let mut truncated = cache.clone();
+            truncated.sweeps = device;
+            for mass in [&authored, &pumped, &travelling] {
+                let dense = outgoing_generator(&operator, boundary, mass).unwrap();
+                let mut midpoint = vec![0.0; dimension * dimension];
+                for row in 0..dimension {
+                    for column in 0..dimension {
+                        midpoint[row * dimension + column] =
+                            f64::from(row == column) - 0.5 * kick * dense[row * dimension + column];
+                    }
+                }
+                let oracle = solve_dense(midpoint, probe.clone(), dimension).unwrap();
+                let magnitude = oracle.iter().map(|value| value.abs()).fold(0.0, f64::max);
+                let swept = truncated.solve(boundary, mass, &probe).unwrap();
+                let difference = maximum_difference(&swept, &oracle);
+                assert!(
+                    difference <= precision * magnitude,
+                    "{device} sweeps missed the dense solve by {difference:e} of \
+                     {magnitude:e} at {fraction} of the step bound"
+                );
+            }
+        }
+        // At the step bound the device count is strictly the smaller, or the
+        // split would cost a field and save nothing.
+        let cache = CanonicalOutgoingMidpointFactor::prepare(
+            &operator,
+            boundary,
+            0.5 * operator.maximum_time_step(),
+        )
+        .unwrap();
+        assert!(
+            cache.device_sweeps() < cache.sweeps(),
+            "{} device sweeps against {}",
+            cache.device_sweeps(),
+            cache.sweeps()
         );
     }
 

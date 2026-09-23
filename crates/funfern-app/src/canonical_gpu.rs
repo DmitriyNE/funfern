@@ -2544,7 +2544,7 @@ fn compile_boundary(
         ),
         trace_count,
         mode_count: outgoing.modes().len(),
-        trace_sweeps: usize_u32(export.sweeps)?,
+        trace_sweeps: usize_u32(export.device_sweeps)?,
     })
 }
 

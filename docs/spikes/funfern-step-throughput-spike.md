@@ -1,8 +1,9 @@
 # Where a solver step goes — 23 September 2026
 
-**Status: measured, not yet acted on.** Two levers are identified and costed
-below; neither is implemented. Frame pacing, which is a separate defect found
-in the same investigation, is being fixed first and is described at the end.
+**Status: lever 1 implemented and measured (23 September 2026); lever 2 not
+implemented, and its estimate below is revised down by that measurement.** Frame
+pacing, a separate defect found in the same investigation, is described at the
+end and has since been fixed.
 
 ## What prompted it
 
@@ -93,6 +94,44 @@ Everything past f32 rounding buys nothing and costs two barriers a sweep.
 Roughly halves the per-step cost. The CPU factor keeps the f64 count; only the
 backend export changes, and `sweeps` is already a field on it.
 
+### Measured
+
+Implemented as `device_sweeps` on the factor and its export: the same bound at
+`f32::EPSILON`, the same two spare sweeps, even. The device reads it; the host
+solve and every host oracle keep the f64 count.
+
+The premise above was wrong in one respect: the solve was never at the ceiling
+of 32. Measured counts are 8 on the reported driven autosave (contraction
+2.2e-3, f32 needs 6) and 10 on the timing harness's second-order scene
+(contraction 2.8e-3, f32 needs 6). A smaller contraction than the ceiling
+assumed is what keeps the f64 count low already.
+
+Production render graph, `canonical_gpu_timing`, 128 steps, baseline and new
+builds interleaved on the same machine:
+
+| scene | sweeps | dispatches/step | baseline | device count |
+| --- | --- | --- | --- | --- |
+| 8.9k dofs, second order | 10 -> 6 | 51 -> 35 | 116.3-117.0 ms | 82.6-83.4 ms (1.40x) |
+| same, with forcing / loss | 10 -> 6 | 53 -> 37 | 116.5-117.0 ms | 83.2-83.4 ms |
+| 21.9k dofs, second order | 10 -> 6 | 51 -> 35 | 132.7-150.1 ms | 115.8-116.3 ms |
+| 8.9k dofs, first order | - | 5 | 49.1-49.4 ms | 50.0-50.1 ms |
+
+Every error lane is bit-identical to four digits between the two counts, as the
+f32 argument predicts. On `canonical_gpu_temporal_timing` (15.3k dofs, driven,
+outgoing) the gain is about 5%, 1131-1213 against 1192-1247 us/step: at that
+size a step costs more than a millisecond and the sweeps are a smaller part of
+it. In the app on the driven autosave at 2x speed the new build averaged 793
+steps/s against 697 over three interleaved pairs, one of them tied, under a
+load average near 20; indicative only.
+
+### The step is not bound by dispatch count
+
+Forcing the device count on the 8.9k scene, 3000 steps: 10 sweeps 0.78 ms/step,
+8 sweeps 0.58, and 6, 4 and 2 sweeps all 0.527 ms/step to within 0.1%. The
+first-order boundary, at 5 dispatches a step, costs 0.39 ms. So there is a floor
+of roughly 0.4-0.5 ms a step that dispatch count does not explain, and the
+6.6 us-per-dispatch model above does not hold below about 35 dispatches.
+
 ## Lever 2 - a static-mass generation should not sweep at all
 
 The CPU already splits this. `direct_trace` applies a precomputed dense inverse
@@ -101,7 +140,11 @@ to the sweep when the mass has moved. The device has only the sweep.
 
 Packing the inverse for undriven generations turns `3 + 2 x sweeps` dispatches
 per half-kick into 2, so the boundary nearly disappears from a linear scene's
-step. Cost is `trace^2` floats: 332 KB at 288 trace nodes.
+step. **Revised after lever 1:** removing the remaining 6 sweeps
+did not move the step at all when tried by forcing the count down to 2, so on
+the measured scenes the direct lane can at most close the gap to the
+first-order floor - about 0.14 ms of 0.53 - and may close less. Find what sets
+the floor before building it. Cost is `trace^2` floats: 332 KB at 288 trace nodes.
 
 This partly reverses `CanonicalWaveState::for_backend`, which skips building the
 inverse because the export does not read it - correct as of today, and what took
