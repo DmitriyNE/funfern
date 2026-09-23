@@ -3465,13 +3465,6 @@ Outgoing-boundary construction, not urgent:
 
 Reported 2026-09-23, not yet reproduced or diagnosed:
 
-- [ ] An over-budget component-total correction still rejects the whole
-  handoff (`canonical_transfer.wgsl`, `ratio > 0.05`, and `CORRECTION_LIMIT` on
-  the host). After the fix below nothing in 74 app handoffs reached it, but an
-  edit should not be refusable for a numerical reason: degrade to the
-  uncorrected interpolation and report it, keeping rejection for layout and
-  non-finite faults.
-
 Found while pacing the solver, not yet diagnosed:
 
 - [ ] `simulated_time()` runs backwards for a frame or two at a handoff. The
@@ -10237,3 +10230,26 @@ put some same-geometry adaptations at ratios up to 0.24. None of the 14 in these
 runs was rejected, so those estimates were probably taken against a state
 several frames stale. The rejection itself remains, and is now a TODO: an edit
 should degrade to the uncorrected field rather than be refused.
+
+## 2026-09-23 — The correction budget has nothing left to refuse
+
+The TODO was to degrade an over-budget component-total correction instead of
+rejecting the handoff. Before building that, a search for an edit that still
+reaches the budget found none, so the rejection stays and the TODO is closed.
+
+- Since geometry edits skip the correction, the only handoff that still applies
+  it is a remesh of unchanged geometry. A throwaway host probe ran the primary
+  map between regular grids, 6->12, 12->6, 8->12, 12->8 and 7->5, and read the
+  ratio the budget tests.
+- Resolved sinusoids: at most 1e-5, most at round-off. Deliberately aliased
+  waves, up to k = 12 on a 5-cell mesh: 0.017. Per-node white noise, the worst
+  field a mesh can carry: 0.018. The budget is 0.05, so there is a factor of
+  three to spare on fields no mesh represents.
+- The 0.24 host estimates noted in the previous entry were taken against lagged
+  readback, and nothing like them appears against the state actually
+  transferred.
+- A degrade path would be a safeguard with no failure to test it against.
+  Stage 8 reopens this path anyway: nonlinear transfer adds a tangent-weighted
+  correction followed by reinversion (plan section 7.2), and that is where the
+  choice between degrading and refusing gets a real failure case. The probe was
+  deleted.
