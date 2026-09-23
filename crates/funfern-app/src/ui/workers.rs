@@ -610,6 +610,14 @@ pub(super) fn spawn_amr_worker(
     false
 }
 
+/// Whether a handoff restores each component's flux total. A remesh of the same
+/// geometry does, so repeated adaptation cannot drift the constant part of the
+/// field; an edit to the geometry has no total to restore and takes what the
+/// interpolation carries.
+fn corrects_component_totals(candidate: &PreparedTopology, active: &PreparedTopology) -> bool {
+    candidate.mesh.geometry_revision == active.mesh.geometry_revision
+}
+
 pub(super) fn compile_gpu_upload(
     candidate: PreparedTopology,
     active: Option<Arc<PreparedTopology>>,
@@ -638,6 +646,11 @@ pub(super) fn compile_gpu_upload(
         runtime_serials,
     )
     .map_err(|error| format!("{error:?}"))?;
+    let runtime = if corrects_component_totals(&candidate, &active) {
+        runtime
+    } else {
+        runtime.without_total_correction()
+    };
     let gpu_transfer = CanonicalGpuTransferPlan::compile_prepared(
         &active.canonical_operator,
         &candidate.canonical_operator,
@@ -793,6 +806,68 @@ mod tests {
     use super::super::*;
     use super::*;
     use funfern_app::topology_editor::TopologyAcceptance;
+
+    /// Adding a hole, and taking it away again, used to be refused about half
+    /// the time: the handoff enforced an area-weighted share of the old flux
+    /// total, and a hole across a wave crest removes more than its area's
+    /// share. An edit has no total to enforce; a remesh of the same geometry
+    /// still does.
+    #[test]
+    fn only_a_remesh_of_the_same_geometry_restores_component_totals() {
+        fn prepare(state: &mut Playground, edge: f64, fresh: bool) -> Arc<PreparedTopology> {
+            let options = MeshingOptions {
+                target_edge_length: edge,
+                ..MeshingOptions::default()
+            };
+            let token = state
+                .runtime
+                .request(
+                    state.editor.revision,
+                    &state.editor.document,
+                    state.editor.compiled_accepted.clone(),
+                    options,
+                    fresh,
+                )
+                .unwrap();
+            for _ in 0..1_000_000 {
+                if let Some(result) = state.runtime.advance(4096) {
+                    result.unwrap();
+                    return state.runtime.commit_ready(token).unwrap();
+                }
+            }
+            panic!("topology preparation did not finish");
+        }
+        let mut state = Playground {
+            editor: funfern_app::topology_editor::TopologyEditor::default(),
+            ..Playground::default()
+        };
+        test_support::settle(&mut state.editor);
+        let plain = prepare(&mut state, 0.18, true);
+
+        state
+            .editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.3, 0.2), 0.2),
+                funfern_app::topology_editor::ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        test_support::settle(&mut state.editor);
+        let holed = prepare(&mut state, 0.18, false);
+        assert!(holed.canonical_transfer.is_some(), "the hole is a handoff");
+        assert!(!corrects_component_totals(&holed, &plain));
+
+        let refined = prepare(&mut state, 0.12, false);
+        assert!(
+            refined.canonical_transfer.is_some(),
+            "the refinement is a handoff"
+        );
+        assert!(corrects_component_totals(&refined, &holed));
+
+        assert!(state.editor.undo());
+        test_support::settle(&mut state.editor);
+        let refilled = prepare(&mut state, 0.12, false);
+        assert!(!corrects_component_totals(&refilled, &refined));
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]

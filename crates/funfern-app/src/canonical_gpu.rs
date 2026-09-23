@@ -287,6 +287,22 @@ pub struct CanonicalGpuRuntimeTransfer {
 }
 
 impl CanonicalGpuRuntimeTransfer {
+    /// The same ownership with every component's total left to the
+    /// interpolation. The correction keeps the constant part of the flux from
+    /// drifting across repeated remeshes of one domain, where the total it
+    /// restores is the one the domain already had. An edit that changes the
+    /// domain has no such total: a hole takes whatever flux was where it now
+    /// is, a refilled one starts with the extension, and an area-weighted
+    /// share of the old total is a guess that a travelling wave defeats -
+    /// measured at 16% of the permitted correction for a hole added across a
+    /// crest, against 0.02% for the interpolation it would be correcting.
+    pub fn without_total_correction(mut self) -> Self {
+        for component in &mut self.components {
+            component.sources.clear();
+        }
+        self
+    }
+
     pub fn identity(
         source: &CanonicalWaveOperator,
         target: &CanonicalWaveOperator,

@@ -3465,11 +3465,12 @@ Outgoing-boundary construction, not urgent:
 
 Reported 2026-09-23, not yet reproduced or diagnosed:
 
-- [ ] Adding a hole with a Draw operation sometimes fails to assemble:
-  `Preparation failed: Canonical GPU handoff rejected: stability or
-  conservative-transfer tolerance failed (failure code 2); accepted generation
-  was retained`. Intermittent; reproduce against the autosave and capture which
-  tolerance the device reports before guessing at the transfer.
+- [ ] An over-budget component-total correction still rejects the whole
+  handoff (`canonical_transfer.wgsl`, `ratio > 0.05`, and `CORRECTION_LIMIT` on
+  the host). After the fix below nothing in 74 app handoffs reached it, but an
+  edit should not be refusable for a numerical reason: degrade to the
+  uncorrected interpolation and report it, keeping rejection for layout and
+  non-finite faults.
 
 Found while pacing the solver, not yet diagnosed:
 
@@ -10190,3 +10191,49 @@ one-control reshape, a world frame and undo; each part fails with the
 corresponding piece removed.
 
 Saved scenes are not migrated: there are none outside development autosaves.
+
+## 2026-09-23 — An edit to the geometry has no flux total to enforce
+
+Reported: adding a hole with Draw sometimes failed with "Canonical GPU handoff
+rejected: stability or conservative-transfer tolerance failed (failure code 2)".
+
+Reproduced on a copy of the autosave by injecting holes and undoing each: about
+half of all handoffs were rejected, near the source and far from it, on undo as
+often as on add, and the same spot passed at one moment and failed at another.
+Code 2 in a handoff has one source, the per-component total correction in
+`canonical_transfer.wgsl`: the transfer interpolates `Q`, then corrects each
+isolated component toward a target total, placing the correction only on
+non-exact nodes - the ring the remesh touched - and rejects when it exceeds 5%
+of that ring's field.
+
+The target is the problem. `CanonicalGpuRuntimeTransfer::from_primary_transfer`
+sets it to an area share, `min(new area / old area, 1) x old total`, as though
+the flux were spread evenly. A hole across a crest removes more than its area's
+share, and the ring is told to put the difference back; a refilled hole gets
+the constant-preserving extension the contract asks for, and the clamp at 1
+then has the ring take it away again. Measured on the CPU with an analytic
+travelling wave, eight phases, with and without a mean: adding a hole needs a
+correction of up to 0.165 of the budget, of which the interpolation's own error
+is 0.0002; removing one, 0.046-0.077, straddling the limit; refining the whole
+mesh, zero. The phase dependence is the intermittency.
+
+A remesh of one domain has a total worth restoring - it keeps repeated
+adaptation from drifting the constant part of the field. An edit that changes
+the domain does not: what a hole should leave is exactly what the interpolation
+already carries. So `corrects_component_totals` keeps the correction only when
+the candidate mesh shares the active one's geometry revision, and otherwise
+`without_total_correction` empties every component row, which the transfer
+already treats as "no correction". Host-only; the shader is unchanged.
+
+`only_a_remesh_of_the_same_geometry_restores_component_totals` prepares a hole,
+a refinement and an undo through the real runtime and checks each decision. In
+the app, two runs on the autosave copy: 31 holes added and 29 undone, 74
+handoffs committed including 14 same-geometry adaptations, none rejected -
+against about half before. `canonical_gpu_handoff` and
+`canonical_gpu_temporal_amr` reproduce their earlier results.
+
+Not reproduced: before the fix, host estimates from the lagged primary readback
+put some same-geometry adaptations at ratios up to 0.24. None of the 14 in these
+runs was rejected, so those estimates were probably taken against a state
+several frames stale. The rejection itself remains, and is now a TODO: an edit
+should degrade to the uncorrected field rather than be refused.
