@@ -294,8 +294,9 @@ impl Playground {
         // What the frame actually cost decides what the next one may spend on
         // the solver. Both readings are of this frame, before anything is asked
         // for, so a batch is always sized by an outcome rather than a guess.
-        self.display_cadence = hold_cadence(self.display_cadence, delta, delta);
-        self.frame_budget = frame_step_budget(self.frame_budget, delta, self.display_cadence);
+        self.display_cadence.observe(delta);
+        self.frame_budget =
+            frame_step_budget(self.frame_budget, delta, self.display_cadence.seconds());
         if self.uploading.is_none()
             && self.source_commit.is_none()
             && self.gpu_upload_preparation.is_none()
@@ -684,8 +685,10 @@ impl Playground {
                     if admitted > 0 {
                         request.request_steps(admitted);
                     }
+                    self.display_cadence.record_batch(admitted);
                 } else if self.wave_step {
                     request.request_steps(1);
+                    self.display_cadence.record_batch(1);
                     self.wave_step = false;
                 }
                 self.speed_reached =

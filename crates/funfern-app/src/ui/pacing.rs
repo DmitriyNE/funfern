@@ -82,47 +82,123 @@ pub(super) fn steps_for_frame(
 /// How much longer than the display's own cadence a frame may run before the
 /// solver's batch is held responsible.
 ///
-/// The controller settles on the edge of this band, so the band is the frame
-/// rate given away: at `1.25` a 120 Hz display holds 96 fps. Tight enough to
-/// keep the cadence, loose enough that a frame landing exactly on it is not
-/// read as an overrun. Under vsync a frame is quantized to the refresh period
-/// or to twice it, and anything inside this band is the former.
-const FRAME_BUDGET_TOLERANCE: f64 = 1.05;
+/// Under vsync a frame time is quantized: the batch either fits inside a
+/// refresh period or pushes presentation to the next one, so there is no
+/// reading between one period and two and a wide band gives nothing away. What
+/// the band must clear is the display's own jitter. Measured over 4670 frames
+/// with the batch pinned at a single step - so every overrun was the display's,
+/// not the solver's - 15.5 % of frames exceeded 1.05x the refresh period, 4.2 %
+/// exceeded 1.25x and 1.7 % exceeded 1.5x. At `1.05` that false accusation rate
+/// alone pinned the batch near a tenth of what the frame could afford. Anything
+/// below `2.0` still catches a genuinely doubled frame.
+const FRAME_BUDGET_TOLERANCE: f64 = 1.5;
 
 /// What an overrunning frame multiplies the batch ceiling by.
 ///
-/// This also has to be sharp enough to overshoot, because the cut is the only
-/// thing that ever produces a frame faster than the last one and so the only
-/// way [`hold_cadence`] learns what the display can do. Backing off gently
-/// enough to merely stop overrunning leaves a saturated solver defining its own
-/// slowness as the cadence: at `0.9` and this scene's numbers the estimate
-/// stalls at 9.02 ms and the display holds 111 fps, where `0.75` finds 8.33 ms
-/// and holds 116.
+/// Sharp, and multiplicative, because this is the direction that protects the
+/// display: when the cost of a step jumps - a finer mesh, a driven medium - the
+/// batch has to come down within a few frames rather than a few hundred.
 const FRAME_BUDGET_BACKOFF: f64 = 0.75;
 
 /// What a frame inside the cadence adds back to it.
-const FRAME_BUDGET_RECOVERY: f64 = 0.5;
+///
+/// Deliberately much smaller than the backoff. The controller can only find the
+/// edge by crossing it, and every crossing costs one presented frame, so the
+/// ratio of these two constants is the steady-state rate of dropped frames:
+/// roughly `recovery / (budget x (1 - backoff) + recovery)`. At the measured
+/// operating point - 8827 dofs, 0.93 ms a step, a batch settling near six -
+/// `0.5` probes on a quarter of all frames and holds 100 fps of a 120 Hz
+/// display, where `0.05` probes on three per cent and holds 117. The cost is
+/// that a batch climbs back slowly, about a second from one step to six, which
+/// is paid only when the cost of a step falls.
+const FRAME_BUDGET_RECOVERY: f64 = 0.05;
 
-/// How fast the observed cadence gives up a better reading, as a factor per
-/// second. The mirror of [`SPEED_HOLD_PER_SECOND`]: a faster frame is believed
-/// at once, a slower one only after the display has stayed slow for a while.
-const CADENCE_RELAX_PER_SECOND: f64 = 1.15;
+/// How many display-only frames the cadence is the median of.
+///
+/// Half a second at 120 Hz. Long enough that the median is stable to a tenth of
+/// a millisecond, short enough to refill while a handoff withholds stepping.
+const CADENCE_WINDOW: usize = 60;
 
-/// The frame interval the display is actually achieving: instant to accept a
-/// faster one, slow to accept a slower one.
+/// The largest batch a frame may carry and still be read as timing the display.
+///
+/// One, not zero, because the budget floors at one step and a running solver
+/// would otherwise never offer a reading. One step is the least load the solver
+/// can impose while running, so this is the closest honest look at the display
+/// available. Two is already too many: on a mesh costing 9 ms a step the pair
+/// overflows a refresh period and the display reads as 24.9 ms rather than
+/// 16.7.
+const CADENCE_QUIET_STEPS: u64 = 1;
+
+/// The frame interval the display is actually achieving, taken from frames the
+/// solver was not loading.
 ///
 /// This is measured rather than assumed because the target depends on hardware
-/// nobody tells us about - 60, 120 and 144 Hz all want different budgets, and
-/// an unthrottled window wants whatever it can reach. Taking the best reading
-/// lately and letting it relax means a saturated solver cannot quietly define
-/// a slow cadence as normal: cutting the batch makes frames faster, which
-/// tightens the target, which is the feedback that finds the display's own
-/// rate.
-pub(super) fn hold_cadence(held: f64, measured: f64, elapsed: f64) -> f64 {
-    if !measured.is_finite() || measured <= 0.0 {
-        return held;
+/// nobody announces: 60, 120 and 144 Hz all want different budgets, and an
+/// unthrottled window wants whatever it can reach.
+///
+/// Two things make it hard to measure, and an earlier version of this got both
+/// wrong by tracking the fastest frame seen. A stall is followed by a very
+/// short frame - 99.9 ms then 2.56 ms, in the trace that exposed this - so the
+/// fastest frame is noise, not the display: it read 1.3 ms where the truth was
+/// 8.32, after which every real frame looked like a threefold overrun and the
+/// batch collapsed to one step and stayed there. But the obvious repair, a
+/// median of recent frames, fails the other way: once the batch is large enough
+/// to slow every frame, the median is the solver's own slowness and the
+/// controller settles for it, at 60 fps of a 120 Hz display.
+///
+/// Both are avoided by choosing *which* frames to measure rather than how to
+/// average them. A frame carrying at most [`CADENCE_QUIET_STEPS`] cannot have
+/// been slowed by the solver, so its timing is the display's; a median over a
+/// window of those rejects the stalls. Such frames are plentiful: every paused
+/// frame, every frame a handoff withholds stepping on, and every frame while
+/// the budget is still climbing from its floor. If the display genuinely slows,
+/// the batch collapses, the window refills from the floor and the estimate
+/// follows.
+pub(super) struct DisplayCadence {
+    quiet: Vec<f64>,
+    pending_batch: u64,
+    seconds: f64,
+}
+
+impl DisplayCadence {
+    /// Seeded at 60 Hz: the slowest display worth assuming, so nothing is
+    /// accused of overrunning before anything has been measured.
+    pub(super) fn new() -> Self {
+        Self {
+            quiet: Vec::new(),
+            pending_batch: 0,
+            seconds: 1.0 / 60.0,
+        }
     }
-    measured.min(held * CADENCE_RELAX_PER_SECOND.powf(elapsed.clamp(0.0, 1.0)))
+
+    /// Take this frame's timing as a reading of the display, if the batch this
+    /// frame carried was small enough that it cannot be responsible for it.
+    ///
+    /// The batch is consumed, so a frame that asked for nothing - paused, or
+    /// mid-handoff - reads as the display alone, which is what it is.
+    pub(super) fn observe(&mut self, frame_seconds: f64) {
+        let batch = core::mem::take(&mut self.pending_batch);
+        if !frame_seconds.is_finite() || frame_seconds <= 0.0 || batch > CADENCE_QUIET_STEPS {
+            return;
+        }
+        if self.quiet.len() == CADENCE_WINDOW {
+            self.quiet.remove(0);
+        }
+        self.quiet.push(frame_seconds);
+        let mut sorted = self.quiet.clone();
+        sorted.sort_by(|left, right| left.total_cmp(right));
+        self.seconds = sorted[sorted.len() / 2];
+    }
+
+    /// Record what the frame in progress asked the solver for.
+    pub(super) fn record_batch(&mut self, steps: u64) {
+        self.pending_batch = self.pending_batch.saturating_add(steps);
+    }
+
+    /// The display's frame interval in seconds.
+    pub(super) fn seconds(&self) -> f64 {
+        self.seconds
+    }
 }
 
 /// The batch ceiling for the next frame, given what this one cost.
@@ -204,100 +280,226 @@ pub(super) fn speed_shortfall(measured: f64, target: f64, stepping: bool) -> Opt
 mod tests {
     use super::*;
 
-    /// The reported defect: selecting a driven material took the frame rate from
-    /// 120 to 65. A driven generation runs at a tighter step, so at the same
-    /// requested speed it asks for proportionally more steps a frame, and the
-    /// batch shares the frame's queue with drawing. Nothing bounded the batch by
-    /// what it would cost, so the solver set the frame time.
+    const OVERHEAD: f64 = 2.5e-3;
+
+    /// A frame under vsync, driven by frame times this app actually measured.
     ///
-    /// Reproduced from the reported numbers: 8827 dofs, `dt` 1.34e-3 linear
-    /// against 6.27e-4 driven, one per-step cost of 0.93 ms fitted to both
-    /// operating points, and 2.5 ms of everything else.
-    #[test]
-    fn a_driven_step_no_longer_takes_the_display_down_with_it() {
-        const PER_STEP: f64 = 0.93e-3;
-        const OVERHEAD: f64 = 2.5e-3;
-        let display = 1.0 / 120.0;
+    /// Presentation waits for a refresh boundary, so work that overflows a
+    /// period is paid for a whole period at a time; but the renderer runs a
+    /// frame behind the app, so an isolated spike is absorbed and only a
+    /// sustained overrun costs frames. That is the `carry` below - overflow is
+    /// banked and spends a period whenever it has earned one. On top of it the
+    /// display has a spread of its own, which is what
+    /// `measured-frame-deltas.txt` holds.
+    ///
+    /// An earlier version of this test modelled the frame as a smooth
+    /// `overhead + steps x cost`, and that model cannot express either defect
+    /// below: with no granularity, probing for the edge looks free, and with no
+    /// jitter a cadence estimate cannot be fooled. Both shipped.
+    struct Display {
+        refresh: f64,
+        jitter: Vec<f64>,
+        next: usize,
+        carry: f64,
+    }
 
-        // One second of frames at a given step, returning the frame rate reached
-        // and the simulated seconds advanced.
-        let run = |time_step: f64, budgeted: bool| {
-            let mut accumulator = 0.0;
-            let mut budget = MAX_STEPS_PER_FRAME as f64;
-            let mut cadence = 1.0 / 60.0;
-            let mut frame = display;
-            // A second of warm-up, then two seconds measured: the claim is
-            // about the rate the controller settles on, and it starts from the
-            // ceiling because nothing has told it what a step costs yet.
-            let (mut frames, mut steps, mut elapsed) = (0u32, 0u64, 0.0);
-            let mut warm = 0.0;
-            while elapsed < 2.0 {
-                if budgeted {
-                    cadence = hold_cadence(cadence, frame, frame);
-                    budget = frame_step_budget(budget, frame, cadence);
-                }
-                let asked = steps_for_frame(
-                    &mut accumulator,
-                    frame,
-                    1.0,
-                    time_step,
-                    if budgeted {
-                        budget
-                    } else {
-                        MAX_STEPS_PER_FRAME as f64
-                    },
-                );
-                // The batch and the drawing share one queue, so the frame is as
-                // long as the work it was given, never shorter than the display.
-                frame = (OVERHEAD + asked as f64 * PER_STEP).max(display);
-                if warm < 1.0 {
-                    warm += frame;
-                    continue;
-                }
-                elapsed += frame;
-                frames += 1;
-                steps += asked;
+    impl Display {
+        /// The measured spread, re-centred on `refresh`. The samples are from a
+        /// 120 Hz panel; using them at another refresh rate assumes the spread
+        /// is the compositor's rather than the panel's, which is what its shape
+        /// - a stall and a short frame in pairs - suggests.
+        fn measured(refresh: f64) -> Self {
+            let samples: Vec<f64> = include_str!("measured-frame-deltas.txt")
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .map(|line| line.trim().parse::<f64>().expect("frame delta") * 1.0e-3)
+                .collect();
+            let mut sorted = samples.clone();
+            sorted.sort_by(|left, right| left.total_cmp(right));
+            let median = sorted[sorted.len() / 2];
+            Self {
+                refresh,
+                jitter: samples.iter().map(|sample| sample - median).collect(),
+                next: 0,
+                carry: 0.0,
             }
-            (
-                f64::from(frames) / elapsed,
-                steps as f64 * time_step / elapsed,
-            )
-        };
+        }
 
-        let (linear_fps, linear_speed) = run(1.34e-3, false);
-        assert!(
-            linear_fps > 115.0,
-            "linear was not display-bound: {linear_fps}"
-        );
-        assert!(
-            linear_speed > 0.95,
-            "linear did not keep up: {linear_speed}"
-        );
+        /// How long the frame carrying `work` seconds of solver batch takes.
+        fn present(&mut self, work: f64) -> f64 {
+            self.carry += (work - self.refresh).max(0.0);
+            let extra = (self.carry / self.refresh).floor();
+            self.carry -= extra * self.refresh;
+            let jitter = self.jitter[self.next % self.jitter.len()];
+            self.next += 1;
+            ((1.0 + extra) * self.refresh + jitter).max(1.0e-3)
+        }
+    }
 
-        // The reported regression, with nothing bounding the batch.
-        let (driven_fps, driven_speed) = run(6.27e-4, false);
-        assert!(
-            driven_fps < 80.0,
-            "the reported drop did not reproduce: {driven_fps}"
-        );
-        assert!(driven_speed < 0.7, "it also fell behind: {driven_speed}");
+    /// Four seconds of paced frames after a second of warm-up: frames a second,
+    /// simulated seconds a wall second, and the batch a frame settled on.
+    fn paced(
+        display: &mut Display,
+        time_step: f64,
+        per_step: f64,
+        budgeted: bool,
+    ) -> (f64, f64, f64) {
+        let mut accumulator = 0.0;
+        let mut cadence = DisplayCadence::new();
+        let mut budget = 1.0;
+        let mut frame = display.refresh;
+        let (mut frames, mut steps, mut elapsed, mut warm) = (0u32, 0u64, 0.0, 0.0);
+        while elapsed < 4.0 {
+            cadence.observe(frame);
+            if budgeted {
+                budget = frame_step_budget(budget, frame, cadence.seconds());
+            }
+            let asked = steps_for_frame(
+                &mut accumulator,
+                frame,
+                1.0,
+                time_step,
+                if budgeted {
+                    budget
+                } else {
+                    MAX_STEPS_PER_FRAME as f64
+                },
+            );
+            cadence.record_batch(asked);
+            frame = display.present(OVERHEAD + asked as f64 * per_step);
+            if warm < 1.0 {
+                warm += frame;
+                continue;
+            }
+            elapsed += frame;
+            frames += 1;
+            steps += asked;
+        }
+        (
+            f64::from(frames) / elapsed,
+            steps as f64 * time_step / elapsed,
+            steps as f64 / f64::from(frames).max(1.0),
+        )
+    }
+
+    /// The first reported defect: selecting a driven material took the frame
+    /// rate from 120 to 65. A driven generation runs at a tighter step, so at
+    /// the same requested speed it asks for proportionally more steps a frame,
+    /// and the batch shares the frame's queue with drawing. Nothing bounded the
+    /// batch by what it would cost, so the solver set the frame time.
+    ///
+    /// From the reported numbers: 8827 dofs, `dt` 1.34e-3 linear against
+    /// 6.27e-4 driven, 0.93 ms a step fitted to both operating points.
+    #[test]
+    fn a_driven_step_does_not_take_the_display_down_with_it() {
+        let refresh = 1.0 / 120.0;
+
+        // Unbudgeted and linear, the step is loose enough that the batch fits:
+        // 110 fps and 739 steps a second here against 120 and 750 reported.
+        let (fps, speed, _) = paced(&mut Display::measured(refresh), 1.34e-3, 0.93e-3, false);
+        assert!(fps > 105.0, "linear was not display-bound: {fps}");
+        assert!(speed > 0.9, "linear did not keep up: {speed}");
+
+        // Unbudgeted and driven, the reported regression. It lands below the
+        // reported 65 fps because nothing here models the GPU backpressure that
+        // caps outstanding lead; the direction and the cause are the point.
+        let (fps, _, _) = paced(&mut Display::measured(refresh), 6.27e-4, 0.93e-3, false);
+        assert!(fps < 80.0, "the reported drop did not reproduce: {fps}");
 
         // Budgeted, the display is served and the shortfall is what gives.
-        let (budgeted_fps, budgeted_speed) = run(6.27e-4, true);
+        let (fps, speed, per_frame) =
+            paced(&mut Display::measured(refresh), 6.27e-4, 0.93e-3, true);
         assert!(
-            budgeted_fps > 110.0,
-            "the display is still being held behind the solver: {budgeted_fps}"
+            fps > 110.0,
+            "the display is still held behind the solver: {fps}"
+        );
+        assert!(speed > 0.3, "the solver barely advanced: {speed}");
+        // And it stays a simulation: several steps between one frame and the
+        // next, so every frame has a new configuration to draw.
+        assert!(
+            per_frame > 2.0,
+            "the batch collapsed to a step a frame: {per_frame}"
+        );
+    }
+
+    /// The second reported defect, and the reason the cadence is measured only
+    /// from frames the solver was not loading. Tracking the fastest frame seen
+    /// latches onto the short frame that follows a stall - 99.9 ms then 2.56 ms
+    /// in the trace that exposed this - after which every real frame reads as a
+    /// threefold overrun. Measured in the app: the estimate sat at 2.56 ms
+    /// against a true 8.32, and 2638 of 2670 frames carried a batch of exactly
+    /// one step. The frame rate held; the simulation ran at a tenth of the
+    /// speed asked for, which is how it was reported.
+    #[test]
+    fn the_cadence_is_not_fooled_by_the_frame_that_follows_a_stall() {
+        let refresh = 1.0 / 120.0;
+        let mut display = Display::measured(refresh);
+        let mut cadence = DisplayCadence::new();
+        let mut fastest = f64::INFINITY;
+        for _ in 0..600 {
+            let frame = display.present(OVERHEAD);
+            cadence.observe(frame);
+            fastest = fastest.min(frame);
+        }
+        assert!(
+            fastest < refresh * 0.6,
+            "the recorded trace has no stall recovery in it to be fooled by: {fastest}"
         );
         assert!(
-            budgeted_speed > 0.0,
-            "the solver stopped advancing entirely: {budgeted_speed}"
+            (cadence.seconds() - refresh).abs() < refresh * 0.05,
+            "the cadence is not the refresh period: {} ms",
+            cadence.seconds() * 1.0e3
         );
-        // It advances many steps a frame, so every frame still has a new
-        // configuration to draw - the display is never waiting on the solver
-        // for something to show.
+    }
+
+    /// The mirror of it: a solver slow enough to hold every frame must not have
+    /// its own slowness taken for the display's, which is how a plain median of
+    /// recent frames fails - it settles for 60 fps of a 120 Hz panel.
+    #[test]
+    fn a_loaded_frame_is_not_a_reading_of_the_display() {
+        let mut cadence = DisplayCadence::new();
+        for _ in 0..120 {
+            cadence.record_batch(40);
+            cadence.observe(1.0 / 15.0);
+        }
+        assert_eq!(
+            cadence.seconds(),
+            1.0 / 60.0,
+            "a slow batch redefined what the display can do"
+        );
+
+        // A frame that asked for nothing is the display alone.
+        for _ in 0..120 {
+            cadence.observe(1.0 / 144.0);
+        }
+        assert!((cadence.seconds() - 1.0 / 144.0).abs() < 1.0e-12);
+
+        // So is one carrying the single step the budget floors at.
+        for _ in 0..120 {
+            cadence.record_batch(1);
+            cadence.observe(1.0 / 120.0);
+        }
+        assert!((cadence.seconds() - 1.0 / 120.0).abs() < 1.0e-12);
+
+        // Nonsense leaves the reading alone.
+        cadence.observe(f64::NAN);
+        cadence.observe(-1.0);
+        cadence.observe(0.0);
+        assert!((cadence.seconds() - 1.0 / 120.0).abs() < 1.0e-12);
+    }
+
+    /// A slower display is believed rather than accused of overrunning a faster
+    /// one, which is the failure the fixed estimate had to avoid.
+    #[test]
+    fn a_slower_display_is_believed_rather_than_accused() {
+        let (fps, _, per_frame) = paced(&mut Display::measured(1.0 / 60.0), 6.27e-4, 0.93e-3, true);
         assert!(
-            budgeted_speed / budgeted_fps / 6.27e-4 > 1.0,
-            "fewer than one step a frame: {budgeted_speed}"
+            fps > 55.0,
+            "a 60 Hz display did not hold its own rate: {fps}"
+        );
+        assert!(
+            per_frame > 4.0,
+            "the batch collapsed on a slower display: {per_frame}"
         );
     }
 
@@ -321,9 +523,10 @@ mod tests {
         }
         assert_eq!(starved, 1.0);
 
-        // And it climbs back to the ceiling rather than staying shy of it.
+        // And it climbs back to the ceiling rather than staying shy of it -
+        // slowly, which is the price of probing for the edge only rarely.
         let mut recovering = starved;
-        for _ in 0..200 {
+        for _ in 0..1300 {
             recovering = frame_step_budget(recovering, cadence * 0.5, cadence);
         }
         assert_eq!(recovering, MAX_STEPS_PER_FRAME as f64);
@@ -334,33 +537,6 @@ mod tests {
         // Nonsense leaves it alone.
         assert_eq!(frame_step_budget(budget, f64::NAN, cadence), budget);
         assert_eq!(frame_step_budget(budget, cadence, 0.0), budget);
-    }
-
-    /// The target is measured because the hardware is not announced. A faster
-    /// display is believed at once; a slower one only after it stays slow, so a
-    /// saturated solver cannot define its own slowness as the cadence.
-    #[test]
-    fn the_cadence_is_the_best_frame_seen_lately() {
-        let held = 1.0 / 60.0;
-        let faster = hold_cadence(held, 1.0 / 144.0, 1.0 / 144.0);
-        assert!((faster - 1.0 / 144.0).abs() < 1.0e-12);
-
-        // One slow frame barely moves it.
-        let nudged = hold_cadence(faster, 1.0, 1.0 / 144.0);
-        assert!(
-            nudged < faster * 1.01,
-            "one slow frame relaxed it: {nudged}"
-        );
-
-        // A second of slow frames does.
-        let mut relaxed = faster;
-        for _ in 0..120 {
-            relaxed = hold_cadence(relaxed, 1.0, 1.0 / 120.0);
-        }
-        assert!(relaxed > faster * 1.1, "it never relaxed: {relaxed}");
-
-        assert_eq!(hold_cadence(held, f64::NAN, 0.01), held);
-        assert_eq!(hold_cadence(held, -1.0, 0.01), held);
     }
 
     /// Backlog is held only up to what a frame may spend. Holding a full ceiling

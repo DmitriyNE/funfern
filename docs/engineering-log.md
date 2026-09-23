@@ -9623,3 +9623,48 @@ double-click probe lookup still using its own hit test rather than `hit_probe`.
   Rust 1.96.0. Generated the lockfile offline. No numerical tests exist yet because
   the core contains no implementation; browser execution starts in milestone 1.
 - Next: begin the browser shell and spline editor after this setup step.
+
+## 2026-09-23 — The batch ceiling was measuring the wrong thing
+
+The frame-pacing controller shipped yesterday collapsed the solver batch to
+exactly one step a frame: 2638 of 2670 frames, measured. Frame rate held at 120
+but the simulation ran at a tenth of the speed asked for, which is how it was
+reported — "simulation is just bolted to the framerate, fps==sps".
+
+Two defects, both in how the display's cadence was estimated, and both invisible
+to the test that guarded it.
+
+The estimator tracked the fastest frame seen lately, on the reasoning that a
+saturated solver must not be able to define its own slowness as normal. But the
+fastest frame is not the display — a stall is followed by a very short frame
+(99.9 ms then 2.56 ms in the trace), so the estimate latched at 2.56 ms against
+a true 8.32 and every real frame read as a threefold overrun. The obvious
+repair, a median of recent frames, fails the other way: once the batch is large
+enough to slow every frame, the median is the solver's slowness, and a closed
+loop over the recorded jitter settles it at 60 fps of a 120 Hz panel.
+
+The fix is to choose which frames to measure rather than how to average them. A
+frame carrying at most one step cannot have been slowed by the solver, so a
+median over a window of those is the display and nothing else. Such frames are
+plentiful: every paused frame, every frame a handoff withholds stepping on, and
+every frame while the budget climbs from its floor — which is why the budget now
+starts at the floor rather than the ceiling.
+
+The tolerance band moved 1.05 → 1.5 and the recovery 0.5 → 0.05, both from
+measurement rather than from taste. With the batch pinned at one step, 15.5 % of
+frames still exceeded 1.05x the refresh period and 1.7 % exceeded 1.5x: at 1.05
+the band sat inside the display's own jitter and the false accusations alone
+pinned the batch. And since the controller can only find the edge by crossing
+it, the ratio of backoff to recovery is the steady-state rate of dropped frames;
+0.5 probed on a quarter of all frames.
+
+Measured on the reported scene, before and after: 120 fps / 120 steps a second,
+against 120 fps / 1178. The originally reported defect was 65 fps / 900.
+
+What let both of these ship was the test. It modelled a frame as
+`overhead + steps x cost` — smooth, no jitter, no presentation boundary — and
+neither defect can exist in that model. The gate is now driven by 600 frame
+deltas this app actually measured (`measured-frame-deltas.txt`), presented
+through a model that pays for overrun a refresh period at a time with one frame
+of pipeline slack. That model reproduces the reported linear operating point to
+within 8 % without being fitted to it.
