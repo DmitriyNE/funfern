@@ -10052,3 +10052,44 @@ overlay worked. That count was taken over the points the lattice had kept and
 could not see the ones it had dropped; it was never split by region. The
 recorder fix it verified is correct, but "the overlay works on a driven
 document" was a claim the measurement did not support.
+
+## 2026-09-23 — A driven medium takes source edits as patches
+
+Since `6a4a50b` every source edit on a driven document prepared a whole
+generation, because the live gate refused source patches on a temporal plan.
+That was correct while their composition with a moving medium was open. Two
+questions closed it.
+
+Phase across a rebase. `source_patch` builds its records against
+`CanonicalGpuClock::initial`, which looked like it could break the carrier on a
+generation whose epoch has moved on. It cannot: the device ignores the host's
+phase anchor and re-anchors the new drive to the accepted drive's current phase
+on its own clock (`canonical_wave.wgsl`, operations 5 and 6), and
+`rebase_clock_records` rebases source and material-law records in the same
+pass. The host clock never reaches the result.
+
+Weight normalization. The weights are mass-scaled (`extend_legacy_volume`,
+`from_legacy_boundaries`), which is what made the pulse wrong on a driven
+medium. But the material-law plan settles this one the other way: point and
+volume sources are compiled against the immutable generation reference mass,
+and "changing a constitutive law must not stale source normalization". The
+pulse differs because it is authored as a field increment. The patch touches
+the drive table and the weights and nothing in the material runtime bank.
+
+`canonical_gpu_temporal_live_source` checks it on the device: a pumped mass and
+a time-crystal stiffness, a generation starting at epoch origin 37.25 s as a
+rebase would leave it, a weight-and-drive patch, a drive patch and a pulse at
+one paused boundary, then 320 steps against the f64 temporal oracle carrying
+each edit's phase forward. Q 4.8e-7, b 2.2e-6. The fixture first shows that an
+unedited run (1.7e-1) and a carrier restarted at its authored phase (5.9e-1)
+land far outside the tolerance. With the gate still closed it reports the
+refusal.
+
+So the live gate admits `EVENT_SOURCE_PATCH` and `EVENT_SOURCE_WEIGHT_PATCH` on
+a temporal plan, and `prepared_solver_update` no longer forces `FullHandoff` on
+a driven medium. `a_driven_medium_takes_source_edits_as_patches` runs the
+point-source motion and toggle test over a pumped document. In the app, on a
+copy of the driven autosave: seventeen injected moves, toggles and frequency
+changes, seventeen live patches committed, no packed generation after startup,
+no rejection, device failure code 0 throughout. The `Refuse` fallback stays, for
+an edit a future gate turns away.

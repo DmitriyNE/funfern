@@ -3411,11 +3411,18 @@ impl CanonicalGpuRequest {
         if !payload_valid {
             return Err("live canonical event does not match the active generation");
         }
+        // A source edit rewrites the drive table and the nodal weights and
+        // nothing else. The weights are normalized by the generation's fixed
+        // reference mass, not the moving one, and the carrier is re-anchored
+        // on the device's own clock, so a driven medium composes with it
+        // unchanged (`canonical_gpu_temporal_live_source`).
         if handles.material_runtime_count != 0
             && !matches!(
                 event.kind,
                 EVENT_PRIMARY_PULSE
                     | EVENT_GRID_FILTER
+                    | EVENT_SOURCE_PATCH
+                    | EVENT_SOURCE_WEIGHT_PATCH
                     | EVENT_TEMPORAL_SWITCH
                     | EVENT_TEMPORAL_LAW_PATCH
             )

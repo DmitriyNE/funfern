@@ -1289,15 +1289,6 @@ impl TopologyPreparationJob {
         };
         if forcing.as_ref() == previous.canonical_forcing.as_ref() {
             PreparedSolverUpdate::MeasurementsOnly
-        } else if self.driven() {
-            // A source-only update is a promise that the edit can be delivered
-            // as a live patch, and the promise is kept by preparing none of the
-            // handoff maps a packed generation needs. A driven generation
-            // cannot take those patches - their composition with a moving
-            // medium has not been closed - so on one the promise cannot be
-            // made. Discovering that at upload time instead left the edit with
-            // no way through: refused as a patch, unpackable as a generation.
-            PreparedSolverUpdate::FullHandoff
         } else if forcing_layout_eq(forcing, &previous.canonical_forcing) {
             PreparedSolverUpdate::SourceDrivesOnly
         } else if forcing_sparse_layout_eq(forcing, &previous.canonical_forcing) {
@@ -2638,9 +2629,30 @@ mod tests {
 
     #[test]
     fn point_source_motion_and_toggle_keep_the_structural_weight_layout() {
+        point_source_edits_patch_the_running_generation(false);
+    }
+
+    /// A driven medium takes the same source patches: they rewrite the drive
+    /// table and weights only, and the weights are normalized by the fixed
+    /// reference mass (`canonical_gpu_temporal_live_source`).
+    #[test]
+    fn a_driven_medium_takes_source_edits_as_patches() {
+        point_source_edits_patch_the_running_generation(true);
+    }
+
+    fn point_source_edits_patch_the_running_generation(driven: bool) {
         let editor = TopologyEditor::default();
         let mut document = editor.document.clone();
         document.model.source.enabled = true;
+        if driven {
+            let drive = funfern_core::TimeDrive::ParametricPump {
+                depth: funfern_core::ScalarField::constant(0.2),
+                frequency_hz: funfern_core::ScalarField::constant(1.0),
+                phase_radians: funfern_core::ScalarField::constant(0.25),
+            };
+            document.model.draft.materials[0].mass_law.drive = drive.clone();
+            document.model.accepted.materials[0].mass_law.drive = drive;
+        }
         let mut runtime = TopologyRuntime::default();
         let first = runtime
             .request(
@@ -2652,7 +2664,7 @@ mod tests {
             )
             .unwrap();
         prepare(&mut runtime).unwrap();
-        runtime.commit_ready(first).unwrap();
+        assert_eq!(runtime.commit_ready(first).unwrap().driven(), driven);
 
         document.model.source.position.x += 0.05;
         let second = runtime
