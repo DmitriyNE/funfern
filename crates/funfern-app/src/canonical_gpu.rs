@@ -27,7 +27,7 @@ use bevy::{
             ComputePipelineDescriptor, PipelineCache, ShaderStages, ShaderType,
             binding_types::storage_buffer,
         },
-        renderer::{RenderContext, RenderDevice, RenderGraph},
+        renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue},
         storage::{GpuShaderBuffer, ShaderBuffer},
     },
 };
@@ -2900,7 +2900,7 @@ pub const fn canonical_failure_description(reason: u32) -> &'static str {
 // Large explicit validation requests are encoded in one command buffer. The
 // interactive caller still controls its much smaller per-frame request size.
 const MAX_STEPS_PER_FRAME: u64 = 256;
-/// Bound CPU-encoded evolution against the last GPU-completed clock. Without
+/// Bound CPU-encoded evolution against the steps the queue has retired. Without
 /// this fence the render world can keep feeding Metal while a large solve or a
 /// backgrounded window completes more slowly, building an unbounded queue of
 /// command buffers even though each individual frame is small.
@@ -2909,6 +2909,7 @@ const MAX_ENCODED_STEP_LEAD: u64 = 64;
 #[derive(Default)]
 pub struct CanonicalGpuStats {
     completed_steps: AtomicU64,
+    retired_steps: AtomicU64,
     local_step: AtomicU32,
     dispatches: AtomicU64,
     status: AtomicU32,
@@ -2920,6 +2921,24 @@ pub struct CanonicalGpuStats {
 impl CanonicalGpuStats {
     pub fn completed_steps(&self) -> u64 {
         self.completed_steps.load(Ordering::Relaxed)
+    }
+
+    /// Steps the device has finished executing, learned from the queue rather
+    /// than from a readback. This is what the lead fences pace on. The
+    /// completed clock arrives with the state it describes, several frames
+    /// after the work retired, and a fence counting against it measures that
+    /// round trip rather than queue depth: an overloaded scene ran 25-30%
+    /// fewer steps under it than the device could execute. It never reads
+    /// behind the completed clock, so a queue that has not reported yet leaves
+    /// pacing where a readback alone would have put it.
+    pub fn retired_steps(&self) -> u64 {
+        self.retired_steps
+            .load(Ordering::Relaxed)
+            .max(self.completed_steps())
+    }
+
+    fn retire(&self, steps: u64) {
+        self.retired_steps.fetch_max(steps, Ordering::Relaxed);
     }
 
     pub fn dispatches(&self) -> u64 {
@@ -4264,6 +4283,10 @@ impl Plugin for CanonicalWaveGpuPlugin {
                     compute_canonical_handoff.after(compute_canonical_wave),
                 )
                     .before(camera_driver),
+            )
+            .add_systems(
+                RenderGraph,
+                retire_canonical_steps.in_set(RenderGraphSystems::Finish),
             );
     }
 }
@@ -4658,6 +4681,33 @@ fn prepare_canonical_bind_group(
     });
 }
 
+/// Asks the queue to report when everything submitted so far has executed, and
+/// credits that to the generation the steps were encoded for. It runs after the
+/// frame's submission, so the steps it names are all in flight. Each generation
+/// has its own stats, so a report that arrives after a handoff lands on the
+/// retired generation's counter and paces nothing.
+fn retire_canonical_steps(
+    request: Option<Res<CanonicalGpuRequest>>,
+    group: Option<Res<CanonicalBindGroup>>,
+    queue: Res<RenderQueue>,
+    mut registered: Local<(u64, u64)>,
+) {
+    let (Some(request), Some(group)) = (request, group) else {
+        return;
+    };
+    if group.generation != request.generation {
+        return;
+    }
+    let mark = (group.generation, group.encoded_steps);
+    if *registered == mark {
+        return;
+    }
+    *registered = mark;
+    let stats = request.stats.clone();
+    let steps = group.encoded_steps;
+    queue.on_submitted_work_done(move || stats.retire(steps));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_canonical_handoff_bind_groups(
     mut commands: Commands,
@@ -4911,7 +4961,7 @@ fn compute_canonical_wave(
     let Some(pipelines) = pipelines else { return };
     let encoded_lead = group
         .encoded_steps
-        .saturating_sub(request.stats.completed_steps());
+        .saturating_sub(request.stats.retired_steps());
     let pending = request
         .desired_steps
         .saturating_sub(group.encoded_steps)
@@ -5684,6 +5734,41 @@ mod tests {
         OuterBoundaryCondition, QuadraticTransferMap, QuadraticWaveOperator, ScalarField, Scene,
         TimeDrive, TriMesh, mesh_scene,
     };
+
+    #[test]
+    fn retirement_paces_ahead_of_the_readback_but_never_behind_it() {
+        let stats = CanonicalGpuStats::default();
+        stats.completed_steps.store(10, Ordering::Relaxed);
+        assert_eq!(stats.retired_steps(), 10);
+        stats.retire(40);
+        assert_eq!(stats.retired_steps(), 40);
+        // Reports can land out of order; an older one must not pull it back.
+        stats.retire(20);
+        assert_eq!(stats.retired_steps(), 40);
+        stats.completed_steps.store(50, Ordering::Relaxed);
+        assert_eq!(stats.retired_steps(), 50);
+    }
+
+    #[test]
+    fn a_report_for_a_replaced_generation_paces_nothing() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let replaced = request.stats().clone();
+        world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            request.install(
+                &mut assets,
+                &mut commands,
+                plan(OuterBoundaryCondition::Reflecting),
+            );
+        });
+        let installed = request.stats().retired_steps();
+        assert_eq!(installed, request.stats().completed_steps());
+        replaced.retire(installed + 1_000);
+        assert_eq!(request.stats().retired_steps(), installed);
+    }
 
     fn plan(boundary: OuterBoundaryCondition) -> CanonicalGpuPlan {
         let scene = Scene::initial();

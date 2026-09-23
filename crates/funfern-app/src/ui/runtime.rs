@@ -697,7 +697,7 @@ impl Playground {
                         self.frame_budget,
                     );
                     let admitted = steps_with_gpu_backpressure(
-                        request.stats().completed_steps(),
+                        request.stats().retired_steps(),
                         request.requested_steps(),
                         batch.steps,
                     );

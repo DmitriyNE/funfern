@@ -174,9 +174,12 @@ dense trace-by-trace reduction per sweep predicts. The 2-sweep runs matched the
 6-sweep Q error against the host oracle, 5.4e-5 against 5.5e-5 over 6000 steps;
 that is an observation about the precision target, not a reason to change it.
 
-The interactive app runs under the same fence, and it is already filed: pace on
-a completion signal that does not go through a readback. Whether it caps the
-app's throughput is measured there, not here.
+The interactive app runs under the same fence. It binds only once a scene
+overloads the device: under contention the host fence clamped up to 60 % of
+frames, and lifting both fences gained 25-30 %. Both fences now pace on steps
+the queue reports retired rather than on the readback clock, which recovered
+roughly 10-15 % of that; the rest is real in-flight work, which the fence is
+there to bound (engineering log, 23 September).
 
 ## Lever 2 - a static-mass generation should not sweep at all
 

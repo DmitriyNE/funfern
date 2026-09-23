@@ -298,12 +298,16 @@ pub(super) fn frame_step_budget(
     next.clamp(1.0, MAX_STEPS_PER_FRAME as f64)
 }
 
-/// Keeps the host request clock close to the last GPU-completed boundary. A
+/// Keeps the host request clock close to the steps the queue has retired. A
 /// render thread can otherwise encode small batches faster than an overloaded
 /// or background-throttled GPU executes them, accumulating minutes of stale
 /// simulation work without ever violating the per-frame batch ceiling.
-pub(super) fn steps_with_gpu_backpressure(completed: u64, requested: u64, proposed: u64) -> u64 {
-    let outstanding = requested.saturating_sub(completed);
+///
+/// `retired` is the queue's count, not the readback clock: the readback lags
+/// several frames, and a fence counting against it clamps on latency rather
+/// than on work still queued.
+pub(super) fn steps_with_gpu_backpressure(retired: u64, requested: u64, proposed: u64) -> u64 {
+    let outstanding = requested.saturating_sub(retired);
     proposed.min(MAX_STEPS_PER_FRAME.saturating_sub(outstanding))
 }
 
@@ -946,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_backpressure_drops_requests_beyond_the_completed_lead() {
+    fn gpu_backpressure_drops_requests_beyond_the_retired_lead() {
         assert_eq!(steps_with_gpu_backpressure(100, 100, 12), 12);
         assert_eq!(
             steps_with_gpu_backpressure(100, 150, 20),

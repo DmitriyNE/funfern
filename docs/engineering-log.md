@@ -3387,36 +3387,6 @@ above:
 
 ## Current TODOs
 
-Pacing is fenced twice against a clock that arrives three frames late:
-
-- [ ] Both step fences measure against `completed_steps`, which is reported
-  through a paced readback rather than read from the queue, so the lead each
-  computes is largely its own reporting latency. Measured on a scene asking for
-  11 steps a frame: the host's lead ran to a median of 39 and a **max of 99
-  against a cap of 64**, so on those frames the host was clamped to zero steps
-  and the simulation froze outright; the render world's own fence
-  (`MAX_ENCODED_STEP_LEAD`, also 64) was left about 28 steps of real headroom
-  after latency, which is why the completion counter sits at zero on 62 % of
-  frames and then jumps by 33 - encoding happens in bursts gated by readback
-  arrivals, not by the GPU.
-
-  Three repairs were tried and all three measured worse than what is there.
-  Publishing the render world's own `encoded_steps` and pacing the host against
-  it does remove the phantom clamp - 9.7 % of frames down to 0.2 %, and 2.1 % of
-  requested steps dropped down to none - but it takes away a brake the render
-  fence was relying on, and throughput fell to 0.33x of the requested rate in
-  two runs. Opening the render fence to 256 to cover the round trip then let
-  batches through at 12..22 steps a frame and took the display to 60 fps. The
-  two fences are load-bearing against each other, and both are steering on a
-  signal that is mostly latency.
-
-  The repair this actually needs is a timely completion signal - counting
-  submissions retired through `Queue::on_submitted_work_done`, or any queue-side
-  figure - after which both fences can be sized against real queue depth. That
-  is a design change, not a constant, and it should not be tuned by experiment
-  on a machine whose run-to-run variation is larger than the effects being
-  measured.
-
 - [ ] No way to measure, from the host, how evenly the drawn state advances.
   The requested stream is measurable and the completed counter is not usable for
   it - the counter is zero on 62 % of frames and then jumps by 33, which is the
@@ -10282,4 +10252,48 @@ therefore ran 64 steps a round trip.
 - Not established here: whether the app's own throughput is fence-bound. The
   app has the same fence and a filed repair, a completion signal that does not
   go through a readback; that is the next measurement.
+
+## 2026-09-23 — Both fences pace on what the queue has retired
+
+The filed repair for the step fences: pace on a completion signal from the
+queue rather than on the readback clock. Before building it, measured whether
+the app is fence-bound at all, on a copy of the autosave in a scratch HOME.
+
+- Light scenes never touch a fence. At edge 0.07 and 2x the scene wants 521 sps
+  and gets them at 120 fps, with the lead near 7 against 64.
+- Overloaded ones do. At edge 0.04 and 2x, wanting 1467 sps, under GPU
+  contention from other applications: 350-770 sps at about 60 fps, the host
+  fence clamping 2-60 % of frames and the render fence never. Lifting both
+  fences gave 710-945 sps at the same frame rate, so the device had capacity the
+  fence withheld.
+- `CanonicalGpuStats::retired_steps` is raised from a
+  `Queue::on_submitted_work_done` callback that a `RenderGraphSystems::Finish`
+  system registers after each frame's submission, naming the steps encoded so
+  far. Both fences read it: the render world's encoded lead and the host's
+  `steps_with_gpu_backpressure`. It never reads behind `completed_steps`, so a
+  queue that has not reported leaves pacing where the readback put it.
+  `completed_steps` keeps its meaning for display, probes and simulated time.
+- No generation serial is needed. Each generation has its own stats, and the
+  callback holds the ones it was registered for, so a report arriving after a
+  handoff lands on the retired generation's counter.
+- Interleaved against the previous build with the timing harness running as
+  competing GPU load: 838-854 sps against 678-787, host clamping 16-37 % of
+  frames against 35-60 %. Unloaded, both builds deliver the same ~840 sps at
+  110 fps with no clamping. One comparable loaded pair; the second pair's load
+  did not take hold for the new build.
+- The gain is smaller than lifting the fences outright, and the retired lag
+  says why: the queue reports only about a frame ahead of the readback, 55-59
+  steps against 71-74 under load and 24-26 against 29-33 without. The rest is
+  genuinely in flight - pipelined frames and the GPU queue. So the earlier
+  diagnosis that the fences steered on "a signal that is mostly latency" was
+  half right: the readback added about a frame, and the fence of 64 is now
+  measured against real queue depth. Raising it to win the rest would buy
+  throughput by queueing latency on purpose, which is what the fence exists to
+  refuse.
+- Tests: retirement leads the readback but never trails it, and never moves
+  backwards on an out-of-order report; a report for a replaced generation paces
+  nothing, through a real `install`. The wasm32 target still checks.
+- Also found: the app accepts speeds only in 0.02-2.0, and a document outside
+  that range resets presentation to defaults. Intended, but a measurement at
+  8x silently ran at 1x until the reset was noticed.
 
