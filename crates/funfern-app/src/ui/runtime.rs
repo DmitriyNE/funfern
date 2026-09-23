@@ -383,12 +383,10 @@ impl Playground {
                                     self.source_commit =
                                         Some(PendingSourceCommit { token, serial });
                                 }
-                                Err(error)
-                                    if error == "another canonical transaction is pending" => {}
-                                Err(error) => {
-                                    self.runtime.reject_ready(token, error.clone());
-                                    self.message = error;
-                                }
+                                Err(error) => match live_event_fallback(&error) {
+                                    LiveEventFallback::Retry => {}
+                                    LiveEventFallback::Pack => needs_gpu_pack = true,
+                                },
                             }
                         }
                     }
@@ -811,9 +809,80 @@ impl Playground {
     }
 }
 
+/// What to do with a source edit whose live patch the accepted generation would
+/// not take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveEventFallback {
+    /// The generation is busy. The candidate stays ready and a later frame
+    /// tries the same patch again.
+    Retry,
+    /// The generation cannot take this patch at all. The edit goes through a
+    /// whole prepared generation instead, which is what it did before the patch
+    /// existed.
+    Pack,
+}
+
+/// A refused live patch is a reason to take the slow path, never a reason to
+/// lose the edit.
+///
+/// Source moves and weight edits were routed onto the live-patch fast path in
+/// "Avoid full handoffs for sources and measurements"; the day after, temporal
+/// material events arrived and gated every patch kind whose composition with a
+/// driven medium had not been tested. A driven scene therefore took the fast
+/// path and was then refused, and the refusal rejected the prepared candidate -
+/// so moving a source on a pumped medium reported a failed preparation and
+/// dropped the edit. Neither change is wrong on its own.
+///
+/// Packing is the fallback because it is the path these edits took before the
+/// patch existed, and it is known to carry them. It costs a prepared generation
+/// per edit on a driven medium until the gate closes for source patches, which
+/// is a cost rather than a defect.
+fn live_event_fallback(error: &str) -> LiveEventFallback {
+    if error == "another canonical transaction is pending" {
+        LiveEventFallback::Retry
+    } else {
+        LiveEventFallback::Pack
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reported regression: moving a continuous source on a pumped medium
+    /// reported "this event has not passed its Stage 7 temporal composition
+    /// gate" as a failed preparation, and the edit was lost.
+    #[test]
+    fn a_refused_source_patch_packs_instead_of_losing_the_edit() {
+        // The gate a driven generation puts on patch kinds it has not composed
+        // with yet, verbatim from `queue_live_event`.
+        assert_eq!(
+            live_event_fallback("this event has not passed its Stage 7 temporal composition gate"),
+            LiveEventFallback::Pack
+        );
+        // Anything else the generation will not take is equally a reason to
+        // take the slow path rather than to drop the edit.
+        for refusal in [
+            "live canonical event does not match the active generation",
+            "a temporal material event requires a temporal generation",
+            "live canonical event serial is stale or the solver has failed",
+            "canonical GPU is not installed",
+        ] {
+            assert_eq!(
+                live_event_fallback(refusal),
+                LiveEventFallback::Pack,
+                "{refusal}"
+            );
+        }
+
+        // Except a generation that is merely busy: the same patch is worth
+        // trying again next frame, and packing would throw away a fast path
+        // that is about to be available.
+        assert_eq!(
+            live_event_fallback("another canonical transaction is pending"),
+            LiveEventFallback::Retry
+        );
+    }
 
     /// Handover generations preserve the accepted-step total. Their first
     /// observation establishes a baseline instead of re-crediting the run;

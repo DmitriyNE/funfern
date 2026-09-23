@@ -9839,3 +9839,45 @@ because each run carries its own control - the same frame times paced with no
 ceiling at all, which should sit near 1 % and read 4.4 %, 7.3 %, 9.8 % and
 11.7 % on the bad ones. Without that control two of those runs would have been
 read as results.
+
+## 2026-09-23 — A refused live patch no longer loses the edit
+
+Reported: moving the continuous source or placing a pulse on a pumped medium
+fails with "this event has not passed its Stage 7 temporal composition gate",
+reported as a failed preparation.
+
+A regression from two commits a day apart, neither wrong alone. On 20 September
+"Avoid full handoffs for sources and measurements" routed source moves and
+weight edits onto the live-patch fast path. On 21 September "Add transactional
+temporal material events" gated every patch kind whose composition with a driven
+medium had not been tested, which is all of them but the two temporal ones and,
+later, the grid filter. A driven scene therefore took the fast path and was
+refused by it. Before 20 September the same edit took a whole prepared
+generation and worked.
+
+The refusal was also handled as a failure rather than as a fallback: it called
+`reject_ready`, which throws the prepared candidate away and leaves the
+preparation in `Failed`. So the edit was lost, not deferred - the second line in
+the report.
+
+A refused patch now falls back to packing a generation, which is the path these
+edits took before the patch existed. Only "another canonical transaction is
+pending" still retries, because there the fast path is about to be available and
+packing would throw it away. Verified against the reported scene by injecting
+six source moves into an instrumented build: all six hit the gate, all six
+packed, no preparation failed and the solver kept running across every one.
+
+The cost is a prepared generation per source edit on a driven medium, which
+after this week's packing work is tens of milliseconds rather than the second it
+would have been. That stands until the gate closes for source patches.
+
+Pulses are not fixed by this and cannot be: a pulse is an increment to the live
+GPU state, so there is no prepared candidate to carry it. It is also the one
+gated patch that is genuinely unsound as built - `primary_pulse` scales the
+field increment by the operator's *authored* primary mass, while a driven medium
+applies it at a boundary whose instantaneous mass is that times a factor the
+host cannot know in advance. On the reported pump that factor bottoms at 0.219,
+so the injected amplitude would be wrong by up to about fourfold depending on
+where the pump sat when the event landed. The fix is the one the Switch event
+already uses: upload the increment and let the GPU scale it at the boundary it
+applies to.
