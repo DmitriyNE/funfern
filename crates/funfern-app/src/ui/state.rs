@@ -5,6 +5,7 @@ use crate::field_paint::FieldPaintTopology;
 use crate::files::FileEvent;
 use crate::material_overlay::{MaterialOverlayJob, MaterialOverlaySnapshot};
 use crate::recording::VideoRecorder;
+use crate::wave_gpu::MAX_STEPS_PER_FRAME;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Rect};
@@ -107,6 +108,12 @@ pub struct Playground {
     /// replacement took to prepare and handed over a full-amplitude field.
     pub(super) fresh_requested: bool,
     pub(super) accumulator: f64,
+    /// Largest solver batch a frame may ask for, so the display is never held
+    /// behind one. See [`super::pacing::frame_step_budget`].
+    pub(super) frame_budget: f64,
+    /// Frame interval the display is actually reaching, measured rather than
+    /// assumed. See [`super::pacing::hold_cadence`].
+    pub(super) display_cadence: f64,
     pub(super) sim_time_offset: f64,
     pub(super) completed_steps: u64,
     pub(super) steps_per_second: f64,
@@ -330,6 +337,8 @@ impl Default for Playground {
             reset_requested: false,
             fresh_requested: false,
             accumulator: 0.0,
+            frame_budget: MAX_STEPS_PER_FRAME as f64,
+            display_cadence: 1.0 / 60.0,
             sim_time_offset: 0.0,
             completed_steps: 0,
             steps_per_second: 0.0,

@@ -61,18 +61,100 @@ pub(super) fn steps_for_frame(
     delta: f64,
     speed: f64,
     time_step: f64,
+    budget: f64,
 ) -> u64 {
     if !time_step.is_finite() || time_step <= 0.0 || !speed.is_finite() || speed <= 0.0 {
         return 0;
     }
     const DISPLAY_INTERVAL: f64 = 1.0 / 60.0;
+    let ceiling = budget.clamp(1.0, MAX_STEPS_PER_FRAME as f64);
     *accumulator += delta.clamp(0.0, DISPLAY_INTERVAL) * speed;
-    let steps = (*accumulator / time_step)
-        .floor()
-        .clamp(0.0, MAX_STEPS_PER_FRAME as f64) as u64;
+    let steps = (*accumulator / time_step).floor().clamp(0.0, ceiling) as u64;
     *accumulator -= steps as f64 * time_step;
-    *accumulator = accumulator.min(MAX_STEPS_PER_FRAME as f64 * time_step);
+    // Backlog is held only up to what a frame may actually spend. Holding more
+    // would saturate every following frame trying to catch up, which is the
+    // opposite of the contract: the shortfall is what gives, and it is
+    // reported rather than queued.
+    *accumulator = accumulator.min(ceiling * time_step);
     steps
+}
+
+/// How much longer than the display's own cadence a frame may run before the
+/// solver's batch is held responsible.
+///
+/// The controller settles on the edge of this band, so the band is the frame
+/// rate given away: at `1.25` a 120 Hz display holds 96 fps. Tight enough to
+/// keep the cadence, loose enough that a frame landing exactly on it is not
+/// read as an overrun. Under vsync a frame is quantized to the refresh period
+/// or to twice it, and anything inside this band is the former.
+const FRAME_BUDGET_TOLERANCE: f64 = 1.05;
+
+/// What an overrunning frame multiplies the batch ceiling by.
+///
+/// This also has to be sharp enough to overshoot, because the cut is the only
+/// thing that ever produces a frame faster than the last one and so the only
+/// way [`hold_cadence`] learns what the display can do. Backing off gently
+/// enough to merely stop overrunning leaves a saturated solver defining its own
+/// slowness as the cadence: at `0.9` and this scene's numbers the estimate
+/// stalls at 9.02 ms and the display holds 111 fps, where `0.75` finds 8.33 ms
+/// and holds 116.
+const FRAME_BUDGET_BACKOFF: f64 = 0.75;
+
+/// What a frame inside the cadence adds back to it.
+const FRAME_BUDGET_RECOVERY: f64 = 0.5;
+
+/// How fast the observed cadence gives up a better reading, as a factor per
+/// second. The mirror of [`SPEED_HOLD_PER_SECOND`]: a faster frame is believed
+/// at once, a slower one only after the display has stayed slow for a while.
+const CADENCE_RELAX_PER_SECOND: f64 = 1.15;
+
+/// The frame interval the display is actually achieving: instant to accept a
+/// faster one, slow to accept a slower one.
+///
+/// This is measured rather than assumed because the target depends on hardware
+/// nobody tells us about - 60, 120 and 144 Hz all want different budgets, and
+/// an unthrottled window wants whatever it can reach. Taking the best reading
+/// lately and letting it relax means a saturated solver cannot quietly define
+/// a slow cadence as normal: cutting the batch makes frames faster, which
+/// tightens the target, which is the feedback that finds the display's own
+/// rate.
+pub(super) fn hold_cadence(held: f64, measured: f64, elapsed: f64) -> f64 {
+    if !measured.is_finite() || measured <= 0.0 {
+        return held;
+    }
+    measured.min(held * CADENCE_RELAX_PER_SECOND.powf(elapsed.clamp(0.0, 1.0)))
+}
+
+/// The batch ceiling for the next frame, given what this one cost.
+///
+/// Frame rate must not be a function of solver throughput. A frame that cannot
+/// advance the simulation as far as the speed setting asks should still ship on
+/// time and draw the latest state - at any batch worth pacing the solver has
+/// advanced many steps, so there is always a new configuration to show, and the
+/// simulated-speed shortfall is the thing that gives. It is already measured
+/// and reported.
+///
+/// Nothing else bounds this. The step count is capped by accumulated simulated
+/// time, by `MAX_STEPS_PER_FRAME` and by outstanding encoded lead, but never by
+/// how long the batch will take to execute, and the compute shares the frame's
+/// queue with drawing. So the batch sets the frame time, and a driven medium -
+/// which runs at a tighter step and therefore asks for proportionally more
+/// steps a frame - took the display down with it.
+///
+/// Multiplicative backoff and additive recovery rather than a cost model: it
+/// needs no estimate of what a step costs, and it converges on the largest
+/// batch that still ships frames at the cadence.
+pub(super) fn frame_step_budget(budget: f64, frame_seconds: f64, cadence: f64) -> f64 {
+    if !frame_seconds.is_finite() || frame_seconds <= 0.0 || !cadence.is_finite() || cadence <= 0.0
+    {
+        return budget;
+    }
+    let next = if frame_seconds > cadence * FRAME_BUDGET_TOLERANCE {
+        budget * FRAME_BUDGET_BACKOFF
+    } else {
+        budget + FRAME_BUDGET_RECOVERY
+    };
+    next.clamp(1.0, MAX_STEPS_PER_FRAME as f64)
 }
 
 /// Keeps the host request clock close to the last GPU-completed boundary. A
@@ -121,6 +203,181 @@ pub(super) fn speed_shortfall(measured: f64, target: f64, stepping: bool) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reported defect: selecting a driven material took the frame rate from
+    /// 120 to 65. A driven generation runs at a tighter step, so at the same
+    /// requested speed it asks for proportionally more steps a frame, and the
+    /// batch shares the frame's queue with drawing. Nothing bounded the batch by
+    /// what it would cost, so the solver set the frame time.
+    ///
+    /// Reproduced from the reported numbers: 8827 dofs, `dt` 1.34e-3 linear
+    /// against 6.27e-4 driven, one per-step cost of 0.93 ms fitted to both
+    /// operating points, and 2.5 ms of everything else.
+    #[test]
+    fn a_driven_step_no_longer_takes_the_display_down_with_it() {
+        const PER_STEP: f64 = 0.93e-3;
+        const OVERHEAD: f64 = 2.5e-3;
+        let display = 1.0 / 120.0;
+
+        // One second of frames at a given step, returning the frame rate reached
+        // and the simulated seconds advanced.
+        let run = |time_step: f64, budgeted: bool| {
+            let mut accumulator = 0.0;
+            let mut budget = MAX_STEPS_PER_FRAME as f64;
+            let mut cadence = 1.0 / 60.0;
+            let mut frame = display;
+            // A second of warm-up, then two seconds measured: the claim is
+            // about the rate the controller settles on, and it starts from the
+            // ceiling because nothing has told it what a step costs yet.
+            let (mut frames, mut steps, mut elapsed) = (0u32, 0u64, 0.0);
+            let mut warm = 0.0;
+            while elapsed < 2.0 {
+                if budgeted {
+                    cadence = hold_cadence(cadence, frame, frame);
+                    budget = frame_step_budget(budget, frame, cadence);
+                }
+                let asked = steps_for_frame(
+                    &mut accumulator,
+                    frame,
+                    1.0,
+                    time_step,
+                    if budgeted {
+                        budget
+                    } else {
+                        MAX_STEPS_PER_FRAME as f64
+                    },
+                );
+                // The batch and the drawing share one queue, so the frame is as
+                // long as the work it was given, never shorter than the display.
+                frame = (OVERHEAD + asked as f64 * PER_STEP).max(display);
+                if warm < 1.0 {
+                    warm += frame;
+                    continue;
+                }
+                elapsed += frame;
+                frames += 1;
+                steps += asked;
+            }
+            (
+                f64::from(frames) / elapsed,
+                steps as f64 * time_step / elapsed,
+            )
+        };
+
+        let (linear_fps, linear_speed) = run(1.34e-3, false);
+        assert!(
+            linear_fps > 115.0,
+            "linear was not display-bound: {linear_fps}"
+        );
+        assert!(
+            linear_speed > 0.95,
+            "linear did not keep up: {linear_speed}"
+        );
+
+        // The reported regression, with nothing bounding the batch.
+        let (driven_fps, driven_speed) = run(6.27e-4, false);
+        assert!(
+            driven_fps < 80.0,
+            "the reported drop did not reproduce: {driven_fps}"
+        );
+        assert!(driven_speed < 0.7, "it also fell behind: {driven_speed}");
+
+        // Budgeted, the display is served and the shortfall is what gives.
+        let (budgeted_fps, budgeted_speed) = run(6.27e-4, true);
+        assert!(
+            budgeted_fps > 110.0,
+            "the display is still being held behind the solver: {budgeted_fps}"
+        );
+        assert!(
+            budgeted_speed > 0.0,
+            "the solver stopped advancing entirely: {budgeted_speed}"
+        );
+        // It advances many steps a frame, so every frame still has a new
+        // configuration to draw - the display is never waiting on the solver
+        // for something to show.
+        assert!(
+            budgeted_speed / budgeted_fps / 6.27e-4 > 1.0,
+            "fewer than one step a frame: {budgeted_speed}"
+        );
+    }
+
+    /// The budget is an outcome, not a guess: an overrunning frame cuts it and
+    /// frames inside the cadence give it back.
+    #[test]
+    fn the_batch_ceiling_follows_what_frames_actually_cost() {
+        let cadence = 1.0 / 120.0;
+        let budget = MAX_STEPS_PER_FRAME as f64;
+
+        let overran = frame_step_budget(budget, cadence * 2.0, cadence);
+        assert!(overran < budget, "an overrunning frame kept its batch");
+        let recovered = frame_step_budget(overran, cadence, cadence);
+        assert!(recovered > overran, "a cheap frame did not give any back");
+
+        // It bottoms out at one rather than at zero: a solver that cannot fit
+        // a step inside a frame still advances, one step at a time.
+        let mut starved = budget;
+        for _ in 0..200 {
+            starved = frame_step_budget(starved, cadence * 10.0, cadence);
+        }
+        assert_eq!(starved, 1.0);
+
+        // And it climbs back to the ceiling rather than staying shy of it.
+        let mut recovering = starved;
+        for _ in 0..200 {
+            recovering = frame_step_budget(recovering, cadence * 0.5, cadence);
+        }
+        assert_eq!(recovering, MAX_STEPS_PER_FRAME as f64);
+
+        // A frame just inside the tolerance is not held responsible.
+        assert!(frame_step_budget(budget, cadence * 1.02, cadence) >= budget);
+
+        // Nonsense leaves it alone.
+        assert_eq!(frame_step_budget(budget, f64::NAN, cadence), budget);
+        assert_eq!(frame_step_budget(budget, cadence, 0.0), budget);
+    }
+
+    /// The target is measured because the hardware is not announced. A faster
+    /// display is believed at once; a slower one only after it stays slow, so a
+    /// saturated solver cannot define its own slowness as the cadence.
+    #[test]
+    fn the_cadence_is_the_best_frame_seen_lately() {
+        let held = 1.0 / 60.0;
+        let faster = hold_cadence(held, 1.0 / 144.0, 1.0 / 144.0);
+        assert!((faster - 1.0 / 144.0).abs() < 1.0e-12);
+
+        // One slow frame barely moves it.
+        let nudged = hold_cadence(faster, 1.0, 1.0 / 144.0);
+        assert!(
+            nudged < faster * 1.01,
+            "one slow frame relaxed it: {nudged}"
+        );
+
+        // A second of slow frames does.
+        let mut relaxed = faster;
+        for _ in 0..120 {
+            relaxed = hold_cadence(relaxed, 1.0, 1.0 / 120.0);
+        }
+        assert!(relaxed > faster * 1.1, "it never relaxed: {relaxed}");
+
+        assert_eq!(hold_cadence(held, f64::NAN, 0.01), held);
+        assert_eq!(hold_cadence(held, -1.0, 0.01), held);
+    }
+
+    /// Backlog is held only up to what a frame may spend. Holding a full ceiling
+    /// of it while the budget is small would saturate every following frame
+    /// trying to catch up, which is the opposite of the contract.
+    #[test]
+    fn a_small_budget_does_not_queue_a_backlog_it_will_never_spend() {
+        let step = 1.0e-3;
+        let mut accumulator = 0.0;
+        for _ in 0..100 {
+            steps_for_frame(&mut accumulator, 1.0, 8.0, step, 4.0);
+        }
+        assert!(
+            accumulator <= 4.0 * step + 1.0e-12,
+            "backlog beyond the budget: {accumulator}"
+        );
+    }
 
     #[test]
     fn handoff_withholds_steps_only_when_the_source_cannot_advance() {
@@ -185,7 +442,13 @@ mod tests {
                 let mut accumulator = 0.0;
                 let idle = (0..600)
                     .filter(|_| {
-                        steps_for_frame(&mut accumulator, PACING_FRAME_SECONDS, speed, step) == 0
+                        steps_for_frame(
+                            &mut accumulator,
+                            PACING_FRAME_SECONDS,
+                            speed,
+                            step,
+                            MAX_STEPS_PER_FRAME as f64,
+                        ) == 0
                     })
                     .count();
                 assert_eq!(
@@ -207,9 +470,10 @@ mod tests {
         let mut quiet = 0.0;
         let (mut full_total, mut half_total, mut quiet_total) = (0, 0, 0);
         for _ in 0..60 {
-            full_total += steps_for_frame(&mut full, frame, 1.0, step);
-            half_total += steps_for_frame(&mut half, frame, 0.5, step);
-            quiet_total += steps_for_frame(&mut quiet, frame, 0.02, step);
+            full_total += steps_for_frame(&mut full, frame, 1.0, step, MAX_STEPS_PER_FRAME as f64);
+            half_total += steps_for_frame(&mut half, frame, 0.5, step, MAX_STEPS_PER_FRAME as f64);
+            quiet_total +=
+                steps_for_frame(&mut quiet, frame, 0.02, step, MAX_STEPS_PER_FRAME as f64);
         }
         // A second of frames at one millisecond a step.
         assert_eq!(full_total, 960);
@@ -225,12 +489,21 @@ mod tests {
         let step = 1.0e-3;
         let mut on_time = 0.0;
         let mut late = 0.0;
-        let expected = steps_for_frame(&mut on_time, 1.0 / 60.0, 1.0, step);
-        assert_eq!(steps_for_frame(&mut late, 1.0, 1.0, step), expected);
+        let expected = steps_for_frame(
+            &mut on_time,
+            1.0 / 60.0,
+            1.0,
+            step,
+            MAX_STEPS_PER_FRAME as f64,
+        );
+        assert_eq!(
+            steps_for_frame(&mut late, 1.0, 1.0, step, MAX_STEPS_PER_FRAME as f64),
+            expected
+        );
         assert!((late - on_time).abs() < 1.0e-12);
 
         let mut accumulator = 0.0;
-        let steps = steps_for_frame(&mut accumulator, 1.0, 8.0, step);
+        let steps = steps_for_frame(&mut accumulator, 1.0, 8.0, step, MAX_STEPS_PER_FRAME as f64);
         assert_eq!(steps, MAX_STEPS_PER_FRAME);
         assert!(
             accumulator <= MAX_STEPS_PER_FRAME as f64 * step + 1.0e-12,
@@ -238,15 +511,24 @@ mod tests {
         );
         // And it stays capped however long the solver is behind.
         for _ in 0..100 {
-            steps_for_frame(&mut accumulator, 1.0, 8.0, step);
+            steps_for_frame(&mut accumulator, 1.0, 8.0, step, MAX_STEPS_PER_FRAME as f64);
         }
         assert!(accumulator <= MAX_STEPS_PER_FRAME as f64 * step + 1.0e-12);
 
         // Nonsense asks for nothing rather than panicking or racing.
         let mut idle = 0.0;
-        assert_eq!(steps_for_frame(&mut idle, 0.016, 1.0, 0.0), 0);
-        assert_eq!(steps_for_frame(&mut idle, 0.016, 0.0, 1.0e-3), 0);
-        assert_eq!(steps_for_frame(&mut idle, -1.0, 1.0, 1.0e-3), 0);
+        assert_eq!(
+            steps_for_frame(&mut idle, 0.016, 1.0, 0.0, MAX_STEPS_PER_FRAME as f64),
+            0
+        );
+        assert_eq!(
+            steps_for_frame(&mut idle, 0.016, 0.0, 1.0e-3, MAX_STEPS_PER_FRAME as f64),
+            0
+        );
+        assert_eq!(
+            steps_for_frame(&mut idle, -1.0, 1.0, 1.0e-3, MAX_STEPS_PER_FRAME as f64),
+            0
+        );
     }
 
     #[test]

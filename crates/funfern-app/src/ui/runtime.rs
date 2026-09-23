@@ -291,6 +291,11 @@ impl Playground {
         // Starting another preparation mid-upload clears `runtime.ready`, and
         // would make the accepted GPU generation impossible to publish under
         // its immutable topology token. A later frame picks the edit up.
+        // What the frame actually cost decides what the next one may spend on
+        // the solver. Both readings are of this frame, before anything is asked
+        // for, so a batch is always sized by an outcome rather than a guess.
+        self.display_cadence = hold_cadence(self.display_cadence, delta, delta);
+        self.frame_budget = frame_step_budget(self.frame_budget, delta, self.display_cadence);
         if self.uploading.is_none()
             && self.source_commit.is_none()
             && self.gpu_upload_preparation.is_none()
@@ -669,6 +674,7 @@ impl Playground {
                         delta,
                         self.editor.document.presentation.simulation_speed,
                         dt,
+                        self.frame_budget,
                     );
                     let admitted = steps_with_gpu_backpressure(
                         request.stats().completed_steps(),

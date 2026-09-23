@@ -5,6 +5,50 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-23 — The solver was allowed to set the frame time
+
+Reported: selecting a non-stationary material takes the frame rate from 120 to
+65. The reply that this is the tighter trajectory step asking for more steps a
+frame was the mechanism but not the defect - frame rate should not be a function
+of solver throughput at all. At 13.85 steps a frame there is always a new
+configuration to draw, so nothing justifies the display waiting.
+
+- The measurement, from the reported numbers at 8827 dofs: steps a frame are
+  `750/120 = 6.25` and `900/65 = 13.85`, and fitting `frame = R + steps x S` to
+  both points gives one per-step cost, `S = 0.93 ms`, `R = 2.5 ms`. So a driven
+  step costs what a fixed one costs; the whole difference is how many of them a
+  frame asks for.
+- `steps_for_frame` capped by accumulated simulated time and by
+  `MAX_STEPS_PER_FRAME`, and `steps_with_gpu_backpressure` by outstanding lead.
+  Nothing capped by what the batch would cost, and the compute shares the
+  frame's queue with drawing, so the batch set the frame time. `pacing.rs`
+  already stated the contract - preserve display service, report the shortfall -
+  without enforcing it.
+- `frame_step_budget` is multiplicative backoff and additive recovery on the
+  batch ceiling, which needs no estimate of what a step costs and converges on
+  the largest batch that still ships frames at the cadence.
+- The target is measured, not assumed: 60, 120 and 144 Hz want different
+  budgets. `hold_cadence` holds the best frame lately and relaxes upward, the
+  mirror of `hold_rate`.
+- The subtle constant is the backoff. It is also the only thing that ever
+  produces a frame faster than the last, so it is how the cadence estimate
+  learns what the display can do. Backing off just enough to stop overrunning
+  leaves a saturated solver defining its own slowness as normal: at `0.9` the
+  estimate stalls at 9.02 ms and holds 111 fps, where `0.75` finds 8.33 ms and
+  holds 116. The tolerance is the band the controller settles on the edge of, so
+  it is frame rate given away directly - `1.25` would hold 96.
+- Simulated from the reported operating point: 65 fps at 0.56x speed becomes
+  116 fps at 0.44x. That is the trade asked for, and the shortfall is already
+  measured and reported.
+- The backlog cap moved from `MAX_STEPS_PER_FRAME` to the budget. Holding a full
+  ceiling of backlog while the budget is small would saturate every following
+  frame catching up, which is the opposite of the contract.
+- Why a step costs 0.93 ms at all is a separate question, written up in
+  [the step throughput spike](spikes/funfern-step-throughput-spike.md): 141
+  dispatches a step, almost all of them the outgoing trace sweep, which is
+  launch-latency bound rather than work bound. Two levers costed there, neither
+  taken yet.
+
 ## 2026-09-23 — A dense inverse nobody read, built one column at a time
 
 Reported: after a material change the status sits at "Ready for GPU upload" for
