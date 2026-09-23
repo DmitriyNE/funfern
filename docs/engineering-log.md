@@ -3463,6 +3463,21 @@ Outgoing-boundary construction, not urgent:
   below a threshold; whether the accuracy can be raised mid-run without
   disturbing the accepted history is the part to check first.
 
+Reported 2026-09-23, not yet reproduced or diagnosed:
+
+- [ ] The material selector is gone from the Draw panel. A drawn face is then
+  assigned whatever material id the tool last held, and after a scene switch or
+  a material deletion that id may not exist, so the operation is rejected with a
+  non-existing-material error and there is no control to pick another.
+- [ ] Adding a hole with a Draw operation sometimes fails to assemble:
+  `Preparation failed: Canonical GPU handoff rejected: stability or
+  conservative-transfer tolerance failed (failure code 2); accepted generation
+  was retained`. Intermittent; reproduce against the autosave and capture which
+  tolerance the device reports before guessing at the transfer.
+- [ ] Moving a whole subdomain should carry its material frame with it. Today the
+  frame stays where it was, so a spatially varying or anisotropic material slides
+  through the moved region instead of travelling with it.
+
 Found while pacing the solver, not yet diagnosed:
 
 - [ ] `simulated_time()` runs backwards for a frame or two at a handoff. The
