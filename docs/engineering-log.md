@@ -9962,3 +9962,63 @@ and never goes to stderr, so the search could only ever find nothing. What was
 actually confirmed was that the fallback branch was taken, not that what
 followed it worked - and it did not. A check that cannot fail is worth no more
 here than a test that cannot fail.
+
+## 2026-09-23 — The estimate was right; the one it replaced over-read interfaces
+
+A report that the AMR estimate reads 1.2% on a scene that used to read about 20%
+raised the question of whether the new number is correct, not merely different.
+The calibration harness could not answer it: every fixture was a single medium
+on a bare rectangle, and the scene in question has a material interface.
+
+So `temporal_amr_calibration` gains an interface fixture - `Scene::initial()`
+with its obstacle turned into a `MaterialInterface` over a second material of
+stiffness 2.5 - run three ways. Efficiency index (estimate over true error
+against a fine reference) across the refinement sequence:
+
+| fixture | h=0.20 | h=0.14 | h=0.10 | span |
+|---|---|---|---|---|
+| static path, interface | 12.9 | 12.9 | 19.1 | 2.06x |
+| driven path, inert | 1.42 | 1.42 | 1.33 | 1.07x |
+| driven path, mass pumped | 1.38 | 1.19 | 1.01 | 1.36x |
+
+The estimate in use is bounded, near-constant under refinement and slightly
+conservative. The static one charged the physical kink in the scalar gradient
+at the interface as discretization error: its jump term reads 4.79e-4 there
+against 3.14e-6 for the complementary-flux jump, which is continuous across the
+interface by construction. The old 20% was a 13-19x over-read of a true error
+already near 1-2%.
+
+The hypothesis going in was the opposite - that the substituted estimator would
+be blind at an interface. The measurement disproved it. The smooth-box rows are
+unchanged, so the 1.88 calibration constant stands; the static estimator, still
+used for undriven documents, is the one that is not trustworthy near an
+interface. Nothing is fixed here; the fixtures are kept as the harness's first
+multi-material coverage.
+
+## 2026-09-23 — Probes on a driven medium were blank, not wrong
+
+The temporal variants of all four recorders - point, line, area and the vector
+overlay - had been built and gated on the device, but the app never called
+them. It built every stencil from the fixed operator. The expectation was that
+a driven document's probes would therefore read the field through the authored
+mass rather than the moving one, off by about the pump depth.
+
+They read nothing. Every recorder shader refuses a stencil that does not address
+the law tables once the plan is temporal (`canonical_probe.wgsl`,
+`canonical_curve_probe.wgsl`, `canonical_area_probe.wgsl`), by design, so the
+device never mixes the two coefficient sets. Swapping the fixed calls into a
+copy of `canonical_gpu_temporal_consumer` reproduced it: twenty steps completed,
+no point record, no arrows, line samples invalid and area contributions
+skipped. The unmodified gate, on the temporal calls, passes at about 1e-6 on
+every lane.
+
+`RecorderSource` now chooses once, in `ui.rs`, from the active generation's
+temporal operator and the installed plan's temporal manifest, and both call
+sites build through it. The two can disagree for a frame across a handoff that
+changes whether the medium is driven; then the source is `None` and the upload
+waits, which `probes_need_upload` already retries on the next frame. That
+pairing has its own test.
+
+In the app, against a copy of the autosave (a pumped material, one point probe)
+with the overlay switched on: 1544 of 1544 point samples finite by 13.7 s, and
+306 of 306 arrows carrying flow from the second readback on.

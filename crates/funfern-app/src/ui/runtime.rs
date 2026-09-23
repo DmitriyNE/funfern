@@ -619,14 +619,17 @@ impl Playground {
             vector_display,
             assets,
             commands,
-            overlay_active.as_ref(),
+            overlay_active
+                .as_ref()
+                .and_then(|active| Some((active, RecorderSource::of(active, request)?))),
             request.generation(),
         );
         if self.uploading.is_none()
             && let Some(active) = self.runtime.active().cloned()
             && probes_need_upload(self.probe_upload, active.bundle.token, request.generation())
+            && let Some(source) = RecorderSource::of(&active, request)
         {
-            self.configure_probes(recorders, assets, commands, &active);
+            self.configure_probes(recorders, assets, commands, &active, source);
         }
         if let Some(active) = self.runtime.active() {
             let dt = self.solver_time_step();

@@ -1,14 +1,15 @@
 #![allow(clippy::collapsible_if)]
 
 use crate::canonical_gpu::{
-    CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuTransferPlan,
+    CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuTemporalManifest,
+    CanonicalGpuTransferPlan,
 };
 use crate::files::FileEvent;
 use crate::material_overlay::MaterialOverlay;
 use crate::recording::{self, RecordingSpec};
 use crate::wave_gpu::{
-    AreaProbeDisplay, CurveProbeDisplay, FarFieldDisplay, ProbeDisplay, VectorOverlayDisplay,
-    WaveDisplay, WaveGpuRequest,
+    AreaProbeDisplay, AreaProbeInput, CurveProbeDisplay, CurveProbeInput, FarFieldDisplay,
+    ProbeDisplay, RecorderContext, VectorOverlayDisplay, WaveDisplay, WaveGpuRequest,
 };
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -413,6 +414,138 @@ struct ProbeUpload {
 
 fn probes_need_upload(upload: Option<ProbeUpload>, token: TopologyToken, generation: u64) -> bool {
     upload.is_none_or(|upload| upload.token != token || upload.generation != generation)
+}
+
+/// The reconstruction every recorder over a generation has to be built from.
+/// A driven plan rejects a stencil that does not address its law tables, so a
+/// fixed one there records nothing at all rather than a wrong value.
+#[derive(Clone, Copy)]
+enum RecorderSource<'a> {
+    Fixed(&'a CanonicalWaveOperator),
+    Temporal(
+        &'a CanonicalTemporalWaveOperator,
+        CanonicalGpuTemporalManifest,
+    ),
+}
+
+impl<'a> RecorderSource<'a> {
+    /// `None` while the active generation and the installed plan disagree
+    /// about whether the medium is driven, which a handoff can leave for a
+    /// frame. The caller waits rather than building against the wrong one.
+    fn of(active: &'a PreparedTopology, request: &CanonicalGpuRequest) -> Option<Self> {
+        let installed = request.manifest().and_then(|manifest| manifest.temporal);
+        Some(
+            match recorder_pairing(active.canonical_temporal_operator.as_deref(), installed)? {
+                Some((operator, manifest)) => Self::Temporal(operator, manifest),
+                None => Self::Fixed(&active.canonical_operator),
+            },
+        )
+    }
+
+    fn point_probes(
+        self,
+        request: &mut WaveGpuRequest,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        probes: &[(u64, Option<QuadraticPointStencil>)],
+        sample_rate: f64,
+        context: RecorderContext,
+    ) -> Result<(), String> {
+        match self {
+            Self::Fixed(operator) => request.update_canonical_point_probes(
+                assets,
+                commands,
+                operator,
+                probes,
+                sample_rate,
+                context,
+            ),
+            Self::Temporal(operator, manifest) => request.update_temporal_canonical_point_probes(
+                assets,
+                commands,
+                operator,
+                manifest,
+                probes,
+                sample_rate,
+                context,
+            ),
+        }
+    }
+
+    fn curve_probes(
+        self,
+        request: &mut WaveGpuRequest,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        probes: &[CurveProbeInput],
+        context: RecorderContext,
+    ) -> Result<(), String> {
+        match self {
+            Self::Fixed(operator) => {
+                request.update_canonical_curve_probes(assets, commands, operator, probes, context)
+            }
+            Self::Temporal(operator, manifest) => request.update_temporal_canonical_curve_probes(
+                assets, commands, operator, manifest, probes, context,
+            ),
+        }
+    }
+
+    fn area_probes(
+        self,
+        request: &mut WaveGpuRequest,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        probes: &[AreaProbeInput],
+        sample_rate: f64,
+        context: RecorderContext,
+    ) -> Result<(), String> {
+        match self {
+            Self::Fixed(operator) => request.update_canonical_area_probes(
+                assets,
+                commands,
+                operator,
+                probes,
+                sample_rate,
+                context,
+            ),
+            Self::Temporal(operator, manifest) => request.update_temporal_canonical_area_probes(
+                assets,
+                commands,
+                operator,
+                manifest,
+                probes,
+                sample_rate,
+                context,
+            ),
+        }
+    }
+
+    fn vector_overlay(
+        self,
+        request: &mut WaveGpuRequest,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        stencils: &[QuadraticPointStencil],
+    ) -> Result<(), String> {
+        match self {
+            Self::Fixed(operator) => {
+                request.update_canonical_vector_overlay(assets, commands, operator, stencils)
+            }
+            Self::Temporal(operator, manifest) => request.update_temporal_canonical_vector_overlay(
+                assets, commands, operator, manifest, stencils,
+            ),
+        }
+    }
+}
+
+/// A driven generation pairs with a plan that carries law tables, an inert one
+/// with a plan that does not, and anything else is a handoff in between.
+fn recorder_pairing<T, M>(temporal: Option<T>, installed: Option<M>) -> Option<Option<(T, M)>> {
+    match (temporal, installed) {
+        (Some(operator), Some(manifest)) => Some(Some((operator, manifest))),
+        (None, None) => Some(None),
+        _ => None,
+    }
 }
 
 /// Ownership of an AMR estimate's immutable snapshot. Live GPU events replace

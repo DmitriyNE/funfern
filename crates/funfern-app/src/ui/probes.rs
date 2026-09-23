@@ -356,6 +356,7 @@ impl Playground {
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
         active: &Arc<PreparedTopology>,
+        source: RecorderSource<'_>,
     ) {
         let mut points = vec![];
         let mut curves = vec![];
@@ -451,34 +452,10 @@ impl Playground {
             physics,
             history,
         };
-        let result = request
-            .update_canonical_point_probes(
-                assets,
-                commands,
-                &active.canonical_operator,
-                &points,
-                120.0,
-                context,
-            )
-            .and_then(|()| {
-                request.update_canonical_curve_probes(
-                    assets,
-                    commands,
-                    &active.canonical_operator,
-                    &curves,
-                    context,
-                )
-            })
-            .and_then(|()| {
-                request.update_canonical_area_probes(
-                    assets,
-                    commands,
-                    &active.canonical_operator,
-                    &areas,
-                    60.0,
-                    context,
-                )
-            });
+        let result = source
+            .point_probes(request, assets, commands, &points, 120.0, context)
+            .and_then(|()| source.curve_probes(request, assets, commands, &curves, context))
+            .and_then(|()| source.area_probes(request, assets, commands, &areas, 60.0, context));
         if let Err(error) = result {
             self.message = error;
         }
@@ -731,6 +708,18 @@ mod tests {
             area_revision: revision,
             far_field_revision: revision,
         }
+    }
+
+    /// A driven plan records nothing through a stencil that does not address
+    /// its law tables, so a recorder is only built once the generation and the
+    /// installed plan agree about whether the medium is driven.
+    #[test]
+    fn a_recorder_waits_for_the_plan_to_agree_with_the_generation() {
+        assert_eq!(recorder_pairing::<(), ()>(None, None), Some(None));
+        assert_eq!(recorder_pairing(Some('t'), Some(3)), Some(Some(('t', 3))));
+        // A handoff between an inert and a driven generation, either way round.
+        assert_eq!(recorder_pairing::<char, u8>(Some('t'), None), None);
+        assert_eq!(recorder_pairing::<char, u8>(None, Some(3)), None);
     }
 
     #[test]

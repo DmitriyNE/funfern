@@ -196,7 +196,7 @@ impl Playground {
         display: &VectorOverlayDisplay,
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
-        active: Option<&Arc<PreparedTopology>>,
+        active: Option<(&Arc<PreparedTopology>, RecorderSource<'_>)>,
         generation: u64,
     ) {
         let mode = self
@@ -216,7 +216,9 @@ impl Playground {
         // runtime commit for a frame. Keep the completed old lattice visible;
         // clearing it here creates exactly the mesh-handoff blink this cache
         // exists to bridge.
-        let Some(active) = active else { return };
+        let Some((active, source)) = active else {
+            return;
+        };
         if generation == 0 || !self.viewport_rect.is_positive() {
             return;
         }
@@ -277,12 +279,7 @@ impl Playground {
             key.visible_bins,
         );
         let stencils = points.iter().map(|point| point.stencil).collect::<Vec<_>>();
-        match recorders.update_canonical_vector_overlay(
-            assets,
-            commands,
-            &active.canonical_operator,
-            &stencils,
-        ) {
+        match source.vector_overlay(recorders, assets, commands, &stencils) {
             Ok(()) => {
                 if points.is_empty() {
                     self.vector_overlay_previous_layout = None;
