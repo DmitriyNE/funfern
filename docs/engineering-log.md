@@ -10555,3 +10555,39 @@ media. The device still refuses them, and so does the app.
     `1 + χσ²` linear limit within 2e-3.
   - TM ε-Kerr and TE μ-Kerr evolve identically to 1e-12 under `b ↦ −b` (TE
     flips the curl orientation). The same law on the swapped slot does not.
+
+## 2026-09-24 — Nonlinear media compose sources, pins, loss, gaps and walls
+
+Stage 8.4. The composition wired in 8.3 now has tests. Each one steps a strong
+field, where the maps depart from linear by tens of percent, and asserts that
+what the accounting lanes leave unaccounted converges at order > 1.7:
+
+- `nonlinear_media_compose_sources_and_prescribed_data`: a volume source plus
+  a held wall on Kerr mass and saturable stiffness.
+- `a_pinned_nonlinear_node_holds_its_field_not_its_linear_flux`: `Q = P(g)`,
+  and a held field in a fixed medium exchanges nothing.
+- `a_lossy_nonlinear_medium_dissipates_passively_at_second_order`: both
+  channels. The decay keeps scaling the canonical `Q` and `b` exactly, which is
+  passive because stored energy rises with `|Q|`. The rate therefore means the
+  relative decay of the stored flux, weighted by the linear coefficient shares
+  at a junction; it is not the conductivity form `σE`, which was first order in
+  the spike.
+- `a_thin_gap_in_a_nonlinear_medium_keeps_the_balance_second_order`.
+- `a_complementary_nonlinearity_radiates_through_both_outgoing_walls`: a
+  saturable stiffness row against first- and second-order outgoing walls. The
+  trace primary map is linear, so the existing trace solve is exact.
+
+**Found, not fixed: prescribed data on the time-driven path is first order.**
+It is a Stage 7 defect and reproduces on linear media.
+- A harmonic prescribed signal, undriven linear medium, `Scene::default`,
+  T = 0.3: the complementary-flux error against a 2000-step reference falls
+  5.30e-3 → 2.39e-3 → 1.12e-3 over 50/100/200 steps (ratios 2.2, 2.1). The
+  fixed path on the same scene gives ratios 4.08 and 4.05.
+- A held constant value beside a pumped mass leaves the energy balance first
+  order (order 0.54–0.95) whenever the free field is not also at rest. The
+  existing test holds every node, so nothing moves and it passes.
+- Likely cause: both kicks pin at the step endpoints (moved there on
+  20 September so the work quadrature sees the pin), so the drift reads the
+  pinned field at `t_n` instead of `t_{n+½}`. The device follows this oracle.
+- The Stage 8 tests therefore hold prescribed data constant and undriven.
+  Reported for a decision before any change.

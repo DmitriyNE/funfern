@@ -7000,4 +7000,248 @@ mod tests {
             .sqrt();
         assert!(difference < 2e-3 * norm, "{}", difference / norm);
     }
+
+    /// Steps `operator` to `target` at three refinements from a strong field
+    /// and asserts that what the lanes leave unaccounted converges at second
+    /// order: the composition's own splitting error and nothing else. Returns
+    /// the finest run's `(lane total, unaccounted)` for the caller's checks.
+    fn nonlinear_balance_is_second_order(
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+        target: f64,
+        amplitude: f64,
+    ) -> (CanonicalTemporalStepAccounting, f64) {
+        let base = operator.base();
+        let ceiling = 0.4 * operator.maximum_time_step();
+        let mut previous: Option<(f64, f64)> = None;
+        let mut finest = (CanonicalTemporalStepAccounting::default(), 0.0);
+        for refinement in [1.0, 0.5, 0.25] {
+            let steps = (target / (ceiling * refinement)).ceil() as u64;
+            let time_step = target / steps as f64;
+            let mass = base.primary_mass();
+            let primary = base
+                .node_points()
+                .iter()
+                .zip(mass)
+                .map(|(point, mass)| amplitude * mass * (1.4 * point.x - 0.9 * point.y).sin())
+                .collect::<Vec<_>>();
+            let potential = base
+                .node_points()
+                .iter()
+                .map(|point| 0.6 * amplitude * (0.8 * point.x + 1.2 * point.y).cos())
+                .collect::<Vec<_>>();
+            let complementary = base.compatible_flux(&potential).unwrap();
+            let mut state =
+                CanonicalTemporalWaveState::new(operator, time_step, primary, complementary)
+                    .unwrap()
+                    .pinned(operator, forcing)
+                    .unwrap();
+            let before = state.energy(operator).unwrap();
+            let mut total = CanonicalTemporalStepAccounting::default();
+            for _ in 0..steps {
+                let step = state.step_with_forcing(operator, forcing).unwrap();
+                assert!(step.primary_loss >= 0.0 && step.complementary_loss >= 0.0);
+                assert!(step.boundary_loss >= 0.0);
+                total.temporal_work += step.temporal_work;
+                total.source_work += step.source_work;
+                total.prescribed_exchange += step.prescribed_exchange;
+                total.primary_loss += step.primary_loss;
+                total.complementary_loss += step.complementary_loss;
+                total.boundary_loss += step.boundary_loss;
+            }
+            let after = state.energy(operator).unwrap();
+            let unaccounted = after
+                - before
+                - total.temporal_work
+                - total.source_work
+                - total.prescribed_exchange
+                + total.primary_loss
+                + total.complementary_loss
+                + total.boundary_loss;
+            if let Some((coarse_step, coarse)) = previous {
+                let order =
+                    (coarse.abs() / unaccounted.abs()).log2() / (coarse_step / time_step).log2();
+                assert!(
+                    order > 1.7,
+                    "measured order {order:.2} between dt {coarse_step:.3e} and {time_step:.3e}"
+                );
+            }
+            previous = Some((time_step, unaccounted));
+            finest = (total, unaccounted);
+        }
+        finest
+    }
+
+    fn nonlinear_default_scene() -> Scene {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.field = kerr(0.8);
+        scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+        scene
+    }
+
+    #[test]
+    fn nonlinear_media_compose_sources_and_prescribed_data() {
+        // Undriven: prescribed data beside a pumped mass is first order on
+        // this path for a linear medium too (engineering log, 24 September).
+        let operator = compile(&nonlinear_default_scene()).unwrap();
+        let base = operator.base();
+        let mut prescribed = vec![None; base.degrees_of_freedom()];
+        for (node, point) in base.node_points().iter().enumerate() {
+            if point.x < -0.999 {
+                // Held constant, for the same reason.
+                prescribed[node] = Some(TimeSignal::Harmonic {
+                    offset: 0.3,
+                    amplitude: 0.0,
+                    frequency_hz: 0.0,
+                    phase_radians: 0.0,
+                });
+            }
+        }
+        assert!(prescribed.iter().any(Option::is_some));
+        let mut forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+        forcing
+            .push_source(
+                CanonicalSource::direct(
+                    base,
+                    base.primary_mass().to_vec(),
+                    TimeSignal::harmonic(0.0, 0.9, 1.7, 0.4),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.3, 0.5);
+        assert!(total.source_work.abs() > 1e-4, "{total:?}");
+        assert!(total.prescribed_exchange.abs() > 1e-4, "{total:?}");
+    }
+
+    #[test]
+    fn a_pinned_nonlinear_node_holds_its_field_not_its_linear_flux() {
+        let operator = compile(&nonlinear_default_scene()).unwrap();
+        let base = operator.base();
+        let held = 0.7;
+        let prescribed = vec![
+            Some(TimeSignal::Harmonic {
+                offset: held,
+                amplitude: 0.0,
+                frequency_hz: 0.0,
+                phase_radians: 0.0,
+            });
+            base.degrees_of_freedom()
+        ];
+        let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+        let mut state =
+            CanonicalTemporalWaveState::zero(&operator, 0.3 * operator.maximum_time_step())
+                .unwrap()
+                .pinned(&operator, &forcing)
+                .unwrap();
+        for _ in 0..5 {
+            let step = state.step_with_forcing(&operator, &forcing).unwrap();
+            // A held field in a fixed medium exchanges nothing.
+            assert!(step.prescribed_exchange.abs() < 1e-13);
+        }
+        let runtime = operator.initial_runtime();
+        let field = operator
+            .primary_field_at(state.primary_flux(), state.time(), &runtime)
+            .unwrap();
+        for (field, (flux, mass)) in field
+            .iter()
+            .zip(state.primary_flux().iter().zip(base.primary_mass()))
+        {
+            assert!((field - held).abs() < 1e-13);
+            assert!((flux - mass * (1.0 + 0.8 * held * held) * held).abs() < 1e-13 * flux);
+        }
+    }
+
+    #[test]
+    fn a_lossy_nonlinear_medium_dissipates_passively_at_second_order() {
+        let mut scene = nonlinear_default_scene();
+        let channel = |rate: f64| LossChannel {
+            base_rate: ScalarField::constant(rate),
+            law: DampingLaw {
+                rate: RateLaw::Constant,
+                drive: TimeDrive::None,
+            },
+        };
+        scene.materials[0].electric_loss = Some(channel(0.5));
+        scene.materials[0].magnetic_loss = Some(channel(0.3));
+        let operator = compile(&scene).unwrap();
+        let forcing = CanonicalForcing::none(operator.base());
+        let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.3, 0.5);
+        assert!(
+            total.primary_loss > 1e-4 && total.complementary_loss > 1e-4,
+            "{total:?}"
+        );
+    }
+
+    #[test]
+    fn a_thin_gap_in_a_nonlinear_medium_keeps_the_balance_second_order() {
+        let mut scene = nonlinear_default_scene();
+        scene.internal_boundaries.push(crate::InternalBoundary {
+            id: crate::InternalBoundaryId(1),
+            spline: crate::OpenCubicSpline::uniform(vec![
+                Point2::new(-0.65, 0.0),
+                Point2::new(-0.2, 0.0),
+                Point2::new(0.2, 0.0),
+                Point2::new(0.65, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![crate::InternalBoundaryLaw {
+                coupling: crate::InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 120.0,
+                },
+                ..crate::InternalBoundaryLaw::REFLECTING
+            }],
+        });
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            17,
+            MeshingOptions {
+                target_edge_length: 0.18,
+                minimum_angle_degrees: 14.0,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        assert!(!operator.base().thin_gap_samples().is_empty());
+        let forcing = CanonicalForcing::none(operator.base());
+        nonlinear_balance_is_second_order(&operator, &forcing, 0.25, 0.5);
+    }
+
+    #[test]
+    fn a_complementary_nonlinearity_radiates_through_both_outgoing_walls() {
+        for condition in [
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        ] {
+            let mut scene = Scene::default();
+            let mesh = mesh_scene(
+                &scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.3,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap();
+            let quadratic =
+                QuadraticWaveOperator::assemble_scene(&mesh, &scene, condition).unwrap();
+            scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+            let operator =
+                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            let forcing = CanonicalForcing::none(operator.base());
+            let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
+            assert!(total.boundary_loss > 1e-5, "{condition:?}: {total:?}");
+        }
+    }
 }
