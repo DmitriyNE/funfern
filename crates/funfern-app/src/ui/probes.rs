@@ -539,9 +539,13 @@ impl Playground {
         if self.uploaded_time_step > 0.0 {
             return self.uploaded_time_step;
         }
+        // The generation's own step, which for a driven one is the tighter step
+        // its coefficient trajectory demands rather than what its authored
+        // coefficients allow. Reading the base operator's here would name a
+        // step the running solver never takes.
         self.runtime
             .active()
-            .map_or(0.0, |active| active.operator.recommended_time_step())
+            .map_or(0.0, |active| active.recommended_time_step())
     }
 
     /// Republishes when the speed ceiling wants a different step from the one

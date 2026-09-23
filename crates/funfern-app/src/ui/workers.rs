@@ -661,8 +661,19 @@ pub(super) fn compile_gpu_upload(
     // its drives' identities are read, and those follow from the operator and
     // the forcing, so rebuilding recovers them exactly. It is packing work on a
     // worker thread, not frame work.
+    //
+    // It is rebuilt at the *source's* own step, not the candidate's. Nothing
+    // read back from it depends on a step, but a driven generation runs at the
+    // tighter step its coefficient trajectory demands rather than the one its
+    // authored coefficients allow, so the two rarely agree - and undriving a
+    // medium loosens the step, which leaves the candidate's above what the
+    // source will hold a state at. Packing the source at the candidate's step
+    // is what refused every switch from a pump back to a linear material.
     let gpu_transfer = if active.driven() || candidate.driven() {
-        let source = compile_generation_plan(&active, time_step, clock)?;
+        let source_step = active.recommended_time_step();
+        let source_clock =
+            CanonicalGpuClock::initial(source_step).map_err(|error| format!("{error:?}"))?;
+        let source = compile_generation_plan(&active, source_step, source_clock)?;
         gpu_transfer
             .with_temporal_material_runtime(&source, &plan)
             .map_err(|error| format!("{error:?}"))?

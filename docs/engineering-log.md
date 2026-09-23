@@ -29,6 +29,19 @@ reach. Everything else says which check it was.
 - The existing both-directions test hid this by packing every direction at the
   pump's step, the one step that always works. `undriving_packs_at_the_step_the
   _host_actually_uses` packs at the step the host computes, and fails.
+- Fixed by packing the source plan at the *source's* own step with its own
+  clock. Nothing read back from that plan depends on a step - node and sample
+  counts, record counts, drive signatures, material identities - so the step
+  there is free, and the source's own is the one it is guaranteed to hold.
+  Measured on the reported document: linear candidate `2.5355e-3` against a pump
+  ceiling of `2.5198e-3`, overrunning it by 0.6%.
+- Swept for the sibling shape. `solver_time_step`'s fallback named the base
+  operator's step, which for a driven generation is not the step the solver
+  runs; it now reads the generation's own. Reachable only before the first
+  upload, but it is the same mistake and the third time this family has bitten.
+- The both-directions test now packs each direction at the candidate's step,
+  which is what the host computes, instead of at one generation's step for all
+  of them. A single shared step is exactly the case that always works.
 - Three rounds of guessing, then one run once the message was specific. The cost
   of a shared error variant is paid entirely by whoever is holding the report.
 

@@ -894,16 +894,23 @@ mod second_preset_reproduction {
             panic!("preparation did not finish");
         };
 
+        // Each direction packs at the step the host would choose for it - the
+        // candidate's - rather than at one generation's step for all of them.
+        // A single shared step is the one thing that always works, and packing
+        // that way hid a refusal for every switch that loosened it.
+        let speed = state.editor.document.presentation.simulation_speed;
+        let step =
+            |prepared: &PreparedTopology| paced_time_step(prepared.recommended_time_step(), speed);
+
         let pumped = apply(&mut state, "Parametric pump");
         assert!(pumped.driven() && !pumped.fresh);
-        let step = pumped.recommended_time_step();
 
         let crystal = apply(&mut state, "Time crystal");
         assert!(crystal.driven() && !crystal.fresh);
         let packed = compile_gpu_upload(
             PreparedTopology::clone(&crystal),
             Some(pumped),
-            step,
+            step(&crystal),
             [0; 4],
         )
         .expect("one driven generation hands off to another");
@@ -930,9 +937,13 @@ mod second_preset_reproduction {
         // A medium that stops being driven still shares its field with what
         // came before. Only the runtime bank goes, and a bank with no records
         // to write is nothing to carry, so this hands off like any other edit.
-        let packed =
-            compile_gpu_upload(PreparedTopology::clone(&inert), Some(crystal), step, [0; 4])
-                .expect("undriving a generation still packs");
+        let packed = compile_gpu_upload(
+            PreparedTopology::clone(&inert),
+            Some(crystal),
+            step(&inert),
+            [0; 4],
+        )
+        .expect("undriving a generation still packs");
         let transfer = packed
             .transfer
             .as_ref()
@@ -942,6 +953,90 @@ mod second_preset_reproduction {
             (1, 0),
             "the bank it had is dropped and none is written"
         );
+    }
+
+    /// Reported from the running application, reproducibly: select the
+    /// parametric pump, then switch back to linear, and after seconds of
+    /// "waiting for GPU upload" the host refuses and silently keeps the pump.
+    ///
+    /// The host packs with the *candidate's* step. A driven generation runs at
+    /// the tighter step its coefficient trajectory demands, so the linear
+    /// candidate's step is the larger of the two - and the pack rebuilds the
+    /// *source* plan at that same step to read its drives back. The pump will
+    /// not hold it, so the source plan refuses and the whole upload dies.
+    /// Nothing is wrong with either generation or with the handoff maps; the
+    /// two just do not share a step, and only the source has to.
+    ///
+    /// The sibling test above hides this by packing every direction at the
+    /// pump's step, which is the one step that always works.
+    #[test]
+    fn undriving_packs_at_the_step_the_host_actually_uses() {
+        let mut state = Playground::default();
+        activate(&mut state);
+
+        let apply = |state: &mut Playground, name: &str| {
+            let material = state.editor.document.model.draft.materials[0].clone();
+            let preset = law_presets()
+                .iter()
+                .find(|preset| preset.name == name)
+                .expect("catalogue entry");
+            state
+                .editor
+                .update_material(apply_law_preset(preset, &material).unwrap())
+                .unwrap();
+            settle(&mut state.editor);
+            let token = state
+                .runtime
+                .request(
+                    state.editor.revision,
+                    &state.editor.document,
+                    state.editor.compiled_accepted.clone(),
+                    MeshingOptions {
+                        target_edge_length: 0.18,
+                        ..MeshingOptions::default()
+                    },
+                    false,
+                )
+                .unwrap();
+            for _ in 0..1_000_000 {
+                if let Some(result) = state.runtime.advance(4096) {
+                    result.unwrap();
+                    return state.runtime.commit_ready(token).unwrap();
+                }
+            }
+            panic!("preparation did not finish");
+        };
+
+        let pumped = apply(&mut state, "Parametric pump");
+        assert!(pumped.driven());
+        let inert = apply(&mut state, "Linear");
+        assert!(!inert.driven());
+
+        let speed = state.editor.document.presentation.simulation_speed;
+        let candidate_step = paced_time_step(inert.recommended_time_step(), speed);
+        assert!(
+            candidate_step
+                > pumped
+                    .canonical_temporal_operator
+                    .as_ref()
+                    .expect("a driven generation carries a temporal operator")
+                    .maximum_time_step(),
+            "the reproduction needs the candidate step to overrun the pump, \
+             candidate {candidate_step}, pump ceiling {}",
+            pumped
+                .canonical_temporal_operator
+                .as_ref()
+                .unwrap()
+                .maximum_time_step()
+        );
+
+        compile_gpu_upload(
+            PreparedTopology::clone(&inert),
+            Some(pumped),
+            candidate_step,
+            [0; 4],
+        )
+        .expect("switching back to linear must pack at the step the host chose");
     }
 
     /// Switching a drive *on* is the direction that was reported: the field
