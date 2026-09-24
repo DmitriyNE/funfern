@@ -199,7 +199,16 @@ running; this file covers using it.
   principal axis; the local stiffness/flux tensor is `k diag(a, 1/a)`, preserving
   the base coefficient's geometric mean while giving a principal wave-speed ratio
   `a`. The ratio survives Mechanical/EM and TM/TE switches unchanged. Unused
-  non-default materials can be deleted. Selecting a region row highlights its
+  non-default materials can be deleted. A material's **Response** selector
+  applies a law preset - a switchable medium, a pump, a time crystal, a
+  travelling modulation, a Kerr or a saturable medium - and shows what the
+  laws compose to. A switchable medium gets a **Switch ▸** button (hotkey
+  **S**, for the material open in the editor or the scene's only Switch) that
+  ramps it to its alternate law and back over its Switch ramp, on the running
+  field; it is not an edit and leaves undo alone. A Kerr or saturable medium
+  reads out how far the field has moved it, as the coefficient's peak change
+  from its small-signal value, and the Solver section names what lowers the
+  step ceiling. Selecting a region row highlights its
   complete derived boundary in the viewport and carries the same categorical
   swatch the Subdomains overlay uses. Material changes preserve the live field and reuse the committed
   mesh. Profile placement appears for the selected subdomain and can be adjusted

@@ -289,6 +289,7 @@ impl Playground {
         request.set_grid_scale_filter(self.editor.document.presentation.grid_scale_filter);
         self.finish_source_commit(request);
         self.supervise_solver_fault(request, assets, commands);
+        self.refresh_switch_states(display);
         // Starting another preparation mid-upload clears `runtime.ready`, and
         // would make the accepted GPU generation impossible to publish under
         // its immutable topology token. A later frame picks the edit up.
@@ -543,6 +544,8 @@ impl Playground {
                             self.canonical_event_observed = 0;
                             self.wave_energy = None;
                             self.nonlinear_strength.clear();
+                            // A fresh start begins from the authored runtime.
+                            self.switch_targets.clear();
                             self.amr_energy_peak = 0.0;
                         }
                         self.restart_exposures_after_handoff(upload.fresh);
@@ -680,6 +683,13 @@ impl Playground {
                     Ok(()) => {}
                     Err(error) => self.message = error,
                 }
+            }
+            if let Some(material) = (self.uploading.is_none() && self.source_commit.is_none())
+                .then(|| self.pending_switch.take())
+                .flatten()
+            {
+                let active = active.clone();
+                self.send_material_switch(&active, display, request, assets, material);
             }
             // Drain once the packed candidate is ready so begin_handoff gets a
             // complete requested-step boundary. After that, keep advancing the
@@ -830,6 +840,107 @@ impl Playground {
     /// is therefore a baseline, not progress: counting its absolute total
     /// credited the whole run again after every adaptive handover and could
     /// leave the reported real-time rate falsely high for many seconds.
+    /// Each Switch material's accepted ramp, read from the runtime bank the
+    /// latest full snapshot carries, at that snapshot's clock.
+    fn refresh_switch_states(&mut self, display: &CanonicalGpuDisplay) {
+        self.switch_states.clear();
+        let Some(temporal) = self
+            .runtime
+            .active()
+            .and_then(|active| active.canonical_temporal_operator.clone())
+        else {
+            return;
+        };
+        let authored = temporal.initial_runtime();
+        let runtime = display
+            .accepted_material_runtime(&authored)
+            .unwrap_or(authored);
+        let time = display.clock.map_or(0.0, |clock| clock.absolute_seconds);
+        for material in &self.editor.document.model.accepted.materials {
+            if material.mass_law.alternate.is_none() && material.stiffness_law.alternate.is_none() {
+                continue;
+            }
+            let Some(record) = runtime
+                .records()
+                .iter()
+                .find(|record| record.material() == material.id)
+            else {
+                continue;
+            };
+            let switch = record.switch();
+            let now = switch.blend(time).unwrap_or(switch.target_blend());
+            self.switch_states
+                .push((material.id, switch.target_blend(), now));
+        }
+    }
+
+    /// Sends one material's Switch towards whichever state it is not headed
+    /// for, over the material's authored ramp. The device stamps the start;
+    /// nothing is written to the document.
+    fn send_material_switch(
+        &mut self,
+        active: &PreparedTopology,
+        display: &CanonicalGpuDisplay,
+        request: &mut CanonicalGpuRequest,
+        assets: &mut Assets<ShaderBuffer>,
+        material: MaterialId,
+    ) {
+        let Some(temporal) = &active.canonical_temporal_operator else {
+            self.message = "This medium has no Switch to throw".into();
+            return;
+        };
+        let authored = temporal.initial_runtime();
+        let runtime = display
+            .accepted_material_runtime(&authored)
+            .unwrap_or(authored);
+        let Some(ramp) = self
+            .editor
+            .document
+            .model
+            .accepted
+            .materials
+            .iter()
+            .find(|candidate| candidate.id == material)
+            .map(|found| found.switch_ramp)
+        else {
+            return;
+        };
+        let heading = self.switch_targets.get(&material).copied().or_else(|| {
+            runtime
+                .records()
+                .iter()
+                .find(|record| record.material() == material)
+                .map(|record| record.switch().target_blend() >= 0.5)
+        });
+        let Some(heading) = heading else {
+            self.message = "This material has no Switch in the running generation".into();
+            return;
+        };
+        self.canonical_event_serial = self
+            .canonical_event_serial
+            .max(request.stats().processed_event())
+            .saturating_add(1)
+            .max(1);
+        match CanonicalGpuLiveEvent::temporal_switch_in(
+            &runtime,
+            material,
+            !heading,
+            ramp,
+            self.canonical_event_serial,
+        )
+        .map_err(|error| format!("{error:?}"))
+        .and_then(|event| {
+            request
+                .queue_live_event(assets, event)
+                .map_err(str::to_owned)
+        }) {
+            Ok(()) => {
+                self.switch_targets.insert(material, !heading);
+            }
+            Err(error) => self.message = error,
+        }
+    }
+
     /// A device failure during a run pauses it at the last accepted step,
     /// names the reason in the log and lights the badge. Nothing is clipped
     /// or reset: Run or Step clears the latch and retries from that step, and

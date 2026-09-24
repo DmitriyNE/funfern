@@ -25,6 +25,9 @@ impl Playground {
         // whatever the user aimed at. Every grab test uses the press origin.
         let press = ui.input(|input| input.pointer.press_origin()).or(pointer);
         let typing = ui.ctx().egui_wants_keyboard_input();
+        if !typing && ui.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::S)) {
+            self.request_material_switch();
+        }
         let touch_active = ui.input(|input| input.any_touches());
         self.touch_active = touch_active;
         let multi_touch = ui.input(|input| input.multi_touch());

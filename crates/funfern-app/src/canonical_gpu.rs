@@ -650,14 +650,27 @@ impl CanonicalGpuLiveEvent {
         duration: f64,
         serial: u32,
     ) -> Result<Self, CanonicalGpuBuildError> {
+        Self::temporal_switch_in(state.runtime(), material, switched, duration, serial)
+    }
+
+    /// The same event from the runtime bank alone, which is what an
+    /// application holding no CPU state has: the record's index is all the
+    /// upload names, and every generation compiles its records in the order
+    /// of this bank.
+    pub fn temporal_switch_in(
+        runtime: &CanonicalMaterialRuntimeState,
+        material: MaterialId,
+        switched: bool,
+        duration: f64,
+        serial: u32,
+    ) -> Result<Self, CanonicalGpuBuildError> {
         Self::validate_serial(serial)?;
         if !duration.is_finite() || duration < 0.0 {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "a material Switch duration must be finite and nonnegative",
             ));
         }
-        let runtime_index = state
-            .runtime()
+        let runtime_index = runtime
             .records()
             .binary_search_by_key(&material, |record| record.material())
             .map_err(|_| {

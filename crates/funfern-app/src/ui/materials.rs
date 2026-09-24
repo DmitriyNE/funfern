@@ -523,6 +523,41 @@ impl Playground {
                             .update_while_editing(false),
                     );
                 });
+                // Throwing the Switch is a run-time act, not an edit: it is
+                // stamped on the device clock and leaves the document and its
+                // undo history alone.
+                let state = self
+                    .switch_states
+                    .iter()
+                    .find(|(id, _, _)| *id == material.id)
+                    .copied();
+                let heading = self
+                    .switch_targets
+                    .get(&material.id)
+                    .copied()
+                    .or(state.map(|(_, target, _)| target >= 0.5));
+                ui.horizontal(|ui| {
+                    let label = if heading == Some(true) {
+                        "Switch ◂"
+                    } else {
+                        "Switch ▸"
+                    };
+                    if ui
+                        .add_enabled(state.is_some(), egui::Button::new(label))
+                        .on_hover_text(
+                            "Ramp this material to its alternate law, or back, over the \
+                             Switch ramp. Hotkey S. It acts on the running medium and is \
+                             not an edit.",
+                        )
+                        .on_disabled_hover_text("Runs once the medium is running")
+                        .clicked()
+                    {
+                        self.pending_switch = Some(material.id);
+                    }
+                    if let Some((_, target, now)) = state {
+                        ui.small(switch_state_text(target, now));
+                    }
+                });
             }
             // What the laws compose to, in the names the preset gave them.
             for line in material_law_summary(&material, physics, LawSummaryDetail::Named)
@@ -635,6 +670,55 @@ impl Playground {
     }
 }
 
+/// Where a material's Switch stands: at either end, or how far along its
+/// ramp towards the end it is headed for.
+fn switch_state_text(target: f64, now: f64) -> String {
+    let (end, progress) = if target >= 0.5 {
+        ("alternate", now)
+    } else {
+        ("base", 1.0 - now)
+    };
+    if progress >= 0.999 {
+        format!("At {end}")
+    } else {
+        format!("Ramping to {end}: {:.0}%", 100.0 * progress)
+    }
+}
+
+impl Playground {
+    /// The Switch the hotkey throws: the material open in the editor if it
+    /// has one, otherwise the document's only Switch material.
+    pub(super) fn request_material_switch(&mut self) {
+        let switchable = self
+            .editor
+            .document
+            .model
+            .accepted
+            .materials
+            .iter()
+            .filter(|material| {
+                material.mass_law.alternate.is_some() || material.stiffness_law.alternate.is_some()
+            })
+            .map(|material| material.id)
+            .collect::<Vec<_>>();
+        let chosen = self
+            .material_edit
+            .as_ref()
+            .map(|material| material.id)
+            .filter(|id| switchable.contains(id))
+            .or_else(|| (switchable.len() == 1).then(|| switchable[0]));
+        match chosen {
+            Some(material) => self.pending_switch = Some(material),
+            None if switchable.is_empty() => {
+                self.message = "No material here has a Switch".into();
+            }
+            None => {
+                self.message = "Open the material to switch in the editor first".into();
+            }
+        }
+    }
+}
+
 /// One line per row of `material` whose law follows the field, reading the
 /// row's peak change from its small-signal value.
 fn nonlinear_strength_lines(
@@ -711,6 +795,59 @@ mod tests {
                 "Now: Reciprocal stiffness s₀ up to +0.04% from its small-signal value",
             ]
         );
+    }
+
+    #[test]
+    fn the_switch_state_reads_its_end_or_its_progress() {
+        assert_eq!(switch_state_text(0.0, 0.0), "At base");
+        assert_eq!(switch_state_text(1.0, 1.0), "At alternate");
+        assert_eq!(switch_state_text(1.0, 0.4), "Ramping to alternate: 40%");
+        assert_eq!(switch_state_text(0.0, 0.25), "Ramping to base: 75%");
+    }
+
+    /// The hotkey finds the document's one Switch material, and the running
+    /// generation compiles a runtime record the device event can name. The
+    /// device side of the event is `canonical_gpu_temporal`'s gate.
+    #[test]
+    fn a_switch_preset_can_be_thrown_on_the_running_medium() {
+        let mut state = Playground::default();
+        activate(&mut state);
+        state.request_material_switch();
+        assert_eq!(state.pending_switch, None, "nothing here has a Switch");
+
+        let material = state.editor.document.model.draft.materials[0].clone();
+        let switch = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Switchable medium" && preset.row == LawPresetRow::Mass)
+            .expect("the catalogue offers a Switch");
+        state
+            .editor
+            .update_material(apply_law_preset(switch, &material).unwrap())
+            .unwrap();
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        state.request_material_switch();
+        assert_eq!(state.pending_switch, Some(material.id));
+
+        let temporal = active
+            .canonical_temporal_operator
+            .as_ref()
+            .expect("a Switch medium runs as a temporal generation");
+        let runtime = temporal.initial_runtime();
+        let record = runtime
+            .records()
+            .iter()
+            .find(|record| record.material() == material.id)
+            .expect("the Switch material has a runtime record");
+        assert_eq!(record.switch().target_blend(), 0.0, "it starts at its base");
+        funfern_app::canonical_gpu::CanonicalGpuLiveEvent::temporal_switch_in(
+            &runtime,
+            material.id,
+            true,
+            0.5,
+            1,
+        )
+        .unwrap();
     }
 
     /// The claim the Response selector makes: choosing a preset and applying

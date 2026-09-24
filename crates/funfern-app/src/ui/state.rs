@@ -142,6 +142,16 @@ pub struct Playground {
     pub(super) pulse_amplitude: f32,
     pub(super) pulse_width: f32,
     pub(super) pending_pulse: Option<(Point2, RegionId)>,
+    /// A material Switch asked for by its button or hotkey, sent at the next
+    /// frame that can queue a live event.
+    pub(super) pending_switch: Option<MaterialId>,
+    /// The Switch direction last sent for each material. The accepted runtime
+    /// only arrives with a full snapshot, so a second press before then would
+    /// otherwise read the old direction and send the same one again.
+    pub(super) switch_targets: std::collections::BTreeMap<MaterialId, bool>,
+    /// Each Switch material's accepted ramp from the latest snapshot:
+    /// `(material, target blend, blend now)`.
+    pub(super) switch_states: Vec<(MaterialId, f64, f64)>,
     pub(super) canonical_event_serial: u32,
     pub(super) canonical_event_observed: u32,
     pub(super) probe_mode: Option<ProbePlacement>,
@@ -366,6 +376,9 @@ impl Default for Playground {
             pulse_amplitude: 1.0,
             pulse_width: 0.06,
             pending_pulse: None,
+            pending_switch: None,
+            switch_targets: std::collections::BTreeMap::new(),
+            switch_states: Vec::new(),
             canonical_event_serial: 0,
             canonical_event_observed: 0,
             probe_mode: None,

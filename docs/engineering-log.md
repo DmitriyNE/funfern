@@ -11250,3 +11250,32 @@ screen said so.
   - `the_time_step_bound_names_the_row_that_lowers_it`: a 0.2 pump floors at
     0.8, and the ceiling falls by √0.8; Kerr keeps the fixed ceiling.
   - Both line formatters, with the skin's names.
+
+## 2026-09-24 — The Switch can be thrown from the editor
+
+Stage 10.3. The device has had the material Switch event since Stage 7, stamped
+on its own clock, but only the examples ever sent it. A switchable medium could
+be authored and its ramp set, and nothing would throw it.
+
+- **Button and hotkey.** `Switch ▸` / `Switch ◂` sits beside the Switch ramp.
+  Hotkey S acts on the material open in the editor, or the document's only
+  Switch material. The button is disabled until the medium runs, and shows
+  "At base", "At alternate" or "Ramping to …: n%".
+  - The state is the accepted runtime bank from the latest full snapshot,
+    read at that snapshot's clock.
+  - The direction last sent is kept per material. Two presses inside one
+    snapshot interval therefore go there and back, not the same way twice.
+  - A fresh start forgets it, since the authored runtime starts at base.
+- **Event.** `CanonicalGpuLiveEvent::temporal_switch_in` builds the event from
+  the runtime bank alone, which is all an app without a CPU state has. The
+  state-taking form now wraps it.
+- **Not an edit.** The event goes through the live-event queue beside pulses
+  and source patches. It changes neither the document nor undo, and a
+  handoff carries the ramp over with the runtime bank as before.
+- **Tests:**
+  - `a_switch_preset_can_be_thrown_on_the_running_medium`: with no Switch the
+    hotkey refuses. After the Switch preset, it picks that material, the
+    generation has its record at base, and the event builds.
+  - The state text at both ends and mid-ramp.
+  - The device side is `canonical_gpu_temporal`'s Switch-reversal gate,
+    unchanged.
