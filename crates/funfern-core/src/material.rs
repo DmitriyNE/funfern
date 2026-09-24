@@ -216,7 +216,7 @@ impl ScalarField {
 
     /// Builds a reciprocal expression and performs the small, structural
     /// simplifications used when converting between physics material laws.
-    pub(crate) fn reciprocal(&self) -> Result<Self, MaterialError> {
+    pub fn reciprocal(&self) -> Result<Self, MaterialError> {
         Self::from_transformed_expression(Expression::Binary {
             operator: BinaryOperator::Div,
             left: Box::new(Expression::Constant(1.0)),
@@ -1196,6 +1196,36 @@ fn replace_identifier(source: &str, old: &str, new: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mechanical Advanced view shows `s₀ = 1/k₀` and writes an edited
+    /// `s₀` back as `k₀ = 1/s₀`. Round trips must not grow the expression.
+    #[test]
+    fn a_reciprocal_round_trip_returns_the_formula_it_started_from() {
+        for source in [
+            "2 + 0.5 * x",
+            "k_base * (1 + 0.2 * cos(3 * theta))",
+            "exp(-r * r)",
+        ] {
+            let field = ScalarField::formula(source).unwrap();
+            let there = field.reciprocal().unwrap();
+            let back = there.reciprocal().unwrap();
+            // The same map, and at most one normalization of its text:
+            // printing may parenthesize once, and never again after that.
+            let program = |field: &ScalarField| match field {
+                ScalarField::Formula(formula) => formula.program.clone(),
+                ScalarField::Constant(_) => unreachable!("{source} folded to a constant"),
+            };
+            assert_eq!(program(&back), program(&field), "{source} via {there:?}");
+            let again = back.reciprocal().unwrap().reciprocal().unwrap();
+            assert_eq!(again, back, "{source} grew on a second round trip");
+        }
+        let constant = ScalarField::constant(4.0);
+        assert_eq!(constant.reciprocal().unwrap(), ScalarField::constant(0.25));
+        assert_eq!(
+            constant.reciprocal().unwrap().reciprocal().unwrap(),
+            constant
+        );
+    }
 
     fn at(x: f64, y: f64) -> MaterialCoordinates {
         MaterialCoordinates {

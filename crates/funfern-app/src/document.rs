@@ -205,6 +205,10 @@ pub struct PresentationSettings {
     pub mesh_edge: f64,
     pub adaptation: AdaptationSettings,
     pub grid_scale_filter: bool,
+    /// Whether the material editor shows every law slot and the numeric
+    /// effective law, rather than the preset's named values. A way of looking
+    /// at the same material, so it is kept with the view and not undone.
+    pub advanced_materials: bool,
 }
 
 /// The adaptation controls, as the panel shows them.
@@ -300,6 +304,7 @@ impl Default for PresentationSettings {
             mesh_edge: 0.08,
             adaptation: AdaptationSettings::default(),
             grid_scale_filter: true,
+            advanced_materials: false,
         }
     }
 }

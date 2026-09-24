@@ -11279,3 +11279,43 @@ be authored and its ramp set, and nothing would throw it.
   - The state text at both ends and mid-ramp.
   - The device side is `canonical_gpu_temporal`'s Switch-reversal gate,
     unchanged.
+
+## 2026-09-24 — Simplified and Advanced material views
+
+Stage 10.4, plan §11.
+
+- **The toggle.** An Advanced checkbox beside the Library heading, stored as
+  `PresentationSettings::advanced_materials`. It is saved with the view
+  settings, with a serde default so older files still load, and it touches
+  neither the model, the revision nor undo.
+- **Simplified** is the panel as it was: base values, the preset selector
+  and its named values, the effective law in names, the Switch and the
+  nonlinear readout.
+- **Advanced** (`ui/law_editor.rs`) adds:
+  - every slot of both rows: field response (Linear, Kerr, Saturable; χ and
+    optional bound, or χ and σ), drive (none, pump, time crystal,
+    travelling, with every parameter), Switch alternate, and divide, offered
+    only on a linear row;
+  - both named loss channels, with the field each one damps in this skin in
+    the hover, and a warning when legacy damping would clash with them;
+  - the effective law evaluated at the frame origin.
+- **Only runnable laws are offered.** A signed χ₁, a divided field response
+  or a field-dependent loss rate already on a material is shown as not run
+  and left alone. Nothing converts it.
+- **Reciprocal stiffness.** In Mechanical, Advanced shows the stiffness row as
+  `s₀ = 1/k₀`. `ScalarField::reciprocal` is now public; `k₀` is rewritten as
+  `1/s₀` only when `s₀` is edited, and each hidden editor forgets its cached
+  text.
+- **Relative χ.** The hover states that χ is relative, `c₀(1 + χ|u|²)`, and
+  that the expanded map's absolute cubic coefficient `a₃ = c₀χ` is a different
+  quantity.
+- **Tests:**
+  - A round trip of `k₀` formulas through the reciprocal twice keeps the
+    compiled program. Printing may normalize the text once, never again.
+  - An edited `1/(3 + x)` stores `k₀ = 3 + x`.
+  - Rendering the reciprocal editor leaves `k₀` untouched.
+  - A Custom material (signed polynomial, travelling drive with a formula,
+    saturable row with a spatial σ, alternate, field-dependent loss channel)
+    is rendered twice in all three skins and comes back identical, with no
+    formula errors.
+  - The toggle is not an edit and survives the file.

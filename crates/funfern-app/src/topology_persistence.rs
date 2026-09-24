@@ -1133,6 +1133,8 @@ struct StoredPresentation {
     adaptation_maximum_edge: f64,
     #[serde(default = "default_grid_scale_filter")]
     grid_scale_filter: bool,
+    #[serde(default)]
+    advanced_materials: bool,
 }
 
 fn default_mesh_edge() -> f64 {
@@ -1826,6 +1828,7 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
         adaptation_minimum_edge: settings.adaptation.minimum_edge,
         adaptation_maximum_edge: settings.adaptation.maximum_edge,
         grid_scale_filter: settings.grid_scale_filter,
+        advanced_materials: settings.advanced_materials,
         vector_overlay: match settings.vector_overlay {
             VectorOverlay::Off => StoredVectorOverlay::Off,
             VectorOverlay::ComplementaryField => StoredVectorOverlay::ComplementaryField,
@@ -1888,6 +1891,7 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
             maximum_edge: stored.adaptation_maximum_edge,
         },
         grid_scale_filter: stored.grid_scale_filter,
+        advanced_materials: stored.advanced_materials,
         vector_overlay: match stored.vector_overlay {
             StoredVectorOverlay::Off => VectorOverlay::Off,
             StoredVectorOverlay::ComplementaryField => VectorOverlay::ComplementaryField,
@@ -2407,6 +2411,7 @@ mod tests {
                     maximum_edge: if flag { 0.2 } else { 0.35 },
                 },
                 grid_scale_filter: flag,
+                advanced_materials: flag,
             };
             document.model.probes = vec![TopologyProbeDefinition {
                 id: ProbeId(1),
@@ -2446,6 +2451,7 @@ mod tests {
             "adaptation_minimum_edge",
             "adaptation_maximum_edge",
             "grid_scale_filter",
+            "advanced_materials",
             "probe_labels",
             "field_auto_exposure",
             "simulation_speed",

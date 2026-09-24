@@ -47,6 +47,7 @@ mod gesture;
 mod gizmo;
 mod input;
 mod inspectors;
+mod law_editor;
 mod materials;
 mod pacing;
 mod paint;

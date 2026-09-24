@@ -325,6 +325,16 @@ impl Playground {
         ui.horizontal(|ui| {
             ui.label("Library");
             self.formula_help_toggle(ui);
+            // A view of the same materials, kept with the document's other
+            // view settings rather than as an undoable edit.
+            ui.checkbox(
+                &mut self.editor.document.presentation.advanced_materials,
+                "Advanced",
+            )
+            .on_hover_text(
+                "Every law slot of both rows, the loss channels and the effective law \
+                 in numbers, instead of the preset's named values",
+            );
             if ui.button("+").clicked() {
                 match self.editor.add_material() {
                     Ok(id) => {
@@ -444,16 +454,39 @@ impl Playground {
                 &mut self.material_formula_edits,
                 &mut self.material_formula_errors,
             );
-            material_scalar_editor(
-                ui,
-                (material.id.0, 1),
-                labels.stiffness,
-                &mut material.stiffness,
-                &material.parameters,
-                0.000001,
-                &mut self.material_formula_edits,
-                &mut self.material_formula_errors,
-            );
+            let advanced = self.editor.document.presentation.advanced_materials;
+            // `k₀` and `s₀` are one coefficient shown two ways; each editor
+            // caches its own text, so the one not on screen forgets it rather
+            // than reappearing with a value from before the other was edited.
+            let hidden = if advanced && physics == PhysicsModel::Mechanical {
+                1
+            } else {
+                law_editor::RECIPROCAL_STIFFNESS
+            };
+            self.material_formula_edits.remove(&(material.id.0, hidden));
+            self.material_formula_errors
+                .remove(&(material.id.0, hidden));
+            if advanced && physics == PhysicsModel::Mechanical {
+                law_editor::reciprocal_stiffness_editor(
+                    ui,
+                    &mut material,
+                    &mut law_editor::FormulaEdits {
+                        edits: &mut self.material_formula_edits,
+                        errors: &mut self.material_formula_errors,
+                    },
+                );
+            } else {
+                material_scalar_editor(
+                    ui,
+                    (material.id.0, 1),
+                    labels.stiffness,
+                    &mut material.stiffness,
+                    &material.parameters,
+                    0.000001,
+                    &mut self.material_formula_edits,
+                    &mut self.material_formula_errors,
+                );
+            }
             material_scalar_editor(
                 ui,
                 (material.id.0, 2),
@@ -559,11 +592,26 @@ impl Playground {
                     }
                 });
             }
+            if advanced {
+                law_editor::advanced_law_editor(
+                    ui,
+                    &mut material,
+                    physics,
+                    &mut law_editor::FormulaEdits {
+                        edits: &mut self.material_formula_edits,
+                        errors: &mut self.material_formula_errors,
+                    },
+                );
+                ui.separator();
+            }
             // What the laws compose to, in the names the preset gave them.
             for line in material_law_summary(&material, physics, LawSummaryDetail::Named)
                 .unwrap_or_default()
             {
                 ui.small(format!("{} = {}", line.subject, line.response));
+            }
+            if advanced {
+                law_editor::numeric_law_summary(ui, &material, physics);
             }
             // How far the field has taken this medium from its small-signal
             // response right now, so a Kerr run that is barely nonlinear is
@@ -795,6 +843,23 @@ mod tests {
                 "Now: Reciprocal stiffness s₀ up to +0.04% from its small-signal value",
             ]
         );
+    }
+
+    /// The Advanced toggle is a view: it changes neither the model, nor its
+    /// revision, nor the undo history, and it survives the file.
+    #[test]
+    fn the_advanced_view_is_presentation_not_an_edit() {
+        let mut state = Playground::default();
+        activate(&mut state);
+        let model = state.editor.document.model.clone();
+        let revision = state.editor.revision;
+        state.editor.document.presentation.advanced_materials = true;
+        assert_eq!(state.editor.document.model, model);
+        assert_eq!(state.editor.revision, revision);
+        assert!(!state.editor.undo(), "the toggle made an undo step");
+        let saved = funfern_app::topology_persistence::save(&state.editor.document).unwrap();
+        let loaded = funfern_app::topology_persistence::parse_document(saved.as_bytes()).unwrap();
+        assert!(loaded.presentation.advanced_materials);
     }
 
     #[test]

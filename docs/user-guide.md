@@ -208,7 +208,15 @@ running; this file covers using it.
   field; it is not an edit and leaves undo alone. A Kerr or saturable medium
   reads out how far the field has moved it, as the coefficient's peak change
   from its small-signal value, and the Solver section names what lowers the
-  step ceiling. Selecting a region row highlights its
+  step ceiling. **Advanced**, beside the Library heading, opens every law slot
+  of both rows - field response, drive, Switch alternate, divide - and both
+  named loss channels, with the effective law evaluated at the frame origin.
+  In Mechanical it presents the stiffness row as the reciprocal stiffness
+  `s₀ = 1/k₀` the solver uses, written back as `k₀` only when edited. χ is
+  relative: the coefficient is `c₀(1 + χ|u|²)`, not `c₀u + a₃|u|²u`. Only laws
+  the solver runs are offered, and a slot holding one it does not run is shown
+  and kept as authored. The view is kept with the document and is not an
+  edit. Selecting a region row highlights its
   complete derived boundary in the viewport and carries the same categorical
   swatch the Subdomains overlay uses. Material changes preserve the live field and reuse the committed
   mesh. Profile placement appears for the selected subdomain and can be adjusted
