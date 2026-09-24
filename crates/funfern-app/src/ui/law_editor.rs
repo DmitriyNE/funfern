@@ -21,6 +21,11 @@ const STIFFNESS_ROW: u8 = 32;
 const ELECTRIC_LOSS: u8 = 48;
 const MAGNETIC_LOSS: u8 = 64;
 pub(super) const RECIPROCAL_STIFFNESS: u8 = 80;
+const RESTORING: u8 = 96;
+pub(super) const SELF_OSCILLATING_RESPONSE: &str = "Not beside a self-oscillating loss: van der Pol's node map assumes a linear response. \
+     Make the loss constant first.";
+/// The van der Pol threshold, beside its channel's rate and drive slots.
+const THRESHOLD: u8 = 14;
 
 pub(super) struct FormulaEdits<'a> {
     pub edits: &'a mut BTreeMap<(u64, u8), String>,
@@ -79,11 +84,31 @@ pub(super) fn law_slots_editor(
 ) {
     let id = material.id.0;
     let parameters = material.parameters.clone();
+    let field_laws = !self_oscillating(material);
     let (base, law) = match row {
         LawPresetRow::Stiffness => (STIFFNESS_ROW, &mut material.stiffness_law),
         _ => (MASS_ROW, &mut material.mass_law),
     };
-    coefficient_law_editor(ui, id, base, law, &parameters, sources, formulas);
+    coefficient_law_editor(
+        ui,
+        id,
+        base,
+        law,
+        &parameters,
+        sources,
+        field_laws,
+        formulas,
+    );
+}
+
+/// Whether a material's loss self-oscillates. Van der Pol's node map assumes
+/// the field is the flux over the mass, so a field-dependent response is not
+/// offered beside it.
+pub(super) fn self_oscillating(material: &Material) -> bool {
+    [&material.electric_loss, &material.magnetic_loss]
+        .into_iter()
+        .flatten()
+        .any(|channel| matches!(channel.law.rate, RateLaw::VanDerPol { .. }))
 }
 
 /// Which named loss channel damps the field a row's coefficient belongs to.
@@ -174,8 +199,23 @@ pub(super) fn loss_rate_editor(
     };
     let mut edited = shown.clone();
     let parameters = material.parameters.clone();
+    // Gate O: the primary row's loss may self-oscillate instead.
+    let primary = row == legacy_damping_row(physics);
+    let active = primary
+        && row_channel(material, physics, row)
+            .as_ref()
+            .is_some_and(|channel| matches!(channel.law.rate, RateLaw::VanDerPol { .. }));
+    if primary {
+        loss_kind_editor(ui, material, physics, row, active, formulas);
+    }
+    let active = primary
+        && row_channel(material, physics, row)
+            .as_ref()
+            .is_some_and(|channel| matches!(channel.law.rate, RateLaw::VanDerPol { .. }));
     let label = if legacy {
         "Loss rate (legacy)"
+    } else if active {
+        "Gain rate γ₀"
     } else {
         "Loss rate"
     };
@@ -214,8 +254,32 @@ pub(super) fn loss_rate_editor(
     }
     let channel = row_channel(material, physics, row);
     let Some(found) = channel else { return };
+    if let RateLaw::VanDerPol { threshold, .. } = &found.law.rate
+        && primary
+    {
+        let mut edited = threshold.clone();
+        field_row(
+            ui,
+            (id, base + THRESHOLD),
+            "Threshold a",
+            &mut edited,
+            &parameters,
+            0.000001,
+            formulas,
+        )
+        .on_hover_text(
+            "Below this field amplitude the medium gives energy, above it takes energy, so a \
+             field settles near it.",
+        );
+        if let Some(found) = row_channel(material, physics, row)
+            && let RateLaw::VanDerPol { threshold, .. } = &mut found.law.rate
+        {
+            *threshold = edited;
+        }
+        return;
+    }
     if found.law.rate != RateLaw::Constant {
-        ui.small("A field-dependent loss rate does not run yet; it is kept as authored.");
+        ui.small("This field-dependent loss rate does not run; it is kept as authored.");
     }
     if advanced {
         let before = found.law.drive.clone();
@@ -226,6 +290,295 @@ pub(super) fn loss_rate_editor(
             if let Some(found) = row_channel(material, physics, row) {
                 found.law.drive = drive;
             }
+        }
+    }
+}
+
+/// The primary row's loss kind: a constant rate, or van der Pol's
+/// self-oscillating one (catalogue D3). It is offered only where the solver
+/// runs it: beside a linear response, with no drive on the channel.
+fn loss_kind_editor(
+    ui: &mut egui::Ui,
+    material: &mut Material,
+    physics: PhysicsModel,
+    row: LawPresetRow,
+    active: bool,
+    formulas: &mut FormulaEdits,
+) {
+    let linear_response = material.mass_law.field == FieldLaw::Linear
+        && material.stiffness_law.field == FieldLaw::Linear;
+    let undriven = row_channel(material, physics, row)
+        .as_ref()
+        .is_none_or(|channel| channel.law.drive == TimeDrive::None);
+    let mut chosen = active;
+    ui.horizontal(|ui| {
+        ui.label("Loss kind");
+        ui.selectable_value(&mut chosen, false, "Constant");
+        ui.add_enabled_ui(active || (linear_response && undriven), |ui| {
+            ui.selectable_value(&mut chosen, true, "Self-oscillating")
+                .on_hover_text(van_der_pol_text(physics))
+                .on_disabled_hover_text(if linear_response {
+                    "Van der Pol runs on an undriven loss; remove this row's loss drive first."
+                } else {
+                    "Van der Pol runs only beside a linear response; its node map assumes the \
+                     field is the flux over the mass."
+                });
+        });
+    });
+    if chosen == active {
+        return;
+    }
+    let base = if row == LawPresetRow::Stiffness {
+        MAGNETIC_LOSS
+    } else {
+        ELECTRIC_LOSS
+    };
+    forget(formulas, material.id.0, base, 0..16);
+    set_self_oscillating(material, physics, row, chosen);
+}
+
+/// Makes a row's loss self-oscillating or constant again. A legacy damping
+/// moves into the named channel first; a channel's rate carries across, and a
+/// fresh one starts at a gain of 0.5 per second against a threshold of 1.
+fn set_self_oscillating(
+    material: &mut Material,
+    physics: PhysicsModel,
+    row: LawPresetRow,
+    chosen: bool,
+) {
+    adopt_legacy_damping(material, physics);
+    let channel = row_channel(material, physics, row);
+    if chosen {
+        let rate = channel
+            .as_ref()
+            .map(|channel| channel.base_rate.clone())
+            .filter(|rate| *rate != ScalarField::constant(0.0))
+            .unwrap_or(ScalarField::constant(0.5));
+        *channel = Some(LossChannel {
+            base_rate: rate,
+            law: DampingLaw {
+                rate: RateLaw::VanDerPol {
+                    threshold: ScalarField::constant(1.0),
+                    // Only a threshold past this is refused; a preset has no
+                    // amplitude it could promise to stay under.
+                    amplitude_bound: ScalarField::constant(1.0e3),
+                },
+                drive: TimeDrive::None,
+            },
+        });
+    } else if let Some(found) = channel {
+        found.law.rate = RateLaw::Constant;
+    }
+}
+
+/// The restoring force on the integrated field (Gate O). It is not a
+/// coefficient, so it has a group of its own: the law, its values, and what
+/// it composes to. Returns an error to report when a preset could not apply.
+pub(super) fn restoring_editor(
+    ui: &mut egui::Ui,
+    material: &mut Material,
+    physics: PhysicsModel,
+    advanced: bool,
+    numbers: bool,
+    formulas: &mut FormulaEdits,
+) -> Option<String> {
+    let origin = MaterialCoordinates {
+        x: 0.0,
+        y: 0.0,
+        r: 0.0,
+        theta: 0.0,
+    };
+    let detail = if numbers {
+        LawSummaryDetail::Numeric(origin)
+    } else {
+        LawSummaryDetail::Named
+    };
+    let matched = identify_restoring_preset(material);
+    let equation = matched
+        .as_ref()
+        .map(|found| restoring_preset_text(found.preset, physics).equation)
+        .unwrap_or_default();
+    match restoring_law_summary(material, physics, detail) {
+        Ok(Some(line)) => {
+            let response = ui.small(format!("{} = {}", line.subject, line.response));
+            if !equation.is_empty() {
+                response.on_hover_text(&equation);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            ui.small(format!("Restoring law unavailable: {error}"));
+        }
+    }
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        ui.label("Law");
+        egui::ComboBox::from_id_salt(("restoring-law", material.id.0))
+            .selected_text(matched.as_ref().map_or_else(
+                || "Custom".to_owned(),
+                |found| restoring_preset_text(found.preset, physics).name,
+            ))
+            .show_ui(ui, |ui| {
+                for preset in restoring_presets() {
+                    let text = restoring_preset_text(preset, physics);
+                    let current = matched.as_ref().is_some_and(|found| found.preset == preset);
+                    let hover = if text.equation.is_empty() {
+                        text.phenomenon.clone()
+                    } else {
+                        format!("{}.\n\n{}", text.phenomenon, text.equation)
+                    };
+                    if ui
+                        .selectable_label(current, text.name)
+                        .on_hover_text(hover)
+                        .clicked()
+                    {
+                        chosen = Some(preset);
+                    }
+                }
+            });
+    });
+    let mut failure = None;
+    if let Some(preset) = chosen {
+        match apply_restoring_preset(preset, material) {
+            Ok(applied) => {
+                forget(formulas, material.id.0, RESTORING, 0..4);
+                *material = applied;
+            }
+            Err(error) => failure = Some(error.to_string()),
+        }
+    }
+    if advanced {
+        restoring_slots_editor(ui, material, formulas);
+    } else if let Some(found) = identify_restoring_preset(material) {
+        for (variable, name) in found.preset.variables.iter().zip(&found.parameters) {
+            let Some(parameter) = material
+                .parameters
+                .iter_mut()
+                .find(|parameter| parameter.name == *name)
+            else {
+                continue;
+            };
+            ui.horizontal(|ui| {
+                ui.label(variable.label);
+                ui.add(
+                    egui::DragValue::new(&mut parameter.value)
+                        .speed(0.01)
+                        .range(variable.minimum..=variable.maximum)
+                        .update_while_editing(false),
+                );
+            });
+        }
+    }
+    // The cutoff as a frequency, which is what a source is authored in.
+    if let RestoringLaw::KleinGordon { omega0 } | RestoringLaw::SineGordon { omega0 } =
+        &material.restoring
+        && let Ok(omega0) = omega0.evaluate(origin, &material.parameters)
+    {
+        ui.small(format!(
+            "Cutoff f₀ = ω₀/2π = {:.3} Hz",
+            omega0 / std::f64::consts::TAU
+        ))
+        .on_hover_text(
+            "A wave below this frequency does not propagate in the medium. A drive on the \
+             mass row moves it as ω₀√(m₀/m).",
+        );
+    }
+    failure
+}
+
+/// The restoring slot itself, in Advanced: its kind and each parameter as a
+/// formula. A kind change writes that law with constant starting values.
+fn restoring_slots_editor(ui: &mut egui::Ui, material: &mut Material, formulas: &mut FormulaEdits) {
+    let id = material.id.0;
+    let parameters = material.parameters.clone();
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        None,
+        KleinGordon,
+        SineGordon,
+        Phi4,
+    }
+    let kind = match &material.restoring {
+        RestoringLaw::None => Kind::None,
+        RestoringLaw::KleinGordon { .. } => Kind::KleinGordon,
+        RestoringLaw::SineGordon { .. } => Kind::SineGordon,
+        RestoringLaw::Phi4 { .. } => Kind::Phi4,
+    };
+    let mut chosen = kind;
+    ui.horizontal(|ui| {
+        ui.label("Kind");
+        egui::ComboBox::from_id_salt(("restoring-kind", id))
+            .selected_text(match kind {
+                Kind::None => "None",
+                Kind::KleinGordon => "Klein-Gordon",
+                Kind::SineGordon => "sine-Gordon",
+                Kind::Phi4 => "φ⁴",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut chosen, Kind::None, "None");
+                ui.selectable_value(&mut chosen, Kind::KleinGordon, "Klein-Gordon");
+                ui.selectable_value(&mut chosen, Kind::SineGordon, "sine-Gordon");
+                ui.selectable_value(&mut chosen, Kind::Phi4, "φ⁴");
+            });
+    });
+    if chosen != kind {
+        forget(formulas, id, RESTORING, 0..4);
+        // Carry the cutoff across Klein-Gordon and sine-Gordon, which share it.
+        let omega0 = match &material.restoring {
+            RestoringLaw::KleinGordon { omega0 } | RestoringLaw::SineGordon { omega0 } => {
+                omega0.clone()
+            }
+            _ => ScalarField::constant(3.0),
+        };
+        material.restoring = match chosen {
+            Kind::None => RestoringLaw::None,
+            Kind::KleinGordon => RestoringLaw::KleinGordon { omega0 },
+            Kind::SineGordon => RestoringLaw::SineGordon { omega0 },
+            Kind::Phi4 => RestoringLaw::Phi4 {
+                lambda: ScalarField::constant(16.0),
+                amplitude_bound: ScalarField::constant(1.6),
+            },
+        };
+    }
+    match &mut material.restoring {
+        RestoringLaw::None => {}
+        RestoringLaw::KleinGordon { omega0 } | RestoringLaw::SineGordon { omega0 } => {
+            field_row(
+                ui,
+                (id, RESTORING),
+                "Cutoff ω₀",
+                omega0,
+                &parameters,
+                0.0,
+                formulas,
+            );
+        }
+        RestoringLaw::Phi4 {
+            lambda,
+            amplitude_bound,
+        } => {
+            field_row(
+                ui,
+                (id, RESTORING),
+                "Well depth λ",
+                lambda,
+                &parameters,
+                0.0,
+                formulas,
+            );
+            field_row(
+                ui,
+                (id, RESTORING + 1),
+                "Amplitude bound",
+                amplitude_bound,
+                &parameters,
+                1.0,
+                formulas,
+            )
+            .on_hover_text(
+                "The largest |r| the medium admits. It sets φ⁴'s curvature, and so the step; \
+                 a node that passes it stops the run rather than being clipped.",
+            );
         }
     }
 }
@@ -313,6 +666,7 @@ fn drive_kind(drive: &TimeDrive) -> DriveKind {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn coefficient_law_editor(
     ui: &mut egui::Ui,
     id: u64,
@@ -320,6 +674,7 @@ fn coefficient_law_editor(
     law: &mut CoefficientLaw,
     parameters: &[MaterialParameter],
     sources: &[(String, f64)],
+    field_laws: bool,
     formulas: &mut FormulaEdits,
 ) {
     let kind = response_kind(&law.field);
@@ -335,10 +690,14 @@ fn coefficient_law_editor(
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut chosen, ResponseKind::Linear, "Linear");
-                ui.selectable_value(&mut chosen, ResponseKind::Kerr, "Kerr")
-                    .on_hover_text("ḡ = 1 + χ|u|²");
-                ui.selectable_value(&mut chosen, ResponseKind::Saturable, "Saturable")
-                    .on_hover_text("ḡ = 1 + χ|u|² / (1 + |u|²/σ²)");
+                ui.add_enabled_ui(field_laws, |ui| {
+                    ui.selectable_value(&mut chosen, ResponseKind::Kerr, "Kerr")
+                        .on_hover_text("ḡ = 1 + χ|u|²")
+                        .on_disabled_hover_text(SELF_OSCILLATING_RESPONSE);
+                    ui.selectable_value(&mut chosen, ResponseKind::Saturable, "Saturable")
+                        .on_hover_text("ḡ = 1 + χ|u|² / (1 + |u|²/σ²)")
+                        .on_disabled_hover_text(SELF_OSCILLATING_RESPONSE);
+                });
             });
     });
     if chosen != kind {
@@ -823,6 +1182,81 @@ mod tests {
 
     /// A legacy material is shown, in either view and every skin, without
     /// being rewritten: its damping reads as the primary row's loss.
+    /// Viewing an oscillator material - sine-Gordon beside van der Pol on the
+    /// primary row - rewrites nothing, in either view or any skin.
+    #[test]
+    fn viewing_an_oscillator_leaves_it_as_authored() {
+        let sine_gordon = restoring_presets()
+            .iter()
+            .find(|preset| preset.id == "R2")
+            .unwrap();
+        for physics in SKINS {
+            let mut material =
+                apply_restoring_preset(sine_gordon, &Scene::initial().materials[0]).unwrap();
+            set_self_oscillating(&mut material, physics, legacy_damping_row(physics), true);
+            let before = material.clone();
+            for advanced in [false, true] {
+                let (mut edit, mut error) = edits();
+                let context = egui::Context::default();
+                for _ in 0..2 {
+                    let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                        let mut formulas = FormulaEdits {
+                            edits: &mut edit,
+                            errors: &mut error,
+                        };
+                        rows(ui, &mut material, physics, advanced, &[], &mut formulas);
+                        restoring_editor(
+                            ui,
+                            &mut material,
+                            physics,
+                            advanced,
+                            advanced,
+                            &mut formulas,
+                        );
+                    });
+                }
+                assert_eq!(material, before, "{physics:?}, advanced {advanced}");
+            }
+        }
+    }
+
+    /// Self-oscillation lands on the primary row's own channel in each skin -
+    /// electric in TM, magnetic in TE and Mechanical - takes a legacy damping
+    /// along, and switching back keeps the rate as a constant loss.
+    #[test]
+    fn self_oscillation_sits_on_the_primary_channel() {
+        for physics in SKINS {
+            let mut material = Scene::initial().materials[0].clone();
+            material.damping = ScalarField::constant(0.3);
+            let row = legacy_damping_row(physics);
+            set_self_oscillating(&mut material, physics, row, true);
+            assert_eq!(material.damping, ScalarField::constant(0.0));
+            let electric = physics
+                == PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                };
+            let (channel, other) = if electric {
+                (&material.electric_loss, &material.magnetic_loss)
+            } else {
+                (&material.magnetic_loss, &material.electric_loss)
+            };
+            let channel = channel.as_ref().expect("the primary channel");
+            assert!(other.is_none(), "{physics:?}");
+            assert_eq!(channel.base_rate, ScalarField::constant(0.3));
+            assert!(matches!(channel.law.rate, RateLaw::VanDerPol { .. }));
+            set_self_oscillating(&mut material, physics, row, false);
+            let channel = if electric {
+                &material.electric_loss
+            } else {
+                &material.magnetic_loss
+            };
+            assert_eq!(
+                channel.as_ref().map(|channel| channel.law.rate.clone()),
+                Some(RateLaw::Constant)
+            );
+        }
+    }
+
     #[test]
     fn viewing_a_legacy_damping_leaves_it_where_it_is() {
         let mut material = Scene::initial().materials[0].clone();

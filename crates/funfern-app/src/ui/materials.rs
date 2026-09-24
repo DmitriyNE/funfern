@@ -423,12 +423,24 @@ impl Playground {
                         |found| law_preset_label(found.preset, physics),
                     ))
                     .show_ui(ui, |ui| {
+                        // A field-dependent response does not run beside van der
+                        // Pol, so it is not offered there.
+                        let self_oscillating = law_editor::self_oscillating(&material);
                         for preset in law_presets() {
                             let current =
                                 matched.as_ref().is_some_and(|found| found.preset == preset);
+                            let offered =
+                                !(self_oscillating && preset.id.starts_with("M-F")) || current;
                             if ui
-                                .selectable_label(current, law_preset_label(preset, physics))
+                                .add_enabled(
+                                    offered,
+                                    egui::Button::selectable(
+                                        current,
+                                        law_preset_label(preset, physics),
+                                    ),
+                                )
                                 .on_hover_text(preset.phenomenon)
+                                .on_disabled_hover_text(law_editor::SELF_OSCILLATING_RESPONSE)
                                 .clicked()
                             {
                                 chosen = Some(preset);
@@ -580,6 +592,27 @@ impl Playground {
                         }
                     });
             }
+            // Gate O: the restoring force on the integrated field, which is
+            // not a coefficient and so is not under either row.
+            egui::CollapsingHeader::new("Restoring force")
+                .id_salt(("material-restoring", material.id.0))
+                .default_open(!material.restoring.is_none())
+                .show(ui, |ui| {
+                    let mut formulas = law_editor::FormulaEdits {
+                        edits: &mut self.material_formula_edits,
+                        errors: &mut self.material_formula_errors,
+                    };
+                    if let Some(error) = law_editor::restoring_editor(
+                        ui,
+                        &mut material,
+                        physics,
+                        advanced,
+                        numbers,
+                        &mut formulas,
+                    ) {
+                        self.notify(error);
+                    }
+                });
             egui::CollapsingHeader::new("Anisotropy")
                 .id_salt(("material-anisotropy", material.id.0))
                 .default_open(material.axis_ratio != ScalarField::constant(1.0))

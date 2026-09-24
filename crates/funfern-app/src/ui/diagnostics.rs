@@ -763,14 +763,27 @@ impl Playground {
 
 /// What sets a time-driven generation's step ceiling, in the skin's names.
 fn time_step_bound_line(bound: CanonicalTimeStepBound, physics: PhysicsModel) -> String {
-    let lowered = [
+    let mut lowered = [
         (LawPresetRow::Mass, bound.primary_floor),
         (LawPresetRow::Stiffness, bound.complementary_floor),
     ]
     .into_iter()
     .filter(|(_, floor)| *floor < 1.0)
-    .map(|(row, floor)| format!("{} falls to {floor:.2}×", law_row_label(physics, row)))
+    .map(|(row, floor)| {
+        format!(
+            "{} falls to {floor:.2}× at its lowest",
+            law_row_label(physics, row)
+        )
+    })
     .collect::<Vec<_>>();
+    // Gate O: a restoring law is not a coefficient, but its curvature
+    // tightens the step as `1/dt² = 1/dt_bound² + V″/4`.
+    if bound.restoring_curvature > 0.0 {
+        lowered.push(format!(
+            "the restoring law's curvature V″ reaches {:.3}",
+            bound.restoring_curvature
+        ));
+    }
     if lowered.is_empty() {
         return format!(
             "Step ceiling {:.3e} s, the fixed medium's: no law here lowers it",
@@ -778,7 +791,7 @@ fn time_step_bound_line(bound: CanonicalTimeStepBound, physics: PhysicsModel) ->
         );
     }
     format!(
-        "Step ceiling {:.3e} s, {:.2}× the fixed medium's: {} at its lowest",
+        "Step ceiling {:.3e} s, {:.2}× the fixed medium's: {}",
         bound.trajectory,
         bound.trajectory / bound.fixed,
         lowered.join(", ")
@@ -845,6 +858,7 @@ mod tests {
             trajectory: 2.0e-3 * 0.8_f64.sqrt(),
             primary_floor: 0.8,
             complementary_floor: 1.0,
+            restoring_curvature: 0.0,
         };
         assert_eq!(
             time_step_bound_line(pumped, physics),
@@ -859,6 +873,16 @@ mod tests {
         assert_eq!(
             time_step_bound_line(kerr, physics),
             "Step ceiling 2.000e-3 s, the fixed medium's: no law here lowers it"
+        );
+        let sine_gordon = CanonicalTimeStepBound {
+            trajectory: 1.0e-3,
+            restoring_curvature: 9.0,
+            ..kerr
+        };
+        assert_eq!(
+            time_step_bound_line(sine_gordon, physics),
+            "Step ceiling 1.000e-3 s, 0.50× the fixed medium's: the restoring law's curvature \
+             V″ reaches 9.000"
         );
     }
 

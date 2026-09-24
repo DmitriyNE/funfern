@@ -146,21 +146,22 @@ impl LossChannel {
     }
 }
 
-/// Reserved oscillator authoring data. The formulas are candidate restoring
-/// functions only; their physical state, energy and skin mapping remain behind
-/// Gate O and are not interpreted by the legacy solver.
+/// A restoring law on the integrated primary field `r = ∫u dt` (catalogue
+/// slot R, Gate O): the step carries `r` as state and adds `−m₀V′(r)` to the
+/// kick, at the primary row's authored mass. The fixed solver path does not
+/// carry `r`, so a material holding one takes the time-driven path.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RestoringLaw {
     None,
-    /// `V′ = omega0²·u`: dispersion with a cutoff at `omega0`.
+    /// `V′ = omega0²·r`: dispersion with a cutoff at `omega0`.
     KleinGordon {
         omega0: ScalarField,
     },
-    /// `V′ = omega0²·sin(u)`: kinks, antikinks and breathers.
+    /// `V′ = omega0²·sin(r)`: kinks, antikinks and breathers.
     SineGordon {
         omega0: ScalarField,
     },
-    /// `V′ = lambda·(u³ − u)`: two wells at `u = ±1`, domain walls between.
+    /// `V′ = lambda·(r³ − r)`: two wells at `r = ±1`, domain walls between.
     Phi4 {
         lambda: ScalarField,
         amplitude_bound: ScalarField,
@@ -1970,13 +1971,13 @@ impl RateLawValues {
 }
 
 impl RestoringLawValues {
-    /// `V′(u)`, the acceleration taken away at a node.
-    pub fn slope(self, u: f64) -> f64 {
+    /// `V′(r)` on the integrated field, the force per unit authored mass.
+    pub fn slope(self, r: f64) -> f64 {
         match self {
             Self::None => 0.0,
-            Self::KleinGordon { omega0 } => omega0 * omega0 * u,
-            Self::SineGordon { omega0 } => omega0 * omega0 * u.sin(),
-            Self::Phi4 { lambda, .. } => lambda * (u * u * u - u),
+            Self::KleinGordon { omega0 } => omega0 * omega0 * r,
+            Self::SineGordon { omega0 } => omega0 * omega0 * r.sin(),
+            Self::Phi4 { lambda, .. } => lambda * (r * r * r - r),
         }
     }
 

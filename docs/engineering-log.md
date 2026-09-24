@@ -12152,3 +12152,40 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
     catalogues by its test.
 - **Docs.** The catalogue marks R1–R3 and D3 as running and describes the
   integrated field.
+
+## 2026-09-25 — Oscillator media in the material editor (Stage 11.4b)
+
+- **Restoring force group.** A group of its own after the two coefficient
+  rows, because a restoring law is not a coefficient. It holds:
+  - the law's line, `R = m₀·V′(r)` in Names or Numbers, whose hover is the
+    equation;
+  - a Law selector with every restoring preset under its per-skin name,
+    hovering its phenomenon and equation;
+  - its values in Simplified, or in Advanced the raw slot: kind plus a
+    formula per parameter. Changing between Klein–Gordon and sine-Gordon
+    keeps the cutoff;
+  - for Klein–Gordon and sine-Gordon, the cutoff as a frequency.
+- **Self-oscillating loss.** The primary row's loss has a kind: Constant or
+  Self-oscillating (van der Pol).
+  - Self-oscillating writes van der Pol on that row's own channel (electric
+    in TM, magnetic in TE and Mechanical) and adopts a legacy damping first.
+  - Its rate reads "Gain rate γ₀", beside a "Threshold a" editor, with
+    `van_der_pol_text` as the hover.
+  - It is offered only beside a linear response and an undriven channel.
+    While it is set, Kerr and saturable are withheld in both the Simplified
+    selector and the Advanced response kind, with the reason in the hover,
+    so an authored document still assembles.
+- **Corrected effective-law text.** The restoring summary predated Gate O: it
+  wrote the law on the displayed field (`3²·u`) and without its mass. It is
+  now `R = ρ₀·3²·r`, weighed by each skin's primary mass (ε₀ in TM, μ₀ in
+  TE). The `RestoringLaw` doc comments also said `u`; they say `r`.
+- **Step readout.** `CanonicalTimeStepBound` gains `restoring_curvature`, and
+  the ceiling line names it ("the restoring law's curvature V″ reaches …")
+  when a restoring law is what lowers the step.
+- **Tests.**
+  - `viewing_an_oscillator_leaves_it_as_authored`: sine-Gordon beside van
+    der Pol, both views, every skin.
+  - `self_oscillation_sits_on_the_primary_channel`.
+  - The summary test in TM and TE.
+  - The step-ceiling line with a restoring curvature.
+- **Not checked by me:** the editor on screen.

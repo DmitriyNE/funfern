@@ -1685,6 +1685,10 @@ pub struct CanonicalTimeStepBound {
     pub trajectory: f64,
     pub primary_floor: f64,
     pub complementary_floor: f64,
+    /// Gate O: the largest `V″` a restoring law reaches, over the lowest mass
+    /// factor, which tightens the step as `1/dt² = 1/dt_bound² + V″/4`. Zero
+    /// without one.
+    pub restoring_curvature: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1712,6 +1716,8 @@ pub struct CanonicalTemporalWaveOperator {
     maximum_time_step: f64,
     primary_floor: f64,
     complementary_floor: f64,
+    /// The restoring law's step contribution, as the bound reports it.
+    restoring_curvature: f64,
     /// Whether any contribution carries a restoring law, so the state holds
     /// the integrated field `r = ∫u dt` and the kick feels `−Σ m₀ V′(r)`.
     has_restoring: bool,
@@ -1966,6 +1972,7 @@ impl CanonicalTemporalWaveOperator {
             complementary_floor,
             has_restoring,
             has_active_loss,
+            restoring_curvature,
         })
     }
 
@@ -2064,6 +2071,7 @@ impl CanonicalTemporalWaveOperator {
             trajectory: self.maximum_time_step,
             primary_floor: self.primary_floor,
             complementary_floor: self.complementary_floor,
+            restoring_curvature: self.restoring_curvature,
         }
     }
 

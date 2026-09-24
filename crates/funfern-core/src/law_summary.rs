@@ -45,7 +45,9 @@ struct SkinNames {
     stiffness: &'static str,
     stiffness_base: &'static str,
     stiffness_field: &'static str,
-    primary_field: &'static str,
+    /// The authored mass of the primary field, which weighs the restoring
+    /// force: `ρ₀`, `ε₀` in TM, `μ₀` in TE.
+    primary_base: &'static str,
 }
 
 const fn skin_names(physics: PhysicsModel) -> SkinNames {
@@ -59,7 +61,7 @@ const fn skin_names(physics: PhysicsModel) -> SkinNames {
             stiffness: "s",
             stiffness_base: "s₀",
             stiffness_field: "e",
-            primary_field: "u",
+            primary_base: "ρ₀",
         },
         PhysicsModel::Electromagnetic {
             polarization: ElectromagneticPolarization::Tm,
@@ -70,7 +72,7 @@ const fn skin_names(physics: PhysicsModel) -> SkinNames {
             stiffness: "μ",
             stiffness_base: "μ₀",
             stiffness_field: "H",
-            primary_field: "E_z",
+            primary_base: "ε₀",
         },
         PhysicsModel::Electromagnetic {
             polarization: ElectromagneticPolarization::Te,
@@ -81,7 +83,7 @@ const fn skin_names(physics: PhysicsModel) -> SkinNames {
             stiffness: "μ",
             stiffness_base: "μ₀",
             stiffness_field: "H_z",
-            primary_field: "H_z",
+            primary_base: "μ₀",
         },
     }
 }
@@ -142,23 +144,22 @@ pub fn row_law_summary(
     }))
 }
 
-/// The restoring row's line, when one is authored.
+/// The restoring force's line, when one is authored: `R = m₀·V′(r)` on the
+/// integrated field `r = ∫u dt`, weighed by the primary row's authored mass.
 pub fn restoring_law_summary(
     material: &Material,
     physics: PhysicsModel,
     detail: LawSummaryDetail,
 ) -> Result<Option<LawSummaryLine>, MaterialError> {
     let names = skin_names(physics);
-    Ok(restoring_response(
-        &material.restoring,
-        names.primary_field,
-        &material.parameters,
-        detail,
-    )?
-    .map(|response| LawSummaryLine {
-        subject: "V′",
-        response,
-    }))
+    Ok(
+        restoring_response(&material.restoring, &material.parameters, detail)?.map(|slope| {
+            LawSummaryLine {
+                subject: "R",
+                response: format!("{}·{slope}", names.primary_base),
+            }
+        }),
+    )
 }
 
 /// `c₀ · g · h · s`, or `c₀ / (g · h · s)` when the law is inverted, because
@@ -278,23 +279,20 @@ fn drive_multiplier(
 
 fn restoring_response(
     law: &RestoringLaw,
-    field: &str,
     parameters: &[MaterialParameter],
     detail: LawSummaryDetail,
 ) -> Result<Option<String>, MaterialError> {
     Ok(match law {
         RestoringLaw::None => None,
         RestoringLaw::KleinGordon { omega0 } => {
-            Some(format!("{}²·{field}", scalar(omega0, parameters, detail)?))
+            Some(format!("{}²·r", scalar(omega0, parameters, detail)?))
         }
-        RestoringLaw::SineGordon { omega0 } => Some(format!(
-            "{}²·sin {field}",
-            scalar(omega0, parameters, detail)?
-        )),
-        RestoringLaw::Phi4 { lambda, .. } => Some(format!(
-            "{}·({field}³ − {field})",
-            scalar(lambda, parameters, detail)?
-        )),
+        RestoringLaw::SineGordon { omega0 } => {
+            Some(format!("{}²·sin r", scalar(omega0, parameters, detail)?))
+        }
+        RestoringLaw::Phi4 { lambda, .. } => {
+            Some(format!("{}·(r³ − r)", scalar(lambda, parameters, detail)?))
+        }
     })
 }
 
@@ -427,7 +425,7 @@ mod tests {
                         omega0: ScalarField::constant(3.0),
                     };
                 },
-                "3²·u",
+                "ρ₀·3²·r",
             ),
             (
                 "R2",
@@ -436,7 +434,7 @@ mod tests {
                         omega0: ScalarField::constant(1.5),
                     };
                 },
-                "1.5²·sin u",
+                "ρ₀·1.5²·sin r",
             ),
             (
                 "R3",
@@ -446,7 +444,7 @@ mod tests {
                         amplitude_bound: ScalarField::constant(2.0),
                     };
                 },
-                "0.75·(u³ − u)",
+                "ρ₀·0.75·(r³ − r)",
             ),
         ];
         for (id, apply, expected) in cases {
@@ -455,6 +453,30 @@ mod tests {
             let lines = named(&subject, PhysicsModel::Mechanical);
             assert_eq!(lines.len(), 1, "{id} produced {lines:?}");
             assert_eq!(lines[0].response, expected, "{id}");
+        }
+        // Gate O: the force is on `r = ∫u dt`, weighed by each skin's own
+        // primary mass.
+        let mut subject = material();
+        subject.restoring = RestoringLaw::SineGordon {
+            omega0: ScalarField::constant(2.0),
+        };
+        for (physics, base) in [
+            (
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                },
+                "ε₀",
+            ),
+            (
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Te,
+                },
+                "μ₀",
+            ),
+        ] {
+            let lines = named(&subject, physics);
+            assert_eq!(lines[0].subject, "R");
+            assert_eq!(lines[0].response, format!("{base}·2²·sin r"));
         }
     }
 
