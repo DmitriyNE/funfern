@@ -209,6 +209,9 @@ pub struct PresentationSettings {
     /// effective law, rather than the preset's named values. A way of looking
     /// at the same material, so it is kept with the view and not undone.
     pub advanced_materials: bool,
+    /// Whether the Advanced view writes each row's effective law with its
+    /// expressions evaluated, rather than by the names the author gave them.
+    pub law_formula_numbers: bool,
 }
 
 /// The adaptation controls, as the panel shows them.
@@ -305,6 +308,7 @@ impl Default for PresentationSettings {
             adaptation: AdaptationSettings::default(),
             grid_scale_filter: true,
             advanced_materials: false,
+            law_formula_numbers: false,
         }
     }
 }

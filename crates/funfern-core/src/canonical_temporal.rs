@@ -8862,4 +8862,107 @@ mod tests {
         assert_eq!(bound.complementary_floor, 1.0);
         assert_eq!(bound.trajectory, bound.fixed);
     }
+
+    /// A plane pulse launched along +x in a reflecting channel, stepped for
+    /// `seconds`, and the share of its field energy found behind where it
+    /// started: what a modulation sent backwards.
+    fn backward_share(scene: &Scene, sign: f64, seconds: f64) -> f64 {
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.08,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap();
+        let base = operator.base();
+        let (start, width) = (-0.35, 0.08);
+        let pulse = |x: f64| (-((x - start) / width).powi(2)).exp();
+        // `U = g(x − ct)` with `b = Cψ` and `ψ_t = U`: `ψ = −G/c`, `G′ = g`,
+        // by a cumulative sum along x of the same Gaussian.
+        let erf_like = |x: f64| {
+            let steps = 400;
+            let a = start - 6.0 * width;
+            let h = (x - a) / steps as f64;
+            if h <= 0.0 {
+                return 0.0;
+            }
+            (0..steps)
+                .map(|k| pulse(a + (k as f64 + 0.5) * h) * h)
+                .sum::<f64>()
+        };
+        let primary = base
+            .node_points()
+            .iter()
+            .zip(base.primary_mass())
+            .map(|(point, mass)| mass * pulse(point.x))
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| -sign * erf_like(point.x))
+            .collect::<Vec<_>>();
+        let complementary = base.compatible_flux(&potential).unwrap();
+        let time_step = 0.4 * operator.maximum_time_step();
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary).unwrap();
+        for _ in 0..(seconds / time_step).round() as u64 {
+            state.step(&operator).unwrap();
+        }
+        let field = operator
+            .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+            .unwrap();
+        let weight = |(point, (value, mass)): (&Point2, (&f64, &f64))| -> (bool, f64) {
+            (point.x < start - 3.0 * width, mass * value * value)
+        };
+        let (mut behind, mut total) = (0.0, 0.0);
+        for (is_behind, energy) in base
+            .node_points()
+            .iter()
+            .zip(field.iter().zip(base.primary_mass()))
+            .map(weight)
+        {
+            total += energy;
+            if is_behind {
+                behind += energy;
+            }
+        }
+        behind / total
+    }
+
+    fn modulated(depth: f64, invert_stiffness: bool) -> Scene {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.drive = pump(depth, 2.0, 0.0);
+        scene.materials[0].stiffness_law.drive = pump(depth, 2.0, 0.0);
+        scene.materials[0].stiffness_law.inverted = invert_stiffness;
+        scene
+    }
+
+    /// The catalogue's falsifiable claim for the reflectionless time
+    /// interface. Moving `m` and `K` together so that `√(mK)` holds is, in
+    /// rescaled time `dτ = dt/h`, the unmodulated wave equation, so a pulse
+    /// running forward sends nothing back. Holding the speed and moving the
+    /// impedance - which is what the preset did while it inverted one row -
+    /// sends a measurable share back.
+    #[test]
+    fn a_constant_impedance_modulation_sends_nothing_back() {
+        let matched = backward_share(&modulated(0.4, false), 1.0, 0.5);
+        let impedance_only = backward_share(&modulated(0.4, true), 1.0, 0.5);
+        assert!(matched < 1.0e-3, "matched pair sent back {matched:.3e}");
+        assert!(
+            impedance_only > 0.02,
+            "an impedance modulation sent back only {impedance_only:.3e}"
+        );
+    }
 }

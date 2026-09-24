@@ -211,7 +211,9 @@ running; this file covers using it.
   step ceiling. The editor groups everything by coefficient: the density or
   permittivity group holds its base value, its loss rate and the laws that
   multiply it, and the stiffness or permeability group the same for its row,
-  so nothing about ε is found under μ. Each row has one loss rate, the loss of
+  so nothing about ε is found under μ. Each group opens with what its row
+composes to; in Advanced a Names | Numbers toggle writes it with the authored
+names or with every expression evaluated at the material frame's origin. Each row has one loss rate, the loss of
   that row's physical field (electric with ε, magnetic with μ; in Mechanical,
   the displacement loss with density and the stress loss with s₀). An older
   document's Damping σ appears as its primary row's loss, marked legacy, and

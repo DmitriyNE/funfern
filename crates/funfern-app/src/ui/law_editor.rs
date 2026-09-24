@@ -590,21 +590,43 @@ fn drive_editor(
     }
 }
 
-/// The effective law with every expression evaluated at the material frame's
-/// origin: the numbers behind the Simplified view's named summary.
-pub(super) fn numeric_law_summary(ui: &mut egui::Ui, material: &Material, physics: PhysicsModel) {
+/// One row's effective law, by its names or with every expression evaluated
+/// at the material frame's origin. Numbers are exact everywhere when nothing
+/// in the row varies in space, and the hover says which it is.
+pub(super) fn row_formula(
+    ui: &mut egui::Ui,
+    material: &Material,
+    physics: PhysicsModel,
+    row: LawPresetRow,
+    numbers: bool,
+) {
     let origin = MaterialCoordinates {
         x: 0.0,
         y: 0.0,
         r: 0.0,
         theta: 0.0,
     };
-    match material_law_summary(material, physics, LawSummaryDetail::Numeric(origin)) {
-        Ok(lines) if lines.is_empty() => {}
-        Ok(lines) => {
-            ui.small("At the frame origin:");
-            for line in lines {
-                ui.small(format!("{} = {}", line.subject, line.response));
+    let detail = if numbers {
+        LawSummaryDetail::Numeric(origin)
+    } else {
+        LawSummaryDetail::Named
+    };
+    match row_law_summary(material, physics, row, detail) {
+        Ok(None) => {}
+        Ok(Some(line)) => {
+            let response = ui.small(format!("{} = {}", line.subject, line.response));
+            if numbers {
+                let (base, law) = match row {
+                    LawPresetRow::Stiffness => (&material.stiffness, &material.stiffness_law),
+                    _ => (&material.mass_density, &material.mass_law),
+                };
+                response.on_hover_text(if base.spatially_constant() && !law.uses_frame() {
+                    "Every expression evaluated; nothing in this row varies in space, so the \
+                     numbers hold everywhere in the material"
+                } else {
+                    "Every expression evaluated at the origin of the material's frame; this \
+                     row varies in space, so elsewhere the numbers differ"
+                });
             }
         }
         Err(error) => {
@@ -779,7 +801,9 @@ mod tests {
                             errors: &mut error,
                         },
                     );
-                    numeric_law_summary(ui, &material, physics);
+                    for row in [LawPresetRow::Mass, LawPresetRow::Stiffness] {
+                        row_formula(ui, &material, physics, row, true);
+                    }
                 });
             }
             assert_eq!(material, before, "{physics:?}");

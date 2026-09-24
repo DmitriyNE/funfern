@@ -484,6 +484,18 @@ impl Playground {
                 self.material_formula_errors
                     .remove(&(material.id.0, hidden));
             }
+            // Advanced can write each row's law by its names or with every
+            // expression evaluated; the names say where a number comes from,
+            // the numbers what it is. A view setting, not an edit.
+            let numbers = advanced && self.editor.document.presentation.law_formula_numbers;
+            if advanced {
+                ui.horizontal(|ui| {
+                    ui.small("Effective law");
+                    let presentation = &mut self.editor.document.presentation;
+                    ui.selectable_value(&mut presentation.law_formula_numbers, false, "Names");
+                    ui.selectable_value(&mut presentation.law_formula_numbers, true, "Numbers");
+                });
+            }
             // One group per coefficient: its base value, its loss, and every
             // law that multiplies it, so nothing about ε is found under μ.
             for row in [LawPresetRow::Mass, LawPresetRow::Stiffness] {
@@ -496,6 +508,9 @@ impl Playground {
                     .id_salt(("material-row", material.id.0, row == LawPresetRow::Mass))
                     .default_open(true)
                     .show(ui, |ui| {
+                        // What this row composes to, before the controls that
+                        // compose it.
+                        law_editor::row_formula(ui, &material, physics, row, numbers);
                         let mut formulas = law_editor::FormulaEdits {
                             edits: &mut self.material_formula_edits,
                             errors: &mut self.material_formula_errors,
@@ -630,15 +645,11 @@ impl Playground {
                     }
                 });
             }
-            ui.separator();
-            // What the laws compose to, in the names the preset gave them.
-            for line in material_law_summary(&material, physics, LawSummaryDetail::Named)
-                .unwrap_or_default()
+            // The restoring row belongs to neither coefficient.
+            if let Ok(Some(line)) =
+                restoring_law_summary(&material, physics, LawSummaryDetail::Named)
             {
                 ui.small(format!("{} = {}", line.subject, line.response));
-            }
-            if advanced {
-                law_editor::numeric_law_summary(ui, &material, physics);
             }
 
             // Only the parameters the user made. A preset's own are above,

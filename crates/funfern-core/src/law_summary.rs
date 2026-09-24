@@ -54,8 +54,10 @@ const fn skin_names(physics: PhysicsModel) -> SkinNames {
             mass: "ρ",
             mass_base: "ρ₀",
             mass_field: "u",
-            stiffness: "k",
-            stiffness_base: "k₀",
+            // The row's law multiplies the reciprocal stiffness, so it is
+            // written as that: `s₀ · h` is a stiffness divided by `h`.
+            stiffness: "s",
+            stiffness_base: "s₀",
             stiffness_field: "e",
             primary_field: "u",
         },
@@ -95,42 +97,68 @@ pub fn material_law_summary(
     physics: PhysicsModel,
     detail: LawSummaryDetail,
 ) -> Result<Vec<LawSummaryLine>, MaterialError> {
-    let names = skin_names(physics);
-    let parameters = &material.parameters;
     let mut lines = Vec::new();
-    if !material.mass_law.is_linear() {
-        lines.push(LawSummaryLine {
-            subject: names.mass,
-            response: coefficient_response(
-                &material.mass_law,
-                names.mass_base,
-                names.mass_field,
-                parameters,
-                detail,
-            )?,
-        });
+    for row in [crate::LawPresetRow::Mass, crate::LawPresetRow::Stiffness] {
+        if let Some(line) = row_law_summary(material, physics, row, detail)? {
+            lines.push(line);
+        }
     }
-    if !material.stiffness_law.is_linear() {
-        lines.push(LawSummaryLine {
-            subject: names.stiffness,
-            response: coefficient_response(
-                &material.stiffness_law,
-                names.stiffness_base,
-                names.stiffness_field,
-                parameters,
-                detail,
-            )?,
-        });
-    }
-    if let Some(response) =
-        restoring_response(&material.restoring, names.primary_field, parameters, detail)?
-    {
-        lines.push(LawSummaryLine {
-            subject: "V′",
-            response,
-        });
+    if let Some(line) = restoring_law_summary(material, physics, detail)? {
+        lines.push(line);
     }
     Ok(lines)
+}
+
+/// One constitutive row's line, or `None` when no law modifies it. `Both`
+/// names no single row and reads as `None`.
+pub fn row_law_summary(
+    material: &Material,
+    physics: PhysicsModel,
+    row: crate::LawPresetRow,
+    detail: LawSummaryDetail,
+) -> Result<Option<LawSummaryLine>, MaterialError> {
+    let names = skin_names(physics);
+    let (law, subject, base, field) = match row {
+        crate::LawPresetRow::Mass => (
+            &material.mass_law,
+            names.mass,
+            names.mass_base,
+            names.mass_field,
+        ),
+        crate::LawPresetRow::Stiffness => (
+            &material.stiffness_law,
+            names.stiffness,
+            names.stiffness_base,
+            names.stiffness_field,
+        ),
+        crate::LawPresetRow::Both => return Ok(None),
+    };
+    if law.is_linear() {
+        return Ok(None);
+    }
+    Ok(Some(LawSummaryLine {
+        subject,
+        response: coefficient_response(law, base, field, &material.parameters, detail)?,
+    }))
+}
+
+/// The restoring row's line, when one is authored.
+pub fn restoring_law_summary(
+    material: &Material,
+    physics: PhysicsModel,
+    detail: LawSummaryDetail,
+) -> Result<Option<LawSummaryLine>, MaterialError> {
+    let names = skin_names(physics);
+    Ok(restoring_response(
+        &material.restoring,
+        names.primary_field,
+        &material.parameters,
+        detail,
+    )?
+    .map(|response| LawSummaryLine {
+        subject: "V′",
+        response,
+    }))
 }
 
 /// `c₀ · g · h · s`, or `c₀ / (g · h · s)` when the law is inverted, because
@@ -434,6 +462,36 @@ mod tests {
     /// a reflectionless time interface expressible: one drive on each row with
     /// the multiplier inverted on one of them, so the impedance stays put
     /// while the speed moves.
+    /// Each row reads alone, so the editor can put a row's law in that row's
+    /// group; a linear row, and `Both`, read as nothing.
+    #[test]
+    fn each_row_reads_its_own_law() {
+        let mut subject = material();
+        subject.stiffness_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(1.5),
+            phase_radians: ScalarField::constant(0.0),
+        };
+        let row = |row| {
+            row_law_summary(
+                &subject,
+                PhysicsModel::Mechanical,
+                row,
+                LawSummaryDetail::Named,
+            )
+            .unwrap()
+        };
+        assert_eq!(row(crate::LawPresetRow::Mass), None);
+        assert_eq!(
+            row(crate::LawPresetRow::Stiffness),
+            Some(LawSummaryLine {
+                subject: "s",
+                response: "s₀ · (1 + 0.2·cos(2π·1.5·t + 0))".into(),
+            })
+        );
+        assert_eq!(row(crate::LawPresetRow::Both), None);
+    }
+
     #[test]
     fn a_constant_impedance_pair_reads_as_one_row_dividing() {
         let drive = || TimeDrive::ParametricPump {
@@ -454,8 +512,8 @@ mod tests {
                     response: "ρ₀ · (1 + 0.2·cos(2π·1.5·t + 0))".into(),
                 },
                 LawSummaryLine {
-                    subject: "k",
-                    response: "k₀ / (1 + 0.2·cos(2π·1.5·t + 0))".into(),
+                    subject: "s",
+                    response: "s₀ / (1 + 0.2·cos(2π·1.5·t + 0))".into(),
                 },
             ]
         );

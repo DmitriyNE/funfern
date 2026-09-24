@@ -70,9 +70,14 @@ That makes the one thing only this slot can do available now. A time interface
 in `m` alone changes both the speed and the impedance `Z = √(mK)`; modulating
 `m` and `K` together so `Z` is unchanged gives a **reflectionless time
 interface**, the direct contrast against M-T1's reflecting one. The pairing is
-expressible with one drive on each row and `inverted` on one of them, and the
-claim is falsifiable: reflection off the interface must measure zero where M-T1
-alone measures the reflecting coefficient.
+the same drive on both rows with **neither** inverted: every stiffness-row law
+already divides the scalar `K` (it multiplies μ, or the mechanical reciprocal
+stiffness `s₀`), so `m·h` with `K/h` holds `√(mK)`. Until 2026-09-24 the preset
+inverted the stiffness row, which held the speed and moved the impedance by the
+whole factor - the interface that reflects most. The claim is falsifiable and
+now measured: `a_constant_impedance_modulation_sends_nothing_back` sends
+< 1e-3 of a pulse's energy back under the pair against 4.4% under the old,
+impedance-only pairing.
 
 The field-driven half follows slot M's: Kerr and saturable run on the CPU
 reference on this row too. They act on the direct coefficient `s₀` (ε in TE),

@@ -410,14 +410,14 @@ impl LawPreset {
         match (self.row, self.shape) {
             (LawPresetRow::Mass, _) => (written, linear),
             (LawPresetRow::Stiffness, _) => (linear, written),
-            // The impedance `sqrt(m K)` holds still only if one row divides by
-            // what the other multiplies by; the speed `sqrt(K/m)` then carries
-            // the whole modulation.
-            (LawPresetRow::Both, LawPresetShape::ConstantImpedancePump) => {
-                let mut reciprocal = written.clone();
-                reciprocal.inverted = true;
-                (written, reciprocal)
-            }
+            // The impedance `sqrt(m K)` holds still when the scalar mass is
+            // multiplied by what the scalar stiffness is divided by. Every
+            // stiffness-row law already divides `K`: it multiplies μ, which
+            // `K = 1/μ` divides by, and in Mechanical it multiplies the
+            // reciprocal stiffness s₀. So the same drive on both rows, neither
+            // inverted, is the pair; the speed `sqrt(K/m)` then carries the
+            // whole modulation. Inverting one row instead held the speed and
+            // moved the impedance, the interface that reflects most.
             (LawPresetRow::Both, _) => (written.clone(), written),
         }
     }
@@ -563,29 +563,84 @@ mod tests {
         *depth = ScalarField::constant(0.2);
         assert_eq!(identify_law_preset(&constant), None);
 
-        let mut moved = applied;
-        moved.stiffness_law = moved.mass_law.clone();
-        assert_eq!(identify_law_preset(&moved), None);
+        // The same pump copied onto the other row is the reflectionless
+        // pair, which is a preset of its own; an inverted copy is not.
+        let mut copied = applied;
+        copied.stiffness_law = copied.mass_law.clone();
+        assert_eq!(
+            identify_law_preset(&copied).map(|found| found.preset.name),
+            Some("Reflectionless time interface")
+        );
+        copied.stiffness_law.inverted = true;
+        assert_eq!(identify_law_preset(&copied), None);
     }
 
-    /// The impedance-preserving pair is the one preset that needs both rows,
-    /// and the thing that makes it work is that one row divides by what the
-    /// other multiplies by. Its effective-law text is where a user sees that,
-    /// so this checks the two together.
+    /// The impedance-preserving pair, measured on the coefficients the solver
+    /// steps with: at a pump crest `h = 1.5` the scalar mass and stiffness
+    /// move oppositely in every skin, so `√(mK)` holds and the speed moves by
+    /// the whole factor. Its effective-law text says the same thing.
     #[test]
-    fn the_reflectionless_pair_divides_on_one_row() {
+    fn the_reflectionless_pair_holds_the_impedance_and_moves_the_speed() {
+        use crate::{
+            ElectromagneticPolarization, MaterialFrame, Point2, Region, RegionId,
+            canonical_temporal::CanonicalMaterialRuntimeState,
+            wave::evaluate_timed_directional_material_library_at,
+        };
         let entry = preset("M-T2/K-T2", "Reflectionless time interface");
-        let applied = apply_law_preset(entry, &Material::default_medium()).unwrap();
-        assert!(!applied.mass_law.inverted);
-        assert!(applied.stiffness_law.inverted);
+        let mut applied = apply_law_preset(entry, &Material::default_medium()).unwrap();
+        assert!(!applied.mass_law.inverted && !applied.stiffness_law.inverted);
         assert_eq!(applied.mass_law.drive, applied.stiffness_law.drive);
-
         let lines =
             material_law_summary(&applied, PhysicsModel::Mechanical, LawSummaryDetail::Named)
                 .unwrap();
-        assert_eq!(lines.len(), 2);
         assert!(lines[0].response.starts_with("ρ₀ · "), "{lines:?}");
-        assert!(lines[1].response.starts_with("k₀ / "), "{lines:?}");
+        assert!(lines[1].response.starts_with("s₀ · "), "{lines:?}");
+
+        // A still pump at zero phase sits at its crest.
+        for parameter in &mut applied.parameters {
+            parameter.value = match parameter.name.as_str() {
+                "depth" => 0.5,
+                _ => 0.0,
+            };
+        }
+        let region = Region {
+            id: RegionId(1),
+            material: applied.id,
+            frame: MaterialFrame::world(),
+        };
+        let materials = [applied];
+        let runtime = CanonicalMaterialRuntimeState::authored(materials.iter().cloned()).unwrap();
+        for physics in [
+            PhysicsModel::Mechanical,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            },
+        ] {
+            let coefficients = evaluate_timed_directional_material_library_at(
+                physics,
+                &materials,
+                &[region],
+                region.id,
+                Point2::default(),
+                0.0,
+                &runtime,
+            )
+            .unwrap();
+            let mass = coefficients.instantaneous.mass_density / coefficients.authored.mass_density;
+            let stiffness =
+                coefficients.instantaneous.stiffness.xx / coefficients.authored.stiffness.xx;
+            assert!(
+                (mass * stiffness - 1.0).abs() < 1e-12,
+                "{physics:?}: impedance moved"
+            );
+            assert!(
+                ((stiffness / mass).sqrt() - 1.0).abs() > 0.3,
+                "{physics:?}: the speed did not move"
+            );
+        }
     }
 
     /// Parameters the user authored survive, and a preset that wants a name

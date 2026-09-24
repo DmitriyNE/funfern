@@ -11477,3 +11477,49 @@ the Advanced loss channels interact. Separately, the autosave failed to assemble
     skins.
   - `each_row_owns_the_loss_channel_of_its_field`.
   - The Custom-material and `s₀` tests from 10.4 pass on the new layout.
+
+## 2026-09-24 — Formulas in their rows, and two wrong readings of the stiffness row
+
+Reported: the composed formulas should sit in their coefficient's group, and
+Advanced showed two of them. The two were the named and the numeric forms,
+printed together. The user asked for a toggle between them instead.
+
+- **Formulas.** Each row group opens with its own line, from the new
+  `row_law_summary`. `material_law_summary` is now built from it plus
+  `restoring_law_summary`, and the restoring line, when set, sits after the
+  rows. Simplified writes names. Advanced has a Names | Numbers toggle, stored
+  as `PresentationSettings::law_formula_numbers` (serde default, not an edit).
+  Its hover says whether the numbers hold everywhere or only at the frame
+  origin, because the row varies in space.
+- **Defect 1: the effective-law text had the Mechanical stiffness row
+  backwards.** The row's law multiplies the reciprocal stiffness `s₀`, so it
+  divides `k`: a crest of 1.5 gives `k₀/1.5`, per
+  `a_pump_on_the_stiffness_row_lowers_the_mechanical_stiffness`. The text
+  printed `k = k₀ · (1 + …)`. It now reads `s = s₀ · …`, as the row's label
+  and plan §11 do. EM was right.
+- **Defect 2: the "Reflectionless time interface" preset did the opposite of
+  its name.** It inverted the stiffness row. At a pump crest `h = 1.5`, in
+  Mechanical, TM and TE alike, the scalar mass and stiffness moved *together*
+  (×1.5, ×1.5 in Mechanical and TM; ×0.667 each in TE). So `√(mK)` moved by
+  `h` and the speed held: a pure impedance modulation, the interface that
+  reflects most.
+  - Every stiffness-row law already divides the scalar `K`, so the pair is
+    the same drive on both rows with neither inverted. It is fixed, and the
+    catalogue text corrected.
+  - The only test had checked the inverted flag and the text, and the text
+    was wrong in the matching direction.
+  - Now measured, not read:
+    - `the_reflectionless_pair_holds_the_impedance_and_moves_the_speed`
+      checks the solver's instantaneous coefficients in all three skins:
+      `m·K` = 1 to 1e-12, and the speed moves.
+    - `a_constant_impedance_modulation_sends_nothing_back` launches a plane
+      pulse in a reflecting channel under a 0.4-deep, 2 Hz modulation. The
+      share of energy behind the start after 0.5 s is 0.0000 for the pair
+      against 0.0439 for the old inverted pairing, and exactly zero with no
+      modulation. By the rescaling `dτ = dt/h`, the matched pair is the
+      unmodulated equation.
+  - A saved document carrying the old inverted pair now reads as Custom.
+    It is not migrated, because it is a different, legal medium.
+- `a_slot_edited_by_hand_stops_matching` expected a mass-row pump copied onto
+  the stiffness row to match no preset. It is now, correctly, the
+  reflectionless pair; an inverted copy matches none.

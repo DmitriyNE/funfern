@@ -1135,6 +1135,8 @@ struct StoredPresentation {
     grid_scale_filter: bool,
     #[serde(default)]
     advanced_materials: bool,
+    #[serde(default)]
+    law_formula_numbers: bool,
 }
 
 fn default_mesh_edge() -> f64 {
@@ -1829,6 +1831,7 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
         adaptation_maximum_edge: settings.adaptation.maximum_edge,
         grid_scale_filter: settings.grid_scale_filter,
         advanced_materials: settings.advanced_materials,
+        law_formula_numbers: settings.law_formula_numbers,
         vector_overlay: match settings.vector_overlay {
             VectorOverlay::Off => StoredVectorOverlay::Off,
             VectorOverlay::ComplementaryField => StoredVectorOverlay::ComplementaryField,
@@ -1892,6 +1895,7 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
         },
         grid_scale_filter: stored.grid_scale_filter,
         advanced_materials: stored.advanced_materials,
+        law_formula_numbers: stored.law_formula_numbers,
         vector_overlay: match stored.vector_overlay {
             StoredVectorOverlay::Off => VectorOverlay::Off,
             StoredVectorOverlay::ComplementaryField => VectorOverlay::ComplementaryField,
@@ -2412,6 +2416,7 @@ mod tests {
                 },
                 grid_scale_filter: flag,
                 advanced_materials: flag,
+                law_formula_numbers: !flag,
             };
             document.model.probes = vec![TopologyProbeDefinition {
                 id: ProbeId(1),
@@ -2452,6 +2457,7 @@ mod tests {
             "adaptation_maximum_edge",
             "grid_scale_filter",
             "advanced_materials",
+            "law_formula_numbers",
             "probe_labels",
             "field_auto_exposure",
             "simulation_speed",
