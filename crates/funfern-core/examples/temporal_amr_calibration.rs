@@ -22,8 +22,8 @@ use std::time::Instant;
 
 use funfern_core::{
     BACKGROUND_REGION, CanonicalIndicatorSnapshot, CanonicalTemporalPointStencil,
-    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, LoopRole, Material,
-    MaterialFrame, MaterialId, MeshingOptions, OuterBoundaryCondition, Point2,
+    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, FieldLaw, LoopRole,
+    Material, MaterialFrame, MaterialId, MeshingOptions, OuterBoundaryCondition, Point2,
     QuadraticPointStencil, QuadraticSolutionSnapshot, QuadraticWaveOperator, Region, RegionId,
     ScalarField, Scene, SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive, TriMesh,
     canonical_temporal_indicator_supplement, mesh_scene,
@@ -79,6 +79,24 @@ fn main() {
         ("static path, interface", interface_scene(false), true),
         ("interface, inert", interface_scene(false), false),
         ("interface, mass pumped", interface_scene(true), false),
+        // Stage 8: field-dependent response, strong enough that the maps
+        // depart from linear by roughly 20% at the mode's peak.
+        ("mass Kerr", nonlinear(Some(kerr(30.0)), None), false),
+        ("stiffness Kerr", nonlinear(None, Some(kerr(20.0))), false),
+        (
+            "both saturable",
+            nonlinear(Some(saturable(60.0, 0.06)), Some(saturable(40.0, 0.08))),
+            false,
+        ),
+        (
+            "mass Kerr, pumped",
+            {
+                let mut scene = driven(true, None);
+                scene.materials[0].mass_law.field = kerr(30.0);
+                scene
+            },
+            false,
+        ),
     ] {
         // The finest mesh sets the timestep every mesh in the sweep uses.
         let reference_edge = *EDGES.last().expect("one reference edge");
@@ -149,6 +167,33 @@ fn main() {
          the driven rows stop agreeing with the static one, it is the constant that\n\
          is stale, not the estimator that is broken."
     );
+}
+
+fn kerr(chi2: f64) -> FieldLaw {
+    FieldLaw::Polynomial {
+        chi1: ScalarField::constant(0.0),
+        chi2: ScalarField::constant(chi2),
+        amplitude_bound: None,
+    }
+}
+
+fn saturable(chi: f64, saturation: f64) -> FieldLaw {
+    FieldLaw::Saturable {
+        chi: ScalarField::constant(chi),
+        saturation: ScalarField::constant(saturation),
+    }
+}
+
+/// A field-dependent medium on either row.
+fn nonlinear(mass: Option<FieldLaw>, stiffness: Option<FieldLaw>) -> Scene {
+    let mut scene = Scene::default();
+    if let Some(law) = mass {
+        scene.materials[0].mass_law.field = law;
+    }
+    if let Some(law) = stiffness {
+        scene.materials[0].stiffness_law.field = law;
+    }
+    scene
 }
 
 fn inert_scene() -> Scene {
@@ -472,10 +517,21 @@ fn estimate(
         time: state.time(),
         time_step: state.time_step(),
     };
+    // The size rule's instantaneous materials evaluate coefficients without a
+    // field, so a field-dependent row hands the job its small-signal
+    // (law-stripped) medium; the supplement carries the nonlinear maps.
+    let nonlinear = operator.has_field_laws();
+    let mut sized = authored.clone();
+    if nonlinear {
+        for material in &mut sized.materials {
+            material.mass_law.field = FieldLaw::Linear;
+            material.stiffness_law.field = FieldLaw::Linear;
+        }
+    }
     let mut job = SolutionIndicatorJob::new(
         mesh.clone(),
         quadratic.clone(),
-        authored.clone(),
+        sized,
         scalar_snapshot,
         SolutionIndicatorOptions {
             minimum_edge_length: 0.005,

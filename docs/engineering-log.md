@@ -10724,3 +10724,63 @@ tangent at the event state.
     amplitude, a ratio of 3.96.
 - **Scope:** CPU only, conservative bulk only, as for the driven filter. The
   app and device still refuse field-dependent generations.
+
+## 2026-09-24 — The estimator, the point probe and maintenance read nonlinear maps
+
+Stage 8.7, on the CPU reference. The app still refuses field-dependent media.
+
+- **`canonical_temporal_indicator_supplement`** now runs on field-dependent
+  generations, so `indicator_supplement_supported` no longer excludes them.
+  - The recovery, jump and drift terms read the physical field from the
+    nonlinear inverse at each sample.
+  - Every defect is weighted by the tangent `J_b` at the snapshot. The energy
+    of a small `δ` is `½δ·J_b δ`, which is what `J` meant on the linear path.
+  - Element energy splits each node's store exactly by term,
+    `T = Σ mᵢ(ḡᵢU² − Gᵢ(U))`, and each sample's store is its own.
+  - The outgoing defect reads the generator at the trace's discrete gradient
+    with unit mass (the field form of the linear kick's `Q_mid/m`). It is
+    weighted by `∂U/∂Q` in place of `1/m`.
+  - Linear samples keep their arithmetic exactly.
+  - Tests: `the_nonlinear_estimate_is_the_linear_one_at_zero_response` agrees
+    to 1e-9. `the_nonlinear_estimate_splits_the_solver_energy_and_departs_from_linear`:
+    element energies sum to the solver's nonlinear energy to 1e-12, while the
+    linear maps misread the same state by over 5%.
+- **Calibration** (`temporal_amr_calibration`, new rows). The maps depart from
+  linear by about 20% at the mode's peak:
+
+  | row | index at h = 0.2 / 0.14 / 0.1 | spread over 15× the unknowns |
+  | --- | --- | --- |
+  | mass Kerr | 1.558 / 1.332 / 1.424 | 1.17× |
+  | stiffness Kerr | 1.606 / 1.360 / 1.450 | 1.18× |
+  | both saturable | 1.704 / 1.448 / 1.535 | 1.18× |
+  | pumped mass Kerr | 1.702 / 1.452 / 1.548 | 1.17× |
+
+  The inert row in the same sweep is 1.509 / 1.278, spread 1.18×. The index is
+  as flat as the linear and driven rows and sits up to 10% higher, so the
+  driven accuracy target carries over without a new constant.
+  - The size rule is handed the small-signal (law-stripped) medium, because
+    its instantaneous-material path evaluates coefficients without a field.
+  - Carried to the device port: an amplitude-aware wavelength, since Kerr
+    χ > 0 slows the wave where the field is strong.
+- **Point probe:** `CanonicalTemporalPointStencil::sample` reads a
+  field-dependent medium.
+  - Each sample is inverted at its own site, and only physical fields are
+    interpolated.
+  - The energy density is `c(ḡ(r)r² − G(r))` per row.
+  - `complementary_field`, which has no operator and so no inverse, refuses
+    such a medium.
+  - The area readout still refuses.
+  - Test: `a_point_probe_reads_the_nonlinear_field_the_solver_inverts`
+    (uniform fields read back to 1e-12).
+- **Maintenance:** `CanonicalTemporalWaveState::maintain_component_totals` is
+  the driven and nonlinear counterpart of the fixed path's.
+  - It spreads a roundoff-sized `δ` by the tangent `P′(U)`, which is the
+    instantaneous mass at a linear node.
+  - It reinverts, and refuses a correction past a declared bound.
+  - A drift above `1e-10` is refused rather than projected.
+  - Nothing in production calls either version yet.
+  - Test: `nonlinear_invariant_maintenance_shifts_the_field_and_respects_the_domain`.
+- **Transfer** needs no nonlinear change. `Q` and `b` transfer conservatively
+  and the target state reinverts them. `CanonicalTemporalWaveState::new_at`
+  refuses a transferred flux outside its domain, so a remap past a bound fails
+  before any state is built.

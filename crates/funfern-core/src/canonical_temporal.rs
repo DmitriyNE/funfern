@@ -357,9 +357,6 @@ impl CanonicalTemporalPointStencil {
         stencil: QuadraticPointStencil,
         operator: &CanonicalTemporalWaveOperator,
     ) -> Result<Self, WaveError> {
-        if operator.has_field_laws {
-            return Err(WaveError::Unsupported(CONSUMER_FIELD_LAWS));
-        }
         let fixed = CanonicalPointStencil::from_quadratic(stencil, operator.base())?;
         let element = stencil.element as usize;
         let start = element
@@ -454,6 +451,15 @@ impl CanonicalTemporalPointStencil {
         time: f64,
         runtime: &CanonicalMaterialRuntimeState,
     ) -> Result<Point2, WaveError> {
+        // Without the operator a field law has no inverse to apply; the
+        // nonlinear field is read through [`Self::sample`].
+        if self
+            .sample_coefficients
+            .iter()
+            .any(|sample| sample.law.field != FieldLawValues::Linear)
+        {
+            return Err(WaveError::Unsupported(CONSUMER_FIELD_LAWS));
+        }
         let mut field = Point2::default();
         for local in 0..self.fixed.complementary_samples.len() {
             let sample = self.fixed.complementary_samples[local] as usize;
@@ -503,16 +509,57 @@ impl CanonicalTemporalPointStencil {
             previous_primary += self.fixed.primary_weights[local] * previous;
         }
         let primary_rate = (primary - previous_primary) / time_step;
-        let complementary = self.complementary_field(complementary_flux, time, runtime)?;
         let primary_factor = self.primary.factor_at(time, runtime)?;
         let complementary_factor = self.complementary.factor_at(time, runtime)?;
-        let energy_density = 0.5
-            * (self.fixed.primary_reference * primary_factor * primary * primary
-                + complementary_factor
-                    * self
-                        .fixed
-                        .complementary_reference
-                        .quadratic_form(complementary));
+        let (complementary, energy_density) = if operator.has_field_laws {
+            // Each sample is inverted at its own site, as the solver does,
+            // and only the physical fields are interpolated. The density is
+            // the stored energy of the interpolated fields under the laws at
+            // the probe, `c (ḡ(r) r² − G(r))` per row, whose linear form is
+            // the `c r²/2` below.
+            let mut field = Point2::default();
+            for local in 0..self.fixed.complementary_samples.len() {
+                let sample = self.fixed.complementary_samples[local] as usize;
+                let flux = complementary_flux
+                    .get(sample)
+                    .ok_or(WaveError::InvalidState)?;
+                field = field
+                    + operator.complementary_sample_field(sample, *flux, time, runtime)?
+                        * self.fixed.complementary_weights[local];
+            }
+            let store = |law: FieldLawValues, r: f64| law.multiplier(r) * r * r - law.coenergy(r);
+            let reference = self.fixed.complementary_reference;
+            let scale = reference.xx.abs().max(reference.yy.abs());
+            let isotropic = self.complementary.law.field == FieldLawValues::Linear
+                || (reference.xy.abs() <= 1e-12 * scale
+                    && (reference.xx - reference.yy).abs() <= 1e-12 * scale);
+            if !isotropic {
+                return Err(WaveError::InvalidState);
+            }
+            let complementary_store = if self.complementary.law.field == FieldLawValues::Linear {
+                0.5 * reference.quadratic_form(field)
+            } else {
+                reference.xx * store(self.complementary.law.field, field.norm())
+            };
+            (
+                field,
+                self.fixed.primary_reference
+                    * primary_factor
+                    * store(self.primary.law.field, primary.abs())
+                    + complementary_factor * complementary_store,
+            )
+        } else {
+            let complementary = self.complementary_field(complementary_flux, time, runtime)?;
+            (
+                complementary,
+                0.5 * (self.fixed.primary_reference * primary_factor * primary * primary
+                    + complementary_factor
+                        * self
+                            .fixed
+                            .complementary_reference
+                            .quadratic_form(complementary)),
+            )
+        };
         let energy_flow =
             Point2::new(-complementary.y, complementary.x) * (self.fixed.orientation * primary);
         if [
@@ -699,11 +746,25 @@ pub fn canonical_temporal_indicator_supplement(
 
     // Instantaneous complementary inverses, once per sample rather than once
     // per use: the recovery, the residual norm and the energy all need them.
+    //
+    // On a field-dependent medium the physical field is the nonlinear inverse
+    // of `b`, and every norm is the tangent map at the snapshot, `J_b`: the
+    // energy of a small defect `δ` is `½ δ·J_b δ`, which is what the linear
+    // `J` meant. A linear sample's tangent is its own `J / factor`.
+    let nonlinear = operator.has_field_laws();
     let mut inverses = Vec::with_capacity(sample_count);
+    let mut sample_fields = Vec::new();
+    if nonlinear {
+        inverses =
+            operator.complementary_tangents_at(&snapshot.complementary_flux, time, runtime)?;
+        sample_fields =
+            operator.complementary_field_at(&snapshot.complementary_flux, time, runtime)?;
+    }
     for (sample, temporal) in base
         .constitutive_samples()
         .iter()
         .zip(&operator.complementary)
+        .filter(|_| !nonlinear)
     {
         let factor = coefficient_factor(temporal.coefficient, time, runtime)?;
         if !factor.is_finite() || factor <= 0.0 {
@@ -717,6 +778,15 @@ pub fn canonical_temporal_indicator_supplement(
             sample.complementary_inverse.yy / factor,
         ));
     }
+
+    // The physical complementary field at every sample.
+    let physical_at = |index: usize| -> Point2 {
+        if nonlinear {
+            sample_fields[index]
+        } else {
+            inverses[index].apply(snapshot.complementary_flux[index])
+        }
+    };
 
     let omega = (std::f64::consts::TAU * resolved_frequency_hz).max(1.0);
     let mut recovered = BTreeMap::<(usize, RegionId), (Point2, f64)>::new();
@@ -745,14 +815,12 @@ pub fn canonical_temporal_indicator_supplement(
         }
         let start = element * 6;
         for (local, interpolation) in vertex_weights.iter().enumerate() {
-            let value = interpolation.iter().enumerate().fold(
-                Point2::default(),
-                |sum, (sample, weight)| {
-                    sum + inverses[start + sample]
-                        .apply(snapshot.complementary_flux[start + sample])
-                        * *weight
-                },
-            );
+            let value = interpolation
+                .iter()
+                .enumerate()
+                .fold(Point2::default(), |sum, (sample, weight)| {
+                    sum + physical_at(start + sample) * *weight
+                });
             let entry = recovered
                 .entry((triangle.vertices[local], triangle.region))
                 .or_default();
@@ -772,8 +840,7 @@ pub fn canonical_temporal_indicator_supplement(
                     sum + entry.0 * (weight / entry.1)
                 },
             );
-            let physical =
-                inverses[start + local].apply(snapshot.complementary_flux[start + local]);
+            let physical = physical_at(start + local);
             let defect = physical - smoothed;
             let reference = inverses[start + local]
                 .inverse()
@@ -859,8 +926,7 @@ pub fn canonical_temporal_indicator_supplement(
                 let mut map = SymmetricTensor2::default();
                 for (sample, weight) in interpolation.into_iter().enumerate() {
                     let inverse = inverses[start + sample];
-                    flux =
-                        flux + inverse.apply(snapshot.complementary_flux[start + sample]) * weight;
+                    flux = flux + physical_at(start + sample) * weight;
                     map = SymmetricTensor2::new(
                         map.xx + inverse.xx * weight,
                         map.xy + inverse.xy * weight,
@@ -909,9 +975,29 @@ pub fn canonical_temporal_indicator_supplement(
 
     // Primary energy uses the mass in force now, so a modulated element is
     // not credited with the storage its authored coefficient would have.
+    //
+    // A nonlinear node's store splits exactly by term: with
+    // `Q = Σ mᵢ ḡᵢ(U) U`, `T = U·Q − Σ mᵢ Gᵢ(U) = Σ mᵢ (ḡᵢ U² − Gᵢ(U))`.
     let mass = operator.primary_mass_at(time, runtime)?;
-    for contribution in base.primary_contributions() {
+    let primary_terms = if nonlinear {
+        Some(operator.primary_terms_at(time, runtime)?.0)
+    } else {
+        None
+    };
+    for (index, contribution) in base.primary_contributions().iter().enumerate() {
         let node = contribution.node as usize;
+        if let Some(terms) = &primary_terms {
+            let field = current_field[node].abs();
+            let range = operator.primary_range(node);
+            let position = operator.node_contributions[range.clone()]
+                .iter()
+                .position(|entry| *entry as usize == index)
+                .ok_or(WaveError::InvalidState)?;
+            let term = terms[range.start + position];
+            element_energy[contribution.element as usize] += term.coefficient
+                * (term.law.multiplier(field) * field * field - term.law.coenergy(field));
+            continue;
+        }
         let element = contribution.element as usize;
         let factor = coefficient_factor(
             operator.primary[element * 7 + contribution.local_node as usize].coefficient,
@@ -931,8 +1017,11 @@ pub fn canonical_temporal_indicator_supplement(
         let element = sample.element as usize;
         let current = snapshot.complementary_flux[sample_index];
         let previous = snapshot.previous_complementary_flux[sample_index];
-        element_energy[element] +=
-            0.5 * sample.integration_weight * current.dot(inverses[sample_index].apply(current));
+        element_energy[element] += if nonlinear {
+            operator.complementary_sample_energy(sample_index, current, time, runtime)?
+        } else {
+            0.5 * sample.integration_weight * current.dot(inverses[sample_index].apply(current))
+        };
         let nodes = base.element_nodes()[element];
         let reference = midpoint_field[nodes[0] as usize];
         let mut curl = Point2::default();
@@ -1014,12 +1103,46 @@ pub fn canonical_temporal_indicator_supplement(
             .map(|(current, previous)| 0.5 * (current + previous))
             .collect::<Vec<_>>();
         let midpoint_mass = operator.primary_mass_at(time - 0.5 * snapshot.time_step, runtime)?;
-        let mut derivative = boundary.diagnostic_derivative_with(
-            base,
-            &midpoint_mass,
-            &midpoint_trace,
-            &midpoint_z,
-        )?;
+        // A nonlinear trace is stepped on the discrete gradient `ū`, so the
+        // generator is read at `ū` with unit mass - the linear kick's
+        // `Q_mid/m` in field form - and the residual is weighted by the
+        // tangent `∂U/∂Q` in place of `1/m`.
+        let (mut derivative, residual_weight) = if nonlinear {
+            let midpoint_time = time - 0.5 * snapshot.time_step;
+            let (terms, _) = operator.primary_terms_at(midpoint_time, runtime)?;
+            let mut gradient = Vec::with_capacity(midpoint_trace.len());
+            for (trace, node) in boundary.trace_nodes().iter().enumerate() {
+                let (value, _) = operator.primary_discrete_gradient(
+                    &terms,
+                    *node as usize,
+                    previous_trace[trace],
+                    current_trace[trace],
+                    runtime,
+                )?;
+                gradient.push(value);
+            }
+            let unit = vec![1.0; node_count];
+            let field = operator.primary_field_at(
+                &midpoint_flux_of(&snapshot.primary_flux, &snapshot.previous_primary_flux),
+                midpoint_time,
+                runtime,
+            )?;
+            let weight = operator.primary_tangent_inverse_at(&field, midpoint_time, runtime)?;
+            (
+                boundary.diagnostic_derivative_with(base, &unit, &gradient, &midpoint_z)?,
+                weight,
+            )
+        } else {
+            (
+                boundary.diagnostic_derivative_with(
+                    base,
+                    &midpoint_mass,
+                    &midpoint_trace,
+                    &midpoint_z,
+                )?,
+                midpoint_mass.iter().map(|mass| 1.0 / mass).collect(),
+            )
+        };
         let instantaneous_force =
             |complementary: &[Point2], auxiliary: &[f64], at: f64| -> Result<Vec<f64>, WaveError> {
                 let mut force = operator.force_at(complementary, at, runtime)?;
@@ -1051,7 +1174,7 @@ pub fn canonical_temporal_indicator_supplement(
             let defect = current_trace[trace]
                 - previous_trace[trace]
                 - snapshot.time_step * derivative[trace];
-            residual += 0.5 * defect * defect / midpoint_mass[*node as usize];
+            residual += 0.5 * defect * defect * residual_weight[*node as usize];
         }
         for auxiliary in 0..outgoing_count {
             let defect = current_z[auxiliary]
@@ -1087,6 +1210,14 @@ pub fn canonical_temporal_indicator_supplement(
         thin_gap_contribution,
         outgoing_contribution,
     })
+}
+
+fn midpoint_flux_of(current: &[f64], previous: &[f64]) -> Vec<f64> {
+    current
+        .iter()
+        .zip(previous)
+        .map(|(current, previous)| 0.5 * (current + previous))
+        .collect()
 }
 
 /// What a driven medium demands of the mesh, beyond what the sources ask.
@@ -1677,10 +1808,9 @@ impl CanonicalTemporalWaveOperator {
         // a damped boundary and prescribed boundary data are not: each puts a
         // term in the evolution that the defect would otherwise charge to the
         // mesh, and none has been derived here.
-        // A field-dependent medium's estimator reads its tangent maps, which
-        // are not derived yet.
-        let indicator_supplement_supported =
-            undamped_boundary && !has_loss && undriven_boundary && !has_field_laws;
+        // A field-dependent medium's estimator reads its nonlinear observables
+        // and weighs every defect by the tangent maps at the snapshot.
+        let indicator_supplement_supported = undamped_boundary && !has_loss && undriven_boundary;
         Ok(Self {
             base,
             primary,
@@ -2109,6 +2239,51 @@ impl CanonicalTemporalWaveOperator {
             ));
         }
         Ok(tangents)
+    }
+
+    /// The physical complementary field at one sample holding `flux`.
+    pub fn complementary_sample_field(
+        &self,
+        index: usize,
+        flux: Point2,
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<Point2, WaveError> {
+        let sample = self
+            .base
+            .constitutive_samples()
+            .get(index)
+            .ok_or(WaveError::InvalidState)?;
+        let temporal = self.complementary[index].coefficient;
+        if temporal.law.field == FieldLawValues::Linear {
+            let factor = coefficient_factor(temporal, time, runtime)?;
+            return Ok(sample.complementary_inverse.apply(flux) / factor);
+        }
+        let (term, _) = self.complementary_term_at(index, time, runtime)?;
+        radial_inverse(term, flux, temporal, runtime)
+    }
+
+    /// Stored energy of one sample holding `flux`, weight included.
+    fn complementary_sample_energy(
+        &self,
+        index: usize,
+        flux: Point2,
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<f64, WaveError> {
+        let sample = &self.base.constitutive_samples()[index];
+        let temporal = self.complementary[index].coefficient;
+        if temporal.law.field == FieldLawValues::Linear {
+            let factor = coefficient_factor(temporal, time, runtime)?;
+            return Ok(0.5
+                * sample.integration_weight
+                * flux.dot(sample.complementary_inverse.apply(flux))
+                / factor);
+        }
+        let (term, _) = self.complementary_term_at(index, time, runtime)?;
+        let radius = radial_inverse(term, flux, temporal, runtime)?.norm();
+        let terms = [term];
+        Ok(sample.integration_weight * ConstitutiveSite::new(&terms).energy(flux.norm(), radius))
     }
 
     /// One nonlinear complementary sample's map at `time`: the direct
@@ -2777,6 +2952,80 @@ impl CanonicalTemporalWaveState {
         self.primary_flux = next_primary;
         self.complementary_flux = next_complementary;
         Ok((before - after).max(0.0))
+    }
+
+    /// Corrects only roundoff-sized drift from already accounted component
+    /// totals, as the fixed path's `maintain_component_totals` does, with the
+    /// correction spread by positive tangent weights.
+    ///
+    /// The fixed path spreads `δ` by nodal mass, which shifts the field
+    /// uniformly. On a field-dependent medium the weight that does the same is
+    /// the tangent `P′(U)`, and it is the instantaneous mass at a linear node.
+    /// The corrected fluxes are then reinverted: a correction that would carry
+    /// a node past its declared bound is refused and the state is kept. A
+    /// mismatch above roundoff is physical or a broken ledger, and is refused
+    /// rather than projected away.
+    pub fn maintain_component_totals(
+        &mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+        intended_totals: &[f64],
+    ) -> Result<f64, WaveError> {
+        let base = operator.base();
+        if intended_totals.len() != base.component_count()
+            || forcing.prescribed().len() != base.degrees_of_freedom()
+            || intended_totals.iter().any(|value| !value.is_finite())
+        {
+            return Err(WaveError::InvalidState);
+        }
+        let weights = if operator.has_field_laws {
+            let field = operator.primary_field_at(&self.primary_flux, self.time, &self.runtime)?;
+            operator
+                .primary_tangent_inverse_at(&field, self.time, &self.runtime)?
+                .into_iter()
+                .map(|inverse| 1.0 / inverse)
+                .collect::<Vec<_>>()
+        } else {
+            operator.primary_mass_at(self.time, &self.runtime)?
+        };
+        let scale = self
+            .primary_flux
+            .iter()
+            .map(|value| value.abs())
+            .sum::<f64>()
+            .max(1.0);
+        let mut next = self.primary_flux.clone();
+        let mut maximum = 0.0_f64;
+        for (component, intended) in intended_totals.iter().enumerate() {
+            let owned = |node: usize| base.component_labels()[node] as usize == component;
+            let current = (0..next.len())
+                .filter(|node| owned(*node))
+                .map(|node| next[node])
+                .sum::<f64>();
+            let delta = intended - current;
+            maximum = maximum.max(delta.abs());
+            if delta.abs() > 1.0e-10 * scale {
+                return Err(WaveError::InvalidState);
+            }
+            let eligible = (0..next.len())
+                .filter(|node| owned(*node) && forcing.prescribed()[*node].is_none())
+                .map(|node| weights[node])
+                .sum::<f64>();
+            if delta != 0.0 && eligible == 0.0 {
+                return Err(WaveError::InvalidState);
+            }
+            for node in 0..next.len() {
+                if owned(node) && forcing.prescribed()[node].is_none() {
+                    next[node] += delta * weights[node] / eligible;
+                }
+            }
+        }
+        validate_finite(&next)?;
+        if operator.has_field_laws {
+            operator.primary_field_at(&next, self.time, &self.runtime)?;
+        }
+        self.primary_flux = next;
+        Ok(maximum)
     }
 
     /// Gate F: the grid filter on a field-dependent medium.
@@ -7014,10 +7263,257 @@ mod tests {
         assert!((initial - previous - escaped).abs() < 1e-3 * initial);
     }
 
+    /// A snapshot across one step of `operator` from a strong state, and the
+    /// mesh it was compiled on, on the second-order wall.
+    fn nonlinear_snapshot(
+        scene: &Scene,
+    ) -> (
+        TriMesh,
+        CanonicalTemporalWaveOperator,
+        CanonicalIndicatorSnapshot,
+    ) {
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap();
+        let (primary, complementary) = strong_fluxes(&operator, 6.0);
+        let time_step = 0.4 * operator.maximum_time_step();
+        let state =
+            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary).unwrap();
+        let mut next = state.clone();
+        next.step(&operator).unwrap();
+        let snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            primary_flux: next.primary_flux().to_vec(),
+            previous_primary_flux: state.primary_flux().to_vec(),
+            complementary_flux: next.complementary_flux().to_vec(),
+            previous_complementary_flux: state.complementary_flux().to_vec(),
+            auxiliary: next.outgoing_pole_currents().to_vec(),
+            previous_auxiliary: state.outgoing_pole_currents().to_vec(),
+            time: time_step,
+            time_step,
+        };
+        (mesh, operator, snapshot)
+    }
+
     #[test]
-    fn a_nonlinear_generation_refuses_the_consumers_not_yet_ported() {
-        let operator = compile(&kerr_scene()).unwrap();
-        assert!(!operator.indicator_supplement_supported());
+    fn a_point_probe_reads_the_nonlinear_field_the_solver_inverts() {
+        let scene = kerr_scene();
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let runtime = operator.initial_runtime();
+        // A uniform field and a uniform complementary field: the probe must
+        // read exactly those, and the energy density of the stored maps.
+        let (u, v) = (0.4, Point2::new(0.05, -0.03));
+        let primary = operator
+            .base()
+            .primary_mass()
+            .iter()
+            .map(|mass| mass * (1.0 + 0.8 * u * u) * u)
+            .collect::<Vec<_>>();
+        let r = v.norm();
+        let complementary = operator
+            .base()
+            .constitutive_samples()
+            .iter()
+            .map(|sample| {
+                let j = sample.complementary_inverse.xx;
+                v * ((1.0 + 20.0 * r * r) / j)
+            })
+            .collect::<Vec<_>>();
+        let point = Point2::new(0.1, 0.2);
+        let stencil = QuadraticPointStencil::build(&mesh, &quadratic, &base_scene, point).unwrap();
+        let probe = CanonicalTemporalPointStencil::from_quadratic(stencil, &operator).unwrap();
+        let sample = probe
+            .sample(
+                &operator,
+                &primary,
+                &primary,
+                &complementary,
+                0.1,
+                0.1,
+                &runtime,
+            )
+            .unwrap();
+        assert!((sample.primary - u).abs() < 1e-12);
+        assert!((sample.complementary - v).norm() < 1e-12);
+        assert!(sample.primary_rate.abs() < 1e-10);
+        let density = probe.fixed().primary_reference * (0.5 * u * u + 0.75 * 0.8 * u.powi(4))
+            + probe.fixed().complementary_reference.xx * (0.5 * r * r + 0.75 * 20.0 * r.powi(4));
+        assert!((sample.energy_density - density).abs() < 1e-12 * density);
+        assert!(
+            probe
+                .complementary_field(&complementary, 0.1, &runtime)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn nonlinear_invariant_maintenance_shifts_the_field_and_respects_the_domain() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = bounded_kerr(-0.2, 1.0);
+        let operator = compile(&scene).unwrap();
+        let base = operator.base();
+        let forcing = CanonicalForcing::none(base);
+        let field = |u: f64| (1.0 - 0.2 * u * u) * u;
+        let uniform = |u: f64| {
+            base.primary_mass()
+                .iter()
+                .map(|mass| mass * field(u))
+                .collect::<Vec<_>>()
+        };
+        let time_step = 0.3 * operator.maximum_time_step();
+        let empty = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, time_step, uniform(0.5), empty.clone())
+                .unwrap();
+        let intended = state.primary_flux().iter().sum::<f64>();
+        let drift = 1e-12 * intended;
+        state.primary_flux[0] -= drift;
+        state.primary_flux[1] += 0.5 * drift;
+        let repaired = state
+            .maintain_component_totals(&operator, &forcing, &[intended])
+            .unwrap();
+        assert!((repaired - 0.5 * drift).abs() <= 1e-3 * drift);
+        assert!((state.primary_flux().iter().sum::<f64>() - intended).abs() <= 1e-15 * intended);
+        // A drift beyond roundoff is refused, not projected away.
+        state.primary_flux[0] += 1e-6 * intended;
+        let perturbed = state.clone();
+        assert!(
+            state
+                .maintain_component_totals(&operator, &forcing, &[intended])
+                .is_err()
+        );
+        assert_eq!(state, perturbed);
+        // At the declared bound a correction outward cannot land.
+        let at_bound = uniform(1.0);
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, time_step, at_bound, empty).unwrap();
+        let total = state.primary_flux().iter().sum::<f64>();
+        let kept = state.clone();
+        assert!(
+            state
+                .maintain_component_totals(&operator, &forcing, &[total * (1.0 + 1e-11)])
+                .is_err()
+        );
+        assert_eq!(state, kept);
+    }
+
+    #[test]
+    fn the_nonlinear_estimate_is_the_linear_one_at_zero_response() {
+        let linear_scene = Scene::default();
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.field = kerr(0.0);
+        scene.materials[0].stiffness_law.field = saturable_law(0.0, 1.0);
+        let (mesh, linear, snapshot) = nonlinear_snapshot(&linear_scene);
+        let (_, nonlinear, _) = nonlinear_snapshot(&scene);
+        assert!(nonlinear.indicator_supplement_supported());
+        let forcing = CanonicalForcing::none(linear.base());
+        let estimate = |operator: &CanonicalTemporalWaveOperator| {
+            canonical_temporal_indicator_supplement(
+                &mesh,
+                operator,
+                &forcing,
+                &snapshot,
+                &operator.initial_runtime(),
+                1.0,
+            )
+            .unwrap()
+        };
+        let (expected, actual) = (estimate(&linear), estimate(&nonlinear));
+        let close = |a: &[f64], b: &[f64]| {
+            let scale = a.iter().fold(0.0_f64, |m, v| m.max(v.abs())).max(1e-300);
+            a.iter().zip(b).all(|(a, b)| (a - b).abs() <= 1e-9 * scale)
+        };
+        assert!(close(&expected.element_energy, &actual.element_energy));
+        assert!(close(
+            &expected.element_complementary_recovery,
+            &actual.element_complementary_recovery
+        ));
+        assert!(close(
+            &expected.element_cell_residual,
+            &actual.element_cell_residual
+        ));
+        assert!(close(
+            &expected.element_boundary_residual,
+            &actual.element_boundary_residual
+        ));
+        assert!(expected.outgoing_contribution > 0.0);
+    }
+
+    #[test]
+    fn the_nonlinear_estimate_splits_the_solver_energy_and_departs_from_linear() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.field = kerr(0.8);
+        scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+        let (mesh, operator, snapshot) = nonlinear_snapshot(&scene);
+        let forcing = CanonicalForcing::none(operator.base());
+        let runtime = operator.initial_runtime();
+        let estimate = canonical_temporal_indicator_supplement(
+            &mesh, &operator, &forcing, &snapshot, &runtime, 1.0,
+        )
+        .unwrap();
+        // The element energies are the solver's own nonlinear store, split.
+        let stored = operator
+            .energy_at(
+                &snapshot.primary_flux,
+                &snapshot.complementary_flux,
+                snapshot.time,
+                &runtime,
+            )
+            .unwrap();
+        let split = estimate.element_energy.iter().sum::<f64>();
+        assert!(
+            (split - stored).abs() <= 1e-12 * stored,
+            "{split} against {stored}"
+        );
+        // Read with the linear maps, the same state is mis-weighed.
+        let (_, linear, _) = nonlinear_snapshot(&Scene::default());
+        let linear_estimate = canonical_temporal_indicator_supplement(
+            &mesh,
+            &linear,
+            &forcing,
+            &snapshot,
+            &linear.initial_runtime(),
+            1.0,
+        )
+        .unwrap();
+        let linear_split = linear_estimate.element_energy.iter().sum::<f64>();
+        assert!((linear_split - stored).abs() > 0.05 * stored);
+        assert!(estimate.drift_contribution.is_finite() && estimate.drift_contribution > 0.0);
+        assert!(estimate.outgoing_contribution.is_finite() && estimate.outgoing_contribution > 0.0);
     }
 
     /// The filtered state and the energy it removed, from `primary, complementary`.
