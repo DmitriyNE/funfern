@@ -142,6 +142,12 @@ fn accounting_item_count() -> u32 {
 fn accounting_bank_offset(slot: u32) -> u32 {
     return scratch_count() + slot * accounting_item_count();
 }
+// One word per trace, after both accounting banks, on a generation whose wall
+// carries a field law: `(Q_k, ū_k, 2g_k, last Newton step)`.
+fn nonlinear_trace_offset() -> u32 {
+    return scratch_count() + 2u * accounting_item_count();
+}
+fn nonlinear_trace() -> bool { return (control.boundary_offsets.w & 16u) != 0u; }
 fn has_loss_stages() -> bool { return (control.boundary_offsets.w & 1u) != 0u; }
 fn use_force_cache() -> bool { return (control.boundary_offsets.w & 4u) != 0u; }
 fn has_prescribed_trace() -> bool { return (control.boundary_offsets.w & 8u) != 0u; }
@@ -500,6 +506,25 @@ fn temporal_primary_flux_of_field(node: u32, field: f32, local_time: f32) -> f32
     }
     let magnitude = primary_site(node, local_time, abs(field)).x;
     return select(-magnitude, magnitude, field >= 0.0);
+}
+
+// `(ū, dū/dQ)` for the kick from `old` to `flux` at one node: the mean of
+// `U` over the interval by two-point Gauss-Legendre, which is the reference's
+// discrete gradient `ΔT/ΔQ` to an error of the fourth power of the step, and
+// its exact derivative in `flux`. The quotient itself would lose to f32
+// cancellation what the rule does not.
+fn trace_gradient(node: u32, old: f32, flux: f32, local_time: f32) -> vec2<f32> {
+    let middle = 0.5 * (old + flux);
+    let half = 0.5 * (flux - old) * 0.57735027;
+    let left = temporal_primary_field(node, middle - half, local_time);
+    let right = temporal_primary_field(node, middle + half, local_time);
+    let left_slope = 1.0 / primary_site(node, local_time, abs(left)).y;
+    let right_slope = 1.0 / primary_site(node, local_time, abs(right)).y;
+    let inner = 0.5 - 0.5 * 0.57735027;
+    let outer = 0.5 + 0.5 * 0.57735027;
+    return vec2<f32>(
+        0.5 * (left + right),
+        0.5 * (left_slope * inner + right_slope * outer));
 }
 
 // Stored energy of one node holding `flux`: `|Q|·r − ∫₀ʳ P`, and the linear
@@ -1619,10 +1644,9 @@ fn kick_node(node: u32, second: bool) {
     if second { inject_at(node); }
 }
 
-// The kick at a node whose map follows its field. Admission keeps absorbing
-// walls off such a node until the discrete-gradient wall is ported, so the
-// kick itself is explicit; a pin is written through the forward map,
-// `Q = P(g)`. The energy lanes charge source and force work at the field of
+// The kick at a node whose map follows its field. It is explicit in the bulk
+// and implicit in the discrete gradient on an absorbing wall; a pin is
+// written through the forward map, `Q = P(g)`. The energy lanes charge source and force work at the field of
 // the kick's mean flux, a second-order stand-in for the reference's exact
 // discrete gradient: these lanes are diagnostics, and an f32 energy quotient
 // would lose more to cancellation than the midpoint rule does.
@@ -1631,11 +1655,34 @@ fn kick_nonlinear_node(
     duration: f32, target_time: f32,
 ) {
     let pinned = nodes[node].boundary.z != 0u;
+    let damping = nodes[node].damping_support.x;
     var next = old + duration * net;
     var field: f32;
     if pinned {
         field = harmonic_value(nodes[node].prescribed, target_time);
         next = temporal_primary_flux_of_field(node, field, target_time);
+    } else if damping != 0.0 {
+        // An absorbing wall makes the kick implicit in the discrete gradient:
+        // `f(Q) = Q − old − τ·net + τd·ū(old, Q) = 0`. `f` rises with slope at
+        // least one, so a trial point `x` and `x − f(x)` bracket the root.
+        let admittance = duration * damping;
+        let first = next - old - duration * net
+            + admittance * trace_gradient(node, old, next, target_time).x;
+        var low = min(next, next - first);
+        var high = max(next, next - first);
+        var converged = first == 0.0;
+        for (var iteration = 0u; iteration < INVERSE_ITERATIONS && !converged; iteration += 1u) {
+            let gradient = trace_gradient(node, old, next, target_time);
+            let residual = next - old - duration * net + admittance * gradient.x;
+            if residual > 0.0 { high = min(high, next); } else { low = max(low, next); }
+            var candidate = next - residual / (1.0 + admittance * gradient.y);
+            if !(candidate >= low && candidate <= high) { candidate = 0.5 * (low + high); }
+            let step = abs(candidate - next);
+            next = candidate;
+            converged = step <= 4.0 * 1.1920929e-7 * max(abs(next), abs(old));
+        }
+        if !converged { reject(STATUS_INVERSE_CONVERGENCE); }
+        field = trace_gradient(node, old, next, target_time).x;
     } else {
         field = temporal_primary_field(node, 0.5 * (old + next), target_time);
     }
@@ -1643,10 +1690,12 @@ fn kick_nonlinear_node(
     let force_work = duration * field * held_force;
     set_candidate_q(node, next);
     scratch[node].values.x += source_work;
+    scratch[node].values.w += duration * damping * field * field;
     if pinned {
         let energy_change = temporal_primary_energy(node, next, target_time)
             - temporal_primary_energy(node, old, target_time);
-        scratch[node].values.y += energy_change - source_work + force_work;
+        scratch[node].values.y += energy_change - source_work + force_work
+            + duration * damping * field * field;
     }
     if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
 }
@@ -1726,6 +1775,21 @@ fn reduce_boundary_scalar(local: u32, value: f32) -> f32 {
     return reduced_values[0];
 }
 
+fn reduce_boundary_max(local: u32, value: f32) -> f32 {
+    reduced_values[local] = value;
+    workgroupBarrier();
+    var width = WORKGROUP_SIZE / 2u;
+    loop {
+        if width == 0u { break; }
+        if local < width {
+            reduced_values[local] = max(reduced_values[local], reduced_values[local + width]);
+        }
+        workgroupBarrier();
+        width /= 2u;
+    }
+    return reduced_values[0];
+}
+
 fn reduce_boundary_vector(local: u32, value: vec2<f32>) -> vec2<f32> {
     mode_values[local] = value;
     workgroupBarrier();
@@ -1752,8 +1816,11 @@ fn boundary_prepare(mode: u32, local: u32, second: bool) {
             let node = trace_word.x;
             let current = select(
                 accepted_q(node), candidate_q(node), second || has_loss_stages());
-            partial_modal += trace_coefficient(mode, trace)
-                * current * trace_inverse_mass(trace_word, instant);
+            var old_field = current * trace_inverse_mass(trace_word, instant);
+            if nonlinear_trace() {
+                old_field = bitcast<f32>(trace_word.y);
+            }
+            partial_modal += trace_coefficient(mode, trace) * old_field;
         }
     }
     let modal = reduce_boundary_scalar(local, partial_modal);
@@ -1821,11 +1888,20 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
     let trace_word_index = control.table_offsets.z + trace;
     let trace_word = boundary[trace_word_index].data;
     let node = trace_word.x;
-    let inverse_mass = trace_inverse_mass(trace_word, boundary_instant(second));
+    var inverse_mass = trace_inverse_mass(trace_word, boundary_instant(second));
     let damping = bitcast<f32>(trace_word.z);
     let old = select(
         accepted_q(node), candidate_q(node), second || has_loss_stages());
-    let derivative = -damping * inverse_mass * old - coupling.x;
+    var old_field = inverse_mass * old;
+    // On a nonlinear wall each Newton iteration is this same linear kick at
+    // the per-node mass `1/(2g_k)` with the old field replaced by `2c_k`,
+    // `c_k = ū_k − g_k Q_k`: the reference's `nonlinear_outgoing_kick_with`.
+    // A linear node has `g = 1/2m` and `c = Q_old/2m`, the values it replaces.
+    if nonlinear_trace() {
+        inverse_mass = scratch[nonlinear_trace_offset() + trace].values.z;
+        old_field = bitcast<f32>(trace_word.y);
+    }
+    let derivative = -damping * old_field - coupling.x;
     let source_time = control.clock_f32.y
         + select(0.0, control.clock_f32.x, second);
     let source = source_rate(node, source_time);
@@ -1947,6 +2023,18 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
         }
     }
     let new_modal = reduce_boundary_scalar(local, partial_modal);
+    // The largest trace flux, which is the scale a Newton step is judged
+    // against: a node near zero has no scale of its own, and the sweep's f32
+    // floor is set by the whole trace, not by that node.
+    var trace_scale = 0.0;
+    if nonlinear_trace() {
+        var partial_scale = 0.0;
+        for (var trace = local; trace < trace_count; trace += WORKGROUP_SIZE) {
+            partial_scale = max(
+                partial_scale, abs(scratch[trace_solution_offset() + trace].values.x));
+        }
+        trace_scale = reduce_boundary_max(local, partial_scale);
+    }
     if !participating || local != 0u { return; }
     if i < trace_count {
         let trace = i;
@@ -1961,7 +2049,16 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
             + select(0.0, control.clock_f32.x, second);
         let source = source_rate(node, source_time);
         let held_force = force(node, second);
-        let midpoint = 0.5 * (old + next) * inverse_mass;
+        var midpoint = 0.5 * (old + next) * inverse_mass;
+        if nonlinear_trace() {
+            // The last Newton step must have settled: a solve still moving
+            // at its cap is a detected failure, not an accepted state.
+            let iterate = scratch[nonlinear_trace_offset() + trace].values.x;
+            if abs(next - iterate) > 1.0e-5 * max(trace_scale, 1.0e-30) {
+                reject(STATUS_INVERSE_CONVERGENCE);
+            }
+            midpoint = trace_gradient(node, old, next, boundary_instant(second)).x;
+        }
         let source_work = duration * midpoint * source;
         let force_work = duration * midpoint * held_force;
         let boundary_loss = duration * damping * midpoint * midpoint;
@@ -2022,6 +2119,48 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
         scratch[mode_accounting_offset() + mode].values.x += auxiliary_change;
         scratch[mode_accounting_offset() + mode].values.w += outgoing_loss;
     }
+}
+
+// One Newton linearization of a nonlinear wall's trace: from the iterate
+// `Q_k` (the old flux on the first pass, the last solve's after), the
+// discrete gradient `ū_k`, its slope `g_k`, the old field `2c_k` the prepare
+// and reduce passes read in place of `Q_old/m`, and the step just taken,
+// which the finalize checks.
+fn boundary_linearize(trace: u32, second: bool, first_iteration: bool) {
+    if stopped() || trace >= control.counts_b.y { return; }
+    let word_index = control.table_offsets.z + trace;
+    let node = boundary[word_index].data.x;
+    let old = select(accepted_q(node), candidate_q(node), second || has_loss_stages());
+    let region = nonlinear_trace_offset() + trace;
+    var iterate = old;
+    var step = 0.0;
+    if !first_iteration {
+        iterate = scratch[trace_solution_offset() + trace].values.x;
+        step = abs(iterate - scratch[region].values.x);
+    }
+    let gradient = trace_gradient(node, old, iterate, boundary_instant(second));
+    boundary[word_index].data.y = bitcast<u32>(2.0 * (gradient.x - gradient.y * iterate));
+    scratch[region].values = vec4<f32>(iterate, gradient.x, 2.0 * gradient.y, step);
+}
+
+@compute @workgroup_size(128)
+fn boundary_linearize_begin_first(@builtin(global_invocation_id) id: vec3<u32>) {
+    boundary_linearize(id.x, false, true);
+}
+
+@compute @workgroup_size(128)
+fn boundary_linearize_first(@builtin(global_invocation_id) id: vec3<u32>) {
+    boundary_linearize(id.x, false, false);
+}
+
+@compute @workgroup_size(128)
+fn boundary_linearize_begin_second(@builtin(global_invocation_id) id: vec3<u32>) {
+    boundary_linearize(id.x, true, true);
+}
+
+@compute @workgroup_size(128)
+fn boundary_linearize_second(@builtin(global_invocation_id) id: vec3<u32>) {
+    boundary_linearize(id.x, true, false);
 }
 
 @compute @workgroup_size(128)

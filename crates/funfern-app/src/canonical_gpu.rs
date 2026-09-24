@@ -100,6 +100,14 @@ const TEMPORAL_INVERTED: u32 = 2;
 /// law's parameters: `(χ, saturation, amplitude bound or 0, minimum ḡ)`.
 const TEMPORAL_FIELD_KERR: u32 = 4;
 const TEMPORAL_FIELD_SATURABLE: u32 = 8;
+/// Control flag: the wall's trace carries a field law, so each kick runs the
+/// Newton linearization below around the linear trace solve.
+const NONLINEAR_TRACE_FLAG: u32 = 16;
+/// Linear trace solves per kick on a nonlinear wall. The f64 reference
+/// converges in three for the fixtures measured (1134 of 1217 kicks) and four
+/// for the rest; the finalize pass rejects a kick whose last step has not
+/// settled, so this is a budget with a detected overrun, not a hope.
+const NONLINEAR_TRACE_SOLVES: usize = 4;
 /// Last state-buffer word identifies the accepted lane and clock at the exact
 /// instant that buffer was copied. State and control are separate asynchronous
 /// readbacks, so the host must not combine their independently arriving values.
@@ -1036,22 +1044,29 @@ impl CanonicalGpuPlan {
     ) -> Result<(), CanonicalGpuBuildError> {
         // A field law runs as its record's fourth word, inverted per stage by
         // the shader's bracketed solve. Sources, pins, loss and gaps compose
-        // with it on the device: each adds to or scales `Q` and `b`, and a pin
-        // is written through the forward map. An outgoing or absorbing wall
-        // needs the discrete-gradient kick, which is not ported yet, so it is
-        // refused here rather than run with a linear one.
-        let walled = operator.base().outgoing_boundary().is_some()
-            || operator
-                .base()
-                .first_order_boundary_damping()
-                .iter()
-                .any(|value| *value != 0.0);
-        if operator.has_field_laws() && walled {
-            return Err(CanonicalGpuBuildError::Unrepresentable(
-                "field-dependent response against an outgoing wall is not on the device yet",
-            ));
-        }
+        // with it: each adds to or scales `Q` and `b`, and a pin is written
+        // through the forward map. An absorbing wall kicks through the
+        // discrete gradient at its node, and an outgoing wall runs a fixed
+        // budget of Newton linearizations around its linear trace solve.
         self.field_laws = operator.has_field_laws();
+        if self.field_laws && self.trace_count > 0 {
+            if self.trace_direct {
+                return Err(CanonicalGpuBuildError::InvalidLayout(
+                    "a nonlinear wall's trace mass moves, so it cannot apply a packed inverse",
+                ));
+            }
+            // One word per trace for the Newton linearization, after both
+            // accounting banks.
+            self.scratch.extend(std::iter::repeat_n(
+                GpuCanonicalScratchWord::default(),
+                self.trace_count,
+            ));
+            self.manifest.bytes.scratch = self.scratch.len() * size_of::<GpuCanonicalScratchWord>();
+            self.control.boundary_offsets.w |= NONLINEAR_TRACE_FLAG;
+            self.manifest.dispatches_per_step = self.manifest.dispatches_per_step
+                - trace_dispatches(self.trace_count, self.trace_sweeps, false)
+                + nonlinear_trace_dispatches(self.trace_count, self.trace_sweeps);
+        }
         self.grid_filter_admitted = operator.conservative_bulk_supported() && !self.field_laws;
         let primary_samples = operator.primary_coefficient_samples().collect::<Vec<_>>();
         let complementary_samples = operator
@@ -1806,7 +1821,11 @@ impl CanonicalGpuPlan {
         self.manifest.dispatches_per_step = 4
             + usize::from(self.needs_loss_stages) * 2
             + usize::from(self.needs_accounting)
-            + trace_dispatches(self.trace_count, self.trace_sweeps, self.trace_direct);
+            + if self.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0 {
+                nonlinear_trace_dispatches(self.trace_count, self.trace_sweeps)
+            } else {
+                trace_dispatches(self.trace_count, self.trace_sweeps, self.trace_direct)
+            };
         Ok(())
     }
 
@@ -2460,6 +2479,15 @@ fn trace_dispatches(trace_count: usize, sweeps: usize, direct: bool) -> usize {
         return 0;
     }
     6 + 2 * if direct { 1 } else { 2 * sweeps }
+}
+
+/// The same for a nonlinear wall: per kick, one linearization per solve,
+/// then prepare, reduce and the solve itself for each, and one finalize.
+fn nonlinear_trace_dispatches(trace_count: usize, sweeps: usize) -> usize {
+    if trace_count == 0 {
+        return 0;
+    }
+    2 * (1 + NONLINEAR_TRACE_SOLVES * (3 + 2 * sweeps))
 }
 
 fn compile_boundary(
@@ -3118,6 +3146,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     trace_direct: bool,
     grid_filter_admitted: bool,
     field_laws: bool,
+    nonlinear_trace: bool,
     drive_count: u32,
     material_runtime_count: u32,
     source_count: u32,
@@ -3328,6 +3357,7 @@ fn add_canonical_buffers(
         trace_direct: plan.trace_direct,
         grid_filter_admitted: plan.grid_filter_admitted,
         field_laws: plan.field_laws,
+        nonlinear_trace: plan.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0,
         drive_count,
         material_runtime_count,
         source_count,
@@ -4525,6 +4555,10 @@ struct CanonicalPipeline {
     resident_filter_commit: CachedComputePipelineId,
     filter_temporal_gather: CachedComputePipelineId,
     filter_temporal_samples: CachedComputePipelineId,
+    boundary_linearize_begin_first: CachedComputePipelineId,
+    boundary_linearize_first: CachedComputePipelineId,
+    boundary_linearize_begin_second: CachedComputePipelineId,
+    boundary_linearize_second: CachedComputePipelineId,
 }
 
 #[derive(Resource)]
@@ -4611,6 +4645,10 @@ fn init_canonical_pipeline(
     let resident_filter_commit = queue("resident_filter_commit");
     let filter_temporal_gather = queue("filter_temporal_gather");
     let filter_temporal_samples = queue("filter_temporal_samples");
+    let boundary_linearize_begin_first = queue("boundary_linearize_begin_first");
+    let boundary_linearize_first = queue("boundary_linearize_first");
+    let boundary_linearize_begin_second = queue("boundary_linearize_begin_second");
+    let boundary_linearize_second = queue("boundary_linearize_second");
     commands.insert_resource(CanonicalPipeline {
         layout,
         start_loss,
@@ -4649,6 +4687,10 @@ fn init_canonical_pipeline(
         resident_filter_commit,
         filter_temporal_gather,
         filter_temporal_samples,
+        boundary_linearize_begin_first,
+        boundary_linearize_first,
+        boundary_linearize_begin_second,
+        boundary_linearize_second,
     });
 
     let map_layout = BindGroupLayoutDescriptor::new(
@@ -5115,6 +5157,52 @@ fn encode_trace_solve(
     }
 }
 
+/// One kick's boundary stages: prepare, reduce, the trace solve and finalize.
+///
+/// One pair of dispatches per sweep. The barrier a pass needs between its two
+/// reductions is the one between dispatches, and going through it keeps each
+/// half as wide as the boundary is. A fixed generation applies its inverse
+/// instead, in one pass. A nonlinear wall wraps prepare, reduce and the solve
+/// in a fixed budget of Newton linearizations; its finalize rejects a kick
+/// whose last step has not settled.
+fn encode_boundary_kick(
+    pass: &mut bevy::render::render_resource::ComputePass,
+    pipelines: &[&bevy::render::render_resource::ComputePipeline],
+    handles: &CanonicalGpuBufferHandles,
+    second: bool,
+) {
+    let (prepare, reduce, finalize, begin, linearize) = if second {
+        (8, 9, 10, 34, 35)
+    } else {
+        (2, 3, 5, 32, 33)
+    };
+    let solves = if handles.nonlinear_trace {
+        NONLINEAR_TRACE_SOLVES
+    } else {
+        1
+    };
+    for solve in 0..solves {
+        if handles.nonlinear_trace {
+            pass.set_pipeline(pipelines[if solve == 0 { begin } else { linearize }]);
+            pass.dispatch_workgroups(
+                handles
+                    .trace_count
+                    .div_ceil(CANONICAL_GPU_WORKGROUP_SIZE)
+                    .max(1),
+                1,
+                1,
+            );
+        }
+        pass.set_pipeline(pipelines[prepare]);
+        pass.dispatch_workgroups(handles.trace_count, 1, 1);
+        pass.set_pipeline(pipelines[reduce]);
+        pass.dispatch_workgroups(handles.trace_count, 1, 1);
+        encode_trace_solve(pass, pipelines, handles);
+    }
+    pass.set_pipeline(pipelines[finalize]);
+    pass.dispatch_workgroups(handles.trace_count, 1, 1);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compute_canonical_wave(
     mut render_context: RenderContext,
@@ -5178,6 +5266,10 @@ fn compute_canonical_wave(
         // stays put.
         pipeline.boundary_sweep_trace,
         pipeline.boundary_direct_trace,
+        pipeline.boundary_linearize_begin_first,
+        pipeline.boundary_linearize_first,
+        pipeline.boundary_linearize_begin_second,
+        pipeline.boundary_linearize_second,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -5453,17 +5545,7 @@ fn compute_canonical_wave(
         pass.set_pipeline(pipelines[1]);
         pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         if handles.trace_count > 0 {
-            pass.set_pipeline(pipelines[2]);
-            pass.dispatch_workgroups(handles.trace_count, 1, 1);
-            pass.set_pipeline(pipelines[3]);
-            pass.dispatch_workgroups(handles.trace_count, 1, 1);
-            // One pair of dispatches per sweep. The barrier a pass needs
-            // between its two reductions is the one between dispatches, and
-            // going through it keeps each half as wide as the boundary is. A
-            // fixed generation applies its inverse instead, in one pass.
-            encode_trace_solve(&mut pass, &pipelines, handles);
-            pass.set_pipeline(pipelines[5]);
-            pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            encode_boundary_kick(&mut pass, &pipelines, handles, false);
         }
         pass.set_pipeline(pipelines[6]);
         pass.dispatch_workgroups(
@@ -5474,13 +5556,7 @@ fn compute_canonical_wave(
         pass.set_pipeline(pipelines[7]);
         pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         if handles.trace_count > 0 {
-            pass.set_pipeline(pipelines[8]);
-            pass.dispatch_workgroups(handles.trace_count, 1, 1);
-            pass.set_pipeline(pipelines[9]);
-            pass.dispatch_workgroups(handles.trace_count, 1, 1);
-            encode_trace_solve(&mut pass, &pipelines, handles);
-            pass.set_pipeline(pipelines[10]);
-            pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            encode_boundary_kick(&mut pass, &pipelines, handles, true);
         }
         if handles.needs_loss_stages {
             pass.set_pipeline(pipelines[11]);

@@ -10957,3 +10957,41 @@ Stage 9.3.
 - **Carried to 9.8:** a driven linear step costs about 10% more
   (`canonical_gpu_temporal_timing`: 400 → 442 µs a step), because every node
   now checks its records for a field law. A plan-level flag will skip that.
+
+## 2026-09-24 — A nonlinear trace kicks through its discrete gradient on the device
+
+Stage 9.4. Field laws are now admitted against both outgoing walls.
+
+- **First-order wall.** `kick_nonlinear_node` solves
+  `Q − old − τ·net + τd·ū(old, Q) = 0` by a bracketed scalar Newton. The
+  residual rises with slope at least one, so a trial point and `x − f(x)`
+  bracket the root.
+  - `ū` is `trace_gradient`, the two-point Gauss–Legendre mean of `U` over the
+    kick. It matches the reference's `ΔT/ΔQ` to the fourth power of the step,
+    without the quotient's f32 cancellation. Its derivative in `Q` is exact.
+  - The wall's loss lane is `τd ū²`.
+- **Second-order wall.** It reuses the linear device kick unchanged inside a
+  fixed budget of `NONLINEAR_TRACE_SOLVES = 4` Newton iterations, the
+  reference's `nonlinear_outgoing_kick_with` on the device.
+  - Each iteration's `boundary_linearize_*` pass writes the old field `2c_k`
+    into the trace word's free lane `y` (a driven wall never reads its packed
+    mass there). It writes `(Q_k, ū_k, 2g_k, step)` into a per-trace scratch
+    region appended after the accounting banks (`nonlinear_trace_offset`).
+  - Prepare and reduce read `2c_k` in place of `Q_old/m`, and reduce seeds the
+    solve with the inverse mass `2g_k`. At `g = 1/2m`, `c = Q_old/2m` these are
+    the values replaced.
+  - The finalize pass rejects a kick whose last Newton step exceeds `1e-5` of
+    the largest trace flux (`STATUS_INVERSE_CONVERGENCE`). It is judged
+    against the whole trace because a node near zero has no scale of its own,
+    and the f32 sweep floor is set by the trace. A per-node scale failed on
+    exactly those nodes, while the converged state matched to 1.15e-6.
+  - The host encodes `encode_boundary_kick`: control flag bit 4
+    (`NONLINEAR_TRACE_FLAG`), four new pipelines (32–35), and
+    `nonlinear_trace_dispatches` in the dispatch count. A packed direct trace
+    inverse is refused on such a wall, since its trace mass moves.
+- **Gate:** `canonical_gpu_nonlinear` with `NONLINEAR_WALL=1` gives
+  Q 1.100e-6, b 8.402e-7. With `=2`, Q 1.151e-6, b 8.654e-7.
+  - With a single solve per kick the second-order run fails with status 5, so
+    the check is not vacuous.
+- **Unchanged:** all seventeen examples and every mode exit 0 with their
+  figures.

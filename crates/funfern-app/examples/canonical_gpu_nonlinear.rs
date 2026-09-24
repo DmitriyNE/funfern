@@ -12,6 +12,11 @@
 //! `NONLINEAR_FORCED=1` composes a volume source, a harmonic prescribed wall
 //! and both loss channels with the pumped medium; `NONLINEAR_GAP=1` a stiff
 //! thin gap across it. Each is a stage the device writes through the maps.
+//!
+//! `NONLINEAR_WALL=1` or `=2` replaces the reflecting walls with a first- or
+//! second-order outgoing wall, so the Kerr trace kicks through its discrete
+//! gradient: a scalar Newton at an absorbing node, or a budget of Newton
+//! linearizations around the linear trace solve.
 
 use std::time::{Duration, Instant};
 
@@ -51,6 +56,11 @@ fn main() -> AppExit {
     let forced = flag("NONLINEAR_FORCED");
     let gap = flag("NONLINEAR_GAP");
     let pumped = flag("NONLINEAR_PUMPED") || forced || gap;
+    let wall = match std::env::var("NONLINEAR_WALL").as_deref() {
+        Ok("1") => OuterBoundaryCondition::FirstOrderOutgoing,
+        Ok("2") => OuterBoundaryCondition::SecondOrderOutgoing,
+        _ => OuterBoundaryCondition::Reflecting,
+    };
     let mut scene = Scene::default();
     if forced {
         let channel = |rate: f64| LossChannel {
@@ -112,12 +122,8 @@ fn main() -> AppExit {
         },
     )
     .expect("nonlinear mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
-        &mesh,
-        &fixed_scene,
-        OuterBoundaryCondition::Reflecting,
-    )
-    .expect("nonlinear scalar operator");
+    let scalar = QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, wall)
+        .expect("nonlinear scalar operator");
     let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
         .expect("nonlinear operator");
     assert!(operator.has_field_laws());
@@ -196,7 +202,16 @@ fn main() -> AppExit {
          up to {:.0}% from its linear read",
         if pumped { " (pumped)" } else { "" },
         if forced { " + source, pins, loss" } else { "" },
-        if gap { " + thin gap" } else { "" },
+        match wall {
+            OuterBoundaryCondition::FirstOrderOutgoing => " + first-order wall",
+            OuterBoundaryCondition::SecondOrderOutgoing => " + second-order wall",
+            _ =>
+                if gap {
+                    " + thin gap"
+                } else {
+                    ""
+                },
+        },
         plan.node_count,
         plan.sample_count,
         100.0 * departure
