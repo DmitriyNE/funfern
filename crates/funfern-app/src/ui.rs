@@ -811,6 +811,51 @@ const FORMULA_SYMBOLS: [(&str, &str); 4] = [
 /// accept. The reference drifted from the parser once already - it advertised
 /// `ln` and `pow`, which the language has never had - so these examples are
 /// what keeps the two in step.
+/// The Laws section of the formula reference: how a material's laws compose,
+/// which field each reads, and where each is valid. Every law the catalogue
+/// offers is here; nothing here is a law the solver does not run.
+const FORMULA_LAWS: [(&str, &str); 9] = [
+    (
+        "c = c₀(x)·ḡ·d(t)·s(t)",
+        "a coefficient is its base value times the field response, the drive and the Switch; \
+         Divide makes the drive and Switch divide it instead",
+    ),
+    (
+        "field argument",
+        "the density or permittivity row reads the primary field; the other row reads the \
+         magnitude of the complementary field",
+    ),
+    (
+        "Kerr  ḡ = 1 + χ|u|²",
+        "χ is relative, per unit |u|²; χ < 0 defocuses and needs an amplitude bound",
+    ),
+    (
+        "Saturable  ḡ = 1 + χ|u|²/(1 + |u|²/σ²)",
+        "Kerr that levels off at 1 + χσ²",
+    ),
+    (
+        "Pump  d = 1 + a·cos(2πft + φ)",
+        "a < 1; twice a mode's frequency amplifies it",
+    ),
+    (
+        "Time crystal  d = 1 + a·tanh(k·cos(2πft + φ))/tanh(k)",
+        "a train of temporal interfaces, sharper as k grows",
+    ),
+    (
+        "Travelling  d = 1 + a·cos(2πft − q·x + φ)",
+        "q along the direction angle, in the material frame",
+    ),
+    (
+        "Switch  s: 1 → alternate",
+        "thrown on the running medium, over the Switch ramp; zero ramp is a hard interface",
+    ),
+    (
+        "step ceiling",
+        "set by the lowest factor each row reaches over every phase, Switch state and \
+         admitted amplitude",
+    ),
+];
+
 const FORMULA_FUNCTIONS: [(&str, &str, &str); 11] = [
     ("sqrt(v)", "square root", "sqrt(r)"),
     ("abs(v)", "magnitude", "abs(x)"),

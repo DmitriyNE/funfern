@@ -11319,3 +11319,31 @@ Stage 10.4, plan §11.
     is rendered twice in all three skins and comes back identical, with no
     formula errors.
   - The toggle is not an edit and survives the file.
+
+## 2026-09-24 — Pump frequency from a source, parameter rename, and the Laws help
+
+Stage 10.5.
+
+- **Pump helper.** `= 2 × source` sits beside a preset's pump frequency and
+  beside any constant drive frequency in Advanced. It lists every enabled
+  source with a frequency: the point source and each region's volume source.
+  With several, it becomes a menu naming each one and its frequency. A
+  frequency written as a formula is left alone.
+- **Rename.** A user parameter's name is now editable in the Parameters list.
+  On commit it goes through `Material::rename_parameter`, which rewrites every
+  formula in every slot (base, both rows, both loss channels, restoring) or
+  none. A reserved or duplicate name is refused with a message and changes
+  nothing.
+  - Typed text is keyed by material, position and the name it was opened
+    on. Text typed against a name that has since changed is dropped.
+  - Deleting a parameter forgets that material's typed text.
+- **Formula help.** A new Laws section covers the coefficient composition,
+  the field argument of each row, each law's form and validity (relative χ,
+  the defocusing bound, the saturation ceiling), the drives, the Switch and
+  the step ceiling. `the_laws_reference_covers_every_offered_law` fails if a
+  catalogue preset has no entry. The grammar tables are unchanged.
+- **Already covered, confirmed rather than rebuilt:** preset collisions
+  (`a_preset_never_takes_a_parameter_the_user_already_authored`), capacity
+  (`a_full_material_refuses_a_preset_rather_than_half_writing_it`),
+  transactional rename across all slots, and parameter discovery and
+  `uses_frame` walking every law field.

@@ -72,6 +72,9 @@ pub struct Playground {
     pub(super) material_edit: Option<Material>,
     pub(super) material_formula_edits: BTreeMap<(u64, u8), String>,
     pub(super) material_formula_errors: BTreeMap<(u64, u8), String>,
+    /// A parameter name being typed, keyed by material and position, with the
+    /// name it was opened on.
+    pub(super) parameter_name_edits: BTreeMap<(u64, usize), (String, String)>,
     /// Whether the formula reference is showing. It is a window rather than a
     /// menu so it stays readable while a formula is being typed.
     pub(super) formula_help_open: bool,
@@ -339,6 +342,7 @@ impl Default for Playground {
             material_edit: None,
             material_formula_edits: BTreeMap::new(),
             material_formula_errors: BTreeMap::new(),
+            parameter_name_edits: BTreeMap::new(),
             formula_help_open: false,
             examples_open: false,
             example_previews: funfern_app::topology_examples::catalog()

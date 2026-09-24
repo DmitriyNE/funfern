@@ -74,6 +74,7 @@ pub(super) fn advanced_law_editor(
     ui: &mut egui::Ui,
     material: &mut Material,
     physics: PhysicsModel,
+    sources: &[(String, f64)],
     formulas: &mut FormulaEdits,
 ) {
     let id = material.id.0;
@@ -88,7 +89,7 @@ pub(super) fn advanced_law_editor(
     ] {
         ui.separator();
         ui.label(law_row_label(physics, row));
-        coefficient_law_editor(ui, id, base, law, &parameters, formulas);
+        coefficient_law_editor(ui, id, base, law, &parameters, sources, formulas);
     }
     ui.separator();
     let legacy_damping = material.damping != ScalarField::constant(0.0);
@@ -191,6 +192,7 @@ fn coefficient_law_editor(
     base: u8,
     law: &mut CoefficientLaw,
     parameters: &[MaterialParameter],
+    sources: &[(String, f64)],
     formulas: &mut FormulaEdits,
 ) {
     let kind = response_kind(&law.field);
@@ -297,7 +299,15 @@ fn coefficient_law_editor(
             );
         }
     }
-    drive_editor(ui, id, base + 4, &mut law.drive, parameters, formulas);
+    drive_editor(
+        ui,
+        id,
+        base + 4,
+        &mut law.drive,
+        parameters,
+        sources,
+        formulas,
+    );
     let mut switchable = law.alternate.is_some();
     if ui
         .checkbox(&mut switchable, "Switch alternate")
@@ -339,6 +349,7 @@ fn drive_editor(
     base: u8,
     drive: &mut TimeDrive,
     parameters: &[MaterialParameter],
+    sources: &[(String, f64)],
     formulas: &mut FormulaEdits,
 ) {
     let kind = drive_kind(drive);
@@ -386,6 +397,22 @@ fn drive_editor(
             },
         };
         forget(formulas, id, base, 0..5);
+    }
+    // A constant pump frequency can be set from a source; one written as a
+    // formula is the author's, and is left to them.
+    let frequency = match drive {
+        TimeDrive::ParametricPump { frequency_hz, .. }
+        | TimeDrive::TimeCrystal { frequency_hz, .. }
+        | TimeDrive::TravellingModulation { frequency_hz, .. } => Some(frequency_hz),
+        TimeDrive::None => None,
+    };
+    if let Some(ScalarField::Constant(value)) = frequency
+        && !sources.is_empty()
+    {
+        ui.horizontal(|ui| {
+            ui.small("Frequency from");
+            super::materials::double_source_button(ui, sources, value);
+        });
     }
     let mut row = |slot: u8, label: &str, field: &mut ScalarField, minimum: f64| {
         field_row(
@@ -481,6 +508,7 @@ fn loss_channel_editor(
         base + 4,
         &mut channel.law.drive,
         parameters,
+        &[],
         formulas,
     );
 }
@@ -580,6 +608,7 @@ mod tests {
                 ui,
                 &mut material,
                 PhysicsModel::Mechanical,
+                &[],
                 &mut FormulaEdits {
                     edits: &mut edit,
                     errors: &mut error,
@@ -647,6 +676,7 @@ mod tests {
                         ui,
                         &mut material,
                         physics,
+                        &[("point source".to_owned(), 2.5)],
                         &mut FormulaEdits {
                             edits: &mut edit,
                             errors: &mut error,

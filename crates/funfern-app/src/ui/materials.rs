@@ -522,6 +522,10 @@ impl Playground {
             {
                 ui.separator();
             }
+            let sources = source_frequencies(
+                &self.editor.document.model.source,
+                &self.editor.document.model.draft,
+            );
             if let Some(found) = &matched {
                 for (variable, name) in found.preset.variables.iter().zip(&found.parameters) {
                     let Some(parameter) = material
@@ -539,6 +543,9 @@ impl Playground {
                                 .range(variable.minimum..=variable.maximum)
                                 .update_while_editing(false),
                         );
+                        if variable.parameter == "pump_hz" {
+                            double_source_button(ui, &sources, &mut parameter.value);
+                        }
                     });
                 }
             }
@@ -597,6 +604,7 @@ impl Playground {
                     ui,
                     &mut material,
                     physics,
+                    &sources,
                     &mut law_editor::FormulaEdits {
                         edits: &mut self.material_formula_edits,
                         errors: &mut self.material_formula_errors,
@@ -633,6 +641,8 @@ impl Playground {
             // Only the parameters the user made. A preset's own are above,
             // under the labels it gave them, and showing them again here was
             // two controls for one number.
+            let material_id = material.id.0;
+            let mut renames = Vec::new();
             ui.collapsing("Parameters", |ui| {
                 let mut remove = None;
                 let referenced_names = material
@@ -645,7 +655,27 @@ impl Playground {
                     }
                     let referenced = referenced_names.contains(&parameter.name);
                     ui.horizontal(|ui| {
-                        ui.label(&parameter.name);
+                        // Renamed on commit, every formula that uses the name
+                        // rewritten with it or none at all.
+                        // Keyed by position and the name it was opened on, so
+                        // text typed against a name that has since changed
+                        // (an undo, a preset) is dropped, not committed.
+                        let key = (material_id, index);
+                        let entry = self
+                            .parameter_name_edits
+                            .entry(key)
+                            .or_insert_with(|| (parameter.name.clone(), parameter.name.clone()));
+                        if entry.0 != parameter.name {
+                            *entry = (parameter.name.clone(), parameter.name.clone());
+                        }
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut entry.1)
+                                .desired_width(72.0)
+                                .hint_text("name"),
+                        );
+                        if response.lost_focus() && entry.1 != parameter.name {
+                            renames.push((index, entry.1.clone()));
+                        }
                         ui.add(
                             egui::DragValue::new(&mut parameter.value)
                                 .speed(0.01)
@@ -666,6 +696,8 @@ impl Playground {
                 }
                 if let Some(index) = remove {
                     debug_assert!(material.remove_parameter(index).is_ok());
+                    self.parameter_name_edits
+                        .retain(|(owner, _), _| *owner != material_id);
                 }
                 if material.parameters.len() < MAX_MATERIAL_PARAMETERS
                     && ui.button("+ Parameter").clicked()
@@ -684,6 +716,14 @@ impl Playground {
                         .push(MaterialParameter { name, value: 1.0 });
                 }
             });
+            for (index, name) in renames {
+                self.parameter_name_edits.remove(&(material_id, index));
+                if material.rename_parameter(index, name.clone()).is_err() {
+                    self.notify(format!(
+                        "Cannot rename to {name:?}: it must be a new, non-reserved identifier"
+                    ));
+                }
+            }
             let stored = self
                 .editor
                 .document
@@ -714,6 +754,82 @@ impl Playground {
                 }
             }
             self.material_edit = Some(material);
+        }
+    }
+}
+
+/// Every enabled source with a frequency, named for the pump helper: the
+/// point source and each region's volume source.
+pub(super) fn source_frequencies(
+    source: &PointSource,
+    scene: &TopologyScene,
+) -> Vec<(String, f64)> {
+    let frequency = |signal: &TimeSignal| match signal {
+        TimeSignal::Harmonic {
+            amplitude,
+            frequency_hz,
+            ..
+        } if *amplitude != 0.0 && *frequency_hz > 0.0 => Some(*frequency_hz),
+        _ => None,
+    };
+    let mut found = Vec::new();
+    if source.enabled
+        && let Some(hz) = frequency(&source.signal)
+    {
+        found.push(("point source".to_owned(), hz));
+    }
+    for volume in scene.volume_sources.iter().filter(|volume| volume.enabled) {
+        if let Some(hz) = frequency(&volume.signal) {
+            found.push((
+                if volume.region == BACKGROUND_REGION {
+                    "background source".to_owned()
+                } else {
+                    format!("region {} source", volume.region.0)
+                },
+                hz,
+            ));
+        }
+    }
+    found
+}
+
+/// `= 2 × source`: a pump at twice a source's frequency amplifies what that
+/// source launches. With several sources the button asks which.
+pub(super) fn double_source_button(
+    ui: &mut egui::Ui,
+    sources: &[(String, f64)],
+    frequency: &mut f64,
+) -> bool {
+    match sources {
+        [] => {
+            ui.add_enabled(false, egui::Button::new("= 2 × source").small())
+                .on_disabled_hover_text("No enabled source has a frequency");
+            false
+        }
+        [(name, hz)] => {
+            let clicked = ui
+                .add(egui::Button::new("= 2 × source").small())
+                .on_hover_text(format!("Pump at twice the {name}'s {hz} Hz"))
+                .clicked();
+            if clicked {
+                *frequency = 2.0 * hz;
+            }
+            clicked
+        }
+        several => {
+            let mut chosen = None;
+            ui.menu_button("= 2 × …", |ui| {
+                for (name, hz) in several {
+                    if ui.button(format!("{name} ({hz} Hz)")).clicked() {
+                        chosen = Some(*hz);
+                        ui.close();
+                    }
+                }
+            });
+            if let Some(hz) = chosen {
+                *frequency = 2.0 * hz;
+            }
+            chosen.is_some()
         }
     }
 }
@@ -860,6 +976,33 @@ mod tests {
         let saved = funfern_app::topology_persistence::save(&state.editor.document).unwrap();
         let loaded = funfern_app::topology_persistence::parse_document(saved.as_bytes()).unwrap();
         assert!(loaded.presentation.advanced_materials);
+    }
+
+    /// The pump helper offers each enabled source that has a frequency, and
+    /// only those.
+    #[test]
+    fn the_pump_helper_lists_every_source_with_a_frequency() {
+        let mut source = PointSource {
+            enabled: true,
+            signal: TimeSignal::harmonic(0.0, 1.0, 2.5, 0.0),
+            ..PointSource::default()
+        };
+        let mut scene = TopologyScene::default();
+        assert_eq!(
+            source_frequencies(&source, &scene),
+            [("point source".to_owned(), 2.5)]
+        );
+        scene.volume_sources.push(VolumeSource {
+            region: BACKGROUND_REGION,
+            enabled: true,
+            profile: ScalarField::constant(1.0),
+            parameters: vec![],
+            signal: TimeSignal::harmonic(0.0, 0.5, 4.0, 0.0),
+        });
+        assert_eq!(source_frequencies(&source, &scene).len(), 2);
+        source.enabled = false;
+        scene.volume_sources[0].signal = TimeSignal::harmonic(0.3, 0.0, 4.0, 0.0);
+        assert!(source_frequencies(&source, &scene).is_empty());
     }
 
     #[test]

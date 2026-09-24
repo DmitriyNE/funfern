@@ -279,6 +279,18 @@ impl Playground {
                     });
                 ui.separator();
                 ui.small("A radial profile, for example: parameter R = 0.35 with stiffness 2 - clamp(0, 1, r / R)^2.");
+                ui.separator();
+                ui.strong("Laws");
+                egui::Grid::new("formula_help_laws")
+                    .num_columns(2)
+                    .spacing([12.0, 2.0])
+                    .show(ui, |ui| {
+                        for (form, meaning) in FORMULA_LAWS {
+                            ui.monospace(form);
+                            ui.small(meaning);
+                            ui.end_row();
+                        }
+                    });
             });
         self.formula_help_open = open;
     }
@@ -777,6 +789,40 @@ fn time_step_bound_line(bound: CanonicalTimeStepBound, physics: PhysicsModel) ->
 mod tests {
     use super::*;
     use crate::material_overlay::MaterialProperty;
+
+    /// Every shape the catalogue offers is explained in the Laws section, so
+    /// the reference cannot fall behind the presets.
+    #[test]
+    fn the_laws_reference_covers_every_offered_law() {
+        let text = FORMULA_LAWS
+            .iter()
+            .map(|(form, meaning)| format!("{form} {meaning}"))
+            .collect::<String>();
+        for name in [
+            "Kerr",
+            "Saturable",
+            "Pump",
+            "Time crystal",
+            "Travelling",
+            "Switch",
+            "Divide",
+        ] {
+            assert!(text.contains(name), "{name} is missing from the Laws help");
+        }
+        for preset in law_presets() {
+            let covered = match preset.name {
+                "Linear" => true,
+                "Switchable medium" | "Reflectionless time interface" => text.contains("Switch"),
+                "Parametric pump" => text.contains("Pump"),
+                "Time crystal" => text.contains("Time crystal"),
+                "Travelling modulation" => text.contains("Travelling"),
+                "Kerr medium" => text.contains("Kerr"),
+                "Saturable medium" => text.contains("Saturable"),
+                other => panic!("the Laws help does not know the {other} preset"),
+            };
+            assert!(covered, "{}", preset.name);
+        }
+    }
 
     #[test]
     fn the_step_ceiling_line_names_the_row_that_lowers_it() {
