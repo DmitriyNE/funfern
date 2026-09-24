@@ -12379,3 +12379,29 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
 - **Device:** `canonical_gpu_long_run` at 400 steps, Q 1.3e-6, b 1.5e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — The Luneburg lens lit at an angle (gallery 4)
+
+- The lens was lit by a Dirichlet drive on the whole left wall, so it only
+  ever showed normal incidence, and that wall reflected everything scattered
+  back to it. The left wall is outgoing again. The wave now comes from a
+  tilted internal radiator: a straight open curve 1.1 long, normal to 30°,
+  0.85 from the lens centre, whose lens-facing face carries a prescribed
+  Neumann flux at 3.5 Hz and whose back face is second-order outgoing. An
+  internal Neumann face runs on the canonical path and on the device as it
+  is, so the volume-source fallback was not needed. The focus probe moved to
+  the rim point the wave runs towards, (0.45, 0.22).
+- **Measured** in exploration at edge 0.06, steady amplitude at 3.5 Hz; the
+  test runs the same claims at edge 0.08:
+
+  | Where | Lens | No lens |
+  | --- | --- | --- |
+  | the 30° rim point | 1.76 | 0.94 |
+  | the 0° rim point | 0.57 | 0.61 |
+
+  The spot is about ±0.1 across the direction of travel. Test:
+  `the_luneburg_lens_focuses_an_angled_wave_on_its_far_rim` (focus over 2.5×
+  the 0° point, over 1.5× the lensless field, flanks at ±0.15 under half).
+- **Device:** `canonical_gpu_long_run` at 400 steps, Q 1.3e-6, b 1.2e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

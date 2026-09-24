@@ -49,7 +49,8 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 "Luneburg lens",
-                "A TE magnetic-field wave focuses at the far rim of a radial-index lens.",
+                "A TE plane wave arriving at 30° focuses on the far rim of a radial-index lens, \
+                 wherever it comes from.",
                 luneburg_lens(),
             ),
             example(
@@ -457,21 +458,53 @@ fn anisotropic_crystal() -> TopologyDocument {
     document
 }
 
+/// The Luneburg lens's centre and radius, and the direction its light comes
+/// from, 30° above the x axis.
+const LUNEBURG_CENTRE: Point2 = Point2 { x: 0.08, y: 0.0 };
+const LUNEBURG_RADIUS: f64 = 0.43;
+const LUNEBURG_DEGREES: f64 = 30.0;
+
+fn luneburg_direction() -> Point2 {
+    let angle = LUNEBURG_DEGREES.to_radians();
+    Point2::new(angle.cos(), angle.sin())
+}
+
+/// Where the lens focuses its plane wave: the rim point it runs towards.
+fn luneburg_focus() -> Point2 {
+    LUNEBURG_CENTRE + luneburg_direction() * LUNEBURG_RADIUS
+}
+
 fn luneburg_lens() -> TopologyDocument {
+    luneburg_lens_with(true)
+}
+
+/// A plane wave from a tilted radiator: an open line whose face towards the
+/// lens carries a prescribed flux and whose back face absorbs.
+fn luneburg_lens_with(lens: bool) -> TopologyDocument {
     let mut builder = Builder::new();
-    let center = Point2::new(0.08, 0.0);
-    let radius = 0.43;
+    let (center, radius) = (LUNEBURG_CENTRE, LUNEBURG_RADIUS);
     builder.scene.physics = PhysicsModel::Electromagnetic {
         polarization: ElectromagneticPolarization::Te,
     };
-    builder.scene.outer_boundaries.sides[OuterSide::Left.index()] =
-        OuterBoundaryCondition::Dirichlet {
-            signal: TimeSignal::harmonic(0.0, 0.7, 3.5, 0.0),
-        };
+    let direction = luneburg_direction();
+    let across = Point2::new(-direction.y, direction.x);
+    let middle = center - direction * 0.85;
+    // Running from `+across` to `−across`, the curve's left is `direction`.
+    builder.open_curve(
+        OpenCubicSpline::polyline(vec![middle + across * 0.55, middle - across * 0.55]).unwrap(),
+        &[SpanBehavior::Separated {
+            left: FaceBoundaryCondition::Neumann {
+                signal: TimeSignal::harmonic(0.0, 15.0, 3.5, 0.0),
+            },
+            right: FaceBoundaryCondition::SecondOrderOutgoing,
+            coupling: InternalBoundaryCoupling::Independent,
+        }],
+    );
     builder.scene.materials.push(Material {
         id: MaterialId(2),
         name: "Luneburg profile".into(),
-        mass_density: ScalarField::formula("max(2 - (r / R)^2, 1)").unwrap(),
+        mass_density: ScalarField::formula(if lens { "max(2 - (r / R)^2, 1)" } else { "1" })
+            .unwrap(),
         stiffness: ScalarField::constant(1.0),
         damping: ScalarField::constant(0.0),
         axis_ratio: ScalarField::constant(1.0),
@@ -499,7 +532,7 @@ fn luneburg_lens() -> TopologyDocument {
         color: [91, 220, 194],
         enabled: true,
         target: TopologyProbeTarget::AreaDisk {
-            center: Point2::new(center.x + radius - 0.025, 0.0),
+            center: luneburg_focus() - direction * 0.025,
             radius: 0.065,
         },
     });
@@ -1347,5 +1380,36 @@ mod tests {
             near.1,
             far.1
         );
+    }
+
+    /// The Luneburg gallery claim: a plane wave arriving at 30° focuses on
+    /// the rim point it runs towards, not where normal incidence focused, and
+    /// into a spot the same wave without the lens does not make.
+    #[test]
+    fn the_luneburg_lens_focuses_an_angled_wave_on_its_far_rim() {
+        let lens = Harmonic::run(&luneburg_lens(), 0.08, 6.0, 3.5, 3.0);
+        let bare = Harmonic::run(&luneburg_lens_with(false), 0.08, 6.0, 3.5, 3.0);
+        let focus = luneburg_focus();
+        let normal_focus = LUNEBURG_CENTRE + Point2::new(LUNEBURG_RADIUS, 0.0);
+        let peak = lens.at(focus);
+        let elsewhere = lens.at(normal_focus);
+        let unfocused = bare.at(focus);
+        assert!(
+            peak > 2.5 * elsewhere,
+            "{peak:.3} at the focus, {elsewhere:.3} at 0°"
+        );
+        assert!(
+            peak > 1.5 * unfocused,
+            "{peak:.3} with the lens, {unfocused:.3} without"
+        );
+        let direction = luneburg_direction();
+        let across = Point2::new(-direction.y, direction.x);
+        for side in [1.0, -1.0] {
+            let flank = lens.at(focus + across * (0.15 * side));
+            assert!(
+                flank < 0.5 * peak,
+                "the spot's flank holds {flank:.3} of {peak:.3}"
+            );
+        }
     }
 }
