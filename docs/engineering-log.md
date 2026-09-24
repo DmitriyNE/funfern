@@ -11814,3 +11814,43 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
   outer condition is global, so a y-uniform packet would also be damped by
   the walls it grazes, and no clean measurement exists on this mesh. The
   11.5 waveguide scene is where it gets measured.
+
+## 2026-09-24 — The grid filter on oscillator media (Stage 11.2)
+
+- **Design.** The filter's complementary correction is a correction to the
+  integrated field, `δb = ηC δψ`. `r` now takes the same `δψ`, and the
+  correction filters the total force on `ψ`: `δψ = −s A K A (F + R)`. Its
+  first-order energy change is `−s (F + R)ᵀ A K A (F + R) ≤ 0`, and it is
+  zero at an equilibrium. The commit test includes `V(r)`. Without a
+  restoring law the correction is the same arithmetic as before, and the
+  inert, driven and Kerr filter tests pass unchanged.
+- **Why not leave `r` alone** (measured on a static sine-Gordon kink,
+  ω₀ = 4, edge 0.1, filter at full strength every 16 steps, over 20 s):
+
+  | filter | `b − ηC r` | energy removed |
+  | --- | --- | --- |
+  | on `F`, `r` untouched | 0.113 by 5 s, then held (1.4% of the steepest flux) | 6.84e-5 |
+  | on `F + R`, `r` moved | 1.0e-11 | 4.99e-5 |
+
+  In my plan I expected the old form to visibly wear a kink away. It
+  doesn't at this timescale: the correction is suppressed as `(k/k_max)⁴`
+  on resolved content, and the centre is the same either way. The defect
+  is the permanent offset between `b` and `ηC r`, which detunes the
+  equilibrium the step would otherwise keep.
+- **The kink's centre drifts without any filter.** It is at −6.8e-5 after
+  5 s, −4.5e-4 after 10 s, −2.1e-3 after 15 s and −9.5e-3 after 20 s: a kink
+  midway between two reflecting walls is pulled equally by its two images,
+  an unstable balance. The largest nodal change in `r` is also a poor
+  measure of whether a kink holds: the truncated `4·atan` profile does not
+  meet the walls' `∂ₙr = 0`, so its tails relax (0.08 at ω₀ = 4, 0.89 at
+  ω₀ = 2), filter or not.
+- **Tests.**
+  - `the_grid_filter_keeps_an_oscillator_equilibrium_and_b_equal_to_eta_c_r`:
+    over 1 s the filtered kink stays within 2.5e-3 of its unfiltered run,
+    with its centre within 1e-8, and the φ⁴ wall within 3.0e-4. They
+    remove 1.7e-5 and 2.8e-6 of their energies. `b = ηC r` holds to 1e-11
+    relative at every event.
+  - Sine-Gordon and Kerr sine-Gordon join the filter sweep over every
+    composition, which checks that each filter commits, only removes
+    energy, and leaves pins, pole currents, gap jumps and free totals
+    alone.

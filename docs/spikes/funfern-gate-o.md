@@ -93,6 +93,20 @@ which is exact only for a non-dispersive wave. A Klein–Gordon plane wave with
 at `2ω₀`, 0.29 at `1.2ω₀`, and total at cutoff. The walls compose and
 balance; they just do not absorb near the cutoff, and the presets say so.
 
+**The grid filter.** The step keeps `b = ηC r` exactly when there is no
+complementary loss. The filter's complementary correction is `δb = ηC δψ`,
+so `r` takes the same `δψ`, and the filter acts on the total force on `ψ`:
+
+```text
+δψ = −s A K A (F(b) + R(r)),   b ← b + ηC δψ,   r ← r + δψ
+```
+
+Its first-order energy change is `−s (F + R)ᵀ A K A (F + R) ≤ 0`, and it is
+zero at an equilibrium (a static kink, a wall or a well, where `F + R = 0`
+with `F` itself nonzero). The commit test includes `V(r)`. The `Q`
+correction is unchanged. A filter on `F` alone that left `r` where it was
+would part `b` from `ηC r` for good.
+
 ## Timestep
 
 Verlet on `M⁻¹K + V″` is stable for `h²(λ_max + V″_max)/4 ≤ 1`, so the

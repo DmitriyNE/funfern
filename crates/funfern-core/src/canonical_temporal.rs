@@ -3244,6 +3244,15 @@ impl CanonicalTemporalWaveState {
     /// there is no exchange to account. The pole currents and gap jumps are
     /// left as they are, and their stored energy is part of the commit test,
     /// which admits only a candidate whose total energy does not rise.
+    ///
+    /// Gate O: on an oscillator medium the complementary correction is a
+    /// correction to the integrated field, `δb = ηC δψ`, and `r` takes the
+    /// same `δψ`, so the step's invariant `b = ηC r` survives the filter. It
+    /// filters the total force on `ψ`, `δψ = −s A K A (F + R)`, whose
+    /// first-order energy change `−s (F + R)ᵀ A K A (F + R)` is not positive,
+    /// and which is zero at an equilibrium: a static kink, a wall or a well
+    /// balances `F(b) + R(r) = 0` with `F` itself nonzero, and a filter on `F`
+    /// alone would wear it away event by event.
     pub fn apply_grid_filter_with_forcing(
         &mut self,
         operator: &CanonicalTemporalWaveOperator,
@@ -3270,7 +3279,7 @@ impl CanonicalTemporalWaveState {
             return Ok(0.0);
         }
         let before = self.energy(operator)?;
-        let (primary_correction, complementary_correction) = if operator.has_field_laws {
+        let (primary_correction, integrated_correction) = if operator.has_field_laws {
             self.tangent_grid_filter_corrections(operator)?
         } else {
             self.frozen_grid_filter_corrections(operator)?
@@ -3289,31 +3298,44 @@ impl CanonicalTemporalWaveState {
                 *value -= scale * correction;
             }
         }
+        let complementary_correction = operator.base().compatible_flux(&integrated_correction)?;
         for (value, correction) in next_complementary.iter_mut().zip(complementary_correction) {
             *value = *value - correction * scale;
         }
+        let mut next_integrated = self.integrated_field.clone();
+        for (value, correction) in next_integrated.iter_mut().zip(&integrated_correction) {
+            *value -= scale * correction;
+        }
         validate_finite(&next_primary)?;
+        validate_finite(&next_integrated)?;
         if next_complementary.iter().any(|value| !value.finite()) {
             return Err(WaveError::InvalidState);
         }
         let after =
             operator.energy_at(&next_primary, &next_complementary, self.time, &self.runtime)?
-                + self.history_energy(operator);
+                + history_energy_of(
+                    operator,
+                    &self.thin_gap_jump,
+                    &self.outgoing_z,
+                    &next_integrated,
+                );
         let tolerance = 2.0e-12 * before.abs().max(after.abs()).max(1.0);
         if after > before + tolerance {
             return Err(WaveError::InvalidState);
         }
         self.primary_flux = next_primary;
         self.complementary_flux = next_complementary;
+        self.integrated_field = next_integrated;
         Ok((before - after).max(0.0))
     }
 
     /// The time-driven linear polynomial's two corrections, every map frozen
-    /// at the event instant.
+    /// at the event instant: the one to `Q`, and the one to the integrated
+    /// field, which `b` takes through `ηC`.
     fn frozen_grid_filter_corrections(
         &self,
         operator: &CanonicalTemporalWaveOperator,
-    ) -> Result<(Vec<f64>, Vec<Point2>), WaveError> {
+    ) -> Result<(Vec<f64>, Vec<f64>), WaveError> {
         let mass = operator.primary_mass_at(self.time, &self.runtime)?;
         let inverse_mass = |values: Vec<f64>| {
             values
@@ -3333,11 +3355,10 @@ impl CanonicalTemporalWaveState {
             .map(|(flux, mass)| flux / mass)
             .collect::<Vec<_>>();
         let primary_correction = stiffness(&inverse_mass(stiffness(&primary_field)?))?;
-        let gathered = operator.force_at(&self.complementary_flux, self.time, &self.runtime)?;
-        let complementary_correction = operator
-            .base()
-            .compatible_flux(&inverse_mass(stiffness(&inverse_mass(gathered))?))?;
-        Ok((primary_correction, complementary_correction))
+        let mut gathered = operator.force_at(&self.complementary_flux, self.time, &self.runtime)?;
+        add_restoring_force(operator, &self.integrated_field, &mut gathered)?;
+        let integrated_correction = inverse_mass(stiffness(&inverse_mass(gathered))?);
+        Ok((primary_correction, integrated_correction))
     }
 
     /// Corrects only roundoff-sized drift from already accounted component
@@ -3440,7 +3461,7 @@ impl CanonicalTemporalWaveState {
     fn tangent_grid_filter_corrections(
         &self,
         operator: &CanonicalTemporalWaveOperator,
-    ) -> Result<(Vec<f64>, Vec<Point2>), WaveError> {
+    ) -> Result<(Vec<f64>, Vec<f64>), WaveError> {
         let (time, runtime) = (self.time, &self.runtime);
         let field = operator.primary_field_at(&self.primary_flux, time, runtime)?;
         let tangent = operator.primary_tangent_inverse_at(&field, time, runtime)?;
@@ -3463,11 +3484,10 @@ impl CanonicalTemporalWaveState {
             operator.gather_force(&fields)
         };
         let primary_correction = stiffness(&weighted(stiffness(&field)?))?;
-        let gathered = operator.force_at(&self.complementary_flux, time, runtime)?;
-        let complementary_correction = operator
-            .base()
-            .compatible_flux(&weighted(stiffness(&weighted(gathered))?))?;
-        Ok((primary_correction, complementary_correction))
+        let mut gathered = operator.force_at(&self.complementary_flux, time, runtime)?;
+        add_restoring_force(operator, &self.integrated_field, &mut gathered)?;
+        let integrated_correction = weighted(stiffness(&weighted(gathered))?);
+        Ok((primary_correction, integrated_correction))
     }
 
     pub fn step(
@@ -9326,9 +9346,16 @@ mod tests {
     #[test]
     fn a_driven_or_nonlinear_filter_beside_each_composition_only_removes_energy() {
         type Author = fn(&mut Scene);
-        let media: [(&str, Author); 3] = [
+        let media: [(&str, Author); 5] = [
             ("pumped", |scene| {
                 scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+            }),
+            ("sine-gordon", |scene| {
+                scene.materials[0].restoring = sine_gordon(3.0);
+            }),
+            ("kerr sine-gordon", |scene| {
+                scene.materials[0].restoring = sine_gordon(3.0);
+                scene.materials[0].mass_law.field = kerr(0.8);
             }),
             ("kerr and saturable", |scene| {
                 scene.materials[0].mass_law.field = kerr(0.8);
@@ -10170,6 +10197,90 @@ mod tests {
         assert_eq!(state.integrated_field(), integrated);
         for (flux, mass) in state.primary_flux().iter().zip(base.primary_mass()) {
             assert!((flux - 0.5 * mass).abs() < 1e-14);
+        }
+    }
+
+    /// The largest gap between `b` and `ηC r`, which the step keeps without
+    /// complementary loss and the filter now keeps too.
+    fn integrated_mismatch(
+        operator: &CanonicalTemporalWaveOperator,
+        state: &CanonicalTemporalWaveState,
+    ) -> f64 {
+        operator
+            .base()
+            .compatible_flux(state.integrated_field())
+            .unwrap()
+            .iter()
+            .zip(state.complementary_flux())
+            .map(|(a, b)| (*a - *b).norm())
+            .fold(0.0, f64::max)
+    }
+
+    /// A static kink and a φ⁴ wall balance `F(b) + R(r) = 0` with `F`
+    /// nonzero, so the filter acts on the total force and moves `r` with
+    /// `b`. Filtered at every cadence, each follows its unfiltered run, and
+    /// `b = ηC r` holds through every event.
+    ///
+    /// A filter on `F` alone that left `r` where it was would part `b` from
+    /// `ηC r` by 0.11 on this kink (1.4% of its steepest flux) within 5 s, and
+    /// keep that offset; it also took 37% more energy over 20 s. The
+    /// centre drifts the same with or without any filter: a kink midway
+    /// between two reflecting walls is pulled equally by its two images, an
+    /// unstable balance that grows about sixfold every 5 s.
+    #[test]
+    fn the_grid_filter_keeps_an_oscillator_equilibrium_and_b_equal_to_eta_c_r() {
+        let omega0 = 4.0;
+        let sine = restoring_operator(sine_gordon(omega0), 0.1);
+        let lambda: f64 = 16.0;
+        let width = 2.0_f64.sqrt() / lambda.sqrt();
+        let quartic = restoring_operator(phi4(lambda, 1.6), 0.1);
+        let wall = quartic
+            .base()
+            .node_points()
+            .iter()
+            .map(|point| (point.x / width).tanh())
+            .collect::<Vec<_>>();
+        let cases = [
+            ("kink", &sine, kink(&sine, 1.0 / omega0, 0.0, 0.0)),
+            ("wall", &quartic, resting_state(&quartic, wall)),
+        ];
+        for (label, operator, start) in cases {
+            let energy = start.energy(operator).unwrap();
+            let run = |strength: f64| {
+                let mut state = start.clone();
+                let mut removed = 0.0;
+                let steps = (1.0 / state.time_step()).round() as usize;
+                for step in 1..=steps {
+                    state.step(operator).unwrap();
+                    if step % crate::GRID_SCALE_FILTER_CADENCE as usize == 0 {
+                        removed += state.apply_grid_filter(operator, strength).unwrap();
+                        let mismatch = integrated_mismatch(operator, &state);
+                        assert!(
+                            mismatch < 1e-11 * steepest(&state),
+                            "{label}, step {step}: {mismatch:e}"
+                        );
+                    }
+                }
+                (state, removed)
+            };
+            let (free, _) = run(0.0);
+            let (filtered, removed) = run(1.0);
+            assert!(removed > 0.0, "{label}");
+            assert!(
+                removed < 1e-4 * energy,
+                "{label}: removed {removed:e} of {energy}"
+            );
+            let apart = filtered
+                .integrated_field()
+                .iter()
+                .zip(free.integrated_field())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max);
+            assert!(apart < 5e-3, "{label}: the filtered run is {apart:e} away");
+            if label == "kink" {
+                let shift = kink_centre(operator, &filtered) - kink_centre(operator, &free);
+                assert!(shift.abs() < 1e-8, "the filter moved the kink by {shift:e}");
+            }
         }
     }
 }
