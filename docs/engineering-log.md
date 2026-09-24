@@ -11705,3 +11705,31 @@ Also landing with this, for Stage 10.8:
   - the size rule for complementary-row field laws.
 - **Next:** Stage 11, the oscillator and active-medium extensions (gate O),
   on the user's word.
+
+## 2026-09-24 — Gate O decided
+
+Stage 11.0. [Gate O](spikes/funfern-gate-o.md) records the decision and the
+derivation.
+- **The state.** Restoring laws act on the integrated field `r = ∫u dt`, one
+  nodal state beside `Q` and `b`: `ṙ = U(Q)` in the drift and
+  `Q̇ −= Σ_c m₀_c V_c′(r)` in the kick. The Hamiltonian stays separable,
+  so the split stays Störmer–Verlet and every energy consumer gains one
+  term.
+- **The alternative** was a nodal current `J̇ = M V′(u)` acting on the
+  displayed field. It costs the same state and arithmetic, as the user
+  pointed out, but it conserves a different energy, and each energy consumer
+  would need a second version.
+- **Choices recorded:**
+  - the restoring coefficient is the authored mass, so `ω₀` is the authored
+    medium's cutoff and there is no temporal work;
+  - the ceiling is `1/dt² = 1/dt_bound² + V″_max/4`;
+  - φ⁴ uses its amplitude bound;
+  - `r` starts at 0;
+  - a handoff interpolates `r`;
+  - van der Pol is an exact Bernoulli half map with its own "active gain"
+    lane.
+- **Per the user, nothing is relabelled and nothing hidden.** Every skin offers
+  every law, and its help states the equation and what `r` names there:
+  - TM: `r = −A_z`, a plasma cutoff, a Josephson line;
+  - TE: the dual;
+  - Mechanical: the time integral of the displayed displacement.

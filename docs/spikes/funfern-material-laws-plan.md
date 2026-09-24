@@ -807,7 +807,7 @@ Other gates and their completion point:
 | F: grid filter | Canonical action and spectral/invariant tests | Production common-core cutover |
 | T: integrated transfer | Geometry-prepared conservative policy and bounded correction measurements | Production common-core cutover |
 | C: nonlinear catalogue | Signed χ₁/vector meaning, reciprocal conversion, nonlinear anisotropy | Enabling those combinations/presets |
-| O: oscillator media | Equations and extra-state/reference contract | Enabling KG/sine–Gordon/φ⁴/van der Pol as promised models |
+| O: oscillator media — decided | Equations and extra-state/reference contract: [Gate O](funfern-gate-o.md) chose the integrated-field state `r = ∫u dt` (Option A) | Enabling KG/sine–Gordon/φ⁴/van der Pol as promised models, each after its own tests |
 
 These are engineering derivation/validation tasks. They do not require stopping ordinary implementation to ask permission for routine choices.
 
