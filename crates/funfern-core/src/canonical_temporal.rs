@@ -6757,6 +6757,90 @@ mod tests {
             .sum()
     }
 
+    /// The size rule on a self-focusing medium divides its wavelength floor by
+    /// `√(ḡ + Aḡ′)` at the field's envelope `A`, `1 + 3χA²` for Kerr, and reads
+    /// the same at every phase of a cycle, so it does not retarget elements
+    /// twice a period.
+    #[test]
+    fn the_size_rule_resolves_the_wavelength_a_strong_kerr_field_makes() {
+        let target = |chi: f64, phase: f64| {
+            let mut scene = Scene::initial();
+            scene.materials[0].mass_law.field = kerr(chi);
+            let mut base_scene = scene.clone();
+            strip_temporal_laws(&mut base_scene.materials);
+            let mesh = std::sync::Arc::new(
+                mesh_scene(
+                    &base_scene,
+                    1,
+                    MeshingOptions {
+                        target_edge_length: 0.25,
+                        ..MeshingOptions::default()
+                    },
+                )
+                .unwrap(),
+            );
+            let quadratic = std::sync::Arc::new(
+                QuadraticWaveOperator::assemble_scene(
+                    &mesh,
+                    &base_scene,
+                    OuterBoundaryCondition::Reflecting,
+                )
+                .unwrap(),
+            );
+            let operator =
+                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            let frequency = 2.0;
+            let omega = std::f64::consts::TAU * frequency;
+            let count = quadratic.degrees_of_freedom();
+            // A uniform harmonic field of envelope one.
+            let snapshot = crate::QuadraticSolutionSnapshot {
+                mesh_revision: mesh.mesh_revision,
+                displacement: vec![phase.cos(); count],
+                velocity: vec![-omega * phase.sin(); count],
+                acceleration: vec![0.0; count],
+                volume_acceleration: vec![0.0; count],
+                auxiliary: vec![0.0; count],
+                time: 0.0,
+                time_step: 0.4 * operator.maximum_time_step(),
+            };
+            let mut job = crate::SolutionIndicatorJob::new(
+                mesh.clone(),
+                quadratic.clone(),
+                scene,
+                snapshot,
+                crate::SolutionIndicatorOptions {
+                    minimum_edge_length: 1.0e-4,
+                    maximum_edge_length: 10.0,
+                    resolved_frequency_hz: frequency,
+                    ..Default::default()
+                },
+            )
+            .with_instantaneous_materials(operator.initial_runtime());
+            let report = loop {
+                if let Some(result) = job.advance(4_096) {
+                    break result.unwrap().report;
+                }
+            };
+            (
+                report.smallest_wavelength_target,
+                report.largest_field_tangent,
+            )
+        };
+        let (linear, unit) = target(0.0, 0.3);
+        assert_eq!(unit, 1.0);
+        let (kerr_target, tangent) = target(0.8, 0.3);
+        assert!(
+            (tangent - (1.0 + 3.0 * 0.8)).abs() < 1.0e-12,
+            "tangent {tangent}"
+        );
+        assert!(
+            (kerr_target * tangent.sqrt() - linear).abs() < 1.0e-9 * linear,
+            "{kerr_target} against {linear}"
+        );
+        let (other_phase, _) = target(0.8, 1.9);
+        assert!((other_phase - kerr_target).abs() < 1.0e-9 * kerr_target);
+    }
+
     fn relative_gap(left: f64, right: f64) -> f64 {
         (left - right).abs() / left.abs().max(right.abs()).max(1.0e-12)
     }

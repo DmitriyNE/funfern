@@ -160,6 +160,43 @@ pub(crate) fn evaluate_timed_directional_material_library_at(
         .ok_or(MaterialError::InvalidValue)
 }
 
+/// The tangent `ḡ + Aḡ′` of the primary row's field law at amplitude `A`, at
+/// one point: how much slower a small wave riding on a field of that amplitude
+/// runs, squared. A linear row reads one.
+///
+/// Only the primary row: its argument is the nodal field the estimator holds.
+/// The complementary row's argument is the complementary field, which the
+/// estimator does not read through its inverse, so it stays at its
+/// small-signal limit.
+pub(crate) fn primary_field_tangent_at(
+    physics: PhysicsModel,
+    materials: &[Material],
+    regions: &[Region],
+    region: RegionId,
+    point: Point2,
+    amplitude: f64,
+) -> Result<f64, MaterialError> {
+    let region = regions
+        .iter()
+        .find(|candidate| candidate.id == region)
+        .ok_or(MaterialError::InvalidValue)?;
+    let material = materials
+        .iter()
+        .find(|material| material.id == region.material)
+        .ok_or(MaterialError::InvalidValue)?;
+    let (_, law) = crate::canonical_temporal::coefficient_for(physics, material, true);
+    if law.field == crate::FieldLaw::Linear {
+        return Ok(1.0);
+    }
+    let law = law.evaluate_at(region.frame.coordinates(point), &material.parameters)?;
+    let tangent = law.field.tangent(amplitude.abs(), law.inverted);
+    if tangent.is_finite() && tangent > 0.0 {
+        Ok(tangent)
+    } else {
+        Err(MaterialError::InvalidValue)
+    }
+}
+
 /// Constant material coefficients for the scalar wave model
 /// `mass_density * u_tt + damping * u_t - div(stiffness * grad(u)) = f`.
 #[derive(Clone, Copy, Debug, PartialEq)]

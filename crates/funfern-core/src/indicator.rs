@@ -578,6 +578,9 @@ pub struct SolutionIndicatorReport {
     /// where nothing is forced. Below the smallest element allowed it, rather
     /// than the accuracy target, is what holds the mesh at its floor.
     pub smallest_wavelength_target: f64,
+    /// The largest field tangent `ḡ + Aḡ′` any element's size rule was
+    /// divided by, one where no field law reached it.
+    pub largest_field_tangent: f64,
 }
 
 impl Default for SolutionIndicatorReport {
@@ -610,6 +613,7 @@ impl Default for SolutionIndicatorReport {
             global_indicator: 0.0,
             dormant: false,
             smallest_wavelength_target: f64::INFINITY,
+            largest_field_tangent: 1.0,
         }
     }
 }
@@ -1567,6 +1571,16 @@ impl SolutionIndicatorJob {
             dyy = dyy + basis * stiffness.yy;
         }
         let stiffness_divergence = Point2::new(dxx.x + dxy.y, dxy.x + dyy.y);
+        // A self-focusing law slows a small wave riding on a strong field by
+        // the square root of its tangent, so the wavelength the size rule has
+        // to resolve shrinks with it. The amplitude is the field's envelope at
+        // the resolved frequency, `√(U² + (U̇/ω)²)`, not its instantaneous
+        // value, which crosses zero twice a cycle and would retarget the same
+        // element every period. A tangent below one - a defocusing law, whose
+        // waves run faster - never coarsens the mesh.
+        let tangent = self.field_tangent(index, triangle.region, &geometry.points)?;
+        self.report.largest_field_tangent = self.report.largest_field_tangent.max(tangent);
+        let minimum_wave_speed = minimum_wave_speed / tangent.sqrt();
         self.material_samples[index] = Some(ElementMaterialSamples {
             vertex_stiffness,
             quadrature: samples,
@@ -1575,6 +1589,57 @@ impl SolutionIndicatorJob {
         });
         self.phase = IndicatorPhase::SampleMaterials(index + 1);
         Ok(())
+    }
+
+    fn field_tangent(
+        &self,
+        index: usize,
+        region: RegionId,
+        points: &[Point2; 3],
+    ) -> Result<f64, SolutionIndicatorError> {
+        if self.runtime.is_none() {
+            return Ok(1.0);
+        }
+        let (physics, materials, regions) = match &self.input {
+            IndicatorInput::Scene(scene) => {
+                (scene.physics, &scene.materials[..], &scene.regions[..])
+            }
+            IndicatorInput::Topology { model, .. } => {
+                (model.physics, &model.materials[..], &model.regions[..])
+            }
+        };
+        let frequency = if self.options.resolved_frequency_hz > 0.0 {
+            self.options.resolved_frequency_hz
+        } else {
+            self.options.forcing_frequency_hz
+        };
+        let omega = std::f64::consts::TAU * frequency;
+        let amplitude = self.operator.element_nodes()[index]
+            .iter()
+            .map(|node| {
+                let node = *node as usize;
+                let field = self.snapshot.displacement.get(node).copied().unwrap_or(0.0);
+                let rate = self.snapshot.velocity.get(node).copied().unwrap_or(0.0);
+                if omega > 0.0 {
+                    (field * field + (rate / omega).powi(2)).sqrt()
+                } else {
+                    field.abs()
+                }
+            })
+            .fold(0.0_f64, f64::max);
+        let mut tangent = 1.0_f64;
+        for point in points {
+            let value = crate::wave::primary_field_tangent_at(
+                physics, materials, regions, region, *point, amplitude,
+            )
+            .map_err(|error| SolutionIndicatorError::MaterialEvaluation {
+                region,
+                point: *point,
+                reason: error.to_string(),
+            })?;
+            tangent = tangent.max(value);
+        }
+        Ok(tangent)
     }
 
     fn boundary_edge_nodes(

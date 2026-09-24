@@ -11607,3 +11607,31 @@ saturable media on both sides, since a plausible wrong total is worse than none.
 - **Gate.** `canonical_gpu_temporal_consumer` with `CONSUMER_NONLINEAR=1` now
   compares the area readout too: total energy 1.33e-7, complement RMS
   1.63e-7. The linear mode is unchanged.
+
+## 2026-09-24 — The size rule sees the wavelength a strong Kerr field makes
+
+Stage 10.7, second half. The size rule read every field law at its
+small-signal limit. A self-focusing law slows a small wave riding on a strong
+field by `√(ḡ + Aḡ′)`, which is `√(1 + 3χA²)` for Kerr. So the harmonics and
+the strong-field regions were resolved as if the medium were linear.
+
+- `wave::primary_field_tangent_at` evaluates the primary row's tangent at a
+  point and amplitude. `SolutionIndicatorJob` divides each element's
+  wavelength floor by `√τ`, the largest tangent over its points at the
+  largest field envelope over its nodes. The report carries
+  `largest_field_tangent`.
+- **The amplitude is the envelope, not the instantaneous field.** It is
+  `√(U² + (U̇/ω)²)` at the resolved frequency, because `U` itself crosses zero
+  twice a cycle and would retarget the same elements every period. A tangent
+  below one (defocusing) never coarsens.
+- **Scope.** Only the primary row. The complementary row's argument is the
+  complementary field, which the estimator does not read through its
+  inverse, so it keeps the small-signal limit. Both shipped presets act on
+  the primary row.
+  - In the app, `U̇` comes from the linear base operator (`Q̇/M`), which on
+    a Kerr medium overstates it by up to the tangent between peaks. The
+    envelope therefore errs high, meaning a little more refinement, never
+    less.
+- `the_size_rule_resolves_the_wavelength_a_strong_kerr_field_makes`: at
+  χ = 0.8 and envelope 1 the tangent is 3.4 exactly. The target is the χ = 0
+  target over √3.4 to 1e-9, and it is identical at two phases of the cycle.
