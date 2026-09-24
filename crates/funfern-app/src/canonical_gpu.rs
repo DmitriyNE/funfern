@@ -62,7 +62,7 @@ macro_rules! add_shader_buffer {
     }};
 }
 
-pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 4;
+pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 5;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
 pub const CANONICAL_GPU_WORKGROUP_SIZE: u32 = 128;
 pub const CANONICAL_GPU_MAX_TRACE: usize = 1024;
@@ -117,6 +117,8 @@ const LOSS_RECORDS_FLAG: u32 = 64;
 /// word per node after the gap and outgoing lanes, and one restoring record
 /// per primary coefficient record.
 const RESTORING_FLAG: u32 = 128;
+/// A loss record whose rate is van der Pol's, `β(u²/a² − 1)`.
+const TEMPORAL_LOSS_VAN_DER_POL: u32 = 16;
 const RESTORING_KLEIN_GORDON: u32 = 1;
 const RESTORING_SINE_GORDON: u32 = 2;
 const RESTORING_PHI4: u32 = 3;
@@ -235,6 +237,10 @@ pub(crate) struct GpuCanonicalControl {
     pub candidate_accounting_b: Vec4,
     /// Filter scale, orientation, half step and quarter step.
     pub evolution: Vec4,
+    /// Gate O: accepted active gain (x); the other lanes are reserved.
+    pub accepted_accounting_c: Vec4,
+    /// Candidate counterpart of `accepted_accounting_c`.
+    pub candidate_accounting_c: Vec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -1199,8 +1205,16 @@ impl CanonicalGpuPlan {
         }
         let primary_losses = operator.primary_loss_samples().collect::<Vec<_>>();
         let complementary_losses = operator.complementary_loss_samples().collect::<Vec<_>>();
-        for loss in primary_losses.iter().chain(&complementary_losses) {
-            if loss.law.rate != RateLawValues::Constant {
+        for (index, loss) in primary_losses
+            .iter()
+            .chain(&complementary_losses)
+            .enumerate()
+        {
+            // Van der Pol on the primary row runs as the exact Bernoulli
+            // stage map (Gate O); any other field-dependent rate does not.
+            let active = index < primary_losses.len()
+                && matches!(loss.law.rate, RateLawValues::VanDerPol { .. });
+            if loss.law.rate != RateLawValues::Constant && !active {
                 return Err(CanonicalGpuBuildError::Unrepresentable(
                     "a field-dependent loss rate is not derived on the device",
                 ));
@@ -1312,6 +1326,10 @@ impl CanonicalGpuPlan {
             .zip(&primary_losses)
         {
             by_node[contribution.node as usize].push(*loss);
+            // An active node's loss stage is gain, charged to its own lane.
+            if matches!(loss.law.rate, RateLawValues::VanDerPol { .. }) && loss.base_rate > 0.0 {
+                self.nodes[contribution.node as usize].boundary.w = 1;
+            }
         }
         for losses in by_node {
             for loss in losses {
@@ -1813,6 +1831,8 @@ impl CanonicalGpuPlan {
                 0.5 * dt,
                 0.25 * dt,
             ),
+            accepted_accounting_c: Vec4::ZERO,
+            candidate_accounting_c: Vec4::ZERO,
         };
         // This word is outside `counts_a.w`, so no physical-state dispatch
         // visits it. Commit shaders republish it after every accepted lane or
@@ -2984,6 +3004,12 @@ fn pack_temporal_loss(
         ));
     }
     words[1].data.x = finite_f32(loss.base_rate, "temporal loss rate")?.to_bits();
+    // Van der Pol carries `1/a²` in the field word a loss never uses.
+    if let RateLawValues::VanDerPol { threshold, .. } = loss.law.rate {
+        words[0].data.w |= TEMPORAL_LOSS_VAN_DER_POL;
+        words[3].data.x =
+            finite_f32(1.0 / (threshold * threshold), "van der Pol threshold")?.to_bits();
+    }
     Ok(words)
 }
 
@@ -4218,6 +4244,9 @@ pub struct CanonicalGpuDisplay {
     pub previous_auxiliary: Vec<f32>,
     pub clock: Option<CanonicalGpuDisplayClock>,
     pub accounting: [f32; 8],
+    /// Gate O: accepted energy a van der Pol medium's loss stages put in, of
+    /// either sign.
+    pub active_gain: f32,
     pub readbacks: u64,
     pub full_readbacks: u64,
     /// State-readback serial at which the latest full snapshot arrived. Equal
@@ -4490,6 +4519,7 @@ fn receive_canonical_control(
     });
     display.accounting[..4].copy_from_slice(&value.accepted_accounting_a.to_array());
     display.accounting[4..].copy_from_slice(&value.accepted_accounting_b.to_array());
+    display.active_gain = value.accepted_accounting_c.x;
     display.runtime_serials = value.runtime_serials.to_array();
     display.event_result = value.event_result.to_array();
     display.accepted_slot = value.event.z & 1;
@@ -6626,7 +6656,7 @@ mod tests {
     fn rust_and_wgsl_layout_manifests_match_exactly() {
         let shader = include_str!("canonical_wave.wgsl");
         for declaration in [
-            "const LAYOUT_VERSION: u32 = 4u;",
+            "const LAYOUT_VERSION: u32 = 5u;",
             "const STATE_WORD_STRIDE: u32 = 16u;",
             "const NODE_STRIDE: u32 = 96u;",
             "const SAMPLE_STRIDE: u32 = 112u;",
@@ -6640,8 +6670,8 @@ mod tests {
         assert_eq!(GpuCanonicalNode::min_size().get() as usize, 96);
         assert_eq!(GpuCanonicalSample::min_size().get() as usize, 112);
         assert_eq!(GpuCanonicalTableWord::min_size().get() as usize, 16);
-        assert_eq!(size_of::<GpuCanonicalControl>(), 272);
-        assert_eq!(GpuCanonicalControl::min_size().get() as usize, 272);
+        assert_eq!(size_of::<GpuCanonicalControl>(), 304);
+        assert_eq!(GpuCanonicalControl::min_size().get() as usize, 304);
         naga::front::wgsl::parse_str(shader).unwrap();
     }
 
@@ -6857,6 +6887,66 @@ mod tests {
         assert!(records.iter().all(|record| {
             record.data.x == RESTORING_SINE_GORDON && f32::from_bits(record.data.z) == 4.0
         }));
+    }
+
+    /// Van der Pol runs on the device as the exact Bernoulli stage map: its
+    /// loss records carry the flag and `1/a²`, and every node it reaches is
+    /// marked active, so the reduction charges its energy change to the gain
+    /// lane rather than to loss.
+    #[test]
+    fn a_van_der_pol_plan_marks_its_records_and_nodes() {
+        let mut scene = Scene::default();
+        scene.materials[0].restoring = funfern_core::RestoringLaw::KleinGordon {
+            omega0: ScalarField::constant(3.0),
+        };
+        scene.materials[0].magnetic_loss = Some(funfern_core::LossChannel {
+            base_rate: ScalarField::constant(0.8),
+            law: funfern_core::DampingLaw {
+                rate: funfern_core::RateLaw::VanDerPol {
+                    threshold: ScalarField::constant(0.5),
+                    amplitude_bound: ScalarField::constant(10.0),
+                },
+                drive: funfern_core::TimeDrive::None,
+            },
+        });
+        let mut fixed_scene = scene.clone();
+        fixed_scene.materials[0].restoring = funfern_core::RestoringLaw::None;
+        let mesh = mesh_scene(
+            &fixed_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.4,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &fixed_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
+        let time_step = 0.4 * operator.maximum_time_step();
+        let state = CanonicalTemporalWaveState::zero(&operator, time_step).unwrap();
+        let plan = CanonicalGpuPlan::compile_temporal(
+            &operator,
+            &state,
+            &CanonicalForcing::none(operator.base()),
+            CanonicalGpuClock::initial(time_step).unwrap(),
+        )
+        .unwrap();
+        assert!(plan.nodes.iter().all(|node| node.boundary.w == 1));
+        let header = plan.control.runtime_slots.z as usize;
+        let losses = plan.tables[header + 2].data.x as usize;
+        let records = operator.base().primary_contributions().len();
+        for record in 0..records {
+            let word = losses + record * TEMPORAL_COEFFICIENT_WORDS;
+            assert_ne!(plan.tables[word].data.w & TEMPORAL_LOSS_VAN_DER_POL, 0);
+            assert_eq!(f32::from_bits(plan.tables[word + 1].data.x), 0.8);
+            assert_eq!(f32::from_bits(plan.tables[word + 3].data.x), 4.0);
+        }
     }
 
     /// The filter composes wherever the stepper does, as on the CPU

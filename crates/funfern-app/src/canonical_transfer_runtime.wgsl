@@ -17,6 +17,9 @@ struct Control {
     accepted_accounting_a: vec4<f32>, accepted_accounting_b: vec4<f32>,
     candidate_accounting_a: vec4<f32>, candidate_accounting_b: vec4<f32>,
     evolution: vec4<f32>,
+    // Gate O: accepted and candidate active gain (x); the rest is reserved.
+    accepted_accounting_c: vec4<f32>,
+    candidate_accounting_c: vec4<f32>,
 }
 struct Status {
     candidate: atomic<u32>, latch: atomic<u32>,
@@ -252,6 +255,8 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
     new_control.accepted_accounting_b = old_control.accepted_accounting_b;
     new_control.candidate_accounting_a = old_control.accepted_accounting_a;
     new_control.candidate_accounting_b = old_control.accepted_accounting_b;
+    new_control.accepted_accounting_c = old_control.accepted_accounting_c;
+    new_control.candidate_accounting_c = old_control.accepted_accounting_c;
     // A side carries no runtime bank when its medium does not move, and a
     // medium can start or stop moving across a handoff. So zero records on
     // either side is legitimate: with none at the source every target record is

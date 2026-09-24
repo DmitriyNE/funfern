@@ -6,6 +6,9 @@ struct Control {
     accepted_accounting_a: vec4<f32>, accepted_accounting_b: vec4<f32>,
     candidate_accounting_a: vec4<f32>, candidate_accounting_b: vec4<f32>,
     evolution: vec4<f32>,
+    // Gate O: accepted and candidate active gain (x); the rest is reserved.
+    accepted_accounting_c: vec4<f32>,
+    candidate_accounting_c: vec4<f32>,
 }
 struct StateWord { values: vec4<f32> }
 struct Node {

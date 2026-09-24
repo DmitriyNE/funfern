@@ -1,5 +1,5 @@
 // Canonical direct-state f32 solver. Rust layout version 3.
-const LAYOUT_VERSION: u32 = 4u;
+const LAYOUT_VERSION: u32 = 5u;
 const STATE_WORD_STRIDE: u32 = 16u;
 const NODE_STRIDE: u32 = 96u;
 const SAMPLE_STRIDE: u32 = 112u;
@@ -33,6 +33,7 @@ const STATUS_NON_FINITE: u32 = 4u;
 const STATUS_INVERSE_CONVERGENCE: u32 = 5u;
 // Gate O: a node's integrated field passed its restoring law's declared bound.
 const STATUS_RESTORING_DOMAIN: u32 = 6u;
+const TEMPORAL_LOSS_VAN_DER_POL: u32 = 16u;
 const RESTORING_KLEIN_GORDON: u32 = 1u;
 const RESTORING_SINE_GORDON: u32 = 2u;
 const RESTORING_PHI4: u32 = 3u;
@@ -58,6 +59,9 @@ struct Control {
     candidate_accounting_a: vec4<f32>,
     candidate_accounting_b: vec4<f32>,
     evolution: vec4<f32>,
+    // Gate O: accepted and candidate active gain (x); the rest is reserved.
+    accepted_accounting_c: vec4<f32>,
+    candidate_accounting_c: vec4<f32>,
 }
 
 struct Status {
@@ -409,6 +413,66 @@ fn sample_loss_rate(sample: u32, local_time: f32) -> f32 {
     let losses = tables[control.runtime_slots.z + 2u].data;
     let loss = losses.y + (samples[sample].nodes_b.w - header.z);
     return table_float(loss + 1u, 0u) * temporal_factor(loss, local_time);
+}
+
+// Gate O: a node carrying van der Pol, whose loss stage is the exact
+// Bernoulli map and whose energy change is active gain.
+fn node_is_active(node: u32) -> bool { return nodes[node].boundary.w != 0u; }
+
+// `e^{−x}`'s complement over `x`, `(1 − e^{−x})/x`, by its series where f32
+// would cancel the direct form away.
+fn one_minus_exp_neg_over(x: f32) -> f32 {
+    if abs(x) < 0.02 {
+        return 1.0 - x * (0.5 - x * (1.0 / 6.0 - x * (1.0 / 24.0 - x / 120.0)));
+    }
+    return (1.0 - exp(-x)) / x;
+}
+
+// A van der Pol node over one half step, exactly: `Q̇ = −(β + kQ²)Q` is the
+// Bernoulli equation `ẏ = −2(β + ky)y` in `y = Q²`, whose solution keeps
+// `Q`'s sign. `β` and `k = α/M²` weigh the node's materials by the masses in
+// force at the half interval's midpoint, as the reference does.
+fn active_loss_map(node: u32, flux: f32, second: bool) -> f32 {
+    let header = tables[control.runtime_slots.z].data;
+    let losses = tables[control.runtime_slots.z + 2u].data;
+    let range = nodes[node].stiffness.zw;
+    let duration = 0.5 * control.clock_f32.x;
+    let rate_time = control.clock_f32.y + select(0.25, 0.75, second) * control.clock_f32.x;
+    var mass = 0.0;
+    var beta = 0.0;
+    var alpha = 0.0;
+    for (var record = 0u; record < range.y; record += 1u) {
+        let word = range.x + record * TEMPORAL_COEFFICIENT_WORDS;
+        let loss = losses.x + (word - header.x);
+        let coefficient = table_float(word + 1u, 0u) * temporal_factor(word, rate_time);
+        let rate = table_float(loss + 1u, 0u);
+        mass += coefficient;
+        if (tables[loss].data.w & TEMPORAL_LOSS_VAN_DER_POL) != 0u {
+            beta -= coefficient * rate;
+            alpha += coefficient * rate * table_float(loss + 3u, 0u);
+        } else {
+            beta += coefficient * rate * temporal_factor(loss, rate_time);
+        }
+    }
+    beta /= mass;
+    let k = alpha / (mass * mass * mass);
+    let x = 2.0 * beta * duration;
+    let s = k * flux * flux * 2.0 * duration * one_minus_exp_neg_over(x);
+    // `Q·e^{−x/2}/√(1 + s)` as `Q + Q·(d₁ + d₂ + d₁d₂)`: the multiplier sits
+    // within a few parts in a thousand of one and rounds the same way every
+    // stage, so it is formed as its small departures, as the passive map is.
+    let d1 = exp_minus_one(-0.5 * x);
+    let root = sqrt(1.0 + s);
+    let d2 = -s / (root * (1.0 + root));
+    return flux + flux * (d1 + d2 + d1 * d2);
+}
+
+// `e^{z} − 1`, by its series where f32 would cancel the direct form away.
+fn exp_minus_one(z: f32) -> f32 {
+    if abs(z) < 0.02 {
+        return z * (1.0 + z * (0.5 + z * (1.0 / 6.0 + z * (1.0 / 24.0 + z / 120.0))));
+    }
+    return exp(z) - 1.0;
 }
 
 // The share one half-step of loss takes away. Each half map stands for its
@@ -1215,6 +1279,7 @@ fn event_begin(@builtin(global_invocation_id) id: vec3<u32>) {
     if i == 0u {
         control.candidate_accounting_a = control.accepted_accounting_a;
         control.candidate_accounting_b = control.accepted_accounting_b;
+        control.candidate_accounting_c = control.accepted_accounting_c;
     }
     // State and the cumulative step-accounting bank share the accepted lane.
     // A zero-duration event flips that lane, so begin a fresh contribution
@@ -1629,6 +1694,7 @@ fn commit_event() {
     control.event.x = control.event.y;
     control.accepted_accounting_a = control.candidate_accounting_a;
     control.accepted_accounting_b = control.candidate_accounting_b;
+    control.accepted_accounting_c = control.candidate_accounting_c;
     if operation == 3u {
         var flags = control.boundary_offsets.w & 8u;
         flags |= control.event.w & 1u;
@@ -1678,6 +1744,7 @@ fn resident_filter_commit() {
     control.event.z = accepted_slot() ^ 1u;
     control.accepted_accounting_a = control.candidate_accounting_a;
     control.accepted_accounting_b = control.candidate_accounting_b;
+    control.accepted_accounting_c = control.candidate_accounting_c;
     publish_snapshot_metadata();
 }
 
@@ -1765,7 +1832,8 @@ fn handoff_clear_scratch(@builtin(global_invocation_id) id: vec3<u32>) {
 fn handoff_commit() {
     var failure = atomicLoad(&status.candidate);
     if !finite_vector(control.candidate_accounting_a)
-        || !finite_vector(control.candidate_accounting_b) {
+        || !finite_vector(control.candidate_accounting_b)
+        || !finite_vector(control.candidate_accounting_c) {
         failure = max(failure, STATUS_NON_FINITE);
     }
     if failure != 0u {
@@ -1776,6 +1844,7 @@ fn handoff_commit() {
     control.event.z = accepted_slot() ^ 1u;
     control.accepted_accounting_a = control.candidate_accounting_a;
     control.accepted_accounting_b = control.candidate_accounting_b;
+    control.accepted_accounting_c = control.candidate_accounting_c;
     atomicStore(&status.transaction_1, control.clock_u32.w);
     atomicStore(&status.transaction_2, control.clock_u32.z);
     atomicStore(&status.handoff, 0u);
@@ -1878,7 +1947,8 @@ fn start_loss(@builtin(global_invocation_id) id: vec3<u32>) {
                 * harmonic_value(nodes[i].prescribed, control.clock_f32.y);
             exchange = 0.5 * (owned * owned - old * old) * nodes[i].mass_loss.y;
         }
-        let next = owned - owned * node_loss_fraction(i, false);
+        var next = owned - owned * node_loss_fraction(i, false);
+        if node_is_active(i) { next = active_loss_map(i, owned, false); }
         set_candidate_q(i, next);
         if use_force_cache() {
             set_candidate_force(i, accepted_force(i));
@@ -2686,6 +2756,7 @@ fn finish_loss_validate(@builtin(global_invocation_id) id: vec3<u32>) {
     if i < node_count {
         let before = candidate_q(i);
         var next = before - before * node_loss_fraction(i, true);
+        if node_is_active(i) { next = active_loss_map(i, before, true); }
         let stage_time = control.clock_f32.y + control.clock_f32.x;
         scratch[i].values.z += stage_primary_energy(i, before, stage_time)
             - stage_primary_energy(i, next, stage_time);
@@ -2766,7 +2837,8 @@ fn reduce_accounting(@builtin(local_invocation_id) id: vec3<u32>) {
         if nodes[node].boundary.x == NO_INDEX || has_prescribed_trace() {
             accounting_a.y += item.y;
         }
-        accounting_a.z += item.z;
+        // An active node's loss stage is gain of either sign, charged below.
+        if !node_is_active(node) { accounting_a.z += item.z; }
     }
     for (var sample = local; sample < control.counts_a.y; sample += WORKGROUP_SIZE) {
         let item = control.counts_a.x + sample;
@@ -2785,9 +2857,13 @@ fn reduce_accounting(@builtin(local_invocation_id) id: vec3<u32>) {
     }
     workgroupBarrier();
 
+    // The step fills only `b.x`; `b.y` carries the active gain through the
+    // reduction and lands in `c.x`.
     var accounting_b = vec4<f32>(0.0);
     for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
-        accounting_b.x += scratch[accounting_bank_offset(accepted_slot()) + node].values.w;
+        let item = scratch[accounting_bank_offset(accepted_slot()) + node].values;
+        accounting_b.x += item.w;
+        if node_is_active(node) { accounting_b.y -= item.z; }
     }
     for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
         let item_index = control.counts_a.x + control.counts_a.y + mode;
@@ -2795,7 +2871,10 @@ fn reduce_accounting(@builtin(local_invocation_id) id: vec3<u32>) {
     }
     let total_b = reduce_accounting_half(local, accounting_b);
     if local == 0u {
-        control.accepted_accounting_b = control.candidate_accounting_b + total_b;
+        control.accepted_accounting_b = control.candidate_accounting_b
+            + vec4<f32>(total_b.x, 0.0, 0.0, 0.0);
+        control.accepted_accounting_c = control.candidate_accounting_c
+            + vec4<f32>(total_b.y, 0.0, 0.0, 0.0);
     }
 }
 

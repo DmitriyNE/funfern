@@ -11,12 +11,20 @@
 //! - `kink`: a sine-Gordon kink launched at half the wave speed;
 //! - `phi4`: a φ⁴ domain wall, kicked;
 //! - `pumped`: sine-Gordon beside a parametric pump on the mass row;
-//! - `kerr`: sine-Gordon beside a Kerr mass row.
+//! - `kerr`: sine-Gordon beside a Kerr mass row;
+//! - `van-der-pol`: Klein-Gordon with a van der Pol primary loss, whose
+//!   stage map is the exact Bernoulli map and whose energy is active gain,
+//!   compared lane for lane with the reference's.
 //!
 //! `OSCILLATOR_COMPOSE` adds one composition: `wall1`, `wall2`, `gap`,
-//! `pins`, `source` or `loss`. `OSCILLATOR_FILTER=1` turns the resident grid
+//! `pins`, `source`, `loss`, or `junction`: a second material inside the
+//! scene's obstacle, with its own Klein-Gordon cutoff and a constant primary
+//! loss, so interface nodes sum two restoring laws and weigh an active rate
+//! against a passive one. `OSCILLATOR_FILTER=1` turns the resident grid
 //! filter on, against the reference's `apply_grid_filter_with_forcing` every
-//! sixteenth step. `OSCILLATOR_STEPS` sets the run (default 200).
+//! sixteenth step. `OSCILLATOR_STEPS` sets the run (default 200), and
+//! `OSCILLATOR_AMPLITUDE` scales the smooth initial field (default 1): at 0.05
+//! van der Pol sits below its threshold and grows.
 
 use std::time::{Duration, Instant};
 
@@ -29,10 +37,10 @@ use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
     BACKGROUND_REGION, CanonicalForcing, CanonicalSource, CanonicalTemporalWaveOperator,
     CanonicalTemporalWaveState, CoefficientLaw, DampingLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE,
-    InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw,
-    LossChannel, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition, Point2,
-    QuadraticWaveOperator, RateLaw, RestoringLaw, ScalarField, Scene, TimeDrive, TimeSignal,
-    mesh_scene,
+    InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw, LoopRole,
+    LossChannel, Material, MaterialFrame, MaterialId, MeshingOptions, OpenCubicSpline,
+    OuterBoundaryCondition, Point2, QuadraticWaveOperator, RateLaw, Region, RegionId, RestoringLaw,
+    ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
 };
 
 #[derive(Resource)]
@@ -47,6 +55,9 @@ struct Expected {
     primary: Vec<f64>,
     complementary: Vec<Point2>,
     integrated: Vec<f64>,
+    /// The reference's summed active gain and primary loss lanes.
+    gained: f64,
+    lost: f64,
     steps: u64,
     started: Instant,
     deadline: Instant,
@@ -62,14 +73,49 @@ fn main() -> AppExit {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(200);
+    let amplitude = std::env::var("OSCILLATOR_AMPLITUDE")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(1.0);
 
     let sine_gordon = |omega0: f64| RestoringLaw::SineGordon {
         omega0: ScalarField::constant(omega0),
     };
-    let mut scene = Scene::default();
+    let mut scene = if compose == "junction" {
+        let mut scene = Scene::initial();
+        let interior = RegionId(2);
+        scene.obstacles[0].role = LoopRole::MaterialInterface {
+            exterior: BACKGROUND_REGION,
+            interior,
+        };
+        scene.materials.push(Material {
+            id: MaterialId(2),
+            name: "Oscillator interior".into(),
+            stiffness: ScalarField::constant(2.5),
+            restoring: RestoringLaw::KleinGordon {
+                omega0: ScalarField::constant(2.0),
+            },
+            magnetic_loss: Some(LossChannel {
+                base_rate: ScalarField::constant(0.3),
+                law: DampingLaw {
+                    rate: RateLaw::Constant,
+                    drive: TimeDrive::None,
+                },
+            }),
+            ..Material::default_medium()
+        });
+        scene.regions.push(Region {
+            id: interior,
+            material: MaterialId(2),
+            frame: MaterialFrame::world(),
+        });
+        scene
+    } else {
+        Scene::default()
+    };
     let material = &mut scene.materials[0];
     material.restoring = match medium.as_str() {
-        "klein-gordon" => RestoringLaw::KleinGordon {
+        "klein-gordon" | "van-der-pol" => RestoringLaw::KleinGordon {
             omega0: ScalarField::constant(3.0),
         },
         "kink" => sine_gordon(4.0),
@@ -94,16 +140,29 @@ fn main() -> AppExit {
             amplitude_bound: None,
         };
     }
+    let channel = |rate: f64| LossChannel {
+        base_rate: ScalarField::constant(rate),
+        law: DampingLaw {
+            rate: RateLaw::Constant,
+            drive: TimeDrive::None,
+        },
+    };
     if compose == "loss" {
-        let channel = |rate: f64| LossChannel {
-            base_rate: ScalarField::constant(rate),
-            law: DampingLaw {
-                rate: RateLaw::Constant,
-                drive: TimeDrive::None,
-            },
-        };
         material.electric_loss = Some(channel(0.4));
         material.magnetic_loss = Some(channel(0.25));
+    }
+    if medium == "van-der-pol" {
+        // Gain below `a = 0.4`, loss above it, on the primary row.
+        material.magnetic_loss = Some(LossChannel {
+            base_rate: ScalarField::constant(0.8),
+            law: DampingLaw {
+                rate: RateLaw::VanDerPol {
+                    threshold: ScalarField::constant(0.4),
+                    amplitude_bound: ScalarField::constant(10.0),
+                },
+                drive: TimeDrive::None,
+            },
+        });
     }
     if compose == "gap" {
         scene.internal_boundaries.push(InternalBoundary {
@@ -216,7 +275,7 @@ fn main() -> AppExit {
                 .iter()
                 .zip(base.primary_mass())
                 .map(|(point, mass)| {
-                    let u = 0.5 * (1.4 * point.x - 0.9 * point.y).sin();
+                    let u = amplitude * 0.5 * (1.4 * point.x - 0.9 * point.y).sin();
                     let multiplier = if medium == "kerr" {
                         1.0 + 0.8 * u * u
                     } else {
@@ -228,7 +287,7 @@ fn main() -> AppExit {
             let r = base
                 .node_points()
                 .iter()
-                .map(|point| 1.2 * (0.7 * point.x + 0.5 * point.y).cos())
+                .map(|point| amplitude * 1.2 * (0.7 * point.x + 0.5 * point.y).cos())
                 .collect::<Vec<_>>();
             (q, r)
         }
@@ -247,10 +306,13 @@ fn main() -> AppExit {
     let mut oracle = state.clone();
     let initial = oracle.energy(&operator).expect("initial energy");
     let (mut filters, mut skipped, mut removed) = (0, 0, 0.0);
+    let (mut gained, mut lost) = (0.0, 0.0);
     for step in 1..=steps {
-        oracle
+        let accounting = oracle
             .step_with_forcing(&operator, &forcing)
             .expect("f64 oscillator step");
+        gained += accounting.active_gain;
+        lost += accounting.primary_loss;
         if filter && step.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
             filters += 1;
             // A candidate that gains energy is not taken, on either side.
@@ -299,6 +361,8 @@ fn main() -> AppExit {
         primary: oracle.primary_flux().to_vec(),
         complementary: oracle.complementary_flux().to_vec(),
         integrated: oracle.integrated_field().to_vec(),
+        gained,
+        lost,
         steps,
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(120),
@@ -393,6 +457,20 @@ fn drive(
     expected.finished = true;
     // The Stage 0 f32 gate, as for the field-dependent media.
     if primary > 3.0e-5 || complementary > 3.0e-5 || integrated > 3.0e-5 {
+        expected.failed = true;
+    }
+    // The gain and primary-loss lanes, each against the reference's sum. An
+    // f32 lane accumulates every step's rounding, so it is held to 1e-3 of
+    // the larger of the two.
+    let scale = expected.gained.abs().max(expected.lost.abs()).max(1.0e-12);
+    let gain = (f64::from(display.active_gain) - expected.gained).abs() / scale;
+    let loss = (f64::from(display.accounting[2]) - expected.lost).abs() / scale;
+    println!(
+        "oscillator lanes: gain {:.6e} against {:.6e} ({gain:.2e}), primary loss {:.6e} \
+         against {:.6e} ({loss:.2e})",
+        display.active_gain, expected.gained, display.accounting[2], expected.lost
+    );
+    if gain > 1.0e-3 || loss > 1.0e-3 {
         expected.failed = true;
     }
 }

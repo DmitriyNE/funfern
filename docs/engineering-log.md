@@ -11969,8 +11969,11 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
     r 1.3e-4 and fails. The moving kink reads 1.2e-5, under the gate but 30×
     its correct 3.9e-7.
 - **Regression suite.** Every other canonical GPU example and its modes
-  exits 0: 49 runs, including `canonical_gpu_long_run` with a constant loss
-  (7.3e-6) and a driven one (3.9e-6).
+  exits 0: 45 runs, including `canonical_gpu_long_run` with a constant loss
+  (7.3e-6) and a driven one (3.9e-6). (This entry first said 49; the first
+  pass was 44 runs, two of them failures: my own mis-invocation of
+  `LONG_RUN_LOSS=1`, which is a pump depth that zeroes the rate, and the
+  defect below. The corrected suite is 45 runs.)
 - **Found, not fixed.** `NONLINEAR_WALL=2 NONLINEAR_FORCED=1` misses by
   Q 1.6e-1 and b 3.0e-1, identically on 7be3fb8, so it predates this stage.
   Its pins at `x < −0.999` sit on the second-order wall's trace. The
@@ -11978,3 +11981,50 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
   assembled Dirichlet signals, not forcing-level pins, so the composition
   runs when it should be refused or derived. Whether the app can author it
   is not checked. Reported, awaiting a decision.
+
+## 2026-09-24 — Van der Pol on the device (Stage 11.3b)
+
+- **Records.** A primary loss record whose rate is van der Pol carries flag
+  16 and `1/a²` in its unused field word. Every node it reaches is marked
+  active in `boundary.w`. Any other field-dependent rate is still refused.
+- **Stage map.** On an active node both loss stages run the exact Bernoulli
+  map. `β` and `k = α/M²` weigh the node's materials by the masses in force
+  at the half interval's midpoint, and a passive material's rate at a shared
+  node enters `β`, as on the CPU.
+- **Gain lane.** There was no spare accounting lane: all eight carry source
+  work, exchange, both losses, boundary loss, filter removal, maintenance
+  and edit exchange. My 11.3 plan said otherwise.
+  - Every shader's `Control` gains `accepted_accounting_c` and
+    `candidate_accounting_c`, at the end so no existing offset moves. The
+    block grows from 272 to 304 bytes, and the layout version goes from 4
+    to 5.
+  - Events, commits, the handoff runtime copy and the handoff commit carry
+    them.
+  - The reduction sends an active node's energy change to `c.x`, and
+    `CanonicalGpuDisplay::active_gain` reads it back.
+- **f32 form of the map.** The first cut, `sign(Q)·√(Q²e^{−x}/(1 + s))`,
+  rounds a multiplier within parts per thousand of one the same way at every
+  stage. Below threshold, where the node grows, that compounded: Klein–Gordon
+  with van der Pol at a junction, from amplitude 0.05, read Q 4.2e-6 at 200
+  steps and b 3.5e-5 at 1000, a fail. The same scene without van der Pol
+  read 3.1e-7 and 8.2e-6. The map is now `Q + Q·(d₁ + d₂ + d₁d₂)`, with
+  `d₁ = expm1(−x/2)` and `d₂ = 1/√(1+s) − 1`, each formed without
+  cancellation:
+
+  | run | Q before → after | b before → after | gain lane before → after |
+  | --- | --- | --- | --- |
+  | junction, 200 steps | 4.2e-6 → 3.9e-7 | 3.5e-6 → 1.6e-6 | 7.4e-5 → 1.2e-7 |
+  | junction, 1000 steps | 2.0e-5 → 1.3e-6 | 3.5e-5 → 1.0e-5 | 1.0e-4 → 1.3e-7 |
+  | bulk, 1000 steps | 1.8e-5 → 7.0e-7 | 2.6e-5 → 1.3e-5 | 4.3e-5 → 9.5e-8 |
+- **Measured** (`canonical_gpu_oscillator`, M1 Max):
+  - **Sweep:** 7 media × 8 compositions (the seven of 11.3a plus a material
+    junction whose interior carries a different Klein–Gordon cutoff and a
+    constant primary loss) × filter on and off, plus van der Pol from
+    amplitude 0.05 for 1000 steps with each composition. 120 runs, all
+    within 3e-5 on `Q`, `b` and `r`, with the gain and primary-loss lanes
+    within 1e-3.
+  - **Worst state:** Q 7.9e-6 (φ⁴ with loss), b 1.4e-5 (van der Pol with a
+    gap, 1000 steps, growing), r 3.2e-6.
+  - **Worst lane:** 2.8e-6.
+- **Regression suite:** 45 runs, all exit 0.
+- **Test:** `a_van_der_pol_plan_marks_its_records_and_nodes`.
