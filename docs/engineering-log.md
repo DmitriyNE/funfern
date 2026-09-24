@@ -11523,3 +11523,57 @@ printed together. The user asked for a toggle between them instead.
 - `a_slot_edited_by_hand_stops_matching` expected a mass-row pump copied onto
   the stiffness row to match no preset. It is now, correctly, the
   reflectionless pair; an inverted copy matches none.
+
+## 2026-09-24 — The device's clock was an f32 running sum
+
+Diagnosed and fixed; found while checking the Stage 10.6 gallery on the GPU.
+Scenes stepped from rest drifted from the f64 reference faster than roundoff.
+On the pump scene: 25 → 4.4e-7, 50 → 2.7e-7, 100 → 1.7e-6, 200 → 1.3e-5,
+400 → 6.1e-5. The fixed path on the same scene, and the existing
+driven-document gate run to 400 steps, did the same.
+
+- **Cause.** `commit_step` advanced the epoch-local time by
+  `clock_f32.y += clock_f32.x`. Every step rounds at the spacing of `t` and the
+  rounding is kept. Replaying the same f32 adds off the device reproduces the
+  measured error in size and shape: 3.4e-8 s behind `n·dt` at step 100 and
+  −8.4e-6 s at step 400. The jump between 100 and 200 steps, where `t` passes
+  1 s and the spacing doubles, appears in both the replay and the device
+  figures.
+  - Over a full epoch (up to 256 s or 2^16 steps) the replay falls 0.12 s
+    behind: 1.9 rad of phase at 2.5 Hz for every source, drive, pin and
+    Switch.
+  - The host reports the clock from exact step counts, so no gate's "clock
+    error" could see it. Every other gate runs 48–200 steps, inside the
+    region where the sum is still accurate.
+- **Fix.** `clock_f32.y = f32(clock_u32.z) · clock_f32.x`: the step count, which
+  the rebase and the handoff already reset with the time, times the step. There
+  is one rounding and nothing accumulates.
+- **After, at 400 steps.** Pump 1.5e-6, Kerr 2.7e-6, time crystal 1.4e-6,
+  travelling 1.0e-6, the fixed-path material lens 1.0e-6. All are within
+  Stage 0.
+  - Clock-sensitive figures in the existing gates improved: handoff clock
+    1.25e-8 → 1.36e-9, rollback clock 8.9e-9 → 2.3e-9, Switch start
+    2.0e-7 → 2.3e-8, nonlinear forced Q 2.3e-6 → 8.9e-7.
+  - All 38 existing device modes exit 0.
+- **Gate.** The new `canonical_gpu_long_run` runs a catalogue scene from rest
+  (`LONG_RUN_SCENE`, default "Parametric pump"; `LONG_RUN_STEPS`, default
+  400) and asserts Stage 0 up to 1000 steps. With the old clock restored it
+  reads 6.1e-5 and exits 1; with the fix it passes.
+- **What remains, characterized, not fixed.** At 4000 steps (20–26 s) the
+  fixed path is 5.8e-6, growing linearly. The driven and field-dependent
+  scenes grow faster: pump 4.0e-5, Kerr 1.05e-4.
+  - Not the step rounding: a reference stepped at exactly `f32(dt)` gives the
+    same figures.
+  - Not state storage: an f64 run rounding Q and b to f32 every step departs
+    only 3.1e-7 (pump) and 4.4e-6 (Kerr).
+  - The pump is partly the size of f32 phase arguments, `φ + ω·t` with `t`
+    up to the epoch length. 16-s epochs halved it (2.3e-5) but made the fixed
+    path worse (9.2e-6), because each re-anchor adds its own rounding, so the
+    epoch length is unchanged.
+  - Kerr did not move with the epoch length. Its trajectory is the most
+    sensitive (15× the pump's to storage rounding), and the f32 inverse's
+    declared 4ε₃₂ tolerance is the likely remaining source. That is not
+    proven.
+  - The next step, if wanted, is compensated phase arithmetic: an exact
+    `ω·t` by `fma` and a two-float anchor, like `add_compensated` for the
+    origin.
