@@ -12189,3 +12189,35 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
   - The summary test in TM and TE.
   - The step-ceiling line with a restoring curvature.
 - **Not checked by me:** the editor on screen.
+
+## 2026-09-25 — Seeing the integrated field, and its energy in the readouts (Stage 11.4c)
+
+- **Integrated field view.** On a generation that carries `r`, the View
+  panel's Field toggle gains a choice between the displayed field and `r`:
+  "Field E_z | Integrated −A_z" in TM, "∫H_z dt" in TE, "Displacement u |
+  Integrated ∫u dt" in Mechanical.
+  - `r` comes from each full snapshot (`WaveDisplay::snapshot_integrated`),
+    and while the view is chosen a snapshot is taken every frame instead of
+    every 0.25 s.
+  - The choice lives in the session, not the document, and resets when the
+    running generation has no restoring law.
+- **Area readout.** `sample_temporal_canonical_area` takes the state's `r`
+  and adds each contribution's `m₀V(r)`, weighed by the authored share as
+  the force is. The device area probe does the same from the restoring
+  records and the auxiliary tail.
+  - **CPU:** `an_oscillator_area_probe_over_every_face_reports_the_solver_energy`,
+    at a junction of sine-Gordon and Klein–Gordon, equals the solver's energy
+    to 1e-9; the restoring store is more than 10% of it.
+  - **Device:** `canonical_gpu_temporal_consumer` with `CONSUMER_OSCILLATOR=1`
+    reads the full-coverage energy at 2.1e-7 against the f64 readout. Before
+    the shader change it missed by 0.999, since the store dominates that
+    state. The plain and nonlinear modes still pass (3.3e-7).
+- **Energy readout and AMR peak.** The periodic energy passed the whole
+  auxiliary block to the fixed breakdown, which on an oscillator would now
+  include `r`. It reads `history_auxiliary()`, and on a field-law or
+  restoring generation adds the store (`stored_energy_view`, and a now-public
+  `restoring_energy`). A snapshot without its `r` reports no energy rather
+  than one missing the store.
+- **Not done:** point and line probes still record `u` only, with no `r`
+  channel. The point probe's energy density does not include `V(r)`.
+- **Not checked by me:** the view on screen.

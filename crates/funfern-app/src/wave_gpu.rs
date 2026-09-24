@@ -2835,6 +2835,9 @@ pub struct WaveDisplay {
     pub snapshot_previous: Vec<f32>,
     pub snapshot_velocity: Vec<f32>,
     pub snapshot_completed_steps: u64,
+    /// Gate O: the integrated field `r` from the latest full canonical
+    /// snapshot, empty without a restoring law.
+    pub snapshot_integrated: Vec<f32>,
     pub completed_steps: u64,
     pub readbacks: u64,
 }

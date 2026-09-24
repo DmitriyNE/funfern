@@ -954,6 +954,19 @@ fn law_preset_label(preset: &LawPreset, physics: PhysicsModel) -> String {
     }
 }
 
+/// The displayed field and its time integral, as the view selector names them.
+fn integrated_field_labels(physics: PhysicsModel) -> (&'static str, &'static str) {
+    match physics {
+        PhysicsModel::Mechanical => ("Displacement u", "Integrated ∫u dt"),
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        } => ("Field E_z", "Integrated −A_z"),
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => ("Field H_z", "Integrated ∫H_z dt"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn material_scalar_editor(
     ui: &mut egui::Ui,
@@ -1891,6 +1904,29 @@ fn aligned_indicator_auxiliary(
 /// operator, the runtime the solver stepped with (the authored one until a
 /// snapshot and a clock agree), and the readback's accepted time. `None`
 /// where the maps are linear and `Q/M` is exact.
+/// A generation's time-driven operator, its accepted runtime and the
+/// snapshot's time, when it carries a field law or a restoring law: both store
+/// energy the fixed breakdown does not know.
+pub(crate) fn stored_energy_view(
+    active: &PreparedTopology,
+    canonical: &CanonicalGpuDisplay,
+) -> Option<(
+    std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
+    funfern_core::CanonicalMaterialRuntimeState,
+    f64,
+)> {
+    let operator = active
+        .canonical_temporal_operator
+        .as_ref()
+        .filter(|operator| operator.has_field_laws() || operator.has_restoring())?;
+    let authored = operator.initial_runtime();
+    let runtime = canonical
+        .accepted_material_runtime(&authored)
+        .unwrap_or(authored);
+    let time = canonical.clock.map_or(0.0, |clock| clock.absolute_seconds);
+    Some((operator.clone(), runtime, time))
+}
+
 pub(crate) fn field_law_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
@@ -1939,6 +1975,7 @@ fn refresh_canonical_wave_display(
         display.snapshot_current.clear();
         display.snapshot_previous.clear();
         display.snapshot_velocity.clear();
+        display.snapshot_integrated.clear();
         display.snapshot_completed_steps = 0;
     }
     display.generation = canonical.generation;
@@ -1976,6 +2013,10 @@ fn refresh_canonical_wave_display(
         display.auxiliary.clear();
         display.auxiliary.resize(operator.degrees_of_freedom(), 0.0);
         display.snapshot_completed_steps = canonical.full_snapshot_completed_steps();
+        display.snapshot_integrated.clear();
+        display
+            .snapshot_integrated
+            .extend(canonical.integrated_field().iter().copied());
         display.complementary_flux.clear();
         display
             .complementary_flux

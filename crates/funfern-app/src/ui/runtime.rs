@@ -757,7 +757,13 @@ impl Playground {
             .saturating_sub(self.completed_steps);
         // Full physical snapshots are for AMR and energy diagnostics. The
         // vector overlay has its own compact display-rate GPU sampler.
-        let full_snapshot_interval = 0.25;
+        // The integrated-field view paints `r`, which arrives only in full
+        // snapshots, so it takes one every frame while it is shown.
+        let full_snapshot_interval = if self.show_integrated_field {
+            0.0
+        } else {
+            0.25
+        };
         if self.full_snapshot_requested.elapsed().as_secs_f64() >= full_snapshot_interval
             && request.request_full_state_readback(commands)
         {
@@ -781,8 +787,15 @@ impl Playground {
                     .iter()
                     .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
                     .collect::<Vec<_>>();
+                // The gap and pole lanes alone; an oscillator's `r` sits after
+                // them and is stored energy of its own.
                 let auxiliary = display
-                    .auxiliary
+                    .history_auxiliary()
+                    .iter()
+                    .map(|value| f64::from(*value))
+                    .collect::<Vec<_>>();
+                let integrated = display
+                    .integrated_field()
                     .iter()
                     .map(|value| f64::from(*value))
                     .collect::<Vec<_>>();
@@ -794,13 +807,26 @@ impl Playground {
                 )
                 .ok();
                 // A field-dependent medium stores the Legendre dual of its
-                // co-energy, not the quadratic form; the gap and pole stores
-                // are unchanged by the field law.
-                let energy = match (breakdown, super::field_law_view(active, display)) {
-                    (Some(breakdown), Some((temporal, runtime, time))) => temporal
-                        .energy_at(&primary, &complementary, time, &runtime)
-                        .ok()
-                        .map(|bulk| bulk + breakdown.thin_gap + breakdown.outgoing),
+                // co-energy, not the quadratic form, and an oscillator's
+                // integrated field stores `Σ m₀V(r)`; the gap and pole stores
+                // are unchanged by either.
+                let energy = match (breakdown, super::stored_energy_view(active, display)) {
+                    // A snapshot without its `r` has no energy to report,
+                    // rather than one missing the restoring store.
+                    (Some(breakdown), Some((temporal, runtime, time)))
+                        if !temporal.has_restoring()
+                            || integrated.len() == temporal.base().degrees_of_freedom() =>
+                    {
+                        temporal
+                            .energy_at(&primary, &complementary, time, &runtime)
+                            .ok()
+                            .map(|bulk| {
+                                bulk + breakdown.thin_gap
+                                    + breakdown.outgoing
+                                    + temporal.restoring_energy(&integrated)
+                            })
+                    }
+                    (_, Some(_)) => None,
                     (breakdown, _) => breakdown.map(CanonicalEnergyBreakdown::total),
                 };
                 if let Some(energy) = energy.filter(|energy| energy.is_finite() && *energy > 0.0) {

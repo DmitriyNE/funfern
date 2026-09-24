@@ -237,6 +237,9 @@ pub struct Playground {
     pub(super) vector_overlay_mode: VectorOverlay,
     pub(super) vector_overlay_exposure: AutoExposure,
     pub(super) field_exposure: AutoExposure,
+    /// Gate O: paint the integrated field `r` instead of the displayed one.
+    /// A view of the session, not of the document.
+    pub(super) show_integrated_field: bool,
     /// Static field-surface geometry. Egui's ordinary mesh path recopies every
     /// index every frame; the paint callback keeps this topology on the GPU.
     pub(super) field_paint_topology: Option<Arc<FieldPaintTopology>>,
@@ -444,6 +447,7 @@ impl Default for Playground {
             vector_overlay_mode: VectorOverlay::Off,
             vector_overlay_exposure: AutoExposure::default(),
             field_exposure: AutoExposure::default(),
+            show_integrated_field: false,
             field_paint_topology: None,
             exposure_scratch: Vec::new(),
             frame_delta: 0.0,

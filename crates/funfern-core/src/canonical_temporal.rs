@@ -1505,15 +1505,27 @@ pub fn canonical_temporal_energy_breakdown(
 /// The field statistics are moments of the interpolated physical fields, and
 /// the energy is the solver's own discrete energy restricted to the covered
 /// elements, both evaluated with the laws in force at `time`.
+///
+/// `integrated_field` is the state's `r` (Gate O), empty without a restoring
+/// law. Each contribution's restoring store `m₀V(r)` is part of the energy it
+/// holds, so a full-coverage probe still equals the solver's energy.
+#[allow(clippy::too_many_arguments)]
 pub fn sample_temporal_canonical_area(
     stencil: &QuadraticAreaStencil,
     operator: &CanonicalTemporalWaveOperator,
     primary_flux: &[f64],
     complementary_flux: &[Point2],
+    integrated_field: &[f64],
     time: f64,
     runtime: &CanonicalMaterialRuntimeState,
 ) -> Result<CanonicalAreaSample, WaveError> {
+    let integrated_count = if operator.has_restoring() {
+        operator.base().degrees_of_freedom()
+    } else {
+        0
+    };
     if primary_flux.len() != operator.base().degrees_of_freedom()
+        || integrated_field.len() != integrated_count
         || complementary_flux.len() != operator.base().complementary_degrees_of_freedom()
         || stencil.covered_area <= 0.0
         || stencil.target_area <= 0.0
@@ -1586,6 +1598,10 @@ pub fn sample_temporal_canonical_area(
             let r = field.abs();
             let law = sample.law.field;
             energy += coefficient * (law.multiplier(r) * r * r - law.coenergy(r));
+            if let Some(integrated) = integrated_field.get(node) {
+                let restoring = operator.primary[element.element as usize * 7 + local].restoring;
+                energy += reference * restoring.potential(*integrated);
+            }
         }
         total_energy += contribution.covered_fraction * energy;
     }
@@ -2045,8 +2061,9 @@ impl CanonicalTemporalWaveOperator {
         Ok(force)
     }
 
-    /// `Σ_i Σ_c m₀_c V_c(r_i)`, the restoring store.
-    fn restoring_energy(&self, integrated: &[f64]) -> f64 {
+    /// `Σ_i Σ_c m₀_c V_c(r_i)`, the restoring store: the part of the energy
+    /// the integrated field holds (Gate O), zero without a restoring law.
+    pub fn restoring_energy(&self, integrated: &[f64]) -> f64 {
         if !self.has_restoring {
             return 0.0;
         }
@@ -7089,6 +7106,7 @@ mod tests {
             &operator,
             &primary,
             &complementary,
+            &[],
             time,
             &runtime,
         )
@@ -7162,6 +7180,7 @@ mod tests {
                 &operator,
                 &primary,
                 &complementary,
+                &[],
                 0.0,
                 &runtime,
             )
@@ -10701,5 +10720,86 @@ mod tests {
     #[test]
     fn the_estimate_still_refuses_van_der_pol() {
         assert!(!van_der_pol_operator(1.0, 0.5, 3.0).indicator_supplement_supported());
+    }
+
+    /// Gate O: over every face an oscillator state's area readout is the
+    /// solver's whole energy, the restoring store included, at a junction of
+    /// two materials carrying different laws.
+    #[test]
+    fn an_oscillator_area_probe_over_every_face_reports_the_solver_energy() {
+        let mut scene = Scene::initial();
+        scene.materials[0].restoring = sine_gordon(3.0);
+        let interior = RegionId(2);
+        scene.obstacles[0].role = LoopRole::MaterialInterface {
+            exterior: BACKGROUND_REGION,
+            interior,
+        };
+        scene.materials.push(Material {
+            id: crate::MaterialId(2),
+            name: "interior".into(),
+            restoring: klein_gordon(2.0),
+            ..Material::default_medium()
+        });
+        scene.regions.push(Region {
+            id: interior,
+            material: crate::MaterialId(2),
+            frame: MaterialFrame::world(),
+        });
+        let (mesh, quadratic, operator) = generation(&scene, 0.3, 1);
+        let base_scene = {
+            let mut base = scene.clone();
+            strip_temporal_laws(&mut base.materials);
+            base
+        };
+        let runtime = operator.initial_runtime();
+        let (primary, complementary) = reference_fluxes(&operator);
+        let integrated = operator
+            .base()
+            .node_points()
+            .iter()
+            .map(|point| 1.2 * (0.7 * point.x + 0.5 * point.y).cos())
+            .collect::<Vec<_>>();
+        let state = CanonicalTemporalWaveState::new(
+            &operator,
+            0.4 * operator.maximum_time_step(),
+            primary.clone(),
+            complementary.clone(),
+        )
+        .unwrap()
+        .with_integrated_field(&operator, integrated.clone())
+        .unwrap();
+        let expected = state.energy(&operator).unwrap();
+        let mut total = 0.0;
+        for region in &base_scene.regions {
+            let stencil = QuadraticAreaStencil::build(
+                &mesh,
+                &quadratic,
+                &base_scene,
+                crate::AreaProbeShape::Region(region.id),
+            )
+            .unwrap();
+            total += sample_temporal_canonical_area(
+                &stencil,
+                &operator,
+                &primary,
+                &complementary,
+                &integrated,
+                0.0,
+                &runtime,
+            )
+            .unwrap()
+            .total_energy;
+        }
+        assert!(
+            (total - expected).abs() < 1.0e-9 * expected,
+            "the faces summed to {total} against the solver's {expected}"
+        );
+        let without = operator
+            .energy_at(&primary, &complementary, 0.0, &runtime)
+            .unwrap();
+        assert!(
+            relative_gap(expected, without) > 0.1,
+            "the store must matter"
+        );
     }
 }

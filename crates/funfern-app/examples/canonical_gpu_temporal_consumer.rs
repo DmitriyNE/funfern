@@ -111,10 +111,20 @@ fn main() -> AppExit {
         };
     }
 
+    // `CONSUMER_OSCILLATOR=1` adds sine-Gordon (Gate O) with a seeded
+    // integrated field, so the area readout's energy has to hold each
+    // contribution's `m₀V(r)` to equal the solver's.
+    let oscillator = std::env::var("CONSUMER_OSCILLATOR").is_ok_and(|value| value == "1");
+    if oscillator {
+        scene.materials[0].restoring = funfern_core::RestoringLaw::SineGordon {
+            omega0: ScalarField::constant(3.0),
+        };
+    }
     let mut fixed_scene = scene.clone();
     for material in &mut fixed_scene.materials {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
+        material.restoring = funfern_core::RestoringLaw::None;
     }
     let mesh = mesh_scene(
         &fixed_scene,
@@ -195,6 +205,17 @@ fn main() -> AppExit {
         .expect("compatible temporal consumer flux");
     let mut state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("temporal consumer state");
+    if oscillator {
+        let integrated = operator
+            .base()
+            .node_points()
+            .iter()
+            .map(|point| 1.2 * (0.7 * point.x + 0.5 * point.y).cos())
+            .collect();
+        state = state
+            .with_integrated_field(&operator, integrated)
+            .expect("temporal consumer integrated field");
+    }
     let gpu_state = state.clone();
     for _ in 0..steps - 1 {
         state.step(&operator).expect("f64 temporal step");
@@ -265,6 +286,7 @@ fn main() -> AppExit {
             &operator,
             state.primary_flux(),
             state.complementary_flux(),
+            state.integrated_field(),
             state.time(),
             state.runtime(),
         )

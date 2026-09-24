@@ -151,8 +151,15 @@ impl Playground {
         {
             // The canonical primary field is authoritative. Display no longer
             // removes a component mean or reconstructs a gauge-dependent
-            // scalar before exposure.
-            let field_values: Arc<[f32]> = display.current.clone().into();
+            // scalar before exposure. On an oscillator, the integrated field
+            // `r` from the latest full snapshot when that view is chosen.
+            let integrated = self.show_integrated_field
+                && display.snapshot_integrated.len() == active.operator.degrees_of_freedom();
+            let field_values: Arc<[f32]> = if integrated {
+                display.snapshot_integrated.clone().into()
+            } else {
+                display.current.clone().into()
+            };
             let level = exposure_level(
                 &field_values,
                 FIELD_EXPOSURE_QUANTILE,

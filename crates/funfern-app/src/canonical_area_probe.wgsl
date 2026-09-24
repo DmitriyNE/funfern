@@ -281,6 +281,39 @@ fn contribution_factor(contribution: AreaContribution, local: u32, local_time: f
     }
     return record_factor(word, local_time);
 }
+// Gate O: the integrated field `r` at a node, the tail of the accepted
+// auxiliary lanes, and this contribution's restoring store `V(r)` per unit
+// authored mass, read from the restoring record that mirrors its coefficient
+// record. Mirrors `restoring_potential_at` in canonical_wave.wgsl.
+fn restoring() -> bool { return (control.boundary_offsets.w & 128u) != 0u; }
+fn accepted_integrated(node: u32) -> f32 {
+    let word = state[control.counts_a.y + control.counts_a.z + node].values;
+    return select(word.x, word.y, (control.event.z & 1u) != 0u);
+}
+fn contribution_potential(contribution: AreaContribution, local: u32, r: f32) -> f32 {
+    let header = tables[control.runtime_slots.z].data;
+    let block = tables[control.runtime_slots.z + 2u].data.z;
+    let word = contribution_word(contribution, local);
+    let entry = tables[block + (word - header.x) / TEMPORAL_COEFFICIENT_WORDS].data;
+    let coefficient = bitcast<f32>(entry.z);
+    switch entry.x {
+        case 1u: { return 0.5 * coefficient * r * r; }
+        case 2u: {
+            let half = sin(0.5 * r);
+            return 2.0 * coefficient * half * half;
+        }
+        case 3u: {
+            let well = r * r - 1.0;
+            return 0.25 * coefficient * well * well;
+        }
+        default: { return 0.0; }
+    }
+}
+fn restoring_store(contribution: AreaContribution, local: u32, node: u32) -> f32 {
+    if !restoring() { return 0.0; }
+    return contribution_potential(contribution, local, accepted_integrated(node));
+}
+
 fn sample_factor(contribution: AreaContribution, local: u32, local_time: f32) -> f32 {
     if !temporal_enabled() { return 1.0; }
     return record_factor(
@@ -359,7 +392,20 @@ fn sample_area_elements(@builtin(global_invocation_id) invocation: vec3<u32>) {
         contribution_store(contribution, 4u, primary_b.x),
         contribution_store(contribution, 5u, primary_b.y),
         contribution_store(contribution, 6u, primary_b.z), 0.0);
-    let energy = dot(stores_a, shares_a) + dot(stores_b, shares_b) + sample_energy;
+    // The restoring store weighs by the authored share: the force uses the
+    // authored mass whatever the drive does to the mass in force.
+    let potentials_a = vec4<f32>(
+        restoring_store(contribution, 0u, a.x),
+        restoring_store(contribution, 1u, a.y),
+        restoring_store(contribution, 2u, a.z),
+        restoring_store(contribution, 3u, a.w));
+    let potentials_b = vec4<f32>(
+        restoring_store(contribution, 4u, b.x),
+        restoring_store(contribution, 5u, b.y),
+        restoring_store(contribution, 6u, b.z), 0.0);
+    let energy = dot(stores_a, shares_a) + dot(stores_b, shares_b) + sample_energy
+        + dot(potentials_a, contribution.node_shares_a)
+        + dot(potentials_b, vec4<f32>(contribution.node_shares_b.xyz, 0.0));
     accumulated.w = contribution.node_shares_b.w * energy;
     scratch[element].primary = accumulated;
 }

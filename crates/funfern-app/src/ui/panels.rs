@@ -13,6 +13,17 @@ impl Playground {
     pub(super) fn view_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("View");
         let field_reference = self.field_exposure.reference();
+        // Gate O: an oscillator generation carries `r = ∫u dt`, which is
+        // where its kinks and domains show; the displayed field is its rate.
+        let oscillator = self.runtime.active().is_some_and(|active| {
+            active
+                .canonical_temporal_operator
+                .as_ref()
+                .is_some_and(|operator| operator.has_restoring())
+        });
+        if !oscillator {
+            self.show_integrated_field = false;
+        }
         let overlay_error = self.material_overlay_error.clone();
         let overlay_progress = self.material_overlay_job.as_ref().map(|job| job.progress());
         let overlay_invalid = match self.editor.document.presentation.material_overlay {
@@ -30,6 +41,18 @@ impl Playground {
         ui.checkbox(&mut p.mesh, "Mesh");
         ui.checkbox(&mut p.mesh_boundaries, "Mesh boundaries");
         ui.checkbox(&mut p.field, "Field");
+        if oscillator && p.field {
+            let (u, r) = integrated_field_labels(self.editor.document.model.draft.physics);
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.show_integrated_field, false, u);
+                ui.selectable_value(&mut self.show_integrated_field, true, r)
+                    .on_hover_text(
+                        "The integrated field the restoring law acts on. A static kink or a \
+                         domain wall shows here and not in the field itself, which is its \
+                         rate. It refreshes with each full snapshot.",
+                    );
+            });
+        }
         ui.add(egui::Slider::new(&mut p.field_gain, 0.25..=12.0).text("Field intensity"));
         if p.field {
             ui.checkbox(&mut p.field_auto_exposure, "Auto exposure")
