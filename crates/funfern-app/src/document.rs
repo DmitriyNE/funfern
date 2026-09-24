@@ -212,6 +212,10 @@ pub struct PresentationSettings {
     /// Whether the Advanced view writes each row's effective law with its
     /// expressions evaluated, rather than by the names the author gave them.
     pub law_formula_numbers: bool,
+    /// Gate O: paint the integrated field `r` rather than the field, on a
+    /// generation that carries a restoring law. Kept with the document so a
+    /// scene of kinks or domains opens showing them.
+    pub integrated_field: bool,
 }
 
 /// The adaptation controls, as the panel shows them.
@@ -309,6 +313,7 @@ impl Default for PresentationSettings {
             grid_scale_filter: true,
             advanced_materials: false,
             law_formula_numbers: false,
+            integrated_field: false,
         }
     }
 }

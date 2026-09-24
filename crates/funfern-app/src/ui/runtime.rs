@@ -759,7 +759,7 @@ impl Playground {
         // vector overlay has its own compact display-rate GPU sampler.
         // The integrated-field view paints `r`, which arrives only in full
         // snapshots, so it takes one every frame while it is shown.
-        let full_snapshot_interval = if self.show_integrated_field {
+        let full_snapshot_interval = if self.integrated_field_shown() {
             0.0
         } else {
             0.25

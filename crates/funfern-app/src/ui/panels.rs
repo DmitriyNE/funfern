@@ -10,20 +10,29 @@ use funfern_core::*;
 use super::*;
 
 impl Playground {
+    /// Whether the active generation carries a restoring law, and so an
+    /// integrated field `r` to show (Gate O).
+    pub(super) fn oscillator_active(&self) -> bool {
+        self.runtime.active().is_some_and(|active| {
+            active
+                .canonical_temporal_operator
+                .as_ref()
+                .is_some_and(|operator| operator.has_restoring())
+        })
+    }
+
+    /// Whether the field is painted as `r`: the document asks for it and the
+    /// generation has one.
+    pub(super) fn integrated_field_shown(&self) -> bool {
+        self.editor.document.presentation.integrated_field && self.oscillator_active()
+    }
+
     pub(super) fn view_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("View");
         let field_reference = self.field_exposure.reference();
         // Gate O: an oscillator generation carries `r = ∫u dt`, which is
         // where its kinks and domains show; the displayed field is its rate.
-        let oscillator = self.runtime.active().is_some_and(|active| {
-            active
-                .canonical_temporal_operator
-                .as_ref()
-                .is_some_and(|operator| operator.has_restoring())
-        });
-        if !oscillator {
-            self.show_integrated_field = false;
-        }
+        let oscillator = self.oscillator_active();
         let overlay_error = self.material_overlay_error.clone();
         let overlay_progress = self.material_overlay_job.as_ref().map(|job| job.progress());
         let overlay_invalid = match self.editor.document.presentation.material_overlay {
@@ -44,8 +53,8 @@ impl Playground {
         if oscillator && p.field {
             let (u, r) = integrated_field_labels(self.editor.document.model.draft.physics);
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.show_integrated_field, false, u);
-                ui.selectable_value(&mut self.show_integrated_field, true, r)
+                ui.selectable_value(&mut p.integrated_field, false, u);
+                ui.selectable_value(&mut p.integrated_field, true, r)
                     .on_hover_text(
                         "The integrated field the restoring law acts on. A static kink or a \
                          domain wall shows here and not in the field itself, which is its \

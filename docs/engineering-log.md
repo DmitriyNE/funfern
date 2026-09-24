@@ -12405,3 +12405,18 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
 - **Device:** `canonical_gpu_long_run` at 400 steps, Q 1.3e-6, b 1.2e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — The integrated-field view is kept with the document (gallery 5)
+
+- The u/r choice in the View panel was session state, and the panel reset it
+  whenever the active generation had no restoring law. A scene of kinks or
+  domains could therefore not open showing them. It is now
+  `PresentationSettings::integrated_field`, stored with `#[serde(default)]`,
+  so version 22 files written before it still load, as off.
+- The field is painted as `r` when the document asks for it and the active
+  generation carries a restoring law (`integrated_field_shown`). Nothing
+  writes the flag back when the generation has none, so a remesh or an edit
+  that briefly drops the oscillator does not lose the choice.
+- The presentation round-trip test sets the flag.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

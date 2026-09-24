@@ -153,7 +153,7 @@ impl Playground {
             // removes a component mean or reconstructs a gauge-dependent
             // scalar before exposure. On an oscillator, the integrated field
             // `r` from the latest full snapshot when that view is chosen.
-            let integrated = self.show_integrated_field
+            let integrated = self.integrated_field_shown()
                 && display.snapshot_integrated.len() == active.operator.degrees_of_freedom();
             let field_values: Arc<[f32]> = if integrated {
                 display.snapshot_integrated.clone().into()
