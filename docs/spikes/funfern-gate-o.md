@@ -107,6 +107,15 @@ with `F` itself nonzero). The commit test includes `V(r)`. The `Q`
 correction is unchanged. A filter on `F` alone that left `r` where it was
 would part `b` from `ηC r` for good.
 
+**The adaptive estimate.** The supplement's element energy includes each
+contribution's `m₀V(r)`, and the outgoing trace residual checks the wall's
+kick against the force it was stepped with, `R(r)` included, at each
+endpoint's own `r`. The drift of `r` adds no term: it is `ṙ = u` on the same
+midpoint field whose defect the `b` drift residual already measures, and its
+uniform part is not a spatial error. A kink's steepness is in `b = ηC r`,
+where the complementary recovery sees it. Van der Pol is a loss channel and
+stays refused with loss.
+
 ## Timestep
 
 Verlet on `M⁻¹K + V″` is stable for `h²(λ_max + V″_max)/4 ≤ 1`, so the

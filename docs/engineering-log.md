@@ -11884,3 +11884,40 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
     complementary loss has parted the two legitimately.
   - **Decision:** `b` keeps its own transfer, and the offset is a stated
     interpolation error of the event.
+
+## 2026-09-24 — The adaptive estimate on oscillator media (Stage 11.2)
+
+- **What changed.**
+  - `CanonicalIndicatorSnapshot` gains `integrated_field` and
+    `previous_integrated_field`, empty without a restoring law. The
+    supplement refuses a snapshot whose lengths don't match its operator.
+  - Element energy adds each contribution's `m₀V(r)` on its own element, so
+    the split equals the state's energy (1e-12, including the restoring
+    store).
+  - The outgoing trace residual adds `R(r)` to the force at each endpoint.
+    On a second-order wall the residual measures 2.7e-7 with it and 6.9e-4
+    without it.
+  - The drift of `r` adds no term: it is the same midpoint field the `b`
+    drift residual already measures.
+  - `indicator_supplement_supported` no longer refuses restoring laws. Van
+    der Pol stays refused, because it is loss.
+- **Calibration** (`temporal_amr_calibration`, new rows). Each is a box mode
+  in `r` at 1.5 rad, released from rest with `b = ηC r`; at that amplitude
+  sine-Gordon's force is 33% below its tangent at the peak. ω₀ = 3,
+  reference h = 0.05.
+
+  | row | index at h = 0.2 / 0.14 / 0.1 | spread |
+  | --- | --- | --- |
+  | inert (control) | 1.509 / 1.278 / 1.364 | 1.18× |
+  | mass Kerr | 1.558 / 1.332 / 1.424 | 1.17× |
+  | Klein–Gordon | 1.525 / 1.360 / 1.435 | 1.12× |
+  | sine-Gordon | 1.534 / 1.365 / 1.407 | 1.12× |
+
+  Every other row is unchanged from Stage 8.
+- **What the calibration does not cover.**
+  - The true error is the lattice norm of `u` and the complementary field,
+    as for every row. It does not include an error in the `V(r)` store
+    itself.
+  - The scalar size job does not take restoring laws, so the example hands
+    it the scene without them, as it already did for field laws. The app
+    will need the same when the device admits these media (11.3/11.4).

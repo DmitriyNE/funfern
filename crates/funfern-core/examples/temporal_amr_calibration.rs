@@ -25,8 +25,8 @@ use funfern_core::{
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, FieldLaw, LoopRole,
     Material, MaterialFrame, MaterialId, MeshingOptions, OuterBoundaryCondition, Point2,
     QuadraticPointStencil, QuadraticSolutionSnapshot, QuadraticWaveOperator, Region, RegionId,
-    ScalarField, Scene, SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive, TriMesh,
-    canonical_temporal_indicator_supplement, mesh_scene,
+    RestoringLaw, ScalarField, Scene, SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive,
+    TriMesh, canonical_temporal_indicator_supplement, mesh_scene,
 };
 
 /// Coarse to fine; the last is the reference.
@@ -95,6 +95,23 @@ fn main() {
                 scene.materials[0].mass_law.field = kerr(30.0);
                 scene
             },
+            false,
+        ),
+        // Stage 11: oscillator media, released from rest as a box mode in
+        // the integrated field. At 1.5 rad sine-Gordon's force is 33% below
+        // its tangent at the peak.
+        (
+            "Klein-Gordon",
+            restoring(RestoringLaw::KleinGordon {
+                omega0: ScalarField::constant(3.0),
+            }),
+            false,
+        ),
+        (
+            "sine-Gordon",
+            restoring(RestoringLaw::SineGordon {
+                omega0: ScalarField::constant(3.0),
+            }),
             false,
         ),
     ] {
@@ -193,6 +210,13 @@ fn nonlinear(mass: Option<FieldLaw>, stiffness: Option<FieldLaw>) -> Scene {
     if let Some(law) = stiffness {
         scene.materials[0].stiffness_law.field = law;
     }
+    scene
+}
+
+/// A restoring law on the default medium.
+fn restoring(law: RestoringLaw) -> Scene {
+    let mut scene = Scene::default();
+    scene.materials[0].restoring = law;
     scene
 }
 
@@ -308,6 +332,7 @@ fn build(
     for material in &mut fixed.materials {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
+        material.restoring = RestoringLaw::None;
     }
     let mesh = Arc::new(
         mesh_scene(
@@ -333,11 +358,33 @@ fn build(
 /// starts from another's interpolation. `cos(n*pi*(x+1)/2)` has zero normal
 /// derivative on both walls, which is what reflecting means here, so the
 /// initial state is compatible and the solution stays smooth.
-fn initial(operator: &CanonicalTemporalWaveOperator) -> (Vec<f64>, Vec<Point2>) {
+///
+/// An oscillator medium is released from rest in `u` instead, with the mode in
+/// the integrated field `r` and its compatible companion `b = ηC r`, so the
+/// restoring law is loaded from the first step.
+fn initial(operator: &CanonicalTemporalWaveOperator) -> (Vec<f64>, Vec<Point2>, Vec<f64>) {
     const MODE_X: f64 = 2.0;
     const MODE_Y: f64 = 1.0;
     let base = operator.base();
     let half = std::f64::consts::PI / 2.0;
+    if operator.has_restoring() {
+        let integrated = base
+            .node_points()
+            .iter()
+            .map(|point| {
+                1.5 * (MODE_X * half * (point.x + 1.0)).cos()
+                    * (MODE_Y * half * (point.y + 1.0)).cos()
+            })
+            .collect::<Vec<_>>();
+        let complementary = base
+            .compatible_flux(&integrated)
+            .expect("compatible integrated mode");
+        return (
+            vec![0.0; base.degrees_of_freedom()],
+            complementary,
+            integrated,
+        );
+    }
     let primary = base
         .primary_mass()
         .iter()
@@ -351,7 +398,7 @@ fn initial(operator: &CanonicalTemporalWaveOperator) -> (Vec<f64>, Vec<Point2>) 
     // From rest: zero complementary flux is the compatible companion of a
     // displacement-only start.
     let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
-    (primary, complementary)
+    (primary, complementary, vec![])
 }
 
 fn lattice_points() -> Vec<Point2> {
@@ -379,16 +426,24 @@ fn solve(
     for material in &mut fixed.materials {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
+        material.restoring = RestoringLaw::None;
     }
-    let (primary, complementary) = initial(&operator);
+    let (primary, complementary, integrated) = initial(&operator);
     let mut state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("calibration state");
+    if !integrated.is_empty() {
+        state = state
+            .with_integrated_field(&operator, integrated)
+            .expect("calibration integrated field");
+    }
     let steps = (TARGET_TIME / time_step).round().max(1.0) as u64;
     let mut previous = state.primary_flux().to_vec();
     let mut previous_complementary = state.complementary_flux().to_vec();
+    let mut previous_integrated = state.integrated_field().to_vec();
     for _ in 0..steps {
         previous = state.primary_flux().to_vec();
         previous_complementary = state.complementary_flux().to_vec();
+        previous_integrated = state.integrated_field().to_vec();
         state.step(&operator).expect("calibration step");
     }
 
@@ -428,6 +483,7 @@ fn solve(
         &state,
         &previous,
         &previous_complementary,
+        &previous_integrated,
         static_path,
     );
     let breakdown = estimator.clone();
@@ -454,6 +510,7 @@ fn estimate(
     state: &CanonicalTemporalWaveState,
     previous: &[f64],
     previous_complementary: &[Point2],
+    previous_integrated: &[f64],
     static_path: bool,
 ) -> Option<funfern_core::SolutionIndicatorReport> {
     let count = operator.base().degrees_of_freedom();
@@ -466,6 +523,8 @@ fn estimate(
         previous_complementary_flux: previous_complementary.to_vec(),
         auxiliary: vec![],
         previous_auxiliary: vec![],
+        integrated_field: state.integrated_field().to_vec(),
+        previous_integrated_field: previous_integrated.to_vec(),
         time: state.time(),
         time_step: state.time_step(),
     };
@@ -520,8 +579,14 @@ fn estimate(
     // The size rule's instantaneous materials evaluate coefficients without a
     // field, so a field-dependent row hands the job its small-signal
     // (law-stripped) medium; the supplement carries the nonlinear maps.
+    //
+    // A restoring law is not a coefficient, so the size rule's materials do
+    // not carry it either; the supplement holds its store and force.
     let nonlinear = operator.has_field_laws();
     let mut sized = authored.clone();
+    for material in &mut sized.materials {
+        material.restoring = RestoringLaw::None;
+    }
     if nonlinear {
         for material in &mut sized.materials {
             material.mass_law.field = FieldLaw::Linear;

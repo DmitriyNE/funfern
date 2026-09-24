@@ -432,6 +432,10 @@ impl Playground {
                 .iter()
                 .map(|value| f64::from(*value))
                 .collect(),
+            // The device refuses oscillator media until Stage 11.3, so no
+            // generation here carries `r`.
+            integrated_field: vec![],
+            previous_integrated_field: vec![],
             time,
             time_step: dt,
         };

@@ -38,6 +38,10 @@ pub struct CanonicalIndicatorSnapshot {
     pub previous_complementary_flux: Vec<Point2>,
     pub auxiliary: Vec<f64>,
     pub previous_auxiliary: Vec<f64>,
+    /// Gate O: the integrated field `r` at both endpoints, empty without a
+    /// restoring law.
+    pub integrated_field: Vec<f64>,
+    pub previous_integrated_field: Vec<f64>,
     pub time: f64,
     pub time_step: f64,
 }
@@ -3927,6 +3931,8 @@ mod tests {
             ],
             auxiliary: vec![],
             previous_auxiliary: vec![],
+            integrated_field: vec![],
+            previous_integrated_field: vec![],
             time: 0.01,
             time_step: 0.01,
         };
@@ -3984,6 +3990,8 @@ mod tests {
             ],
             auxiliary: vec![],
             previous_auxiliary: vec![],
+            integrated_field: vec![],
+            previous_integrated_field: vec![],
             time: 0.125,
             time_step: 0.01,
         };

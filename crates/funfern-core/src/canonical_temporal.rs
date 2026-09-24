@@ -683,6 +683,14 @@ impl CanonicalTemporalAreaContribution {
 /// the authored ones. Loss, a damped boundary and prescribed boundary data are
 /// refused rather than reported with those terms missing, because each puts a
 /// term in the evolution the defect would otherwise charge to the mesh.
+///
+/// Gate O: an oscillator medium's store includes `Σ m₀ V(r)`, split over the
+/// elements each contribution belongs to, and the outgoing trace's force
+/// includes the restoring force at each endpoint's own `r`. The drift of `r`
+/// adds no term of its own: it is `ṙ = u` on the same midpoint field whose
+/// defect the `b` drift residual already measures through `ηC`, and its
+/// uniform part is not a spatial error. A kink's steepness is in `b = ηC r`,
+/// where the complementary recovery sees it.
 pub fn canonical_temporal_indicator_supplement(
     mesh: &TriMesh,
     operator: &CanonicalTemporalWaveOperator,
@@ -706,6 +714,16 @@ pub fn canonical_temporal_indicator_supplement(
         .map_or(0, |boundary| boundary.auxiliary_count());
     if snapshot.auxiliary.len() != gap_count + outgoing_count
         || snapshot.previous_auxiliary.len() != gap_count + outgoing_count
+    {
+        return Err(WaveError::InvalidState);
+    }
+    let integrated_count = if operator.has_restoring() {
+        node_count
+    } else {
+        0
+    };
+    if snapshot.integrated_field.len() != integrated_count
+        || snapshot.previous_integrated_field.len() != integrated_count
     {
         return Err(WaveError::InvalidState);
     }
@@ -1011,6 +1029,17 @@ pub fn canonical_temporal_indicator_supplement(
                 / (mass[node] * mass[node]);
     }
 
+    // The restoring store, each contribution's share on its own element.
+    if operator.has_restoring() {
+        for (contribution, sample) in base.primary_contributions().iter().zip(&operator.primary) {
+            element_energy[contribution.element as usize] += contribution.geometric_weight
+                * contribution.reference_coefficient
+                * sample
+                    .restoring
+                    .potential(snapshot.integrated_field[contribution.node as usize]);
+        }
+    }
+
     // The drift the residual measures against is the one the solver takes:
     // the midpoint primary field, with no loss because the conservative bulk
     // carries none.
@@ -1144,17 +1173,26 @@ pub fn canonical_temporal_indicator_supplement(
                 midpoint_mass.iter().map(|mass| 1.0 / mass).collect(),
             )
         };
-        let instantaneous_force =
-            |complementary: &[Point2], auxiliary: &[f64], at: f64| -> Result<Vec<f64>, WaveError> {
-                let mut force = operator.force_at(complementary, at, runtime)?;
-                add_gap_force(operator, &auxiliary[..gap_count], &mut force)?;
-                Ok(force)
-            };
-        let current_force =
-            instantaneous_force(&snapshot.complementary_flux, &snapshot.auxiliary, time)?;
+        let instantaneous_force = |complementary: &[Point2],
+                                   auxiliary: &[f64],
+                                   integrated: &[f64],
+                                   at: f64|
+         -> Result<Vec<f64>, WaveError> {
+            let mut force = operator.force_at(complementary, at, runtime)?;
+            add_gap_force(operator, &auxiliary[..gap_count], &mut force)?;
+            add_restoring_force(operator, integrated, &mut force)?;
+            Ok(force)
+        };
+        let current_force = instantaneous_force(
+            &snapshot.complementary_flux,
+            &snapshot.auxiliary,
+            &snapshot.integrated_field,
+            time,
+        )?;
         let previous_force = instantaneous_force(
             &snapshot.previous_complementary_flux,
             &snapshot.previous_auxiliary,
+            &snapshot.previous_integrated_field,
             previous_time,
         )?;
         let current_source = forcing.integrated_rate(time)?;
@@ -1907,12 +1945,9 @@ impl CanonicalTemporalWaveOperator {
         // mesh, and none has been derived here.
         // A field-dependent medium's estimator reads its nonlinear observables
         // and weighs every defect by the tangent maps at the snapshot.
-        // The estimator's defect terms know nothing of a restoring force on
-        // the integrated field, so an oscillator medium has no estimate yet.
-        let indicator_supplement_supported = undamped_boundary
-            && !has_loss
-            && undriven_boundary
-            && !primary.iter().any(|sample| !sample.restoring.is_none());
+        // An oscillator medium's restoring store and trace force are in the
+        // estimate (Gate O); van der Pol is a loss channel, refused with loss.
+        let indicator_supplement_supported = undamped_boundary && !has_loss && undriven_boundary;
         Ok(Self {
             base,
             primary,
@@ -5308,6 +5343,8 @@ mod tests {
             previous_complementary_flux: state.complementary_flux().to_vec(),
             auxiliary: vec![],
             previous_auxiliary: vec![],
+            integrated_field: vec![],
+            previous_integrated_field: vec![],
             time: time_step,
             time_step,
         };
@@ -6516,6 +6553,8 @@ mod tests {
             previous_complementary_flux: state.complementary_flux().to_vec(),
             auxiliary: auxiliary_of(&next),
             previous_auxiliary: auxiliary_of(&state),
+            integrated_field: vec![],
+            previous_integrated_field: vec![],
             time: time_step,
             time_step,
         };
@@ -6598,6 +6637,8 @@ mod tests {
             previous_complementary_flux: state.complementary_flux().to_vec(),
             auxiliary: vec![],
             previous_auxiliary: vec![],
+            integrated_field: vec![],
+            previous_integrated_field: vec![],
             time: time_step,
             time_step,
         };
@@ -8039,6 +8080,8 @@ mod tests {
             previous_complementary_flux: state.complementary_flux().to_vec(),
             auxiliary: next.outgoing_pole_currents().to_vec(),
             previous_auxiliary: state.outgoing_pole_currents().to_vec(),
+            integrated_field: vec![],
+            previous_integrated_field: vec![],
             time: time_step,
             time_step,
         };
@@ -10516,5 +10559,130 @@ mod tests {
                 "ran at {measured} after the handoff"
             );
         }
+    }
+
+    /// An oscillator state one step on, as the estimator is handed it.
+    fn oscillator_snapshot(
+        condition: OuterBoundaryCondition,
+    ) -> (
+        TriMesh,
+        CanonicalTemporalWaveOperator,
+        CanonicalTemporalWaveState,
+        CanonicalIndicatorSnapshot,
+    ) {
+        let mut scene = Scene::default();
+        scene.materials[0].restoring = sine_gordon(3.0);
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let mut stripped = scene.clone();
+        stripped.materials[0].restoring = crate::RestoringLaw::None;
+        let quadratic = QuadraticWaveOperator::assemble_scene(&mesh, &stripped, condition).unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let (primary, complementary) = reference_fluxes(&operator);
+        let integrated = operator
+            .base()
+            .node_points()
+            .iter()
+            .map(|point| 1.2 * (0.7 * point.x + 0.5 * point.y).cos())
+            .collect();
+        let state = CanonicalTemporalWaveState::new(
+            &operator,
+            0.4 * operator.maximum_time_step(),
+            primary,
+            complementary,
+        )
+        .unwrap()
+        .with_integrated_field(&operator, integrated)
+        .unwrap();
+        let mut next = state.clone();
+        next.step(&operator).unwrap();
+        let snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            primary_flux: next.primary_flux().to_vec(),
+            previous_primary_flux: state.primary_flux().to_vec(),
+            complementary_flux: next.complementary_flux().to_vec(),
+            previous_complementary_flux: state.complementary_flux().to_vec(),
+            auxiliary: next.outgoing_pole_currents().to_vec(),
+            previous_auxiliary: state.outgoing_pole_currents().to_vec(),
+            integrated_field: next.integrated_field().to_vec(),
+            previous_integrated_field: state.integrated_field().to_vec(),
+            time: next.time(),
+            time_step: next.time_step(),
+        };
+        (mesh, operator, next, snapshot)
+    }
+
+    /// The estimate on an oscillator medium splits the solver's whole store,
+    /// restoring potential included, and checks the outgoing trace's kick
+    /// against the force it was stepped with: leave `R(r)` out and the trace
+    /// residual is the restoring force itself.
+    #[test]
+    fn the_oscillator_estimate_splits_the_store_and_charges_the_trace_its_own_force() {
+        let (mesh, operator, state, snapshot) =
+            oscillator_snapshot(OuterBoundaryCondition::Reflecting);
+        assert!(operator.indicator_supplement_supported());
+        let forcing = CanonicalForcing::none(operator.base());
+        let runtime = operator.initial_runtime();
+        let estimate = canonical_temporal_indicator_supplement(
+            &mesh, &operator, &forcing, &snapshot, &runtime, 1.0,
+        )
+        .unwrap();
+        let stored = state.energy(&operator).unwrap();
+        let split = estimate.element_energy.iter().sum::<f64>();
+        assert!(
+            (split - stored).abs() <= 1e-12 * stored,
+            "{split} against {stored}"
+        );
+
+        // A snapshot that leaves out `r`, or holds the wrong length, is
+        // refused rather than estimated without the store.
+        let mut short = snapshot.clone();
+        short.integrated_field.clear();
+        short.previous_integrated_field.clear();
+        assert!(
+            canonical_temporal_indicator_supplement(
+                &mesh, &operator, &forcing, &short, &runtime, 1.0
+            )
+            .is_err()
+        );
+
+        let (mesh, operator, _, snapshot) =
+            oscillator_snapshot(OuterBoundaryCondition::SecondOrderOutgoing);
+        let forcing = CanonicalForcing::none(operator.base());
+        let consistent = canonical_temporal_indicator_supplement(
+            &mesh, &operator, &forcing, &snapshot, &runtime, 1.0,
+        )
+        .unwrap()
+        .outgoing_contribution;
+        let mut blind = snapshot.clone();
+        blind.integrated_field.iter_mut().for_each(|r| *r = 0.0);
+        blind
+            .previous_integrated_field
+            .iter_mut()
+            .for_each(|r| *r = 0.0);
+        let without = canonical_temporal_indicator_supplement(
+            &mesh, &operator, &forcing, &blind, &runtime, 1.0,
+        )
+        .unwrap()
+        .outgoing_contribution;
+        // Measured 2.7e-7 against 6.9e-4.
+        assert!(
+            without > 500.0 * consistent,
+            "trace residual {consistent:e} with the force, {without:e} without"
+        );
+    }
+
+    /// Van der Pol is a loss channel, and the estimate still refuses loss.
+    #[test]
+    fn the_estimate_still_refuses_van_der_pol() {
+        assert!(!van_der_pol_operator(1.0, 0.5, 3.0).indicator_supplement_supported());
     }
 }

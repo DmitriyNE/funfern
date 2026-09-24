@@ -488,6 +488,8 @@ fn estimate(
         previous_complementary_flux: previous_complementary_flux.to_vec(),
         auxiliary: vec![],
         previous_auxiliary: vec![],
+        integrated_field: vec![],
+        previous_integrated_field: vec![],
         time,
         time_step,
     };

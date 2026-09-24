@@ -1037,6 +1037,8 @@ mod tests {
             ],
             auxiliary: Vec::new(),
             previous_auxiliary: Vec::new(),
+            integrated_field: vec![],
+            previous_integrated_field: vec![],
             time: 0.01,
             time_step: 0.01,
         };
