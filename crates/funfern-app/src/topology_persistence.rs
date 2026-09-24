@@ -2581,4 +2581,67 @@ mod tests {
             );
         }
     }
+
+    /// A law the file describes wrongly is refused at load, whole: an unknown
+    /// kind, a missing coefficient, a value outside the law's domain, or one
+    /// that does not fit an f64.
+    #[test]
+    fn malformed_laws_are_rejected() {
+        let mut document = TopologyDocument::default();
+        for scene in [&mut document.model.draft, &mut document.model.accepted] {
+            scene.materials[0].mass_law = CoefficientLaw {
+                field: FieldLaw::Saturable {
+                    chi: ScalarField::constant(0.8),
+                    saturation: ScalarField::constant(1.0),
+                },
+                drive: TimeDrive::ParametricPump {
+                    depth: ScalarField::constant(0.2),
+                    frequency_hz: ScalarField::constant(1.0),
+                    phase_radians: ScalarField::constant(0.0),
+                },
+                alternate: None,
+                inverted: false,
+            };
+        }
+        let original: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        assert!(parse_document(serde_json::to_string(&original).unwrap().as_bytes()).is_ok());
+        fn law(value: &mut serde_json::Value) -> &mut serde_json::Value {
+            &mut value["model"]["accepted"]["materials"][0]["mass_law"]
+        }
+        type Corruption = fn(&mut serde_json::Value);
+        let cases: [(&str, Corruption); 6] = [
+            ("unknown field kind", |law| {
+                law["field"]["kind"] = serde_json::json!("quartic")
+            }),
+            ("missing coefficient", |law| {
+                law["field"] = serde_json::json!({ "kind": "polynomial",
+                    "chi1": { "kind": "constant", "value": 0.0 } });
+            }),
+            ("zero saturation", |law| {
+                law["field"]["saturation"] =
+                    serde_json::json!({ "kind": "constant", "value": 0.0 });
+            }),
+            ("pump deeper than the coefficient", |law| {
+                law["drive"]["depth"] = serde_json::json!({ "kind": "constant", "value": 1.2 });
+            }),
+            ("overflowing coefficient", |law| {
+                law["field"]["chi"] =
+                    serde_json::json!({ "kind": "constant", "value": "overflow" });
+            }),
+            ("unknown drive kind", |law| {
+                law["drive"]["kind"] = serde_json::json!("wobble")
+            }),
+        ];
+        for (name, corrupt) in cases {
+            let mut value = original.clone();
+            corrupt(law(&mut value));
+            let text = serde_json::to_string(&value)
+                .unwrap()
+                .replace("\"overflow\"", "1e400");
+            assert!(
+                parse_document(text.as_bytes()).is_err(),
+                "a file with a {name} loaded"
+            );
+        }
+    }
 }

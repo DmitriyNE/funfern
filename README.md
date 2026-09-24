@@ -40,6 +40,8 @@
 
 * **Spatially varying and anisotropic constitutive laws** with formula-defined material properties in local coordinate frames.
 
+* **Time-driven and nonlinear media**: switchable media and time interfaces, parametric pumps, time crystals, travelling modulations, and Kerr and saturable response, composing with the boundary conditions, sources, loss and thin gaps, and running on the GPU.
+
 * **Error-estimate-driven adaptive mesh refinement and coarsening** under wavelength, grading and mesh-size constraints, preserving the running solution.
 
 * **Extensive solution diagnostics**: scalar and vector field overlays, point, line, boundary and area probes, energy and flux measurements, and time-domain far-field estimation.
@@ -80,11 +82,15 @@ wavelength, grading and element-size constraints.
 
 Scenes support undo/redo, autosave, versioned JSON files and shareable links.
 Geometry, snapshots and viewport recordings can be exported. The built-in
-example gallery ships obstacle arrays, GRIN rods and Luneburg profiles, ready to
+example gallery ships obstacle arrays, GRIN rods, Luneburg profiles and driven
+and nonlinear media, ready to
 run with their drivers, probes and view presets; `examples/` currently holds the
 obstacle scene as a standalone file as well.
 
-Nonlinear and time-dependent constitutive laws are work in progress.
+Materials take their laws from a preset selector or, in the Advanced view,
+slot by slot; the gallery's Kerr slab, parametric pump, time crystal and
+travelling modulation scenes each show one, and each is backed by a test that
+measures what it claims.
 
 ## Implementation
 

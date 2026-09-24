@@ -939,4 +939,69 @@ mod tests {
             "{with:.3?} against {against:.3?}"
         );
     }
+
+    /// Stage 10's exit: every catalogue preset, on a fresh material in every
+    /// skin, survives the file and prepares the way the application prepares
+    /// it. So does a material carrying both named loss channels.
+    #[test]
+    fn every_preset_round_trips_and_prepares_in_every_skin() {
+        for physics in [
+            PhysicsModel::Mechanical,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            },
+        ] {
+            let mut materials = law_presets()
+                .iter()
+                .map(|preset| {
+                    (
+                        format!("{} ({:?})", preset.name, preset.row),
+                        apply_law_preset(preset, &Material::default_medium()).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut lossy = Material::default_medium();
+            lossy.electric_loss = Some(LossChannel {
+                base_rate: ScalarField::constant(0.2),
+                law: DampingLaw::constant(),
+            });
+            lossy.magnetic_loss = Some(LossChannel {
+                base_rate: ScalarField::constant(0.1),
+                law: DampingLaw::constant(),
+            });
+            materials.push(("both loss channels".into(), lossy));
+            for (label, material) in materials {
+                let mut builder = Builder::new();
+                builder.scene.physics = physics;
+                builder.scene.outer_boundaries =
+                    OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
+                builder.scene.materials[0] = Material {
+                    id: builder.scene.materials[0].id,
+                    ..material
+                };
+                let mut document = builder.document();
+                document.model.source = source(Point2::new(-0.5, 0.0), 2.0, 5.0, 0.06);
+                let bytes = crate::topology_persistence::save_compact(&document).unwrap();
+                let loaded = crate::topology_persistence::parse_document(&bytes).unwrap();
+                assert_eq!(loaded, document, "{physics:?}: {label} changed in the file");
+                let prepared = prepare(&loaded, 0.3);
+                assert!(
+                    prepared.canonical_operator.degrees_of_freedom() > 0,
+                    "{physics:?}: {label}"
+                );
+                // A preset that writes a law prepares the operator that runs
+                // it; linear and constant loss are the fixed path's.
+                let carries_law = !loaded.model.accepted.materials[0].mass_law.is_linear()
+                    || !loaded.model.accepted.materials[0].stiffness_law.is_linear();
+                assert_eq!(
+                    prepared.canonical_temporal_operator.is_some(),
+                    carries_law,
+                    "{physics:?}: {label}"
+                );
+            }
+        }
+    }
 }

@@ -36,9 +36,10 @@ use funfern_core::{
     CanonicalMaterialRuntimeState, CanonicalOutgoingHistoryTransferMap,
     CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
     CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalTemporalCoefficientSample,
-    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferMap, CanonicalWaveOperator, CanonicalWaveState, FieldLawValues,
-    GRID_SCALE_FILTER_CADENCE, MaterialId, MaterialSwitchRuntime, Point2, QuadraticWaveOperator,
+    CanonicalTemporalLossSample, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
+    CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWaveOperator,
+    CanonicalWaveState, CoefficientLawValues, FieldLawValues, GRID_SCALE_FILTER_CADENCE,
+    MaterialId, MaterialSwitchRuntime, Point2, QuadraticWaveOperator, RateLawValues,
     TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
 };
 
@@ -106,6 +107,12 @@ const NONLINEAR_TRACE_FLAG: u32 = 16;
 /// Control flag: some record carries a field law, so the per-stage caches of
 /// nodal fields and sample secants exist and the step fills them.
 const FIELD_LAWS_FLAG: u32 = 32;
+/// A time-driven generation that carries loss evaluates each loss stage's
+/// rates from its loss records, at the stage's own instant, instead of the
+/// fractions packed at compile time: a driven channel moves its rate, and a
+/// node shared by materials whose masses move weighs their rates by the
+/// masses in force.
+const LOSS_RECORDS_FLAG: u32 = 64;
 /// Linear trace solves per kick on a nonlinear wall. The f64 reference
 /// converges in three for the fixtures measured (1134 of 1217 kicks) and four
 /// for the rest; the finalize pass rejects a kick whose last step has not
@@ -749,6 +756,23 @@ impl CanonicalGpuLiveEvent {
         if target.control.clock_f32.x > target.control.clock_f32.w {
             return Err(CanonicalGpuBuildError::InvalidClock);
         }
+        // The patch uploads coefficient records only. Loss records, their
+        // drives and the flag that reads them belong to the generation, so a
+        // change there takes a new one.
+        let loss_block = |plan: &CanonicalGpuPlan, header_offset: usize| {
+            let losses = plan.tables[header_offset + 2].data;
+            (
+                plan.control.boundary_offsets.w & LOSS_RECORDS_FLAG,
+                plan.tables[losses.x as usize..].to_vec(),
+            )
+        };
+        if loss_block(current, current_manifest.header_offset)
+            != loss_block(target, target_manifest.header_offset)
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a live temporal-law patch cannot change a loss channel",
+            ));
+        }
 
         let current_header = current.tables[current_manifest.header_offset].data;
         let target_header = target.tables[target_manifest.header_offset].data;
@@ -1127,6 +1151,25 @@ impl CanonicalGpuPlan {
                 ));
             }
         }
+        let primary_losses = operator.primary_loss_samples().collect::<Vec<_>>();
+        let complementary_losses = operator.complementary_loss_samples().collect::<Vec<_>>();
+        for loss in primary_losses.iter().chain(&complementary_losses) {
+            if loss.law.rate != RateLawValues::Constant {
+                return Err(CanonicalGpuBuildError::Unrepresentable(
+                    "a field-dependent loss rate is not derived on the device",
+                ));
+            }
+            let Some(drive) = loss.drive else { continue };
+            let key = (loss.material, temporal_drive_index(drive));
+            if drives
+                .insert(key, loss.law.drive)
+                .is_some_and(|old| old != loss.law.drive)
+            {
+                return Err(CanonicalGpuBuildError::InvalidLayout(
+                    "one material runtime lane resolved to multiple drive definitions",
+                ));
+            }
+        }
         if primary_samples
             .iter()
             .chain(&complementary_samples)
@@ -1138,7 +1181,8 @@ impl CanonicalGpuPlan {
         }
 
         let header_offset = self.tables.len();
-        self.tables.extend([GpuCanonicalTableWord::default(); 2]);
+        // Three words: record offsets, record shape, and the loss blocks.
+        self.tables.extend([GpuCanonicalTableWord::default(); 3]);
         let primary_offset = self.tables.len();
         let mut by_node = vec![Vec::new(); self.node_count];
         for (contribution, sample) in operator
@@ -1208,6 +1252,42 @@ impl CanonicalGpuPlan {
                 switch_word,
                 frequency_word,
             ]);
+        }
+
+        // Loss records mirror the coefficient records one for one, so a
+        // node's or sample's loss is found at the same distance into its
+        // block as its coefficient is into the coefficient block.
+        let primary_loss_offset = self.tables.len();
+        let mut by_node = vec![Vec::new(); self.node_count];
+        for (contribution, loss) in operator
+            .base()
+            .primary_contributions()
+            .iter()
+            .zip(&primary_losses)
+        {
+            by_node[contribution.node as usize].push(*loss);
+        }
+        for losses in by_node {
+            for loss in losses {
+                self.tables
+                    .extend(pack_temporal_loss(loss, &runtime_indices)?);
+            }
+        }
+        let complementary_loss_offset = self.tables.len();
+        for loss in &complementary_losses {
+            self.tables
+                .extend(pack_temporal_loss(*loss, &runtime_indices)?);
+        }
+        self.tables[header_offset + 2] = GpuCanonicalTableWord {
+            data: UVec4::new(
+                usize_u32(primary_loss_offset)?,
+                usize_u32(complementary_loss_offset)?,
+                0,
+                0,
+            ),
+        };
+        if operator.has_loss() {
+            self.control.boundary_offsets.w |= LOSS_RECORDS_FLAG;
         }
 
         self.tables[header_offset] = GpuCanonicalTableWord {
@@ -2799,6 +2879,44 @@ fn temporal_drive_from_index(index: u32) -> CanonicalMaterialDrive {
         3 => CanonicalMaterialDrive::MagneticLoss,
         _ => unreachable!("material runtime lanes are fixed at four"),
     }
+}
+
+/// A loss record in the coefficient record's shape: the channel's drive as a
+/// linear, unswitched law, and its base rate where a coefficient record holds
+/// its reference. A site no channel reaches is a zero rate under no drive.
+fn pack_temporal_loss(
+    loss: CanonicalTemporalLossSample,
+    runtime_indices: &BTreeMap<MaterialId, u32>,
+) -> Result<[GpuCanonicalTableWord; TEMPORAL_COEFFICIENT_WORDS], CanonicalGpuBuildError> {
+    let runtime_index =
+        *runtime_indices
+            .get(&loss.material)
+            .ok_or(CanonicalGpuBuildError::InvalidLayout(
+                "a temporal loss has no material runtime record",
+            ))?;
+    let sample = CanonicalTemporalCoefficientSample {
+        material: loss.material,
+        coordinates: loss.coordinates,
+        drive: loss.drive.unwrap_or(CanonicalMaterialDrive::ElectricLoss),
+        law: CoefficientLawValues {
+            field: FieldLawValues::Linear,
+            drive: if loss.drive.is_some() {
+                loss.law.drive
+            } else {
+                TimeDriveValues::None
+            },
+            alternate: None,
+            inverted: false,
+        },
+    };
+    let mut words = pack_temporal_coefficient(sample, runtime_index, 1.0)?;
+    if !loss.base_rate.is_finite() || loss.base_rate < 0.0 {
+        return Err(CanonicalGpuBuildError::Unrepresentable(
+            "temporal loss rate",
+        ));
+    }
+    words[1].data.x = finite_f32(loss.base_rate, "temporal loss rate")?.to_bits();
+    Ok(words)
 }
 
 fn pack_temporal_coefficient(

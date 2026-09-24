@@ -10,7 +10,13 @@
 //! the step count each step, and this gate keeps it that way.
 //!
 //! `LONG_RUN_SCENE` names a catalogue scene (default "Parametric pump") and
-//! `LONG_RUN_STEPS` the step count (default 400). The Stage 0 bound is
+//! `LONG_RUN_STEPS` the step count (default 400). `LONG_RUN_LOSS` puts an
+//! electric loss of 0.6 on the scene's second material: `none` a constant
+//! one, a number a pump of that depth on the rate. On the pumped slab both
+//! failed before the device read its loss records: the constant one because a
+//! node on the slab's edge weighs the two materials' rates by masses the pump
+//! moves (3.2e-4 at 200 steps), the driven one because its drive was dropped
+//! (2.3e-2). The Stage 0 bound is
 //! asserted at up to 1000 steps. Past that, a driven or field-dependent
 //! scene's own sensitivity lets the f32 trajectory part from the f64 one
 //! faster than roundoff alone, and the figure is printed, not judged.
@@ -52,6 +58,26 @@ fn main() -> AppExit {
         .unwrap_or_else(|| panic!("no catalogue scene named {name:?}"))
         .document
         .clone();
+    let mut document = document;
+    if let Ok(loss) = std::env::var("LONG_RUN_LOSS") {
+        let drive = match loss.as_str() {
+            "none" => funfern_core::TimeDrive::None,
+            depth => funfern_core::TimeDrive::ParametricPump {
+                depth: funfern_core::ScalarField::constant(depth.parse().expect("a loss depth")),
+                frequency_hz: funfern_core::ScalarField::constant(1.3),
+                phase_radians: funfern_core::ScalarField::constant(0.0),
+            },
+        };
+        for scene in [&mut document.model.draft, &mut document.model.accepted] {
+            scene.materials[1].electric_loss = Some(funfern_core::LossChannel {
+                base_rate: funfern_core::ScalarField::constant(0.6),
+                law: funfern_core::DampingLaw {
+                    rate: funfern_core::RateLaw::Constant,
+                    drive: drive.clone(),
+                },
+            });
+        }
+    }
     let edge = document.presentation.mesh_edge;
     let editor = TopologyEditor::from_document(document).unwrap();
     let mut runtime = TopologyRuntime::default();

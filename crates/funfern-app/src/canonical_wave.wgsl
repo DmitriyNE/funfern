@@ -159,6 +159,8 @@ fn field_laws() -> bool { return (control.boundary_offsets.w & 32u) != 0u; }
 fn node_field_offset() -> u32 { return nonlinear_trace_offset() + control.counts_b.y; }
 fn sample_secant_offset() -> u32 { return node_field_offset() + control.counts_a.x; }
 fn has_loss_stages() -> bool { return (control.boundary_offsets.w & 1u) != 0u; }
+// A time-driven generation carrying loss reads its rates from loss records.
+fn loss_records() -> bool { return (control.boundary_offsets.w & 64u) != 0u; }
 fn use_force_cache() -> bool { return (control.boundary_offsets.w & 4u) != 0u; }
 fn has_prescribed_trace() -> bool { return (control.boundary_offsets.w & 8u) != 0u; }
 fn accepted_slot() -> u32 { return control.event.z & 1u; }
@@ -362,6 +364,69 @@ fn temporal_primary_mass(node: u32, local_time: f32) -> f32 {
 
 fn temporal_inverse_primary_mass(node: u32, local_time: f32) -> f32 {
     return 1.0 / temporal_primary_mass(node, local_time);
+}
+
+// `1 − e^{−x}`, kept accurate as `x → 0`, where f32 would cancel it away.
+fn one_minus_exp_neg(x: f32) -> f32 {
+    if x < 1.0e-3 { return x * (1.0 - x * (0.5 - x / 6.0)); }
+    return 1.0 - exp(-x);
+}
+
+// A node's loss rate at `local_time`: its materials' rates weighed by the
+// masses in force, `Σ c_r(t) γ_r(t) / Σ c_r(t)`. A node shared by a pumped
+// lossy material and a still one is not the rate either has alone, and the
+// weight moves with the pump. Each loss record sits as far into the loss
+// block as its coefficient record sits into the coefficient block.
+fn node_loss_rate(node: u32, local_time: f32) -> f32 {
+    let header = tables[control.runtime_slots.z].data;
+    let losses = tables[control.runtime_slots.z + 2u].data;
+    let range = nodes[node].stiffness.zw;
+    var mass = 0.0;
+    var weighted = 0.0;
+    for (var record = 0u; record < range.y; record += 1u) {
+        let word = range.x + record * TEMPORAL_COEFFICIENT_WORDS;
+        let loss = losses.x + (word - header.x);
+        let coefficient = table_float(word + 1u, 0u) * temporal_factor(word, local_time);
+        mass += coefficient;
+        weighted += coefficient * table_float(loss + 1u, 0u) * temporal_factor(loss, local_time);
+    }
+    return weighted / mass;
+}
+
+fn sample_loss_rate(sample: u32, local_time: f32) -> f32 {
+    let header = tables[control.runtime_slots.z].data;
+    let losses = tables[control.runtime_slots.z + 2u].data;
+    let loss = losses.y + (samples[sample].nodes_b.w - header.z);
+    return table_float(loss + 1u, 0u) * temporal_factor(loss, local_time);
+}
+
+// The share one half-step of loss takes away. Each half map stands for its
+// own half interval, so its rate is read at that interval's midpoint, as the
+// reference reads it; packed fractions serve generations whose rates cannot
+// move.
+fn node_loss_fraction(node: u32, second: bool) -> f32 {
+    if !loss_records() { return nodes[node].mass_loss.z; }
+    let rate_time = control.clock_f32.y + select(0.25, 0.75, second) * control.clock_f32.x;
+    return one_minus_exp_neg(0.5 * control.clock_f32.x * node_loss_rate(node, rate_time));
+}
+
+fn sample_loss_fraction(sample: u32, second: bool) -> f32 {
+    if !loss_records() { return samples[sample].curl_6_loss.z; }
+    let rate_time = control.clock_f32.y + select(0.25, 0.75, second) * control.clock_f32.x;
+    return one_minus_exp_neg(0.5 * control.clock_f32.x * sample_loss_rate(sample, rate_time));
+}
+
+// Stored energy of a node and of a sample at `local_time`, through the maps
+// in force: what a loss stage takes away is charged at those, not at the
+// authored linear stores.
+fn stage_primary_energy(node: u32, flux: f32, local_time: f32) -> f32 {
+    if temporal_enabled() { return temporal_primary_energy(node, flux, local_time); }
+    return 0.5 * flux * flux * nodes[node].mass_loss.y;
+}
+
+fn stage_complementary_energy(sample: u32, flux: vec2<f32>, local_time: f32) -> f32 {
+    if temporal_enabled() { return temporal_complementary_energy(sample, flux, local_time); }
+    return b_energy(sample, flux);
 }
 
 fn temporal_complementary_factor(sample: u32, local_time: f32) -> f32 {
@@ -1722,19 +1787,23 @@ fn start_loss(@builtin(global_invocation_id) id: vec3<u32>) {
                 * harmonic_value(nodes[i].prescribed, control.clock_f32.y);
             exchange = 0.5 * (owned * owned - old * old) * nodes[i].mass_loss.y;
         }
-        let next = owned - owned * nodes[i].mass_loss.z;
+        let next = owned - owned * node_loss_fraction(i, false);
         set_candidate_q(i, next);
         if use_force_cache() {
             set_candidate_force(i, accepted_force(i));
         }
         scratch[i].values.y = exchange;
-        scratch[i].values.z = 0.5 * (owned * owned - next * next) * nodes[i].mass_loss.y;
+        let stage_time = control.clock_f32.y;
+        scratch[i].values.z = stage_primary_energy(i, owned, stage_time)
+            - stage_primary_energy(i, next, stage_time);
     } else if i < node_count + sample_count {
         let sample_index = i - node_count;
         let old = accepted_b(sample_index);
-        let next = old - old * samples[sample_index].curl_6_loss.z;
+        let next = old - old * sample_loss_fraction(sample_index, false);
         set_candidate_b(sample_index, next);
-        scratch[i].values.x = b_energy(sample_index, old) - b_energy(sample_index, next);
+        let stage_time = control.clock_f32.y;
+        scratch[i].values.x = stage_complementary_energy(sample_index, old, stage_time)
+            - stage_complementary_energy(sample_index, next, stage_time);
     } else {
         let auxiliary = i - auxiliary_offset();
         set_candidate_auxiliary(auxiliary, accepted_auxiliary(auxiliary));
@@ -2515,8 +2584,10 @@ fn finish_loss_validate(@builtin(global_invocation_id) id: vec3<u32>) {
     let sample_count = control.counts_a.y;
     if i < node_count {
         let before = candidate_q(i);
-        var next = before - before * nodes[i].mass_loss.z;
-        scratch[i].values.z += 0.5 * (before * before - next * next) * nodes[i].mass_loss.y;
+        var next = before - before * node_loss_fraction(i, true);
+        let stage_time = control.clock_f32.y + control.clock_f32.x;
+        scratch[i].values.z += stage_primary_energy(i, before, stage_time)
+            - stage_primary_energy(i, next, stage_time);
         if nodes[i].boundary.z != 0u && !temporal_enabled() {
             let owned = nodes[i].mass_loss.x
                 * harmonic_value(nodes[i].prescribed, control.clock_f32.y + control.clock_f32.x);
@@ -2528,8 +2599,10 @@ fn finish_loss_validate(@builtin(global_invocation_id) id: vec3<u32>) {
     } else if i < node_count + sample_count {
         let sample_index = i - node_count;
         let before = candidate_b(sample_index);
-        let next = before - before * samples[sample_index].curl_6_loss.z;
-        scratch[i].values.x += b_energy(sample_index, before) - b_energy(sample_index, next);
+        let next = before - before * sample_loss_fraction(sample_index, true);
+        let stage_time = control.clock_f32.y + control.clock_f32.x;
+        scratch[i].values.x += stage_complementary_energy(sample_index, before, stage_time)
+            - stage_complementary_energy(sample_index, next, stage_time);
         set_candidate_b(sample_index, next);
         if !all(next >= vec2<f32>(-MAX_FINITE))
             || !all(next <= vec2<f32>(MAX_FINITE)) {

@@ -1575,6 +1575,18 @@ pub fn sample_temporal_canonical_area(
     }
 }
 
+impl From<TemporalLossSample> for CanonicalTemporalLossSample {
+    fn from(sample: TemporalLossSample) -> Self {
+        Self {
+            material: sample.material,
+            coordinates: sample.coordinates,
+            drive: sample.drive,
+            base_rate: sample.base_rate,
+            law: sample.law,
+        }
+    }
+}
+
 impl From<TemporalCoefficientSample> for CanonicalTemporalCoefficientSample {
     fn from(sample: TemporalCoefficientSample) -> Self {
         Self {
@@ -1596,6 +1608,19 @@ pub struct CanonicalTemporalLossRates {
 /// unchanged by a field law, because the Hamiltonian stays separable,
 /// `H_Q(Q, t) + H_b(b, t)`: only the two observables `U(Q)` and `v(b)` become
 /// inverses of nonlinear maps.
+/// One loss contribution or sample as the device packs it: the channel's base
+/// rate and its drive, evaluated where the solver evaluates it. `drive` names
+/// the runtime lane its carrier phase lives in; `None` is a site no channel
+/// reaches, whose rate is zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalTemporalLossSample {
+    pub material: MaterialId,
+    pub coordinates: MaterialCoordinates,
+    pub drive: Option<CanonicalMaterialDrive>,
+    pub base_rate: f64,
+    pub law: DampingLawValues,
+}
+
 /// How far one field-dependent material has moved from its small-signal
 /// response: the largest `ḡ(|field|) − 1` over its sites on each row. For Kerr
 /// that is `χ|u|²`, the relative change of the coefficient itself; a row
@@ -2016,6 +2041,20 @@ impl CanonicalTemporalWaveOperator {
         self.complementary
             .iter()
             .map(|sample| sample.coefficient.into())
+    }
+
+    /// Each primary contribution's loss, in contribution order.
+    pub fn primary_loss_samples(
+        &self,
+    ) -> impl ExactSizeIterator<Item = CanonicalTemporalLossSample> + '_ {
+        self.primary.iter().map(|sample| sample.loss.into())
+    }
+
+    /// Each complementary sample's loss, in sample order.
+    pub fn complementary_loss_samples(
+        &self,
+    ) -> impl ExactSizeIterator<Item = CanonicalTemporalLossSample> + '_ {
+        self.complementary.iter().map(|sample| sample.loss.into())
     }
 
     pub fn primary_mass_at(

@@ -1056,6 +1056,53 @@ can carry, what each does to a wave and which of them run today is the
 [material law catalogue](material-law-catalogue.md); its slot IDs are the names
 the preset selector and the engineering log use.
 
+### Time-driven and field-dependent media
+
+A material's two constitutive rows each carry a `CoefficientLaw`: a field
+response (linear, Kerr, saturable), a time drive (pump, time crystal, travelling
+modulation), a Switch alternate and a divide flag. A coefficient is
+`c₀(x)·ḡ(|field|)·d(t)·s(t)`. The mass row reads the primary field and the
+other row the magnitude of the complementary field. The Mechanical stiffness
+row's law multiplies the reciprocal stiffness `s₀ = 1/k₀`, so it divides `k`.
+The Hamiltonian stays separable, so the kick-drift-kick split is unchanged.
+Only `U = P⁻¹(Q)` and `v(b)` become inverses, solved per stage by a
+safeguarded, bracketed Newton at a declared tolerance (`8ε` in f64, `4ε₃₂` on
+the device). A solve outside its domain fails the step and leaves the accepted
+state unchanged.
+
+The laws compile into a `CanonicalTemporalWaveOperator` over the same base as
+the fixed operator, which the application assembles from the law-stripped
+model. Every coefficient is evaluated at its own stage instant. Named loss
+channels (electric, magnetic) follow their physical field across skins. The
+channel on the primary field is what legacy `damping` means, and the two
+cannot both be active. The timestep ceiling covers the whole coefficient
+trajectory: each row's lowest tangent factor over every drive phase, Switch
+state and admitted amplitude.
+
+On the device, laws are records beside the node and sample tables, and runtime
+phases and Switch states live in a bank carried with the state snapshot.
+- **Clock:** the epoch-local time is `step count × dt` in f32, formed each
+  step, never a running sum.
+- **Loss:** a lossy time-driven generation carries one loss record per
+  coefficient record, in a block of its own. Each loss stage reads the rate at
+  its half-interval's midpoint: a node's is its materials' rates weighed by
+  the masses in force, a sample's its own. Lost energy is charged at the
+  stores in force. A live law patch that would change a loss record is
+  refused and takes a new generation.
+- **Grid filter:** runs on every composition the stepper admits. A time-driven
+  generation first freezes each site's map at the event instant (`m⁻¹(t)` or
+  the tangent inverse at nodes, secant and radial tangent at samples). On a
+  field-dependent generation a candidate that would add energy is skipped,
+  not faulted.
+- **Consumers:** probes, the area readout and the AMR estimator read fields
+  through the same inverses. The area readout splits each node's stored
+  energy over its materials as `Σ m_c (ḡ_c U² − G_c)`, and the size rule
+  divides its wavelength floor by the primary row's tangent at the field
+  envelope.
+
+The per-stage reports in `docs/spikes/funfern-material-laws-stage{7,8,9,10}-report.md`
+hold the measurements.
+
 ## Legacy scalar evolution model
 
 The following centered scalar formulation is retained as a numerical comparison

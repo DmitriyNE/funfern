@@ -11635,3 +11635,60 @@ the strong-field regions were resolved as if the medium were linear.
 - `the_size_rule_resolves_the_wavelength_a_strong_kerr_field_makes`: at
   χ = 0.8 and envelope 1 the tangent is 3.4 exactly. The target is the χ = 0
   target over √3.4 to 1e-9, and it is identical at two phases of the cycle.
+
+## 2026-09-24 — The device read loss as a constant on every driven medium
+
+Found writing the Stage 10 docs, whose README line claimed loss composes on the
+GPU. The catalogue said D1, a time-driven loss, does not run, yet the unified
+loss editor offers a drive on a row's loss. So I checked.
+
+- **Two faults, both silent.** On the pump gallery scene with a 0.6 electric
+  loss on the slab, 200 steps from rest:
+  - **Driven loss** (pumped at depth 0.9): Q 2.3e-2 from the reference. The
+    device packed `exp(−γ h/2)` from the authored base rate at compile time
+    and never read the drive.
+  - **Constant loss on a pumped material:** Q 3.2e-4, against 1.5e-6 at 50
+    steps, before the wave reaches the slab. `loss_rates_at` weighs a node
+    shared by several materials by the masses in force,
+    `Σ c_r(t) γ_r / Σ c_r(t)`, and a pump moves those masses. The device kept
+    the authored weighting. The forced-loss gates use one uniform material,
+    so they could not see it.
+- **Fix.**
+  - A lossy time-driven generation carries a loss record per coefficient
+    record, in a block after the runtime bank, found from a third header
+    word. The record has the coefficient record's shape, with the base rate
+    in place of the reference, and the channel's drive as an unswitched
+    linear law.
+  - The loss drives now fill their runtime lanes, which only coefficient
+    drives filled before.
+  - `LOSS_RECORDS_FLAG` makes each loss stage compute its fraction from the
+    records, at `t + h/4` and `t + 3h/4` as the reference does, via
+    `1 − e^{−x}` with a series below 1e-3.
+  - Loss accounting now charges the stores in force (`temporal_primary_energy`,
+    `temporal_complementary_energy`), not the authored inverse mass and
+    quadratic store. Before, it misstated the lane on pumped and nonlinear
+    media.
+  - A field-dependent loss rate is refused at plan compile, and a live law
+    patch that would change a loss record is refused.
+- **Gate.** `canonical_gpu_long_run` gains `LONG_RUN_LOSS` (`none`, or a
+  drive depth). At 400 steps:
+
+  | scene | constant loss (Q) | driven loss, depth 0.9 (Q) |
+  | --- | --- | --- |
+  | pump | 7.3e-6 | 3.2e-6 |
+  | Kerr | 3.3e-6 | 3.4e-6 |
+  | time crystal | 3.1e-6 | 2.1e-6 |
+
+  All 39 other modes exit 0. Only the two lossy time-driven ones moved, in
+  the fourth digit.
+
+Also landing with this, for Stage 10.8:
+- `every_preset_round_trips_and_prepares_in_every_skin`: every catalogue preset
+  in all three skins, plus a material with both loss channels, survives
+  `save_compact` and `parse_document` unchanged and prepares through the
+  app's pipeline, with a time-driven operator exactly where the preset writes
+  a law.
+- `malformed_laws_are_rejected`: an unknown field or drive kind, a missing
+  coefficient, a zero saturation, a pump deeper than the coefficient and an
+  overflowing value are each refused at load.
+- README and architecture describe the time-driven and nonlinear media.
