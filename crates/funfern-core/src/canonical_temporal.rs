@@ -2216,6 +2216,15 @@ impl CanonicalTemporalWaveOperator {
         self.primary.iter().map(|sample| sample.loss.into())
     }
 
+    /// Each primary contribution's restoring law on the integrated field,
+    /// in contribution order. Its force is weighed by the contribution's
+    /// authored lumped mass, `geometric_weight · reference_coefficient`.
+    pub fn primary_restoring_samples(
+        &self,
+    ) -> impl ExactSizeIterator<Item = crate::RestoringLawValues> + '_ {
+        self.primary.iter().map(|sample| sample.restoring)
+    }
+
     /// Each complementary sample's loss, in sample order.
     pub fn complementary_loss_samples(
         &self,

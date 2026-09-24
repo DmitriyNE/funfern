@@ -11921,3 +11921,60 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
   - The scalar size job does not take restoring laws, so the example hands
     it the scene without them, as it already did for field laws. The app
     will need the same when the device admits these media (11.3/11.4).
+
+## 2026-09-24 — Oscillator media on the device (Stage 11.3a)
+
+- **Layout.**
+  - `r` is one auxiliary word per node, after the gap and outgoing lanes and
+    before the metadata word. `counts_a.z` and `counts_a.w` grow by the node
+    count, and so does the scratch, whose offsets all follow the state count.
+    Every event and loss stage that copies or validates auxiliary lanes
+    therefore carries `r` with no change of its own.
+  - A new `RESTORING_FLAG` (128) marks the generation.
+  - Restoring records mirror the coefficient records, one word each (kind,
+    `m₀`, `ω₀²` or `λ`, bound), in the same way the loss records already do.
+    Their block offset sits in the spare lane of the loss header word.
+  - `CanonicalGpuDisplay::integrated_field()` reads `r` back.
+- **Step.**
+  - `force()` adds `Σ m₀V′(r)`, from the accepted `r` in the first kick and
+    the candidate in the second. Every kick path reads it, both walls
+    included.
+  - The drift advances `r` on `temporal_drift_field`, the same midpoint
+    field as `b`.
+  - A φ⁴ node past its bound latches a new status, 6 ("the integrated field
+    passed its restoring law's amplitude bound").
+  - The potential is formed as `2 sin²(r/2)` for sine-Gordon, since
+    `1 − cos r` cancels in f32.
+- **Filter.**
+  - The site force is `F + R`, and `r` takes `−s·A·(K A (F+R))` from the
+    gathered lane before the energies overwrite it. `V(r)` joins the commit
+    test, as on the CPU since c871742.
+  - A candidate that raises the energy is a filter not taken, as on
+    field-law media: the correction is signed only to first order on a
+    nonlinear law.
+- **Refused, with messages:**
+  - linear and temporal law patches on an oscillator generation, which needs
+    a new generation;
+  - device handoffs to or from one, until 11.3c.
+- **Measured** (`canonical_gpu_oscillator`, M1 Max, 5485 nodes, 200 steps).
+  Six media (Klein–Gordon, sine-Gordon, moving kink, kicked φ⁴ wall, pumped
+  sine-Gordon, Kerr sine-Gordon) × seven compositions (none, first- and
+  second-order walls, gap, pins, source, loss), each with and without the
+  resident filter: 84 runs, all within 3e-5.
+  - **Worst:** Q 7.9e-6 (φ⁴ with loss), b 4.1e-6 (Klein–Gordon with a gap),
+    r 1.1e-6 (Kerr sine-Gordon).
+  - **Typical:** Q 4e-7, b 1–3e-6, r 4–7e-7.
+  - **Every filter commits:** 12 per run, none skipped.
+  - **The gate catches a filter that leaves `r` alone:** sine-Gordon reads
+    r 1.3e-4 and fails. The moving kink reads 1.2e-5, under the gate but 30×
+    its correct 3.9e-7.
+- **Regression suite.** Every other canonical GPU example and its modes
+  exits 0: 49 runs, including `canonical_gpu_long_run` with a constant loss
+  (7.3e-6) and a driven one (3.9e-6).
+- **Found, not fixed.** `NONLINEAR_WALL=2 NONLINEAR_FORCED=1` misses by
+  Q 1.6e-1 and b 3.0e-1, identically on 7be3fb8, so it predates this stage.
+  Its pins at `x < −0.999` sit on the second-order wall's trace. The
+  operator's refusal of prescribed data on an outgoing trace reads only the
+  assembled Dirichlet signals, not forcing-level pins, so the composition
+  runs when it should be refused or derived. Whether the app can author it
+  is not checked. Reported, awaiting a decision.

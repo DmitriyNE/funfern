@@ -40,7 +40,7 @@ use funfern_core::{
     CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWaveOperator,
     CanonicalWaveState, CoefficientLawValues, FieldLawValues, GRID_SCALE_FILTER_CADENCE,
     MaterialId, MaterialSwitchRuntime, Point2, QuadraticWaveOperator, RateLawValues,
-    TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
+    RestoringLawValues, TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
 };
 
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
@@ -113,6 +113,13 @@ const FIELD_LAWS_FLAG: u32 = 32;
 /// node shared by materials whose masses move weighs their rates by the
 /// masses in force.
 const LOSS_RECORDS_FLAG: u32 = 64;
+/// Gate O: the generation carries the integrated field `r`, one auxiliary
+/// word per node after the gap and outgoing lanes, and one restoring record
+/// per primary coefficient record.
+const RESTORING_FLAG: u32 = 128;
+const RESTORING_KLEIN_GORDON: u32 = 1;
+const RESTORING_SINE_GORDON: u32 = 2;
+const RESTORING_PHI4: u32 = 3;
 /// Linear trace solves per kick on a nonlinear wall. The f64 reference
 /// converges in three for the fixtures measured (1134 of 1217 kicks) and four
 /// for the rest; the finalize pass rejects a kick whose last step has not
@@ -961,6 +968,9 @@ pub struct CanonicalGpuPlan {
     /// refused on such a generation until their device stages read the
     /// nonlinear maps; the filter reads them through its site pass.
     pub field_laws: bool,
+    /// Gate O: nodes carrying the integrated field `r`, the tail of the
+    /// auxiliary lanes. Zero without a restoring law.
+    pub integrated_count: usize,
     needs_loss_stages: bool,
     needs_accounting: bool,
     event_kind: u32,
@@ -1088,12 +1098,41 @@ impl CanonicalGpuPlan {
         // through the forward map. An absorbing wall kicks through the
         // discrete gradient at its node, and an outgoing wall runs a fixed
         // budget of Newton linearizations around its linear trace solve.
-        // Gate O's integrated field has no device lane yet; running such a
-        // medium here would drop its restoring force without a word.
+        // Gate O's integrated field is one auxiliary word per node, after
+        // the gap and outgoing lanes and before the metadata word, so every
+        // stage and event that copies or validates auxiliary lanes carries it.
+        // Its restoring force enters the shared nodal force, which every kick
+        // path reads, the walls' included.
         if operator.has_restoring() {
-            return Err(CanonicalGpuBuildError::Unrepresentable(
-                "oscillator media do not run on the device yet",
+            let integrated = state.integrated_field();
+            if integrated.len() != self.node_count {
+                return Err(CanonicalGpuBuildError::InvalidLayout(
+                    "the integrated field does not match the operator",
+                ));
+            }
+            let words = integrated
+                .iter()
+                .map(|r| {
+                    finite_f32(*r, "integrated field").map(|value| GpuCanonicalStateWord {
+                        values: Vec4::new(value, value, 0.0, 0.0),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let at = self.control.counts_a.w as usize;
+            self.state.splice(at..at, words);
+            let added = usize_u32(self.node_count)?;
+            self.control.counts_a.z += added;
+            self.control.counts_a.w += added;
+            self.auxiliary_count += self.node_count;
+            self.integrated_count = self.node_count;
+            // Every scratch offset follows the state count, so the scratch
+            // grows by the same words.
+            self.scratch.extend(std::iter::repeat_n(
+                GpuCanonicalScratchWord::default(),
+                self.node_count,
             ));
+            self.manifest.bytes.state += self.node_count * size_of::<GpuCanonicalStateWord>();
+            self.control.boundary_offsets.w |= RESTORING_FLAG;
         }
         self.field_laws = operator.has_field_laws();
         // After both accounting banks: one word per trace (a nonlinear wall's
@@ -1285,11 +1324,32 @@ impl CanonicalGpuPlan {
             self.tables
                 .extend(pack_temporal_loss(*loss, &runtime_indices)?);
         }
+        // Restoring records mirror the coefficient records too, one word
+        // each, so a node's record for the coefficient `c` words into the
+        // coefficient block sits `c / 4` words into this one.
+        let restoring_offset = self.tables.len();
+        if operator.has_restoring() {
+            let mut by_node = vec![Vec::new(); self.node_count];
+            for (contribution, law) in operator
+                .base()
+                .primary_contributions()
+                .iter()
+                .zip(operator.primary_restoring_samples())
+            {
+                let mass = contribution.geometric_weight * contribution.reference_coefficient;
+                by_node[contribution.node as usize].push((law, mass));
+            }
+            for records in by_node {
+                for (law, mass) in records {
+                    self.tables.push(pack_restoring(law, mass)?);
+                }
+            }
+        }
         self.tables[header_offset + 2] = GpuCanonicalTableWord {
             data: UVec4::new(
                 usize_u32(primary_loss_offset)?,
                 usize_u32(complementary_loss_offset)?,
-                0,
+                usize_u32(restoring_offset)?,
                 0,
             ),
         };
@@ -1804,6 +1864,7 @@ impl CanonicalGpuPlan {
             trace_direct,
             grid_filter_admitted: true,
             field_laws: false,
+            integrated_count: 0,
             needs_loss_stages,
             needs_accounting,
             event_kind: EVENT_NONE,
@@ -2926,6 +2987,33 @@ fn pack_temporal_loss(
     Ok(words)
 }
 
+/// One restoring record: the law, the authored lumped mass its force is
+/// weighed by, and the law's parameters (`ω₀²`, or `λ` and the bound).
+fn pack_restoring(
+    law: RestoringLawValues,
+    mass: f64,
+) -> Result<GpuCanonicalTableWord, CanonicalGpuBuildError> {
+    let (kind, first, second) = match law {
+        RestoringLawValues::None => (0, 0.0, 0.0),
+        RestoringLawValues::KleinGordon { omega0 } => {
+            (RESTORING_KLEIN_GORDON, omega0 * omega0, 0.0)
+        }
+        RestoringLawValues::SineGordon { omega0 } => (RESTORING_SINE_GORDON, omega0 * omega0, 0.0),
+        RestoringLawValues::Phi4 {
+            lambda,
+            amplitude_bound,
+        } => (RESTORING_PHI4, lambda, amplitude_bound),
+    };
+    Ok(GpuCanonicalTableWord {
+        data: UVec4::new(
+            kind,
+            finite_f32(mass, "restoring mass")?.to_bits(),
+            finite_f32(first, "restoring coefficient")?.to_bits(),
+            finite_f32(second, "restoring amplitude bound")?.to_bits(),
+        ),
+    })
+}
+
 fn pack_temporal_coefficient(
     sample: CanonicalTemporalCoefficientSample,
     runtime_index: u32,
@@ -3190,6 +3278,7 @@ pub const CANONICAL_FAILURE_TIMESTEP: u32 = 2;
 pub const CANONICAL_FAILURE_INVERSE_DOMAIN: u32 = 3;
 pub const CANONICAL_FAILURE_NON_FINITE: u32 = 4;
 pub const CANONICAL_FAILURE_INVERSE_CONVERGENCE: u32 = 5;
+pub const CANONICAL_FAILURE_RESTORING_DOMAIN: u32 = 6;
 
 pub const fn canonical_failure_description(reason: u32) -> &'static str {
     match reason {
@@ -3199,6 +3288,9 @@ pub const fn canonical_failure_description(reason: u32) -> &'static str {
         CANONICAL_FAILURE_NON_FINITE => "a non-finite field or accounting value was produced",
         CANONICAL_FAILURE_INVERSE_CONVERGENCE => {
             "a constitutive inverse did not converge within its iteration cap"
+        }
+        CANONICAL_FAILURE_RESTORING_DOMAIN => {
+            "the integrated field passed its restoring law's amplitude bound"
         }
         _ => "unknown canonical GPU failure",
     }
@@ -3297,6 +3389,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     trace_direct: bool,
     grid_filter_admitted: bool,
     field_laws: bool,
+    integrated_count: u32,
     nonlinear_trace: bool,
     drive_count: u32,
     material_runtime_count: u32,
@@ -3442,6 +3535,7 @@ fn spawn_canonical_state_readback(
                 node_count: handles.node_count,
                 sample_count: handles.sample_count,
                 material_runtime_count: handles.material_runtime_count,
+                integrated_count: handles.integrated_count,
                 state_count: if full {
                     handles.state_count
                         + 1
@@ -3508,6 +3602,7 @@ fn add_canonical_buffers(
         trace_direct: plan.trace_direct,
         grid_filter_admitted: plan.grid_filter_admitted,
         field_laws: plan.field_laws,
+        integrated_count: plan.integrated_count as u32,
         nonlinear_trace: plan.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0,
         drive_count,
         material_runtime_count,
@@ -3763,6 +3858,16 @@ impl CanonicalGpuRequest {
         {
             return Err("this event is not derived for a field-dependent medium on the device");
         }
+        // A law patch rewrites coefficient records, not restoring ones, so an
+        // oscillator generation takes a new generation for it.
+        if handles.integrated_count != 0
+            && matches!(
+                event.kind,
+                EVENT_TEMPORAL_LAW_PATCH | EVENT_LINEAR_LAW_PATCH
+            )
+        {
+            return Err("a law patch on an oscillator medium takes a new generation");
+        }
         let payload_valid = match event.kind {
             EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE => {
                 event.upload.len() == handles.node_count as usize + 1
@@ -3878,6 +3983,11 @@ impl CanonicalGpuRequest {
             .ok_or("canonical GPU is not installed")?;
         if source.event_kind != EVENT_NONE && self.stats.processed_event() < source.event_serial {
             return Err("canonical GPU handoff is waiting for the staged event boundary");
+        }
+        // The transfer shader does not yet carry the integrated field, and a
+        // handoff that silently zeroed or dropped it would change the physics.
+        if source.integrated_count != 0 || target.integrated_count != 0 {
+            return Err("a handoff to or from an oscillator medium does not run on the device yet");
         }
         if source.node_count as usize != transfer.source_node_count
             || source.sample_count as usize != transfer.source_sample_count
@@ -4125,6 +4235,7 @@ pub struct CanonicalGpuDisplay {
     raw_primary: Vec<GpuCanonicalStateWord>,
     node_count: usize,
     sample_count: usize,
+    integrated_count: usize,
     accepted_slot: u32,
     raw_state_slot: u32,
     /// Absolute accepted step captured inside the state buffer itself. Unlike
@@ -4134,6 +4245,29 @@ pub struct CanonicalGpuDisplay {
 }
 
 impl CanonicalGpuDisplay {
+    /// Gate O: the accepted integrated field `r` from the latest full
+    /// snapshot, the tail of the auxiliary lanes. Empty without a restoring
+    /// law.
+    pub fn integrated_field(&self) -> &[f32] {
+        let start = self.auxiliary.len().saturating_sub(self.integrated_count);
+        if self.integrated_count == 0 || self.auxiliary.len() < self.integrated_count {
+            return &[];
+        }
+        &self.auxiliary[start..]
+    }
+
+    /// The integrated field one step earlier, from the same snapshot.
+    pub fn previous_integrated_field(&self) -> &[f32] {
+        let start = self
+            .previous_auxiliary
+            .len()
+            .saturating_sub(self.integrated_count);
+        if self.integrated_count == 0 || self.previous_auxiliary.len() < self.integrated_count {
+            return &[];
+        }
+        &self.previous_auxiliary[start..]
+    }
+
     pub fn full_snapshot_completed_steps(&self) -> u64 {
         self.raw_state_completed_steps
     }
@@ -4191,6 +4325,7 @@ struct CanonicalStateReadback {
     sample_count: u32,
     state_count: u32,
     material_runtime_count: u32,
+    integrated_count: u32,
     full: bool,
     one_shot: bool,
 }
@@ -4246,6 +4381,7 @@ fn receive_canonical_state(
     begin_canonical_display_generation(&mut display, tag.generation);
     display.node_count = tag.node_count as usize;
     display.sample_count = tag.sample_count as usize;
+    display.integrated_count = tag.integrated_count as usize;
     if tag.full {
         // The accepted runtime bank sits after the metadata word, published
         // by the same commit that wrote the state around it.
@@ -6649,13 +6785,11 @@ mod tests {
         .unwrap()
     }
 
-    /// The filter composes wherever the stepper does, as on the CPU
-    /// reference: fixed, driven and field-dependent generations beside either
-    /// wall. A field-dependent one solves its sites' tangents in one more pass.
-    /// Gate O's integrated field has no device lane yet, so an oscillator
-    /// medium is refused rather than run without its restoring force.
+    /// Gate O: an oscillator generation packs `r` as the tail of its
+    /// auxiliary lanes, both copies seeded from the state, beside one
+    /// restoring record per primary coefficient record, and flags it.
     #[test]
-    fn the_device_refuses_an_oscillator_medium() {
+    fn an_oscillator_plan_carries_its_integrated_field() {
         let mut scene = Scene::initial();
         scene.materials[0].restoring = funfern_core::RestoringLaw::SineGordon {
             omega0: ScalarField::constant(2.0),
@@ -6680,19 +6814,54 @@ mod tests {
         let operator =
             CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
         assert!(operator.has_restoring());
+        let base = operator.base();
         let time_step = 0.4 * operator.maximum_time_step();
-        let state = CanonicalTemporalWaveState::zero(&operator, time_step).unwrap();
-        assert!(
-            CanonicalGpuPlan::compile_temporal(
-                &operator,
-                &state,
-                &CanonicalForcing::none(operator.base()),
-                CanonicalGpuClock::initial(time_step).unwrap(),
-            )
-            .is_err()
+        let integrated = base
+            .node_points()
+            .iter()
+            .map(|point| 0.5 * point.x)
+            .collect::<Vec<_>>();
+        let state = CanonicalTemporalWaveState::zero(&operator, time_step)
+            .unwrap()
+            .with_integrated_field(&operator, integrated.clone())
+            .unwrap();
+        let plan = CanonicalGpuPlan::compile_temporal(
+            &operator,
+            &state,
+            &CanonicalForcing::none(base),
+            CanonicalGpuClock::initial(time_step).unwrap(),
+        )
+        .unwrap();
+        let nodes = base.degrees_of_freedom();
+        let samples = base.complementary_degrees_of_freedom();
+        assert_eq!(plan.integrated_count, nodes);
+        assert_eq!(plan.auxiliary_count, nodes);
+        assert_eq!(plan.control.counts_a.z as usize, nodes);
+        assert_eq!(plan.control.counts_a.w as usize, 2 * nodes + samples);
+        assert_ne!(plan.control.boundary_offsets.w & RESTORING_FLAG, 0);
+        for (word, r) in plan.state[nodes + samples..2 * nodes + samples]
+            .iter()
+            .zip(&integrated)
+        {
+            assert_eq!(word.values.x, *r as f32);
+            assert_eq!(word.values.y, *r as f32);
+        }
+        // The metadata word still sits right after the physical state.
+        assert_eq!(
+            plan.state[plan.control.counts_a.w as usize].values.x,
+            SNAPSHOT_METADATA_MAGIC
         );
+        let header = plan.control.runtime_slots.z as usize;
+        let block = plan.tables[header + 2].data.z as usize;
+        let records = &plan.tables[block..block + base.primary_contributions().len()];
+        assert!(records.iter().all(|record| {
+            record.data.x == RESTORING_SINE_GORDON && f32::from_bits(record.data.z) == 4.0
+        }));
     }
 
+    /// The filter composes wherever the stepper does, as on the CPU
+    /// reference: fixed, driven and field-dependent generations beside either
+    /// wall. A field-dependent one solves its sites' tangents in one more pass.
     #[test]
     fn every_composed_generation_admits_the_grid_filter() {
         assert!(plan(OuterBoundaryCondition::SecondOrderOutgoing).grid_filter_admitted);

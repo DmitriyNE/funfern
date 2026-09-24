@@ -21,6 +21,7 @@ cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_tim
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --outgoing
 cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
 DRIVEN_WALLS=outgoing cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
+OSCILLATOR_MEDIUM=kink OSCILLATOR_FILTER=1 cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator
 ```
 
 The `funfern-app` examples open a window and read the autosave, so run them with
@@ -149,6 +150,15 @@ produce, and requires the recorded field and rate to match an f64 oracle. The
 filter flips the accepted state lane without advancing time, so a recorder
 that differenced the lanes at that boundary reported a filter correction
 divided by the timestep instead of a rate.
+
+`canonical_gpu_oscillator` steps an oscillator medium (Gate O) on the device
+against the f64 reference and requires `Q`, `b` and the integrated field `r`
+within the Stage 0 `3e-5` after 200 steps. `OSCILLATOR_MEDIUM` picks
+Klein-Gordon, sine-Gordon, a moving kink, a φ⁴ wall, or sine-Gordon beside a
+pump or a Kerr row; `OSCILLATOR_COMPOSE` adds a wall of either order, a gap,
+pins, a source or loss; `OSCILLATOR_FILTER=1` runs the resident filter. Across
+all 84 combinations the worst reads `7.9e-6`. A filter that left `r` where it
+was reads `1.3e-4` on sine-Gordon.
 
 `canonical_gpu_temporal_work` stamps a material Switch mid-run and requires
 the runtime decoded from the state snapshot, and the bulk energy split and

@@ -31,6 +31,11 @@ const STATUS_TIMESTEP: u32 = 2u;
 const STATUS_INVERSE_DOMAIN: u32 = 3u;
 const STATUS_NON_FINITE: u32 = 4u;
 const STATUS_INVERSE_CONVERGENCE: u32 = 5u;
+// Gate O: a node's integrated field passed its restoring law's declared bound.
+const STATUS_RESTORING_DOMAIN: u32 = 6u;
+const RESTORING_KLEIN_GORDON: u32 = 1u;
+const RESTORING_SINE_GORDON: u32 = 2u;
+const RESTORING_PHI4: u32 = 3u;
 // Leave serialization headroom below f32::MAX: Naga's decimal WGSL writer
 // rounds the exact maximum upward, which Chrome correctly rejects.
 const MAX_FINITE: f32 = 3.0e+38;
@@ -161,6 +166,12 @@ fn sample_secant_offset() -> u32 { return node_field_offset() + control.counts_a
 fn has_loss_stages() -> bool { return (control.boundary_offsets.w & 1u) != 0u; }
 // A time-driven generation carrying loss reads its rates from loss records.
 fn loss_records() -> bool { return (control.boundary_offsets.w & 64u) != 0u; }
+// Gate O: the generation carries the integrated field `r`, one auxiliary lane
+// per node at the tail of the auxiliary block.
+fn restoring() -> bool { return (control.boundary_offsets.w & 128u) != 0u; }
+fn integrated_index(node: u32) -> u32 {
+    return control.counts_a.z - control.counts_a.x + node;
+}
 fn use_force_cache() -> bool { return (control.boundary_offsets.w & 4u) != 0u; }
 fn has_prescribed_trace() -> bool { return (control.boundary_offsets.w & 8u) != 0u; }
 fn accepted_slot() -> u32 { return control.event.z & 1u; }
@@ -798,12 +809,74 @@ fn gap_force(node: u32, second: bool) -> f32 {
     return result;
 }
 
+// The node's restoring record for its coefficient record at `word`: each sits
+// a quarter as far into its block as the coefficient sits into its own.
+fn restoring_record(word: u32) -> vec4<u32> {
+    let header = tables[control.runtime_slots.z].data;
+    let block = tables[control.runtime_slots.z + 2u].data.z;
+    return tables[block + (word - header.x) / TEMPORAL_COEFFICIENT_WORDS].data;
+}
+
+// `Σ m₀ V′(r)` over the node's materials, at their authored lumped masses.
+// A φ⁴ node past its declared bound fails the step; nothing is clipped.
+fn restoring_force_at(node: u32, r: f32) -> f32 {
+    let range = nodes[node].stiffness.zw;
+    var result = 0.0;
+    for (var record = 0u; record < range.y; record += 1u) {
+        let entry = restoring_record(range.x + record * TEMPORAL_COEFFICIENT_WORDS);
+        let mass = bitcast<f32>(entry.y);
+        let coefficient = bitcast<f32>(entry.z);
+        if entry.x == RESTORING_KLEIN_GORDON {
+            result += mass * coefficient * r;
+        } else if entry.x == RESTORING_SINE_GORDON {
+            result += mass * coefficient * sin(r);
+        } else if entry.x == RESTORING_PHI4 {
+            if abs(r) > bitcast<f32>(entry.w) { reject(STATUS_RESTORING_DOMAIN); }
+            result += mass * coefficient * (r * r - 1.0) * r;
+        }
+    }
+    return result;
+}
+
+// `Σ m₀ V(r)`. Sine-Gordon's `1 − cos r` is formed as `2 sin²(r/2)`, which f32
+// would otherwise cancel away near the vacuum.
+fn restoring_potential_at(node: u32, r: f32) -> f32 {
+    let range = nodes[node].stiffness.zw;
+    var result = 0.0;
+    for (var record = 0u; record < range.y; record += 1u) {
+        let entry = restoring_record(range.x + record * TEMPORAL_COEFFICIENT_WORDS);
+        let mass = bitcast<f32>(entry.y);
+        let coefficient = bitcast<f32>(entry.z);
+        if entry.x == RESTORING_KLEIN_GORDON {
+            result += 0.5 * mass * coefficient * r * r;
+        } else if entry.x == RESTORING_SINE_GORDON {
+            let half = sin(0.5 * r);
+            result += 2.0 * mass * coefficient * half * half;
+        } else if entry.x == RESTORING_PHI4 {
+            let well = r * r - 1.0;
+            result += 0.25 * mass * coefficient * well * well;
+        }
+    }
+    return result;
+}
+
+// The restoring force a kick holds: at the accepted `r` in the first, at the
+// drifted candidate in the second. A loss stage has copied the accepted lane
+// into the candidate before the first kick, as it does for the gaps.
+fn restoring_force(node: u32, second: bool) -> f32 {
+    if !restoring() { return 0.0; }
+    let index = integrated_index(node);
+    return restoring_force_at(node, select(
+        accepted_auxiliary(index), candidate_auxiliary(index),
+        second || has_loss_stages()));
+}
+
 fn force(node: u32, second: bool) -> f32 {
     if use_force_cache() {
         let cached = select(accepted_force(node), candidate_force(node), second);
-        return cached + gap_force(node, second);
+        return cached + gap_force(node, second) + restoring_force(node, second);
     }
-    return gathered_force(node, second);
+    return gathered_force(node, second) + restoring_force(node, second);
 }
 
 // `time` is the instant whose nodal mass converts `Q` into a field. A driven
@@ -1325,7 +1398,12 @@ fn filter_first(@builtin(global_invocation_id) id: vec3<u32>) {
     if stopped() || node >= control.counts_a.x { return; }
     if temporal_enabled() {
         scratch[node].values.x = scratch[node_field_offset() + node].values.y;
-        scratch[node].values.y = filter_temporal_force(node);
+        // Gate O: the total force on the integrated field, `F + R`.
+        var total = filter_temporal_force(node);
+        if restoring() {
+            total += restoring_force_at(node, accepted_auxiliary(integrated_index(node)));
+        }
+        scratch[node].values.y = total;
         return;
     }
     scratch[node].values.x = stiffness_force(node, control.clock_f32.y);
@@ -1389,7 +1467,19 @@ fn filter_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
         var next = accepted_q(i) - scale * filter_gather(i, false);
         if nodes[i].boundary.z != 0u { next = accepted_q(i); }
         set_candidate_q(i, next);
-        let energies = filter_node_energies(i, next);
+        var energies = filter_node_energies(i, next);
+        // Gate O: `r` takes the correction `b` takes through `ηC`,
+        // `δψ = −s A K A (F + R)`, read from the gathered lane before the
+        // energies overwrite it; its store joins the commit test.
+        if restoring() {
+            let index = integrated_index(i);
+            let old_r = accepted_auxiliary(index);
+            let next_r = old_r - scale * filter_node_weight(i) * scratch[i].values.w;
+            set_candidate_auxiliary(index, next_r);
+            energies += vec2<f32>(
+                restoring_potential_at(i, old_r), restoring_potential_at(i, next_r));
+            if !finite_scalar(next_r) { reject(STATUS_NON_FINITE); }
+        }
         scratch[i].values.z = energies.x;
         scratch[i].values.w = energies.y;
         let next_force = candidate_constitutive_force(i);
@@ -1570,11 +1660,12 @@ fn commit_event() {
 fn resident_filter_commit() {
     let failure = atomicLoad(&status.candidate);
     // On a field-dependent medium the tangent polynomial is dissipative only
-    // to first order, so a candidate that gains energy, or leaves the map's
+    // to first order, and so is the total-force correction on a nonlinear
+    // restoring law, so a candidate that gains energy, or leaves the map's
     // domain, is a filter not taken rather than a fault: the accepted lane
     // stays and stepping continues. A linear filter cannot gain energy, and
     // anything non-finite is a fault on either.
-    if failure != 0u && field_laws() && (failure == STATUS_TIMESTEP
+    if failure != 0u && (field_laws() || restoring()) && (failure == STATUS_TIMESTEP
         || failure == STATUS_INVERSE_DOMAIN || failure == STATUS_INVERSE_CONVERGENCE) {
         control.event.z = accepted_slot();
         atomicStore(&status.candidate, 0u);
@@ -2513,6 +2604,16 @@ fn nonlinear_sample_secants_second(@builtin(global_invocation_id) id: vec3<u32>)
 fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if stopped() { return; }
+    // `ṙ = u` drifts with `b`, on the same midpoint field and interval.
+    if i < control.counts_a.x && restoring() {
+        let index = integrated_index(i);
+        let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
+        let next = accepted_auxiliary(index)
+            + control.clock_f32.x * temporal_drift_field(i, middle_time);
+        set_candidate_auxiliary(index, next);
+        if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
+        inject_at(auxiliary_offset() + index);
+    }
     if i < control.counts_a.x && use_force_cache() {
         let next_force = accepted_force(i)
             + control.clock_f32.x
