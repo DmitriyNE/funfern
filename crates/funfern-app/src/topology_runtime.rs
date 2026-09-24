@@ -275,10 +275,6 @@ impl TopologyPreparationPhase {
     }
 }
 
-/// Why a field-dependent document prepares no generation in the app.
-pub(crate) const FIELD_LAWS_AWAIT_THE_DEVICE: &str =
-    "field-dependent response runs only in the CPU reference until the device solver supports it";
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopologyPreparationError {
     pub token: TopologyToken,
@@ -925,14 +921,6 @@ impl TopologyPreparationJob {
                         );
                         self.timing.assembly_ms += elapsed_ms(started);
                         match temporal {
-                            // The core steps a field-dependent medium, but
-                            // only as its CPU reference: the device solver
-                            // reads coefficient factors and would run the
-                            // law as a linear medium. Refused here, before
-                            // any plan is built, until Stage 9 ports it.
-                            Ok(temporal) if temporal.has_field_laws() => {
-                                return Some(Err(self.fail(FIELD_LAWS_AWAIT_THE_DEVICE.into())));
-                            }
                             Ok(temporal) => {
                                 self.canonical_temporal_operator = Some(Arc::new(temporal))
                             }
@@ -2690,11 +2678,11 @@ mod tests {
         (active.driven(), far_field.map(|_| ()))
     }
 
-    /// The core now steps Kerr and saturable media, but the device reads
-    /// coefficient factors only; the app must not build a plan that would run
-    /// one as a linear medium.
+    /// A Kerr document prepares a field-dependent generation: the device
+    /// executes its maps since Stage 9, so nothing between the document and
+    /// the plan may drop the law or refuse it.
     #[test]
-    fn a_field_dependent_document_prepares_no_generation() {
+    fn a_field_dependent_document_prepares_a_field_dependent_generation() {
         let mut document = TopologyEditor::default().document;
         let kerr = funfern_core::FieldLaw::Polynomial {
             chi1: funfern_core::ScalarField::constant(0.0),
@@ -2704,7 +2692,7 @@ mod tests {
         document.model.draft.materials[0].stiffness_law.field = kerr.clone();
         document.model.accepted.materials[0].stiffness_law.field = kerr;
         let mut runtime = TopologyRuntime::default();
-        runtime
+        let token = runtime
             .request(
                 1,
                 &document,
@@ -2713,8 +2701,15 @@ mod tests {
                 true,
             )
             .unwrap();
-        let error = prepare(&mut runtime).unwrap_err();
-        assert_eq!(error.message, FIELD_LAWS_AWAIT_THE_DEVICE);
+        prepare(&mut runtime).unwrap();
+        let active = runtime.commit_ready(token).unwrap();
+        assert!(active.driven());
+        assert!(
+            active
+                .canonical_temporal_operator
+                .as_ref()
+                .is_some_and(|operator| operator.has_field_laws())
+        );
     }
 
     /// The projection integrates a time-invariant exterior, so a drive out

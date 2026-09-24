@@ -11,14 +11,17 @@
 //! one constructor, so a preset cannot be applied in a shape its own matcher
 //! would not recognise.
 //!
-//! Only laws that run are listed. The catalogue's field-driven rows, restoring
-//! laws and driven loss channels are authored types with no solver behind them,
-//! and section 11 of the material-laws plan asks for a preset behind an open
-//! design gate to be unavailable rather than offered and refused - so every
-//! material a user can author this way assembles.
+//! Only laws that run are listed. Kerr and saturable response (M-F1, M-F2)
+//! run on the device since Stage 9, self-focusing only: a defocusing law needs
+//! an authored amplitude bound, which a preset slider cannot promise to keep
+//! valid. Signed χ₁, restoring laws and driven loss channels are authored
+//! types with no solver behind them, and section 11 of the material-laws plan
+//! asks for a preset behind an open design gate to be unavailable rather than
+//! offered and refused - so every material a user can author this way
+//! assembles.
 
 use crate::material::{MaterialParameter, ScalarField};
-use crate::material_law::{CoefficientLaw, TimeDrive};
+use crate::material_law::{CoefficientLaw, FieldLaw, TimeDrive};
 use crate::{MAX_MATERIAL_PARAMETERS, Material, MaterialError};
 
 /// Which constitutive row a preset writes.
@@ -57,6 +60,8 @@ enum LawPresetShape {
     Crystal,
     Travelling,
     ConstantImpedancePump,
+    Kerr,
+    Saturable,
 }
 
 /// A named law from the catalogue, with the values it asks the user for.
@@ -122,6 +127,23 @@ const TARGET: LawPresetVariable = LawPresetVariable {
     maximum: 1.0e3,
 };
 
+const KERR_CHI: LawPresetVariable = LawPresetVariable {
+    parameter: "kerr_chi",
+    label: "Nonlinearity χ",
+    default: 0.8,
+    minimum: 0.0,
+    maximum: 1.0e3,
+};
+const SATURATION: LawPresetVariable = LawPresetVariable {
+    parameter: "saturation",
+    label: "Saturation field",
+    default: 1.0,
+    minimum: 1.0e-6,
+    maximum: 1.0e3,
+};
+
+const KERR_VARIABLES: &[LawPresetVariable] = &[KERR_CHI];
+const SATURABLE_VARIABLES: &[LawPresetVariable] = &[KERR_CHI, SATURATION];
 const PUMP_VARIABLES: &[LawPresetVariable] = &[DEPTH, FREQUENCY, PHASE];
 const CRYSTAL_VARIABLES: &[LawPresetVariable] = &[DEPTH, FREQUENCY, PHASE, EDGE];
 const TRAVELLING_VARIABLES: &[LawPresetVariable] = &[DEPTH, FREQUENCY, PHASE, WAVENUMBER, ANGLE];
@@ -208,6 +230,22 @@ const PRESETS: &[LawPreset] = &[
         row: LawPresetRow::Both,
         variables: PUMP_VARIABLES,
         shape: LawPresetShape::ConstantImpedancePump,
+    },
+    LawPreset {
+        id: "M-F1",
+        name: "Kerr medium",
+        phenomenon: "the wave slows where it is strong: self-focusing and self-phase modulation",
+        row: LawPresetRow::Mass,
+        variables: KERR_VARIABLES,
+        shape: LawPresetShape::Kerr,
+    },
+    LawPreset {
+        id: "M-F2",
+        name: "Saturable medium",
+        phenomenon: "Kerr that levels off, so a focusing beam narrows without collapsing",
+        row: LawPresetRow::Mass,
+        variables: SATURABLE_VARIABLES,
+        shape: LawPresetShape::Saturable,
     },
 ];
 
@@ -354,6 +392,19 @@ impl LawPreset {
                     angle_radians: field(4),
                 };
             }
+            LawPresetShape::Kerr => {
+                written.field = FieldLaw::Polynomial {
+                    chi1: ScalarField::constant(0.0),
+                    chi2: field(0),
+                    amplitude_bound: None,
+                };
+            }
+            LawPresetShape::Saturable => {
+                written.field = FieldLaw::Saturable {
+                    chi: field(0),
+                    saturation: field(1),
+                };
+            }
         }
         let linear = CoefficientLaw::linear();
         match (self.row, self.shape) {
@@ -383,6 +434,16 @@ impl LawPreset {
         // cannot drift into binding different slots to the same variable.
         let slot = match (self.shape, &law.drive) {
             (LawPresetShape::Switch, _) => law.alternate.as_ref()?,
+            (LawPresetShape::Kerr, TimeDrive::None) => match &law.field {
+                FieldLaw::Polynomial { chi2, .. } if index == 0 => chi2,
+                _ => return None,
+            },
+            (LawPresetShape::Saturable, TimeDrive::None) => match &law.field {
+                FieldLaw::Saturable { chi, saturation } => {
+                    [chi, saturation].into_iter().nth(index)?
+                }
+                _ => return None,
+            },
             (
                 LawPresetShape::Pump | LawPresetShape::ConstantImpedancePump,
                 TimeDrive::ParametricPump {
@@ -578,9 +639,20 @@ mod tests {
                 entry.name
             );
             for law in [&applied.mass_law, &applied.stiffness_law] {
+                let values = law
+                    .evaluate_at(
+                        crate::MaterialCoordinates {
+                            x: 0.0,
+                            y: 0.0,
+                            r: 0.0,
+                            theta: 0.0,
+                        },
+                        &applied.parameters,
+                    )
+                    .unwrap();
                 assert!(
-                    matches!(law.field, crate::FieldLaw::Linear),
-                    "{} writes a field law, which assembly refuses",
+                    values.field.executable(values.inverted).is_ok(),
+                    "{} writes a field law the solver does not execute",
                     entry.name
                 );
             }

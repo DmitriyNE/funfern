@@ -11060,3 +11060,30 @@ Stage 9.6.
   | `HANDOFF_REJECT=1` | into a defocusing Kerr target whose bound (0.04) the running field (about 0.07) exceeds | rejected with status 3; the reference refuses the same state; the source then steps on, 24 → 28 accepted steps |
 
 - **Unchanged:** the default mode.
+
+## 2026-09-24 — Kerr and saturable media run in the application
+
+Stage 9.7.
+
+- **Enabled.** The preparation refusal `FIELD_LAWS_AWAIT_THE_DEVICE` is gone.
+  A field-dependent document prepares a field-dependent generation, and the
+  device plan executes it wherever 9.1–9.6 gated it. Only the grid filter
+  stays refused on these generations.
+  `a_field_dependent_document_prepares_a_field_dependent_generation`
+  replaces the refusal test.
+- **Presets.** Two join the Response selector, on the mass row:
+  - **Kerr medium** (M-F1): `χ`, default 0.8;
+  - **Saturable medium** (M-F2): `χ` and the saturation field.
+
+  Both are self-focusing only. A defocusing law needs an authored amplitude
+  bound, which a preset slider cannot keep valid. The catalogue test now
+  requires every preset's laws to be `executable`, instead of requiring them
+  to be linear. Skin changes carry both (8.8).
+- **App run** (scratch HOME, the stored pumped scene with second-order walls,
+  Kerr χ = 0.8 added on the mass row, 40 s):
+  - status ready, no failure, the field-dependent generation active;
+  - the energy readout is the nonlinear store;
+  - 6,077 steps.
+  - The same scene with a linear law ran 21,489 steps. A nonlinear device
+    step costs about 3.5× here, and the rate fell late in the run. Measuring
+    and cutting that is 9.8.
