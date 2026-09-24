@@ -21,6 +21,15 @@
 //! `--filter` turns the resident grid filter on, which runs every sixteenth
 //! step, so the figure includes its amortized cost.
 //!
+//! `--oscillator` adds a sine-Gordon restoring law (Gate O), so each step
+//! also drifts the integrated field and gathers its restoring force;
+//! `--van-der-pol` adds a van der Pol primary loss on top, so the loss stages
+//! run the Bernoulli map. `--loss` puts a constant primary loss there instead,
+//! which runs the same two loss stages without the map, so the two separate
+//! what the stages cost from what the map costs. The restoring law's
+//! curvature lowers the step ceiling, so the per-step figure is the
+//! comparison, not the wall clock.
+//!
 //! Stepping is unfenced, so the figure is what a step costs the device rather
 //! than the readback round trip the interactive lead fence waits on.
 
@@ -62,6 +71,9 @@ fn main() -> AppExit {
     let outgoing = std::env::args().any(|argument| argument == "--outgoing");
     let nonlinear = std::env::args().any(|argument| argument == "--nonlinear");
     let filter = std::env::args().any(|argument| argument == "--filter");
+    let van_der_pol = std::env::args().any(|argument| argument == "--van-der-pol");
+    let constant_loss = std::env::args().any(|argument| argument == "--loss");
+    let oscillator = van_der_pol || std::env::args().any(|argument| argument == "--oscillator");
     let amplitude = if nonlinear { 12.0 } else { 1.0 };
     let mut scene = Scene::initial();
     if driven {
@@ -90,10 +102,37 @@ fn main() -> AppExit {
             saturation: ScalarField::constant(0.3),
         };
     }
+    if oscillator {
+        scene.materials[0].restoring = funfern_core::RestoringLaw::SineGordon {
+            omega0: ScalarField::constant(3.0),
+        };
+    }
+    if van_der_pol {
+        scene.materials[0].magnetic_loss = Some(funfern_core::LossChannel {
+            base_rate: ScalarField::constant(0.8),
+            law: funfern_core::DampingLaw {
+                rate: funfern_core::RateLaw::VanDerPol {
+                    threshold: ScalarField::constant(0.4),
+                    amplitude_bound: ScalarField::constant(10.0),
+                },
+                drive: TimeDrive::None,
+            },
+        });
+    }
+    if constant_loss {
+        scene.materials[0].magnetic_loss = Some(funfern_core::LossChannel {
+            base_rate: ScalarField::constant(0.8),
+            law: funfern_core::DampingLaw {
+                rate: funfern_core::RateLaw::Constant,
+                drive: TimeDrive::None,
+            },
+        });
+    }
     let mut fixed_scene = scene.clone();
     for material in &mut fixed_scene.materials {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
+        material.restoring = funfern_core::RestoringLaw::None;
     }
     let mesh = mesh_scene(
         &fixed_scene,
@@ -147,10 +186,12 @@ fn main() -> AppExit {
             plan.trace_sweeps,
         );
     }
-    let label = match (driven, nonlinear) {
-        (_, true) => "nonlinear",
-        (true, false) => "driven",
-        (false, false) => "fixed",
+    let label = match (driven, nonlinear, oscillator, van_der_pol) {
+        (_, _, _, true) => "van der Pol",
+        (_, _, true, _) => "oscillator",
+        (_, true, _, _) => "nonlinear",
+        (true, false, _, _) => "driven",
+        (false, false, _, _) => "fixed",
     };
     println!(
         "gpu {label} timing: {} Q, {} b, dt {time_step:.4e}, {STEPS} steps",

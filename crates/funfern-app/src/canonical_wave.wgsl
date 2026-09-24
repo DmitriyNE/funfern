@@ -1,4 +1,4 @@
-// Canonical direct-state f32 solver. Rust layout version 3.
+// Canonical direct-state f32 solver. Rust layout version 5.
 const LAYOUT_VERSION: u32 = 5u;
 const STATE_WORD_STRIDE: u32 = 16u;
 const NODE_STRIDE: u32 = 96u;
@@ -1800,8 +1800,15 @@ fn handoff_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     if i < control.counts_a.w {
         let auxiliary = i - auxiliary_offset();
-        if !finite_scalar(candidate_auxiliary(auxiliary)) {
+        let value = candidate_auxiliary(auxiliary);
+        if !finite_scalar(value) {
             reject(STATUS_NON_FINITE);
+        }
+        // Gate O: a transferred `r` past a φ⁴ bound rejects the handoff here,
+        // and the running generation stays.
+        let first_integrated = control.counts_a.z - control.counts_a.x;
+        if restoring() && auxiliary >= first_integrated {
+            restoring_force_at(auxiliary - first_integrated, value);
         }
         inject_at(i);
     }

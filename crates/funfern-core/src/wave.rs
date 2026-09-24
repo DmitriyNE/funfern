@@ -111,10 +111,14 @@ pub(crate) fn evaluate_timed_directional_material_library_at(
     // reaches anywhere else is refused rather than half-evaluated. That is the
     // same line the temporal supplement draws: it covers the conservative bulk
     // and refuses an operator carrying loss.
-    if material.electric_loss.is_some()
-        || material.magnetic_loss.is_some()
-        || !material.restoring.is_none()
-    {
+    //
+    // A restoring law (Gate O) changes no coefficient: it is an additive
+    // force on the integrated field, whose store and force the canonical
+    // supplement carries. The size rule reads the wave speed here, and a
+    // Klein-Gordon wave at a given frequency is longer than the plain
+    // medium's, `k = √(ω² − ω₀²)/c`, so reading the coefficients without it
+    // can only over-resolve.
+    if material.electric_loss.is_some() || material.magnetic_loss.is_some() {
         return Err(MaterialError::UnsupportedMaterialLaw);
     }
     let properties = material.evaluate_base(region.frame, point)?;

@@ -22,6 +22,9 @@ cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_tim
 cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
 DRIVEN_WALLS=outgoing cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
 OSCILLATOR_MEDIUM=kink OSCILLATOR_FILTER=1 cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator
+OSCILLATOR_HANDOFF=remesh cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator_handoff
+FAILURE_LAW=phi4 cargo run -p funfern-app --release --locked --example canonical_gpu_nonlinear_failure
+cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --oscillator
 ```
 
 The `funfern-app` examples open a window and read the autosave, so run them with
@@ -162,6 +165,16 @@ active-gain and primary-loss lanes to `1e-3`; `OSCILLATOR_AMPLITUDE=0.05` puts i
 below its threshold, where it grows. Across all 120 combinations the worst
 state reads `1.4e-5` and the worst lane `2.8e-6`. A filter that left `r` where
 it was reads `1.3e-4` on sine-Gordon.
+
+`canonical_gpu_oscillator_handoff` hands `r` to the next generation on the
+device against `transfer_integrated_field`: `remesh` (a moving kink onto a
+non-nested finer mesh), `identity`, `from-linear` (starts at `r = 0`),
+`to-linear` (drops it), and `reject`, where a φ⁴ target's bound refuses the
+transferred field with status 6 and the source keeps stepping. Each accepted
+handoff holds `Q`, `b` and `r` to `3e-5` over 60 steps after it.
+`FAILURE_LAW=phi4` runs `canonical_gpu_nonlinear_failure` on a kicked φ⁴ wall:
+the device refuses the reference's step with status 6 and a retry leaves every
+stored bit, `r` included, unchanged.
 
 `canonical_gpu_temporal_work` stamps a material Switch mid-run and requires
 the runtime decoded from the state snapshot, and the bulk energy split and

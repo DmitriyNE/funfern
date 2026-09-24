@@ -195,6 +195,15 @@ impl CanonicalPrimaryTransferMap {
         Ok(map)
     }
 
+    /// The quadratic interpolation rows the map was prepared from, one per
+    /// target node (`None` where the source does not cover it), or `None` for
+    /// an identity map, where every target node copies its own source node.
+    /// A nodal field that is interpolated rather than conserved, such as the
+    /// integrated field `r`, crosses the handoff on exactly these rows.
+    pub fn interpolation_samples(&self) -> Option<&[Option<QuadraticTransferSample>]> {
+        (!self.identity).then_some(self.samples.as_slice())
+    }
+
     pub fn exact_nodes(&self) -> usize {
         if self.identity {
             return self.target_nodes;

@@ -8,19 +8,24 @@
 //! A retry from that state (the app's Run after a failure) must fail again
 //! without moving a single stored bit, because the domain is a property of
 //! the state and not a transient.
+//!
+//! `FAILURE_LAW=phi4` runs the same gate on a φ⁴ oscillator medium (Gate O):
+//! a kicked domain wall whose integrated field passes the law's declared
+//! bound, refused with the restoring-domain status. The retry's bit check
+//! covers `r`, which is part of the accepted auxiliary lanes.
 
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
-    CANONICAL_FAILURE_INVERSE_DOMAIN, CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuPlan,
-    CanonicalGpuRequest, CanonicalWaveGpuPlugin,
+    CANONICAL_FAILURE_INVERSE_DOMAIN, CANONICAL_FAILURE_RESTORING_DOMAIN, CanonicalGpuClock,
+    CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
     CanonicalForcing, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw,
-    FieldLaw, MeshingOptions, OuterBoundaryCondition, Point2, QuadraticWaveOperator, ScalarField,
-    Scene, mesh_scene,
+    FieldLaw, MeshingOptions, OuterBoundaryCondition, Point2, QuadraticWaveOperator, RestoringLaw,
+    ScalarField, Scene, mesh_scene,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,6 +47,8 @@ struct Expected {
     history: Vec<(Vec<f64>, Vec<Point2>)>,
     /// The step the oracle refused.
     refused_step: u64,
+    /// The status the device must refuse it with.
+    status: u32,
     phase: Phase,
     failed_bits: Option<Vec<u32>>,
     failed_readbacks: u64,
@@ -51,15 +58,24 @@ struct Expected {
 }
 
 fn main() -> AppExit {
+    let phi4 = std::env::var("FAILURE_LAW").is_ok_and(|value| value == "phi4");
     let mut scene = Scene::default();
-    scene.materials[0].mass_law.field = FieldLaw::Polynomial {
-        chi1: ScalarField::constant(0.0),
-        chi2: ScalarField::constant(-0.2),
-        amplitude_bound: Some(ScalarField::constant(1.0)),
-    };
+    if phi4 {
+        scene.materials[0].restoring = RestoringLaw::Phi4 {
+            lambda: ScalarField::constant(16.0),
+            amplitude_bound: ScalarField::constant(1.3),
+        };
+    } else {
+        scene.materials[0].mass_law.field = FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(-0.2),
+            amplitude_bound: Some(ScalarField::constant(1.0)),
+        };
+    }
     let mut fixed_scene = scene.clone();
     for material in &mut fixed_scene.materials {
         material.mass_law = CoefficientLaw::linear();
+        material.restoring = RestoringLaw::None;
     }
     let mesh = mesh_scene(
         &fixed_scene,
@@ -94,8 +110,34 @@ fn main() -> AppExit {
             .collect::<Vec<_>>();
         let complementary = base.compatible_flux(&potential).expect("failure flux");
         let primary = vec![0.0; base.degrees_of_freedom()];
-        let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
-            .expect("failure state");
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+                .expect("failure state");
+        if phi4 {
+            // A domain wall `tanh(x/(√2ℓ))`, kicked: the field that runs
+            // into the wells overshoots them past the bound of 1.3.
+            let width = 2.0_f64.sqrt() / 4.0;
+            let integrated = base
+                .node_points()
+                .iter()
+                .map(|point| (point.x / width).tanh())
+                .collect::<Vec<_>>();
+            let primary = base
+                .node_points()
+                .iter()
+                .zip(base.primary_mass())
+                .map(|(point, mass)| mass * amplitude * 0.5 * (1.6 * point.x).cos())
+                .collect::<Vec<_>>();
+            state = CanonicalTemporalWaveState::new(
+                &operator,
+                time_step,
+                primary,
+                base.compatible_flux(&integrated).expect("wall flux"),
+            )
+            .expect("failure state")
+            .with_integrated_field(&operator, integrated)
+            .expect("failure wall");
+        }
         let mut oracle = state.clone();
         let mut history = Vec::new();
         for step in 0..400_u64 {
@@ -119,7 +161,8 @@ fn main() -> AppExit {
     let (state, history, refused_step, reason) =
         chosen.expect("an amplitude that crosses the bound mid-run");
     println!(
-        "nonlinear failure gate: {} Q; the oracle refuses step {} ({reason})",
+        "{} failure gate: {} Q; the oracle refuses step {} ({reason})",
+        if phi4 { "φ⁴" } else { "nonlinear" },
         base.degrees_of_freedom(),
         refused_step + 1
     );
@@ -147,6 +190,11 @@ fn main() -> AppExit {
     .insert_resource(Expected {
         history,
         refused_step,
+        status: if phi4 {
+            CANONICAL_FAILURE_RESTORING_DOMAIN
+        } else {
+            CANONICAL_FAILURE_INVERSE_DOMAIN
+        },
         phase: Phase::Running,
         failed_bits: None,
         failed_readbacks: 0,
@@ -217,7 +265,7 @@ fn drive(
     match expected.phase {
         Phase::Running => {
             // f32 may meet the bound a step either side of f64.
-            if failure != CANONICAL_FAILURE_INVERSE_DOMAIN
+            if failure != expected.status
                 || completed + 1 < expected.refused_step
                 || completed > expected.refused_step + 1
             {
@@ -243,9 +291,10 @@ fn drive(
                 complementary.iter().flat_map(|value| [value.x, value.y]),
             ));
             println!(
-                "device refused step {} with the inverse-domain status; accepted state against \
-                 the oracle's step {completed}: {error:.3e}",
-                completed + 1
+                "device refused step {} with status {failure} ({}); accepted state against the \
+                 oracle's step {completed}: {error:.3e}",
+                completed + 1,
+                funfern_app::canonical_gpu::canonical_failure_description(failure)
             );
             if error > 3.0e-5 {
                 expected.failed = true;
@@ -272,7 +321,7 @@ fn drive(
                 },
                 expected.started.elapsed().as_secs_f64() * 1e3
             );
-            expected.failed = !unchanged || failure != CANONICAL_FAILURE_INVERSE_DOMAIN;
+            expected.failed = !unchanged || failure != expected.status;
             expected.phase = Phase::Done;
         }
         Phase::Done => {}

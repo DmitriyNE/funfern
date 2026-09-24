@@ -2105,6 +2105,26 @@ mod tests {
             };
         }
         assert!(!lossy.time_invariant());
+
+        // Gate O: a restoring law and a van der Pol rate carry state and gain
+        // the fixed path and the free-space projection do not have.
+        let mut oscillator = Material::default_medium();
+        oscillator.restoring = crate::RestoringLaw::KleinGordon {
+            omega0: ScalarField::constant(2.0),
+        };
+        assert!(!oscillator.time_invariant());
+        let mut active = Material::default_medium();
+        active.magnetic_loss = Some(crate::LossChannel {
+            base_rate: ScalarField::constant(0.5),
+            law: crate::DampingLaw {
+                rate: crate::RateLaw::VanDerPol {
+                    threshold: ScalarField::constant(0.4),
+                    amplitude_bound: ScalarField::constant(10.0),
+                },
+                drive: crate::TimeDrive::None,
+            },
+        });
+        assert!(!active.time_invariant());
     }
 
     #[test]

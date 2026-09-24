@@ -423,19 +423,27 @@ impl Playground {
                 .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
                 .collect(),
             auxiliary: canonical
-                .auxiliary
+                .history_auxiliary()
                 .iter()
                 .map(|value| f64::from(*value))
                 .collect(),
             previous_auxiliary: canonical
-                .previous_auxiliary
+                .previous_history_auxiliary()
                 .iter()
                 .map(|value| f64::from(*value))
                 .collect(),
-            // The device refuses oscillator media until Stage 11.3, so no
-            // generation here carries `r`.
-            integrated_field: vec![],
-            previous_integrated_field: vec![],
+            // Gate O: the integrated field from the same snapshot, empty
+            // without a restoring law.
+            integrated_field: canonical
+                .integrated_field()
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect(),
+            previous_integrated_field: canonical
+                .previous_integrated_field()
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect(),
             time,
             time_step: dt,
         };

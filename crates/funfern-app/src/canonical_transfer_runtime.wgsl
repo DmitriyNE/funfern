@@ -1,5 +1,5 @@
 // Runtime/clock half of canonical generation handoff.
-const TRANSFER_LAYOUT_VERSION: u32 = 2u;
+const TRANSFER_LAYOUT_VERSION: u32 = 3u;
 const NO_INDEX: u32 = 0xffffffffu;
 const DRIVE_TARGET_PARAMETERS: u32 = 0x80000000u;
 const DRIVE_INDEX_MASK: u32 = 0x7fffffffu;

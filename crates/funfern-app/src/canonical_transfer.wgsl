@@ -1,5 +1,5 @@
-// Latest-state canonical generation transfer. Rust transfer layout version 2.
-const TRANSFER_LAYOUT_VERSION: u32 = 2u;
+// Latest-state canonical generation transfer. Rust transfer layout version 3.
+const TRANSFER_LAYOUT_VERSION: u32 = 3u;
 const WORKGROUP_SIZE: u32 = 128u;
 const PRIMARY_WORDS: u32 = 4u;
 const VECTOR_WORDS: u32 = 4u;
@@ -257,6 +257,38 @@ fn transfer_outgoing(@builtin(global_invocation_id) id: vec3<u32>) {
             * packed_transfer_float(row, source);
     }
     set_candidate_auxiliary(target_gap_count() + target_index, value);
+    if !finite_scalar(value) { reject(STATUS_NON_FINITE); }
+}
+
+// Gate O: the integrated field `r` at the tail of each side's auxiliary
+// lanes, interpolated on the primary map's rows: a nodal field, not a
+// conserved one. A source without `r` hands zero; a target without one has no
+// lanes to fill.
+fn source_integrated_count() -> u32 { return header(9u).y; }
+fn target_integrated_count() -> u32 { return header(9u).z; }
+fn old_integrated(node: u32) -> f32 {
+    return old_auxiliary(source_gap_count() + source_outgoing_count() + node);
+}
+
+@compute @workgroup_size(128)
+fn transfer_integrated(@builtin(global_invocation_id) id: vec3<u32>) {
+    let target_index = id.x;
+    if stopped() || target_index >= target_integrated_count() { return; }
+    var value = 0.0;
+    if source_integrated_count() != 0u {
+        let base = header(9u).x + target_index * PRIMARY_WORDS;
+        let indices_a = transfer[base].data;
+        let metadata = transfer[base + 2u].data;
+        let count = metadata.w;
+        for (var slot = 0u; slot < min(count, 4u); slot += 1u) {
+            value += old_integrated(indices_a[slot]) * transfer_float(base + 1u, slot);
+        }
+        for (var slot = 4u; slot < count; slot += 1u) {
+            value += old_integrated(metadata[slot - 4u]) * transfer_float(base + 3u, slot - 4u);
+        }
+    }
+    set_candidate_auxiliary(
+        target_gap_count() + target_outgoing_count() + target_index, value);
     if !finite_scalar(value) { reject(STATUS_NON_FINITE); }
 }
 

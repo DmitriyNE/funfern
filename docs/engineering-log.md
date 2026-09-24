@@ -12028,3 +12028,84 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
   - **Worst lane:** 2.8e-6.
 - **Regression suite:** 45 runs, all exit 0.
 - **Test:** `a_van_der_pol_plan_marks_its_records_and_nodes`.
+
+## 2026-09-24 — The integrated field across a device handoff, and the app wiring (Stage 11.3c)
+
+- **Device handoff of `r`.**
+  - `CanonicalGpuTransferPlan::with_integrated_field` packs one row per
+    target node from the primary map's interpolation rows (new
+    `CanonicalPrimaryTransferMap::interpolation_samples`), not its
+    support-weighted ones: `r` is interpolated, not conserved. A new
+    `transfer_integrated` pass applies them.
+    - A source without `r` hands zero, and a target without a restoring law
+      drops it. `integrated_counts()` says which.
+    - `begin_handoff` refuses a transfer whose counts do not match both
+      plans, so a transfer prepared without `r` cannot carry it by accident.
+  - `handoff_finalize` checks a transferred `r` against the target's φ⁴
+    bound. Past it, the handoff is rejected with status 6 and the source
+    keeps running.
+  - The transfer header grows to 10 words, and the transfer layout version
+    goes from 2 to 3. It must be bumped in `canonical_transfer.wgsl`,
+    `canonical_transfer_runtime.wgsl` and the Rust constant. Missing the
+    runtime shader's copy made every handoff fail its layout check; the
+    existing handoff examples caught it.
+  - The handoff's edit-exchange lane reads authored linear stores for `Q`
+    and `b`, as before, and does not include `V(r)`.
+- **Measured** (`canonical_gpu_oscillator_handoff`, 60 steps each side):
+
+  | mode | Q | b | r |
+  | --- | --- | --- | --- |
+  | identity, sine-Gordon | 2.6e-7 | 3.0e-6 | 1.1e-6 |
+  | remesh, kink at v = 0.5, 5485 → 11121 nodes | 5.5e-7 | 3.7e-7 | 2.4e-7 |
+  | plain → Klein–Gordon (starts at zero) | 7.3e-7 | 5.5e-7 | 1.4e-7 |
+  | Klein–Gordon → plain (drops `r`) | 3.3e-7 | 2.5e-6 | — |
+  | φ⁴ wall → bound 0.9 | rejected with status 6; the source kept stepping | | |
+- **Failure during stepping.** `canonical_gpu_nonlinear_failure` with
+  `FAILURE_LAW=phi4`, on a kicked φ⁴ wall at bound 1.3:
+  - the device refuses the reference's step 367 with status 6;
+  - its accepted state matches the reference's step 366 to 4.0e-6;
+  - a retry fails again with every stored bit, `r` included, unchanged.
+- **Long runs**, as `canonical_gpu_long_run` does: asserted up to 1000
+  steps, printed past that.
+
+  | medium | 1000 steps (Q / b / r) | 4000 steps (Q / b / r) |
+  | --- | --- | --- |
+  | Klein–Gordon | 8.2e-7 / 9.4e-6 / 2.9e-6 | 2.3e-6 / 1.8e-5 / 2.4e-6 |
+  | sine-Gordon | 9.8e-7 / 5.9e-6 / 1.0e-6 | 5.7e-6 / 4.7e-6 / 1.5e-6 |
+  | moving kink | 1.8e-6 / 1.2e-6 / 6.7e-7 | 7.5e-6 / 5.4e-6 / 9.2e-7 |
+  | φ⁴ wall | 3.6e-6 / 8.9e-7 / 7.1e-7 | 8.7e-6 / 6.0e-6 / 4.0e-6 |
+  | van der Pol, growing from 0.05 | 7.0e-7 / 1.3e-5 / 1.9e-6 | 1.6e-6 / 3.9e-4 / 2.0e-6 |
+
+  The last `b` is a shrunk lane, not a grown error. By step 4000 the medium
+  has settled into a nearly uniform self-oscillation: `|Q|` is 20× its
+  start, `|b|` (a gradient) is 3.4% of its start. In units of the starting
+  `b` the error is 1.3e-5. The example now prints each lane's scale against
+  its start.
+- **Cost** (`canonical_gpu_temporal_timing`, M1 Max, 15270 DOFs, driven
+  fixture, three runs each):
+  - driven 433–442 µs/step; with sine-Gordon 425–467, which is inside the
+    run-to-run spread;
+  - with a constant primary loss 616–625, and sine-Gordon plus that loss
+    599–600;
+  - van der Pol 650. So the Bernoulli map costs about 8% over a constant
+    loss; the loss stages it needs are the rest.
+  - `--oscillator`, `--van-der-pol` and `--loss` are new flags.
+- **App wiring.**
+  - `compile_gpu_upload` installs the `r` rows whenever either generation
+    carries `r`.
+  - The AMR snapshot reads `r` from the display, and it reads the gap and
+    outgoing lanes through new `history_auxiliary` accessors, since `r` now
+    sits at their tail.
+  - The scalar size rule admits a restoring law: it changes no coefficient,
+    and a Klein–Gordon wave at a given frequency is longer than the plain
+    medium's, so reading the coefficients without it can only over-resolve.
+- **Found and fixed on the way.** `Material::time_invariant` ignored
+  restoring laws and field-dependent loss rates, so the app would have
+  routed an oscillator or van der Pol document down the fixed path, which
+  refuses it at assembly. It now reads both as time-varying, which is also
+  what the far field's free-space projection needs: a Klein–Gordon exterior
+  has no wave-equation Green's function. No preset authors these laws until
+  11.4, so nothing reached it.
+- **Not checked by me.** An oscillator document end to end in the app;
+  presets arrive in 11.4.
+- **Regression suite:** 56 runs, all exit 0.

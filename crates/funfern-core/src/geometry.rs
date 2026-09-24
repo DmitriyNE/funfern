@@ -134,20 +134,26 @@ pub struct Material {
 }
 
 impl Material {
-    /// Whether this material's response is fixed in time: no field law, no
-    /// drive and no Switch alternate on either constitutive row, and no drive
-    /// on either loss channel. Consumers whose derivation assumes a
-    /// time-invariant medium test this rather than inspecting each slot.
+    /// Whether this material is a plain linear, time-invariant wave medium:
+    /// no field law, no drive and no Switch alternate on either constitutive
+    /// row, no drive and no field-dependent rate on either loss channel, and
+    /// no restoring law. Consumers whose derivation assumes such a medium
+    /// (the fixed solver path, the far field's free-space projection) test
+    /// this rather than inspecting each slot. A restoring law is time
+    /// invariant, but it is not this medium: its integrated field is state
+    /// the fixed path does not carry, and Klein-Gordon has no wave-equation
+    /// Green's function.
     pub fn time_invariant(&self) -> bool {
         let channel_is_fixed = |channel: &Option<LossChannel>| {
-            channel
-                .as_ref()
-                .is_none_or(|channel| channel.law.drive.is_none())
+            channel.as_ref().is_none_or(|channel| {
+                channel.law.drive.is_none() && matches!(channel.law.rate, crate::RateLaw::Constant)
+            })
         };
         self.mass_law.is_linear()
             && self.stiffness_law.is_linear()
             && channel_is_fixed(&self.electric_loss)
             && channel_is_fixed(&self.magnetic_loss)
+            && self.restoring.is_none()
     }
 }
 

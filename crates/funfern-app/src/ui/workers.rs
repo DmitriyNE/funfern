@@ -694,9 +694,19 @@ pub(super) fn compile_gpu_upload(
         let source_clock =
             CanonicalGpuClock::initial(source_step).map_err(|error| format!("{error:?}"))?;
         let source = compile_generation_plan(&active, source_step, source_clock, TraceLane::Sweep)?;
-        gpu_transfer
+        let gpu_transfer = gpu_transfer
             .with_temporal_material_runtime(&source, &plan)
-            .map_err(|error| format!("{error:?}"))?
+            .map_err(|error| format!("{error:?}"))?;
+        // Gate O: an oscillator generation on either side carries the
+        // integrated field across, starts it from zero, or drops it, and the
+        // handoff refuses a transfer that does not say which.
+        if source.integrated_count != 0 || plan.integrated_count != 0 {
+            gpu_transfer
+                .with_integrated_field(&transfer.primary, &source, &plan)
+                .map_err(|error| format!("{error:?}"))?
+        } else {
+            gpu_transfer
+        }
     } else {
         gpu_transfer
     };

@@ -81,8 +81,9 @@ const EVENT_TEMPORAL_SWITCH: u32 = 7;
 const EVENT_TEMPORAL_LAW_PATCH: u32 = 8;
 const RESIDENT_FILTER_DISPATCHES: u64 = 7;
 const RESIDENT_FILTER_ACCOUNTING_DISPATCHES: u64 = 1;
-const TRANSFER_LAYOUT_VERSION: u32 = 2;
-const TRANSFER_HEADER_WORDS: usize = 9;
+const TRANSFER_LAYOUT_VERSION: u32 = 3;
+/// The tenth word locates the integrated-field rows (Gate O).
+const TRANSFER_HEADER_WORDS: usize = 10;
 const HANDOFF_RECEIPT_MAGIC: u32 = 0x4841_4e44;
 const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
 const DRIVE_INDEX_MASK: u32 = !DRIVE_TARGET_PARAMETERS;
@@ -480,6 +481,10 @@ pub struct CanonicalGpuTransferPlan {
     target_drive_count: usize,
     source_material_runtime_count: usize,
     target_material_runtime_count: usize,
+    /// Gate O: nodes carrying `r` on each side, installed by
+    /// [`CanonicalGpuTransferPlan::with_integrated_field`].
+    source_integrated_count: usize,
+    target_integrated_count: usize,
     words: Vec<GpuCanonicalTransferWord>,
 }
 
@@ -2463,8 +2468,96 @@ impl CanonicalGpuTransferPlan {
             target_drive_count: target_forcing.sources().len(),
             source_material_runtime_count: 0,
             target_material_runtime_count: 0,
+            source_integrated_count: 0,
+            target_integrated_count: 0,
             words,
         })
+    }
+
+    /// Gate O: how many nodes carry the integrated field on each side of
+    /// this transfer. `(n, 0)` drops a source's `r`; `(0, n)` starts the
+    /// target from `r = 0`.
+    pub fn integrated_counts(&self) -> (usize, usize) {
+        (self.source_integrated_count, self.target_integrated_count)
+    }
+
+    /// Adds the integrated field `r` to a prepared transfer whenever either
+    /// generation carries one. `r` is a nodal field, not a conserved one, so
+    /// it crosses on the primary map's interpolation rows rather than its
+    /// support-weighted ones, and a target node the source does not cover
+    /// starts at zero, as on the reference (`transfer_integrated_field`). A
+    /// source without `r` hands a restoring target zero everywhere, and a
+    /// target without a restoring law drops the source's; the counts say
+    /// which. A handoff refuses a transfer whose counts do not match its
+    /// plans, so one prepared without this cannot carry `r` by accident.
+    pub fn with_integrated_field(
+        mut self,
+        primary: &CanonicalPrimaryTransferMap,
+        source: &CanonicalGpuPlan,
+        target: &CanonicalGpuPlan,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        if source.node_count != self.source_node_count
+            || target.node_count != self.target_node_count
+            || primary.target_node_count() != self.target_node_count
+            || self.words[9].data.w != 0
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "the integrated field does not match the transfer generations",
+            ));
+        }
+        self.words.truncate(self.manifest.word_count);
+        let rows_offset = self.words.len();
+        if source.integrated_count != 0 && target.integrated_count != 0 {
+            let samples = primary.interpolation_samples();
+            for target_node in 0..self.target_node_count {
+                let (nodes, weights, count) = match samples {
+                    None => {
+                        let mut nodes = [0_u32; 7];
+                        let mut weights = [0.0_f64; 7];
+                        nodes[0] = usize_u32(target_node)?;
+                        weights[0] = 1.0;
+                        (nodes, weights, 1)
+                    }
+                    Some(samples) => match &samples[target_node] {
+                        Some(sample) => (sample.nodes, sample.weights, 7),
+                        None => ([0; 7], [0.0; 7], 0),
+                    },
+                };
+                let weight = |index: usize| finite_f32(weights[index], "integrated-field weight");
+                self.words
+                    .push(transfer_word(nodes[0], nodes[1], nodes[2], nodes[3]));
+                self.words.push(transfer_word(
+                    weight(0)?.to_bits(),
+                    weight(1)?.to_bits(),
+                    weight(2)?.to_bits(),
+                    weight(3)?.to_bits(),
+                ));
+                self.words
+                    .push(transfer_word(nodes[4], nodes[5], nodes[6], count));
+                self.words.push(transfer_word(
+                    weight(4)?.to_bits(),
+                    weight(5)?.to_bits(),
+                    weight(6)?.to_bits(),
+                    0,
+                ));
+            }
+        }
+        self.source_integrated_count = source.integrated_count;
+        self.target_integrated_count = target.integrated_count;
+        self.words[9] = transfer_word(
+            usize_u32(rows_offset)?,
+            usize_u32(self.source_integrated_count)?,
+            usize_u32(self.target_integrated_count)?,
+            1,
+        );
+        self.manifest.word_count = self.words.len();
+        self.words.resize(
+            self.words.len().max(self.target_node_count + 1),
+            GpuCanonicalTransferWord::default(),
+        );
+        self.words[5].data.y = usize_u32(self.manifest.word_count)?;
+        self.manifest.bytes = self.words.len() * size_of::<GpuCanonicalTransferWord>();
+        Ok(self)
     }
 
     /// Adds stable material-runtime ownership to an already prepared geometry
@@ -4010,10 +4103,12 @@ impl CanonicalGpuRequest {
         if source.event_kind != EVENT_NONE && self.stats.processed_event() < source.event_serial {
             return Err("canonical GPU handoff is waiting for the staged event boundary");
         }
-        // The transfer shader does not yet carry the integrated field, and a
-        // handoff that silently zeroed or dropped it would change the physics.
-        if source.integrated_count != 0 || target.integrated_count != 0 {
-            return Err("a handoff to or from an oscillator medium does not run on the device yet");
+        // The integrated field crosses only on a transfer that was told about
+        // it, so neither side can zero or drop it silently.
+        if transfer.integrated_counts()
+            != (source.integrated_count as usize, target.integrated_count)
+        {
+            return Err("the handoff does not describe either generation's integrated field");
         }
         if source.node_count as usize != transfer.source_node_count
             || source.sample_count as usize != transfer.source_sample_count
@@ -4023,12 +4118,16 @@ impl CanonicalGpuRequest {
                     + transfer.source_sample_count
                     + transfer.source_gap_count
                     + transfer.source_outgoing_count
+                    + transfer.source_integrated_count
             || source.drive_count as usize != transfer.source_drive_count
             || source.material_runtime_count as usize != transfer.source_material_runtime_count
             || target.node_count != transfer.target_node_count
             || target.sample_count != transfer.target_sample_count
             || target.control.counts_b.x as usize != transfer.target_gap_count
-            || target.auxiliary_count != transfer.target_gap_count + transfer.target_outgoing_count
+            || target.auxiliary_count
+                != transfer.target_gap_count
+                    + transfer.target_outgoing_count
+                    + transfer.target_integrated_count
             || target.control.counts_c.w as usize != transfer.target_component_count
             || target.control.counts_c.z as usize != transfer.target_drive_count
             || target
@@ -4283,6 +4382,19 @@ impl CanonicalGpuDisplay {
             return &[];
         }
         &self.auxiliary[start..]
+    }
+
+    /// The gap and outgoing history lanes alone: the auxiliary lanes
+    /// without the integrated field at their tail.
+    pub fn history_auxiliary(&self) -> &[f32] {
+        let end = self.auxiliary.len() - self.integrated_field().len();
+        &self.auxiliary[..end]
+    }
+
+    /// The history lanes one step earlier, from the same snapshot.
+    pub fn previous_history_auxiliary(&self) -> &[f32] {
+        let end = self.previous_auxiliary.len() - self.previous_integrated_field().len();
+        &self.previous_auxiliary[..end]
     }
 
     /// The integrated field one step earlier, from the same snapshot.
@@ -4891,6 +5003,7 @@ struct CanonicalTransferPipeline {
     transfer_vector: CachedComputePipelineId,
     transfer_gap: CachedComputePipelineId,
     transfer_outgoing: CachedComputePipelineId,
+    transfer_integrated: CachedComputePipelineId,
     reduce_density: CachedComputePipelineId,
     reduce_components: CachedComputePipelineId,
     correct_primary: CachedComputePipelineId,
@@ -5117,6 +5230,12 @@ fn init_canonical_pipeline(
         transfer_outgoing: queue_transfer(
             "canonical transfer outgoing history",
             "transfer_outgoing",
+            map_layout.clone(),
+            transfer_shader.clone(),
+        ),
+        transfer_integrated: queue_transfer(
+            "canonical transfer integrated field",
+            "transfer_integrated",
             map_layout.clone(),
             transfer_shader.clone(),
         ),
@@ -6078,6 +6197,7 @@ fn compute_canonical_handoff(
         canonical.handoff_clear_scratch,
         canonical.handoff_commit,
         transfer.correct_primary,
+        transfer.transfer_integrated,
     ];
     if ids.iter().any(|id| {
         matches!(
@@ -6126,6 +6246,9 @@ fn compute_canonical_handoff(
         1,
         1,
     );
+    // Gate O: the integrated field, on the interpolation rows.
+    pass.set_pipeline(pipelines[15]);
+    pass.dispatch_workgroups(workgroups(target.node_count), 1, 1);
     pass.set_pipeline(pipelines[5]);
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(pipelines[6]);
