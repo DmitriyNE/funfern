@@ -1819,6 +1819,30 @@ fn aligned_indicator_auxiliary(
     )
 }
 
+/// The maps a field-dependent generation's readbacks are read through: its
+/// operator, the runtime the solver stepped with (the authored one until a
+/// snapshot and a clock agree), and the readback's accepted time. `None`
+/// where the maps are linear and `Q/M` is exact.
+pub(crate) fn field_law_view(
+    active: &PreparedTopology,
+    canonical: &CanonicalGpuDisplay,
+) -> Option<(
+    std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
+    funfern_core::CanonicalMaterialRuntimeState,
+    f64,
+)> {
+    let operator = active
+        .canonical_temporal_operator
+        .as_ref()
+        .filter(|operator| operator.has_field_laws())?;
+    let authored = operator.initial_runtime();
+    let runtime = canonical
+        .accepted_material_runtime(&authored)
+        .unwrap_or(authored);
+    let time = canonical.clock.map_or(0.0, |clock| clock.absolute_seconds);
+    Some((operator.clone(), runtime, time))
+}
+
 fn refresh_canonical_wave_display(
     active: Option<&Arc<PreparedTopology>>,
     canonical: &CanonicalGpuDisplay,
@@ -1852,13 +1876,30 @@ fn refresh_canonical_wave_display(
     display.generation = canonical.generation;
     display.completed_steps = request.stats().completed_steps();
     display.current.clear();
-    display.current.extend(
-        canonical
-            .primary_flux
-            .iter()
-            .zip(operator.primary_mass())
-            .map(|(flux, mass)| (f64::from(*flux) / mass) as f32),
-    );
+    // A field-dependent medium's field is the inverse of its map, not `Q/M`:
+    // read at 30% amplitude departure, the linear division would paint a
+    // different field from the one the solver steps.
+    let nonlinear_field =
+        field_law_view(active, canonical).and_then(|(temporal, runtime, time)| {
+            let flux = canonical
+                .primary_flux
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect::<Vec<_>>();
+            temporal.primary_field_at(&flux, time, &runtime).ok()
+        });
+    match nonlinear_field {
+        Some(field) => display
+            .current
+            .extend(field.into_iter().map(|value| value as f32)),
+        None => display.current.extend(
+            canonical
+                .primary_flux
+                .iter()
+                .zip(operator.primary_mass())
+                .map(|(flux, mass)| (f64::from(*flux) / mass) as f32),
+        ),
+    }
     if canonical.full_readback_at == canonical.readbacks {
         display.snapshot_current.clear();
         display

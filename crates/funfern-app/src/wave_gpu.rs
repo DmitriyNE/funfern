@@ -1380,6 +1380,12 @@ impl WaveGpuRequest {
         sample_rate: f64,
         context: RecorderContext,
     ) -> Result<(), String> {
+        // The area readout sums linear stores; a field-dependent medium's is
+        // not derived on either side, and a plausible wrong total is worse
+        // than none.
+        if operator.has_field_laws() && probes.iter().any(|probe| probe.stencil.is_some()) {
+            return Err("area readouts are not yet available on a field-dependent medium".into());
+        }
         let index = TemporalTableIndex::build(operator, manifest)?;
         self.update_area_probes_from(
             assets,
@@ -5992,8 +5998,11 @@ mod tests {
     fn canonical_probe_shaders_consume_direct_accepted_state() {
         let point = include_str!("canonical_probe.wgsl");
         assert!(point.contains("if !temporal_enabled() { return nodes[node].mass_loss.y; }"));
-        assert!(point.contains("accepted_q(a.x) * primary_inverse_mass(a.x, local_time)"));
-        assert!(point.contains("previous_q(a.x) * primary_inverse_mass(a.x, previous_time)"));
+        // The nodal field goes through the solver's own assembled map, which
+        // is the linear division unless a record follows its field.
+        assert!(point.contains("probe_primary_field(a.x, accepted_q(a.x), local_time)"));
+        assert!(point.contains("probe_primary_field(a.x, previous_q(a.x), previous_time)"));
+        assert!(point.contains("if !nonlinear { return flux / mass; }"));
         assert!(point.contains("return select(value.xy, value.zw"));
         assert!(point.contains("fn sample_vector_overlay"));
         assert!(point.contains("output[sample].primary = vec4<f32>(complement, flow)"));
@@ -6047,8 +6056,11 @@ mod tests {
     fn consumers_invert_at_solver_samples_before_interpolating() {
         let point = include_str!("canonical_probe.wgsl");
         assert!(point.contains(
-            "let recovered = apply_symmetric(stencil.sample_inverse[local].xyz, flux[local])"
+            "field += sample_field(stencil, local, flux[local], local_time) * weights[local];"
         ));
+        assert!(
+            point.contains("let linear = apply_symmetric(stencil.sample_inverse[local].xyz, flux)")
+        );
         assert!(point.contains("/ sample_temporal_factor(stencil, local, local_time)"));
         assert!(
             point.contains("dot(field, apply_symmetric(stencil.reference_inverse.yzw, field))")

@@ -126,14 +126,16 @@ pub(crate) fn evaluate_timed_directional_material_library_at(
     let mut factors = [1.0; 2];
     for (factor, primary) in factors.iter_mut().zip([true, false]) {
         let (drive, law) = crate::canonical_temporal::coefficient_for(physics, material, primary);
-        let law = law.evaluate_at(coordinates, &material.parameters)?;
-        // A field-dependent response is Stage 8 and the temporal operator
-        // refuses to compile one, so a runtime that reached here cannot
-        // describe one. Refusing rather than ignoring the field law keeps that
-        // true if the operator's gate ever moves.
-        if !matches!(law.field, FieldLawValues::Linear) {
+        let mut law = law.evaluate_at(coordinates, &material.parameters)?;
+        // A field law is read at its small-signal limit, `ḡ(0) = 1`: the
+        // instantaneous material here sizes the mesh by its wave speed, and
+        // a field-free speed is the one the medium has wherever the field is
+        // weak. Kerr with χ > 0 is slower where the field is strong, so an
+        // amplitude-aware size rule is a carried item, not this.
+        if law.field.executable(law.inverted).is_err() {
             return Err(MaterialError::UnsupportedMaterialLaw);
         }
+        law.field = FieldLawValues::Linear;
         *factor = runtime.coefficient_law_factor(material.id, drive, law, coordinates, time)?;
         if !factor.is_finite() || *factor <= 0.0 {
             return Err(MaterialError::InvalidValue);

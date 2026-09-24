@@ -66,6 +66,9 @@ struct Expected {
     line_time: f64,
     area_total_energy: f64,
     area_rms_complementary: f64,
+    /// Whether the area readout is compared. A field-dependent medium's area
+    /// readout is refused on both sides, so its run checks the rest.
+    area_checked: bool,
     arrows: Vec<(f64, f64)>,
     started: Instant,
     deadline: Instant,
@@ -90,6 +93,22 @@ fn main() -> AppExit {
         phase_radians: ScalarField::constant(-0.19),
         sharpness: ScalarField::constant(3.0),
     };
+    // `CONSUMER_NONLINEAR=1` adds Kerr on the mass row and saturation on the
+    // stiffness row, strong enough at this state's amplitude that a consumer
+    // reading a linear map would miss by tens of percent. The point, line and
+    // arrow consumers then invert at the solver's own sites on both sides.
+    let nonlinear = std::env::var("CONSUMER_NONLINEAR").is_ok_and(|value| value == "1");
+    if nonlinear {
+        material.mass_law.field = funfern_core::FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(40.0),
+            amplitude_bound: None,
+        };
+        material.stiffness_law.field = funfern_core::FieldLaw::Saturable {
+            chi: ScalarField::constant(300.0),
+            saturation: ScalarField::constant(0.03),
+        };
+    }
 
     let mut fixed_scene = scene.clone();
     for material in &mut fixed_scene.materials {
@@ -239,15 +258,17 @@ fn main() -> AppExit {
             (sample.complementary.norm(), sample.energy_flow.norm())
         })
         .collect::<Vec<_>>();
-    let area_sample = sample_temporal_canonical_area(
-        &area,
-        &operator,
-        state.primary_flux(),
-        state.complementary_flux(),
-        state.time(),
-        state.runtime(),
-    )
-    .expect("f64 temporal area sample");
+    let area_sample = (!nonlinear).then(|| {
+        sample_temporal_canonical_area(
+            &area,
+            &operator,
+            state.primary_flux(),
+            state.complementary_flux(),
+            state.time(),
+            state.runtime(),
+        )
+        .expect("f64 temporal area sample")
+    });
     let expected = Expected {
         steps,
         time: state.time(),
@@ -258,8 +279,11 @@ fn main() -> AppExit {
         energy: sample.energy_density,
         line: line_expected,
         line_time: state.time(),
-        area_total_energy: area_sample.total_energy,
-        area_rms_complementary: area_sample.rms_complementary,
+        area_total_energy: area_sample.as_ref().map_or(0.0, |area| area.total_energy),
+        area_rms_complementary: area_sample
+            .as_ref()
+            .map_or(0.0, |area| area.rms_complementary),
+        area_checked: area_sample.is_some(),
         arrows,
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(60),
@@ -350,24 +374,26 @@ fn install(
             },
         )
         .expect("install temporal line recorder");
-    recorders
-        .update_temporal_canonical_area_probes(
-            &mut assets,
-            &mut commands,
-            &pending.operator,
-            temporal_manifest,
-            &[AreaProbeInput {
-                id: AREA_PROBE_ID,
-                stencil: Some(pending.area.clone()),
-            }],
-            AREA_SAMPLE_RATE,
-            RecorderContext {
-                time_step: 0.38 * pending.operator.maximum_time_step(),
-                physics: PhysicsModel::Mechanical,
-                history: RecorderHistory::Restart,
-            },
-        )
-        .expect("install temporal area recorder");
+    if !pending.operator.has_field_laws() {
+        recorders
+            .update_temporal_canonical_area_probes(
+                &mut assets,
+                &mut commands,
+                &pending.operator,
+                temporal_manifest,
+                &[AreaProbeInput {
+                    id: AREA_PROBE_ID,
+                    stencil: Some(pending.area.clone()),
+                }],
+                AREA_SAMPLE_RATE,
+                RecorderContext {
+                    time_step: 0.38 * pending.operator.maximum_time_step(),
+                    physics: PhysicsModel::Mechanical,
+                    history: RecorderHistory::Restart,
+                },
+            )
+            .expect("install temporal area recorder");
+    }
     let lattice = pending
         .line
         .iter()
@@ -456,24 +482,29 @@ fn finish_when_ready(
             line_errors[lane] = line_errors[lane].max(relative_error(got[lane], reference[lane]));
         }
     }
-    let Some(area) = areas
-        .records
-        .iter()
-        .filter(|record| record.probe_id == AREA_PROBE_ID)
-        .max_by(|left, right| left.time.total_cmp(&right.time))
-    else {
-        return;
-    };
-    if (area.time - expected.line_time).abs() > 2.0e-4 {
-        return;
+    let mut area_errors = [0.0; 2];
+    let mut area_coverage = 0.0;
+    if expected.area_checked {
+        let Some(area) = areas
+            .records
+            .iter()
+            .filter(|record| record.probe_id == AREA_PROBE_ID)
+            .max_by(|left, right| left.time.total_cmp(&right.time))
+        else {
+            return;
+        };
+        if (area.time - expected.line_time).abs() > 2.0e-4 {
+            return;
+        }
+        area_errors = [
+            relative_error(area.total_energy, expected.area_total_energy),
+            relative_error(
+                area.rms_transverse_magnitude,
+                expected.area_rms_complementary,
+            ),
+        ];
+        area_coverage = area.coverage;
     }
-    let area_errors = [
-        relative_error(area.total_energy, expected.area_total_energy),
-        relative_error(
-            area.rms_transverse_magnitude,
-            expected.area_rms_complementary,
-        ),
-    ];
     println!(
         "temporal line consumer worst errors over {} samples: u {:.3e}, complement {:.3e}, energy {:.3e}, normal flow {:.3e}",
         expected.line.len(),
@@ -495,7 +526,7 @@ fn finish_when_ready(
     }
     println!(
         "temporal area consumer over {:.0}% coverage: total energy {:.3e}, complement rms {:.3e}",
-        area.coverage * 100.0,
+        area_coverage * 100.0,
         area_errors[0],
         area_errors[1]
     );

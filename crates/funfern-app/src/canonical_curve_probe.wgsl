@@ -53,6 +53,11 @@ const TEMPORAL_DRIVE_CRYSTAL: u32 = 2u;
 const TEMPORAL_DRIVE_TRAVELLING: u32 = 3u;
 const TEMPORAL_HAS_ALTERNATE: u32 = 1u;
 const TEMPORAL_INVERTED: u32 = 2u;
+const TEMPORAL_FIELD_KERR: u32 = 4u;
+const TEMPORAL_FIELD_SATURABLE: u32 = 8u;
+const TEMPORAL_FIELD_MASK: u32 = 12u;
+const PROBE_INVERSE_TOLERANCE: f32 = 4.76837158e-7;
+const PROBE_INVERSE_ITERATIONS: u32 = 40u;
 
 fn accepted_q(node: u32) -> f32 {
     return select(state[node].values.x, state[node].values.y, (control.event.z & 1u) != 0u);
@@ -128,6 +133,118 @@ fn temporal_factor(
     let factor = drive * switch_factor;
     return select(factor, 1.0 / factor, (metadata.w & TEMPORAL_INVERTED) != 0u);
 }
+// The executed field laws, as the solver evaluates them: `ḡ`, `ḡ + rḡ′`
+// and the co-energy of one record at `r = |field|`.
+fn field_kind(word: u32) -> u32 { return tables[word].data.w & TEMPORAL_FIELD_MASK; }
+fn field_response(word: u32, r: f32) -> vec3<f32> {
+    let chi = table_float(word + 3u, 0u);
+    let square = r * r;
+    switch field_kind(word) {
+        case TEMPORAL_FIELD_KERR: {
+            return vec3<f32>(1.0 + chi * square, 1.0 + 3.0 * chi * square,
+                0.5 * square + 0.25 * chi * square * square);
+        }
+        case TEMPORAL_FIELD_SATURABLE: {
+            let saturation = table_float(word + 3u, 1u);
+            let sigma2 = saturation * saturation;
+            let x = square / sigma2;
+            let denominator = 1.0 + x;
+            var excess: f32;
+            if x < 0.03 {
+                excess = x * x * (0.5 - x * (1.0 / 3.0 - x * (0.25 - x * 0.2)));
+            } else {
+                excess = x - log(denominator);
+            }
+            return vec3<f32>(1.0 + chi * square / denominator,
+                1.0 + chi * square * (x + 3.0) / (denominator * denominator),
+                0.5 * square + 0.5 * chi * sigma2 * sigma2 * excess);
+        }
+        default: { return vec3<f32>(1.0, 1.0, 0.5 * square); }
+    }
+}
+fn record_factor(word: u32, local_time: f32) -> f32 {
+    return temporal_factor(tables[word].data, tables[word + 1u].data,
+        table_float(word + 2u, 0u), table_float(word + 2u, 1u), local_time);
+}
+// The node's field from its flux, through the same assembled map and the
+// same bracketed solve the solver runs. A probe cannot fail the step; a solve
+// that does not settle within the cap returns its last bracketed iterate,
+// and the solver's own inverse at that stage has already raised the status.
+fn probe_primary_field(node: u32, flux: f32, local_time: f32) -> f32 {
+    if !temporal_enabled() { return flux * nodes[node].mass_loss.y; }
+    let range = nodes[node].stiffness.zw;
+    var nonlinear = false;
+    var mass = 0.0;
+    var floor_value = 0.0;
+    var bound = 0.0;
+    for (var record = 0u; record < range.y; record += 1u) {
+        let word = range.x + record * TEMPORAL_COEFFICIENT_WORDS;
+        let coefficient = table_float(word + 1u, 0u) * record_factor(word, local_time);
+        mass += coefficient;
+        if field_kind(word) != 0u {
+            nonlinear = true;
+            floor_value += coefficient * table_float(word + 3u, 3u);
+            let own = table_float(word + 3u, 2u);
+            if own > 0.0 && (bound == 0.0 || own < bound) { bound = own; }
+        } else {
+            floor_value += coefficient;
+        }
+    }
+    if !nonlinear { return flux / mass; }
+    let goal = abs(flux);
+    if goal == 0.0 || !(floor_value > 0.0) { return 0.0; }
+    var high = goal / floor_value;
+    if bound > 0.0 && high > bound { high = bound; }
+    var low = 0.0;
+    var r = 0.5 * high;
+    for (var iteration = 0u; iteration < PROBE_INVERSE_ITERATIONS; iteration += 1u) {
+        var value = 0.0;
+        var tangent = 0.0;
+        for (var record = 0u; record < range.y; record += 1u) {
+            let word = range.x + record * TEMPORAL_COEFFICIENT_WORDS;
+            let coefficient = table_float(word + 1u, 0u) * record_factor(word, local_time);
+            let response = field_response(word, r);
+            value += coefficient * response.x * r;
+            tangent += coefficient * response.y;
+        }
+        let residual = value - goal;
+        if abs(residual) <= PROBE_INVERSE_TOLERANCE * goal { break; }
+        if residual < 0.0 { low = r; } else { high = r; }
+        if high - low <= 2.0 * 1.1920929e-7 * high { r = 0.5 * (low + high); break; }
+        let newton = r - residual / tangent;
+        r = select(0.5 * (low + high), newton, newton > low && newton < high);
+    }
+    return select(-r, r, flux >= 0.0);
+}
+// `v(b)` at one of the element's samples: the radial solve on a nonlinear
+// record, `J b / factor` on a linear one.
+fn sample_field(stencil: PointStencil, local: u32, flux: vec2<f32>, local_time: f32) -> vec2<f32> {
+    let linear = apply_symmetric(stencil.sample_inverse[local].xyz, flux)
+        / sample_temporal_factor(stencil, local, local_time);
+    if !temporal_enabled() { return linear; }
+    let word = stencil.temporal_complementary.x + local * TEMPORAL_COEFFICIENT_WORDS;
+    if field_kind(word) == 0u { return linear; }
+    let magnitude = length(flux);
+    if magnitude == 0.0 { return vec2<f32>(0.0); }
+    let coefficient = record_factor(word, local_time) / stencil.sample_inverse[local].x;
+    let floor_value = coefficient * table_float(word + 3u, 3u);
+    if !(floor_value > 0.0) { return linear; }
+    var high = magnitude / floor_value;
+    let bound = table_float(word + 3u, 2u);
+    if bound > 0.0 && high > bound { high = bound; }
+    var low = 0.0;
+    var r = 0.5 * high;
+    for (var iteration = 0u; iteration < PROBE_INVERSE_ITERATIONS; iteration += 1u) {
+        let response = field_response(word, r);
+        let residual = coefficient * response.x * r - magnitude;
+        if abs(residual) <= PROBE_INVERSE_TOLERANCE * magnitude { break; }
+        if residual < 0.0 { low = r; } else { high = r; }
+        if high - low <= 2.0 * 1.1920929e-7 * high { r = 0.5 * (low + high); break; }
+        let newton = r - residual / (coefficient * response.y);
+        r = select(0.5 * (low + high), newton, newton > low && newton < high);
+    }
+    return flux * (r / magnitude);
+}
 // The assembled nodal map, summed over every contribution that owns this
 // node. This is the primary inverse the solver itself owns.
 fn primary_inverse_mass(node: u32, local_time: f32) -> f32 {
@@ -175,12 +292,12 @@ fn probe_temporal_factor(stencil: PointStencil, primary: bool, local_time: f32) 
     var word = stencil.temporal_complementary.x;
     var spatial_phase = dot(vec4<f32>(
         table_float(word + 2u, 1u),
-        table_float(word + 5u, 1u),
-        table_float(word + 8u, 1u),
-        table_float(word + 11u, 1u)), stencil.complementary_a)
+        table_float(word + 1u * TEMPORAL_COEFFICIENT_WORDS + 2u, 1u),
+        table_float(word + 2u * TEMPORAL_COEFFICIENT_WORDS + 2u, 1u),
+        table_float(word + 3u * TEMPORAL_COEFFICIENT_WORDS + 2u, 1u)), stencil.complementary_a)
         + dot(vec4<f32>(
-            table_float(word + 14u, 1u),
-            table_float(word + 17u, 1u), 0.0, 0.0), stencil.complementary_b);
+            table_float(word + 4u * TEMPORAL_COEFFICIENT_WORDS + 2u, 1u),
+            table_float(word + 5u * TEMPORAL_COEFFICIENT_WORDS + 2u, 1u), 0.0, 0.0), stencil.complementary_b);
     if primary {
         let words_a = stencil.temporal_primary_a;
         let words_b = stencil.temporal_primary_b;
@@ -204,19 +321,32 @@ fn physical_complement(
     let weights = complementary_weights(stencil);
     var field = vec2<f32>(0.0);
     for (var local = 0u; local < COMPLEMENTARY_SAMPLES; local += 1u) {
-        let recovered = apply_symmetric(stencil.sample_inverse[local].xyz, flux[local])
-            / sample_temporal_factor(stencil, local, local_time);
-        field += recovered * weights[local];
+        field += sample_field(stencil, local, flux[local], local_time) * weights[local];
     }
     return field;
 }
+// The stored-energy densities of the interpolated fields under the laws at
+// the probe point: `c (ḡ(r) r² − G(r))` per row, whose linear form is the
+// `c r²/2` a field-linear medium reads.
+fn field_store(word: u32, r: f32) -> f32 {
+    let response = field_response(word, r);
+    return response.x * r * r - response.z;
+}
 fn complementary_energy(stencil: PointStencil, field: vec2<f32>, local_time: f32) -> f32 {
-    return 0.5 * probe_temporal_factor(stencil, false, local_time)
-        * dot(field, apply_symmetric(stencil.reference_inverse.yzw, field));
+    let factor = probe_temporal_factor(stencil, false, local_time);
+    if temporal_enabled() && field_kind(stencil.temporal_complementary.x) != 0u {
+        return factor * stencil.reference_inverse.y
+            * field_store(stencil.temporal_complementary.x, length(field));
+    }
+    return 0.5 * factor * dot(field, apply_symmetric(stencil.reference_inverse.yzw, field));
 }
 fn primary_energy(stencil: PointStencil, value: f32, local_time: f32) -> f32 {
-    return 0.5 * stencil.reference_inverse.x
-        * probe_temporal_factor(stencil, true, local_time) * value * value;
+    let factor = probe_temporal_factor(stencil, true, local_time);
+    if temporal_enabled() && field_kind(stencil.temporal_primary_a.x) != 0u {
+        return stencil.reference_inverse.x * factor
+            * field_store(stencil.temporal_primary_a.x, abs(value));
+    }
+    return 0.5 * stencil.reference_inverse.x * factor * value * value;
 }
 fn energy_flow(stencil: PointStencil, value: f32, field: vec2<f32>) -> vec2<f32> {
     return stencil.orientation.x * value * vec2<f32>(-field.y, field.x);
@@ -225,14 +355,14 @@ fn primary_field(stencil: PointStencil, local_time: f32) -> f32 {
     let a = stencil.nodes_a;
     let b = stencil.nodes_b;
     let values_a = vec4<f32>(
-        accepted_q(a.x) * primary_inverse_mass(a.x, local_time),
-        accepted_q(a.y) * primary_inverse_mass(a.y, local_time),
-        accepted_q(a.z) * primary_inverse_mass(a.z, local_time),
-        accepted_q(a.w) * primary_inverse_mass(a.w, local_time));
+        probe_primary_field(a.x, accepted_q(a.x), local_time),
+        probe_primary_field(a.y, accepted_q(a.y), local_time),
+        probe_primary_field(a.z, accepted_q(a.z), local_time),
+        probe_primary_field(a.w, accepted_q(a.w), local_time));
     let values_b = vec4<f32>(
-        accepted_q(b.x) * primary_inverse_mass(b.x, local_time),
-        accepted_q(b.y) * primary_inverse_mass(b.y, local_time),
-        accepted_q(b.z) * primary_inverse_mass(b.z, local_time), 0.0);
+        probe_primary_field(b.x, accepted_q(b.x), local_time),
+        probe_primary_field(b.y, accepted_q(b.y), local_time),
+        probe_primary_field(b.z, accepted_q(b.z), local_time), 0.0);
     return dot(values_a, stencil.primary_a) + dot(values_b, stencil.primary_b);
 }
 fn primary_field_and_rate(stencil: PointStencil) -> vec2<f32> {
@@ -241,14 +371,14 @@ fn primary_field_and_rate(stencil: PointStencil) -> vec2<f32> {
     let previous_time = control.clock_f32.y - control.clock_f32.x;
     let value = primary_field(stencil, control.clock_f32.y);
     let previous_a = vec4<f32>(
-        previous_q(a.x) * primary_inverse_mass(a.x, previous_time),
-        previous_q(a.y) * primary_inverse_mass(a.y, previous_time),
-        previous_q(a.z) * primary_inverse_mass(a.z, previous_time),
-        previous_q(a.w) * primary_inverse_mass(a.w, previous_time));
+        probe_primary_field(a.x, previous_q(a.x), previous_time),
+        probe_primary_field(a.y, previous_q(a.y), previous_time),
+        probe_primary_field(a.z, previous_q(a.z), previous_time),
+        probe_primary_field(a.w, previous_q(a.w), previous_time));
     let previous_b_values = vec4<f32>(
-        previous_q(b.x) * primary_inverse_mass(b.x, previous_time),
-        previous_q(b.y) * primary_inverse_mass(b.y, previous_time),
-        previous_q(b.z) * primary_inverse_mass(b.z, previous_time), 0.0);
+        probe_primary_field(b.x, previous_q(b.x), previous_time),
+        probe_primary_field(b.y, previous_q(b.y), previous_time),
+        probe_primary_field(b.z, previous_q(b.z), previous_time), 0.0);
     let old_value = dot(previous_a, stencil.primary_a)
         + dot(previous_b_values, stencil.primary_b);
     return vec2<f32>(value, (value - old_value) / control.clock_f32.x);

@@ -10995,3 +10995,47 @@ Stage 9.4. Field laws are now admitted against both outgoing walls.
     the check is not vacuous.
 - **Unchanged:** all seventeen examples and every mode exit 0 with their
   figures.
+
+## 2026-09-24 — Probes, the display and the energy readout read nonlinear maps
+
+Stage 9.5.
+
+- **Point, line and arrow probes.** The shared reconstruction block, still
+  byte-identical across `canonical_probe.wgsl` and `canonical_curve_probe.wgsl`,
+  gains the executed field laws.
+  - The nodal field goes through the node's assembled map by the solver's own
+    bracketed solve (`probe_primary_field`).
+  - Each complementary sample is inverted at that sample before interpolation
+    (`sample_field`).
+  - The densities are `c(ḡ(r)r² − G(r))` per row.
+  - A probe cannot fail a step, so an unsettled solve returns its last
+    bracketed iterate; the solver has already raised the status at that
+    stage.
+  - Gate: `CONSUMER_NONLINEAR=1` on `canonical_gpu_temporal_consumer` puts Kerr
+    on the mass row and saturation on the stiffness row under the drives.
+    Point: u 1.79e-7, rate 2.11e-6, energy 1.33e-7. Line and arrows: at most
+    1.93e-6. Both are against the Stage 8 CPU point stencil.
+- **Found and fixed: a 9.1 regression.** `probe_temporal_factor` hard-coded the
+  3-word record stride (`word + 5u … 17u`). With 4-word records, a travelling
+  drive on the stiffness row read its probe-point spatial phase from the
+  wrong words. The consumer gate missed it because its travelling drive is
+  on the mass row, whose records are addressed individually. The offsets are
+  now multiples of `TEMPORAL_COEFFICIENT_WORDS`.
+- **Area readout.** It still sums linear stores, and its CPU counterpart
+  refuses these media, so `update_temporal_canonical_area_probes` refuses a
+  field-dependent generation by name rather than report a plausible wrong
+  total.
+- **App display and energy.**
+  - `field_law_view` reads a field-dependent generation's readbacks through
+    its temporal operator, under the decoded runtime when the readbacks agree
+    and the authored one otherwise.
+  - The painted field is `P⁻¹(Q)`, not `Q/M`.
+  - The energy readout is the operator's nonlinear store, plus the gap and
+    pole stores.
+- **Size rule.** `evaluate_timed_directional_material_library_at` evaluates an
+  executed field law at its small-signal limit, `ḡ(0) = 1`, instead of
+  refusing it. The amplitude-aware wavelength stays carried.
+- **Carried: the device grid filter on a field-dependent medium.** The CPU
+  tangent filter (gate F) is not ported. `grid_filter_admitted` stays false on
+  these generations, and the checkbox's refusal note says so.
+- **Unchanged:** every example and mode (twenty-six runs) exits 0.

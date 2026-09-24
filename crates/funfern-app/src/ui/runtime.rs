@@ -775,14 +775,23 @@ impl Playground {
                     .iter()
                     .map(|value| f64::from(*value))
                     .collect::<Vec<_>>();
-                let energy = canonical_energy_breakdown(
+                let breakdown = canonical_energy_breakdown(
                     &active.canonical_operator,
                     &primary,
                     &complementary,
                     &auxiliary,
                 )
-                .ok()
-                .map(CanonicalEnergyBreakdown::total);
+                .ok();
+                // A field-dependent medium stores the Legendre dual of its
+                // co-energy, not the quadratic form; the gap and pole stores
+                // are unchanged by the field law.
+                let energy = match (breakdown, super::field_law_view(active, display)) {
+                    (Some(breakdown), Some((temporal, runtime, time))) => temporal
+                        .energy_at(&primary, &complementary, time, &runtime)
+                        .ok()
+                        .map(|bulk| bulk + breakdown.thin_gap + breakdown.outgoing),
+                    (breakdown, _) => breakdown.map(CanonicalEnergyBreakdown::total),
+                };
                 if let Some(energy) = energy.filter(|energy| energy.is_finite() && *energy > 0.0) {
                     // Full snapshots run throughout the simulation, whether
                     // AMR is currently enabled or not. Preserve that history
