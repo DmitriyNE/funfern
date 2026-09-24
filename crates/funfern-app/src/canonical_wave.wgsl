@@ -9,19 +9,28 @@ const MAX_TRACE: u32 = 1024u;
 const MODE_WORDS: u32 = 12u;
 const NO_INDEX: u32 = 0xffffffffu;
 const FORCE_KIND_GAP: u32 = 1u;
-const TEMPORAL_COEFFICIENT_WORDS: u32 = 3u;
+const TEMPORAL_COEFFICIENT_WORDS: u32 = 4u;
 const TEMPORAL_DRIVE_NONE: u32 = 0u;
 const TEMPORAL_DRIVE_PUMP: u32 = 1u;
 const TEMPORAL_DRIVE_CRYSTAL: u32 = 2u;
 const TEMPORAL_DRIVE_TRAVELLING: u32 = 3u;
 const TEMPORAL_HAS_ALTERNATE: u32 = 1u;
 const TEMPORAL_INVERTED: u32 = 2u;
+const TEMPORAL_FIELD_KERR: u32 = 4u;
+const TEMPORAL_FIELD_SATURABLE: u32 = 8u;
+const TEMPORAL_FIELD_MASK: u32 = 12u;
+// Safeguarded Newton for the constitutive inverse. The tolerance is the
+// device criterion fixed in Stage 8 (`F32_INVERSE_TOLERANCE`); the cap turns
+// a pathological solve into a detected failure, never an accepted guess.
+const INVERSE_TOLERANCE: f32 = 4.76837158e-7;
+const INVERSE_ITERATIONS: u32 = 40u;
 const SNAPSHOT_METADATA_MAGIC: f32 = 8675309.0;
 
 const STATUS_LAYOUT: u32 = 1u;
 const STATUS_TIMESTEP: u32 = 2u;
 const STATUS_INVERSE_DOMAIN: u32 = 3u;
 const STATUS_NON_FINITE: u32 = 4u;
+const STATUS_INVERSE_CONVERGENCE: u32 = 5u;
 // Leave serialization headroom below f32::MAX: Naga's decimal WGSL writer
 // rounds the exact maximum upward, which Chrome correctly rejects.
 const MAX_FINITE: f32 = 3.0e+38;
@@ -343,6 +352,215 @@ fn temporal_complementary_factor(sample: u32, local_time: f32) -> f32 {
     return temporal_factor(samples[sample].nodes_b.w, local_time);
 }
 
+// ---------------------------------------------------------------------------
+// Field-dependent response: the executed Kerr and saturable maps
+// ---------------------------------------------------------------------------
+//
+// A record's field law sits in its flag bits; its fourth word holds
+// `(χ, saturation, amplitude bound or 0, minimum ḡ)`. Every executed law is
+// even, so it reads `r = |field|`. These mirror `FieldLawValues` in the core.
+
+fn field_kind(word: u32) -> u32 {
+    return tables[word].data.w & TEMPORAL_FIELD_MASK;
+}
+
+// `ḡ(r)`, `ḡ + rḡ′` and the co-energy `∫₀ʳ ḡ(s)s ds`, as one vector.
+fn field_response(word: u32, r: f32) -> vec3<f32> {
+    let chi = table_float(word + 3u, 0u);
+    let square = r * r;
+    switch field_kind(word) {
+        case TEMPORAL_FIELD_KERR: {
+            return vec3<f32>(
+                1.0 + chi * square,
+                1.0 + 3.0 * chi * square,
+                0.5 * square + 0.25 * chi * square * square);
+        }
+        case TEMPORAL_FIELD_SATURABLE: {
+            let saturation = table_float(word + 3u, 1u);
+            let sigma2 = saturation * saturation;
+            let x = square / sigma2;
+            let denominator = 1.0 + x;
+            // `x − ln(1 + x)` cancels for small `x`; its series takes over
+            // well before f32 loses the difference.
+            var excess: f32;
+            if x < 0.03 {
+                excess = x * x * (0.5 - x * (1.0 / 3.0 - x * (0.25 - x * 0.2)));
+            } else {
+                excess = x - log(denominator);
+            }
+            return vec3<f32>(
+                1.0 + chi * square / denominator,
+                1.0 + chi * square * (x + 3.0) / (denominator * denominator),
+                0.5 * square + 0.5 * chi * sigma2 * sigma2 * excess);
+        }
+        default: { return vec3<f32>(1.0, 1.0, 0.5 * square); }
+    }
+}
+
+fn node_is_nonlinear(node: u32) -> bool {
+    let range = nodes[node].stiffness.zw;
+    for (var record = 0u; record < range.y; record += 1u) {
+        if field_kind(range.x + record * TEMPORAL_COEFFICIENT_WORDS) != 0u {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The node's assembled map at `r`: `(P(r), P′(r), ∫₀ʳ P)`, summed over every
+// material that meets there.
+fn primary_site(node: u32, local_time: f32, r: f32) -> vec3<f32> {
+    let range = nodes[node].stiffness.zw;
+    var total = vec3<f32>(0.0);
+    for (var record = 0u; record < range.y; record += 1u) {
+        let word = range.x + record * TEMPORAL_COEFFICIENT_WORDS;
+        let coefficient = table_float(word + 1u, 0u) * temporal_factor(word, local_time);
+        let response = field_response(word, r);
+        total += coefficient * vec3<f32>(response.x * r, response.y, response.z);
+    }
+    return total;
+}
+
+// `(Σ c ḡ_min, tightest amplitude bound or 0)`: the solve's bracket.
+fn primary_bracket(node: u32, local_time: f32) -> vec2<f32> {
+    let range = nodes[node].stiffness.zw;
+    var floor_value = 0.0;
+    var bound = 0.0;
+    for (var record = 0u; record < range.y; record += 1u) {
+        let word = range.x + record * TEMPORAL_COEFFICIENT_WORDS;
+        let coefficient = table_float(word + 1u, 0u) * temporal_factor(word, local_time);
+        var minimum = 1.0;
+        if field_kind(word) != 0u {
+            minimum = table_float(word + 3u, 3u);
+            let own = table_float(word + 3u, 2u);
+            if own > 0.0 && (bound == 0.0 || own < bound) { bound = own; }
+        }
+        floor_value += coefficient * minimum;
+    }
+    return vec2<f32>(floor_value, bound);
+}
+
+// `r` solving `value(r) = goal` on `[0, high]` for an increasing map
+// whose value, tangent and bound the caller supplies through `primary_site`
+// or the single-record complementary form below. Returns -1 on failure, with
+// the status already raised.
+fn solve_primary_radius(node: u32, local_time: f32, goal: f32) -> f32 {
+    let bracket = primary_bracket(node, local_time);
+    if !(bracket.x > 0.0) {
+        reject(STATUS_INVERSE_DOMAIN);
+        return -1.0;
+    }
+    var high = goal / bracket.x;
+    if bracket.y > 0.0 && high > bracket.y {
+        if primary_site(node, local_time, bracket.y).x < goal * (1.0 - INVERSE_TOLERANCE) {
+            reject(STATUS_INVERSE_DOMAIN);
+            return -1.0;
+        }
+        high = bracket.y;
+    }
+    var low = 0.0;
+    var r = 0.5 * high;
+    for (var iteration = 0u; iteration < INVERSE_ITERATIONS; iteration += 1u) {
+        let site = primary_site(node, local_time, r);
+        let residual = site.x - goal;
+        if abs(residual) <= INVERSE_TOLERANCE * goal { return r; }
+        if residual < 0.0 { low = r; } else { high = r; }
+        if high - low <= 2.0 * 1.1920929e-7 * high { return 0.5 * (low + high); }
+        let newton = r - residual / site.y;
+        r = select(0.5 * (low + high), newton, newton > low && newton < high);
+    }
+    reject(STATUS_INVERSE_CONVERGENCE);
+    return -1.0;
+}
+
+// The primary field `U = P⁻¹(Q)` at `local_time`. A node without a field law
+// keeps the linear division, arithmetic unchanged.
+fn temporal_primary_field(node: u32, flux: f32, local_time: f32) -> f32 {
+    if !node_is_nonlinear(node) {
+        return flux * temporal_inverse_primary_mass(node, local_time);
+    }
+    let goal = abs(flux);
+    if goal == 0.0 { return 0.0; }
+    let r = solve_primary_radius(node, local_time, goal);
+    if r < 0.0 { return 0.0; }
+    return select(-r, r, flux >= 0.0);
+}
+
+// Stored energy of one node holding `flux`: `|Q|·r − ∫₀ʳ P`, and the linear
+// `Q²/2m` where no law follows the field.
+fn temporal_primary_energy(node: u32, flux: f32, local_time: f32) -> f32 {
+    if !node_is_nonlinear(node) {
+        return 0.5 * flux * flux * temporal_inverse_primary_mass(node, local_time);
+    }
+    let r = abs(temporal_primary_field(node, flux, local_time));
+    return abs(flux) * r - primary_site(node, local_time, r).z;
+}
+
+// `r/(j|b|)` at one sample: the scalar that turns the force entry's folded
+// `W curlᵀ J b` into `W curlᵀ v(b)`. For a linear record it is `1/factor`,
+// exactly the division it replaces.
+fn temporal_complementary_secant(sample: u32, flux: vec2<f32>, local_time: f32) -> f32 {
+    let word = samples[sample].nodes_b.w;
+    let factor = temporal_factor(word, local_time);
+    if field_kind(word) == 0u { return 1.0 / factor; }
+    let magnitude = length(flux);
+    if magnitude == 0.0 { return 1.0 / factor; }
+    let reference = samples[sample].constitutive.x;
+    let coefficient = factor / reference;
+    let r = solve_complementary_radius(word, coefficient, magnitude);
+    if r < 0.0 { return 0.0; }
+    return r / (reference * magnitude);
+}
+
+// The single-record radial solve `c ḡ(r) r = |b|`.
+fn solve_complementary_radius(word: u32, coefficient: f32, goal: f32) -> f32 {
+    let floor_value = coefficient * table_float(word + 3u, 3u);
+    if !(floor_value > 0.0) {
+        reject(STATUS_INVERSE_DOMAIN);
+        return -1.0;
+    }
+    var high = goal / floor_value;
+    let bound = table_float(word + 3u, 2u);
+    if bound > 0.0 && high > bound {
+        if coefficient * field_response(word, bound).x * bound
+            < goal * (1.0 - INVERSE_TOLERANCE) {
+            reject(STATUS_INVERSE_DOMAIN);
+            return -1.0;
+        }
+        high = bound;
+    }
+    var low = 0.0;
+    var r = 0.5 * high;
+    for (var iteration = 0u; iteration < INVERSE_ITERATIONS; iteration += 1u) {
+        let response = field_response(word, r);
+        let residual = coefficient * response.x * r - goal;
+        if abs(residual) <= INVERSE_TOLERANCE * goal { return r; }
+        if residual < 0.0 { low = r; } else { high = r; }
+        if high - low <= 2.0 * 1.1920929e-7 * high { return 0.5 * (low + high); }
+        let newton = r - residual / (coefficient * response.y);
+        r = select(0.5 * (low + high), newton, newton > low && newton < high);
+    }
+    reject(STATUS_INVERSE_CONVERGENCE);
+    return -1.0;
+}
+
+// Stored energy of one sample holding `flux`, its weight included:
+// `W(|b| r − c G(r))`, and the linear `½W b·Jb / factor` otherwise.
+fn temporal_complementary_energy(sample: u32, flux: vec2<f32>, local_time: f32) -> f32 {
+    let word = samples[sample].nodes_b.w;
+    if field_kind(word) == 0u {
+        return b_energy(sample, flux) / temporal_factor(word, local_time);
+    }
+    let magnitude = length(flux);
+    if magnitude == 0.0 { return 0.0; }
+    let reference = samples[sample].constitutive.x;
+    let coefficient = temporal_factor(word, local_time) / reference;
+    let r = solve_complementary_radius(word, coefficient, magnitude);
+    if r < 0.0 { return 0.0; }
+    let response = field_response(word, r);
+    return samples[sample].constitutive.w * (magnitude * r - coefficient * response.z);
+}
+
 fn boundary_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(boundary[word].data[lane]);
 }
@@ -438,7 +656,7 @@ fn gathered_force(node: u32, second: bool) -> f32 {
                 accepted_b(index), candidate_b(index), second || has_loss_stages());
             var inverse_factor = 1.0;
             if driven {
-                inverse_factor = 1.0 / temporal_complementary_factor(index, force_time);
+                inverse_factor = temporal_complementary_secant(index, flux, force_time);
             }
             result += inverse_factor
                 * dot(vec2<f32>(coefficient_x, table_float(entry, 3u)), flux);
@@ -1828,7 +2046,7 @@ fn temporal_drift_field(node: u32, middle_time: f32) -> f32 {
     if nodes[node].boundary.z != 0u {
         return harmonic_value(nodes[node].prescribed, middle_time);
     }
-    return candidate_q(node) * temporal_inverse_primary_mass(node, middle_time);
+    return temporal_primary_field(node, candidate_q(node), middle_time);
 }
 
 @compute @workgroup_size(128)

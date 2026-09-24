@@ -56,7 +56,7 @@ fn absolute_time() -> f32 {
 // Mirrors the shared block in canonical_probe.wgsl. The structures here are
 // the area recorder's own, so the arithmetic is repeated rather than the text
 // shared; a test pins the parts that must agree.
-const TEMPORAL_COEFFICIENT_WORDS: u32 = 3u;
+const TEMPORAL_COEFFICIENT_WORDS: u32 = 4u;
 const TEMPORAL_DRIVE_NONE: u32 = 0u;
 const TEMPORAL_DRIVE_PUMP: u32 = 1u;
 const TEMPORAL_DRIVE_CRYSTAL: u32 = 2u;

@@ -50,7 +50,7 @@ struct ProbeSample {
 // and is what this replaced, but it invents an evaluation site the solver
 // does not have.
 const COMPLEMENTARY_SAMPLES: u32 = 6u;
-const TEMPORAL_COEFFICIENT_WORDS: u32 = 3u;
+const TEMPORAL_COEFFICIENT_WORDS: u32 = 4u;
 const TEMPORAL_DRIVE_NONE: u32 = 0u;
 const TEMPORAL_DRIVE_PUMP: u32 = 1u;
 const TEMPORAL_DRIVE_CRYSTAL: u32 = 2u;

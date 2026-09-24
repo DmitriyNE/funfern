@@ -37,7 +37,7 @@ use funfern_core::{
     CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
     CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalTemporalCoefficientSample,
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferMap, CanonicalWaveOperator, CanonicalWaveState,
+    CanonicalVectorTransferMap, CanonicalWaveOperator, CanonicalWaveState, FieldLawValues,
     GRID_SCALE_FILTER_CADENCE, MaterialId, MaterialSwitchRuntime, Point2, QuadraticWaveOperator,
     TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
 };
@@ -87,7 +87,7 @@ const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
 const DRIVE_INDEX_MASK: u32 = !DRIVE_TARGET_PARAMETERS;
 const TEMPORAL_TABLE_VERSION: u32 = 1;
 const TEMPORAL_ENABLED: u32 = 1;
-const TEMPORAL_COEFFICIENT_WORDS: usize = 3;
+const TEMPORAL_COEFFICIENT_WORDS: usize = 4;
 const TEMPORAL_RUNTIME_WORDS_PER_SLOT: usize = 3;
 const TEMPORAL_RUNTIME_SLOTS: usize = 2;
 const TEMPORAL_DRIVE_NONE: u32 = 0;
@@ -96,6 +96,10 @@ const TEMPORAL_DRIVE_CRYSTAL: u32 = 2;
 const TEMPORAL_DRIVE_TRAVELLING: u32 = 3;
 const TEMPORAL_HAS_ALTERNATE: u32 = 1;
 const TEMPORAL_INVERTED: u32 = 2;
+/// A record's field law, in its flag bits. The fourth record word carries the
+/// law's parameters: `(χ, saturation, amplitude bound or 0, minimum ḡ)`.
+const TEMPORAL_FIELD_KERR: u32 = 4;
+const TEMPORAL_FIELD_SATURABLE: u32 = 8;
 /// Last state-buffer word identifies the accepted lane and clock at the exact
 /// instant that buffer was copied. State and control are separate asynchronous
 /// readbacks, so the host must not combine their independently arriving values.
@@ -905,6 +909,10 @@ pub struct CanonicalGpuPlan {
     /// fixed one is; a driven one only on a conservative bulk, which is all
     /// the time-driven filter has been derived and tested for.
     grid_filter_admitted: bool,
+    /// Whether any record carries a field law. Pulses, filters and law
+    /// patches are refused on such a generation until their device stages
+    /// read the nonlinear maps.
+    pub field_laws: bool,
     needs_loss_stages: bool,
     needs_accounting: bool,
     event_kind: u32,
@@ -1026,14 +1034,19 @@ impl CanonicalGpuPlan {
         state: &CanonicalTemporalWaveState,
         clock: CanonicalGpuClock,
     ) -> Result<(), CanonicalGpuBuildError> {
-        if operator.has_field_laws() {
-            // The tables below carry coefficient factors; a field law would
-            // be dropped and the medium run as a linear one.
+        // A field law runs as its record's fourth word, inverted per stage by
+        // the shader's bracketed solve. The device admits it where that solve
+        // is the whole story so far: the freely evolving bulk. Walls, forcing,
+        // loss and gaps each need their own discrete-gradient stage on the
+        // device first; until then they are refused here rather than run
+        // with a linear kick.
+        if operator.has_field_laws() && !operator.conservative_bulk_supported() {
             return Err(CanonicalGpuBuildError::Unrepresentable(
-                "field-dependent response is not executed on the device yet",
+                "field-dependent response runs on the device only in a free bulk so far",
             ));
         }
-        self.grid_filter_admitted = operator.conservative_bulk_supported();
+        self.field_laws = operator.has_field_laws();
+        self.grid_filter_admitted = operator.conservative_bulk_supported() && !self.field_laws;
         let primary_samples = operator.primary_coefficient_samples().collect::<Vec<_>>();
         let complementary_samples = operator
             .complementary_coefficient_samples()
@@ -1657,6 +1670,7 @@ impl CanonicalGpuPlan {
             trace_sweeps: trace_sweeps as usize,
             trace_direct,
             grid_filter_admitted: true,
+            field_laws: false,
             needs_loss_stages,
             needs_accounting,
             event_kind: EVENT_NONE,
@@ -1680,6 +1694,11 @@ impl CanonicalGpuPlan {
         field_increment: &[f64],
         serial: u32,
     ) -> Result<(), CanonicalGpuBuildError> {
+        if self.field_laws {
+            return Err(CanonicalGpuBuildError::Unrepresentable(
+                "a pulse on a field-dependent medium is not derived on the device",
+            ));
+        }
         if field_increment.len() != self.node_count {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "a GPU pulse must cover every primary node",
@@ -2706,7 +2725,7 @@ fn temporal_coefficient_records(
                 "a temporal coefficient range exceeds its table",
             ))?;
         for words in plan.tables[start..end].chunks_exact(TEMPORAL_COEFFICIENT_WORDS) {
-            records.push([words[0], words[1], words[2]]);
+            records.push([words[0], words[1], words[2], words[3]]);
         }
     }
     Ok(records)
@@ -2770,8 +2789,10 @@ fn pack_temporal_coefficient(
             )
         }
     };
+    let (field_flag, field_words) = pack_field_law(sample.law.field, sample.law.inverted)?;
     let flags = (u32::from(sample.law.alternate.is_some()) * TEMPORAL_HAS_ALTERNATE)
-        | (u32::from(sample.law.inverted) * TEMPORAL_INVERTED);
+        | (u32::from(sample.law.inverted) * TEMPORAL_INVERTED)
+        | field_flag;
     let reference_f32 = finite_f32(reference, "temporal reference coefficient")?;
     let alternate_f32 = finite_f32(
         sample.law.alternate.unwrap_or(1.0),
@@ -2826,7 +2847,44 @@ fn pack_temporal_coefficient(
             ],
             "temporal coefficient",
         )?,
+        finite_float_word(field_words, "temporal field law")?,
     ])
+}
+
+/// The flag and parameter word of one record's field law. Only the executed
+/// subset reaches here - the operator refused the rest at compile time - and
+/// a law it executes is refused again rather than dropped if it somehow is
+/// not one of the two the device knows.
+fn pack_field_law(
+    law: FieldLawValues,
+    inverted: bool,
+) -> Result<(u32, [f64; 4]), CanonicalGpuBuildError> {
+    if law.executable(inverted).is_err() {
+        return Err(CanonicalGpuBuildError::Unrepresentable(
+            "a field law the device does not execute",
+        ));
+    }
+    let bound = law.amplitude_bound().unwrap_or(0.0);
+    Ok(match law {
+        FieldLawValues::Linear => (0, [0.0; 4]),
+        FieldLawValues::Polynomial { chi2, .. } => {
+            let minimum = if chi2 >= 0.0 {
+                1.0
+            } else {
+                1.0 + chi2 * bound * bound
+            };
+            (TEMPORAL_FIELD_KERR, [chi2, 0.0, bound, minimum])
+        }
+        FieldLawValues::Saturable { chi, saturation } => (
+            TEMPORAL_FIELD_SATURABLE,
+            [
+                chi,
+                saturation,
+                0.0,
+                (1.0 + chi * saturation * saturation).min(1.0),
+            ],
+        ),
+    })
 }
 
 fn finite_float_word(
@@ -2946,6 +3004,7 @@ pub const CANONICAL_FAILURE_LAYOUT: u32 = 1;
 pub const CANONICAL_FAILURE_TIMESTEP: u32 = 2;
 pub const CANONICAL_FAILURE_INVERSE_DOMAIN: u32 = 3;
 pub const CANONICAL_FAILURE_NON_FINITE: u32 = 4;
+pub const CANONICAL_FAILURE_INVERSE_CONVERGENCE: u32 = 5;
 
 pub const fn canonical_failure_description(reason: u32) -> &'static str {
     match reason {
@@ -2953,6 +3012,9 @@ pub const fn canonical_failure_description(reason: u32) -> &'static str {
         CANONICAL_FAILURE_TIMESTEP => "stability or conservative-transfer tolerance failed",
         CANONICAL_FAILURE_INVERSE_DOMAIN => "constitutive inverse left its valid domain",
         CANONICAL_FAILURE_NON_FINITE => "a non-finite field or accounting value was produced",
+        CANONICAL_FAILURE_INVERSE_CONVERGENCE => {
+            "a constitutive inverse did not converge within its iteration cap"
+        }
         _ => "unknown canonical GPU failure",
     }
 }
@@ -3049,6 +3111,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     trace_sweeps: u32,
     trace_direct: bool,
     grid_filter_admitted: bool,
+    field_laws: bool,
     drive_count: u32,
     material_runtime_count: u32,
     source_count: u32,
@@ -3258,6 +3321,7 @@ fn add_canonical_buffers(
         trace_sweeps,
         trace_direct: plan.trace_direct,
         grid_filter_admitted: plan.grid_filter_admitted,
+        field_laws: plan.field_laws,
         drive_count,
         material_runtime_count,
         source_count,
@@ -3500,6 +3564,18 @@ impl CanonicalGpuRequest {
         let handles = self.buffers.as_ref().expect("checked installed buffers");
         if event.kind == EVENT_GRID_FILTER && !handles.grid_filter_admitted {
             return Err("the grid filter is not validated for this time-driven scene");
+        }
+        // A pulse is a field increment scaled by the nodal mass, and a law
+        // patch revalidates only positive factors: neither is the nonlinear
+        // map's, so a field-dependent generation takes a new generation for
+        // either instead.
+        if handles.field_laws
+            && matches!(
+                event.kind,
+                EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE | EVENT_TEMPORAL_LAW_PATCH
+            )
+        {
+            return Err("this event is not derived for a field-dependent medium on the device");
         }
         let payload_valid = match event.kind {
             EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE => {

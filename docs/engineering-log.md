@@ -10841,3 +10841,54 @@ was not re-run in the app.
   oracle's speed ever matters.
 - **Next:** Stage 9, the device port. Its f32 inverse criterion is already
   fixed.
+
+## 2026-09-24 — Stage 9 begins: a nonlinear bulk steps on the device
+
+Stage 9 plan:
+- **9.1** layout and bulk;
+- **9.2** failure and recovery, including an app Resume;
+- **9.3** composition;
+- **9.4** walls;
+- **9.5** filter, probes and the display;
+- **9.6** handoff admission;
+- **9.7** app enablement, with "Kerr medium" and "Saturable medium" presets;
+- **9.8** closeout.
+
+The app keeps refusing field laws until 9.7.
+
+**9.1, this step:**
+- **Layout.** Coefficient records grow from 3 words to 4
+  (`TEMPORAL_COEFFICIENT_WORDS` on the host and in all four shaders). The law
+  kind sits in flag bits 2–3 (`TEMPORAL_FIELD_KERR`, `_SATURABLE`). The fourth
+  word holds `(χ, saturation, amplitude bound or 0, minimum ḡ)`.
+  `pack_field_law` refuses anything outside `FieldLawValues::executable`
+  rather than dropping it.
+- **Kernels** (`canonical_wave.wgsl`):
+  - `field_response` gives `ḡ`, `ḡ + rḡ′` and the co-energy. The saturable
+    `x − ln(1+x)` uses its series below 0.03.
+  - `primary_site` sums a junction's records.
+  - `solve_primary_radius` and `solve_complementary_radius` are safeguarded
+    Newton inside the analytic bracket, at the Stage 8 device tolerance
+    `4ε₃₂`, with a cap of 40 iterations.
+  - Past a bound they raise the existing `STATUS_INVERSE_DOMAIN`. A capped
+    solve raises the new `STATUS_INVERSE_CONVERGENCE` (5, described on the
+    host).
+- **Wiring.**
+  - The drift reads `temporal_primary_field`.
+  - The gathered force replaces the linear `1/factor` with
+    `temporal_complementary_secant`, `r/(j|b|)`, which turns the force entry's
+    folded `W curlᵀ J b` into `W curlᵀ v(b)`.
+  - A record with no field law keeps its arithmetic exactly. Energies
+    (`temporal_primary_energy`, `temporal_complementary_energy`) are in place
+    for the stages that need them next.
+- **Admission.** `attach_temporal_bulk` admits field laws on a conservative
+  bulk only. Walls, forcing, loss and gaps are refused until their device
+  stages exist. On field-law plans the grid filter is not admitted, and
+  pulses, maintenance and temporal law patches are refused, both staged and
+  live.
+- **Gate:** `canonical_gpu_nonlinear` (new), Kerr mass with saturable
+  stiffness, 5,485 dofs, 200 steps, the field up to 30% from its linear read.
+  Q 8.462e-7, b 8.615e-7. With `NONLINEAR_PUMPED=1` (up to 34%): Q 1.022e-6,
+  b 1.168e-6. The Stage 0 limit is 3e-5.
+- **Unchanged:** all fifteen existing device examples exit 0 with their
+  figures.
