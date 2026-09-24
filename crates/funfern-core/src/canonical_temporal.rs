@@ -2039,6 +2039,78 @@ impl CanonicalTemporalWaveOperator {
         ))
     }
 
+    /// `∂U/∂Q = 1/P′(U)` at every node, for the field `field` already
+    /// reconstructed from the flux.
+    fn primary_tangent_inverse_at(
+        &self,
+        field: &[f64],
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<Vec<f64>, WaveError> {
+        let (terms, _) = self.primary_terms_at(time, runtime)?;
+        let tangent = field
+            .iter()
+            .enumerate()
+            .map(|(node, field)| {
+                1.0 / ConstitutiveSite::new(&terms[self.primary_range(node)]).tangent(field.abs())
+            })
+            .collect::<Vec<_>>();
+        validate_positive(&tangent)?;
+        Ok(tangent)
+    }
+
+    /// `J_b = ∂v/∂b` at every sample and the current flux.
+    ///
+    /// For the radial map `|b| = c′ ḡ(r) r` it is
+    /// `(r/|b|)(I − b̂b̂ᵀ) + b̂b̂ᵀ / (c′ (ḡ + rḡ′))`: the secant response across
+    /// the field and the radial tangent along it. A linear sample's is its
+    /// `J / factor`.
+    fn complementary_tangents_at(
+        &self,
+        complementary_flux: &[Point2],
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<Vec<SymmetricTensor2>, WaveError> {
+        let mut tangents = Vec::with_capacity(complementary_flux.len());
+        for (index, ((base, temporal), flux)) in self
+            .base
+            .constitutive_samples()
+            .iter()
+            .zip(&self.complementary)
+            .zip(complementary_flux)
+            .enumerate()
+        {
+            if temporal.coefficient.law.field == FieldLawValues::Linear {
+                let factor = coefficient_factor(temporal.coefficient, time, runtime)?;
+                let inverse = base.complementary_inverse;
+                tangents.push(SymmetricTensor2::new(
+                    inverse.xx / factor,
+                    inverse.xy / factor,
+                    inverse.yy / factor,
+                ));
+                continue;
+            }
+            let (term, _) = self.complementary_term_at(index, time, runtime)?;
+            let terms = [term];
+            let site = ConstitutiveSite::new(&terms);
+            let magnitude = flux.norm();
+            let radius = radial_inverse(term, *flux, temporal.coefficient, runtime)?.norm();
+            let radial = 1.0 / site.tangent(radius);
+            if magnitude == 0.0 {
+                tangents.push(SymmetricTensor2::isotropic(radial));
+                continue;
+            }
+            let secant = radius / magnitude;
+            let (x, y) = (flux.x / magnitude, flux.y / magnitude);
+            tangents.push(SymmetricTensor2::new(
+                secant + (radial - secant) * x * x,
+                (radial - secant) * x * y,
+                secant + (radial - secant) * y * y,
+            ));
+        }
+        Ok(tangents)
+    }
+
     /// One nonlinear complementary sample's map at `time`: the direct
     /// coefficient over the isotropic reference inverse, `|b| = (c/j)·ḡ(r)·r`,
     /// with that coefficient's time derivative.
@@ -2111,12 +2183,21 @@ impl CanonicalTemporalWaveOperator {
             return self.base.force(complementary_flux);
         }
         let fields = self.complementary_field_at(complementary_flux, time, runtime)?;
+        self.gather_force(&fields)
+    }
+
+    /// `Cᵀ W v`: the nodal force of a complementary field given at every
+    /// sample.
+    fn gather_force(&self, fields: &[Point2]) -> Result<Vec<f64>, WaveError> {
+        if fields.len() != self.base.complementary_degrees_of_freedom() {
+            return Err(WaveError::InvalidState);
+        }
         let mut force = vec![0.0; self.base.degrees_of_freedom()];
         for (sample_index, (sample, field)) in self
             .base
             .constitutive_samples()
             .iter()
-            .zip(fields)
+            .zip(fields.iter().copied())
             .enumerate()
         {
             let nodes = self.base.element_nodes()[sample_index / 6];
@@ -2634,11 +2715,6 @@ impl CanonicalTemporalWaveState {
                 "the time-driven grid filter needs a conservative bulk this scene does not have",
             ));
         }
-        if operator.has_field_laws {
-            return Err(WaveError::Unsupported(
-                "the grid filter is not derived for a field-dependent medium (gate F)",
-            ));
-        }
         if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
             return Err(WaveError::Unsupported(
                 "the time-driven grid filter strength is not a fraction between zero and one",
@@ -2646,6 +2722,9 @@ impl CanonicalTemporalWaveState {
         }
         if strength == 0.0 {
             return Ok(0.0);
+        }
+        if operator.has_field_laws {
+            return self.apply_tangent_grid_filter(operator, strength);
         }
         let before = self.energy(operator)?;
         let mass = operator.primary_mass_at(self.time, &self.runtime)?;
@@ -2691,6 +2770,86 @@ impl CanonicalTemporalWaveState {
         }
         let after =
             operator.energy_at(&next_primary, &next_complementary, self.time, &self.runtime)?;
+        let tolerance = 2.0e-12 * before.abs().max(after.abs()).max(1.0);
+        if after > before + tolerance {
+            return Err(WaveError::InvalidState);
+        }
+        self.primary_flux = next_primary;
+        self.complementary_flux = next_complementary;
+        Ok((before - after).max(0.0))
+    }
+
+    /// Gate F: the grid filter on a field-dependent medium.
+    ///
+    /// The linear polynomial with every map frozen at its tangent at the
+    /// event state:
+    /// - `M⁻¹` becomes `A = ∂U/∂Q`, the diagonal `1/P′(U)`;
+    /// - `J` becomes `J_b = ∂v/∂b` at each sample;
+    /// - the outer operators act on the actual observables `U(Q)` and `F(b)`.
+    ///
+    /// ```text
+    /// Q ← Q − α K_t A K_t U / Λ²
+    /// b ← b − α C A K_t A F(b) / Λ²,   K_t = Cᵀ W J_b C
+    /// ```
+    ///
+    /// To first order in `α` the energy change is
+    /// `−α/Λ² [(K_t U)ᵀ A (K_t U) + Fᵀ A K_t A F] ≤ 0`, because `A` and
+    /// `K_t` are positive (semi)definite for every executed law. The
+    /// trajectory bound `Λ = 4/dt_max²` covers the tangent over all admitted
+    /// amplitudes. The correction is a `Cᵀ(·)` in `Q` and a `C(·)` in `b`,
+    /// so a constant field, component totals and compatibility are kept
+    /// exactly. At small amplitude every tangent is the linear map and this is
+    /// the linear filter. The higher orders are not signed, so the commit
+    /// keeps the existing rule: only when the nonlinear energy does not rise
+    /// and the new state is inside its domain.
+    fn apply_tangent_grid_filter(
+        &mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        strength: f64,
+    ) -> Result<f64, WaveError> {
+        let (time, runtime) = (self.time, &self.runtime);
+        let before = self.energy(operator)?;
+        let field = operator.primary_field_at(&self.primary_flux, time, runtime)?;
+        let tangent = operator.primary_tangent_inverse_at(&field, time, runtime)?;
+        let sample_tangents =
+            operator.complementary_tangents_at(&self.complementary_flux, time, runtime)?;
+        let weighted = |values: Vec<f64>| {
+            values
+                .into_iter()
+                .zip(&tangent)
+                .map(|(value, tangent)| value * tangent)
+                .collect::<Vec<_>>()
+        };
+        let stiffness = |field: &[f64]| -> Result<Vec<f64>, WaveError> {
+            let flux = operator.base().compatible_flux(field)?;
+            let fields = flux
+                .iter()
+                .zip(&sample_tangents)
+                .map(|(flux, tangent)| tangent.apply(*flux))
+                .collect::<Vec<_>>();
+            operator.gather_force(&fields)
+        };
+        let primary_correction = stiffness(&weighted(stiffness(&field)?))?;
+        let gathered = operator.force_at(&self.complementary_flux, time, runtime)?;
+        let complementary_correction = operator
+            .base()
+            .compatible_flux(&weighted(stiffness(&weighted(gathered))?))?;
+
+        let eigenvalue_bound = 4.0 / operator.maximum_time_step().powi(2);
+        let scale = strength / eigenvalue_bound.powi(2);
+        let mut next_primary = self.primary_flux.clone();
+        let mut next_complementary = self.complementary_flux.clone();
+        for (value, correction) in next_primary.iter_mut().zip(primary_correction) {
+            *value -= scale * correction;
+        }
+        for (value, correction) in next_complementary.iter_mut().zip(complementary_correction) {
+            *value = *value - correction * scale;
+        }
+        validate_finite(&next_primary)?;
+        if next_complementary.iter().any(|value| !value.finite()) {
+            return Err(WaveError::InvalidState);
+        }
+        let after = operator.energy_at(&next_primary, &next_complementary, time, runtime)?;
         let tolerance = 2.0e-12 * before.abs().max(after.abs()).max(1.0);
         if after > before + tolerance {
             return Err(WaveError::InvalidState);
@@ -6858,14 +7017,127 @@ mod tests {
     #[test]
     fn a_nonlinear_generation_refuses_the_consumers_not_yet_ported() {
         let operator = compile(&kerr_scene()).unwrap();
-        let mut state =
-            CanonicalTemporalWaveState::zero(&operator, 0.5 * operator.maximum_time_step())
-                .unwrap();
-        assert!(matches!(
-            state.apply_grid_filter(&operator, 0.5),
-            Err(WaveError::Unsupported(reason)) if reason.contains("gate F")
-        ));
         assert!(!operator.indicator_supplement_supported());
+    }
+
+    /// The filtered state and the energy it removed, from `primary, complementary`.
+    fn filtered(
+        operator: &CanonicalTemporalWaveOperator,
+        primary: &[f64],
+        complementary: &[Point2],
+        strength: f64,
+    ) -> (CanonicalTemporalWaveState, f64) {
+        let mut state = CanonicalTemporalWaveState::new(
+            operator,
+            0.4 * operator.maximum_time_step(),
+            primary.to_vec(),
+            complementary.to_vec(),
+        )
+        .unwrap();
+        let removed = state.apply_grid_filter(operator, strength).unwrap();
+        (state, removed)
+    }
+
+    #[test]
+    fn the_tangent_filter_is_the_linear_filter_at_zero_response() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = kerr(0.0);
+        scene.materials[0].stiffness_law.field = saturable_law(0.0, 1.0);
+        let nonlinear = compile(&scene).unwrap();
+        let linear = compile(&Scene::initial()).unwrap();
+        let (primary, complementary) = strong_fluxes(&linear, 6.0);
+        let (expected, expected_removed) = filtered(&linear, &primary, &complementary, 0.8);
+        let (actual, actual_removed) = filtered(&nonlinear, &primary, &complementary, 0.8);
+        assert!(expected_removed > 0.0);
+        assert!((expected_removed - actual_removed).abs() <= 1e-10 * expected_removed);
+        let scale = primary.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+        for (a, b) in expected.primary_flux().iter().zip(actual.primary_flux()) {
+            assert!((a - b).abs() <= 1e-12 * scale);
+        }
+        for (a, b) in expected
+            .complementary_flux()
+            .iter()
+            .zip(actual.complementary_flux())
+        {
+            assert!((*a - *b).norm() <= 1e-12);
+        }
+    }
+
+    #[test]
+    fn the_tangent_filter_keeps_its_invariants_and_never_adds_energy() {
+        let operator = compile(&kerr_scene()).unwrap();
+        let base = operator.base();
+        // A constant field is untouched, whatever the map: K_t U = 0.
+        let held = base
+            .primary_mass()
+            .iter()
+            .map(|mass| mass * (1.0 + 0.8 * 0.09) * 0.3)
+            .collect::<Vec<_>>();
+        let empty = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let (state, removed) = filtered(&operator, &held, &empty, 1.0);
+        assert_eq!(removed, 0.0);
+        assert_eq!(state.primary_flux(), held);
+
+        // A strong state keeps its total and its compatibility.
+        let (primary, _) = strong_fluxes(&operator, 6.0);
+        let potential = (0..base.degrees_of_freedom())
+            .map(|index| 0.2 * (index as f64 * 1.713).sin())
+            .collect::<Vec<_>>();
+        let compatible = base.compatible_flux(&potential).unwrap();
+        let (state, removed) = filtered(&operator, &primary, &compatible, 1.0);
+        assert!(removed > 0.0);
+        let total = |values: &[f64]| values.iter().sum::<f64>();
+        let magnitude = primary.iter().map(|value| value.abs()).sum::<f64>();
+        assert!((total(state.primary_flux()) - total(&primary)).abs() <= 1e-13 * magnitude);
+        let stationary = base
+            .stationary_complementary_component(state.complementary_flux())
+            .unwrap();
+        let norm = |values: &[Point2]| values.iter().map(|v| v.norm().powi(2)).sum::<f64>().sqrt();
+        assert!(norm(&stationary) <= 1e-10 * norm(state.complementary_flux()));
+
+        // Interleaved with steps at full strength, every filter removes.
+        let mut state = CanonicalTemporalWaveState::new(
+            &operator,
+            0.4 * operator.maximum_time_step(),
+            primary,
+            compatible,
+        )
+        .unwrap();
+        for _ in 0..20 {
+            state.step(&operator).unwrap();
+            assert!(state.apply_grid_filter(&operator, 1.0).unwrap() >= 0.0);
+        }
+    }
+
+    #[test]
+    fn the_tangent_filter_departs_from_the_linear_one_at_the_square_of_the_amplitude() {
+        let nonlinear = compile(&kerr_scene()).unwrap();
+        let linear = compile(&Scene::initial()).unwrap();
+        let departure = |amplitude: f64| {
+            let (primary, complementary) = strong_fluxes(&linear, amplitude);
+            let (expected, _) = filtered(&linear, &primary, &complementary, 1.0);
+            let (actual, _) = filtered(&nonlinear, &primary, &complementary, 1.0);
+            // Compare the corrections, not the states: the correction is what
+            // the filter adds, and it is small next to the state.
+            let correction = |state: &CanonicalTemporalWaveState| {
+                state
+                    .primary_flux()
+                    .iter()
+                    .zip(&primary)
+                    .map(|(after, before)| after - before)
+                    .collect::<Vec<_>>()
+            };
+            let (a, b) = (correction(&expected), correction(&actual));
+            let norm = a.iter().map(|v| v * v).sum::<f64>().sqrt();
+            a.iter()
+                .zip(&b)
+                .map(|(x, y)| (x - y) * (x - y))
+                .sum::<f64>()
+                .sqrt()
+                / norm
+        };
+        let ratio = departure(0.5) / departure(0.25);
+        assert!((ratio - 4.0).abs() < 0.3, "ratio {ratio}");
     }
 
     #[test]

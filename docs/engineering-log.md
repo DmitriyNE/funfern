@@ -10691,3 +10691,36 @@ wall awaits its boundary kick" is lifted, because the kick now exists.
     budget closes to 7.4e-5.
 - **Newton cost:** 3 linear trace solves per kick in 1134 of 1217 kicks, 4 in
   the rest. This is the CPU oracle's figure, not a device budget (Stage 9).
+
+## 2026-09-24 — Gate F: the grid filter on a field-dependent medium
+
+Stage 8.6. The grid filter's refusal on field-dependent generations is lifted.
+It now runs `apply_tangent_grid_filter`, the linear polynomial frozen at its
+tangent at the event state.
+
+- **The filter:**
+  - `M⁻¹ → A = 1/P′(U)`, and `J → J_b = ∂v/∂b`. The radial map's tangent is
+    the secant across the field and `1/(c′(ḡ + rḡ′))` along it.
+  - The outer operators act on the actual `U(Q)` and `F(b)`.
+  - `Λ = 4/dt_max²` from the tangent envelope, which already bounds the
+    tangent over every admitted amplitude.
+- **Energy:**
+  - First order in `α`, the energy change is
+    `−α/Λ²[(K_tU)ᵀA(K_tU) + FᵀAK_tAF] ≤ 0`.
+  - Higher orders are unsigned, so the existing commit rule stays: the
+    nonlinear energy must not rise, and the new state must invert.
+- **Invariants kept by construction:** the constant field, component totals and
+  compatibility. `force_at` now gathers through a shared `gather_force`.
+- **Tests:**
+  - `the_tangent_filter_is_the_linear_filter_at_zero_response`: `1e-12`.
+  - `the_tangent_filter_keeps_its_invariants_and_never_adds_energy`:
+    - a held field is untouched exactly;
+    - the total is kept to `1e-13`, and the stationary component stays below
+      `1e-10`;
+    - it removes 2.54e-5 of 9.04 from the strong state;
+    - 20 steps, each followed by a full-strength filter, all commit.
+  - `the_tangent_filter_departs_from_the_linear_one_at_the_square_of_the_amplitude`:
+    the correction's departure is 2.47e-3, then 9.80e-3 at twice the
+    amplitude, a ratio of 3.96.
+- **Scope:** CPU only, conservative bulk only, as for the driven filter. The
+  app and device still refuse field-dependent generations.
