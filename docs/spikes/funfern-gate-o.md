@@ -132,7 +132,12 @@ restoring law tightens the trajectory ceiling:
 - **A handoff** carries `r` as a nodal field, interpolated like the displayed
   field, not conserved like `Q`. A static or driven source generation without
   `r` hands over `r = 0`. A target without restoring laws discards it, and
-  says so in the handoff record.
+  says so in the handoff record (`transfer_integrated_field`). `b` keeps its
+  own reconstruction rather than being rebuilt as `ηC r`, so a remesh leaves
+  `b` and `ηC r` apart by the difference of two interpolation errors, which
+  the step then keeps. Rebuilding `b` would remove that offset, but it would
+  be wrong wherever complementary loss has parted them legitimately, and it
+  measured no better.
 - **Probes and snapshots** carry `r` beside `Q` and `b`. The GPU state gains
   one word per node for its accepted and candidate copies.
 

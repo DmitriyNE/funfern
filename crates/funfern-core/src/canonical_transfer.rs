@@ -10,9 +10,9 @@ use std::{
 };
 
 use crate::{
-    CanonicalOutgoingBoundary, CanonicalOutgoingPhysicalMemory, CanonicalThinGapMemory,
-    CanonicalWaveOperator, Point2, QuadraticTransferMap, QuadraticTransferSample, ThinGapSample,
-    ThinGapTraceKey, TriMesh, WaveError,
+    CanonicalOutgoingBoundary, CanonicalOutgoingPhysicalMemory, CanonicalTemporalWaveOperator,
+    CanonicalThinGapMemory, CanonicalWaveOperator, Point2, QuadraticTransferMap,
+    QuadraticTransferSample, ThinGapSample, ThinGapTraceKey, TriMesh, WaveError,
 };
 
 const QUADRATURE_SAMPLES: usize = 6;
@@ -1818,6 +1818,72 @@ fn solve_six(mut matrix: [[f64; 6]; 6], mut right: [f64; 6]) -> Result<[f64; 6],
     } else {
         Err(WaveError::InvalidState)
     }
+}
+
+/// Gate O: what became of the integrated field `r = ∫u dt` across a handoff.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CanonicalIntegratedFieldTransfer {
+    /// The target's `r`, one value per target node, or empty when the target
+    /// carries no restoring law.
+    pub field: Vec<f64>,
+    /// Target nodes the source does not cover, which start at `r = 0`.
+    pub exposed_nodes: usize,
+    /// The source held an `r` and the target has no restoring law to keep it.
+    pub discarded: bool,
+    /// The target has a restoring law and the source had no `r` (a static or
+    /// driven generation), so the target starts from `r = 0` everywhere.
+    pub started_at_zero: bool,
+}
+
+/// Hands the integrated field to the next generation.
+///
+/// `r` is a nodal field, not an integrated quantity like `Q`, so it is
+/// interpolated as the displayed field is, through the same quadratic map;
+/// nothing about it is conserved. Its uniform part is physical for every
+/// restoring law, so it is carried rather than rebuilt from `b`. A node the
+/// source does not cover starts at `r = 0`: the vacuum of Klein-Gordon and
+/// sine-Gordon, the unstable top of φ⁴. The report says when a target drops
+/// an `r` it has no law for, and when one starts from zero because its
+/// source had none.
+pub fn transfer_integrated_field(
+    interpolation: &QuadraticTransferMap,
+    source_field: &[f64],
+    target: &CanonicalTemporalWaveOperator,
+) -> Result<CanonicalIntegratedFieldTransfer, WaveError> {
+    let target_nodes = target.base().degrees_of_freedom();
+    if interpolation.samples().len() != target_nodes {
+        return Err(WaveError::SizeMismatch {
+            expected: target_nodes,
+            actual: interpolation.samples().len(),
+        });
+    }
+    if !target.has_restoring() {
+        return Ok(CanonicalIntegratedFieldTransfer {
+            discarded: !source_field.is_empty(),
+            ..CanonicalIntegratedFieldTransfer::default()
+        });
+    }
+    if source_field.is_empty() {
+        return Ok(CanonicalIntegratedFieldTransfer {
+            field: vec![0.0; target_nodes],
+            started_at_zero: true,
+            ..CanonicalIntegratedFieldTransfer::default()
+        });
+    }
+    if source_field.len() != interpolation.source_dofs() {
+        return Err(WaveError::SizeMismatch {
+            expected: interpolation.source_dofs(),
+            actual: source_field.len(),
+        });
+    }
+    let field = interpolation
+        .interpolate(source_field, 0.0)
+        .map_err(|_| WaveError::InvalidState)?;
+    Ok(CanonicalIntegratedFieldTransfer {
+        field,
+        exposed_nodes: interpolation.exposed_nodes(),
+        ..CanonicalIntegratedFieldTransfer::default()
+    })
 }
 
 #[cfg(test)]

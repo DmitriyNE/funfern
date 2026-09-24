@@ -11854,3 +11854,33 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
     composition, which checks that each filter commits, only removes
     energy, and leaves pins, pole currents, gap jumps and free totals
     alone.
+
+## 2026-09-24 — The integrated field across a handoff (Stage 11.2)
+
+- **`transfer_integrated_field`** (`canonical_transfer.rs`) interpolates `r`
+  through the handoff's own `QuadraticTransferMap`, like the displayed
+  field. Nothing about it is conserved. Uncovered nodes start at 0.
+  - **Report:** it says when a restoring target starts from zero because its
+    source had no `r`, and when a target with no restoring law drops one.
+  - **Scope:** the core side only. The app hands over on the device, which
+    refuses oscillator media until 11.3.
+- **Measured:**
+  - **Identity handoff:** `r`, the energy and the next 20 steps are
+    bit-identical.
+  - **Remesh:** a sine-Gordon kink (ω₀ = 4) at edge 0.1 is handed at 0.4 s
+    to a non-nested mesh at edge 0.07.
+
+    | kink | centre across the handoff | energy change | after, over 1.2 s |
+    | --- | --- | --- | --- |
+    | at rest | −2.3e-7 → −4.0e-7 | −7.8e-6 | stays at 0.0000 |
+    | at v = 0.5 | −0.1035 → −0.1035 | −9.8e-6 | runs at 0.4989 (0.4990 without a handoff) |
+- **`b` against `ηC r` after a remesh:** 3.3e-2 and 3.7e-2 of the steepest
+  flux (2.8e-2 and 6.0e-2 from an edge-0.06 source). The gradient of an
+  interpolated `r` and the reconstructed `b` err differently, and the step
+  keeps the offset.
+  - **The alternative:** rebuild `b = ηC r` on the target. It removes the
+    offset but measured no better: energy −7.4e-6 and −2.0e-5, the same
+    speed and the same centre. It would also be wrong wherever
+    complementary loss has parted the two legitimately.
+  - **Decision:** `b` keeps its own transfer, and the offset is a stated
+    interpolation error of the event.

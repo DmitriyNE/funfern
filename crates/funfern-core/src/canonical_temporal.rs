@@ -10283,4 +10283,238 @@ mod tests {
             }
         }
     }
+
+    /// One generation of a scene: its mesh, its quadratic operator and its
+    /// time-driven operator, for handoff tests that need all three.
+    fn generation(
+        scene: &Scene,
+        edge: f64,
+        revision: u64,
+    ) -> (
+        TriMesh,
+        QuadraticWaveOperator,
+        CanonicalTemporalWaveOperator,
+    ) {
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            revision,
+            MeshingOptions {
+                target_edge_length: edge,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, revision)
+                .unwrap();
+        (mesh, quadratic, operator)
+    }
+
+    /// Hands a state to a new generation the way a topology transaction
+    /// does: `Q` conservatively, `b` by its vector reconstruction, `r` by
+    /// interpolation.
+    fn hand_off(
+        source: &(
+            TriMesh,
+            QuadraticWaveOperator,
+            CanonicalTemporalWaveOperator,
+        ),
+        state: &CanonicalTemporalWaveState,
+        target: &(
+            TriMesh,
+            QuadraticWaveOperator,
+            CanonicalTemporalWaveOperator,
+        ),
+    ) -> (
+        CanonicalTemporalWaveState,
+        crate::CanonicalIntegratedFieldTransfer,
+    ) {
+        let same_mesh = std::ptr::eq(source, target);
+        let interpolation = if same_mesh {
+            crate::QuadraticTransferMap::identity_on_mesh(&source.0, &source.1, &target.1)
+        } else {
+            crate::QuadraticTransferMap::build(&source.0, &source.1, &target.0, &target.1)
+        }
+        .unwrap();
+        let (source_base, target_base) = (source.2.base(), target.2.base());
+        let primary =
+            crate::CanonicalPrimaryTransferMap::prepare(&interpolation, source_base, target_base)
+                .unwrap()
+                .transfer(
+                    state.primary_flux(),
+                    &vec![None; target_base.component_count()],
+                    &vec![false; target_base.degrees_of_freedom()],
+                )
+                .unwrap()
+                .0;
+        let complementary = crate::CanonicalVectorTransferMap::prepare(
+            &source.0,
+            source_base,
+            &target.0,
+            target_base,
+        )
+        .unwrap()
+        .transfer(state.complementary_flux())
+        .unwrap()
+        .0;
+        let transfer =
+            crate::transfer_integrated_field(&interpolation, state.integrated_field(), &target.2)
+                .unwrap();
+        let mut handed = CanonicalTemporalWaveState::new_at(
+            &target.2,
+            state.time_step().min(0.4 * target.2.maximum_time_step()),
+            primary,
+            complementary,
+            state.time(),
+        )
+        .unwrap();
+        if !transfer.field.is_empty() {
+            handed = handed
+                .with_integrated_field(&target.2, transfer.field.clone())
+                .unwrap();
+        }
+        (handed, transfer)
+    }
+
+    /// An identity handoff copies `r` exactly and the run goes on as if
+    /// nothing had happened.
+    #[test]
+    fn an_identity_handoff_carries_the_integrated_field_exactly() {
+        let mut scene = Scene::default();
+        scene.materials[0].restoring = sine_gordon(3.0);
+        let generation = generation(&scene, 0.3, 1);
+        let operator = &generation.2;
+        let forcing = CanonicalForcing::none(operator.base());
+        let (primary, complementary) = reference_fluxes(operator);
+        let mut state = CanonicalTemporalWaveState::new(
+            operator,
+            0.4 * operator.maximum_time_step(),
+            primary,
+            complementary,
+        )
+        .unwrap();
+        for _ in 0..30 {
+            state.step_with_forcing(operator, &forcing).unwrap();
+        }
+        let (mut handed, transfer) = hand_off(&generation, &state, &generation);
+        assert_eq!(transfer.exposed_nodes, 0);
+        assert!(!transfer.discarded && !transfer.started_at_zero);
+        assert_eq!(handed.integrated_field(), state.integrated_field());
+        assert_eq!(
+            handed.energy(operator).unwrap(),
+            state.energy(operator).unwrap()
+        );
+        for _ in 0..20 {
+            state.step_with_forcing(operator, &forcing).unwrap();
+            handed.step_with_forcing(operator, &forcing).unwrap();
+        }
+        assert_eq!(handed.integrated_field(), state.integrated_field());
+        assert_eq!(handed.primary_flux(), state.primary_flux());
+    }
+
+    /// A generation without `r` hands a restoring target zero, which it
+    /// reports; a target without a restoring law drops the source's `r`, and
+    /// reports that.
+    #[test]
+    fn a_handoff_reports_an_integrated_field_started_or_dropped() {
+        let linear = generation(&Scene::default(), 0.3, 1);
+        let mut scene = Scene::default();
+        scene.materials[0].restoring = klein_gordon(2.0);
+        let oscillator = generation(&scene, 0.25, 2);
+        let (primary, complementary) = reference_fluxes(&linear.2);
+        let state = CanonicalTemporalWaveState::new(
+            &linear.2,
+            0.4 * oscillator.2.maximum_time_step(),
+            primary,
+            complementary,
+        )
+        .unwrap();
+        let (handed, transfer) = hand_off(&linear, &state, &oscillator);
+        assert!(transfer.started_at_zero && !transfer.discarded);
+        assert!(handed.integrated_field().iter().all(|r| *r == 0.0));
+        assert_eq!(
+            handed.integrated_field().len(),
+            oscillator.2.base().degrees_of_freedom()
+        );
+
+        let mut moved = handed.clone();
+        for _ in 0..10 {
+            moved.step(&oscillator.2).unwrap();
+        }
+        assert!(moved.integrated_field().iter().any(|r| *r != 0.0));
+        let (back, transfer) = hand_off(&oscillator, &moved, &linear);
+        assert!(transfer.discarded && !transfer.started_at_zero);
+        assert!(transfer.field.is_empty() && back.integrated_field().is_empty());
+    }
+
+    /// Across a remesh a kink at rest stays at rest and one in flight keeps
+    /// its speed: `r` is interpolated, `b` reconstructed and `Q` conserved,
+    /// and the three agree to the new mesh's interpolation error.
+    #[test]
+    fn a_kink_crosses_a_remesh_at_rest_or_at_its_speed() {
+        let omega0 = 4.0;
+        let length = 1.0 / omega0;
+        let mut scene = Scene::default();
+        scene.materials[0].restoring = sine_gordon(omega0);
+        let coarse = generation(&scene, 0.1, 1);
+        let fine = generation(&scene, 0.07, 2);
+        let seconds = |state: &CanonicalTemporalWaveState, time: f64| {
+            (time / state.time_step()).round() as usize
+        };
+        // Both run 1.2 s, handed over at 0.4 s: the moving kink on the path
+        // symmetric between the walls, as without a handoff.
+        for speed in [0.0, 0.5] {
+            let start = if speed == 0.0 { 0.0 } else { -0.3 };
+            let mut state = kink(&coarse.2, length, start, speed);
+            let centre = kink_centre(&coarse.2, &state);
+            assert!(centre.abs() < 1e-6 || speed != 0.0);
+            for _ in 0..seconds(&state, 0.4) {
+                state.step(&coarse.2).unwrap();
+            }
+            let before = (
+                kink_centre(&coarse.2, &state),
+                state.energy(&coarse.2).unwrap(),
+                state.time(),
+            );
+            let (mut handed, transfer) = hand_off(&coarse, &state, &fine);
+            assert_eq!(transfer.exposed_nodes, 0);
+            let after = (
+                kink_centre(&fine.2, &handed),
+                handed.energy(&fine.2).unwrap(),
+            );
+            let mismatch = integrated_mismatch(&fine.2, &handed) / steepest(&handed);
+            for _ in 0..seconds(&handed, 0.8) {
+                handed.step(&fine.2).unwrap();
+            }
+            let end = kink_centre(&fine.2, &handed);
+            let measured = (end - centre) / handed.time();
+            assert!(
+                (after.0 - before.0).abs() < 1e-6,
+                "the handoff moved the kink from {} to {}",
+                before.0,
+                after.0
+            );
+            let energy = (after.1 - before.1).abs() / before.1;
+            assert!(
+                energy < 1e-4,
+                "the handoff moved the energy by {energy:.2e}"
+            );
+            // Interpolating `r` and reconstructing `b` err differently, and
+            // the step keeps whatever offset they leave (3–4% of the
+            // steepest flux here; the log has the comparison).
+            assert!(mismatch < 0.1, "b and ηC r disagree by {mismatch:.2e}");
+            assert!(
+                (measured - speed).abs() < 0.01,
+                "ran at {measured} after the handoff"
+            );
+        }
+    }
 }
