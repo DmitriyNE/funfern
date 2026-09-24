@@ -814,7 +814,7 @@ const FORMULA_SYMBOLS: [(&str, &str); 4] = [
 /// The Laws section of the formula reference: how a material's laws compose,
 /// which field each reads, and where each is valid. Every law the catalogue
 /// offers is here; nothing here is a law the solver does not run.
-const FORMULA_LAWS: [(&str, &str); 9] = [
+const FORMULA_LAWS: [(&str, &str); 14] = [
     (
         "c = c₀(x)·ḡ·d(t)·s(t)",
         "a coefficient is its base value times the field response, the drive and the Switch; \
@@ -852,7 +852,29 @@ const FORMULA_LAWS: [(&str, &str); 9] = [
     (
         "step ceiling",
         "set by the lowest factor each row reaches over every phase, Switch state and \
-         admitted amplitude",
+         admitted amplitude, and by a restoring law's largest curvature",
+    ),
+    (
+        "Restoring  M₀r̈ + Kr + M₀V′(r) = 0",
+        "r = ∫u dt is carried as state; the field shown is u = ṙ, so a static kink shows \
+         u = 0 and the Integrated field view shows r",
+    ),
+    (
+        "Klein-Gordon  V = ½ω₀²r²",
+        "a cutoff at ω₀: waves below it do not propagate",
+    ),
+    (
+        "sine-Gordon  V = ω₀²(1 − cos r)",
+        "kinks of one 2π step in r, slower than c and contracted as they run",
+    ),
+    (
+        "φ⁴  V = ¼λ(r² − 1)²",
+        "wells at r = ±1 and an unstable top at 0; the bound caps |r| and sets the step",
+    ),
+    (
+        "Self-oscillating  γ = γ₀(|u|²/a² − 1)",
+        "van der Pol: gain below a, loss above, counted as active gain; only beside a \
+         linear response",
     ),
 ];
 

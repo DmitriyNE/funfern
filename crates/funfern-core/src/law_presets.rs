@@ -14,15 +14,22 @@
 //! Only laws that run are listed. Kerr and saturable response (M-F1, M-F2)
 //! run on the device since Stage 9, self-focusing only: a defocusing law needs
 //! an authored amplitude bound, which a preset slider cannot promise to keep
-//! valid. Signed χ₁, restoring laws and driven loss channels are authored
-//! types with no solver behind them, and section 11 of the material-laws plan
-//! asks for a preset behind an open design gate to be unavailable rather than
-//! offered and refused - so every material a user can author this way
-//! assembles.
+//! valid. Signed χ₁ is an authored type with no solver behind it, and section
+//! 11 of the material-laws plan asks for a preset behind an open design gate
+//! to be unavailable rather than offered and refused - so every material a
+//! user can author this way assembles.
+//!
+//! Restoring laws (R1-R3, Gate O) are a second family beside the response
+//! presets, because they are not a coefficient: they add a force on the
+//! integrated field `r = ∫u dt`, and a material can carry one beside any
+//! response - sine-Gordon in a Kerr medium is one material. Their names say
+//! what `r` is in each skin ([`restoring_preset_text`]).
 
 use crate::material::{MaterialParameter, ScalarField};
-use crate::material_law::{CoefficientLaw, FieldLaw, TimeDrive};
-use crate::{MAX_MATERIAL_PARAMETERS, Material, MaterialError};
+use crate::material_law::{CoefficientLaw, FieldLaw, RestoringLaw, TimeDrive};
+use crate::{
+    ElectromagneticPolarization, MAX_MATERIAL_PARAMETERS, Material, MaterialError, PhysicsModel,
+};
 
 /// Which constitutive row a preset writes.
 ///
@@ -272,16 +279,11 @@ pub struct LawPresetMatch {
 /// drive whose kind was changed by hand, stops matching, which is what makes a
 /// preset a snapshot rather than a binding.
 pub fn identify_law_preset(material: &Material) -> Option<LawPresetMatch> {
-    // No preset reaches past the two constitutive rows, so a material carrying
-    // a restoring law or a loss channel was not written by one - whatever its
-    // rows look like. Calling that Linear would name a medium after the half of
-    // it the selector happens to inspect.
-    if !material.restoring.is_none()
-        || material.electric_loss.is_some()
-        || material.magnetic_loss.is_some()
-    {
-        return None;
-    }
+    // A response preset names the two constitutive rows and nothing else.
+    // Each row's loss has its own editor beside it since Stage 10, and a
+    // restoring law has its own selector since Gate O, so neither makes the
+    // rows Custom: a lossy Kerr medium is a Kerr medium, and so is one that
+    // also carries sine-Gordon.
     for preset in PRESETS {
         let Some(names) = (0..preset.variables.len())
             .map(|index| preset.bound_parameter(material, index))
@@ -314,33 +316,61 @@ pub fn apply_law_preset(
     let existing = outgoing
         .as_ref()
         .filter(|found| found.preset == preset)
-        .cloned();
+        .map(|found| found.parameters.clone());
+    rebind(
+        material,
+        existing,
+        outgoing.map(|found| found.parameters),
+        preset.variables,
+        |material| {
+            material.mass_law = CoefficientLaw::linear();
+            material.stiffness_law = CoefficientLaw::linear();
+        },
+        |material, names| {
+            let (mass, stiffness) = preset.laws(names);
+            material.mass_law = mass;
+            material.stiffness_law = stiffness;
+        },
+    )
+}
+
+/// The factory both preset families share. `existing` is the parameters the
+/// material already binds to this same preset, which re-applying keeps with
+/// their tuned values; `outgoing` is those of the preset being replaced,
+/// which leave with it.
+///
+/// A preset owns the parameters it created, so the one being replaced takes
+/// its own with it. Leaving them behind orphans a value with no law referring
+/// to it and, four presets later, exhausts the material's parameter budget so
+/// the next choice is refused outright. The laws are cleared first, so a
+/// parameter is judged against the material it is leaving rather than the
+/// one it arrived in, and anything the user pointed at from a base
+/// coefficient or another slot stays.
+fn rebind(
+    material: &Material,
+    existing: Option<Vec<String>>,
+    outgoing: Option<Vec<String>>,
+    variables: &[LawPresetVariable],
+    clear: impl Fn(&mut Material),
+    write: impl Fn(&mut Material, &[String]),
+) -> Result<Material, MaterialError> {
     let mut applied = material.clone();
     if existing.is_none()
         && let Some(outgoing) = &outgoing
     {
-        // A preset owns the parameters it created, so the one being replaced
-        // takes its own with it. Leaving them behind orphans a value with no
-        // law referring to it and, four presets later, exhausts the material's
-        // parameter budget so the next choice is refused outright.
-        //
-        // The laws go first, so a parameter is judged against the material it
-        // is leaving rather than the one it arrived in, and anything the user
-        // pointed at from a base coefficient or another slot stays.
-        applied.mass_law = CoefficientLaw::linear();
-        applied.stiffness_law = CoefficientLaw::linear();
+        clear(&mut applied);
         let referenced = applied
             .parameter_names()
             .map(str::to_owned)
             .collect::<Vec<_>>();
         applied.parameters.retain(|parameter| {
-            !outgoing.parameters.contains(&parameter.name) || referenced.contains(&parameter.name)
+            !outgoing.contains(&parameter.name) || referenced.contains(&parameter.name)
         });
     }
-    let mut names = Vec::with_capacity(preset.variables.len());
-    for (index, variable) in preset.variables.iter().enumerate() {
+    let mut names = Vec::with_capacity(variables.len());
+    for (index, variable) in variables.iter().enumerate() {
         if let Some(found) = &existing {
-            names.push(found.parameters[index].clone());
+            names.push(found[index].clone());
             continue;
         }
         let name = free_parameter_name(&applied, variable.parameter, &names);
@@ -353,10 +383,274 @@ pub fn apply_law_preset(
         });
         names.push(name);
     }
-    let (mass, stiffness) = preset.laws(&names);
-    applied.mass_law = mass;
-    applied.stiffness_law = stiffness;
+    write(&mut applied, &names);
     Ok(applied)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestoringShape {
+    None,
+    KleinGordon,
+    SineGordon,
+    Phi4,
+}
+
+/// A restoring law from the catalogue's slot R (Gate O): a force `−m₀V′(r)`
+/// on the integrated field `r = ∫u dt`, which the step carries as state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RestoringPreset {
+    /// The catalogue ID, empty for the absence of a law.
+    pub id: &'static str,
+    /// The equation's own name; [`restoring_preset_text`] says what it is in
+    /// a skin.
+    pub name: &'static str,
+    pub variables: &'static [LawPresetVariable],
+    shape: RestoringShape,
+}
+
+const OMEGA0: LawPresetVariable = LawPresetVariable {
+    parameter: "omega0",
+    label: "Cutoff ω₀",
+    default: 3.0,
+    minimum: 0.0,
+    maximum: 1.0e3,
+};
+const LAMBDA: LawPresetVariable = LawPresetVariable {
+    parameter: "lambda",
+    label: "Well depth λ",
+    default: 16.0,
+    minimum: 0.0,
+    maximum: 1.0e4,
+};
+// The wells sit at ±1, so the field has to be allowed past them.
+const PHI4_BOUND: LawPresetVariable = LawPresetVariable {
+    parameter: "phi4_bound",
+    label: "Amplitude bound",
+    default: 1.6,
+    minimum: 1.0,
+    maximum: 100.0,
+};
+
+const RESTORING_PRESETS: &[RestoringPreset] = &[
+    RestoringPreset {
+        id: "",
+        name: "None",
+        variables: &[],
+        shape: RestoringShape::None,
+    },
+    RestoringPreset {
+        id: "R1",
+        name: "Klein-Gordon",
+        variables: &[OMEGA0],
+        shape: RestoringShape::KleinGordon,
+    },
+    RestoringPreset {
+        id: "R2",
+        name: "sine-Gordon",
+        variables: &[OMEGA0],
+        shape: RestoringShape::SineGordon,
+    },
+    RestoringPreset {
+        id: "R3",
+        name: "φ⁴ double well",
+        variables: &[LAMBDA, PHI4_BOUND],
+        shape: RestoringShape::Phi4,
+    },
+];
+
+/// Every restoring law a material can be given, in the order the selector
+/// shows them.
+pub fn restoring_presets() -> &'static [RestoringPreset] {
+    RESTORING_PRESETS
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RestoringPresetMatch {
+    pub preset: &'static RestoringPreset,
+    /// One parameter name per entry of `preset.variables`, in that order.
+    pub parameters: Vec<String>,
+}
+
+/// Recovers the restoring preset behind a material's slot R, or `None` for
+/// one no preset writes (a constant `ω₀`, an expression), which the editor
+/// reads as Custom.
+pub fn identify_restoring_preset(material: &Material) -> Option<RestoringPresetMatch> {
+    for preset in RESTORING_PRESETS {
+        let Some(names) = (0..preset.variables.len())
+            .map(|index| preset.bound_parameter(material, index))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        if material.restoring == preset.law(&names) {
+            return Some(RestoringPresetMatch {
+                preset,
+                parameters: names,
+            });
+        }
+    }
+    None
+}
+
+/// Writes a restoring preset onto a material, leaving its rows and losses as
+/// they are.
+pub fn apply_restoring_preset(
+    preset: &'static RestoringPreset,
+    material: &Material,
+) -> Result<Material, MaterialError> {
+    let outgoing = identify_restoring_preset(material);
+    let existing = outgoing
+        .as_ref()
+        .filter(|found| found.preset == preset)
+        .map(|found| found.parameters.clone());
+    rebind(
+        material,
+        existing,
+        outgoing.map(|found| found.parameters),
+        preset.variables,
+        |material| material.restoring = RestoringLaw::None,
+        |material, names| material.restoring = preset.law(names),
+    )
+}
+
+impl RestoringPreset {
+    fn law(&self, names: &[String]) -> RestoringLaw {
+        let field = |index: usize| ScalarField::formula(&names[index]).expect("parameter name");
+        match self.shape {
+            RestoringShape::None => RestoringLaw::None,
+            RestoringShape::KleinGordon => RestoringLaw::KleinGordon { omega0: field(0) },
+            RestoringShape::SineGordon => RestoringLaw::SineGordon { omega0: field(0) },
+            RestoringShape::Phi4 => RestoringLaw::Phi4 {
+                lambda: field(0),
+                amplitude_bound: field(1),
+            },
+        }
+    }
+
+    fn bound_parameter(&self, material: &Material, index: usize) -> Option<String> {
+        let slot = match (self.shape, &material.restoring) {
+            (RestoringShape::KleinGordon, RestoringLaw::KleinGordon { omega0 })
+            | (RestoringShape::SineGordon, RestoringLaw::SineGordon { omega0 })
+                if index == 0 =>
+            {
+                omega0
+            }
+            (
+                RestoringShape::Phi4,
+                RestoringLaw::Phi4 {
+                    lambda,
+                    amplitude_bound,
+                },
+            ) => [lambda, amplitude_bound].into_iter().nth(index)?,
+            _ => return None,
+        };
+        let source = slot.source()?;
+        material
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == source)
+            .then(|| source.to_owned())
+    }
+}
+
+/// What a restoring preset is in one skin: the same equation throughout, named
+/// for what its integrated field `r = ∫u dt` is there. Nothing is relabelled:
+/// the displayed field stays `u`, and the text says so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoringPresetText {
+    pub name: String,
+    /// What the law does, in this skin's quantities.
+    pub phenomenon: String,
+    /// The equation and what `r` is, common to every law.
+    pub equation: String,
+}
+
+/// The name, phenomenon and equation of a restoring preset in a skin, after
+/// the table in `docs/spikes/funfern-gate-o.md`.
+pub fn restoring_preset_text(
+    preset: &RestoringPreset,
+    physics: PhysicsModel,
+) -> RestoringPresetText {
+    let (u, r) = integrated_field_names(physics);
+    let (name, phenomenon) = match (preset.shape, physics) {
+        (RestoringShape::None, _) => ("None".to_owned(), "no restoring force".to_owned()),
+        (RestoringShape::KleinGordon, PhysicsModel::Mechanical) => (
+            "Klein-Gordon: a cutoff on the displacement".to_owned(),
+            format!("waves below ω₀ do not propagate; {r} is pulled back to zero"),
+        ),
+        (
+            RestoringShape::KleinGordon,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+        ) => (
+            "Klein-Gordon: cold plasma".to_owned(),
+            format!(
+                "a plasma cutoff at ω₀: waves below it do not propagate; {r} is the vector potential"
+            ),
+        ),
+        (RestoringShape::KleinGordon, _) => (
+            "Klein-Gordon: the dual plasma".to_owned(),
+            format!("a cutoff at ω₀ on {u}: waves below it do not propagate"),
+        ),
+        (
+            RestoringShape::SineGordon,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+        ) => (
+            "sine-Gordon: Josephson line".to_owned(),
+            format!(
+                "kinks in {r} are fluxons, each one step of 2π; {u} shows it as a voltage pulse"
+            ),
+        ),
+        (RestoringShape::SineGordon, _) => (
+            format!("sine-Gordon: kinks in {r}"),
+            format!("kinks and breathers in {r}, each kink one step of 2π"),
+        ),
+        (RestoringShape::Phi4, _) => (
+            format!("φ⁴: a double well in {r}"),
+            format!("two vacua at {r} = ±1 with domain walls between; zero is the unstable top"),
+        ),
+    };
+    let equation = if preset.shape == RestoringShape::None {
+        String::new()
+    } else {
+        format!(
+            "M₀r̈ + Kr + M₀V′(r) = 0 with r = {r}. The field shown is {u} = ṙ, so a static kink \
+             shows {u} = 0; the Integrated field view shows r. ω₀ is the cutoff as authored: a \
+             drive on the mass row moves it as ω₀√(m₀/m)."
+        )
+    };
+    RestoringPresetText {
+        name,
+        phenomenon,
+        equation,
+    }
+}
+
+/// The skin's displayed field and its time integral.
+fn integrated_field_names(physics: PhysicsModel) -> (&'static str, &'static str) {
+    match physics {
+        PhysicsModel::Mechanical => ("u", "∫u dt"),
+        PhysicsModel::Electromagnetic { polarization } => match polarization {
+            ElectromagneticPolarization::Tm => ("E_z", "−A_z"),
+            ElectromagneticPolarization::Te => ("H_z", "∫H_z dt"),
+        },
+    }
+}
+
+/// The self-oscillating loss (catalogue D3) as a skin names it: gain below
+/// its threshold, loss above, on the displayed field.
+pub fn van_der_pol_text(physics: PhysicsModel) -> String {
+    let (u, _) = integrated_field_names(physics);
+    format!(
+        "Self-oscillating (van der Pol): a rate γ₀(|{u}|²/a² − 1) that gives energy below the \
+         threshold a and takes it above, so a small field grows and saturates; beside \
+         Klein-Gordon it is a lattice of oscillators whose rate amplitude settles near 2a/√3. \
+         Its energy is counted as active gain, of either sign, not as loss. It runs only beside \
+         a linear response."
+    )
 }
 
 impl LawPreset {
@@ -796,20 +1090,159 @@ mod tests {
         assert!(linear.valid());
     }
 
-    /// A material carrying a law no preset writes is Custom, even when its
-    /// constitutive rows are untouched. Reading it as Linear would name the
-    /// medium after the half of it the selector looks at.
+    /// A response preset names the rows only. A loss on a row and a restoring
+    /// law each have their own editor, so neither turns a Kerr medium into
+    /// Custom.
     #[test]
-    fn a_law_outside_the_constitutive_rows_reads_as_custom() {
-        let mut material = Material::default_medium();
+    fn a_loss_or_a_restoring_law_leaves_the_response_named() {
+        let kerr =
+            apply_law_preset(preset("M-F1", "Kerr medium"), &Material::default_medium()).unwrap();
+        let mut material = apply_restoring_preset(restoring("R2"), &kerr).unwrap();
+        material.magnetic_loss = Some(crate::LossChannel {
+            base_rate: ScalarField::constant(0.2),
+            law: crate::DampingLaw::constant(),
+        });
         assert_eq!(
             identify_law_preset(&material).unwrap().preset.name,
-            "Linear"
+            "Kerr medium"
         );
-        material.restoring = crate::RestoringLaw::KleinGordon {
+        assert_eq!(
+            identify_restoring_preset(&material).unwrap().preset.name,
+            "sine-Gordon"
+        );
+    }
+
+    fn restoring(id: &str) -> &'static RestoringPreset {
+        RESTORING_PRESETS
+            .iter()
+            .find(|preset| preset.id == id)
+            .expect("restoring catalogue entry")
+    }
+
+    /// Every restoring preset is recovered from what it writes, with its
+    /// defaults, and switching between them takes the old parameters along
+    /// while a response preset's stay.
+    #[test]
+    fn every_restoring_preset_is_recovered_and_retires_its_parameters() {
+        let pumped = apply_law_preset(
+            preset("M-T2", "Parametric pump"),
+            &Material::default_medium(),
+        )
+        .unwrap();
+        for entry in RESTORING_PRESETS {
+            let applied = apply_restoring_preset(entry, &pumped).unwrap();
+            let found = identify_restoring_preset(&applied).expect(entry.name);
+            assert_eq!(found.preset.id, entry.id);
+            for (name, variable) in found.parameters.iter().zip(entry.variables) {
+                let value = applied
+                    .parameters
+                    .iter()
+                    .find(|parameter| parameter.name == *name)
+                    .unwrap()
+                    .value;
+                assert_eq!(value, variable.default);
+            }
+            assert!(applied.valid(), "{}", entry.name);
+            assert_eq!(
+                identify_law_preset(&applied).unwrap().preset.name,
+                "Parametric pump"
+            );
+        }
+        // Chaining never accumulates, and the pump's three stay throughout.
+        let mut chained = pumped;
+        for entry in RESTORING_PRESETS
+            .iter()
+            .cycle()
+            .take(RESTORING_PRESETS.len() * 3)
+        {
+            chained = apply_restoring_preset(entry, &chained).unwrap();
+            assert_eq!(
+                chained.parameters.len(),
+                3 + entry.variables.len(),
+                "{}",
+                entry.name
+            );
+        }
+        // Re-applying keeps a tuned value.
+        let mut tuned =
+            apply_restoring_preset(restoring("R1"), &Material::default_medium()).unwrap();
+        tuned.parameters[0].value = 7.5;
+        assert_eq!(
+            apply_restoring_preset(restoring("R1"), &tuned).unwrap(),
+            tuned
+        );
+        // A constant ω₀ written by hand is Custom.
+        let mut custom = tuned;
+        custom.restoring = crate::RestoringLaw::KleinGordon {
             omega0: ScalarField::constant(2.0),
         };
-        assert_eq!(identify_law_preset(&material), None);
+        assert_eq!(identify_restoring_preset(&custom), None);
+    }
+
+    /// Every skin names each law for what its integrated field is there, and
+    /// every law's text carries the equation and what a static kink shows.
+    #[test]
+    fn each_skin_names_each_restoring_law_for_its_integrated_field() {
+        use crate::ElectromagneticPolarization;
+        let skins = [
+            (PhysicsModel::Mechanical, "∫u dt"),
+            (
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                },
+                "−A_z",
+            ),
+            (
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Te,
+                },
+                "∫H_z dt",
+            ),
+        ];
+        for entry in RESTORING_PRESETS
+            .iter()
+            .filter(|entry| !entry.id.is_empty())
+        {
+            let mut names = Vec::new();
+            for (physics, integrated) in skins {
+                let text = restoring_preset_text(entry, physics);
+                assert!(text.equation.contains("r = "), "{}", entry.name);
+                assert!(
+                    text.equation.contains(integrated),
+                    "{}: {physics:?}",
+                    entry.name
+                );
+                assert!(text.equation.contains("static kink"));
+                names.push(text.name);
+            }
+            // The names differ where the physics differs; φ⁴ and the
+            // Mechanical and TE sine-Gordon are the same equation named by
+            // their own `r`.
+            assert!(names.iter().any(|name| name != &names[0]) || entry.id == "R3");
+        }
+        assert!(van_der_pol_text(PhysicsModel::Mechanical).contains("active gain"));
+    }
+
+    /// A restoring preset survives a skin change and comes back.
+    #[test]
+    fn every_restoring_preset_survives_a_skin_change() {
+        use crate::ElectromagneticPolarization;
+        let mechanical = PhysicsModel::Mechanical;
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        for entry in RESTORING_PRESETS {
+            let applied = apply_restoring_preset(entry, &Material::default_medium()).unwrap();
+            let converted = mechanical.convert_material(tm, &applied).unwrap();
+            assert_eq!(
+                tm.convert_material(mechanical, &converted).unwrap(),
+                applied
+            );
+            assert_eq!(
+                identify_restoring_preset(&converted).unwrap().preset.id,
+                entry.id
+            );
+        }
     }
 
     /// A material with no room left for the parameters a preset needs is

@@ -360,10 +360,13 @@ impl PhysicsModel {
         // `D = ε(1 + χ|E|²)E` with `e ↔ E`, and `ρ(u)` is `μ(H)`. The laws that
         // do not carry are the ones the solver does not execute either: a
         // signed χ₁ or a reciprocal field response has no settled vector law
-        // to carry to. A restoring law has no counterpart to move to. Loss
-        // channels stay attached to their own physical field, and their rate
-        // conversion is a contract of its own, so they are refused rather than
-        // guessed at.
+        // to carry to. A restoring law (Gate O) moves unchanged: it acts on
+        // the integrated primary field with the primary row's authored mass,
+        // and this conversion maps the primary field `u ↔ H_z` and its mass
+        // `ρ ↔ μ` onto each other, so `ρ₀ r̈ + … + ρ₀V′(r)` is `μ₀ r̈ + … +
+        // μ₀V′(r)` in the other skin. Loss channels stay attached to their own
+        // physical field, and their rate conversion is a contract of its own,
+        // so they are refused rather than guessed at.
         for law in [&material.mass_law, &material.stiffness_law] {
             if matches!(law.field, FieldLaw::Linear) {
                 continue;
@@ -377,9 +380,6 @@ impl PhysicsModel {
                     "a signed or reciprocal field response",
                 ));
             }
-        }
-        if !material.restoring.is_none() {
-            return Err(MaterialError::UnconvertibleMaterialLaw("a restoring law"));
         }
         if material.electric_loss.is_some() || material.magnetic_loss.is_some() {
             return Err(MaterialError::UnconvertibleMaterialLaw(
@@ -1713,13 +1713,16 @@ mod tests {
         };
         let base = Material::default_medium();
 
+        // A restoring law carries unchanged: it follows the primary field.
         let mut restoring = base.clone();
         restoring.restoring = RestoringLaw::KleinGordon {
             omega0: ScalarField::constant(2.0),
         };
+        let converted = mechanical.convert_material(tm, &restoring).unwrap();
+        assert_eq!(converted.restoring, restoring.restoring);
         assert_eq!(
-            mechanical.convert_material(tm, &restoring),
-            Err(MaterialError::UnconvertibleMaterialLaw("a restoring law"))
+            tm.convert_material(mechanical, &converted).unwrap(),
+            restoring
         );
 
         let mut lossy = base;

@@ -12109,3 +12109,46 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
 - **Not checked by me.** An oscillator document end to end in the app;
   presets arrive in 11.4.
 - **Regression suite:** 56 runs, all exit 0.
+
+## 2026-09-24 — Oscillator presets (Stage 11.4a)
+
+- **A second preset family.**
+  - `restoring_presets()`: None, R1 Klein–Gordon (`omega0`), R2 sine-Gordon
+    (`omega0`) and R3 φ⁴ (`lambda`, `phi4_bound`, default 1.6, at least 1).
+  - `apply_restoring_preset` and `identify_restoring_preset` share one
+    factory with the response presets (`rebind`), so a preset still retires
+    its own parameters, keeps tuned ones on re-apply, and never takes a
+    user's.
+  - The families compose: sine-Gordon in a Kerr medium is one material with
+    both named.
+- **Honest names** (`restoring_preset_text`), after the Gate O table:
+  - TM (`r = −A_z`): Klein–Gordon is a cold plasma, sine-Gordon a
+    Josephson line whose kinks are fluxons.
+  - TE: `∫H_z dt`. Mechanical: `∫u dt`.
+  - Every law's text carries `M₀r̈ + Kr + M₀V′(r) = 0`, what `r` is, that a
+    static kink shows `u = 0`, and that a mass-row drive moves the cutoff as
+    `ω₀√(m₀/m)`.
+  - `van_der_pol_text` says it gains below `a`, counts its energy as active
+    gain, and runs only beside a linear response.
+- **Fixed on the way: the response matcher called any loss channel
+  Custom.** That predates Stage 10, which gave each row its own loss
+  editor, so a lossy Kerr medium read as Custom. It now names the rows
+  alone, whatever loss or restoring law sits beside them.
+- **Skins.** A restoring law now carries unchanged across Mechanical↔EM.
+  It acts on the primary field with the primary mass, and that conversion
+  maps `u ↔ H_z` and `ρ ↔ μ`. TM↔TE already kept every law. A van der Pol
+  channel is still refused with every named loss channel.
+- **Tests.**
+  - Every restoring preset is recovered from what it writes, retires its
+    parameters, keeps tuned ones, and reads as Custom once edited to a
+    constant.
+  - Each skin names each law for its `r`.
+  - Every preset survives a skin round trip.
+  - The app's round trip now covers every restoring preset, Kerr beside
+    sine-Gordon, and Klein–Gordon beside van der Pol on the primary
+    channel, in all three skins. Each survives the file and prepares a
+    time-driven operator, carrying `r` exactly when it has a restoring law.
+  - The formula help's Laws section gains five rows, tied to both
+    catalogues by its test.
+- **Docs.** The catalogue marks R1–R3 and D3 as running and describes the
+  integrated field.

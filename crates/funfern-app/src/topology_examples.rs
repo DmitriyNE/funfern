@@ -942,7 +942,9 @@ mod tests {
 
     /// Stage 10's exit: every catalogue preset, on a fresh material in every
     /// skin, survives the file and prepares the way the application prepares
-    /// it. So does a material carrying both named loss channels.
+    /// it. So does a material carrying both named loss channels, and since
+    /// Gate O every restoring preset, sine-Gordon beside Kerr, and van der Pol
+    /// beside Klein-Gordon on the skin's primary channel.
     #[test]
     fn every_preset_round_trips_and_prepares_in_every_skin() {
         for physics in [
@@ -973,6 +975,56 @@ mod tests {
                 law: DampingLaw::constant(),
             });
             materials.push(("both loss channels".into(), lossy));
+            for preset in restoring_presets() {
+                materials.push((
+                    format!("restoring {}", preset.name),
+                    apply_restoring_preset(preset, &Material::default_medium()).unwrap(),
+                ));
+            }
+            let kerr = law_presets()
+                .iter()
+                .find(|preset| preset.name == "Kerr medium")
+                .unwrap();
+            let sine_gordon = restoring_presets()
+                .iter()
+                .find(|preset| preset.id == "R2")
+                .unwrap();
+            materials.push((
+                "Kerr sine-Gordon".into(),
+                apply_restoring_preset(
+                    sine_gordon,
+                    &apply_law_preset(kerr, &Material::default_medium()).unwrap(),
+                )
+                .unwrap(),
+            ));
+            let klein_gordon = restoring_presets()
+                .iter()
+                .find(|preset| preset.id == "R1")
+                .unwrap();
+            let mut oscillator =
+                apply_restoring_preset(klein_gordon, &Material::default_medium()).unwrap();
+            let van_der_pol = Some(LossChannel {
+                base_rate: ScalarField::constant(0.5),
+                law: DampingLaw {
+                    rate: RateLaw::VanDerPol {
+                        threshold: ScalarField::constant(0.4),
+                        amplitude_bound: ScalarField::constant(1.0e3),
+                    },
+                    drive: TimeDrive::None,
+                },
+            });
+            // The primary row's own channel: E in TM, H in TE, and the
+            // displacement's in Mechanical.
+            if physics
+                == (PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                })
+            {
+                oscillator.electric_loss = van_der_pol;
+            } else {
+                oscillator.magnetic_loss = van_der_pol;
+            }
+            materials.push(("van der Pol beside Klein-Gordon".into(), oscillator));
             for (label, material) in materials {
                 let mut builder = Builder::new();
                 builder.scene.physics = physics;
@@ -994,11 +1046,18 @@ mod tests {
                 );
                 // A preset that writes a law prepares the operator that runs
                 // it; linear and constant loss are the fixed path's.
-                let carries_law = !loaded.model.accepted.materials[0].mass_law.is_linear()
-                    || !loaded.model.accepted.materials[0].stiffness_law.is_linear();
+                let carries_law = !loaded.model.accepted.materials[0].time_invariant();
                 assert_eq!(
                     prepared.canonical_temporal_operator.is_some(),
                     carries_law,
+                    "{physics:?}: {label}"
+                );
+                assert_eq!(
+                    prepared
+                        .canonical_temporal_operator
+                        .as_ref()
+                        .is_some_and(|operator| operator.has_restoring()),
+                    !loaded.model.accepted.materials[0].restoring.is_none(),
                     "{physics:?}: {label}"
                 );
             }

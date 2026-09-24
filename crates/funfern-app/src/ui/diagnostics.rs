@@ -822,6 +822,17 @@ mod tests {
             };
             assert!(covered, "{}", preset.name);
         }
+        for preset in funfern_core::restoring_presets() {
+            let covered = match preset.id {
+                "" => true,
+                "R1" => text.contains("Klein-Gordon"),
+                "R2" => text.contains("sine-Gordon"),
+                "R3" => text.contains("φ⁴"),
+                other => panic!("the Laws help does not know restoring law {other}"),
+            };
+            assert!(covered, "{}", preset.name);
+        }
+        assert!(text.contains("van der Pol") && text.contains("r = ∫u dt"));
     }
 
     #[test]

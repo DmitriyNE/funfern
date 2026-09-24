@@ -86,21 +86,28 @@ is the field argument the constitutive map needs. There is no symmetric nodal
 flux argument like `h((u_i + u_j)/2)`. An anisotropic medium refuses a
 nonlinear law on this row (gate C).
 
-## Slot R — additive restoring term, `+= −V'(u)/m`
+## Slot R — additive restoring term on the integrated field, `−m₀V′(r)`
 
-Pointwise, the cheapest slot, landing in the same line as the sources. Stored as
-`Material::restoring`, default `None`. Assembly refuses any other value today.
+Gate O decided the argument: the law acts on the integrated primary field
+`r = ∫u dt`, carried as one nodal state, not on the displayed `u`
+([the decision](spikes/funfern-gate-o.md)). The equation is
+`M₀r̈ + Kr + M₀V′(r) = 0`, and the displayed field is `u = ṙ`, so a static
+kink shows `u = 0`; the Integrated field view shows `r`. Stored as
+`Material::restoring`, default `None`. A restoring preset is its own family
+beside the response presets, so a material can carry one beside any response.
 
 | ID | Law | Phenomenon | Stored as | Status |
 | --- | --- | --- | --- | --- |
-| R1 | Klein-Gordon `ω0²u` (linear) | dispersion `ω² = c²k² + ω0²`, cutoff frequency | `RestoringLaw::KleinGordon` | gated (O) |
-| R2 | sine-Gordon `ω0² sin u` | kinks, antikinks, breathers - the soliton showcase | `RestoringLaw::SineGordon` | gated (O) |
-| R3 | `φ⁴`: `λ(u³ − u)` | domain walls, bubble nucleation | `RestoringLaw::Phi4` | gated (O) |
+| R1 | Klein-Gordon `ω0²r` (linear) | dispersion `ω² = c²k² + ω0²`, cutoff frequency | `RestoringLaw::KleinGordon` | runs |
+| R2 | sine-Gordon `ω0² sin r` | kinks, antikinks, breathers - the soliton showcase | `RestoringLaw::SineGordon` | runs |
+| R3 | `φ⁴`: `λ(r³ − r)` | domain walls, symmetry breaking from `r = 0` | `RestoringLaw::Phi4` | runs (needs its amplitude bound) |
 
-R1 is linear and its dispersion relation is exact, so it is the verification
-stepping-stone that proves the slot before any nonlinearity enters. R2's `V''`
-is bounded, so its CFL contribution is known up front; R3's is not, and needs
-the monitor.
+Each skin names the law for what `r` is there: in TM `r = −A_z`, so R1 is a
+cold plasma and R2 a Josephson line whose kinks are fluxons; in TE
+`r = ∫H_z dt`; in Mechanical the time integral of the displacement. R1's
+dispersion is exact in the discrete operator. R2's `V''` is bounded, so its
+step contribution is known up front; R3's is bounded by its authored
+amplitude, and a node past it fails the step.
 
 ## Slot D — damping multiplier, `d -> d·w`
 
@@ -112,7 +119,7 @@ whose `DampingLaw` carries a rate law and its own time drive.
 | --- | --- | --- | --- | --- |
 | D1 | time-modulated loss | loss-driven parametric effects, PT-symmetry-flavoured pairs with gain | `DampingLaw::drive` over `RateLaw::Constant` | runs (Advanced view; no preset) |
 | D2 | saturable absorption `1/(1 + u²/u_s²)` | self-limiting, passive mode-locking flavour | `RateLaw::SaturableAbsorption` | gated (C) |
-| D3 | van der Pol `−(1 − u²)` | self-oscillation, spontaneous pattern formation | `RateLaw::VanDerPol` | gated (O) |
+| D3 | van der Pol `γ₀(u²/a² − 1)` | self-oscillation, spontaneous pattern formation | `RateLaw::VanDerPol` | runs (primary row, undriven, beside a linear response) |
 
 A constant loss channel runs on the fixed path. D1 runs on the time-driven one:
 the CPU reference since Stage 7, and the device since 24 September 2026. The
@@ -123,15 +130,17 @@ drive; `canonical_gpu_long_run` with `LONG_RUN_LOSS` is the gate. Each row has
 one loss in the editor, the channel on its physical field. Legacy `damping` is
 the channel on the primary field, and the first loss edit moves it there.
 
-D3 is a deliberate instability and stays behind something explicit even once
-gate O closes.
+D3 is a deliberate instability, so it is explicit: its own loss kind on the
+primary row, with its energy in an active-gain lane of either sign rather than
+in loss. Its half map is the exact Bernoulli solution, on the CPU and the
+device.
 
 ## Where the refusals live
 
 | Path | Refuses |
 | --- | --- |
 | `canonical_wave.rs`, `linear_material_sample` | a non-linear `mass_law` or `stiffness_law`, and any restoring law. Admits loss channels. `is_linear()` includes `drive.is_none()`, which is why a driven generation assembles from a stripped model and compiles its laws separately. |
-| `wave.rs`, `evaluate_timed_directional_material_library_at` | any loss channel and any restoring law, so there is no adaptive estimate for a driven medium carrying loss. Field laws are read at their small-signal limit; the size rule applies the primary row's tangent separately. |
+| `wave.rs`, `evaluate_timed_directional_material_library_at` | any loss channel, so there is no adaptive estimate for a driven medium carrying loss. A restoring law changes no coefficient and is read past (the size rule can only over-resolve a Klein-Gordon medium); its store and force are in the canonical supplement. Field laws are read at their small-signal limit; the size rule applies the primary row's tangent separately. |
 | `geometry.rs`, `Material::evaluate_static` | anything but constant loss channels beside linear rows, and legacy damping beside a named channel. It reads the primary field's channel as the static scalar operator's damping. |
 
 A preset whose law is not **runs** is filtered out of the selector rather than
