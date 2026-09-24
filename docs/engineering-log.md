@@ -10591,3 +10591,44 @@ It is a Stage 7 defect and reproduces on linear media.
   pinned field at `t_n` instead of `t_{n+½}`. The device follows this oracle.
 - The Stage 8 tests therefore hold prescribed data constant and undriven.
   Reported for a decision before any change.
+
+## 2026-09-24 — Prescribed data drives the time-driven step at its midpoint
+
+Fixes the Stage 7 defect found in the previous entry, on the CPU reference and
+on the device together.
+
+- **Drift.** It reads a prescribed node's field from its signal at `t_n+½`.
+  The flux stays pinned at the endpoints, where the kicks and the work
+  quadrature stage. Reading the field back from that flux gave the drift
+  `g(t_n)`, or `M(t_n) g(t_n) / M(t_n+½)` under a pump. The gap jump reads the
+  same midpoint field.
+- **Kick.** A pinned node charges its source and force work at its stage
+  field `g(t_stage)`, so its work into the bulk is the trapezoid of `g·F` that
+  the midpoint drift exchanges. The flux-jump quotient it used before mixed in
+  the other endpoint's mass: an order-`h` error under a pump, and why the
+  balance stayed first order once the trajectory was fixed.
+- **Device.** The same two changes, driven generations only: the new
+  `temporal_drift_field` in the drift, and the pinned `midpoint` in
+  `kick_node`. The fixed path is unchanged on both sides.
+- **Measured.** With a harmonic signal on an undriven linear medium, the
+  trajectory errors are now 3.31e-3 → 8.10e-4 → 2.00e-4 (ratios 4.08, 4.05).
+  That matches the fixed path's figures to the digits shown; they were 2.2 and
+  2.1 before. With a pumped mass, held and harmonic pins balance at orders
+  2.00–2.03, and so does the Stage 8 nonlinear composition with a pump, a
+  varying pin and a source.
+- **Tests:**
+  - new: `a_varying_prescribed_signal_steps_at_second_order` and
+    `prescribed_data_beside_a_pumped_mass_balances_at_second_order`;
+  - `nonlinear_media_compose_sources_and_prescribed_data` is back to a pumped
+    medium with a varying pin;
+  - `an_inert_generation_steps_forcing_exactly_as_the_fixed_path_does` still
+    agrees to 1e-12.
+- **Device examples.**
+  - `canonical_gpu_temporal_forced`: Q 2.417e-7, b 4.857e-7.
+  - `canonical_gpu_driven_document`: Q 2.593e-7, b 5.226e-7.
+  - `canonical_gpu_temporal_amr` passes.
+  - The other ten validation examples reproduce their figures.
+- **Seen while here, not changed.** The device's thin-gap drift divides by the
+  authored mass (`mass_loss.y`) on a driven generation too. The oracle uses the
+  instantaneous midpoint field, so a pumped medium with a gap departs from its
+  reference on the device. No device gate covers a gap under a drive.

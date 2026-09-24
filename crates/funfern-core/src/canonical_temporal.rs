@@ -2204,13 +2204,13 @@ impl CanonicalTemporalWaveOperator {
         }
     }
 
-    fn drift_at(
+    /// Drifts `b` on a primary field the caller has already reconstructed at
+    /// the drift's own instant, prescribed values included.
+    fn drift_on(
         &self,
         complementary_flux: &mut [Point2],
-        primary_flux: &[f64],
-        time: f64,
+        primary_field: &[f64],
         duration: f64,
-        runtime: &CanonicalMaterialRuntimeState,
     ) -> Result<(), WaveError> {
         if complementary_flux.len() != self.base.complementary_degrees_of_freedom() {
             return Err(WaveError::SizeMismatch {
@@ -2221,7 +2221,9 @@ impl CanonicalTemporalWaveOperator {
         if !duration.is_finite() {
             return Err(WaveError::InvalidState);
         }
-        let primary_field = self.primary_field_at(primary_flux, time, runtime)?;
+        if primary_field.len() != self.base.degrees_of_freedom() {
+            return Err(WaveError::InvalidState);
+        }
         for (sample_index, (sample, flux)) in self
             .base
             .constitutive_samples()
@@ -2775,14 +2777,27 @@ impl CanonicalTemporalWaveState {
         // The gap's own displacement drifts on the same field and over the
         // same interval as the complementary flux does: both are the drift
         // subflow, and splitting them would break the exactness the local gap
-        // split is admitted for.
+        // split is admitted for, so both read the one field built here.
         //
-        // Reconstructing that field is a walk over every node with a
-        // transcendental at each, so a generation without gaps must not pay
-        // for it. It did until this guard.
+        // A prescribed node's field during the drift is its signal at the
+        // drift's instant. Its flux is pinned at the endpoints, where the
+        // kicks and the work quadrature stage, so reading the field back from
+        // that flux would hand the drift `g(t_n)` - and, under a breathing
+        // mass, `M(t_n) g(t_n) / M(t_n+½)` - which is first order in both the
+        // trajectory and the balance. The energy that crosses the pin this way
+        // is the pinned nodes' force work, which the kicks already charge to
+        // the prescribed exchange.
+        let midpoint_field = {
+            let mut field = operator.primary_field_at(&primary, middle_time, &self.runtime)?;
+            for (value, signal) in field.iter_mut().zip(forcing.prescribed()) {
+                if let Some(signal) = signal {
+                    *value = signal.value(middle_time);
+                }
+            }
+            field
+        };
         let mut gap_jump = self.thin_gap_jump.clone();
         if !gap_jump.is_empty() {
-            let midpoint_field = operator.primary_field_at(&primary, middle_time, &self.runtime)?;
             for (sample, jump) in operator.base().thin_gap_samples().iter().zip(&mut gap_jump) {
                 *jump += duration
                     * (midpoint_field[sample.left_node as usize]
@@ -2790,13 +2805,7 @@ impl CanonicalTemporalWaveState {
             }
             validate_finite(&gap_jump)?;
         }
-        operator.drift_at(
-            &mut complementary,
-            &primary,
-            middle_time,
-            duration,
-            &self.runtime,
-        )?;
+        operator.drift_on(&mut complementary, &midpoint_field, duration)?;
         let (_, complementary_rate_end) =
             operator.complementary_energy_and_rate(&complementary, end_time, &self.runtime)?;
 
@@ -3040,10 +3049,10 @@ fn forced_kick(
             if !new.is_finite() {
                 return Err(WaveError::InvalidState);
             }
-            let gradient = if new != old {
-                (new_energy - old_energy) / (new - old)
-            } else {
-                operator.primary_inverse(terms, node, old, runtime)?
+            let gradient = match forcing.prescribed()[node] {
+                Some(signal) => signal.value(target_time),
+                None if new != old => (new_energy - old_energy) / (new - old),
+                None => operator.primary_inverse(terms, node, old, runtime)?,
             };
             let node_source_work = duration * gradient * source[node];
             let node_force_work = duration * gradient * force[node];
@@ -3068,7 +3077,15 @@ fn forced_kick(
         if !new.is_finite() {
             return Err(WaveError::InvalidState);
         }
-        let midpoint_field = 0.5 * (old + new) / mass;
+        // A pinned node's field at the stage is its signal. Its work into the
+        // bulk is then the trapezoid of `g·F` over the step, which is what the
+        // drift's midpoint `g(t_n+½)` exchanges to second order. The quotient
+        // of the pin's flux jump would mix in the mass it was pinned against
+        // at the other endpoint, an error of order `h` under a pump.
+        let midpoint_field = match forcing.prescribed()[node] {
+            Some(signal) => signal.value(target_time),
+            None => 0.5 * (old + new) / mass,
+        };
         let node_source_work = duration * midpoint_field * source[node];
         let node_force_work = duration * midpoint_field * force[node];
         let node_boundary_loss = duration * damping[node] * midpoint_field * midpoint_field;
@@ -7081,20 +7098,14 @@ mod tests {
 
     #[test]
     fn nonlinear_media_compose_sources_and_prescribed_data() {
-        // Undriven: prescribed data beside a pumped mass is first order on
-        // this path for a linear medium too (engineering log, 24 September).
-        let operator = compile(&nonlinear_default_scene()).unwrap();
+        let mut scene = nonlinear_default_scene();
+        scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+        let operator = compile(&scene).unwrap();
         let base = operator.base();
         let mut prescribed = vec![None; base.degrees_of_freedom()];
         for (node, point) in base.node_points().iter().enumerate() {
             if point.x < -0.999 {
-                // Held constant, for the same reason.
-                prescribed[node] = Some(TimeSignal::Harmonic {
-                    offset: 0.3,
-                    amplitude: 0.0,
-                    frequency_hz: 0.0,
-                    phase_radians: 0.0,
-                });
+                prescribed[node] = Some(TimeSignal::harmonic(0.3, 0.2, 1.3, 0.2));
             }
         }
         assert!(prescribed.iter().any(Option::is_some));
@@ -7242,6 +7253,74 @@ mod tests {
             let forcing = CanonicalForcing::none(operator.base());
             let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
             assert!(total.boundary_loss > 1e-5, "{condition:?}: {total:?}");
+        }
+    }
+
+    /// Prescribed data used to reach the drift through its endpoint flux, so
+    /// the drift saw `g(t_n)` and the trajectory was first order (ratios 2.2
+    /// and 2.1 here, against the fixed path's 4.1). The drift now reads the
+    /// signal at its own instant.
+    #[test]
+    fn a_varying_prescribed_signal_steps_at_second_order() {
+        let operator = compile(&Scene::default()).unwrap();
+        let base = operator.base();
+        let mut prescribed = vec![None; base.degrees_of_freedom()];
+        for (node, point) in base.node_points().iter().enumerate() {
+            if point.x < -0.999 {
+                prescribed[node] = Some(TimeSignal::harmonic(0.3, 0.2, 1.3, 0.2));
+            }
+        }
+        let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+        let run = |steps: u64| {
+            let time_step = 0.3 / steps as f64;
+            let mut state = CanonicalTemporalWaveState::zero(&operator, time_step)
+                .unwrap()
+                .pinned(&operator, &forcing)
+                .unwrap();
+            for _ in 0..steps {
+                state.step_with_forcing(&operator, &forcing).unwrap();
+            }
+            state.complementary_flux().to_vec()
+        };
+        let reference = run(2000);
+        let error = |steps| {
+            run(steps)
+                .iter()
+                .zip(&reference)
+                .map(|(a, b)| (*a - *b).norm())
+                .fold(0.0_f64, f64::max)
+        };
+        let (coarse, middle, fine) = (error(50), error(100), error(200));
+        assert!(coarse / middle > 3.6, "{coarse:e} {middle:e}");
+        assert!(middle / fine > 3.6, "{middle:e} {fine:e}");
+    }
+
+    /// The same defect under a breathing mass: a constant held value beside a
+    /// moving free field balanced at order 0.5-0.9.
+    #[test]
+    fn prescribed_data_beside_a_pumped_mass_balances_at_second_order() {
+        for signal in [
+            TimeSignal::Harmonic {
+                offset: 0.3,
+                amplitude: 0.0,
+                frequency_hz: 0.0,
+                phase_radians: 0.0,
+            },
+            TimeSignal::harmonic(0.3, 0.2, 1.3, 0.2),
+        ] {
+            let mut scene = Scene::default();
+            scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+            let operator = compile(&scene).unwrap();
+            let base = operator.base();
+            let mut prescribed = vec![None; base.degrees_of_freedom()];
+            for (node, point) in base.node_points().iter().enumerate() {
+                if point.x < -0.999 {
+                    prescribed[node] = Some(signal);
+                }
+            }
+            let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+            let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.3, 0.5);
+            assert!(total.prescribed_exchange.abs() > 1e-4, "{total:?}");
         }
     }
 }

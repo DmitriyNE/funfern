@@ -1354,7 +1354,13 @@ fn kick_node(node: u32, second: bool) {
     if nodes[node].boundary.z != 0u {
         next = mass * harmonic_value(nodes[node].prescribed, target_time);
     }
-    let midpoint = 0.5 * (old + next) * inverse_mass;
+    var midpoint = 0.5 * (old + next) * inverse_mass;
+    // A driven pin's field at its stage is its signal, so its work into the
+    // bulk is the trapezoid of `g·F` the midpoint drift exchanges. The flux
+    // jump's quotient would mix in the other endpoint's mass.
+    if temporal_enabled() && nodes[node].boundary.z != 0u {
+        midpoint = harmonic_value(nodes[node].prescribed, target_time);
+    }
     let source_work = duration * midpoint * source;
     let force_work = duration * midpoint * held_force;
     let boundary_loss = duration * damping * midpoint * midpoint;
@@ -1814,6 +1820,17 @@ fn boundary_finalize_second(
     boundary_finalize(group.x, local.x, true);
 }
 
+// The primary field a driven drift reads at its midpoint. A prescribed node's
+// flux is pinned at the step endpoints, where the kicks and the work quadrature
+// stage, so its field is read from its signal at the drift's own instant;
+// dividing the endpoint flux by the midpoint mass would be first order.
+fn temporal_drift_field(node: u32, middle_time: f32) -> f32 {
+    if nodes[node].boundary.z != 0u {
+        return harmonic_value(nodes[node].prescribed, middle_time);
+    }
+    return candidate_q(node) * temporal_inverse_primary_mass(node, middle_time);
+}
+
 @compute @workgroup_size(128)
 fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
@@ -1833,12 +1850,10 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
         var curl = vec2<f32>(0.0);
         if temporal_enabled() {
             let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
-            let reference = candidate_q(sample.nodes_a.x)
-                * temporal_inverse_primary_mass(sample.nodes_a.x, middle_time);
+            let reference = temporal_drift_field(sample.nodes_a.x, middle_time);
             for (var local = 1u; local < 7u; local += 1u) {
                 let node = sample_node(sample, local);
-                let field = candidate_q(node)
-                    * temporal_inverse_primary_mass(node, middle_time);
+                let field = temporal_drift_field(node, middle_time);
                 curl += sample_curl(sample, local) * (field - reference);
             }
         } else {
