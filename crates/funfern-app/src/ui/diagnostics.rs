@@ -592,6 +592,18 @@ impl Playground {
                             self.simulated_time(),
                             self.completed_steps,
                         ));
+                        if let Some(temporal) = &active.canonical_temporal_operator {
+                            ui.small(time_step_bound_line(
+                                temporal.time_step_bound(),
+                                self.editor.document.model.accepted.physics,
+                            ))
+                            .on_hover_text(
+                                "The stability ceiling covers every coefficient the medium can \
+                                 reach: each drive's lowest phase, each Switch state and every \
+                                 admitted field amplitude. A self-focusing law only slows the \
+                                 wave, so it never lowers it.",
+                            );
+                        }
                     }
                     None => {
                         ui.small("Waiting for an accepted mesh and wave operator.");
@@ -737,10 +749,61 @@ impl Playground {
     }
 }
 
+/// What sets a time-driven generation's step ceiling, in the skin's names.
+fn time_step_bound_line(bound: CanonicalTimeStepBound, physics: PhysicsModel) -> String {
+    let lowered = [
+        (LawPresetRow::Mass, bound.primary_floor),
+        (LawPresetRow::Stiffness, bound.complementary_floor),
+    ]
+    .into_iter()
+    .filter(|(_, floor)| *floor < 1.0)
+    .map(|(row, floor)| format!("{} falls to {floor:.2}×", law_row_label(physics, row)))
+    .collect::<Vec<_>>();
+    if lowered.is_empty() {
+        return format!(
+            "Step ceiling {:.3e} s, the fixed medium's: no law here lowers it",
+            bound.trajectory
+        );
+    }
+    format!(
+        "Step ceiling {:.3e} s, {:.2}× the fixed medium's: {} at its lowest",
+        bound.trajectory,
+        bound.trajectory / bound.fixed,
+        lowered.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::material_overlay::MaterialProperty;
+
+    #[test]
+    fn the_step_ceiling_line_names_the_row_that_lowers_it() {
+        let physics = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let pumped = CanonicalTimeStepBound {
+            fixed: 2.0e-3,
+            trajectory: 2.0e-3 * 0.8_f64.sqrt(),
+            primary_floor: 0.8,
+            complementary_floor: 1.0,
+        };
+        assert_eq!(
+            time_step_bound_line(pumped, physics),
+            "Step ceiling 1.789e-3 s, 0.89× the fixed medium's: Permittivity ε falls to \
+             0.80× at its lowest"
+        );
+        let kerr = CanonicalTimeStepBound {
+            trajectory: 2.0e-3,
+            primary_floor: 1.0,
+            ..pumped
+        };
+        assert_eq!(
+            time_step_bound_line(kerr, physics),
+            "Step ceiling 2.000e-3 s, the fixed medium's: no law here lowers it"
+        );
+    }
 
     #[test]
     fn the_formula_reference_names_what_the_parser_accepts() {

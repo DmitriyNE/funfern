@@ -1597,6 +1597,30 @@ pub struct CanonicalTemporalLossRates {
 /// unchanged by a field law, because the Hamiltonian stays separable,
 /// `H_Q(Q, t) + H_b(b, t)`: only the two observables `U(Q)` and `v(b)` become
 /// inverses of nonlinear maps.
+/// How far one field-dependent material has moved from its small-signal
+/// response: the largest `ḡ(|field|) − 1` over its sites on each row. For Kerr
+/// that is `χ|u|²`, the relative change of the coefficient itself; a row
+/// without a field law reads zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalNonlinearStrength {
+    pub material: MaterialId,
+    pub primary: f64,
+    pub complementary: f64,
+}
+
+/// What sets a time-driven generation's timestep ceiling. `trajectory` is
+/// `fixed · √(primary_floor · complementary_floor)`, each floor the lowest
+/// tangent factor that row reaches over every drive phase, Switch state and
+/// admitted amplitude. A floor of one leaves the fixed medium's ceiling; a
+/// self-focusing field law never lowers it, because it only slows the wave.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalTimeStepBound {
+    pub fixed: f64,
+    pub trajectory: f64,
+    pub primary_floor: f64,
+    pub complementary_floor: f64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalTemporalWaveOperator {
     /// Shared, because an application that assembled this base through its own
@@ -1620,6 +1644,8 @@ pub struct CanonicalTemporalWaveOperator {
     indicator_supplement_supported: bool,
     forced_composition_supported: bool,
     maximum_time_step: f64,
+    primary_floor: f64,
+    complementary_floor: f64,
 }
 
 impl CanonicalTemporalWaveOperator {
@@ -1745,6 +1771,17 @@ impl CanonicalTemporalWaveOperator {
             .iter()
             .filter_map(|sample| sample.coefficient.law.tangent_range().map(|range| range.0))
             .fold(f64::INFINITY, f64::min);
+        // A row with no samples leaves the other to set the bound alone.
+        let primary_floor = if minimum_primary_factor.is_finite() {
+            minimum_primary_factor
+        } else {
+            1.0
+        };
+        let complementary_floor = if minimum_complementary_factor.is_finite() {
+            minimum_complementary_factor
+        } else {
+            1.0
+        };
         let maximum_time_step = base.maximum_time_step()
             * (minimum_primary_factor * minimum_complementary_factor).sqrt();
         if !maximum_time_step.is_finite() || maximum_time_step <= 0.0 {
@@ -1825,7 +1862,79 @@ impl CanonicalTemporalWaveOperator {
             indicator_supplement_supported,
             forced_composition_supported,
             maximum_time_step,
+            primary_floor,
+            complementary_floor,
         })
+    }
+
+    /// The timestep ceiling and what lowers it below the fixed medium's.
+    pub fn time_step_bound(&self) -> CanonicalTimeStepBound {
+        CanonicalTimeStepBound {
+            fixed: self.base.maximum_time_step(),
+            trajectory: self.maximum_time_step,
+            primary_floor: self.primary_floor,
+            complementary_floor: self.complementary_floor,
+        }
+    }
+
+    /// Each field-dependent material's peak response at the given fluxes,
+    /// read through the maps the solver inverts: the nodal field for the
+    /// primary row, each sample's complementary field for the other. Materials
+    /// without a field law are left out.
+    pub fn nonlinear_strength(
+        &self,
+        primary_flux: &[f64],
+        complementary_flux: &[Point2],
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<Vec<CanonicalNonlinearStrength>, WaveError> {
+        let mut strengths: Vec<CanonicalNonlinearStrength> = Vec::new();
+        fn slot(
+            strengths: &mut Vec<CanonicalNonlinearStrength>,
+            material: MaterialId,
+        ) -> &mut CanonicalNonlinearStrength {
+            let index = match strengths
+                .iter()
+                .position(|found| found.material == material)
+            {
+                Some(index) => index,
+                None => {
+                    strengths.push(CanonicalNonlinearStrength {
+                        material,
+                        primary: 0.0,
+                        complementary: 0.0,
+                    });
+                    strengths.len() - 1
+                }
+            };
+            &mut strengths[index]
+        }
+        if !self.has_field_laws {
+            return Ok(Vec::new());
+        }
+        let field = self.primary_field_at(primary_flux, time, runtime)?;
+        for (node, value) in field.iter().enumerate() {
+            for index in &self.node_contributions[self.primary_range(node)] {
+                let coefficient = self.primary[*index as usize].coefficient;
+                if coefficient.law.field == FieldLawValues::Linear {
+                    continue;
+                }
+                let response = coefficient.law.field.multiplier(value.abs()) - 1.0;
+                let found = slot(&mut strengths, coefficient.material);
+                found.primary = found.primary.max(response);
+            }
+        }
+        let fields = self.complementary_field_at(complementary_flux, time, runtime)?;
+        for (sample, value) in self.complementary.iter().zip(&fields) {
+            let coefficient = sample.coefficient;
+            if coefficient.law.field == FieldLawValues::Linear {
+                continue;
+            }
+            let response = coefficient.law.field.multiplier(value.norm()) - 1.0;
+            let found = slot(&mut strengths, coefficient.material);
+            found.complementary = found.complementary.max(response);
+        }
+        Ok(strengths)
     }
 
     pub fn base(&self) -> &CanonicalWaveOperator {
@@ -8690,5 +8799,67 @@ mod tests {
                 assert!(total_removed > 0.0, "{label}, {medium}");
             }
         }
+    }
+
+    /// The readout is the coefficient's own relative change: `χu²` for Kerr
+    /// at a uniform field, and below `χσ²` for a saturable row however strong
+    /// the field.
+    #[test]
+    fn nonlinear_strength_reads_each_rows_coefficient_change() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = kerr(0.8);
+        scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+        let operator = compile(&scene).unwrap();
+        let runtime = operator.initial_runtime();
+        let (terms, _) = operator.primary_terms_at(0.0, &runtime).unwrap();
+        let field = 0.5;
+        let primary = (0..operator.base().degrees_of_freedom())
+            .map(|node| {
+                operator
+                    .primary_flux_and_energy_of_field(&terms, node, field, &runtime)
+                    .unwrap()
+                    .0
+            })
+            .collect::<Vec<_>>();
+        let (_, complementary) = strong_fluxes(&operator, 40.0);
+        let strengths = operator
+            .nonlinear_strength(&primary, &complementary, 0.0, &runtime)
+            .unwrap();
+        assert_eq!(strengths.len(), 1);
+        let strength = strengths[0];
+        assert_eq!(strength.material, scene.materials[0].id);
+        assert!(
+            (strength.primary - 0.8 * field * field).abs() < 1e-12,
+            "{strength:?}"
+        );
+        assert!(strength.complementary > 0.1, "{strength:?}");
+        assert!(strength.complementary < 6.0 * 0.3 * 0.3, "{strength:?}");
+
+        // A linear generation has nothing to report.
+        let linear = compile(&Scene::initial()).unwrap();
+        let (primary, complementary) = reference_fluxes(&linear);
+        assert!(
+            linear
+                .nonlinear_strength(&primary, &complementary, 0.0, &runtime)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A pump lowers its row's floor to its lowest factor, and the ceiling
+    /// by its square root; a self-focusing law leaves the fixed ceiling.
+    #[test]
+    fn the_time_step_bound_names_the_row_that_lowers_it() {
+        let mut pumped = Scene::initial();
+        pumped.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+        let bound = compile(&pumped).unwrap().time_step_bound();
+        assert!((bound.primary_floor - 0.8).abs() < 1e-12, "{bound:?}");
+        assert_eq!(bound.complementary_floor, 1.0);
+        assert!((bound.trajectory - bound.fixed * 0.8_f64.sqrt()).abs() < 1e-15);
+
+        let bound = compile(&kerr_scene()).unwrap().time_step_bound();
+        assert_eq!(bound.primary_floor, 1.0);
+        assert_eq!(bound.complementary_floor, 1.0);
+        assert_eq!(bound.trajectory, bound.fixed);
     }
 }

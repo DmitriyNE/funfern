@@ -197,6 +197,9 @@ pub struct Playground {
     pub(super) far_field_recording_from: Option<f64>,
     pub(super) frame_ms: f32,
     pub(super) wave_energy: Option<f64>,
+    /// Each field-dependent material's peak response at the last full
+    /// readback, beside the energy it was read with.
+    pub(super) nonlinear_strength: Vec<funfern_core::CanonicalNonlinearStrength>,
     /// Full-state energy is a diagnostic, not a render input. Recomputing it
     /// over every canonical node and sample at display rate made large meshes
     /// consume a main-thread core even when the diagnostics window was closed.
@@ -410,6 +413,7 @@ impl Default for Playground {
             far_field_recording_from: None,
             frame_ms: 16.0,
             wave_energy: None,
+            nonlinear_strength: Vec::new(),
             energy_readback: 0,
             energy_updated: Instant::now(),
             full_snapshot_requested: Instant::now(),

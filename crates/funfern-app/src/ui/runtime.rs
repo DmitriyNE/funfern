@@ -542,6 +542,7 @@ impl Playground {
                             self.canonical_event_serial = 0;
                             self.canonical_event_observed = 0;
                             self.wave_energy = None;
+                            self.nonlinear_strength.clear();
                             self.amr_energy_peak = 0.0;
                         }
                         self.restart_exposures_after_handoff(upload.fresh);
@@ -800,6 +801,13 @@ impl Playground {
                     self.amr_energy_peak = self.amr_energy_peak.max(energy);
                 }
                 self.wave_energy = energy;
+                self.nonlinear_strength = super::field_law_view(active, display)
+                    .and_then(|(temporal, runtime, time)| {
+                        temporal
+                            .nonlinear_strength(&primary, &complementary, time, &runtime)
+                            .ok()
+                    })
+                    .unwrap_or_default();
                 self.energy_readback = display.full_readbacks;
                 self.energy_updated = Instant::now();
             }

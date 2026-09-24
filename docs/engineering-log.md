@@ -11219,3 +11219,34 @@ Kerr speckle runs on their scene: a Kerr medium behind second-order walls.
   Q 7.24e-7 and b 2.02e-4.
 - **Still open, per the user:** tuning the filter strength, after the
   milestone. The filter is admitted now but deliberately gentle.
+
+## 2026-09-24 — How nonlinear the run is, and what sets its step
+
+Stage 10.2. A Kerr document at the preset's defaults looked like a linear one
+that ran slower. It was running the law: a probe on the user's scene read
+`χu² ≈ 0.05`, and the device matched the Kerr oracle to 1e-5. But nothing on
+screen said so.
+
+- `CanonicalTemporalWaveOperator::nonlinear_strength` reports, per
+  field-dependent material and row, the peak `ḡ(|field|) − 1`. That is the
+  coefficient's own relative change, `χ|u|²` for Kerr.
+  - The primary row reads the nodal fields through each node's contributions,
+    so a junction reports each material separately.
+  - The complementary row reads each sample's field.
+  - The app computes it with the energy readout on each full readback. It
+    costs the same inversions again, at most every quarter second.
+  - The material panel shows one line per nonlinear row, e.g. "Now:
+    Permittivity ε up to +5.3% from its small-signal value", with a hover on
+    what the figure means.
+- `time_step_bound` exposes the ceiling's parts: the fixed ceiling, the
+  trajectory ceiling, and each row's lowest tangent factor over every drive
+  phase, Switch state and admitted amplitude. The Solver section names the
+  row that lowers it, or says no law does. A self-focusing law never lowers
+  the ceiling; its cost is the per-step inverse, not the step.
+- Tests:
+  - `nonlinear_strength_reads_each_rows_coefficient_change`: Kerr reads
+    `0.8·0.5²` exactly at a uniform field of 0.5; the saturable row stays
+    below `χσ²`; a linear generation reports nothing.
+  - `the_time_step_bound_names_the_row_that_lowers_it`: a 0.2 pump floors at
+    0.8, and the ceiling falls by √0.8; Kerr keeps the fixed ceiling.
+  - Both line formatters, with the skin's names.

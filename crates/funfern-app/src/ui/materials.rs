@@ -530,6 +530,22 @@ impl Playground {
             {
                 ui.small(format!("{} = {}", line.subject, line.response));
             }
+            // How far the field has taken this medium from its small-signal
+            // response right now, so a Kerr run that is barely nonlinear is
+            // told apart from one that is not running a law at all.
+            if let Some(strength) = self
+                .nonlinear_strength
+                .iter()
+                .find(|strength| strength.material == material.id)
+            {
+                for line in nonlinear_strength_lines(&material, strength, physics) {
+                    ui.small(line).on_hover_text(
+                        "The largest change of this coefficient anywhere in the material, \
+                         from the latest field: for Kerr it is χ|u|². A few percent is nearly \
+                         linear; self-focusing and harmonics become plain towards 100%.",
+                    );
+                }
+            }
 
             // Only the parameters the user made. A preset's own are above,
             // under the labels it gave them, and showing them again here was
@@ -619,9 +635,83 @@ impl Playground {
     }
 }
 
+/// One line per row of `material` whose law follows the field, reading the
+/// row's peak change from its small-signal value.
+fn nonlinear_strength_lines(
+    material: &Material,
+    strength: &CanonicalNonlinearStrength,
+    physics: PhysicsModel,
+) -> Vec<String> {
+    let percent = |value: f64| {
+        let percent = 100.0 * value;
+        if percent < 0.1 {
+            format!("{percent:.2}%")
+        } else {
+            format!("{percent:.1}%")
+        }
+    };
+    [
+        (&material.mass_law, LawPresetRow::Mass, strength.primary),
+        (
+            &material.stiffness_law,
+            LawPresetRow::Stiffness,
+            strength.complementary,
+        ),
+    ]
+    .into_iter()
+    .filter(|(law, _, _)| law.field != FieldLaw::Linear)
+    .map(|(_, row, value)| {
+        format!(
+            "Now: {} up to +{} from its small-signal value",
+            law_row_label(physics, row),
+            percent(value)
+        )
+    })
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only rows whose law follows the field are read out, in the skin's
+    /// names and as the coefficient's percentage change.
+    #[test]
+    fn the_strength_readout_names_each_nonlinear_row() {
+        let mut material = Scene::initial().materials[0].clone();
+        material.mass_law.field = FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(0.8),
+            amplitude_bound: None,
+        };
+        let strength = CanonicalNonlinearStrength {
+            material: material.id,
+            primary: 0.0534,
+            complementary: 0.0,
+        };
+        let physics = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        assert_eq!(
+            nonlinear_strength_lines(&material, &strength, physics),
+            ["Now: Permittivity ε up to +5.3% from its small-signal value"]
+        );
+        material.stiffness_law.field = FieldLaw::Saturable {
+            chi: ScalarField::constant(6.0),
+            saturation: ScalarField::constant(0.3),
+        };
+        let strength = CanonicalNonlinearStrength {
+            complementary: 0.0004,
+            ..strength
+        };
+        assert_eq!(
+            nonlinear_strength_lines(&material, &strength, PhysicsModel::Mechanical),
+            [
+                "Now: Density ρ₀ up to +5.3% from its small-signal value",
+                "Now: Reciprocal stiffness s₀ up to +0.04% from its small-signal value",
+            ]
+        );
+    }
 
     /// The claim the Response selector makes: choosing a preset and applying
     /// it produces a document the solver compiles as a driven one. Everything
