@@ -16,7 +16,6 @@ use funfern_core::*;
 use super::*;
 
 /// Keys for the formula editors, beyond the four base slots.
-const ROW_SLOTS: u8 = 16;
 const MASS_ROW: u8 = 16;
 const STIFFNESS_ROW: u8 = 32;
 const ELECTRIC_LOSS: u8 = 48;
@@ -69,83 +68,211 @@ pub(super) fn reciprocal_stiffness_editor(
     ));
 }
 
-/// Both rows' law slots and both loss channels.
-pub(super) fn advanced_law_editor(
+/// The law slots of one row: field response, drive, Switch alternate and
+/// divide.
+pub(super) fn law_slots_editor(
     ui: &mut egui::Ui,
     material: &mut Material,
-    physics: PhysicsModel,
+    row: LawPresetRow,
     sources: &[(String, f64)],
     formulas: &mut FormulaEdits,
 ) {
     let id = material.id.0;
     let parameters = material.parameters.clone();
-    for (row, base, law) in [
-        (LawPresetRow::Mass, MASS_ROW, &mut material.mass_law),
-        (
-            LawPresetRow::Stiffness,
-            STIFFNESS_ROW,
-            &mut material.stiffness_law,
-        ),
-    ] {
-        ui.separator();
-        ui.label(law_row_label(physics, row));
-        coefficient_law_editor(ui, id, base, law, &parameters, sources, formulas);
-    }
-    ui.separator();
-    let legacy_damping = material.damping != ScalarField::constant(0.0);
-    for (label, base, channel, field) in [
-        (
-            "Electric loss",
-            ELECTRIC_LOSS,
-            &mut material.electric_loss,
-            channel_field(physics, true),
-        ),
-        (
-            "Magnetic loss",
-            MAGNETIC_LOSS,
-            &mut material.magnetic_loss,
-            channel_field(physics, false),
-        ),
-    ] {
-        loss_channel_editor(ui, id, base, label, field, channel, &parameters, formulas);
-    }
-    if legacy_damping && (material.electric_loss.is_some() || material.magnetic_loss.is_some()) {
-        ui.colored_label(
-            ui.visuals().warn_fg_color,
-            "Set the legacy damping to zero: it cannot run beside a named loss channel",
-        );
+    let (base, law) = match row {
+        LawPresetRow::Stiffness => (STIFFNESS_ROW, &mut material.stiffness_law),
+        _ => (MASS_ROW, &mut material.mass_law),
+    };
+    coefficient_law_editor(ui, id, base, law, &parameters, sources, formulas);
+}
+
+/// Which named loss channel damps the field a row's coefficient belongs to.
+/// In the EM skins the mass row is ε and the other is μ whatever the
+/// polarization, so electric loss sits with ε and magnetic with μ. In
+/// Mechanical the adapter maps magnetic loss onto the density row.
+pub(super) fn row_is_electric(physics: PhysicsModel, row: LawPresetRow) -> bool {
+    match physics {
+        PhysicsModel::Mechanical => row == LawPresetRow::Stiffness,
+        PhysicsModel::Electromagnetic { .. } => row == LawPresetRow::Mass,
     }
 }
 
-/// What each named channel damps in this skin, for its hover text.
-fn channel_field(physics: PhysicsModel, electric: bool) -> &'static str {
-    match (physics, electric) {
-        (PhysicsModel::Mechanical, true) => "damps the stress-like complementary flux",
-        (PhysicsModel::Mechanical, false) => "damps the displacement flux, as Damping σ did",
+/// The row legacy `damping` acts on: the primary one, which is ε in TM, μ in
+/// TE and the density in Mechanical.
+pub(super) fn legacy_damping_row(physics: PhysicsModel) -> LawPresetRow {
+    match physics {
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => LawPresetRow::Stiffness,
+        _ => LawPresetRow::Mass,
+    }
+}
+
+fn row_channel(
+    material: &mut Material,
+    physics: PhysicsModel,
+    row: LawPresetRow,
+) -> &mut Option<LossChannel> {
+    if row_is_electric(physics, row) {
+        &mut material.electric_loss
+    } else {
+        &mut material.magnetic_loss
+    }
+}
+
+/// Moves a legacy `damping` into the named channel of the row it acts on, so
+/// the two can never be authored together. Called only when a loss is edited;
+/// opening a legacy material does not rewrite it.
+pub(super) fn adopt_legacy_damping(material: &mut Material, physics: PhysicsModel) {
+    if material.damping == ScalarField::constant(0.0) {
+        return;
+    }
+    let rate = std::mem::replace(&mut material.damping, ScalarField::constant(0.0));
+    let channel = row_channel(material, physics, legacy_damping_row(physics));
+    match channel {
+        Some(channel) => channel.base_rate = rate,
+        None => {
+            *channel = Some(LossChannel {
+                base_rate: rate,
+                law: DampingLaw {
+                    rate: RateLaw::Constant,
+                    drive: TimeDrive::None,
+                },
+            })
+        }
+    }
+}
+
+/// One row's loss rate. It shows the row's named channel, or a legacy
+/// `damping` where that is what acts on this row, and any edit writes the
+/// named channel. A rate edited back to zero with no drive removes the
+/// channel, so an untouched material and one set back to zero are the same.
+pub(super) fn loss_rate_editor(
+    ui: &mut egui::Ui,
+    material: &mut Material,
+    physics: PhysicsModel,
+    row: LawPresetRow,
+    advanced: bool,
+    formulas: &mut FormulaEdits,
+) {
+    let id = material.id.0;
+    let base = if row == LawPresetRow::Stiffness {
+        MAGNETIC_LOSS
+    } else {
+        ELECTRIC_LOSS
+    };
+    let legacy =
+        row == legacy_damping_row(physics) && material.damping != ScalarField::constant(0.0);
+    let shown = if legacy {
+        material.damping.clone()
+    } else {
+        row_channel(material, physics, row)
+            .as_ref()
+            .map_or(ScalarField::constant(0.0), |channel| {
+                channel.base_rate.clone()
+            })
+    };
+    let mut edited = shown.clone();
+    let parameters = material.parameters.clone();
+    let label = if legacy {
+        "Loss rate (legacy)"
+    } else {
+        "Loss rate"
+    };
+    field_row(
+        ui,
+        (id, base),
+        label,
+        &mut edited,
+        &parameters,
+        0.0,
+        formulas,
+    )
+    .on_hover_text(loss_hover(physics, row, legacy));
+    if edited != shown {
+        adopt_legacy_damping(material, physics);
+        let channel = row_channel(material, physics, row);
+        match channel {
+            Some(found) => found.base_rate = edited,
+            None => {
+                *channel = Some(LossChannel {
+                    base_rate: edited,
+                    law: DampingLaw {
+                        rate: RateLaw::Constant,
+                        drive: TimeDrive::None,
+                    },
+                })
+            }
+        }
+        if let Some(found) = channel
+            && found.base_rate == ScalarField::constant(0.0)
+            && found.law.rate == RateLaw::Constant
+            && found.law.drive == TimeDrive::None
+        {
+            *channel = None;
+        }
+    }
+    let channel = row_channel(material, physics, row);
+    let Some(found) = channel else { return };
+    if found.law.rate != RateLaw::Constant {
+        ui.small("A field-dependent loss rate does not run yet; it is kept as authored.");
+    }
+    if advanced {
+        let before = found.law.drive.clone();
+        let mut drive = before.clone();
+        drive_editor(ui, id, base + 4, &mut drive, &parameters, &[], formulas);
+        if drive != before {
+            adopt_legacy_damping(material, physics);
+            if let Some(found) = row_channel(material, physics, row) {
+                found.law.drive = drive;
+            }
+        }
+    }
+}
+
+fn loss_hover(physics: PhysicsModel, row: LawPresetRow, legacy: bool) -> String {
+    let field = match (physics, row) {
+        (PhysicsModel::Mechanical, LawPresetRow::Stiffness) => "the stress-like complementary flux",
+        (PhysicsModel::Mechanical, _) => "the displacement flux",
         (
             PhysicsModel::Electromagnetic {
                 polarization: ElectromagneticPolarization::Tm,
             },
-            true,
-        ) => "damps E_z, the primary field",
+            LawPresetRow::Stiffness,
+        ) => "the in-plane H",
         (
             PhysicsModel::Electromagnetic {
                 polarization: ElectromagneticPolarization::Tm,
             },
-            false,
-        ) => "damps the in-plane H, the complementary field",
+            _,
+        ) => "E_z",
         (
             PhysicsModel::Electromagnetic {
                 polarization: ElectromagneticPolarization::Te,
             },
-            true,
-        ) => "damps the in-plane E, the complementary field",
+            LawPresetRow::Stiffness,
+        ) => "H_z",
         (
             PhysicsModel::Electromagnetic {
                 polarization: ElectromagneticPolarization::Te,
             },
-            false,
-        ) => "damps H_z, the primary field",
+            _,
+        ) => "the in-plane E",
+    };
+    let channel = if row_is_electric(physics, row) {
+        "electric"
+    } else {
+        "magnetic"
+    };
+    if legacy {
+        format!(
+            "A rate per second that damps {field}. This material still carries the older \
+             Damping σ, which damps whichever field the skin makes primary; editing it \
+             moves it to the {channel} loss, which stays on its physical field across a \
+             skin change."
+        )
+    } else {
+        format!("The {channel} loss: a rate per second that damps {field} in this skin.")
     }
 }
 
@@ -463,56 +590,6 @@ fn drive_editor(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn loss_channel_editor(
-    ui: &mut egui::Ui,
-    id: u64,
-    base: u8,
-    label: &str,
-    what: &str,
-    channel: &mut Option<LossChannel>,
-    parameters: &[MaterialParameter],
-    formulas: &mut FormulaEdits,
-) {
-    let mut enabled = channel.is_some();
-    if ui
-        .checkbox(&mut enabled, label)
-        .on_hover_text(format!("A flux-rate loss that {what} in this skin"))
-        .changed()
-    {
-        *channel = enabled.then(|| LossChannel {
-            base_rate: ScalarField::constant(0.2),
-            law: DampingLaw {
-                rate: RateLaw::Constant,
-                drive: TimeDrive::None,
-            },
-        });
-        forget(formulas, id, base, 0..ROW_SLOTS);
-    }
-    let Some(channel) = channel else { return };
-    field_row(
-        ui,
-        (id, base),
-        "Rate",
-        &mut channel.base_rate,
-        parameters,
-        0.0,
-        formulas,
-    );
-    if channel.law.rate != RateLaw::Constant {
-        ui.small("A field-dependent loss rate does not run yet; it is kept as authored.");
-    }
-    drive_editor(
-        ui,
-        id,
-        base + 4,
-        &mut channel.law.drive,
-        parameters,
-        &[],
-        formulas,
-    );
-}
-
 /// The effective law with every expression evaluated at the material frame's
 /// origin: the numbers behind the Simplified view's named summary.
 pub(super) fn numeric_law_summary(ui: &mut egui::Ui, material: &Material, physics: PhysicsModel) {
@@ -582,6 +659,24 @@ mod tests {
 
     type Texts = BTreeMap<(u64, u8), String>;
 
+    /// Both rows as the panel draws them: each row's loss and, in Advanced,
+    /// its law slots.
+    fn rows(
+        ui: &mut egui::Ui,
+        material: &mut Material,
+        physics: PhysicsModel,
+        advanced: bool,
+        sources: &[(String, f64)],
+        formulas: &mut FormulaEdits,
+    ) {
+        for row in [LawPresetRow::Mass, LawPresetRow::Stiffness] {
+            loss_rate_editor(ui, material, physics, row, advanced, formulas);
+            if advanced {
+                law_slots_editor(ui, material, row, sources, formulas);
+            }
+        }
+    }
+
     fn edits() -> (Texts, Texts) {
         (BTreeMap::new(), BTreeMap::new())
     }
@@ -604,10 +699,11 @@ mod tests {
                     errors: &mut error,
                 },
             );
-            advanced_law_editor(
+            rows(
                 ui,
                 &mut material,
                 PhysicsModel::Mechanical,
+                true,
                 &[],
                 &mut FormulaEdits {
                     edits: &mut edit,
@@ -672,10 +768,11 @@ mod tests {
             let context = egui::Context::default();
             for _ in 0..2 {
                 let _ = context.run_ui(egui::RawInput::default(), |ui| {
-                    advanced_law_editor(
+                    rows(
                         ui,
                         &mut material,
                         physics,
+                        true,
                         &[("point source".to_owned(), 2.5)],
                         &mut FormulaEdits {
                             edits: &mut edit,
@@ -687,6 +784,81 @@ mod tests {
             }
             assert_eq!(material, before, "{physics:?}");
             assert!(error.is_empty(), "{physics:?}: {error:?}");
+        }
+    }
+
+    const SKINS: [PhysicsModel; 3] = [
+        PhysicsModel::Mechanical,
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        },
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        },
+    ];
+
+    /// A legacy material is shown, in either view and every skin, without
+    /// being rewritten: its damping reads as the primary row's loss.
+    #[test]
+    fn viewing_a_legacy_damping_leaves_it_where_it_is() {
+        let mut material = Scene::initial().materials[0].clone();
+        material.damping = ScalarField::constant(0.3);
+        let before = material.clone();
+        for physics in SKINS {
+            for advanced in [false, true] {
+                let (mut edit, mut error) = edits();
+                let context = egui::Context::default();
+                for _ in 0..2 {
+                    let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                        rows(
+                            ui,
+                            &mut material,
+                            physics,
+                            advanced,
+                            &[],
+                            &mut FormulaEdits {
+                                edits: &mut edit,
+                                errors: &mut error,
+                            },
+                        );
+                    });
+                }
+                assert_eq!(material, before, "{physics:?}, advanced {advanced}");
+            }
+        }
+    }
+
+    /// The electric channel sits with ε and the magnetic with μ in both EM
+    /// polarizations; Mechanical puts magnetic on the density. Legacy damping
+    /// belongs to the primary row, and adopting it lands in that row's channel.
+    #[test]
+    fn each_row_owns_the_loss_channel_of_its_field() {
+        use LawPresetRow::{Mass, Stiffness};
+        assert!(!row_is_electric(SKINS[0], Mass) && row_is_electric(SKINS[0], Stiffness));
+        for physics in &SKINS[1..] {
+            assert!(row_is_electric(*physics, Mass) && !row_is_electric(*physics, Stiffness));
+        }
+        assert_eq!(
+            SKINS.map(legacy_damping_row),
+            [Mass, Mass, Stiffness],
+            "the primary row: density, ε for TM, μ for TE"
+        );
+        for (physics, electric) in [(SKINS[0], false), (SKINS[1], true), (SKINS[2], false)] {
+            let mut material = Scene::initial().materials[0].clone();
+            material.damping = ScalarField::constant(0.3);
+            adopt_legacy_damping(&mut material, physics);
+            assert_eq!(material.damping, ScalarField::constant(0.0));
+            let (moved, other) = if electric {
+                (&material.electric_loss, &material.magnetic_loss)
+            } else {
+                (&material.magnetic_loss, &material.electric_loss)
+            };
+            assert_eq!(
+                moved.as_ref().map(|channel| channel.base_rate.clone()),
+                Some(ScalarField::constant(0.3)),
+                "{physics:?}"
+            );
+            assert!(other.is_none(), "{physics:?}");
         }
     }
 

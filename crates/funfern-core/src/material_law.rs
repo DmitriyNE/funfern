@@ -2460,6 +2460,58 @@ pub fn number_text(value: f64) -> String {
 mod tests {
     use super::*;
 
+    /// A static scalar operator reads a constant named loss channel on the
+    /// primary field as its damping, leaves the complementary channel to the
+    /// canonical solver, and refuses what it cannot represent.
+    #[test]
+    fn a_static_evaluation_reads_the_primary_loss_channel_as_damping() {
+        use crate::{ElectromagneticPolarization, Material, MaterialFrame, PhysicsModel, Point2};
+        let channel = |rate: f64| LossChannel {
+            base_rate: ScalarField::constant(rate),
+            law: DampingLaw::constant(),
+        };
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let damping = |material: &Material, physics| {
+            material
+                .evaluate_static(physics, MaterialFrame::world(), Point2::default())
+                .map(|values| values.damping)
+        };
+        let mut material = Material::default_medium();
+        material.electric_loss = Some(channel(0.2));
+        assert_eq!(
+            damping(&material, tm),
+            Ok(0.2),
+            "TM's electric loss is primary"
+        );
+        assert_eq!(damping(&material, te), Ok(0.0), "TE's electric loss is not");
+        assert_eq!(damping(&material, PhysicsModel::Mechanical), Ok(0.0));
+        material.magnetic_loss = Some(channel(0.3));
+        assert_eq!(damping(&material, te), Ok(0.3));
+        assert_eq!(damping(&material, PhysicsModel::Mechanical), Ok(0.3));
+
+        material.damping = ScalarField::constant(0.1);
+        assert!(
+            damping(&material, tm).is_err(),
+            "legacy damping beside a channel"
+        );
+        material.damping = ScalarField::constant(0.0);
+        material.electric_loss.as_mut().unwrap().law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(1.0),
+            phase_radians: ScalarField::constant(0.0),
+        };
+        assert_eq!(
+            damping(&material, tm),
+            Err(MaterialError::UnsupportedMaterialLaw),
+            "a driven loss is a law, not a rate"
+        );
+    }
+
     fn parameters() -> Vec<MaterialParameter> {
         vec![
             MaterialParameter {

@@ -11418,3 +11418,62 @@ at 48–200 steps.
 So the growth predates Stage 10 and does not come from the laws. Whether it is
 f32 accumulation or a defect in something the paths share is not diagnosed. It
 is the next thing to look at, on the user's word.
+
+## 2026-09-24 — One group per coefficient, one loss per row, and named loss that runs
+
+Reported: the material editor listed ε₀, μ₀, loss and anisotropy, and then
+Advanced ε and Advanced μ below them. It was also unclear how the basic loss and
+the Advanced loss channels interact. Separately, the autosave failed to assemble.
+
+- **Defect, found by the new tests and the cause of the autosave failure.** A
+  material with a named loss channel did not prepare in the app: "Cannot
+  assemble wave operator: a triangle has an unknown or invalid region
+  material".
+  - The scalar operator the app prepares beside the canonical one evaluated
+    materials through `Material::evaluate`. That refuses anything with
+    `has_laws()`, and a loss channel counts as a law. The canonical solver
+    reads both channels.
+  - So only legacy Damping σ had ever run in the app. The Advanced loss
+    checkboxes from 10.4 made scenes that could not start; the user's
+    autosave had an electric loss of 0.2 on its second material.
+  - Fix: `Material::evaluate_static`. It admits constant loss channels,
+    reads the channel on the skin's primary field (TM electric, TE and
+    Mechanical magnetic) as the scalar operator's damping, and refuses a
+    driven loss and legacy damping beside a channel, as the canonical
+    compiler does. The complementary channel has no scalar spelling and is
+    left to the canonical solver.
+  - The scalar operator's damping is read only by the legacy scalar GPU
+    plan, which the production solver does not use since Stage 6.
+  - A copy of the autosave now prepares (34,203 dofs, primary loss 0.2).
+- **Loss semantics.** Legacy `damping` is a rate on whichever field the skin
+  makes primary. It is exactly the named channel on that row, in the same
+  units; the difference is that a named channel follows its physical field
+  across a skin change. The two cannot both be active.
+- **Layout.**
+  - One collapsible group per coefficient row, in both views: its base value
+    (`s₀` in Mechanical Advanced), its loss rate, then the preset's values
+    for that row (Simplified) or every law slot (Advanced), then the row's
+    nonlinear readout.
+  - After the rows come Anisotropy, the material-wide Switch ramp and
+    button, the effective law and the parameters. A preset acting on both
+    rows shows its values once, above them.
+- **Loss editing.**
+  - Each row has one loss rate: electric with ε and magnetic with μ in both
+    EM polarizations, magnetic with density and electric with `s₀` in
+    Mechanical.
+  - Legacy damping shows as the primary row's "Loss rate (legacy)". The
+    first loss edit on either row moves it into its channel in one undoable
+    Apply; viewing never rewrites it.
+  - A rate edited back to zero with no drive removes the channel.
+  - Advanced adds the row's loss drive. The legacy Damping σ control and the
+    clash warning are gone.
+- **Tests:**
+  - `a_static_evaluation_reads_the_primary_loss_channel_as_damping` covers
+    each skin, the legacy clash and the driven refusal.
+  - `a_legacy_damping_moves_to_its_channel_with_the_same_rates`: the
+    prepared solver's rates are identical before and after the move.
+  - `a_complementary_loss_prepares_and_reaches_the_solver`.
+  - `viewing_a_legacy_damping_leaves_it_where_it_is`: both views, all
+    skins.
+  - `each_row_owns_the_loss_channel_of_its_field`.
+  - The Custom-material and `s₀` tests from 10.4 pass on the new layout.

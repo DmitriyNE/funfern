@@ -208,9 +208,17 @@ running; this file covers using it.
   field; it is not an edit and leaves undo alone. A Kerr or saturable medium
   reads out how far the field has moved it, as the coefficient's peak change
   from its small-signal value, and the Solver section names what lowers the
-  step ceiling. **Advanced**, beside the Library heading, opens every law slot
-  of both rows - field response, drive, Switch alternate, divide - and both
-  named loss channels, with the effective law evaluated at the frame origin.
+  step ceiling. The editor groups everything by coefficient: the density or
+  permittivity group holds its base value, its loss rate and the laws that
+  multiply it, and the stiffness or permeability group the same for its row,
+  so nothing about ε is found under μ. Each row has one loss rate, the loss of
+  that row's physical field (electric with ε, magnetic with μ; in Mechanical,
+  the displacement loss with density and the stress loss with s₀). An older
+  document's Damping σ appears as its primary row's loss, marked legacy, and
+  moves to that named loss the first time it is edited. **Advanced**, beside
+  the Library heading, opens every law slot of each row - field response,
+  drive, Switch alternate, divide, and a driven loss - with the effective law
+  evaluated at the frame origin.
   In Mechanical it presents the stiffness row as the reciprocal stiffness
   `s₀ = 1/k₀` the solver uses, written back as `k₀` only when edited. χ is
   relative: the coefficient is `c₀(1 + χ|u|²)`, not `c₀u + a₃|u|²u`. Only laws

@@ -21,7 +21,7 @@ pub(crate) fn evaluate_material_library_at(
         .iter()
         .find(|material| material.id == region.material)
         .ok_or(MaterialError::InvalidValue)?
-        .evaluate(region.frame, point)?;
+        .evaluate_static(physics, region.frame, point)?;
     let values = physics.wave_coefficients(WaveCoefficients {
         mass_density: properties.mass_density,
         stiffness: properties.stiffness,
@@ -53,7 +53,7 @@ pub(crate) fn evaluate_directional_material_library_at(
         .iter()
         .find(|material| material.id == region.material)
         .ok_or(MaterialError::InvalidValue)?
-        .evaluate(region.frame, point)?;
+        .evaluate_static(physics, region.frame, point)?;
     let values = physics.directional_wave_coefficients(properties, region.frame);
     values
         .valid()

@@ -388,6 +388,57 @@ impl Material {
         self.evaluate_base(frame, point)
     }
 
+    /// The coefficients a static scalar operator sees.
+    ///
+    /// Like [`Self::evaluate`], but a constant named loss channel is not a
+    /// law it has to refuse: it is a rate, and the channel on the field the
+    /// skin makes primary is exactly what legacy `damping` means - TM's
+    /// electric loss, TE's and Mechanical's magnetic loss. That channel's rate
+    /// stands in for `damping`. The complementary channel has no place in a
+    /// scalar operator and is left to the canonical solver, which applies
+    /// both. Legacy damping beside a named channel is refused, as the
+    /// canonical compiler refuses it.
+    pub fn evaluate_static(
+        &self,
+        physics: crate::PhysicsModel,
+        frame: MaterialFrame,
+        point: Point2,
+    ) -> Result<EvaluatedMaterial, MaterialError> {
+        let constant_loss_only = self.mass_law.is_linear()
+            && self.stiffness_law.is_linear()
+            && self.restoring.is_none()
+            && [&self.electric_loss, &self.magnetic_loss]
+                .into_iter()
+                .flatten()
+                .all(|channel| channel.law.is_constant());
+        if !constant_loss_only {
+            return Err(MaterialError::UnsupportedMaterialLaw);
+        }
+        let mut values = self.evaluate_base(frame, point)?;
+        if self.electric_loss.is_none() && self.magnetic_loss.is_none() {
+            return Ok(values);
+        }
+        if values.damping != 0.0 {
+            return Err(MaterialError::InvalidValue);
+        }
+        let primary = match physics {
+            crate::PhysicsModel::Electromagnetic {
+                polarization: crate::ElectromagneticPolarization::Tm,
+            } => &self.electric_loss,
+            _ => &self.magnetic_loss,
+        };
+        if let Some(channel) = primary {
+            let rate = channel
+                .base_rate
+                .evaluate(frame.coordinates(point), &self.parameters)?;
+            if !rate.is_finite() || rate < 0.0 {
+                return Err(MaterialError::InvalidValue);
+            }
+            values.damping = rate;
+        }
+        Ok(values)
+    }
+
     /// The base coefficients, with any authored law left unapplied.
     ///
     /// [`Self::evaluate`] refuses a law-carrying material on purpose, so that

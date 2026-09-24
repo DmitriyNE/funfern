@@ -442,116 +442,147 @@ impl Playground {
                     Err(error) => self.notify(error.to_string()),
                 }
             }
-            ui.separator();
-            let labels = material_editor_labels(self.editor.document.model.draft.physics);
-            material_scalar_editor(
-                ui,
-                (material.id.0, 0),
-                labels.mass,
-                &mut material.mass_density,
-                &material.parameters,
-                0.000001,
-                &mut self.material_formula_edits,
-                &mut self.material_formula_errors,
-            );
+            let labels = material_editor_labels(physics);
             let advanced = self.editor.document.presentation.advanced_materials;
-            // `k₀` and `s₀` are one coefficient shown two ways; each editor
-            // caches its own text, so the one not on screen forgets it rather
-            // than reappearing with a value from before the other was edited.
-            let hidden = if advanced && physics == PhysicsModel::Mechanical {
-                1
-            } else {
-                law_editor::RECIPROCAL_STIFFNESS
-            };
-            self.material_formula_edits.remove(&(material.id.0, hidden));
-            self.material_formula_errors
-                .remove(&(material.id.0, hidden));
-            if advanced && physics == PhysicsModel::Mechanical {
-                law_editor::reciprocal_stiffness_editor(
-                    ui,
-                    &mut material,
-                    &mut law_editor::FormulaEdits {
-                        edits: &mut self.material_formula_edits,
-                        errors: &mut self.material_formula_errors,
-                    },
-                );
-            } else {
-                material_scalar_editor(
-                    ui,
-                    (material.id.0, 1),
-                    labels.stiffness,
-                    &mut material.stiffness,
-                    &material.parameters,
-                    0.000001,
-                    &mut self.material_formula_edits,
-                    &mut self.material_formula_errors,
-                );
-            }
-            material_scalar_editor(
-                ui,
-                (material.id.0, 2),
-                labels.damping,
-                &mut material.damping,
-                &material.parameters,
-                0.0,
-                &mut self.material_formula_edits,
-                &mut self.material_formula_errors,
+            let sources = source_frequencies(
+                &self.editor.document.model.source,
+                &self.editor.document.model.draft,
             );
-            material_scalar_editor(
-                ui,
-                (material.id.0, 3),
-                labels.axis_ratio,
-                &mut material.axis_ratio,
-                &material.parameters,
-                1.0,
-                &mut self.material_formula_edits,
-                &mut self.material_formula_errors,
-            );
-            // The preset's own values, below the base ones and separated from
-            // them, because the two behave differently: a base coefficient
-            // survives a change of preset, and these are replaced by it.
             // Recomputed, because applying a preset above changed the material.
             let matched = identify_law_preset(&material);
             let preset_owned = matched
                 .as_ref()
                 .map(|found| found.parameters.iter().cloned().collect::<BTreeSet<_>>())
                 .unwrap_or_default();
+            // A preset acting on both rows at once has one set of values for
+            // the pair, so they sit here rather than under either row.
             if matched
                 .as_ref()
-                .is_some_and(|found| !found.preset.variables.is_empty())
+                .is_some_and(|found| found.preset.row == LawPresetRow::Both)
             {
-                ui.separator();
+                preset_values(ui, &mut material, matched.as_ref(), None, &sources);
             }
-            let sources = source_frequencies(
-                &self.editor.document.model.source,
-                &self.editor.document.model.draft,
-            );
-            if let Some(found) = &matched {
-                for (variable, name) in found.preset.variables.iter().zip(&found.parameters) {
-                    let Some(parameter) = material
-                        .parameters
-                        .iter_mut()
-                        .find(|parameter| parameter.name == *name)
-                    else {
-                        continue;
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label(variable.label);
-                        ui.add(
-                            egui::DragValue::new(&mut parameter.value)
-                                .speed(0.005)
-                                .range(variable.minimum..=variable.maximum)
-                                .update_while_editing(false),
+            let strength = self
+                .nonlinear_strength
+                .iter()
+                .find(|strength| strength.material == material.id)
+                .copied();
+            // `k₀` and `s₀` are one coefficient shown two ways; each editor
+            // caches its own text, so the one not on screen forgets it rather
+            // than reappearing with a value from before the other was edited.
+            // The legacy damping slot has no editor of its own any more.
+            let reciprocal = advanced && physics == PhysicsModel::Mechanical;
+            for hidden in [
+                if reciprocal {
+                    1
+                } else {
+                    law_editor::RECIPROCAL_STIFFNESS
+                },
+                2,
+            ] {
+                self.material_formula_edits.remove(&(material.id.0, hidden));
+                self.material_formula_errors
+                    .remove(&(material.id.0, hidden));
+            }
+            // One group per coefficient: its base value, its loss, and every
+            // law that multiplies it, so nothing about ε is found under μ.
+            for row in [LawPresetRow::Mass, LawPresetRow::Stiffness] {
+                let title = match row {
+                    LawPresetRow::Stiffness if reciprocal => "Reciprocal stiffness s₀",
+                    LawPresetRow::Stiffness => labels.stiffness,
+                    _ => labels.mass,
+                };
+                egui::CollapsingHeader::new(title)
+                    .id_salt(("material-row", material.id.0, row == LawPresetRow::Mass))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let mut formulas = law_editor::FormulaEdits {
+                            edits: &mut self.material_formula_edits,
+                            errors: &mut self.material_formula_errors,
+                        };
+                        match row {
+                            LawPresetRow::Stiffness if reciprocal => {
+                                law_editor::reciprocal_stiffness_editor(
+                                    ui,
+                                    &mut material,
+                                    &mut formulas,
+                                );
+                            }
+                            LawPresetRow::Stiffness => material_scalar_editor(
+                                ui,
+                                (material.id.0, 1),
+                                "Base",
+                                &mut material.stiffness,
+                                &material.parameters,
+                                0.000001,
+                                formulas.edits,
+                                formulas.errors,
+                            ),
+                            _ => material_scalar_editor(
+                                ui,
+                                (material.id.0, 0),
+                                "Base",
+                                &mut material.mass_density,
+                                &material.parameters,
+                                0.000001,
+                                formulas.edits,
+                                formulas.errors,
+                            ),
+                        }
+                        law_editor::loss_rate_editor(
+                            ui,
+                            &mut material,
+                            physics,
+                            row,
+                            advanced,
+                            &mut formulas,
                         );
-                        if variable.parameter == "pump_hz" {
-                            double_source_button(ui, &sources, &mut parameter.value);
+                        if advanced {
+                            law_editor::law_slots_editor(
+                                ui,
+                                &mut material,
+                                row,
+                                &sources,
+                                &mut formulas,
+                            );
+                        } else {
+                            preset_values(ui, &mut material, matched.as_ref(), Some(row), &sources);
+                        }
+                        // How far the field has taken this coefficient from its
+                        // small-signal value right now, so a Kerr run that is
+                        // barely nonlinear is told apart from one running no
+                        // law at all.
+                        if let Some(strength) = strength
+                            && let Some(line) =
+                                nonlinear_strength_line(&material, &strength, physics, row)
+                        {
+                            ui.small(line).on_hover_text(
+                                "The largest change of this coefficient anywhere in the \
+                                 material, from the latest field: for Kerr it is χ|u|². A few \
+                                 percent is nearly linear; self-focusing and harmonics become \
+                                 plain towards 100%.",
+                            );
                         }
                     });
-                }
             }
+            egui::CollapsingHeader::new("Anisotropy")
+                .id_salt(("material-anisotropy", material.id.0))
+                .default_open(material.axis_ratio != ScalarField::constant(1.0))
+                .show(ui, |ui| {
+                    material_scalar_editor(
+                        ui,
+                        (material.id.0, 3),
+                        labels.axis_ratio,
+                        &mut material.axis_ratio,
+                        &material.parameters,
+                        1.0,
+                        &mut self.material_formula_edits,
+                        &mut self.material_formula_errors,
+                    );
+                });
             // A Switch's ramp is one number on the material rather than a slot
-            // on a row, so it is edited here rather than exposed as a preset
-            // variable. Zero is a hard temporal interface.
+            // on a row: it moves every row's alternate together. Zero is a
+            // hard temporal interface.
             if material.mass_law.alternate.is_some() || material.stiffness_law.alternate.is_some() {
                 ui.horizontal(|ui| {
                     ui.label("Switch ramp");
@@ -599,19 +630,7 @@ impl Playground {
                     }
                 });
             }
-            if advanced {
-                law_editor::advanced_law_editor(
-                    ui,
-                    &mut material,
-                    physics,
-                    &sources,
-                    &mut law_editor::FormulaEdits {
-                        edits: &mut self.material_formula_edits,
-                        errors: &mut self.material_formula_errors,
-                    },
-                );
-                ui.separator();
-            }
+            ui.separator();
             // What the laws compose to, in the names the preset gave them.
             for line in material_law_summary(&material, physics, LawSummaryDetail::Named)
                 .unwrap_or_default()
@@ -620,22 +639,6 @@ impl Playground {
             }
             if advanced {
                 law_editor::numeric_law_summary(ui, &material, physics);
-            }
-            // How far the field has taken this medium from its small-signal
-            // response right now, so a Kerr run that is barely nonlinear is
-            // told apart from one that is not running a law at all.
-            if let Some(strength) = self
-                .nonlinear_strength
-                .iter()
-                .find(|strength| strength.material == material.id)
-            {
-                for line in nonlinear_strength_lines(&material, strength, physics) {
-                    ui.small(line).on_hover_text(
-                        "The largest change of this coefficient anywhere in the material, \
-                         from the latest field: for Kerr it is χ|u|². A few percent is nearly \
-                         linear; self-focusing and harmonics become plain towards 100%.",
-                    );
-                }
             }
 
             // Only the parameters the user made. A preset's own are above,
@@ -883,39 +886,71 @@ impl Playground {
     }
 }
 
-/// One line per row of `material` whose law follows the field, reading the
-/// row's peak change from its small-signal value.
-fn nonlinear_strength_lines(
+/// The preset's own values, as the labels it gave them. With `row`, only a
+/// one-row preset acting on that row; without, only a preset acting on both.
+fn preset_values(
+    ui: &mut egui::Ui,
+    material: &mut Material,
+    matched: Option<&LawPresetMatch>,
+    row: Option<LawPresetRow>,
+    sources: &[(String, f64)],
+) {
+    let Some(found) = matched else { return };
+    let belongs = match row {
+        Some(row) => found.preset.row == row,
+        None => found.preset.row == LawPresetRow::Both,
+    };
+    if !belongs {
+        return;
+    }
+    for (variable, name) in found.preset.variables.iter().zip(&found.parameters) {
+        let Some(parameter) = material
+            .parameters
+            .iter_mut()
+            .find(|parameter| parameter.name == *name)
+        else {
+            continue;
+        };
+        ui.horizontal(|ui| {
+            ui.label(variable.label);
+            ui.add(
+                egui::DragValue::new(&mut parameter.value)
+                    .speed(0.005)
+                    .range(variable.minimum..=variable.maximum)
+                    .update_while_editing(false),
+            );
+            if variable.parameter == "pump_hz" {
+                double_source_button(ui, sources, &mut parameter.value);
+            }
+        });
+    }
+}
+
+/// The row's peak change from its small-signal value, if its law follows the
+/// field.
+fn nonlinear_strength_line(
     material: &Material,
     strength: &CanonicalNonlinearStrength,
     physics: PhysicsModel,
-) -> Vec<String> {
-    let percent = |value: f64| {
-        let percent = 100.0 * value;
-        if percent < 0.1 {
-            format!("{percent:.2}%")
-        } else {
-            format!("{percent:.1}%")
-        }
+    row: LawPresetRow,
+) -> Option<String> {
+    let (law, value) = match row {
+        LawPresetRow::Stiffness => (&material.stiffness_law, strength.complementary),
+        _ => (&material.mass_law, strength.primary),
     };
-    [
-        (&material.mass_law, LawPresetRow::Mass, strength.primary),
-        (
-            &material.stiffness_law,
-            LawPresetRow::Stiffness,
-            strength.complementary,
-        ),
-    ]
-    .into_iter()
-    .filter(|(law, _, _)| law.field != FieldLaw::Linear)
-    .map(|(_, row, value)| {
-        format!(
-            "Now: {} up to +{} from its small-signal value",
-            law_row_label(physics, row),
-            percent(value)
-        )
-    })
-    .collect()
+    if law.field == FieldLaw::Linear {
+        return None;
+    }
+    let percent = 100.0 * value;
+    let percent = if percent < 0.1 {
+        format!("{percent:.2}%")
+    } else {
+        format!("{percent:.1}%")
+    };
+    Some(format!(
+        "Now: {} up to +{percent} from its small-signal value",
+        law_row_label(physics, row)
+    ))
 }
 
 #[cfg(test)]
@@ -935,34 +970,95 @@ mod tests {
         let strength = CanonicalNonlinearStrength {
             material: material.id,
             primary: 0.0534,
-            complementary: 0.0,
+            complementary: 0.0004,
         };
-        let physics = PhysicsModel::Electromagnetic {
+        let tm = PhysicsModel::Electromagnetic {
             polarization: ElectromagneticPolarization::Tm,
         };
         assert_eq!(
-            nonlinear_strength_lines(&material, &strength, physics),
-            ["Now: Permittivity ε up to +5.3% from its small-signal value"]
+            nonlinear_strength_line(&material, &strength, tm, LawPresetRow::Mass).as_deref(),
+            Some("Now: Permittivity ε up to +5.3% from its small-signal value")
+        );
+        assert_eq!(
+            nonlinear_strength_line(&material, &strength, tm, LawPresetRow::Stiffness),
+            None,
+            "a linear row has nothing to read out"
         );
         material.stiffness_law.field = FieldLaw::Saturable {
             chi: ScalarField::constant(6.0),
             saturation: ScalarField::constant(0.3),
         };
-        let strength = CanonicalNonlinearStrength {
-            complementary: 0.0004,
-            ..strength
-        };
         assert_eq!(
-            nonlinear_strength_lines(&material, &strength, PhysicsModel::Mechanical),
-            [
-                "Now: Density ρ₀ up to +5.3% from its small-signal value",
-                "Now: Reciprocal stiffness s₀ up to +0.04% from its small-signal value",
-            ]
+            nonlinear_strength_line(
+                &material,
+                &strength,
+                PhysicsModel::Mechanical,
+                LawPresetRow::Stiffness
+            )
+            .as_deref(),
+            Some("Now: Reciprocal stiffness s₀ up to +0.04% from its small-signal value")
         );
     }
 
-    /// The Advanced toggle is a view: it changes neither the model, nor its
-    /// revision, nor the undo history, and it survives the file.
+    /// A loss on the complementary row has no legacy spelling at all. It must prepare, and reach the canonical solver as that row's
+    /// loss.
+    #[test]
+    fn a_complementary_loss_prepares_and_reaches_the_solver() {
+        let mut state = Playground::default();
+        let mut material = state.editor.document.model.draft.materials[0].clone();
+        let channel = Some(LossChannel {
+            base_rate: ScalarField::constant(0.25),
+            law: DampingLaw::constant(),
+        });
+        // The complementary row's channel in whatever skin the default
+        // document uses: electric in Mechanical, magnetic in the EM skins.
+        let physics = state.editor.document.model.draft.physics;
+        if law_editor::row_is_electric(physics, LawPresetRow::Stiffness) {
+            material.electric_loss = channel;
+        } else {
+            material.magnetic_loss = channel;
+        }
+        state.editor.update_material(material).unwrap();
+        settle(&mut state.editor);
+        let prepared = activate(&mut state);
+        let rates = &prepared.canonical_operator;
+        assert!(
+            rates
+                .complementary_loss_rate()
+                .iter()
+                .any(|rate| *rate > 0.0)
+        );
+        assert!(rates.primary_loss_rate().iter().all(|rate| *rate == 0.0));
+    }
+
+    /// Editing a legacy material's loss moves it to its named channel in one
+    /// step, and the solver's rates are the same before and after.
+    #[test]
+    fn a_legacy_damping_moves_to_its_channel_with_the_same_rates() {
+        let mut state = Playground::default();
+        let mut material = state.editor.document.model.draft.materials[0].clone();
+        material.damping = ScalarField::constant(0.3);
+        state.editor.update_material(material.clone()).unwrap();
+        settle(&mut state.editor);
+        let legacy = activate(&mut state);
+        let physics = state.editor.document.model.draft.physics;
+        law_editor::adopt_legacy_damping(&mut material, physics);
+        state.editor.update_material(material).unwrap();
+        settle(&mut state.editor);
+        let named = activate(&mut state);
+        let rates = |prepared: &PreparedTopology| {
+            (
+                prepared.canonical_operator.primary_loss_rate().to_vec(),
+                prepared
+                    .canonical_operator
+                    .complementary_loss_rate()
+                    .to_vec(),
+            )
+        };
+        assert!(rates(&legacy).0.iter().any(|rate| *rate > 0.0));
+        assert_eq!(rates(&legacy), rates(&named));
+    }
+
     #[test]
     fn the_advanced_view_is_presentation_not_an_edit() {
         let mut state = Playground::default();
