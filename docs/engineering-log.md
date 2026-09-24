@@ -12315,3 +12315,40 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check pass. The scene click calls the same
   helper and was not exercised through a pointer event.
+
+## 2026-09-25 — The double slit's source in a black box (gallery 1–2)
+
+First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
+
+- **Double slit.** The top and bottom walls reflected, so the channel held
+  standing modes that never left, and the baffles stopped 0.10 short of the
+  walls, which made two more slits. The source now sits in a box of baffles:
+  one open polyline whose three box spans absorb on the inside (second order)
+  and reflect outside, and whose two end spans and a middle baffle form the
+  screen. No region or material is involved. Every outer wall is outgoing, the
+  far field is on at inset 0.08, and a segment probe 0.85 behind the slits is
+  the screen. The builder gained open curves with per-span behaviours.
+- **Where the source goes matters.** With the source 0.5 behind the slits,
+  each slit was lit 27° off its normal and beamed away from the other, and
+  the screen's first dark fringe held 0.45 of the centre's amplitude. At the
+  back of the box (0.78 behind) it holds 0.31, a tenth in intensity. A slit
+  narrowed to 0.02 still passed half the field: a slit in a hard screen
+  transmits strongly in 2D, so width is not the knob.
+- **Far field, measured.** The test projects the steady harmonic field from
+  the document's own Huygens contour with the frequency-domain Kirchhoff
+  integral, using the compiled contour stencils. At edge 0.08, relative to
+  the centre:
+
+  | Direction | Predicted | Measured |
+  | --- | --- | --- |
+  | ±19.5° | zero | 0.06 |
+  | ±41.8° | side lobe | 0.64 (0.68 at 40°) |
+  | 180° | – | 0.25, round the screen's ends |
+
+  Test: `the_double_slit_draws_its_fringes_on_the_screen_and_in_the_far_field`.
+- **Starter obstacle.** Its description promised a reflecting floor, and both
+  walls reflected. Only the floor does now.
+- **Device.** `canonical_gpu_long_run` at 400 steps: double slit Q 1.0e-6,
+  b 1.4e-6; starter Q 8.5e-7, b 1.0e-6, inside the Stage 0 bound.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

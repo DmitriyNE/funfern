@@ -27,7 +27,8 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 "Double slit",
-                "A point source illuminates two apertures in a reflecting waveguide.",
+                "A source boxed in black walls lights two slits; the screen and the far field show \
+                 the fringes.",
                 double_slit(),
             ),
             example(
@@ -183,13 +184,21 @@ impl Builder {
     }
 
     fn baffle(&mut self, spline: OpenCubicSpline) -> CurveId {
+        let behaviors = vec![SpanBehavior::REFLECTING; spline.intervals().len()];
+        self.open_curve(spline, &behaviors)
+    }
+
+    /// An open curve whose spans carry the given behaviours, in order.
+    fn open_curve(&mut self, spline: OpenCubicSpline, behaviors: &[SpanBehavior]) -> CurveId {
+        assert_eq!(behaviors.len(), spline.intervals().len());
         let curve = CurveId(self.next_curve);
         self.next_curve += 1;
-        let spans = (0..spline.intervals().len())
-            .map(|_| {
+        let spans = behaviors
+            .iter()
+            .map(|behavior| {
                 let span = CurveSpan {
                     id: CurveSpanId(self.next_span),
-                    behavior: SpanBehavior::REFLECTING,
+                    behavior: *behavior,
                 };
                 self.next_span += 1;
                 span
@@ -228,16 +237,16 @@ fn source(position: Point2, frequency: f64, amplitude: f64, width: f64) -> Point
     }
 }
 
-fn reflecting_channel() -> OuterBoundaryConditions {
+/// Outgoing on every side but the floor.
+fn reflecting_floor() -> OuterBoundaryConditions {
     let mut boundaries = OuterBoundaryConditions::default();
     boundaries.sides[OuterSide::Bottom.index()] = OuterBoundaryCondition::Reflecting;
-    boundaries.sides[OuterSide::Top.index()] = OuterBoundaryCondition::Reflecting;
     boundaries
 }
 
 fn starter_obstacle() -> TopologyDocument {
     let mut builder = Builder::new();
-    builder.scene.outer_boundaries = reflecting_channel();
+    builder.scene.outer_boundaries = reflecting_floor();
     builder.hole(PeriodicCubicSpline::rounded(Point2::new(0.1, 0.05), 0.22));
     let mut document = builder.document();
     document.model.source = source(Point2::new(-0.55, 0.05), 2.5, 18.0, 0.06);
@@ -255,14 +264,63 @@ fn straight_baffle(y0: f64, y1: f64) -> OpenCubicSpline {
     OpenCubicSpline::polyline(vec![Point2::new(0.0, y0), Point2::new(0.0, y1)]).unwrap()
 }
 
+/// A wall that absorbs on its left face and reflects on its right.
+const ABSORBING_LEFT: SpanBehavior = SpanBehavior::Separated {
+    left: FaceBoundaryCondition::SecondOrderOutgoing,
+    right: FaceBoundaryCondition::Reflecting,
+    coupling: InternalBoundaryCoupling::Independent,
+};
+
+/// The source sits in a box that is black inside and reflecting outside, so
+/// nothing leaves it except through the two slits in its right side, and the
+/// far field sees the two-slit pattern alone.
 fn double_slit() -> TopologyDocument {
+    double_slit_with(0.11, -0.85, -0.78)
+}
+
+/// Slits of half-width `half_width` centred at ±0.25 in the box's right side,
+/// the box's back wall at `back` and the source at `source_x`.
+fn double_slit_with(half_width: f64, back: f64, source_x: f64) -> TopologyDocument {
     let mut builder = Builder::new();
-    builder.scene.outer_boundaries = reflecting_channel();
-    builder.baffle(straight_baffle(-0.9, -0.36));
-    builder.baffle(straight_baffle(-0.14, 0.14));
-    builder.baffle(straight_baffle(0.36, 0.9));
+    builder.scene.outer_boundaries =
+        OuterBoundaryConditions::uniform(OuterBoundaryCondition::SecondOrderOutgoing);
+    // Anticlockwise round the box, so its inside is on the curve's left.
+    builder.open_curve(
+        OpenCubicSpline::polyline(vec![
+            Point2::new(0.0, 0.25 + half_width),
+            Point2::new(0.0, 0.6),
+            Point2::new(back, 0.6),
+            Point2::new(back, -0.6),
+            Point2::new(0.0, -0.6),
+            Point2::new(0.0, -0.25 - half_width),
+        ])
+        .unwrap(),
+        &[
+            SpanBehavior::REFLECTING,
+            ABSORBING_LEFT,
+            ABSORBING_LEFT,
+            ABSORBING_LEFT,
+            SpanBehavior::REFLECTING,
+        ],
+    );
+    builder.baffle(straight_baffle(-0.25 + half_width, 0.25 - half_width));
     let mut document = builder.document();
-    document.model.source = source(Point2::new(-0.62, 0.0), 3.0, 20.0, 0.05);
+    document.model.source = source(Point2::new(source_x, 0.0), 3.0, 20.0, 0.05);
+    document.model.far_field = FarFieldSettings {
+        enabled: true,
+        inset: 0.08,
+    };
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Screen".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Segment {
+            start: Point2::new(0.85, -0.85),
+            end: Point2::new(0.85, 0.85),
+            preset: ProbeSamplingPreset::High,
+        },
+    });
     document
 }
 
@@ -832,6 +890,151 @@ mod tests {
         2.0 * (re * re + im * im).sqrt() / count as f64
     }
 
+    /// The steady complex amplitude at one frequency on every node, from the
+    /// last whole periods of a run from rest.
+    struct Harmonic {
+        prepared: Arc<crate::topology_runtime::PreparedTopology>,
+        nodes: Vec<Point2>,
+        amplitude: Vec<(f64, f64)>,
+        wavenumber: f64,
+    }
+
+    impl Harmonic {
+        fn run(
+            document: &TopologyDocument,
+            edge: f64,
+            seconds: f64,
+            frequency: f64,
+            periods: f64,
+        ) -> Self {
+            let prepared = prepare(document, edge);
+            let forcing = prepared.canonical_forcing.clone();
+            let dt = prepared.recommended_time_step();
+            let steps = (seconds / dt).ceil() as usize;
+            let window = ((periods / frequency) / dt).round() as usize;
+            let omega = std::f64::consts::TAU * frequency;
+            let mut amplitude = Vec::new();
+            let mut accumulate = |step: usize, time: f64, field: &[f64]| {
+                if step + window < steps {
+                    return;
+                }
+                amplitude.resize(field.len(), (0.0, 0.0));
+                let (sin, cos) = (omega * time).sin_cos();
+                let scale = 2.0 / window as f64;
+                for (sum, value) in amplitude.iter_mut().zip(field) {
+                    sum.0 += scale * value * cos;
+                    sum.1 -= scale * value * sin;
+                }
+            };
+            let nodes = match prepared.canonical_temporal_operator.clone() {
+                Some(operator) => {
+                    let mut state = CanonicalTemporalWaveState::zero(&operator, dt)
+                        .unwrap()
+                        .pinned(&operator, &forcing)
+                        .unwrap();
+                    for step in 0..steps {
+                        state.step_with_forcing(&operator, &forcing).unwrap();
+                        let field = operator
+                            .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                            .unwrap();
+                        accumulate(step, state.time(), &field);
+                    }
+                    operator.base().node_points().to_vec()
+                }
+                None => {
+                    let operator = prepared.canonical_operator.clone();
+                    let mut state = CanonicalWaveState::zero(&operator, dt).unwrap();
+                    for step in 0..steps {
+                        state.step_with_forcing(&operator, &forcing).unwrap();
+                        accumulate(step, state.time(), &state.primary_field(&operator).unwrap());
+                    }
+                    operator.node_points().to_vec()
+                }
+            };
+            // The exterior's speed: the far field needs it, and nothing else
+            // here does.
+            let wavenumber = omega
+                / prepared
+                    .far_field
+                    .as_ref()
+                    .and_then(|far| far.as_ref().ok())
+                    .map_or(1.0, |far| far.wave_speed);
+            Self {
+                prepared,
+                nodes,
+                amplitude,
+                wavenumber,
+            }
+        }
+
+        /// `|U|` at the node nearest `point`.
+        fn at(&self, point: Point2) -> f64 {
+            let node = self
+                .nodes
+                .iter()
+                .enumerate()
+                .min_by(|a, b| (*a.1 - point).norm().total_cmp(&(*b.1 - point).norm()))
+                .unwrap()
+                .0;
+            let (re, im) = self.amplitude[node];
+            re.hypot(im)
+        }
+
+        /// `|U|` at `count` evenly spaced points from `start` to `end`.
+        fn along(&self, start: Point2, end: Point2, count: usize) -> Vec<f64> {
+            (0..count)
+                .map(|index| self.at(start + (end - start) * (index as f64 / (count - 1) as f64)))
+                .collect()
+        }
+
+        /// The far-field magnitude towards `degrees`, projected from the
+        /// document's own Huygens contour by the frequency-domain Kirchhoff
+        /// integral `∮ (ik n·ŝ U − ∂ₙU) e^{ik ŝ·y} ds`.
+        fn far_field(&self, degrees: f64) -> f64 {
+            let stencil = self
+                .prepared
+                .far_field
+                .as_ref()
+                .expect("the document enables its far field")
+                .as_ref()
+                .expect("the far field compiles");
+            assert_eq!(
+                self.nodes.len(),
+                self.prepared.operator.degrees_of_freedom()
+            );
+            let k = self.wavenumber;
+            let direction = Point2::new(degrees.to_radians().cos(), degrees.to_radians().sin());
+            let (mut re, mut im) = (0.0, 0.0);
+            for (point, position, normal) in &stencil.samples {
+                let (mut value, mut gradient) =
+                    ((0.0, 0.0), (Point2::default(), Point2::default()));
+                for ((node, weight), slope) in point
+                    .nodes
+                    .iter()
+                    .zip(point.value_weights)
+                    .zip(point.gradient_weights)
+                {
+                    let (a, b) = self.amplitude[*node as usize];
+                    value.0 += weight * a;
+                    value.1 += weight * b;
+                    gradient.0 = gradient.0 + slope * a;
+                    gradient.1 = gradient.1 + slope * b;
+                }
+                let normal_derivative = (normal.dot(gradient.0), normal.dot(gradient.1));
+                let obliquity = k * normal.dot(direction);
+                // ik(n·ŝ)U − ∂ₙU
+                let term = (
+                    -obliquity * value.1 - normal_derivative.0,
+                    obliquity * value.0 - normal_derivative.1,
+                );
+                let (sin, cos) = (k * direction.dot(*position)).sin_cos();
+                re += term.0 * cos - term.1 * sin;
+                im += term.0 * sin + term.1 * cos;
+            }
+            re.hypot(im)
+        }
+    }
+
     /// The Kerr gallery claim: behind the slab, the receiver hears the
     /// source's third harmonic, which a medium with the same geometry and no
     /// response does not make; and the slab's coefficient moves by tens of
@@ -1062,5 +1265,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The double-slit gallery claim. Slits 0.5 apart at wavelength 1/3 put
+    /// the far field's zeros at sin θ = 1/3 and its side lobes at
+    /// sin θ = 2/3: 19.5° and 41.8°. The screen 0.85 behind the slits is in
+    /// the near zone, so its fringes sit a little inside those angles.
+    #[test]
+    fn the_double_slit_draws_its_fringes_on_the_screen_and_in_the_far_field() {
+        let scene = Harmonic::run(&double_slit(), 0.08, 6.0, 3.0, 3.0);
+        let centre = scene.far_field(0.0);
+        for side in [1.0, -1.0] {
+            let zero = scene.far_field(side * 19.47) / centre;
+            let lobe = scene.far_field(side * 41.81) / centre;
+            assert!(
+                zero < 0.15,
+                "{side}: the zero holds {zero:.3} of the centre"
+            );
+            assert!(lobe > 0.5, "{side}: the side lobe holds {lobe:.3}");
+        }
+        let behind = scene.far_field(180.0) / centre;
+        assert!(behind < 0.35, "{behind:.3} went back round the box");
+        let screen = scene.along(Point2::new(0.85, 0.0), Point2::new(0.85, 0.85), 18);
+        let dark = screen[5..9].iter().cloned().fold(f64::MAX, f64::min) / screen[0];
+        let bright = screen[12..16].iter().cloned().fold(0.0, f64::max) / screen[0];
+        assert!(
+            dark < 0.4,
+            "the first dark fringe holds {dark:.3} of the centre"
+        );
+        assert!(bright > 0.6, "the first bright fringe holds {bright:.3}");
     }
 }

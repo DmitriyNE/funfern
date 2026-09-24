@@ -1,0 +1,486 @@
+# Gallery plan: Stage 11.5 and the scenes after it
+
+**Date:** 25 September 2026
+
+**Status:** proposed, awaiting review. Nothing here is built yet.
+
+## Purpose
+
+The gallery is where the solver's physics is seen. Every scene in it must
+satisfy three things, as the four Stage 10 slabs already do:
+
+1. A description that says what the scene shows, in one or two sentences.
+2. A measured claim: a CPU test in `topology_examples.rs` that runs the scene's
+   own document at a coarse mesh and asserts the number the description
+   promises, against a control where one exists. The tolerance is set from the
+   scene's first run and recorded in the engineering log.
+3. A device run through `canonical_gpu_long_run` with the scene's name, inside
+   the Stage 0 bound, before the commit.
+
+A scene whose claim cannot be measured is not shipped. A scene whose physics
+needs something the solver does not have is filed under "Blocked" at the end,
+not approximated.
+
+Scenes are built in `topology_examples.rs` with the existing `Builder`, which
+gains what the new geometry needs (see "Groundwork"). Each scene is one
+commit with the full gate and a dated log entry.
+
+## Conventions used below
+
+- The domain is the unit square `[−1, 1]²`. Frequencies are in Hz, the free
+  wave speed is 1, so a source at 3 Hz has wavelength 1/3.
+- "Launcher" is a plane-wave source: a thin volume-source strip spanning a
+  channel, built as the face between two wall-attached transmitting dividers,
+  with a uniform profile. It radiates both ways; the outer wall behind it is
+  outgoing and takes the backward wave. A Dirichlet wall is not used as a
+  launcher where anything reflects back to it, because a Dirichlet wall
+  reflects fully and makes a cavity.
+- "Channel" is a scene whose top and bottom walls reflect so that a y-uniform
+  wave stays uniform. It is used only where the wave is y-uniform.
+- "Outgoing" without qualification is the second-order condition.
+- Claims are measured on the CPU reference at the mesh edge named in the test.
+  Where a claim needs a phase, the trace helper returns the complex amplitude
+  at the drive frequency over the last whole periods.
+
+## Batch A: existing scenes and groundwork
+
+### 1. Double slit
+
+Today the top and bottom walls reflect, which traps channel modes, and the
+baffles stop at y = ±0.90 while the walls sit at ±1.0, so each end leaves a
+0.10 gap that is itself a slit.
+
+New build: the source sits in a box made of baffles. One C-shaped open
+polyline runs from (0, 0.36) up to (0, 0.60), left to (−0.75, 0.60), down to
+(−0.75, −0.60), right to (0, −0.60) and up to (0, −0.36). Its first and last
+spans are the outer screen pieces, reflecting on both faces. Its three box
+spans absorb on the inside with the second-order condition and reflect on the
+outside. The middle screen piece from (0, −0.14) to (0, 0.14) is a second
+baffle, reflecting on both faces. The slits are the two gaps, width 0.22,
+centres ±0.25. There is no region and no material: the box interior is the
+background face, reached through the slits. The source stays at 3 Hz,
+moved to (−0.50, 0). All four outer walls are outgoing. The far field is on
+with inset 0.08, and every curve lies inside its contour. A segment probe at
+x = 0.85 from y = −0.85 to 0.85 is the screen.
+
+Claims, with the screen 0.85 behind the slits, spacing 0.5, wavelength 1/3:
+
+| Where | Expected |
+| --- | --- |
+| screen, y = 0 | central maximum |
+| screen, y = ±0.31 | minima, RMS well below the centre |
+| screen, y = ±0.77 | side maxima, about half the central intensity |
+| far field, 0° and ±41.8° | the three lobes; nothing on the source side |
+
+Nothing leaves the box except through the slits, so the far-field pattern is
+the two-slit pattern alone.
+
+### 2. Starter obstacle
+
+The description says "above a reflecting floor" but both walls reflect. The
+top wall becomes outgoing; the floor stays.
+
+### 3. GRIN collimator
+
+The rod becomes a quarter-pitch collimator: a point source on its entrance
+base leaves the other base as a collimated beam. The profile changes from
+`smoothstep` to parabolic, `n = 1 + dn·max(0, 1 − (y/H)²)`, because the
+smoothstep profile is flat to fourth order on the axis and has no paraxial
+pitch. With `H = 0.3` and `dn = 0.6` the paraxial pitch is
+`2πH·√((1 + dn)/(2dn)) = 2.18`, so the rod is 0.55 long: x from −0.55 to 0,
+y from −0.3 to 0.3, rectangular. The source sits inside the rod on the
+entrance base at (−0.54, 0), 4 Hz. Mass and stiffness stay reciprocal so the
+impedance is matched, as today.
+
+Claims: the phase of the field at 4 Hz along x = 0.05 is flat to λ/8 over
+the central 70% of the aperture; at x = 0.6 at least 70% of the RMS power
+across the domain height lies within the aperture, against under 35% for the
+bare source. Rays far from the axis have a shorter pitch, which is why the
+claim is on the central 70%.
+
+### 4. Luneburg lens, angled illumination
+
+The left-wall Dirichlet drive goes back to outgoing. A straight open curve
+becomes the radiator: 1.1 long, tilted so its normal points along 30° above
+the x axis through the lens centre, so its centre is at (−0.66, −0.43). Its
+lens-facing face is a prescribed Neumann flux at 3.5 Hz; its back face is
+second-order outgoing. The focus moves to the rim point in the propagation
+direction, (0.45, 0.21).
+
+Claims: the energy in a disk of radius 0.065 at the new focus exceeds twice
+the energy in the same disk at the old focus (0.485, 0); the lens-energy
+probe stays.
+
+Fallback if the canonical operator refuses an internal Neumann face: a thin
+tilted volume-source slab, 1.1 by 0.06, which the phased array already
+proves. It radiates both ways and the backward wave leaves through the
+outgoing walls.
+
+### 5. Groundwork
+
+- `Builder`: per-span behaviours on one curve; open curves whose ends attach
+  to outer walls; faces bounded by walls and dividers assigned to a region.
+- `PresentationSettings` gains the integrated-field view, persisted with a
+  serde default so version 22 files still load. The φ⁴ and Josephson scenes
+  open on it.
+- Test helpers: the trace at several points with the complex amplitude at a
+  frequency and the `r` channel; an RMS profile along a line; energy in a
+  disk. A sweep helper that writes a transmission-versus-frequency table to
+  the scratchpad, for the scenes whose frequency is found rather than chosen.
+- The pulse todo, filed in `docs/plan.md` under "Later experiments". See
+  "Blocked".
+
+## Batch B: oscillator media
+
+### 6. Plasma mirror
+
+TM. A channel whose background is Klein-Gordon with a cutoff that ramps along
+x: `omega0 = W·smoothstep(0, 1, (x − x0)/L)` with `W = 2π·4`, `x0 = −0.2`,
+`L = 0.8`. A launcher at x = −0.82 drives 3 Hz. Left and right walls
+outgoing. The wave stretches and slows as it climbs the ramp, turns where
+`omega0(x)` reaches the drive frequency, near x = 0.30, and dies beyond it.
+The material reads Custom in the simple view, as the GRIN rod does.
+
+Claims:
+
+- The RMS at x = 0.8 is under 2% of the largest RMS on the axis between
+  x = −0.7 and −0.3. With `W = 0` it is comparable.
+- The standing-wave node spacing grows along the ramp as
+  `π/√(ω² − omega0(x)²)`, 0.167 in the flat part and about 0.21 where the
+  cutoff is 0.6 ω; the node count between x = −0.7 and the turning point
+  matches the WKB phase integral to one node.
+- Flat variant, the measurement the log promised on 24 September: cutoff
+  2.5 Hz everywhere, drive 3 Hz, right wall first-order outgoing. The
+  standing-wave ratio on the axis gives the wall reflection
+  `R = (ω − ck)/(ω + ck) = 0.29` within 0.03. The left wall's own reflection
+  does not disturb this, since the ratio of the two travelling amplitudes is
+  R whatever feeds them.
+
+### 7. Josephson line
+
+TM. A channel of sine-Gordon with `omega0 = 12`, so the kink width
+`ℓ = c/omega0` is 0.083. The left wall is Dirichlet with a constant offset of
+3 and no oscillation: the integrated field `r`, the Josephson phase, winds at
+that rate, and every 2π launches one fluxon down the line, a kink in `r` and
+a pulse in `E_z`. Right wall first-order outgoing. Opens on the integrated
+field.
+
+Claims:
+
+- At x = 0.5, `r` advances in steps of 2π, one every 2π/3 = 2.09 s after the
+  first arrives.
+- Each pulse in `u` carries area 2π.
+- A Klein-Gordon line under the same bias: DC is below its cutoff, so `r` at
+  x = 0.5 grows at under 1% of the wall's rate; the static profile is
+  `e^{−12x}`.
+
+Exploratory. Emission from a biased end, the fluxon speed and the outgoing
+wall's treatment of a kink are unmeasured; CPU exploration first. Fallback:
+nonlinear transparency, a strong wave crossing a sine-Gordon slab below its
+cutoff where a weak one cannot. `r` grows without bound at the wall, which
+f32 carries for hours before its resolution matters; the scene does not run
+that long.
+
+### 8. Symmetry breaking
+
+TM. Background φ⁴ with `lambda = 60` and `phi4_bound = 3`, plus a constant
+electric loss of 1/s so the domains settle. Rest is the unstable top of the
+double well, as the Gate O note says; a weak source seeds the fall, 3 Hz,
+amplitude 0.5, at (−0.3, 0.2). All walls outgoing. Opens on the integrated
+field: `u` goes dark once the field settles, `r` shows the domains and the
+walls between them, width `√2·c/√λ = 0.18`, which then straighten and
+annihilate.
+
+Claims after 6 s at the test mesh:
+
+- `|r| > 0.9` on more than 90% of the nodes.
+- Both signs occur, so at least one wall formed.
+- With `lambda = 0`, `|r|` stays under 0.2 everywhere.
+- A seed three times stronger gives the first two claims again.
+
+The bound of 3 clears the fall's overshoot of √2 with margin; it also sets the
+curvature and with it the step, which the mesh bounds tighter anyway.
+
+### 9. Pacemaker
+
+TM. The "Van der Pol oscillators" medium everywhere, threshold 1, gain 2,
+cutoff 2 Hz. A disk of radius 0.25 at the centre carries the same medium with
+cutoff 3 Hz: the pacemaker. A seed source of amplitude 0.01 at 2.5 Hz at
+(−0.6, 0.4), since exact rest never grows. Walls outgoing, reflecting if the
+walls distort the pattern.
+
+The gain acts on `u = ṙ`, so the limit cycle is Rayleigh's, not van der Pol's:
+the amplitude of `u` is `2a/√3 = 1.155`, independent of gain, cutoff and
+seed. The disk's waves run into the bulk with `k = √(ω_p² − ω₀²)/c`,
+wavelength 0.45, as target waves.
+
+Claims:
+
+- Far from the disk, the `u` amplitude is 1.155 within 10%, for seeds of
+  0.01 and 1.0 alike.
+- Far from the disk, the spectrum peaks at 3 Hz above 2 Hz: the bulk is
+  entrained.
+
+Entrainment is established by exploration first. If the bulk does not lock,
+the scene ships uniform with the first claim and the frequency at 2 Hz
+whatever the seed's.
+
+### 10. Plasma-clad whispering gallery
+
+TM. A vacuum disk of radius 0.4 at (0.05, 0) in a Klein-Gordon background
+with cutoff 3.5 Hz. A source just inside the rim at 3 Hz, below the cutoff:
+the cladding is a Drude plasma, the mode hugs the rim and its skin in the
+plasma is `c/√(ω₀² − ω²) = 0.088`. The drive frequency is set by a sweep to a
+whispering-gallery resonance of the clad disk. Walls outgoing; nothing
+reaches them.
+
+Claims:
+
+- The RMS one skin depth outside the rim is `e^{−1}` of the RMS at the rim,
+  within 30%.
+- At the resonance the rim RMS exceeds the off-resonance rim RMS by more
+  than 3×, and the intensity around the rim shows `2m` lobes.
+- Driven at 4 Hz, above the cutoff, the field two skin depths outside the
+  disk is more than 10× what it is at 3 Hz: the cladding turns transparent.
+
+This is the nearest thing to a polariton the catalogue can make. A true
+polariton needs a Lorentz law with a second auxiliary state, which Gate O did
+not add; see "Blocked".
+
+## Batch C: guides, resonators and amplifiers
+
+### 11. Parametric fiber
+
+TM. A GRIN fiber across the whole width, parabolic profile with `H = 0.15`
+and `dn = 0.6`, the face between two wall-attached horizontal dividers. A
+weak signal source at 2.5 Hz sits inside the fiber at its left end. The
+fiber's mass row carries the "Travelling modulation" preset over its graded
+base: pump at 5 Hz, wavenumber `2β` where β is the fundamental mode's
+propagation constant, found in exploration, wave angle 0. The pump travels
+with the signal, which is what phase-matches degenerate parametric gain along
+a line; a pump uniform in space is mismatched by `2k` and its gain averages
+out within a quarter wavelength.
+
+The depth is set so the gain from the source to the far wall is between 4×
+and 8×: higher, and the wall reflections at both ends close a round-trip gain
+above one and the fiber oscillates on its own.
+
+Claims:
+
+- The amplitude at 2.5 Hz at the far end is more than 4× what it is with the
+  pump off.
+- With the pump phase advanced by π/2 the same quadrature is de-amplified,
+  below 1×.
+- With the signal off, the fiber stays quiet: no self-oscillation.
+
+### 12. Bent fiber
+
+TM. A classic step-index core, `ε = 2.25`, width 0.10, which is single-mode
+at 4 Hz (`V = 1.4`). Lead-in along y = −0.5 from the left wall to x = −0.4, a
+90° arc of radius 0.5 centred at (−0.4, 0), lead-out from (0.1, 0) straight
+up to the top wall. The core is the face between two open curves, inner and
+outer edge, each attached to the walls at both ends with transmitting spans;
+or a closed polygon stopping 0.02 short of the walls if the attached form is
+awkward. The source sits in the core at the left end, 4 Hz. The leak radiates
+tangentially from the arc toward the lower right and leaves through the
+outgoing walls.
+
+Claims, with the power measured across the core near the top wall:
+
+- The gallery's radius 0.5 delivers most of the launched power.
+- The test's radius 0.3 loses at least twice what radius 0.7 loses.
+
+### 13. Photonic crystal
+
+TM. A channel with a launcher at the left. A square lattice of dielectric
+rods, `ε = 9`, radius 0.3 of the pitch, pitch 0.16, five rows deep, filling
+the channel height. The gap is found by a transmission sweep in exploration;
+for these rods it is expected near a pitch-over-wavelength of 0.27 to 0.36,
+that is 1.7 to 2.25 Hz. The scene's mesh edge is set fine enough for the
+rods.
+
+Claims: transmission through the five rows under 10% at the gap frequency and
+over 50% at a pass frequency.
+
+Fallback if the sweep is not clean at an affordable mesh: a quarter-wave
+Bragg stack of six pairs, `n = 1` and `n = 2`, whose gap is analytic, 2.35 to
+3.65 Hz at a design frequency of 3 Hz, with a defect layer that puts a
+transmission resonance inside the gap.
+
+### 14. Crystal bend
+
+Stretch on 13. A row of rods removed, with a 90° corner, guiding a
+gap-frequency wave around a bend no fiber could take.
+
+Claim: the power at the defect's exit exceeds 30% of the power entering it,
+while the crystal without the defect passes under 1%.
+
+### 15. Ring resonator
+
+TM. A step-index waveguide, `ε = 2.25`, width 0.1, along y = −0.55 between
+the left and right walls, and a ring of the same material, mean radius 0.35,
+width 0.1, centred so the gap to the guide is 0.05. A source in the guide at
+its left end; the frequency is set by a sweep to a resonance, free spectral
+range about 0.3 Hz.
+
+Claims: transmission past the ring at resonance under half the off-resonance
+transmission; the ring's energy at resonance more than 5× off-resonance.
+
+Attempted. Dropped if it cannot run accurately in real time: the resonance is
+narrow, the mesh must be fine, and mesh dispersion moves it.
+
+### 16. Acoustic whispering gallery
+
+Mechanical. A reflecting arc baffle of radius 0.85 about the origin spanning
+300°, open at the bottom. The source at 4 Hz sits 0.05 inside the wall at the
+top. Walls outgoing; the opening lets sound out.
+
+Claims: with the arc, the RMS at the wall point a half-turn away exceeds the
+RMS at the centre although it is twice as far; with the arc removed the
+centre is louder.
+
+### 17. Dielectric whispering gallery
+
+TM. A disk of `ε = 4`, radius 0.3, with a source just inside the rim; the
+frequency, near 2.5 Hz, is set by a sweep to a whispering-gallery resonance
+of moderate azimuthal order, about `m = 9`, so the resonance is wide enough to
+hit and builds up within seconds. Walls outgoing.
+
+Claims: at resonance the rim RMS exceeds the off-resonance rim RMS by more
+than 3×; the intensity around a circle just inside the rim shows `2m`
+maxima. The ring resonator's simpler cousin: if the ring is dropped, this one
+still carries the physics.
+
+## Batch D: diffraction and interfaces
+
+### 18. Maxwell's fisheye
+
+Mechanical. `n = 2/(1 + (r/R)²)` in a disk of radius `R = 0.45`, so the index
+runs from 2 at the centre to 1 at the rim. A source at 3 Hz just inside the
+rim on the left. Walls outgoing.
+
+Claim: the RMS on the rim peaks at the antipode, more than 3× the RMS at rim
+points 45° away.
+
+### 19. Fresnel zone plate
+
+Mechanical. A launcher at the left, 4 Hz. A screen of baffles at x = 0 open
+over the odd Fresnel zones for a focus at `F = 0.6`: zone edges at
+`y_n = √(nλF + (nλ/2)²)`, 0.41, 0.60, 0.77, 0.92, so the openings are
+|y| < 0.41 and 0.60 < |y| < 0.77, the baffles fill the rest. Walls outgoing.
+
+Claim: the RMS at (0.6, 0) exceeds twice the RMS of the bare plane wave
+there, and exceeds the RMS at (0.6, ±0.4).
+
+### 20. Brewster angle
+
+Electromagnetic, one document per skin. A slab of `ε = 2.25` and a tilted
+launcher whose beam meets it at `θ_B = atan(1.5) = 56.3°`. In the H_z skin the
+reflection vanishes at that angle; in the E_z skin it does not, `|r|² = 0.15`.
+Walls outgoing. The gallery ships the H_z scene; the test builds its E_z twin.
+
+Claim: the reflected RMS in E_z exceeds 5× the reflected RMS in H_z.
+
+### 21. Frustrated total internal reflection
+
+Mechanical. Two right prisms of `n = 1.5` with parallel hypotenuses separated
+by a gap `d`. A tilted source strip inside the first prism sends a beam at 45°
+onto the hypotenuse, past the critical angle of 41.8°; the field in the gap is
+evanescent with `κ = k₀√(n² sin²θ − 1) = 8.9`, decay length 0.11. Walls
+outgoing. The gallery ships `d = 0.1`.
+
+Claim: the transmitted RMS for `d = 0.1` over `d = 0.2` is `e^{−κ·0.1} = 0.41`
+within 30%.
+
+### 22. Talbot carpet
+
+Mechanical. A launcher at the left, 4 Hz. A grating of baffles at x = −0.5,
+period 0.4, 50% open, four periods. The Talbot distance `2a²/λ = 1.28` puts
+the self-image at x = 0.78 and the half-period-shifted image at x = 0.14.
+
+Claim: the RMS profile at x = 0.14 peaks at the bar positions and at x = 0.78
+at the slit positions. Four periods is few; the tolerance comes from the
+first run.
+
+### 23. Drum modes
+
+Mechanical. A closed reflecting circle of radius 0.6 with the background
+material inside and a constant loss of 0.3/s so a steady state exists,
+driven off-centre by a point source at the (2,1) mode, `f = j₂₁/(2πa) =
+1.36 Hz`; the neighbours sit at 1.02 and 1.46 Hz. Trapped modes on purpose.
+
+Claim: the RMS along the two nodal diameters is under 10% of the RMS in the
+four lobes.
+
+### 24. Anderson localization
+
+TM. The crystal's rods at the crystal's pass frequency, but placed at random
+with a fixed seed listed in the code, five rows deep, against the periodic
+crystal of 13.
+
+Claims: the disordered slab's transmission is under a quarter of the
+crystal's; the log-transmission falls roughly linearly with depth over three
+and five rows. Medium risk: the localization length may not be short on fifty
+rods; exploration decides.
+
+### 25. Skin depth
+
+TM. A slab of thickness 0.3 with a constant electric loss of `γ = 2ω` at
+3 Hz. The wavenumber inside is `k = (ω/c)√(1 − iγ/ω)`, so the field decays
+with `Im k = 14.8`, a depth of 0.068, and the wavelength inside is 0.26. The
+scene is described by that exact formula rather than the conductor limit,
+which would need a depth too small to mesh.
+
+Claim: the decay constant measured across the slab matches `Im k` within 15%.
+
+## Batch E: nonlinear extras
+
+### 26. Spatial soliton
+
+TM. A slab of the saturable Kerr medium from x = −0.6 to 0.6. A narrow beam
+from a source strip of width 0.3 at 4 Hz: the weak beam diffracts, Fresnel
+number 0.3; the strong one self-traps where the Kerr index rise reaches about
+`(λ/πw)²/2 = 0.035`. Walls outgoing.
+
+Claim: the strong beam's RMS width at the slab's exit is under 0.6× the weak
+beam's. The risk is the third harmonic the Kerr slab also makes, which is
+phase-matched in a non-dispersive medium; the beam is kept wide and the
+nonlinearity moderate to keep it small.
+
+### 27. Doppler mirror
+
+TM. The "Travelling modulation" preset on a slab, moving toward the source:
+wave angle 180°, pump at `2f`, wavenumber `4k`. That is the Bragg condition
+for backward scattering off a grating moving at `c/2`, and the reflected
+wave comes back at `f(c + v)/(c − v) = 3f`. Depth from exploration; no new
+law.
+
+Claim: the spectrum on the source side peaks at `3f`, and does not with the
+modulation at rest.
+
+## Order
+
+Batch A first, including the groundwork and the todo. Then B, C, D, E. Before
+their scene text is fixed, CPU exploration in the scratchpad settles: the
+fluxon emission (7), the pacemaker's entrainment (9), the clad disk's
+resonance (10), the fiber's β and stable depth (11), the crystal's gap (13),
+the ring's resonance (15), the dielectric disk's resonance (17) and the
+Doppler grating's depth (27). Every other scene gets its claim tolerance from
+its own first run.
+
+Catalogue count after everything: 12 today, 34 after; the catalogue test's
+count and the user guide's example list move with each commit.
+
+## Blocked
+
+- **Pulses.** `TimeSignal` is harmonic only, so a document cannot hold a
+  pulse. That blocks time of flight, group delay in the plasma, echoes, an
+  ellipse refocusing a flash and pulsed Doppler. Filed in `docs/plan.md`
+  under "Later experiments": a windowed harmonic or a burst envelope on every
+  signal consumer, persisted.
+- **A true polariton.** Needs a Lorentz restoring law with a second auxiliary
+  state, which Gate O did not add. Scene 10 uses the Drude plasma the
+  catalogue has.
+- **Saturable and polynomial loss.** Still gated (D2), so no optical limiter,
+  saturable absorber or loss-saturated oscillator. Saturation in this plan
+  comes from Kerr detuning and from wall leakage only.

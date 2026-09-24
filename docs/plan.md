@@ -926,6 +926,16 @@ documented numerical and performance observations.
 Multipatch/trimmed IGA, higher-order triangles, and physical moving-boundary effects.
 Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
+- [ ] Pulsed and gated signals. `TimeSignal` is harmonic only, so a document
+  cannot hold a pulse, and the run-time pulse act is not a document feature.
+  That keeps time of flight, group delay in a Klein-Gordon medium, echoes, an
+  ellipse refocusing a flash and pulsed Doppler out of the gallery
+  (`docs/spikes/funfern-gallery-plan.md`, "Blocked"). Add a windowed harmonic
+  (start, duration, ramp) or a Gaussian burst as a signal variant, honoured by
+  every consumer: point and volume sources, Dirichlet and Neumann walls and
+  faces, and time drives. It is persisted, so it takes a serde default or a
+  file version.
+
 ## Maintenance
 
 - Enable fat LTO and `codegen-units = 1` for the native release build. The
