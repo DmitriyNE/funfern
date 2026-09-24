@@ -254,6 +254,9 @@ pub struct Playground {
     /// The grid filter is asked for but the running generation does not admit
     /// it; see [`funfern_app::canonical_gpu::CanonicalGpuRequest::grid_scale_filter_refused`].
     pub(super) grid_filter_refused: bool,
+    /// The device failure the run is paused on, if any. Run, Step or an edit
+    /// resumes from the last accepted step; the failure itself never commits.
+    pub(super) solver_fault: Option<u32>,
     pub(super) gpu_dispatches: u64,
     pub(super) canonical_gpu_bytes: Option<usize>,
     pub(super) step_backlog: u64,
@@ -444,6 +447,7 @@ impl Default for Playground {
             amr_report: None,
             gpu_status: "loading",
             grid_filter_refused: false,
+            solver_fault: None,
             gpu_dispatches: 0,
             canonical_gpu_bytes: None,
             step_backlog: 0,

@@ -10892,3 +10892,29 @@ The app keeps refusing field laws until 9.7.
   b 1.168e-6. The Stage 0 limit is 3e-5.
 - **Unchanged:** all fifteen existing device examples exit 0 with their
   figures.
+
+## 2026-09-24 — A device failure pauses at the accepted step, and the app can resume
+
+Stage 9.2.
+
+- **Device gate: `canonical_gpu_nonlinear_failure` (new).**
+  - Fixture: defocusing Kerr with bound 1, released from rest with a flux that
+    drives one corner node past the bound.
+  - The f64 reference refuses step 255. The device refuses the same step with
+    `STATUS_INVERSE_DOMAIN`, raised by the drift's inverse at the stage that
+    saw it, not by a readback.
+  - Its accepted state is 1.192e-6 from the oracle's step 254.
+  - After `clear_failure`, a one-step retry fails again with the same status,
+    and the stored state is bit-identical.
+- **App (`ui/runtime.rs`).** Before this, a mid-run device failure latched
+  silently: `gpu_status` read "failed" in diagnostics and stepping stopped.
+  Because `caught_up` is true on failure, the next edit's upload began and was
+  immediately rejected as though the new generation had faulted, so nothing
+  could recover it. Now:
+  - **Pause:** `supervise_solver_fault` stops the run and logs "Paused at the
+    last accepted step: …", with the failure's description and code, and
+    lights the badge. The status channel logs it.
+  - **Resume:** Run or Step clears the latch and retries from that step.
+  - **Corrective edit:** an edit clears the latch before its upload begins, so
+    its generation hands off from the untouched accepted state.
+  - Nothing is clipped or reset.

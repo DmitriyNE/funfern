@@ -288,6 +288,7 @@ impl Playground {
     ) {
         request.set_grid_scale_filter(self.editor.document.presentation.grid_scale_filter);
         self.finish_source_commit(request);
+        self.supervise_solver_fault(request, assets, commands);
         // Starting another preparation mid-upload clears `runtime.ready`, and
         // would make the accepted GPU generation impossible to publish under
         // its immutable topology token. A later frame picks the edit up.
@@ -453,6 +454,12 @@ impl Playground {
             else {
                 return;
             };
+            // A corrective edit on a paused, failed run hands off from the
+            // accepted state, which the failure never touched; the latched
+            // status would otherwise reject the new generation as its own.
+            if request.failed() && request.clear_failure(assets, commands).is_ok() {
+                self.solver_fault = None;
+            }
             let mut handed_off = false;
             let upload = job.result.take().unwrap().and_then(|prepared| {
                 if let Some(transfer) = prepared.transfer {
@@ -806,6 +813,42 @@ impl Playground {
     /// is therefore a baseline, not progress: counting its absolute total
     /// credited the whole run again after every adaptive handover and could
     /// leave the reported real-time rate falsely high for many seconds.
+    /// A device failure during a run pauses it at the last accepted step,
+    /// names the reason in the log and lights the badge. Nothing is clipped
+    /// or reset: Run or Step clears the latch and retries from that step, and
+    /// an edit prepares a generation that hands off from it.
+    fn supervise_solver_fault(
+        &mut self,
+        request: &mut CanonicalGpuRequest,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+    ) {
+        let failure = request.stats().failure();
+        if failure == 0 || self.uploading.is_some() {
+            if failure == 0 {
+                self.solver_fault = None;
+            }
+            return;
+        }
+        if self.solver_fault != Some(failure) {
+            self.solver_fault = Some(failure);
+            self.wave_running = false;
+            self.wave_step = false;
+            self.message = format!(
+                "Paused at the last accepted step: {} (failure code {failure}). Edit the scene, \
+                 or press Run to retry from that step",
+                canonical_failure_description(failure)
+            );
+            self.unseen_error = true;
+            return;
+        }
+        if (self.wave_running || self.wave_step) && request.clear_failure(assets, commands).is_ok()
+        {
+            self.solver_fault = None;
+            self.message = "Resumed from the last accepted step".into();
+        }
+    }
+
     pub(super) fn accumulate_step_rate(&mut self, generation: u64, completed: u64, elapsed: f64) {
         if self.rate_generation != generation {
             self.rate_generation = generation;
