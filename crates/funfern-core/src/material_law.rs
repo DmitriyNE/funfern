@@ -1131,6 +1131,32 @@ pub enum RestoringLawValues {
     Phi4 { lambda: f64, amplitude_bound: f64 },
 }
 
+impl RestoringLawValues {
+    pub fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// The potential `V(r)` per unit authored mass, zero at the vacuum.
+    pub fn potential(self, r: f64) -> f64 {
+        match self {
+            Self::None => 0.0,
+            Self::KleinGordon { omega0 } => 0.5 * omega0 * omega0 * r * r,
+            Self::SineGordon { omega0 } => omega0 * omega0 * (1.0 - r.cos()),
+            Self::Phi4 { lambda, .. } => 0.25 * lambda * (r * r - 1.0).powi(2),
+        }
+    }
+
+    /// The largest `|r|` the law admits, where it declares one.
+    pub fn amplitude_bound(self) -> Option<f64> {
+        match self {
+            Self::Phi4 {
+                amplitude_bound, ..
+            } => Some(amplitude_bound),
+            _ => None,
+        }
+    }
+}
+
 impl FieldLawValues {
     /// The multiplier `ḡ(u)`.
     pub fn multiplier(self, u: f64) -> f64 {

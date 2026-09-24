@@ -11733,3 +11733,56 @@ derivation.
   - TM: `r = −A_z`, a plasma cutoff, a Josephson line;
   - TE: the dual;
   - Mechanical: the time integral of the displayed displacement.
+
+## 2026-09-24 — Oscillator media on the CPU reference
+
+Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
+- **The integrated field.** `CanonicalTemporalWaveState` carries
+  `integrated_field` (`r = ∫u dt`) on a generation with a restoring law.
+  - It drifts with `b` on the same midpoint field.
+  - The kick adds `Σ_c m₀_c V_c′(r)` in the gap spring's slot.
+  - Its store `Σ m₀_c V_c(r)` joins the history energy.
+  - `with_integrated_field` initializes kinks, walls and displaced vacua.
+  - The ceiling gains `V″_max/4` over the lowest mass factor, taking the
+    existing conservative `curvature_bound` for φ⁴.
+  - Temporal compile no longer refuses a restoring law.
+- **Van der Pol.** Admitted on the primary row without a drive. Each node's
+  rate is `β + α u²`, mass-weighted over its materials, and the half map is
+  the exact Bernoulli solution in `Q²` (`bernoulli_map`). Its energy goes to
+  a new signed `active_gain` lane, and the balance subtracts it. It is
+  refused beside a field law, whose `u` is not `Q/M`.
+- **Refused until their stages:** the device (`compile_temporal`, with
+  `the_device_refuses_an_oscillator_medium`) and the AMR supplement.
+- **Fixed on the way.** The step's own `energy_change` measured `before` with
+  the gap and pole stores and `after` without them. Nothing read it, but it
+  made `splitting_residual` wrong on every gapped or second-order-walled
+  scene. `after` now includes the stores.
+- **Measured** (each in a test):
+  - **Klein–Gordon.**
+    - The uniform mode is the Verlet oscillator exactly: `u_n = cos nθ`
+      and `r_n = h sin nθ / sin θ` to 1e-11 over 200 steps.
+    - The box's lowest mode moves from ω = 1.57080 to 2.95254, and
+      `(ω² − ω_lin²)/ω₀²` = 1.00002.
+  - **Both conservative laws:** second-order balance, and reversibility of
+    `r` and `Q` to 1e-10.
+  - **Sine-Gordon kink** (ω₀ = 4, ℓ = 0.25):
+    - Its energy is 63.957 against `8cω₀` × height 2 = 64, and 73.61
+      against `64γ` = 73.90 at v = 0.5.
+    - At rest it moves 9e-8 in 1 s.
+    - Launched at 0.5 it runs at 0.4990 on a path symmetric between the
+      walls, contracted 1.1553 against γ = 1.1547.
+    - From −0.4 to 0 it reads 0.478 at every mesh. That is not a
+      discretization error: a reflecting wall mirrors the kink into an
+      antikink, and the two attract.
+  - **φ⁴** (λ = 16):
+    - Uniform ±1 holds to 1e-12.
+    - `tanh(x/(√2ℓ))` moves less than 0.02 in 1 s.
+    - Settling from just off the unstable top under a primary loss: a
+      one-signed seed falls wholly into +1 (2.8e-4 of the barrier's energy
+      left), and an antisymmetric seed settles to a single wall holding
+      1.0005 × `2σ`, with `σ = (2√2/3)c√λ`.
+  - **Van der Pol:**
+    - The node map matches a 20,000-step Runge–Kutta integration to 1e-12.
+    - Beside Klein–Gordon, a 1e-3 field grows to a rate amplitude of
+      0.57767 against Rayleigh's `2a/√3` = 0.57735.
+    - The gain lane holds the energy change to 1.8e-4.

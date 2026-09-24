@@ -1088,6 +1088,13 @@ impl CanonicalGpuPlan {
         // through the forward map. An absorbing wall kicks through the
         // discrete gradient at its node, and an outgoing wall runs a fixed
         // budget of Newton linearizations around its linear trace solve.
+        // Gate O's integrated field has no device lane yet; running such a
+        // medium here would drop its restoring force without a word.
+        if operator.has_restoring() {
+            return Err(CanonicalGpuBuildError::Unrepresentable(
+                "oscillator media do not run on the device yet",
+            ));
+        }
         self.field_laws = operator.has_field_laws();
         // After both accounting banks: one word per trace (a nonlinear wall's
         // Newton), per node (the drift's field) and per sample (the kick's
@@ -6645,6 +6652,47 @@ mod tests {
     /// The filter composes wherever the stepper does, as on the CPU
     /// reference: fixed, driven and field-dependent generations beside either
     /// wall. A field-dependent one solves its sites' tangents in one more pass.
+    /// Gate O's integrated field has no device lane yet, so an oscillator
+    /// medium is refused rather than run without its restoring force.
+    #[test]
+    fn the_device_refuses_an_oscillator_medium() {
+        let mut scene = Scene::initial();
+        scene.materials[0].restoring = funfern_core::RestoringLaw::SineGordon {
+            omega0: ScalarField::constant(2.0),
+        };
+        let mut fixed_scene = scene.clone();
+        fixed_scene.materials[0].restoring = funfern_core::RestoringLaw::None;
+        let mesh = mesh_scene(
+            &fixed_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &fixed_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
+        assert!(operator.has_restoring());
+        let time_step = 0.4 * operator.maximum_time_step();
+        let state = CanonicalTemporalWaveState::zero(&operator, time_step).unwrap();
+        assert!(
+            CanonicalGpuPlan::compile_temporal(
+                &operator,
+                &state,
+                &CanonicalForcing::none(operator.base()),
+                CanonicalGpuClock::initial(time_step).unwrap(),
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn every_composed_generation_admits_the_grid_filter() {
         assert!(plan(OuterBoundaryCondition::SecondOrderOutgoing).grid_filter_admitted);

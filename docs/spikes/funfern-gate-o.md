@@ -54,7 +54,7 @@ restoring equation in `r`. The displayed `u = ṙ` is its rate.
 | --- | --- | --- | --- |
 | Klein–Gordon | `½ω₀² r²` | `ω₀² r` | `ω₀²` |
 | sine-Gordon | `ω₀²(1 − cos r)` | `ω₀² sin r` | `ω₀²` |
-| φ⁴ | `¼λ(r² − 1)²` | `λ(r³ − r)` | `λ(3B² − 1)` with the authored `amplitude_bound` `B` |
+| φ⁴ | `¼λ(r² − 1)²` | `λ(r³ − r)` | `λ·max(|3B² − 1|, 1)` with the authored `amplitude_bound` `B` |
 
 **The authored mass, on purpose.** `ω₀` is then the cutoff of the medium as
 authored. A drive on the mass row moves the cutoff as `ω₀·√(m₀/m(t))`, which

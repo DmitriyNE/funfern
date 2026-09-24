@@ -21,8 +21,9 @@ use crate::{
     FieldLawValues, LossChannel, Material, MaterialCoordinates, MaterialError, MaterialId,
     MaterialSwitchRuntime, PhysicsModel, Point2, QuadraticAreaElement, QuadraticAreaStencil,
     QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues, RegionId, RestoringLaw,
-    Scene, SymmetricTensor2, TimeDriveRuntime, TimeDriveValues, TopologyWaveModel, TriMesh,
-    WaveError, canonical_area_contribution, complementary_interpolation_weights,
+    RestoringLawValues, Scene, SymmetricTensor2, TimeDriveRuntime, TimeDriveValues,
+    TopologyWaveModel, TriMesh, WaveError, canonical_area_contribution,
+    complementary_interpolation_weights,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,6 +297,9 @@ impl TemporalLossSample {
 struct TemporalPrimarySample {
     coefficient: TemporalCoefficientSample,
     loss: TemporalLossSample,
+    /// The restoring law on the integrated field at this contribution's
+    /// point. Gate O: it acts on `r = ∫u dt` with the authored mass.
+    restoring: RestoringLawValues,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1670,6 +1674,12 @@ pub struct CanonicalTemporalWaveOperator {
     maximum_time_step: f64,
     primary_floor: f64,
     complementary_floor: f64,
+    /// Whether any contribution carries a restoring law, so the state holds
+    /// the integrated field `r = ∫u dt` and the kick feels `−Σ m₀ V′(r)`.
+    has_restoring: bool,
+    /// Whether any primary contribution carries a van der Pol channel, whose
+    /// rate follows the field and is stepped by its exact node map.
+    has_active_loss: bool,
 }
 
 impl CanonicalTemporalWaveOperator {
@@ -1747,6 +1757,7 @@ impl CanonicalTemporalWaveOperator {
             primary.push(TemporalPrimarySample {
                 coefficient: sample.coefficient,
                 loss: sample.loss,
+                restoring: sample.restoring,
             });
         }
         for sample in base.constitutive_samples() {
@@ -1808,6 +1819,31 @@ impl CanonicalTemporalWaveOperator {
         };
         let maximum_time_step = base.maximum_time_step()
             * (minimum_primary_factor * minimum_complementary_factor).sqrt();
+        // Gate O: Verlet on `M⁻¹K + V″` is stable for `h²(λ + V″)/4 ≤ 1`.
+        // The restoring force uses the authored mass while the step divides by
+        // the mass in force, so its curvature is scaled by the lowest mass
+        // factor the trajectory reaches.
+        let has_restoring = primary.iter().any(|sample| !sample.restoring.is_none());
+        let has_active_loss = primary
+            .iter()
+            .any(|sample| matches!(sample.loss.law.rate, RateLawValues::VanDerPol { .. }));
+        if has_active_loss && has_field_laws {
+            return Err(WaveError::Unsupported(
+                "van der Pol's node map assumes a linear primary map; it does not compose \
+                 with a field law yet",
+            ));
+        }
+        let restoring_curvature = primary
+            .iter()
+            .map(|sample| sample.restoring.curvature_bound())
+            .fold(0.0_f64, f64::max)
+            / primary_floor_of(minimum_primary_factor);
+        let maximum_time_step = if restoring_curvature > 0.0 {
+            1.0 / (1.0 / (maximum_time_step * maximum_time_step) + 0.25 * restoring_curvature)
+                .sqrt()
+        } else {
+            maximum_time_step
+        };
         if !maximum_time_step.is_finite() || maximum_time_step <= 0.0 {
             return Err(WaveError::Unsupported(
                 "a driven medium's coefficient trajectory leaves no usable timestep",
@@ -1871,7 +1907,12 @@ impl CanonicalTemporalWaveOperator {
         // mesh, and none has been derived here.
         // A field-dependent medium's estimator reads its nonlinear observables
         // and weighs every defect by the tangent maps at the snapshot.
-        let indicator_supplement_supported = undamped_boundary && !has_loss && undriven_boundary;
+        // The estimator's defect terms know nothing of a restoring force on
+        // the integrated field, so an oscillator medium has no estimate yet.
+        let indicator_supplement_supported = undamped_boundary
+            && !has_loss
+            && undriven_boundary
+            && !primary.iter().any(|sample| !sample.restoring.is_none());
         Ok(Self {
             base,
             primary,
@@ -1888,7 +1929,97 @@ impl CanonicalTemporalWaveOperator {
             maximum_time_step,
             primary_floor,
             complementary_floor,
+            has_restoring,
+            has_active_loss,
         })
+    }
+
+    /// Whether the generation carries a restoring law (Gate O).
+    pub fn has_restoring(&self) -> bool {
+        self.has_restoring
+    }
+
+    /// Each node's rate as `β + α u²`, mass-weighted over its contributions
+    /// at `time`, with the mass it is weighed by: a constant channel adds its
+    /// rate to `β`; a van der Pol one `−base` to `β` and `base/a²` to `α`.
+    fn active_loss_coefficients(
+        &self,
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<ActiveLossCoefficients, WaveError> {
+        let count = self.base.degrees_of_freedom();
+        let (mut mass, mut beta, mut alpha) =
+            (vec![0.0; count], vec![0.0; count], vec![0.0; count]);
+        for (contribution, sample) in self.base.primary_contributions().iter().zip(&self.primary) {
+            let share = contribution.geometric_weight
+                * contribution.reference_coefficient
+                * coefficient_factor(sample.coefficient, time, runtime)?;
+            let node = contribution.node as usize;
+            mass[node] += share;
+            match sample.loss.law.rate {
+                RateLawValues::VanDerPol { threshold, .. } => {
+                    beta[node] -= share * sample.loss.base_rate;
+                    alpha[node] += share * sample.loss.base_rate / (threshold * threshold);
+                }
+                _ => beta[node] += share * loss_rate(sample.loss, time, runtime)?,
+            }
+        }
+        validate_positive(&mass)?;
+        for node in 0..count {
+            beta[node] /= mass[node];
+            alpha[node] /= mass[node];
+        }
+        Ok((beta, alpha, mass))
+    }
+
+    /// `R_i(r) = Σ_c m₀_c V_c′(r_i)`: each contribution's restoring force on
+    /// the integrated field, at its authored lumped mass. A node past a law's
+    /// declared amplitude bound refuses the step, as a field law's inverse
+    /// does; nothing is clipped.
+    fn restoring_force(&self, integrated: &[f64]) -> Result<Vec<f64>, WaveError> {
+        let mut force = vec![0.0; self.base.degrees_of_freedom()];
+        if !self.has_restoring {
+            return Ok(force);
+        }
+        for (contribution, sample) in self.base.primary_contributions().iter().zip(&self.primary) {
+            if sample.restoring.is_none() {
+                continue;
+            }
+            let node = contribution.node as usize;
+            let r = integrated[node];
+            if sample
+                .restoring
+                .amplitude_bound()
+                .is_some_and(|bound| r.abs() > bound)
+            {
+                return Err(WaveError::Unsupported(
+                    "the integrated field passed its restoring law's amplitude bound",
+                ));
+            }
+            let mass = contribution.geometric_weight * contribution.reference_coefficient;
+            force[node] += mass * sample.restoring.slope(r);
+        }
+        validate_finite(&force)?;
+        Ok(force)
+    }
+
+    /// `Σ_i Σ_c m₀_c V_c(r_i)`, the restoring store.
+    fn restoring_energy(&self, integrated: &[f64]) -> f64 {
+        if !self.has_restoring {
+            return 0.0;
+        }
+        self.base
+            .primary_contributions()
+            .iter()
+            .zip(&self.primary)
+            .map(|(contribution, sample)| {
+                contribution.geometric_weight
+                    * contribution.reference_coefficient
+                    * sample
+                        .restoring
+                        .potential(integrated[contribution.node as usize])
+            })
+            .sum()
     }
 
     /// The timestep ceiling and what lowers it below the fixed medium's.
@@ -2799,6 +2930,11 @@ pub struct CanonicalTemporalStepAccounting {
     /// medium's inertia breathes takes work, and it arrives from outside the
     /// domain rather than from the drive.
     pub prescribed_exchange: f64,
+    /// Energy an active (van der Pol) channel put into the field, either
+    /// sign: gain below its threshold, loss above it. Passive channels on the
+    /// same node's other materials are counted here with it, because one map
+    /// acts on the node.
+    pub active_gain: f64,
     pub energy_change: f64,
     /// What the three lanes above fail to account for. The splitting's own
     /// error and nothing else.
@@ -2821,6 +2957,10 @@ pub struct CanonicalTemporalWaveState {
     /// `stiffness * jump^2 / 2`, so it belongs to the state and to the energy
     /// rather than being reconstructible from the bulk.
     thin_gap_jump: Vec<f64>,
+    /// Gate O: the integrated primary field `r = ∫u dt` per node, on a
+    /// generation carrying a restoring law. Its uniform part is physical, so
+    /// it is authoritative state and not reconstructed from `b`.
+    integrated_field: Vec<f64>,
     runtime: CanonicalMaterialRuntimeState,
     time_step: f64,
     time: f64,
@@ -2910,6 +3050,16 @@ impl CanonicalTemporalWaveState {
                     .map_or(0, |boundary| boundary.auxiliary_count())
             ],
             thin_gap_jump: vec![0.0; operator.base().thin_gap_samples().len()],
+            // A fresh generation starts at rest in `r` too: the vacuum of
+            // Klein-Gordon and sine-Gordon, the unstable top of φ⁴.
+            integrated_field: vec![
+                0.0;
+                if operator.has_restoring() {
+                    operator.base().degrees_of_freedom()
+                } else {
+                    0
+                }
+            ],
             runtime: operator.initial_runtime(),
             time_step,
             time,
@@ -2958,22 +3108,39 @@ impl CanonicalTemporalWaveState {
     /// is what the compiled transform is for, so their store is a plain sum of
     /// squares.
     fn history_energy(&self, operator: &CanonicalTemporalWaveOperator) -> f64 {
-        let gaps = self
-            .thin_gap_jump
-            .iter()
-            .zip(operator.base().thin_gap_samples())
-            .map(|(jump, sample)| 0.5 * sample.stiffness * jump * jump)
-            .sum::<f64>();
-        let poles = self
-            .outgoing_z
-            .iter()
-            .map(|value| 0.5 * value * value)
-            .sum::<f64>();
-        gaps + poles
+        history_energy_of(
+            operator,
+            &self.thin_gap_jump,
+            &self.outgoing_z,
+            &self.integrated_field,
+        )
     }
 
     pub fn thin_gap_jump(&self) -> &[f64] {
         &self.thin_gap_jump
+    }
+
+    /// The integrated field `r`, empty without a restoring law.
+    pub fn integrated_field(&self) -> &[f64] {
+        &self.integrated_field
+    }
+
+    /// The same state holding a given integrated field, which is how a kink,
+    /// a domain wall or a displaced vacuum is initialized.
+    pub fn with_integrated_field(
+        mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        integrated_field: Vec<f64>,
+    ) -> Result<Self, WaveError> {
+        if !operator.has_restoring()
+            || integrated_field.len() != operator.base().degrees_of_freedom()
+        {
+            return Err(WaveError::InvalidState);
+        }
+        validate_finite(&integrated_field)?;
+        operator.restoring_force(&integrated_field)?;
+        self.integrated_field = integrated_field;
+        Ok(self)
     }
 
     pub fn outgoing_pole_currents(&self) -> &[f64] {
@@ -3434,7 +3601,7 @@ impl CanonicalTemporalWaveState {
         // but it stands for evolution over its own half interval, so its rate
         // is read at that interval's midpoint. Reading it at the endpoint
         // instead would be first order for a driven loss.
-        let (first_primary_loss, first_complementary_loss) = decay(
+        let (first_primary_loss, first_complementary_loss, first_gain) = decay(
             operator,
             &mut primary,
             &mut complementary,
@@ -3454,6 +3621,7 @@ impl CanonicalTemporalWaveState {
         // 0.99 before this was moved.
         let mut first_force = operator.force_at(&complementary, start_time, &self.runtime)?;
         add_gap_force(operator, &self.thin_gap_jump, &mut first_force)?;
+        add_restoring_force(operator, &self.integrated_field, &mut first_force)?;
         let first_source = forcing.integrated_rate(start_time)?;
         let (work, exchange, escaped) = forced_kick(
             operator,
@@ -3505,11 +3673,19 @@ impl CanonicalTemporalWaveState {
             validate_finite(&gap_jump)?;
         }
         operator.drift_on(&mut complementary, &midpoint_field, duration)?;
+        // The integrated field drifts with `b`, on the same midpoint field and
+        // over the same interval: `ṙ = u` is the same subflow as `ḃ = ηCu`.
+        let mut integrated = self.integrated_field.clone();
+        for (value, field) in integrated.iter_mut().zip(&midpoint_field) {
+            *value += duration * field;
+        }
+        validate_finite(&integrated)?;
         let (_, complementary_rate_end) =
             operator.complementary_energy_and_rate(&complementary, end_time, &self.runtime)?;
 
         let mut second_force = operator.force_at(&complementary, end_time, &self.runtime)?;
         add_gap_force(operator, &gap_jump, &mut second_force)?;
+        add_restoring_force(operator, &integrated, &mut second_force)?;
         let second_source = forcing.integrated_rate(end_time)?;
         let (work, exchange, escaped) = forced_kick(
             operator,
@@ -3527,7 +3703,7 @@ impl CanonicalTemporalWaveState {
         boundary_loss += escaped;
         validate_finite(&primary)?;
 
-        let (second_primary_loss, second_complementary_loss) = decay(
+        let (second_primary_loss, second_complementary_loss, second_gain) = decay(
             operator,
             &mut primary,
             &mut complementary,
@@ -3537,9 +3713,13 @@ impl CanonicalTemporalWaveState {
             &self.runtime,
         )?;
         let primary_loss = first_primary_loss + second_primary_loss;
+        let active_gain = first_gain + second_gain;
         let complementary_loss = first_complementary_loss + second_complementary_loss;
 
-        let after = operator.energy_at(&primary, &complementary, end_time, &self.runtime)?;
+        // Measured like `before`, stores included. Leaving them out charged
+        // every gap spring and pole current to the splitting residual.
+        let after = operator.energy_at(&primary, &complementary, end_time, &self.runtime)?
+            + history_energy_of(operator, &gap_jump, &outgoing_z, &integrated);
         let temporal_work = duration
             * (0.5 * complementary_rate_start + primary_rate_middle + 0.5 * complementary_rate_end);
         let energy_change = after - before;
@@ -3550,8 +3730,13 @@ impl CanonicalTemporalWaveState {
             complementary_loss,
             boundary_loss,
             prescribed_exchange,
+            active_gain,
             energy_change,
-            splitting_residual: energy_change - temporal_work - source_work - prescribed_exchange
+            splitting_residual: energy_change
+                - temporal_work
+                - source_work
+                - prescribed_exchange
+                - active_gain
                 + primary_loss
                 + complementary_loss
                 + boundary_loss,
@@ -3562,6 +3747,7 @@ impl CanonicalTemporalWaveState {
             || !accounting.complementary_loss.is_finite()
             || !accounting.boundary_loss.is_finite()
             || !accounting.prescribed_exchange.is_finite()
+            || !accounting.active_gain.is_finite()
             || !accounting.energy_change.is_finite()
             || !accounting.splitting_residual.is_finite()
         {
@@ -3571,8 +3757,36 @@ impl CanonicalTemporalWaveState {
         self.complementary_flux = complementary;
         self.thin_gap_jump = gap_jump;
         self.outgoing_z = outgoing_z;
+        self.integrated_field = integrated;
         self.time = end_time;
         Ok(accounting)
+    }
+}
+
+/// The stores the bulk fields do not hold: the gap springs, the outgoing pole
+/// currents (already in energy coordinates, so a plain sum of squares) and the
+/// restoring potential on the integrated field.
+fn history_energy_of(
+    operator: &CanonicalTemporalWaveOperator,
+    gaps: &[f64],
+    poles: &[f64],
+    integrated: &[f64],
+) -> f64 {
+    let gaps = gaps
+        .iter()
+        .zip(operator.base().thin_gap_samples())
+        .map(|(jump, sample)| 0.5 * sample.stiffness * jump * jump)
+        .sum::<f64>();
+    let poles = poles.iter().map(|value| 0.5 * value * value).sum::<f64>();
+    gaps + poles + operator.restoring_energy(integrated)
+}
+
+/// The lowest primary tangent factor, or one where no row has any samples.
+fn primary_floor_of(minimum: f64) -> f64 {
+    if minimum.is_finite() && minimum > 0.0 {
+        minimum
+    } else {
+        1.0
     }
 }
 
@@ -3597,6 +3811,22 @@ fn add_gap_force(
     validate_finite(force)
 }
 
+/// Adds the restoring force on the integrated field, which acts like a spring
+/// on `r` in the same kick slot as the gap springs.
+fn add_restoring_force(
+    operator: &CanonicalTemporalWaveOperator,
+    integrated: &[f64],
+    force: &mut [f64],
+) -> Result<(), WaveError> {
+    if !operator.has_restoring() {
+        return Ok(());
+    }
+    for (total, value) in force.iter_mut().zip(operator.restoring_force(integrated)?) {
+        *total += value;
+    }
+    validate_finite(force)
+}
+
 /// One half of the Strang dissipation map, and the energy it removed.
 ///
 /// `stage_time` is where the map sits, which is what the energies are measured
@@ -3611,38 +3841,114 @@ fn decay(
     stage_time: f64,
     rate_time: f64,
     runtime: &CanonicalMaterialRuntimeState,
-) -> Result<(f64, f64), WaveError> {
+) -> Result<(f64, f64, f64), WaveError> {
     if !operator.has_loss {
-        return Ok((0.0, 0.0));
+        return Ok((0.0, 0.0, 0.0));
     }
     let rates = operator.loss_rates_at(rate_time, runtime)?;
+    let active = if operator.has_active_loss {
+        Some(operator.active_loss_coefficients(rate_time, runtime)?)
+    } else {
+        None
+    };
     let primary_before = operator
         .primary_energy_and_rate(primary, stage_time, runtime)?
         .0;
     let complementary_before = operator
         .complementary_energy_and_rate(complementary, stage_time, runtime)?
         .0;
-    for (flux, rate) in primary.iter_mut().zip(&rates.primary) {
-        *flux *= (-duration * rate).exp();
+    let primary_mass = operator.primary_mass_at(stage_time, runtime)?;
+    let node_energy = |flux: &[f64]| -> Result<Vec<f64>, WaveError> {
+        if operator.has_field_laws {
+            return Ok(Vec::new());
+        }
+        Ok(flux
+            .iter()
+            .zip(&primary_mass)
+            .map(|(flux, mass)| 0.5 * flux * flux / mass)
+            .collect())
+    };
+    let before_nodes = node_energy(primary)?;
+    match &active {
+        Some((beta, alpha, mass)) => {
+            for (node, flux) in primary.iter_mut().enumerate() {
+                *flux = bernoulli_map(
+                    *flux,
+                    beta[node],
+                    alpha[node] / (mass[node] * mass[node]),
+                    duration,
+                );
+            }
+        }
+        None => {
+            for (flux, rate) in primary.iter_mut().zip(&rates.primary) {
+                *flux *= (-duration * rate).exp();
+            }
+        }
     }
     for (flux, rate) in complementary.iter_mut().zip(&rates.complementary) {
         *flux = *flux * (-duration * rate).exp();
     }
     validate_finite(primary)?;
-    let removed_primary = primary_before
-        - operator
-            .primary_energy_and_rate(primary, stage_time, runtime)?
-            .0;
     let removed_complementary = complementary_before
         - operator
             .complementary_energy_and_rate(complementary, stage_time, runtime)?
             .0;
-    // A passive channel cannot add energy. Anything else is a defect in the
-    // rate, not a small negative to be clamped away quietly.
+    let Some((_, alpha, _)) = &active else {
+        let removed_primary = primary_before
+            - operator
+                .primary_energy_and_rate(primary, stage_time, runtime)?
+                .0;
+        // A passive channel cannot add energy. Anything else is a defect in
+        // the rate, not a small negative to be clamped away quietly.
+        if removed_primary < -1.0e-12 || removed_complementary < -1.0e-12 {
+            return Err(WaveError::InvalidState);
+        }
+        return Ok((
+            removed_primary.max(0.0),
+            removed_complementary.max(0.0),
+            0.0,
+        ));
+    };
+    // An active node's change is gain, of either sign; the rest is passive.
+    let after_nodes = node_energy(primary)?;
+    let (mut removed_primary, mut gained) = (0.0, 0.0);
+    for node in 0..primary.len() {
+        let change = after_nodes[node] - before_nodes[node];
+        if alpha[node] != 0.0 {
+            gained += change;
+        } else {
+            removed_primary -= change;
+        }
+    }
     if removed_primary < -1.0e-12 || removed_complementary < -1.0e-12 {
         return Err(WaveError::InvalidState);
     }
-    Ok((removed_primary.max(0.0), removed_complementary.max(0.0)))
+    Ok((
+        removed_primary.max(0.0),
+        removed_complementary.max(0.0),
+        gained,
+    ))
+}
+
+/// Per node: the rate's constant part `β`, its `u²` coefficient `α`, and the
+/// mass they were weighed by.
+type ActiveLossCoefficients = (Vec<f64>, Vec<f64>, Vec<f64>);
+
+/// `Q̇ = −(β + k Q²) Q` over `duration`, exactly: in `y = Q²` it is the
+/// Bernoulli equation `ẏ = −2(β + k y) y`, whose solution keeps `Q`'s sign.
+/// A van der Pol node has `β < 0` (gain below threshold) and `k > 0`.
+fn bernoulli_map(flux: f64, beta: f64, k: f64, duration: f64) -> f64 {
+    let y = flux * flux;
+    let next = if beta.abs() * duration < 1.0e-12 {
+        y / (1.0 + 2.0 * k * y * duration)
+    } else {
+        let decay = (-2.0 * beta * duration).exp();
+        // `1 − e^{−2βτ}` over `β`, formed without cancellation.
+        let grown = -(-2.0 * beta * duration).exp_m1() / beta;
+        y * decay / (1.0 + k * y * grown)
+    };
+    flux.signum() * next.max(0.0).sqrt()
 }
 
 /// One half kick with the source and any prescribed pin folded into it, as the
@@ -3867,6 +4173,7 @@ pub(crate) fn strip_temporal_laws(materials: &mut [Material]) {
 struct CompiledTemporalMaterialSample {
     coefficient: TemporalCoefficientSample,
     loss: TemporalLossSample,
+    restoring: RestoringLawValues,
 }
 
 fn temporal_material_sample(
@@ -3891,15 +4198,30 @@ fn temporal_material_sample(
             "duration must be finite and nonnegative",
         );
     }
-    if !material.restoring.is_none() {
-        return material_error(
-            material,
-            "restoring law",
-            point,
-            "oscillator media remain gated",
-        );
-    }
     let coordinates = region.frame.coordinates(point);
+    // Gate O: a restoring law acts on the integrated primary field, so only
+    // the primary row carries it.
+    let restoring = if primary && !material.restoring.is_none() {
+        if !material.restoring.valid(&material.parameters) {
+            return material_error(
+                material,
+                "restoring law",
+                point,
+                "authored frequency, strength or bound is invalid",
+            );
+        }
+        material
+            .restoring
+            .evaluate_at(coordinates, &material.parameters)
+            .map_err(|error| WaveError::MaterialEvaluation {
+                material: material.name.clone(),
+                coefficient: "restoring law",
+                point,
+                reason: error.to_string(),
+            })?
+    } else {
+        RestoringLawValues::None
+    };
     let (coefficient_drive, law) = coefficient_for(model.physics, material, primary);
     if !law.valid(&material.parameters) {
         return material_error(
@@ -3942,6 +4264,7 @@ fn temporal_material_sample(
     }
     let loss = loss_for(model.physics, material, primary, coordinates, point)?;
     Ok(CompiledTemporalMaterialSample {
+        restoring,
         coefficient: TemporalCoefficientSample {
             material: material.id,
             point,
@@ -4058,26 +4381,41 @@ fn loss_for(
     let Some(channel) = channel else {
         return Ok(TemporalLossSample::zero(material.id, point, coordinates));
     };
-    compile_loss(material, channel, drive, coordinates, point)
+    compile_loss(material, channel, drive, primary, coordinates, point)
 }
 
 fn compile_loss(
     material: &Material,
     channel: &LossChannel,
     drive: CanonicalMaterialDrive,
+    primary: bool,
     coordinates: MaterialCoordinates,
     point: Point2,
 ) -> Result<TemporalLossSample, WaveError> {
     if !channel.valid(&material.parameters) {
         return material_error(material, "loss law", point, "authored loss law is invalid");
     }
-    if !matches!(channel.law.rate, RateLaw::Constant) {
-        return material_error(
-            material,
-            "loss law",
-            point,
-            "field-dependent loss remains gated until Stage 8",
-        );
+    match &channel.law.rate {
+        RateLaw::Constant => {}
+        // Gate O: van der Pol acts on the primary field, where the node map
+        // is solved exactly; an undriven rate keeps that map closed-form.
+        RateLaw::VanDerPol { .. } if primary && channel.law.drive.is_none() => {}
+        RateLaw::VanDerPol { .. } => {
+            return material_error(
+                material,
+                "loss law",
+                point,
+                "van der Pol acts on the primary field only, without a drive",
+            );
+        }
+        _ => {
+            return material_error(
+                material,
+                "loss law",
+                point,
+                "a field-dependent passive loss remains gated (C)",
+            );
+        }
     }
     let base_rate = evaluated_nonnegative(
         material,
@@ -9213,6 +9551,502 @@ mod tests {
         assert!(
             impedance_only > 0.02,
             "an impedance modulation sent back only {impedance_only:.3e}"
+        );
+    }
+
+    /// A reflecting unit box of the default medium carrying one restoring law.
+    fn restoring_operator(law: crate::RestoringLaw, edge: f64) -> CanonicalTemporalWaveOperator {
+        let mut scene = Scene::default();
+        scene.materials[0].restoring = law;
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: edge,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap()
+    }
+
+    fn klein_gordon(omega0: f64) -> crate::RestoringLaw {
+        crate::RestoringLaw::KleinGordon {
+            omega0: ScalarField::constant(omega0),
+        }
+    }
+
+    fn sine_gordon(omega0: f64) -> crate::RestoringLaw {
+        crate::RestoringLaw::SineGordon {
+            omega0: ScalarField::constant(omega0),
+        }
+    }
+
+    /// The uniform mode carries no gradient, so it is a lone oscillator at
+    /// `ω₀`, and velocity Verlet steps it exactly: `u_n = cos(nθ)` and
+    /// `r_n = h sin(nθ)/sin θ` with `cos θ = 1 − (ω₀h)²/2`.
+    #[test]
+    fn a_klein_gordon_uniform_mode_is_the_verlet_oscillator_exactly() {
+        let omega0 = 3.0;
+        let operator = restoring_operator(klein_gordon(omega0), 0.4);
+        assert!(operator.has_restoring());
+        let base = operator.base();
+        let h = 0.4 * operator.maximum_time_step();
+        let primary = base.primary_mass().to_vec();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, h, primary, complementary).unwrap();
+        let theta = (1.0 - 0.5 * (omega0 * h).powi(2)).acos();
+        for n in 1..=200 {
+            state.step(&operator).unwrap();
+            let u = state.primary_flux()[0] / base.primary_mass()[0];
+            let r = state.integrated_field()[0];
+            assert!(
+                (u - (n as f64 * theta).cos()).abs() < 1.0e-11,
+                "step {n}: u {u}"
+            );
+            assert!(
+                (r - h * (n as f64 * theta).sin() / theta.sin()).abs() < 1.0e-11,
+                "step {n}: r {r}"
+            );
+        }
+    }
+
+    /// A spatial mode's frequency moves by exactly the cutoff:
+    /// `ω_KG² − ω_linear² = ω₀²`.
+    #[test]
+    fn klein_gordon_adds_its_cutoff_to_a_modes_frequency() {
+        let omega0 = 2.5;
+        let frequency = |law: crate::RestoringLaw| {
+            let operator = restoring_operator(law, 0.25);
+            let base = operator.base();
+            let h = 0.3 * operator.maximum_time_step();
+            // The box's lowest Neumann mode along x.
+            let k = 0.5 * std::f64::consts::PI;
+            let primary = base
+                .node_points()
+                .iter()
+                .zip(base.primary_mass())
+                .map(|(point, mass)| mass * (k * (point.x + 1.0)).cos())
+                .collect::<Vec<_>>();
+            let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+            let mut state =
+                CanonicalTemporalWaveState::new(&operator, h, primary, complementary).unwrap();
+            let node = base
+                .node_points()
+                .iter()
+                .enumerate()
+                .min_by(|a, b| (a.1.x + 1.0).abs().total_cmp(&(b.1.x + 1.0).abs()))
+                .unwrap()
+                .0;
+            // Zero crossings of the wall node's field over several periods.
+            let mut crossings = Vec::new();
+            let mut previous = state.primary_flux()[node];
+            while crossings.len() < 9 {
+                state.step(&operator).unwrap();
+                let current = state.primary_flux()[node];
+                if previous.signum() != current.signum() {
+                    let fraction = previous / (previous - current);
+                    crossings.push(state.time() - h + fraction * h);
+                }
+                previous = current;
+            }
+            let period = 2.0 * (crossings[8] - crossings[0]) / 8.0;
+            std::f64::consts::TAU / period
+        };
+        let linear = frequency(klein_gordon(0.0));
+        let shifted = frequency(klein_gordon(omega0));
+        let ratio = (shifted * shifted - linear * linear) / (omega0 * omega0);
+        assert!((ratio - 1.0).abs() < 0.02, "ω² moved by {ratio:.4} ω₀²");
+    }
+
+    /// Both laws balance at second order, and a step and its inverse return
+    /// the state, integrated field included.
+    #[test]
+    fn restoring_media_balance_at_second_order_and_reverse() {
+        for law in [klein_gordon(2.0), sine_gordon(2.0)] {
+            let operator = restoring_operator(law, 0.3);
+            let forcing = CanonicalForcing::none(operator.base());
+            nonlinear_balance_is_second_order(&operator, &forcing, 0.4, 0.5);
+
+            let (primary, complementary) = reference_fluxes(&operator);
+            let h = 0.4 * operator.maximum_time_step();
+            let start =
+                CanonicalTemporalWaveState::new(&operator, h, primary, complementary).unwrap();
+            let mut state = start.clone();
+            for _ in 0..40 {
+                state.step_by(&operator, h).unwrap();
+            }
+            assert!(state.integrated_field().iter().any(|r| r.abs() > 1.0e-3));
+            for _ in 0..40 {
+                state.step_by(&operator, -h).unwrap();
+            }
+            for (a, b) in state
+                .integrated_field()
+                .iter()
+                .zip(start.integrated_field())
+            {
+                assert!((a - b).abs() < 1.0e-10);
+            }
+            for (a, b) in state.primary_flux().iter().zip(start.primary_flux()) {
+                assert!((a - b).abs() < 1.0e-10);
+            }
+        }
+    }
+
+    /// A sine-Gordon kink `4·atan(e^{γ(x − x₀)/ℓ})` across the box, with
+    /// `ℓ = c/ω₀` and its velocity field, as the state it is.
+    fn kink(
+        operator: &CanonicalTemporalWaveOperator,
+        length: f64,
+        start: f64,
+        speed: f64,
+    ) -> CanonicalTemporalWaveState {
+        let base = operator.base();
+        let gamma = 1.0 / (1.0 - speed * speed).sqrt();
+        let r = base
+            .node_points()
+            .iter()
+            .map(|point| 4.0 * (gamma * (point.x - start) / length).exp().atan())
+            .collect::<Vec<_>>();
+        let primary = base
+            .node_points()
+            .iter()
+            .zip(base.primary_mass())
+            .map(|(point, mass)| {
+                let s = gamma * (point.x - start) / length;
+                mass * (-speed * 2.0 * gamma / length / s.cosh())
+            })
+            .collect::<Vec<_>>();
+        let complementary = base.compatible_flux(&r).unwrap();
+        CanonicalTemporalWaveState::new(
+            operator,
+            0.4 * operator.maximum_time_step(),
+            primary,
+            complementary,
+        )
+        .unwrap()
+        .with_integrated_field(operator, r)
+        .unwrap()
+    }
+
+    /// The kink's centre: across a 0→2π kink the box integrates
+    /// `∫∫ r dA = 4π(1 − x_c)`, exact for a profile symmetric about it.
+    fn kink_centre(
+        operator: &CanonicalTemporalWaveOperator,
+        state: &CanonicalTemporalWaveState,
+    ) -> f64 {
+        let integral = state
+            .integrated_field()
+            .iter()
+            .zip(operator.base().primary_mass())
+            .map(|(r, mass)| r * mass)
+            .sum::<f64>();
+        1.0 - integral / (4.0 * std::f64::consts::PI)
+    }
+
+    fn steepest(state: &CanonicalTemporalWaveState) -> f64 {
+        state
+            .complementary_flux()
+            .iter()
+            .map(|flux| flux.norm())
+            .fold(0.0, f64::max)
+    }
+
+    /// A kink at rest stays at rest; one launched at `v` runs at `v`,
+    /// contracted by `γ`.
+    #[test]
+    fn a_sine_gordon_kink_holds_still_or_runs_at_its_launched_speed() {
+        let omega0 = 4.0;
+        let length = 1.0 / omega0;
+        let operator = restoring_operator(sine_gordon(omega0), 0.08);
+        let run = |speed: f64, start: f64, seconds: f64| {
+            let mut state = kink(&operator, length, start, speed);
+            let before = (kink_centre(&operator, &state), steepest(&state));
+            let energy = state.energy(&operator).unwrap();
+            let steps = (seconds / state.time_step()).round() as usize;
+            for _ in 0..steps {
+                state.step(&operator).unwrap();
+            }
+            let drift = (state.energy(&operator).unwrap() - energy).abs() / energy;
+            assert!(drift < 1.0e-3, "energy moved by {drift:.2e}");
+            (
+                before,
+                (kink_centre(&operator, &state), steepest(&state)),
+                state.time(),
+            )
+        };
+        let ((centre, rest_slope), (after, _), _) = run(0.0, 0.0, 1.0);
+        assert!(centre.abs() < 1.0e-6, "the kink started at {centre}");
+        assert!(after.abs() < 0.01, "a kink at rest moved to {after}");
+
+        // A reflecting wall mirrors a kink into an antikink, and the two
+        // attract: a kink near one wall is slowed, near the other sped up.
+        // Measured on a path symmetric between them the pulls cancel, and the
+        // launched speed is recovered (0.4990 of 0.5 at every mesh tried;
+        // from −0.4 to 0 it reads 0.478 whatever the mesh).
+        let speed = 0.5;
+        let ((start, moving_slope), (end, _), time) = run(speed, -0.3, 1.2);
+        let measured = (end - start) / time;
+        assert!((measured - speed).abs() < 0.01, "ran at {measured}");
+        let contraction = moving_slope / rest_slope;
+        let gamma = 1.0 / (1.0 - speed * speed).sqrt();
+        assert!(
+            (contraction - gamma).abs() < 0.05 * gamma,
+            "contracted by {contraction}"
+        );
+    }
+
+    fn phi4(lambda: f64, bound: f64) -> crate::RestoringLaw {
+        crate::RestoringLaw::Phi4 {
+            lambda: ScalarField::constant(lambda),
+            amplitude_bound: ScalarField::constant(bound),
+        }
+    }
+
+    fn resting_state(
+        operator: &CanonicalTemporalWaveOperator,
+        r: Vec<f64>,
+    ) -> CanonicalTemporalWaveState {
+        let base = operator.base();
+        let complementary = base.compatible_flux(&r).unwrap();
+        CanonicalTemporalWaveState::new(
+            operator,
+            0.4 * operator.maximum_time_step(),
+            vec![0.0; base.degrees_of_freedom()],
+            complementary,
+        )
+        .unwrap()
+        .with_integrated_field(operator, r)
+        .unwrap()
+    }
+
+    /// φ⁴'s wells hold still exactly, its wall `tanh(x/(√2ℓ))`, `ℓ = c/√λ`,
+    /// holds still, and a field set just off the unstable top falls into the
+    /// two wells once a loss lets it settle.
+    #[test]
+    fn phi4_holds_its_wells_and_its_wall_and_breaks_symmetry() {
+        let lambda: f64 = 16.0;
+        let width = 2.0_f64.sqrt() / lambda.sqrt();
+        // The bound only has to clear what the field reaches, √2 from the
+        // top; it sets the curvature, and with it the step.
+        let operator = restoring_operator(phi4(lambda, 1.6), 0.1);
+        let count = operator.base().degrees_of_freedom();
+        for well in [1.0, -1.0] {
+            let mut state = resting_state(&operator, vec![well; count]);
+            for _ in 0..50 {
+                state.step(&operator).unwrap();
+            }
+            assert!(
+                state
+                    .integrated_field()
+                    .iter()
+                    .all(|r| (r - well).abs() < 1.0e-12)
+            );
+        }
+
+        let wall = operator
+            .base()
+            .node_points()
+            .iter()
+            .map(|point| (point.x / width).tanh())
+            .collect::<Vec<_>>();
+        let mut state = resting_state(&operator, wall.clone());
+        let energy = state.energy(&operator).unwrap();
+        let steps = (1.0 / state.time_step()).round() as usize;
+        for _ in 0..steps {
+            state.step(&operator).unwrap();
+        }
+        let moved = state
+            .integrated_field()
+            .iter()
+            .zip(&wall)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(moved < 0.02, "the wall moved by {moved}");
+        let drift = (state.energy(&operator).unwrap() - energy).abs() / energy;
+        assert!(drift < 1.0e-3, "energy moved by {drift:.2e}");
+
+        // Just off the top, with a loss to settle into.
+        let mut scene = Scene::default();
+        scene.materials[0].restoring = phi4(lambda, 1.6);
+        scene.materials[0].damping = ScalarField::constant(2.0);
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.15,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let lossy =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let forcing = CanonicalForcing::none(lossy.base());
+        let settle = |seed: &dyn Fn(Point2) -> f64| {
+            let noise = lossy
+                .base()
+                .node_points()
+                .iter()
+                .map(|point| 1.0e-3 * seed(*point))
+                .collect::<Vec<_>>();
+            let mut state = resting_state(&lossy, noise);
+            let steps = (6.0 / state.time_step()).round() as usize;
+            for _ in 0..steps {
+                state.step_with_forcing(&lossy, &forcing).unwrap();
+            }
+            state
+        };
+        // The top stores `λ/4` per unit area, 16 over the box.
+        let barrier = 0.25 * lambda * 4.0;
+        // A seed of one sign falls wholly into that well.
+        let state = settle(&|point| 1.0 + 0.5 * (7.0 * point.x + 3.0 * point.y).sin());
+        let left = state.energy(&lossy).unwrap() / barrier;
+        assert!(
+            state.integrated_field().iter().all(|r| *r > 0.9),
+            "not all in the +1 well"
+        );
+        assert!(left < 1.0e-3, "kept {left:.2e} of the barrier");
+        // An antisymmetric one settles into one wall along x = 0, whose
+        // tension is `σ = (2√2/3) c √λ`: `2σ` over the box's height.
+        let state = settle(&|point| (0.5 * std::f64::consts::PI * point.x).sin());
+        let tension = 2.0 * 2.0_f64.sqrt() / 3.0 * lambda.sqrt();
+        let ratio = state.energy(&lossy).unwrap() / (2.0 * tension);
+        assert!(state.integrated_field().iter().any(|r| *r > 0.9));
+        assert!(state.integrated_field().iter().any(|r| *r < -0.9));
+        assert!(
+            (ratio - 1.0).abs() < 0.05,
+            "the wall holds {ratio:.3} of 2σ"
+        );
+    }
+
+    /// The van der Pol node map is the exact flow of `Q̇ = −(β + kQ²)Q`,
+    /// against a fine Runge-Kutta integration of the same equation.
+    #[test]
+    fn the_van_der_pol_node_map_is_its_ode_flow() {
+        for (flux, beta, k) in [
+            (0.3, -1.2, 4.0),
+            (-0.8, -0.5, 2.0),
+            (1.1, 0.7, 3.0),
+            (0.4, 0.0, 5.0),
+        ] {
+            let duration = 0.37;
+            let mut q: f64 = flux;
+            let steps = 20_000;
+            let h = duration / steps as f64;
+            let f = |q: f64| -(beta + k * q * q) * q;
+            for _ in 0..steps {
+                let a = f(q);
+                let b = f(q + 0.5 * h * a);
+                let c = f(q + 0.5 * h * b);
+                let d = f(q + h * c);
+                q += h * (a + 2.0 * b + 2.0 * c + d) / 6.0;
+            }
+            let mapped = bernoulli_map(flux, beta, k, duration);
+            assert!(
+                (mapped - q).abs() < 1.0e-12,
+                "{flux}, {beta}, {k}: {mapped} against {q}"
+            );
+        }
+    }
+
+    fn van_der_pol_operator(
+        gain: f64,
+        threshold: f64,
+        omega0: f64,
+    ) -> CanonicalTemporalWaveOperator {
+        let mut scene = Scene::default();
+        scene.materials[0].restoring = klein_gordon(omega0);
+        scene.materials[0].magnetic_loss = Some(crate::LossChannel {
+            base_rate: ScalarField::constant(gain),
+            law: DampingLaw {
+                rate: crate::RateLaw::VanDerPol {
+                    threshold: ScalarField::constant(threshold),
+                    amplitude_bound: ScalarField::constant(10.0),
+                },
+                drive: TimeDrive::None,
+            },
+        });
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.5,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap()
+    }
+
+    /// Beside Klein-Gordon the node equation is Rayleigh's form of van der
+    /// Pol, `r̈ + γ₀(ṙ²/a² − 1)ṙ + ω₀²r = 0`: a small uniform field grows,
+    /// and settles on the limit cycle whose rate amplitude is `2a/√3` for
+    /// weak gain. The gain lane accounts for the energy it put in.
+    #[test]
+    fn van_der_pol_grows_to_its_limit_cycle() {
+        let (gain, threshold, omega0) = (1.0, 0.5, 3.0);
+        let operator = van_der_pol_operator(gain, threshold, omega0);
+        let base = operator.base();
+        let forcing = CanonicalForcing::none(base);
+        let primary = base
+            .primary_mass()
+            .iter()
+            .map(|mass| 1.0e-3 * mass)
+            .collect();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let mut state = CanonicalTemporalWaveState::new(
+            &operator,
+            0.2 * operator.maximum_time_step(),
+            primary,
+            complementary,
+        )
+        .unwrap();
+        let start = state.energy(&operator).unwrap();
+        let mut gained = 0.0;
+        let mut peak: f64 = 0.0;
+        let steps = (30.0 / state.time_step()).round() as usize;
+        for step in 0..steps {
+            let accounting = state.step_with_forcing(&operator, &forcing).unwrap();
+            gained += accounting.active_gain;
+            // The last few periods only.
+            if step > steps - (4.0 / state.time_step()) as usize {
+                peak = peak.max((state.primary_flux()[0] / base.primary_mass()[0]).abs());
+            }
+        }
+        let predicted = 2.0 * threshold / 3.0_f64.sqrt();
+        assert!(
+            (peak - predicted).abs() < 0.05 * predicted,
+            "limit cycle at {peak} against {predicted}"
+        );
+        let change = state.energy(&operator).unwrap() - start;
+        assert!(
+            (change - gained).abs() < 1.0e-3 * change.abs(),
+            "the gain lane holds {gained} of {change}"
         );
     }
 }
