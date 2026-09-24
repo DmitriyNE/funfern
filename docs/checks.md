@@ -21,6 +21,7 @@ cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_tim
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --outgoing
 cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
 DRIVEN_WALLS=outgoing cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
+DRIVEN_LAW=van-der-pol cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
 OSCILLATOR_MEDIUM=kink OSCILLATOR_FILTER=1 cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator
 OSCILLATOR_HANDOFF=remesh cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator_handoff
 FAILURE_LAW=phi4 cargo run -p funfern-app --release --locked --example canonical_gpu_nonlinear_failure
@@ -105,7 +106,8 @@ an f64 oracle. It reads `2.46e-7` over forty-eight steps. `DRIVEN_WALLS=outgoing
 puts the drive behind a second-order outgoing wall - the document's default, and
 the combination that used to be refused - and reads `3.31e-7` over the same
 forty-eight. `DRIVEN_STEPS` and `DRIVEN_DEPTH` override the step count and the
-modulation depth.
+modulation depth. `DRIVEN_LAW=sine-gordon` or `van-der-pol` authors an
+oscillator from the editor's own presets instead and also compares `r`.
 
 `canonical_gpu_temporal_timing` is the throughput comparison that decides
 whether a drive is affordable, run twice with and without `--fixed` on an

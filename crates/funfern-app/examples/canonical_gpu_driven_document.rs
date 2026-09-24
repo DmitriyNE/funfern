@@ -10,6 +10,12 @@
 //! That assembly is where a surprise would hide, because it is the only place
 //! the stripped model, the shared base, the trajectory timestep and the
 //! temporal plan all meet.
+//!
+//! `DRIVEN_LAW` picks what the document authors: `pump` (default), or an
+//! oscillator medium from the editor's own presets (Gate O): `sine-gordon`,
+//! or `van-der-pol`, Klein-Gordon with a self-oscillating loss on the skin's
+//! primary channel. The oscillator runs also seed and compare the integrated
+//! field `r`.
 
 use std::time::{Duration, Instant};
 
@@ -21,7 +27,11 @@ use funfern_app::canonical_gpu::{
 use funfern_app::topology_editor::TopologyEditor;
 use funfern_app::topology_runtime::TopologyRuntime;
 use funfern_app::wave_gpu::WaveGpuPlugin;
-use funfern_core::{CanonicalTemporalWaveState, MeshingOptions, Point2, ScalarField, TimeDrive};
+use funfern_core::{
+    CanonicalTemporalWaveState, DampingLaw, ElectromagneticPolarization, LossChannel,
+    MeshingOptions, PhysicsModel, Point2, RateLaw, ScalarField, TimeDrive, apply_restoring_preset,
+    restoring_presets,
+};
 
 fn steps() -> u64 {
     std::env::var("DRIVEN_STEPS")
@@ -39,6 +49,7 @@ struct Pending {
 struct Expected {
     primary: Vec<f64>,
     complementary: Vec<Point2>,
+    integrated: Vec<f64>,
     started: Instant,
     deadline: Instant,
     finished: bool,
@@ -61,8 +72,45 @@ fn main() -> AppExit {
         frequency_hz: ScalarField::constant(0.9),
         phase_radians: ScalarField::constant(0.2),
     };
-    document.model.draft.materials[0].mass_law.drive = pump.clone();
-    document.model.accepted.materials[0].mass_law.drive = pump;
+    let law = std::env::var("DRIVEN_LAW").unwrap_or_else(|_| "pump".into());
+    let physics = document.model.accepted.physics;
+    for scene in [&mut document.model.draft, &mut document.model.accepted] {
+        let material = &mut scene.materials[0];
+        match law.as_str() {
+            "pump" => material.mass_law.drive = pump.clone(),
+            "sine-gordon" | "van-der-pol" => {
+                let id = if law == "sine-gordon" { "R2" } else { "R1" };
+                let preset = restoring_presets()
+                    .iter()
+                    .find(|preset| preset.id == id)
+                    .expect("restoring preset");
+                *material = apply_restoring_preset(preset, material).expect("restoring preset");
+                if law == "van-der-pol" {
+                    let channel = Some(LossChannel {
+                        base_rate: ScalarField::constant(0.8),
+                        law: DampingLaw {
+                            rate: RateLaw::VanDerPol {
+                                threshold: ScalarField::constant(0.03),
+                                amplitude_bound: ScalarField::constant(1.0e3),
+                            },
+                            drive: TimeDrive::None,
+                        },
+                    });
+                    // The primary row's own channel, as the editor writes it.
+                    if physics
+                        == (PhysicsModel::Electromagnetic {
+                            polarization: ElectromagneticPolarization::Tm,
+                        })
+                    {
+                        material.electric_loss = channel;
+                    } else {
+                        material.magnetic_loss = channel;
+                    }
+                }
+            }
+            other => panic!("unknown DRIVEN_LAW {other}"),
+        }
+    }
     // The document's default walls are second-order outgoing, which a driven
     // medium cannot yet use: that boundary's trace factorization is built from
     // the nodal mass and the device has no way to refresh it. The plan
@@ -146,8 +194,23 @@ fn main() -> AppExit {
         .map(|point| 0.03 * (0.9 * point.x + 1.2 * point.y).cos())
         .collect::<Vec<_>>();
     let complementary = base.compatible_flux(&potential).expect("compatible flux");
-    let seeded = CanonicalTemporalWaveState::new(&temporal, time_step, primary, complementary)
+    let mut seeded = CanonicalTemporalWaveState::new(&temporal, time_step, primary, complementary)
         .expect("seeded state");
+    if temporal.has_restoring() {
+        let integrated = base
+            .node_points()
+            .iter()
+            .map(|point| 1.2 * (0.7 * point.x + 0.5 * point.y).cos())
+            .collect();
+        seeded = seeded
+            .with_integrated_field(&temporal, integrated)
+            .expect("seeded integrated field");
+    }
+    println!(
+        "driven document: {law}, restoring {}, active loss {}",
+        temporal.has_restoring(),
+        temporal.has_loss()
+    );
     let plan =
         CanonicalGpuPlan::compile_temporal(&temporal, &seeded, &prepared.canonical_forcing, clock)
             .expect("temporal plan from the application's own generation");
@@ -182,6 +245,7 @@ fn main() -> AppExit {
     .insert_resource(Expected {
         primary: oracle.primary_flux().to_vec(),
         complementary: oracle.complementary_flux().to_vec(),
+        integrated: oracle.integrated_field().to_vec(),
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(120),
         finished: false,
@@ -238,9 +302,21 @@ fn drive(
     // readback has populated that lane and passes by measuring nothing.
     if display.primary_flux.len() != expected.primary.len()
         || display.complementary_flux.len() != expected.complementary.len()
+        || display.integrated_field().len() != expected.integrated.len()
     {
         return;
     }
+    let integrated = if expected.integrated.is_empty() {
+        0.0
+    } else {
+        relative_l2(
+            display
+                .integrated_field()
+                .iter()
+                .map(|value| f64::from(*value)),
+            expected.integrated.iter().copied(),
+        )
+    };
     let primary = relative_l2(
         display.primary_flux.iter().map(|value| f64::from(*value)),
         expected.primary.iter().copied(),
@@ -256,11 +332,12 @@ fn drive(
             .flat_map(|value| [value.x, value.y]),
     );
     println!(
-        "driven document after {:.2} ms: Q {primary:.3e}, b {complementary:.3e}",
+        "driven document after {:.2} ms: Q {primary:.3e}, b {complementary:.3e}, r \
+         {integrated:.3e}",
         expected.started.elapsed().as_secs_f64() * 1_000.0
     );
     expected.finished = true;
-    if primary > 2.0e-4 || complementary > 2.0e-4 {
+    if primary > 2.0e-4 || complementary > 2.0e-4 || integrated > 2.0e-4 {
         expected.failed = true;
     }
 }

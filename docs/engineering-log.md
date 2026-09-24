@@ -12221,3 +12221,25 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
 - **Not done:** point and line probes still record `u` only, with no `r`
   channel. The point probe's energy density does not include `V(r)`.
 - **Not checked by me:** the view on screen.
+
+## 2026-09-25 — Oscillator documents end to end (Stage 11.4d)
+
+- **`canonical_gpu_driven_document` gains `DRIVEN_LAW`:** `pump`, the
+  default and unchanged; `sine-gordon`, from the R2 preset; or `van-der-pol`,
+  R1 with a self-oscillating loss on the skin's primary channel. An
+  oscillator run seeds `r` and compares it too.
+- **Measured:** an authored document through the app's own resumable
+  preparation, onto the device, against the f64 reference, 48 steps, 3811
+  DOFs:
+
+  | law | reflecting walls (Q / b / r) | second-order walls (Q / b / r) |
+  | --- | --- | --- |
+  | pump | 2.6e-7 / 5.3e-7 / — | 3.3e-7 / 4.0e-7 / — |
+  | sine-Gordon | 1.7e-7 / 2.6e-6 / 6.2e-7 | 1.9e-7 / 5.9e-7 / 4.2e-7 |
+  | Klein–Gordon + van der Pol | 6.4e-8 / 3.0e-6 / 2.3e-7 | 6.3e-8 / 7.3e-7 / 2.3e-7 |
+- **One app run** with the scratch HOME, on a sine-Gordon autosave written
+  by a throwaway example (since deleted; the scratch autosave was restored
+  afterwards). The app opened and ran for 25 s with nothing on stderr.
+  Preparation errors go to the app's own log panel, not stdout, so this run
+  does not show that it assembled. The end-to-end example above covers that
+  path. The UI itself is for the user to judge.
