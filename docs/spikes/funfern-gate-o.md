@@ -87,6 +87,12 @@ energy balance. Loss composes by acting on `Q` and `b` as it does now, which
 gives a damped sine-Gordon. `r` has no loss lane of its own, and complementary
 loss lets `b` part from `ηC r`, which is the direct state's usual freedom.
 
+**Walls.** Both outgoing walls impose `∂ₙu = −u_t/c` at normal incidence,
+which is exact only for a non-dispersive wave. A Klein–Gordon plane wave with
+`ck = √(ω² − ω₀²)` is reflected with amplitude `R = (ω − ck)/(ω + ck)`: 0.07
+at `2ω₀`, 0.29 at `1.2ω₀`, and total at cutoff. The walls compose and
+balance; they just do not absorb near the cutoff, and the presets say so.
+
 ## Timestep
 
 Verlet on `M⁻¹K + V″` is stable for `h²(λ_max + V″_max)/4 ≤ 1`, so the

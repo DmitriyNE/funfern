@@ -8807,6 +8807,15 @@ mod tests {
                     .unwrap()
                     .pinned(operator, forcing)
                     .unwrap();
+            if operator.has_restoring() {
+                // Far enough from zero that sine-Gordon is not its tangent.
+                let integrated = base
+                    .node_points()
+                    .iter()
+                    .map(|point| 1.2 * (0.7 * point.x + 0.5 * point.y).cos())
+                    .collect();
+                state = state.with_integrated_field(operator, integrated).unwrap();
+            }
             let before = state.energy(operator).unwrap();
             let mut total = CanonicalTemporalStepAccounting::default();
             for _ in 0..steps {
@@ -8819,6 +8828,7 @@ mod tests {
                 total.primary_loss += step.primary_loss;
                 total.complementary_loss += step.complementary_loss;
                 total.boundary_loss += step.boundary_loss;
+                total.active_gain += step.active_gain;
             }
             let after = state.energy(operator).unwrap();
             let unaccounted = after
@@ -8826,6 +8836,7 @@ mod tests {
                 - total.temporal_work
                 - total.source_work
                 - total.prescribed_exchange
+                - total.active_gain
                 + total.primary_loss
                 + total.complementary_loss
                 + total.boundary_loss;
@@ -10048,5 +10059,117 @@ mod tests {
             (change - gained).abs() < 1.0e-3 * change.abs(),
             "the gain lane holds {gained} of {change}"
         );
+    }
+
+    /// Every oscillator medium beside every composition balances at second
+    /// order: walls of both orders, prescribed data, a thin gap, loss and a
+    /// source, with a pumped mass row and a Kerr row beside sine-Gordon.
+    /// The restoring force enters the same kick as the gaps and the wall
+    /// terms, and `r` drifts beside `b`, so nothing here is new code; this is
+    /// what shows it composes.
+    #[test]
+    fn oscillator_media_balance_at_second_order_beside_each_composition() {
+        type Author = fn(&mut Scene);
+        let media: [(&str, Author); 5] = [
+            ("klein-gordon", |scene| {
+                scene.materials[0].restoring = klein_gordon(2.0);
+            }),
+            ("sine-gordon", |scene| {
+                scene.materials[0].restoring = sine_gordon(3.0);
+            }),
+            ("pumped sine-gordon", |scene| {
+                scene.materials[0].restoring = sine_gordon(3.0);
+                scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+            }),
+            ("kerr sine-gordon", |scene| {
+                scene.materials[0].restoring = sine_gordon(3.0);
+                scene.materials[0].mass_law.field = kerr(0.8);
+            }),
+            ("van der pol", |scene| {
+                scene.materials[0].restoring = klein_gordon(2.0);
+                scene.materials[0].magnetic_loss = Some(LossChannel {
+                    base_rate: ScalarField::constant(0.8),
+                    law: DampingLaw {
+                        rate: RateLaw::VanDerPol {
+                            threshold: ScalarField::constant(0.4),
+                            amplitude_bound: ScalarField::constant(10.0),
+                        },
+                        drive: TimeDrive::None,
+                    },
+                });
+            }),
+        ];
+        let mut compositions = filter_compositions();
+        compositions.push((
+            "source",
+            Scene::default(),
+            OuterBoundaryCondition::Reflecting,
+        ));
+        for (label, scene, condition) in compositions {
+            for (medium, author) in &media {
+                // Van der Pol is the primary row's loss channel; the lossy
+                // composition already holds that row's loss.
+                if label == "loss" && *medium == "van der pol" {
+                    continue;
+                }
+                let mut scene = scene.clone();
+                author(&mut scene);
+                let operator = filter_operator(&scene, condition);
+                assert!(operator.has_restoring(), "{label}, {medium}");
+                let base = operator.base();
+                let mut forcing = filter_forcing(label, base);
+                if label == "source" {
+                    forcing
+                        .push_source(
+                            CanonicalSource::direct(
+                                base,
+                                base.primary_mass().to_vec(),
+                                TimeSignal::harmonic(0.0, 0.9, 1.7, 0.4),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                }
+                let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.3, 0.5);
+                let exchanged = match label {
+                    "first-order wall" | "second-order wall" => total.boundary_loss,
+                    "prescribed wall" => total.prescribed_exchange.abs(),
+                    "loss" => total.primary_loss,
+                    "source" => total.source_work.abs(),
+                    _ => 1.0,
+                };
+                assert!(exchanged > 1e-5, "{label}, {medium}: {total:?}");
+                if *medium == "van der pol" {
+                    assert!(total.active_gain.abs() > 1e-5, "{label}: {total:?}");
+                }
+            }
+        }
+    }
+
+    /// A pulse is an increment of `u`, and `r = ∫u dt` is continuous in
+    /// time, so a pulse leaves it where it was.
+    #[test]
+    fn a_pulse_leaves_the_integrated_field_where_it_was() {
+        let operator = restoring_operator(sine_gordon(3.0), 0.3);
+        let base = operator.base();
+        let forcing = CanonicalForcing::none(base);
+        let integrated = base
+            .node_points()
+            .iter()
+            .map(|point| 1.2 * point.x)
+            .collect::<Vec<_>>();
+        let mut state =
+            CanonicalTemporalWaveState::zero(&operator, 0.4 * operator.maximum_time_step())
+                .unwrap()
+                .with_integrated_field(&operator, integrated.clone())
+                .unwrap();
+        let increment = vec![0.5; base.degrees_of_freedom()];
+        state
+            .apply_primary_pulse(&operator, &forcing, &increment)
+            .unwrap();
+        assert_eq!(state.integrated_field(), integrated);
+        for (flux, mass) in state.primary_flux().iter().zip(base.primary_mass()) {
+            assert!((flux - 0.5 * mass).abs() < 1e-14);
+        }
     }
 }

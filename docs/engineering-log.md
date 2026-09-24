@@ -11786,3 +11786,31 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
     - Beside Klein–Gordon, a 1e-3 field grows to a rate amplitude of
       0.57767 against Rayleigh's `2a/√3` = 0.57735.
     - The gain lane holds the energy change to 1.8e-4.
+
+## 2026-09-24 — Oscillator media beside every composition (Stage 11.2)
+
+- **What composes, and why nothing new was needed.** The restoring force
+  enters the same kick force as the gap springs and the wall terms, and `r`
+  drifts on the same midpoint field as `b` and the gap jumps. Walls of both
+  orders, prescribed data, a thin gap, loss, a source, a pumped mass row and
+  a Kerr row therefore compose with it as they are. This commit is the tests
+  that show it.
+- **Measured:** `oscillator_media_balance_at_second_order_beside_each_composition`
+  crosses Klein–Gordon, sine-Gordon, pumped sine-Gordon, Kerr sine-Gordon
+  and van der Pol beside Klein–Gordon with the first-order wall, the
+  second-order wall, a prescribed wall, a thin gap, loss and a source. That
+  makes 29 cases (van der Pol beside the lossy case is skipped: it is that
+  row's loss channel). Every case balances at order 1.993–2.003, and each
+  composition's own lane (boundary loss, exchange, loss, source work, active
+  gain) is nonzero. The balance helper now subtracts the active-gain lane and
+  seeds `r` at 1.2 in amplitude, so sine-Gordon is away from its tangent.
+- **Pulses** add to `u` and leave `r` where it was, because `r = ∫u dt` is
+  continuous in time (`a_pulse_leaves_the_integrated_field_where_it_was`).
+- **Walls are not tuned for a dispersive medium.** Both outgoing walls
+  impose `∂ₙu = −u_t/c` at normal incidence. A Klein–Gordon plane wave has
+  `ck = √(ω² − ω₀²)`, so the wall reflects amplitude
+  `R = (ω − ck)/(ω + ck)`: 0.072 at ω = 2ω₀ (0.5% of the energy), 0.29 at
+  1.2ω₀ (8%), and all of it at cutoff. This is derived, not measured. The
+  outer condition is global, so a y-uniform packet would also be damped by
+  the walls it grazes, and no clean measurement exists on this mesh. The
+  11.5 waveguide scene is where it gets measured.
