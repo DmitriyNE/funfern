@@ -60,6 +60,30 @@ pub fn catalog() -> &'static [TopologyExample] {
                 "A point source drives multiple scattering through eight reflecting obstacles.",
                 obstacle_array(),
             ),
+            example(
+                "Kerr slab",
+                "A strong source drives a Kerr slab: the wave slows where it is strong, and the \
+                 receiver hears the source's third harmonic.",
+                kerr_slab(),
+            ),
+            example(
+                "Parametric pump",
+                "A slab pumped at twice the source frequency amplifies what it transmits, by an \
+                 amount the pump's phase sets.",
+                pumped_slab(),
+            ),
+            example(
+                "Time crystal",
+                "A slab whose permittivity steps up and down once a second splits the wave into \
+                 sidebands; its sharp edges reach three steps out.",
+                time_crystal_slab(),
+            ),
+            example(
+                "Travelling modulation",
+                "A modulation running with the wave converts it to higher frequencies; mirrored, \
+                 against the wave, it barely does.",
+                travelling_slab(),
+            ),
         ]
     })
 }
@@ -484,13 +508,208 @@ fn obstacle_array() -> TopologyDocument {
     document
 }
 
+/// A material from a catalogue preset, with its parameters set by name.
+fn preset_material(
+    id: u64,
+    name: &str,
+    color: [u8; 3],
+    preset: &str,
+    row: LawPresetRow,
+    values: &[(&str, f64)],
+) -> Material {
+    let base = Material {
+        id: MaterialId(id),
+        name: name.into(),
+        color,
+        ..Material::default_medium()
+    };
+    let preset = law_presets()
+        .iter()
+        .find(|candidate| candidate.name == preset && candidate.row == row)
+        .expect("the catalogue offers this preset");
+    let mut material = apply_law_preset(preset, &base).expect("a preset applies to a fresh medium");
+    for (parameter, value) in values {
+        material
+            .parameters
+            .iter_mut()
+            .find(|candidate| candidate.name == *parameter)
+            .expect("the preset names this parameter")
+            .value = *value;
+    }
+    material
+}
+
+fn slab(x0: f64, x1: f64, half_height: f64) -> PeriodicCubicSpline {
+    PeriodicCubicSpline::polygon(vec![
+        Point2::new(x0, -half_height),
+        Point2::new(x1, -half_height),
+        Point2::new(x1, half_height),
+        Point2::new(x0, half_height),
+    ])
+    .unwrap()
+}
+
+fn kerr_slab_with(chi: f64, amplitude: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries =
+        OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
+    builder.scene.materials.push(preset_material(
+        2,
+        "Kerr slab",
+        [178, 102, 62],
+        "Kerr medium",
+        LawPresetRow::Mass,
+        &[("kerr_chi", chi)],
+    ));
+    builder.subdomain(
+        slab(-0.3, 0.3, 0.55),
+        MaterialId(2),
+        MaterialFrame {
+            attachment: MaterialFrameAttachment::FollowRegion,
+            ..MaterialFrame::world()
+        },
+    );
+    let mut document = builder.document();
+    document.model.source = source(Point2::new(-0.6, 0.0), 2.5, amplitude, 0.05);
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Receiver".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(0.55, 0.0)),
+    });
+    document
+}
+
+fn pumped_slab_with(depth: f64, pump_hz: f64, phase: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries =
+        OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
+    builder.scene.materials.push(preset_material(
+        2,
+        "Pumped slab",
+        [120, 92, 178],
+        "Parametric pump",
+        LawPresetRow::Mass,
+        &[
+            ("depth", depth),
+            ("pump_hz", pump_hz),
+            ("pump_phase", phase),
+        ],
+    ));
+    builder.subdomain(
+        slab(-0.35, 0.35, 0.55),
+        MaterialId(2),
+        MaterialFrame {
+            attachment: MaterialFrameAttachment::FollowRegion,
+            ..MaterialFrame::world()
+        },
+    );
+    let mut document = builder.document();
+    document.model.source = source(Point2::new(-0.65, 0.0), 2.5, 20.0, 0.05);
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Receiver".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(0.6, 0.0)),
+    });
+    document
+}
+
+/// A slab carrying one preset between a source and a receiver, both of which
+/// can be mirrored through the slab's centre.
+fn modulated_slab(
+    preset: &str,
+    values: &[(&str, f64)],
+    half_width: f64,
+    mirrored: bool,
+) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries =
+        OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
+    builder.scene.materials.push(preset_material(
+        2,
+        "Modulated slab",
+        [92, 150, 178],
+        preset,
+        LawPresetRow::Mass,
+        values,
+    ));
+    builder.subdomain(
+        slab(-half_width, half_width, 0.55),
+        MaterialId(2),
+        MaterialFrame {
+            attachment: MaterialFrameAttachment::FollowRegion,
+            ..MaterialFrame::world()
+        },
+    );
+    let side = if mirrored { -1.0 } else { 1.0 };
+    let mut document = builder.document();
+    document.model.source = source(
+        Point2::new(-side * (half_width + 0.2), 0.0),
+        2.5,
+        20.0,
+        0.05,
+    );
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Receiver".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(side * (half_width + 0.15), 0.0)),
+    });
+    document
+}
+
+const CRYSTAL: [(&str, f64); 4] = [
+    ("depth", 0.3),
+    ("pump_hz", 1.0),
+    ("pump_phase", 0.0),
+    ("edge", 6.0),
+];
+const TRAVELLING: [(&str, f64); 5] = [
+    ("depth", 0.3),
+    ("pump_hz", 1.0),
+    ("pump_phase", 0.0),
+    // 2π per unit length at 1 Hz: the modulation runs at the wave speed, so
+    // each step up in frequency is phase-matched for a wave running with it.
+    ("wavenumber", std::f64::consts::TAU),
+    ("wave_angle", 0.0),
+];
+
+fn kerr_slab() -> TopologyDocument {
+    kerr_slab_with(40.0, 60.0)
+}
+
+fn pumped_slab() -> TopologyDocument {
+    pumped_slab_with(0.4, 5.0, std::f64::consts::FRAC_PI_4)
+}
+
+fn time_crystal_slab() -> TopologyDocument {
+    modulated_slab("Time crystal", &CRYSTAL, 0.35, false)
+}
+
+fn travelling_slab() -> TopologyDocument {
+    modulated_slab("Travelling modulation", &TRAVELLING, 0.6, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 8);
+        assert_eq!(catalog().len(), 12);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -514,5 +733,210 @@ mod tests {
                 PhysicsModel::Electromagnetic { .. }
             )
         }));
+    }
+
+    use crate::topology_editor::TopologyEditor;
+    use crate::topology_runtime::TopologyRuntime;
+    use std::sync::Arc;
+
+    /// Prepares a document as the application does, at a given mesh edge.
+    fn prepare(
+        document: &TopologyDocument,
+        edge: f64,
+    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let editor = TopologyEditor::from_document(document.clone()).unwrap();
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                MeshingOptions {
+                    target_edge_length: edge,
+                    ..MeshingOptions::default()
+                },
+                true,
+            )
+            .unwrap();
+        loop {
+            if let Some(result) = runtime.advance(1 << 16) {
+                result.unwrap();
+                return runtime.commit_ready(token).unwrap();
+            }
+        }
+    }
+
+    /// The primary field at the node nearest `point` after every step, and the
+    /// largest nonlinear strength seen, stepping the CPU reference from rest.
+    fn trace(
+        document: &TopologyDocument,
+        edge: f64,
+        seconds: f64,
+        point: Point2,
+    ) -> (Vec<f64>, f64, f64) {
+        let prepared = prepare(document, edge);
+        let operator = prepared
+            .canonical_temporal_operator
+            .clone()
+            .expect("a law-carrying document prepares a temporal operator");
+        let forcing = prepared.canonical_forcing.clone();
+        let dt = prepared.recommended_time_step();
+        let node = operator
+            .base()
+            .node_points()
+            .iter()
+            .enumerate()
+            .min_by(|a, b| (*a.1 - point).norm().total_cmp(&(*b.1 - point).norm()))
+            .unwrap()
+            .0;
+        let mut state = CanonicalTemporalWaveState::zero(&operator, dt)
+            .unwrap()
+            .pinned(&operator, &forcing)
+            .unwrap();
+        let steps = (seconds / dt).ceil() as usize;
+        let mut series = Vec::with_capacity(steps);
+        let mut strongest = 0.0_f64;
+        for step in 0..steps {
+            state.step_with_forcing(&operator, &forcing).unwrap();
+            let field = operator
+                .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                .unwrap();
+            series.push(field[node]);
+            if step % 50 == 0 {
+                for strength in operator
+                    .nonlinear_strength(
+                        state.primary_flux(),
+                        state.complementary_flux(),
+                        state.time(),
+                        state.runtime(),
+                    )
+                    .unwrap()
+                {
+                    strongest = strongest.max(strength.primary.max(strength.complementary));
+                }
+            }
+        }
+        (series, dt, strongest)
+    }
+
+    /// `|X(f)|` over the last `periods` whole periods of `f`.
+    fn amplitude_at(series: &[f64], dt: f64, frequency: f64, periods: f64) -> f64 {
+        let count = ((periods / frequency) / dt).round() as usize;
+        let window = &series[series.len() - count..];
+        let (mut re, mut im) = (0.0, 0.0);
+        for (index, value) in window.iter().enumerate() {
+            let phase = std::f64::consts::TAU * frequency * index as f64 * dt;
+            re += value * phase.cos();
+            im -= value * phase.sin();
+        }
+        2.0 * (re * re + im * im).sqrt() / count as f64
+    }
+
+    /// The Kerr gallery claim: behind the slab, the receiver hears the
+    /// source's third harmonic, which a medium with the same geometry and no
+    /// response does not make; and the slab's coefficient moves by tens of
+    /// percent, which is what the material readout will show. Measured at a
+    /// coarse mesh so the suite can afford it; the gallery's own mesh is finer.
+    #[test]
+    fn the_kerr_slab_generates_its_third_harmonic() {
+        let receiver = Point2::new(0.55, 0.0);
+        let run = |chi: f64| {
+            let (series, dt, strongest) = trace(&kerr_slab_with(chi, 60.0), 0.15, 4.0, receiver);
+            let ratio = amplitude_at(&series, dt, 7.5, 9.0) / amplitude_at(&series, dt, 2.5, 3.0);
+            (ratio, strongest)
+        };
+        let (kerr, strongest) = run(40.0);
+        let (linear, _) = run(0.0);
+        assert!(kerr > 0.1, "third harmonic {kerr:.3e} of the fundamental");
+        assert!(linear < 0.01, "a linear slab made {linear:.3e}");
+        assert!(strongest > 0.2, "the slab moved only {strongest:.3}");
+    }
+
+    /// Amplitude at the source frequency behind the pumped slab, against the
+    /// unpumped slab's, at a pump phase of `eighths` × π/4.
+    fn pump_gain(pump_hz: f64, eighths: f64) -> f64 {
+        let receiver = Point2::new(0.6, 0.0);
+        let transmitted = |depth: f64, phase: f64| {
+            let (series, dt, _) = trace(
+                &pumped_slab_with(depth, pump_hz, phase),
+                0.15,
+                6.0,
+                receiver,
+            );
+            amplitude_at(&series, dt, 2.5, 4.0)
+        };
+        transmitted(0.4, eighths * std::f64::consts::FRAC_PI_4) / transmitted(0.0, 0.0)
+    }
+
+    /// The pump gallery claim: pumped at twice the source's frequency the slab
+    /// amplifies what it transmits, by an amount set by the pump's phase
+    /// against the source. That phase sensitivity is what marks degenerate
+    /// parametric amplification rather than a slab that merely changed its
+    /// average impedance. The two phases are the extremes of an eight-phase
+    /// scan, which sit at the same phases on a finer mesh (see the log).
+    #[test]
+    fn a_pump_at_twice_the_source_frequency_amplifies_by_phase() {
+        let (best, worst) = (pump_gain(5.0, 1.0), pump_gain(5.0, 5.0));
+        assert!(best > 1.8, "amplified to {best:.3}");
+        assert!(
+            best / worst > 1.5,
+            "phase moved the gain {best:.3} / {worst:.3}"
+        );
+    }
+
+    /// And a pump at an unrelated frequency neither amplifies nor cares for
+    /// its phase.
+    #[test]
+    fn a_detuned_pump_neither_amplifies_nor_depends_on_phase() {
+        let (one, other) = (pump_gain(3.6, 1.0), pump_gain(3.6, 5.0));
+        assert!(one < 1.05 && other < 1.05, "{one:.3}, {other:.3}");
+        assert!(
+            (one / other - 1.0).abs() < 0.15,
+            "{one:.3} against {other:.3}"
+        );
+    }
+
+    /// Each sideband's amplitude at the receiver against the carrier's:
+    /// `f − f_m`, `f + f_m` and `f + 3f_m` for a 2.5 Hz source and 1 Hz
+    /// modulation.
+    fn sidebands(document: &TopologyDocument, receiver: Point2) -> [f64; 3] {
+        let (series, dt, _) = trace(document, 0.15, 8.0, receiver);
+        let at = |hz: f64| amplitude_at(&series, dt, hz, 4.0 * hz);
+        let carrier = at(2.5);
+        [1.5, 3.5, 5.5].map(|hz| at(hz) / carrier)
+    }
+
+    /// The time-crystal gallery claim: the slab splits the wave into
+    /// sidebands, and its sharp edges put several times more into the third
+    /// one than a sinusoidal pump of the same depth and frequency does.
+    #[test]
+    fn a_time_crystal_reaches_further_sidebands_than_a_pump() {
+        let receiver = Point2::new(0.5, 0.0);
+        let crystal = sidebands(&time_crystal_slab(), receiver);
+        let pump = sidebands(
+            &modulated_slab("Parametric pump", &CRYSTAL[..3], 0.35, false),
+            receiver,
+        );
+        assert!(crystal[0] > 0.1 && crystal[1] > 0.3, "{crystal:.3?}");
+        assert!(
+            crystal[2] > 2.5 * pump[2],
+            "{crystal:.3?} against {pump:.3?}"
+        );
+    }
+
+    /// The travelling-modulation gallery claim: running with the wave, the
+    /// modulation converts it up in frequency; mirrored, so the wave runs
+    /// against it, the same slab barely does.
+    #[test]
+    fn a_travelling_modulation_converts_only_the_wave_running_with_it() {
+        let with = sidebands(&travelling_slab(), Point2::new(0.75, 0.0));
+        let against = sidebands(
+            &modulated_slab("Travelling modulation", &TRAVELLING, 0.6, true),
+            Point2::new(-0.75, 0.0),
+        );
+        assert!(
+            with[1] > 4.0 * against[1],
+            "{with:.3?} against {against:.3?}"
+        );
     }
 }

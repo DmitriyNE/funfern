@@ -11347,3 +11347,74 @@ Stage 10.5.
   (`a_full_material_refuses_a_preset_rather_than_half_writing_it`),
   transactional rename across all slots, and parameter discovery and
   `uses_frame` walking every law field.
+
+## 2026-09-24 — Four gallery scenes, each behind a measured claim
+
+Stage 10.6. Plan §11 admits a gallery scene only once its claim is verified.
+Each of these has a test that steps the document through the application's own
+preparation on the f64 CPU reference, at a coarse mesh (0.15) so the suite can
+afford it. The gallery meshes them at 0.08. Parameters were chosen from
+exploration runs in release, recorded here and then removed.
+
+- **Kerr slab.** TM, absorbing walls, χ = 40, source amplitude 60.
+  - Claim: the receiver hears the third harmonic, and the slab's coefficient
+    moves by tens of percent.
+  - Exploration, edge 0.1: at the receiver, A(3f)/A(f) was 0.20, 0.26, 0.22
+    and 0.22 at χ = 20, 40, 80 and at χ = 20 with amplitude 120. The χ = 0
+    control gave 3.0e-4. The peak strength was 0.14, 0.33 and 0.86.
+    kL·χu²/8 predicts about 0.16 at χ = 20.
+  - Test: A(3f)/A(f) > 0.1 against < 0.01 for χ = 0, and peak strength
+    > 0.2.
+  - Self-focusing is not claimed: it needs a beam and a longer run than was
+    measured.
+- **Parametric pump.** A slab at depth 0.4, pumped at 5 Hz = 2f, phase π/4.
+  - Claim: amplification whose size depends on the pump's phase against the
+    source.
+  - Eight-phase scan: 1.22–2.29× the unpumped amplitude at edge 0.15, and
+    1.14–2.30× at edge 0.1, with the extremes at the same phases. A 10 s run
+    widened it to 0.55–2.73×.
+  - Control at 3.6 Hz: 0.87–0.96×, flat in phase.
+  - A pump at 6.9 Hz also amplifies phase-dependently. It is twice about
+    3.45 Hz, which the source's switch-on transient carries. The gallery
+    claims only the 2f phase sensitivity.
+  - Tests: at 2f, best > 1.8× and best/worst > 1.5. At 3.6 Hz, both < 1.05×
+    and within 15% of each other.
+- **Time crystal.** Depth 0.3, 1 Hz, edge sharpness 6.
+  - Claim: sidebands at f ± f_m, and several times more at f + 3f_m than a
+    sinusoidal pump of the same depth.
+  - Measured f + 3f_m: 0.163 against 0.048 at edge 0.15, and 0.133 against
+    0.029 at edge 0.1. An unmodulated slab gave ≤ 0.002.
+  - Test: crystal > 2.5× pump.
+- **Travelling modulation.** Depth 0.3, 1 Hz, q = 2π, so it runs at the wave
+  speed and every up-conversion is phase-matched forward.
+  - Claim: f + f_m is much stronger for the wave running with it than for
+    the mirrored run.
+  - Measured: 1.55 against 0.25 at edge 0.15, and 3.78 against 0.27 at edge
+    0.1. In the luminal regime the cascade drives f + 3f_m above the carrier
+    forward, and that part is resolution-sensitive, so the test does not
+    use it.
+  - Test: forward > 4× backward.
+- **The catalogue now holds 12 scenes.** The validity test checks they
+  compile, save and reload. The claim tests take about 40 s of wall time in
+  parallel in debug.
+- **Not added:** the Switch temporal interface. Its effect needs the user to
+  throw the Switch, which a document cannot hold; the Switchable preset and
+  the S hotkey cover it.
+
+**Found, not fixed: the device drifts from the f64 reference over long runs
+from rest.** Checking each gallery document on the GPU (a throwaway harness:
+the app's own preparation, 400 steps from rest, against the f64 reference) read
+Q 4e-5 to 1e-4. That is above the Stage 0 3e-5, which every existing gate meets
+at 48–200 steps.
+- On the pump scene, by step count: 25 → 4.4e-7, 50 → 2.7e-7, 100 → 1.7e-6,
+  200 → 1.3e-5, 400 → 6.1e-5.
+- Pump depth 0, reflecting walls and a cosine-start source all leave it at
+  5e-5 to 1e-4.
+- The **fixed** path on the same scene with the law stripped is the same:
+  3.6e-7, 1.5e-5 and 8.0e-5 at 100, 200 and 400 steps.
+- `canonical_gpu_driven_document` extended to 400 steps: 6.7e-6 / 1.7e-5
+  pumped and 1.3e-6 at depth 0, against 2.6e-7 at its usual 48.
+
+So the growth predates Stage 10 and does not come from the laws. Whether it is
+f32 accumulation or a defect in something the paths share is not diagnosed. It
+is the next thing to look at, on the user's word.
