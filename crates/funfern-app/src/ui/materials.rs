@@ -741,10 +741,11 @@ impl Playground {
                         }
                     });
                 }
-                if let Some(index) = remove {
-                    debug_assert!(material.remove_parameter(index).is_ok());
-                    self.parameter_name_edits
-                        .retain(|(owner, _), _| *owner != material_id);
+                if let Some(index) = remove
+                    && let Err(error) =
+                        delete_parameter(&mut material, index, &mut self.parameter_name_edits)
+                {
+                    self.notify(format!("Cannot delete the parameter: {error}"));
                 }
                 if material.parameters.len() < MAX_MATERIAL_PARAMETERS
                     && ui.button("+ Parameter").clicked()
@@ -970,6 +971,21 @@ fn preset_values(
     }
 }
 
+/// Deletes one of a material's parameters, refused while a formula still uses
+/// it, and drops the half-typed names keyed by position, which the removal
+/// shifts. This used to run inside a `debug_assert!`, which a release build
+/// compiles out with its argument, so the button did nothing there.
+fn delete_parameter(
+    material: &mut Material,
+    index: usize,
+    name_edits: &mut BTreeMap<(u64, usize), (String, String)>,
+) -> Result<(), MaterialError> {
+    material.remove_parameter(index)?;
+    let owner = material.id.0;
+    name_edits.retain(|(material, _), _| *material != owner);
+    Ok(())
+}
+
 /// The row's peak change from its small-signal value, if its law follows the
 /// field.
 fn nonlinear_strength_line(
@@ -1000,6 +1016,42 @@ fn nonlinear_strength_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deleting a parameter removes it, in every build, and a parameter a
+    /// formula uses is refused and kept.
+    #[test]
+    fn a_parameter_is_deleted_unless_a_formula_uses_it() {
+        let mut material = Material::default_medium();
+        material.parameters = vec![
+            MaterialParameter {
+                name: "p1".into(),
+                value: 1.0,
+            },
+            MaterialParameter {
+                name: "p2".into(),
+                value: 2.0,
+            },
+        ];
+        material.mass_density = ScalarField::formula("1 + p2").unwrap();
+        let mut edits = BTreeMap::from([
+            ((material.id.0, 1), ("p2".to_owned(), "p2x".to_owned())),
+            ((material.id.0 + 1, 0), ("q".to_owned(), "q".to_owned())),
+        ]);
+        delete_parameter(&mut material, 0, &mut edits).unwrap();
+        assert_eq!(
+            material
+                .parameters
+                .iter()
+                .map(|parameter| parameter.name.as_str())
+                .collect::<Vec<_>>(),
+            ["p2"]
+        );
+        // This material's positional edits go; another material's stay.
+        assert_eq!(edits.len(), 1);
+        assert!(edits.contains_key(&(material.id.0 + 1, 0)));
+        assert!(delete_parameter(&mut material, 0, &mut edits).is_err());
+        assert_eq!(material.parameters.len(), 1);
+    }
 
     /// Only rows whose law follows the field are read out, in the skin's
     /// names and as the coefficient's percentage change.

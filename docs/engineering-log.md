@@ -12243,3 +12243,21 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
   Preparation errors go to the app's own log panel, not stdout, so this run
   does not show that it assembled. The end-to-end example above covers that
   path. The UI itself is for the user to judge.
+
+## 2026-09-25 — Material parameters could not be deleted in a release build
+
+- **Reported by the user:** parameters cannot be deleted.
+- **Cause.** The "−" button's handler called
+  `debug_assert!(material.remove_parameter(index).is_ok())`. A release build
+  compiles `debug_assert!` out together with its argument, so the removal
+  never ran, while the pending name edits were still cleared and the click
+  looked handled. A debug build deleted normally, so no debug run showed it.
+  It dates from the first material-law authoring stage (eabe5ca) and was
+  moved unchanged into `ui::materials`. No other `debug_assert!` in the
+  workspace has a side effect.
+- **Fix.** `delete_parameter` removes the parameter, drops this material's
+  positional name edits, and returns the refusal. The panel reports a
+  refusal, though the button is disabled whenever `remove_parameter` would
+  refuse.
+- **Test:** `a_parameter_is_deleted_unless_a_formula_uses_it`, run under
+  `--release` like the rest of the suite.
