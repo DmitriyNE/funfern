@@ -10657,3 +10657,37 @@ This fixes the device defect noted in the previous entry.
   walls is not. The assertion now expects the conservative bulk exactly in
   bare mode. Result: Q 2.672e-7, b 4.655e-7.
 - **Verification:** all fifteen examples exit 0 with their figures unchanged.
+
+## 2026-09-24 — A nonlinear primary trace kicks through its discrete gradient
+
+Stage 8.5. The admission refusal "a field response on an open or absorbing
+wall awaits its boundary kick" is lifted, because the kick now exists.
+
+- **Derivation:** the force-coupled implicit midpoint with the trace midpoint
+  `u_mid` replaced by the discrete gradient `ū` of each node's stored energy.
+  The balance is then exact to the solve's tolerance and the wall stays
+  passive. Written up in the auxiliary spike's section 4, "Force-coupled
+  counterpart".
+- **Second-order wall:** `nonlinear_outgoing_kick_with` in `canonical_wave.rs`
+  is Newton on `Q_Γ`. Each iteration is the existing linear trace solve at the
+  mass `1/(2 dū/dQ)`, so the sweep factor is reused unchanged.
+  - The per-kick balance is checked at `2e-10`, as on the linear path.
+  - The stopping rule respects the roundoff floor that energy-difference
+    slopes put under the iteration: `1e-12` of the trace, or a stalled step
+    below `1e-10`.
+  - `modal_outgoing_loss` is factored out and shared by both kicks.
+- **First-order wall:** `damped_nonlinear_kick` is a bracketed scalar Newton.
+  A pinned node on a damped wall charges `τ d g²` to its exchange.
+- **Discrete gradient:** `primary_discrete_gradient` takes the energy quotient,
+  or the Gauss–Legendre mean of `U` below a `1e-4` relative separation.
+- **Tests:**
+  - `a_zero_response_on_a_wall_kicks_as_the_linear_wall_does`: both orders,
+    `1e-12`.
+  - `a_nonlinear_trace_radiates_passively_and_balances_at_second_order`: both
+    orders plus a pumped second-order wall, order 2.00–2.02.
+  - `a_nonlinear_wall_reflects_as_the_linear_one_at_small_amplitude`: ratio
+    3.99 on both orders.
+  - `a_strong_kerr_pulse_leaves_through_an_outgoing_wall`: 1.0% remains; the
+    budget closes to 7.4e-5.
+- **Newton cost:** 3 linear trace solves per kick in 1134 of 1217 kicks, 4 in
+  the rest. This is the CPU oracle's figure, not a device budget (Stage 9).

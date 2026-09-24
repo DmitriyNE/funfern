@@ -259,6 +259,53 @@ iterations, with equation residual <=`1.1e-14` and relative energy-balance
 residual <=`2.2e-15`. This is a boundary-substep oracle, not a finished generic
 nonlinear solver or measured GPU iteration budget.
 
+#### Force-coupled counterpart (Stage 8, 24 September)
+
+The substep above stood alone. The production kick is the force-coupled
+implicit midpoint rule of `Ẋ = G(u, z) + [s − F, 0]` for `X = (Q_Γ, z)`
+([scattering spike](funfern-boundary-scattering-spike.md), sections 3–4). The
+nonlinear counterpart replaces the trace midpoint `u_mid = (Q0 + Q1)/2m` with
+the per-node discrete gradient `ū`, everywhere that midpoint appears. The
+auxiliaries keep `z_mid`, because their energy is quadratic.
+
+```text
+Q1 − Q0 = τ [G_uu ū + G_uz z_mid + s − F]
+z1 − z0 = τ [G_zu ū + G_zz z_mid]
+```
+
+Since `ΔT = ū·ΔQ` and `Δ(½|z|²) = z_mid·Δz` hold exactly, the kick's energy
+change is `τ (ū, z_mid)·G(ū, z_mid) + τ ū·(s − F)`. That is the linear balance
+term for term, so the wall stays passive and its loss is
+`τ Σ (w(ū) + memory(z_mid))² + τ Σ d ū²`.
+
+**Solve.** Newton on `Q1`, with `g = dū/dQ1 = (U(Q1) − ū)/(Q1 − Q0) > 0`.
+Linearizing `ū ≈ ū_k + g_k (Q1 − Q_k)` makes each iteration exactly the linear
+kick at the per-node mass `m_k = 1/(2 g_k)`. The constant
+`c_k = ū_k − g_k Q_k` enters its right-hand side as `τ G(c_k, 0)`. The existing
+mass-free trace factor, sweeps included, is therefore the whole inner solve.
+
+- A linear node has `g = 1/2m` and `c = Q0/2m`, and reproduces the linear kick
+  in one iteration.
+- A first-order wall is the scalar case, `Q1 − Q0 = τ(s − F − d ū)`, whose
+  residual rises with slope at least one. Any trial point `x` and `x − f(x)`
+  bracket its root.
+- `ū` is the energy quotient when `|Q1 − Q0| > 1e-4 |Q|`. Below that it is the
+  four-point Gauss–Legendre mean of `U` over the interval, which avoids the
+  quotient's cancellation.
+
+**Measured** in the canonical core (`canonical_temporal` tests; Kerr mass
+`χ = 0.8`, saturable stiffness row):
+- A kick converges in 3 linear trace solves (1134 kicks), sometimes 4 (83),
+  and needs no damping.
+- The per-kick balance is checked at `2e-10` relative.
+- Over a run, both wall orders balance at order 2.00–2.02, including under a
+  pump.
+- `χ = 0` reproduces the linear wall to `1e-12`.
+- The wall's departure from its linear control is cubic in the amplitude
+  (ratio 3.99 on doubling).
+- A Gaussian at `u = 1.2` leaves through the second-order wall with 1.0% of
+  its energy remaining, and the energy budget closes to `7.4e-5`.
+
 A future cheap-path restriction, if needed, should say “linear primary
 constitutive map at these trace nodes,” not ban all nonlinear material in an
 entire boundary-touching domain. Complementary nonlinearity alone does not

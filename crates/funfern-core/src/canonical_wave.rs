@@ -2347,7 +2347,6 @@ pub(crate) fn force_coupled_outgoing_kick_with(
         .enumerate()
         .map(|(position, node)| (*node as usize, position))
         .collect::<Vec<_>>();
-    let (_, inverse_energy_transform) = pole_energy_transform()?;
     if outgoing_z.len() != auxiliary_count {
         return Err(WaveError::InvalidState);
     }
@@ -2430,6 +2429,36 @@ pub(crate) fn force_coupled_outgoing_kick_with(
         .zip(&new[trace_count..])
         .map(|(old, new)| 0.5 * (old + new))
         .collect::<Vec<_>>();
+    let outgoing_loss = modal_outgoing_loss(boundary, &midpoint_field, &midpoint_z, duration)?;
+    let boundary_loss = first_order_loss + outgoing_loss;
+    let balance =
+        primary_energy_change + auxiliary_energy_change - source_work + force_work + boundary_loss;
+    let scale = primary_energy_change
+        .abs()
+        .max(auxiliary_energy_change.abs())
+        .max(source_work.abs())
+        .max(force_work.abs())
+        .max(boundary_loss.abs())
+        .max(1.0);
+    if !has_prescribed && balance.abs() > 2.0e-10 * scale {
+        return Err(WaveError::InvalidState);
+    }
+    Ok((
+        source_work,
+        boundary_loss.max(0.0),
+        if has_prescribed { balance } else { 0.0 },
+    ))
+}
+
+/// The outgoing wall's dissipation over one kick, `τ Σ (w + memory)²`, from the
+/// trace field and the auxiliaries at the kick's midpoint.
+fn modal_outgoing_loss(
+    boundary: &CanonicalOutgoingBoundary,
+    midpoint_field: &[f64],
+    midpoint_z: &[f64],
+    duration: f64,
+) -> Result<f64, WaveError> {
+    let (_, inverse_energy_transform) = pole_energy_transform()?;
     let ell_b = (31.0_f64 / 7.0).sqrt();
     let ell = [0.0, 1.0 - ell_b, 2.0 * ell_b - 4.0];
     let mut outgoing_loss = 0.0;
@@ -2437,8 +2466,8 @@ pub(crate) fn force_coupled_outgoing_kick_with(
         let w = mode
             .trace
             .iter()
-            .zip(&trace_position)
-            .map(|(trace, (node, _))| trace * midpoint_field[*node])
+            .zip(&boundary.trace_nodes)
+            .map(|(trace, node)| trace * midpoint_field[*node as usize])
             .sum::<f64>();
         let memory = if let Some(offset) = mode.auxiliary_offset {
             let mut x = [0.0; 3];
@@ -2460,24 +2489,185 @@ pub(crate) fn force_coupled_outgoing_kick_with(
         };
         outgoing_loss += duration * (w + memory).powi(2);
     }
+    Ok(outgoing_loss)
+}
+
+/// A trace node's constitutive map, as the nonlinear boundary kick reads it.
+pub(crate) trait TraceConstitutive {
+    /// The discrete gradient `ū = [T(new) − T(old)] / (new − old)` of the
+    /// node's stored energy, its limit `U(old)` when the two coincide, and its
+    /// slope `dū/d new`, which is positive for every monotone map.
+    fn discrete_gradient(&self, node: usize, old: f64, new: f64) -> Result<(f64, f64), WaveError>;
+    /// Stored energy `T(Q)` at one node.
+    fn energy(&self, node: usize, flux: f64) -> Result<f64, WaveError>;
+}
+
+/// Newton iterations the nonlinear boundary kick may take before its failure
+/// is reported. Each is one linear trace solve.
+const NONLINEAR_TRACE_ITERATIONS: usize = 60;
+
+/// The force-coupled boundary kick for a trace whose primary map is
+/// nonlinear: the discrete-gradient counterpart of
+/// [`force_coupled_outgoing_kick_with`].
+///
+/// The linear kick is the implicit midpoint rule of `Ẋ = G(u, z) + [s − F, 0]`
+/// for `X = (Q_Γ, z)`, with the trace field at the midpoint,
+/// `u_mid = (Q_old + Q_new)/2m`. Here that field becomes the discrete gradient
+/// `ū` of each node's stored energy. The auxiliaries keep their own midpoint,
+/// because their energy is quadratic. Because `ΔT = ū·ΔQ` exactly and
+/// `Δ(½|z|²) = z_mid·Δz`, the step's energy change is
+/// `τ (ū, z_mid)·G(ū, z_mid) + τ ū·(s − F)`, term for term the linear
+/// balance with `ū` in place of `u_mid`. The wall stays passive, and the
+/// balance is exact to the solve's tolerance.
+///
+/// The system is solved by Newton on `Q_new`. Linearizing
+/// `ū ≈ ū_k + g_k (Q − Q_k)` with `g = dū/dQ_new > 0` turns each iteration
+/// into the linear kick itself, at the per-node mass `m_k = 1/(2 g_k)` and
+/// with the constant `c_k = ū_k − g_k Q_k` moved to the right-hand side. So
+/// the existing trace factor, sweeps included, is the whole inner solve. A
+/// linear node has `g = 1/2m` and `c = Q_old/2m`, and reproduces the linear
+/// kick in one iteration.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn nonlinear_outgoing_kick_with(
+    primary_flux: &mut [f64],
+    outgoing_z: &mut [f64],
+    cache: &CanonicalOutgoingMidpointFactor,
+    operator: &CanonicalWaveOperator,
+    boundary: &CanonicalOutgoingBoundary,
+    mass: &[f64],
+    trace_map: &dyn TraceConstitutive,
+    force: &[f64],
+    source: &[f64],
+    duration: f64,
+) -> Result<(f64, f64), WaveError> {
+    let trace_count = boundary.trace_nodes.len();
+    let auxiliary_count = boundary.auxiliary_count;
+    let dimension = trace_count + auxiliary_count;
+    if outgoing_z.len() != auxiliary_count
+        || cache.duration != duration
+        || cache.trace_count != trace_count
+    {
+        return Err(WaveError::InvalidState);
+    }
+    let nodes = boundary
+        .trace_nodes
+        .iter()
+        .map(|node| *node as usize)
+        .collect::<Vec<_>>();
+    let old_q = nodes
+        .iter()
+        .map(|node| primary_flux[*node])
+        .collect::<Vec<_>>();
+    let old_z = outgoing_z.to_vec();
+
+    // Everything on the right that does not depend on the trace field: the
+    // old state, the held interior force and source, and the auxiliaries'
+    // own half of the explicit generator.
+    let mut auxiliary_only = vec![0.0; dimension];
+    auxiliary_only[trace_count..].copy_from_slice(&old_z);
+    let auxiliary_derivative = apply_outgoing_generator(operator, boundary, mass, &auxiliary_only)?;
+    let mut fixed_right = vec![0.0; dimension];
+    for position in 0..trace_count {
+        fixed_right[position] = old_q[position]
+            + duration * (source[nodes[position]] - force[nodes[position]])
+            + 0.5 * duration * auxiliary_derivative[position];
+    }
+    for row in trace_count..dimension {
+        fixed_right[row] = old_z[row - trace_count] + 0.5 * duration * auxiliary_derivative[row];
+    }
+    let unit_mass = vec![1.0; operator.degrees_of_freedom()];
+    let mut current = old_q.clone();
+    let mut solution = Vec::new();
+    let mut converged = false;
+    let mut previous_step = f64::INFINITY;
+    let mut iteration_mass = mass.to_vec();
+    for _ in 0..NONLINEAR_TRACE_ITERATIONS {
+        let mut offset = vec![0.0; dimension];
+        for position in 0..trace_count {
+            let (gradient, slope) =
+                trace_map.discrete_gradient(nodes[position], old_q[position], current[position])?;
+            if !slope.is_finite() || slope <= 0.0 {
+                return Err(WaveError::InvalidState);
+            }
+            offset[position] = gradient - slope * current[position];
+            iteration_mass[nodes[position]] = 0.5 / slope;
+        }
+        let offset_derivative = apply_outgoing_generator(operator, boundary, &unit_mass, &offset)?;
+        let right = fixed_right
+            .iter()
+            .zip(&offset_derivative)
+            .map(|(fixed, derivative)| fixed + duration * derivative)
+            .collect::<Vec<_>>();
+        solution = cache.solve(boundary, &iteration_mass, &right)?;
+        let step = solution[..trace_count]
+            .iter()
+            .zip(&current)
+            .map(|(next, current)| (next - current).abs())
+            .fold(0.0_f64, f64::max);
+        current.copy_from_slice(&solution[..trace_count]);
+        // The slopes are quotients of energy differences, so the iteration
+        // settles onto a roundoff floor rather than to zero. It has converged
+        // once a step is below `1e-12` of the trace, or has stopped
+        // shrinking somewhere below `1e-10` of it.
+        let scale = current
+            .iter()
+            .chain(&old_q)
+            .map(|value| value.abs())
+            .fold(f64::MIN_POSITIVE, f64::max);
+        if step <= 1e-12 * scale || (step <= 1e-10 * scale && step >= 0.5 * previous_step) {
+            converged = true;
+            break;
+        }
+        previous_step = step;
+    }
+    if !converged {
+        return Err(WaveError::Unsupported(
+            "the nonlinear boundary kick did not converge",
+        ));
+    }
+    for (position, node) in nodes.iter().enumerate() {
+        primary_flux[*node] = solution[position];
+    }
+    outgoing_z.copy_from_slice(&solution[trace_count..]);
+
+    let mut source_work = 0.0;
+    let mut force_work = 0.0;
+    let mut first_order_loss = 0.0;
+    let mut primary_energy_change = 0.0;
+    let mut gradient_field = vec![0.0; operator.degrees_of_freedom()];
+    for (position, node) in nodes.iter().copied().enumerate() {
+        let (gradient, _) =
+            trace_map.discrete_gradient(node, old_q[position], solution[position])?;
+        gradient_field[node] = gradient;
+        source_work += duration * gradient * source[node];
+        force_work += duration * gradient * force[node];
+        first_order_loss +=
+            duration * operator.first_order_boundary_damping[node] * gradient * gradient;
+        primary_energy_change += trace_map.energy(node, solution[position])?
+            - trace_map.energy(node, old_q[position])?;
+    }
+    let new_z = &solution[trace_count..];
+    let auxiliary_energy_change = 0.5 * (dot(new_z, new_z) - dot(&old_z, &old_z));
+    let midpoint_z = old_z
+        .iter()
+        .zip(new_z)
+        .map(|(old, new)| 0.5 * (old + new))
+        .collect::<Vec<_>>();
+    let outgoing_loss = modal_outgoing_loss(boundary, &gradient_field, &midpoint_z, duration)?;
     let boundary_loss = first_order_loss + outgoing_loss;
     let balance =
         primary_energy_change + auxiliary_energy_change - source_work + force_work + boundary_loss;
-    let scale = primary_energy_change
+    let magnitude = primary_energy_change
         .abs()
         .max(auxiliary_energy_change.abs())
         .max(source_work.abs())
         .max(force_work.abs())
         .max(boundary_loss.abs())
         .max(1.0);
-    if !has_prescribed && balance.abs() > 2.0e-10 * scale {
+    if balance.abs() > 2.0e-10 * magnitude {
         return Err(WaveError::InvalidState);
     }
-    Ok((
-        source_work,
-        boundary_loss.max(0.0),
-        if has_prescribed { balance } else { 0.0 },
-    ))
+    Ok((source_work, boundary_loss.max(0.0)))
 }
 
 impl CanonicalOutgoingMidpointFactor {

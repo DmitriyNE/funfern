@@ -1943,6 +1943,102 @@ impl CanonicalTemporalWaveOperator {
         Ok(site.energy(flux.abs(), field.abs()))
     }
 
+    /// The discrete gradient `ū = [T(new) − T(old)]/(new − old)` of one
+    /// node's stored energy and its slope `dū/d new`.
+    ///
+    /// The quotient cancels as `new → old`, so below a relative separation
+    /// of `1e-4` the mean of `U` over the interval is taken by four-point
+    /// Gauss-Legendre instead. That is the same integral, to an error many
+    /// orders below roundoff at that separation. The slope there is its limit,
+    /// `1/(2P′)` at the midpoint.
+    fn primary_discrete_gradient(
+        &self,
+        terms: &[ConstitutiveTerm],
+        node: usize,
+        old: f64,
+        new: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(f64, f64), WaveError> {
+        let site = ConstitutiveSite::new(&terms[self.primary_range(node)]);
+        let separation = new - old;
+        if separation.abs() > 1e-4 * old.abs().max(new.abs()) {
+            let gradient = (self.primary_node_energy(terms, node, new, runtime)?
+                - self.primary_node_energy(terms, node, old, runtime)?)
+                / separation;
+            let field = self.primary_inverse(terms, node, new, runtime)?;
+            return Ok((gradient, (field - gradient) / separation));
+        }
+        const POINTS: [(f64, f64); 4] = [
+            (-0.861_136_311_594_052_6, 0.347_854_845_137_453_9),
+            (-0.339_981_043_584_856_3, 0.652_145_154_862_546_1),
+            (0.339_981_043_584_856_3, 0.652_145_154_862_546_1),
+            (0.861_136_311_594_052_6, 0.347_854_845_137_453_9),
+        ];
+        let middle = 0.5 * (old + new);
+        let mut gradient = 0.0;
+        for (point, weight) in POINTS {
+            gradient += 0.5
+                * weight
+                * self.primary_inverse(terms, node, middle + 0.5 * point * separation, runtime)?;
+        }
+        let field = self.primary_inverse(terms, node, middle, runtime)?;
+        Ok((gradient, 0.5 / site.tangent(field.abs())))
+    }
+
+    /// `Q` solving `Q − old = impulse − τd·ū(old, Q)` at one absorbing node:
+    /// the discrete-gradient first-order wall. `f(Q)` rises with slope at
+    /// least one, so every trial `x` brackets the root with `x − f(x)`.
+    fn damped_nonlinear_kick(
+        &self,
+        terms: &[ConstitutiveTerm],
+        node: usize,
+        old: f64,
+        impulse: f64,
+        admittance: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<f64, WaveError> {
+        let residual = |flux: f64| -> Result<(f64, f64), WaveError> {
+            let (gradient, slope) =
+                self.primary_discrete_gradient(terms, node, old, flux, runtime)?;
+            Ok((
+                flux - old - impulse + admittance * gradient,
+                1.0 + admittance * slope,
+            ))
+        };
+        let mut flux = old + impulse;
+        let (value, _) = residual(flux)?;
+        let (mut low, mut high) = if value > 0.0 {
+            (flux - value, flux)
+        } else {
+            (flux, flux - value)
+        };
+        let scale = old.abs().max(impulse.abs()).max(f64::MIN_POSITIVE);
+        for _ in 0..100 {
+            let (value, slope) = residual(flux)?;
+            if value == 0.0 {
+                return Ok(flux);
+            }
+            if value > 0.0 {
+                high = high.min(flux);
+            } else {
+                low = low.max(flux);
+            }
+            let newton = flux - value / slope;
+            let next = if newton > low && newton < high {
+                newton
+            } else {
+                0.5 * (low + high)
+            };
+            if (next - flux).abs() <= 1e-13 * scale.max(next.abs()) {
+                return Ok(next);
+            }
+            flux = next;
+        }
+        Err(WaveError::Unsupported(
+            "the nonlinear absorbing-wall kick did not converge",
+        ))
+    }
+
     /// One nonlinear complementary sample's map at `time`: the direct
     /// coefficient over the isotropic reference inverse, `|b| = (c/j)·ḡ(r)·r`,
     /// with that coefficient's time derivative.
@@ -2996,21 +3092,49 @@ fn forced_kick(
             boundary,
             duration,
         )?;
-        let mut prescribed_cache = None;
-        let (work, escaped, exchange) = crate::canonical_wave::force_coupled_outgoing_kick_with(
-            primary,
-            outgoing_z,
-            &mut prescribed_cache,
-            &factor,
-            operator.base(),
-            boundary,
-            &mass,
-            force,
-            source,
-            duration,
-            forcing,
-            target_time,
-        )?;
+        let nonlinear_trace = nonlinear.as_deref().filter(|terms| {
+            boundary.trace_nodes().iter().any(|node| {
+                !ConstitutiveSite::new(&terms[operator.primary_range(*node as usize)]).is_linear()
+            })
+        });
+        let (work, escaped, exchange) = if let Some(terms) = nonlinear_trace {
+            // Admission refuses prescribed data on a trace, so the nonlinear
+            // kick has no pinned row to hold.
+            let trace = TemporalTrace {
+                operator,
+                terms,
+                runtime,
+            };
+            let (work, escaped) = crate::canonical_wave::nonlinear_outgoing_kick_with(
+                primary,
+                outgoing_z,
+                &factor,
+                operator.base(),
+                boundary,
+                &mass,
+                &trace,
+                force,
+                source,
+                duration,
+            )?;
+            (work, escaped, 0.0)
+        } else {
+            let mut prescribed_cache = None;
+            crate::canonical_wave::force_coupled_outgoing_kick_with(
+                primary,
+                outgoing_z,
+                &mut prescribed_cache,
+                &factor,
+                operator.base(),
+                boundary,
+                &mass,
+                force,
+                source,
+                duration,
+                forcing,
+                target_time,
+            )?
+        };
         source_work += work;
         boundary_loss += escaped;
         prescribed_exchange += exchange;
@@ -3025,40 +3149,57 @@ fn forced_kick(
         if let Some(terms) = nonlinear.as_deref()
             && !ConstitutiveSite::new(&terms[operator.primary_range(node)]).is_linear()
         {
-            // Admission keeps absorbing walls off a nonlinear node, so the
-            // kick is explicit here. Its work is charged through the discrete
-            // gradient `ū = ΔT/ΔQ`, the one field whose work across the kick
-            // is exactly the stored-energy change; the midpoint field the
-            // linear path uses is that same quotient only for a quadratic `T`.
+            // The kick charges its work through the discrete gradient
+            // `ū = ΔT/ΔQ`, the one field whose work across the kick is exactly
+            // the stored-energy change. The midpoint field the linear path
+            // uses is that same quotient only for a quadratic `T`. An
+            // absorbing wall makes the kick implicit in `ū`:
+            // `Q − Q_old = τ(s − F − d·ū(Q))`, which is increasing in `Q`
+            // with slope at least one, so its root is bracketed by any trial
+            // point `x` and `x − f(x)` and found by safeguarded Newton.
             let old_energy = operator.primary_node_energy(terms, node, old, runtime)?;
-            let (new, new_energy) = match forcing.prescribed()[node] {
-                Some(signal) => operator.primary_flux_and_energy_of_field(
-                    terms,
-                    node,
-                    signal.value(target_time),
-                    runtime,
-                )?,
+            let rhs = source[node] - force[node];
+            let (new, new_energy, gradient) = match forcing.prescribed()[node] {
+                Some(signal) => {
+                    let value = signal.value(target_time);
+                    let (new, energy) =
+                        operator.primary_flux_and_energy_of_field(terms, node, value, runtime)?;
+                    (new, energy, value)
+                }
                 None => {
-                    let new = old + duration * (source[node] - force[node]);
+                    let new = if damping[node] == 0.0 {
+                        old + duration * rhs
+                    } else {
+                        operator.damped_nonlinear_kick(
+                            terms,
+                            node,
+                            old,
+                            duration * rhs,
+                            duration * damping[node],
+                            runtime,
+                        )?
+                    };
+                    let (gradient, _) =
+                        operator.primary_discrete_gradient(terms, node, old, new, runtime)?;
                     (
                         new,
                         operator.primary_node_energy(terms, node, new, runtime)?,
+                        gradient,
                     )
                 }
             };
             if !new.is_finite() {
                 return Err(WaveError::InvalidState);
             }
-            let gradient = match forcing.prescribed()[node] {
-                Some(signal) => signal.value(target_time),
-                None if new != old => (new_energy - old_energy) / (new - old),
-                None => operator.primary_inverse(terms, node, old, runtime)?,
-            };
             let node_source_work = duration * gradient * source[node];
             let node_force_work = duration * gradient * force[node];
+            let node_boundary_loss = duration * damping[node] * gradient * gradient;
             source_work += node_source_work;
+            boundary_loss += node_boundary_loss;
             if forcing.prescribed()[node].is_some() {
-                prescribed_exchange += new_energy - old_energy - node_source_work + node_force_work;
+                prescribed_exchange += new_energy - old_energy - node_source_work
+                    + node_force_work
+                    + node_boundary_loss;
             }
             primary[node] = new;
             continue;
@@ -3484,6 +3625,26 @@ fn stable_difference(value: f64, reference: f64) -> f64 {
     }
 }
 
+/// A time-driven generation's trace maps at one stage, as the nonlinear
+/// boundary kick reads them.
+struct TemporalTrace<'a> {
+    operator: &'a CanonicalTemporalWaveOperator,
+    terms: &'a [ConstitutiveTerm],
+    runtime: &'a CanonicalMaterialRuntimeState,
+}
+
+impl crate::canonical_wave::TraceConstitutive for TemporalTrace<'_> {
+    fn discrete_gradient(&self, node: usize, old: f64, new: f64) -> Result<(f64, f64), WaveError> {
+        self.operator
+            .primary_discrete_gradient(self.terms, node, old, new, self.runtime)
+    }
+
+    fn energy(&self, node: usize, flux: f64) -> Result<f64, WaveError> {
+        self.operator
+            .primary_node_energy(self.terms, node, flux, self.runtime)
+    }
+}
+
 /// `U = P⁻¹(Q)` at a scalar site. Every executed law is even, so the map is
 /// odd and the solve runs on `|Q|`.
 fn signed_inverse(site: ConstitutiveSite<'_>, flux: f64) -> Result<f64, ConstitutiveInverseError> {
@@ -3540,11 +3701,13 @@ fn inverse_error(
 /// - A nonlinear complementary law needs an isotropic reference tensor: the
 ///   radial map `|b| = c·ḡ(|v|)·|v|/j` is the whole vector law only there.
 ///   Nonlinear anisotropy is Gate C's.
-/// - A nonlinear primary map at an outgoing trace or an absorbing wall needs
-///   the force-coupled discrete-gradient kick, which is not derived yet.
+///
+/// A nonlinear primary map at an outgoing trace or an absorbing wall is
+/// admitted: its kick is the discrete-gradient counterpart of the linear one
+/// (`nonlinear_outgoing_kick_with`, `damped_nonlinear_kick`).
 fn nonlinear_admission(
     base: &CanonicalWaveOperator,
-    primary: &[TemporalPrimarySample],
+    _primary: &[TemporalPrimarySample],
     complementary: &[TemporalComplementarySample],
     model: TopologyWaveModel<'_>,
 ) -> Result<(), WaveError> {
@@ -3567,28 +3730,6 @@ fn nonlinear_admission(
                 point: coefficient.point,
                 reason: "a field response on an anisotropic medium awaits its vector law \
                          (Gate C)"
-                    .into(),
-            });
-        }
-    }
-    let mut walled = vec![false; base.degrees_of_freedom()];
-    if let Some(boundary) = base.outgoing_boundary() {
-        for node in boundary.trace_nodes() {
-            walled[*node as usize] = true;
-        }
-    }
-    for (node, damping) in base.first_order_boundary_damping().iter().enumerate() {
-        walled[node] |= *damping != 0.0;
-    }
-    for (contribution, temporal) in base.primary_contributions().iter().zip(primary) {
-        let coefficient = temporal.coefficient;
-        if coefficient.law.field != FieldLawValues::Linear && walled[contribution.node as usize] {
-            return Err(WaveError::MaterialEvaluation {
-                material: name(coefficient.material),
-                coefficient: "field law",
-                point: coefficient.point,
-                reason: "a field response on an open or absorbing wall awaits its boundary \
-                         kick"
                     .into(),
             });
         }
@@ -6550,37 +6691,168 @@ mod tests {
         ));
     }
 
+    fn walled(condition: OuterBoundaryCondition, scene: &Scene) -> CanonicalTemporalWaveOperator {
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic =
+            QuadraticWaveOperator::assemble_scene(&mesh, &base_scene, condition).unwrap();
+        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap()
+    }
+
+    const WALLS: [OuterBoundaryCondition; 2] = [
+        OuterBoundaryCondition::FirstOrderOutgoing,
+        OuterBoundaryCondition::SecondOrderOutgoing,
+    ];
+
     #[test]
-    fn a_nonlinear_primary_map_on_a_wall_waits_for_its_boundary_kick() {
-        for condition in [
-            OuterBoundaryCondition::FirstOrderOutgoing,
-            OuterBoundaryCondition::SecondOrderOutgoing,
-        ] {
+    fn a_zero_response_on_a_wall_kicks_as_the_linear_wall_does() {
+        // χ = 0 runs the Newton trace solve and the discrete gradient, which
+        // must converge onto the linear midpoint kick.
+        for condition in WALLS {
             let mut scene = Scene::default();
-            let mesh = mesh_scene(
-                &scene,
-                1,
-                MeshingOptions {
-                    target_edge_length: 0.3,
-                    ..MeshingOptions::default()
-                },
-            )
-            .unwrap();
-            let quadratic =
-                QuadraticWaveOperator::assemble_scene(&mesh, &scene, condition).unwrap();
-            scene.materials[0].stiffness_law.field = kerr(0.8);
-            // The complementary map alone leaves the trace solve linear.
-            let operator =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
-            assert!(operator.has_field_laws());
-            scene.materials[0].mass_law.field = kerr(0.8);
-            match CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1) {
-                Err(WaveError::MaterialEvaluation { reason, .. }) => {
-                    assert!(reason.contains("boundary kick"), "{reason}")
+            let linear = walled(condition, &scene);
+            scene.materials[0].mass_law.field = kerr(0.0);
+            let nonlinear = walled(condition, &scene);
+            assert!(nonlinear.has_field_laws());
+            let time_step = 0.4 * linear.maximum_time_step();
+            let (primary, complementary) = strong_fluxes(&linear, 6.0);
+            let run = |operator: &CanonicalTemporalWaveOperator| {
+                let mut state = CanonicalTemporalWaveState::new(
+                    operator,
+                    time_step,
+                    primary.clone(),
+                    complementary.clone(),
+                )
+                .unwrap();
+                let mut escaped = 0.0;
+                for _ in 0..20 {
+                    escaped += state.step(operator).unwrap().boundary_loss;
                 }
-                other => panic!("{condition:?}: {other:?}"),
+                (state.primary_flux().to_vec(), escaped)
+            };
+            let (expected, expected_loss) = run(&linear);
+            let (actual, actual_loss) = run(&nonlinear);
+            let scale = expected.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+            for (a, b) in expected.iter().zip(&actual) {
+                assert!((a - b).abs() <= 1e-12 * scale, "{condition:?}");
             }
+            assert!(expected_loss > 0.0);
+            assert!((expected_loss - actual_loss).abs() <= 1e-11 * expected_loss);
         }
+    }
+
+    #[test]
+    fn a_nonlinear_trace_radiates_passively_and_balances_at_second_order() {
+        for (condition, pumped) in [(WALLS[0], false), (WALLS[1], false), (WALLS[1], true)] {
+            let mut scene = Scene::default();
+            scene.materials[0].mass_law.field = kerr(0.8);
+            scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+            if pumped {
+                // The trace mass then moves under the wall as well.
+                scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+            }
+            let operator = walled(condition, &scene);
+            let forcing = CanonicalForcing::none(operator.base());
+            let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
+            assert!(total.boundary_loss > 1e-5, "{condition:?}: {total:?}");
+        }
+    }
+
+    #[test]
+    fn a_nonlinear_wall_reflects_as_the_linear_one_at_small_amplitude() {
+        // The wall's departure from its linear control is cubic in the
+        // amplitude, like the bulk's: nothing at the wall is first order in
+        // the nonlinearity.
+        for condition in WALLS {
+            let mut scene = Scene::default();
+            let linear = walled(condition, &scene);
+            scene.materials[0].mass_law.field = kerr(0.8);
+            let nonlinear = walled(condition, &scene);
+            let time_step = 0.4 * linear.maximum_time_step();
+            let departure = |amplitude: f64| {
+                let run = |operator: &CanonicalTemporalWaveOperator| {
+                    let (primary, complementary) = strong_fluxes(&linear, amplitude);
+                    let mut state = CanonicalTemporalWaveState::new(
+                        operator,
+                        time_step,
+                        primary,
+                        complementary,
+                    )
+                    .unwrap();
+                    for _ in 0..40 {
+                        state.step(operator).unwrap();
+                    }
+                    state.primary_flux().to_vec()
+                };
+                let control = run(&linear);
+                let actual = run(&nonlinear);
+                let norm = control
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>()
+                    .sqrt();
+                control
+                    .iter()
+                    .zip(&actual)
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum::<f64>()
+                    .sqrt()
+                    / norm
+            };
+            let ratio = departure(0.5) / departure(0.25);
+            assert!((ratio - 4.0).abs() < 0.3, "{condition:?}: ratio {ratio}");
+        }
+    }
+
+    #[test]
+    fn a_strong_kerr_pulse_leaves_through_an_outgoing_wall() {
+        // A pulse strong enough that the trace map departs from linear by
+        // over 50% crosses the second-order wall. Nothing may pile up at the
+        // wall: most of the energy leaves, and the budget closes.
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.field = kerr(0.8);
+        let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
+        let base = operator.base();
+        let primary = base
+            .node_points()
+            .iter()
+            .zip(base.primary_mass())
+            .map(|(point, mass)| {
+                let u = 1.2 * (-(point.x * point.x + point.y * point.y) / 0.08).exp();
+                mass * (1.0 + 0.8 * u * u) * u
+            })
+            .collect::<Vec<_>>();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let time_step = 0.4 * operator.maximum_time_step();
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary).unwrap();
+        let initial = state.energy(&operator).unwrap();
+        let mut escaped = 0.0;
+        let steps = (3.0 / time_step).ceil() as usize;
+        for _ in 0..steps {
+            // The split conserves a nearby energy, not this one, so the
+            // stored energy is not monotone step by step; the wall's own
+            // dissipation is, and the budget below closes.
+            let accounting = state.step(&operator).unwrap();
+            assert!(accounting.boundary_loss >= 0.0);
+            escaped += accounting.boundary_loss;
+        }
+        let previous = state.energy(&operator).unwrap();
+        assert!(
+            previous < 0.2 * initial,
+            "{} of the energy stayed",
+            previous / initial
+        );
+        assert!((initial - previous - escaped).abs() < 1e-3 * initial);
     }
 
     #[test]
