@@ -11123,3 +11123,14 @@ Stage 9.8, cost.
   law ran 19,777. Both refine adaptively from about 20k to 48k dofs over the
   run, so the nonlinear estimate does not over-refine.
 - **Parity unchanged:** every example and mode exits 0 with its figures.
+
+## 2026-09-24 — Stage 9 closed
+
+- **Report:**
+  [Stage 9 report](spikes/funfern-material-laws-stage9-report.md). The plan's
+  stage table marks Stage 9 complete, and the catalogue lists M-F1 and M-F2 as
+  running.
+- **Carried:** the device grid filter and the area readout on field-dependent
+  media, an amplitude-aware size rule, pulses and live law patches on such
+  plans, and defocusing presets.
+- **Next:** Stage 10, the complete UX, the demonstrations and compatibility.

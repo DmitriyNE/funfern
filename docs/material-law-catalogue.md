@@ -47,8 +47,8 @@ than the Rust variant names.
 
 | ID | Law | Phenomenon | Stored as | Status |
 | --- | --- | --- | --- | --- |
-| M-F1 | Kerr `1 + χu²` | self-focusing, filamentation, self-phase modulation | `FieldLaw::Polynomial` with `chi1 = 0` | CPU reference (direct; χ < 0 needs `amplitude_bound`) |
-| M-F2 | saturable Kerr `1 + χu²/(1 + u²/u_s²)` | stable filaments without collapse - the right default | `FieldLaw::Saturable` | CPU reference (direct; `χu_s² > −8/9`) |
+| M-F1 | Kerr `1 + χu²` | self-focusing, filamentation, self-phase modulation | `FieldLaw::Polynomial` with `chi1 = 0` | runs (direct; presets are self-focusing; χ < 0 needs `amplitude_bound`) |
+| M-F2 | saturable Kerr `1 + χu²/(1 + u²/u_s²)` | stable filaments without collapse - the right default | `FieldLaw::Saturable` | runs (direct; `χu_s² > −8/9`) |
 | M-F3 | quadratic `1 + χu` | asymmetric steepening into shocks, second-harmonic generation | `FieldLaw::Polynomial` with `chi2 = 0` | gated (C) |
 
 Note the sign luck: self-focusing needs the permittivity to rise where the field
