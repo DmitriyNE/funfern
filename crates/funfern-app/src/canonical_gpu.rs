@@ -103,6 +103,9 @@ const TEMPORAL_FIELD_SATURABLE: u32 = 8;
 /// Control flag: the wall's trace carries a field law, so each kick runs the
 /// Newton linearization below around the linear trace solve.
 const NONLINEAR_TRACE_FLAG: u32 = 16;
+/// Control flag: some record carries a field law, so the per-stage caches of
+/// nodal fields and sample secants exist and the step fills them.
+const FIELD_LAWS_FLAG: u32 = 32;
 /// Linear trace solves per kick on a nonlinear wall. The f64 reference
 /// converges in three for the fixtures measured (1134 of 1217 kicks) and four
 /// for the rest; the finalize pass rejects a kick whose last step has not
@@ -1049,19 +1052,24 @@ impl CanonicalGpuPlan {
         // discrete gradient at its node, and an outgoing wall runs a fixed
         // budget of Newton linearizations around its linear trace solve.
         self.field_laws = operator.has_field_laws();
+        if self.field_laws {
+            // After both accounting banks: one word per trace (the wall's
+            // Newton), per node (the drift's field) and per sample (the
+            // kick's secant), in that order.
+            self.scratch.extend(std::iter::repeat_n(
+                GpuCanonicalScratchWord::default(),
+                self.trace_count + self.node_count + self.sample_count,
+            ));
+            self.manifest.bytes.scratch = self.scratch.len() * size_of::<GpuCanonicalScratchWord>();
+            self.control.boundary_offsets.w |= FIELD_LAWS_FLAG;
+            self.manifest.dispatches_per_step += 3;
+        }
         if self.field_laws && self.trace_count > 0 {
             if self.trace_direct {
                 return Err(CanonicalGpuBuildError::InvalidLayout(
                     "a nonlinear wall's trace mass moves, so it cannot apply a packed inverse",
                 ));
             }
-            // One word per trace for the Newton linearization, after both
-            // accounting banks.
-            self.scratch.extend(std::iter::repeat_n(
-                GpuCanonicalScratchWord::default(),
-                self.trace_count,
-            ));
-            self.manifest.bytes.scratch = self.scratch.len() * size_of::<GpuCanonicalScratchWord>();
             self.control.boundary_offsets.w |= NONLINEAR_TRACE_FLAG;
             self.manifest.dispatches_per_step = self.manifest.dispatches_per_step
                 - trace_dispatches(self.trace_count, self.trace_sweeps, false)
@@ -1821,6 +1829,7 @@ impl CanonicalGpuPlan {
         self.manifest.dispatches_per_step = 4
             + usize::from(self.needs_loss_stages) * 2
             + usize::from(self.needs_accounting)
+            + 3 * usize::from(self.field_laws)
             + if self.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0 {
                 nonlinear_trace_dispatches(self.trace_count, self.trace_sweeps)
             } else {
@@ -4559,6 +4568,9 @@ struct CanonicalPipeline {
     boundary_linearize_first: CachedComputePipelineId,
     boundary_linearize_begin_second: CachedComputePipelineId,
     boundary_linearize_second: CachedComputePipelineId,
+    nonlinear_sample_secants_first: CachedComputePipelineId,
+    nonlinear_sample_secants_second: CachedComputePipelineId,
+    nonlinear_node_fields: CachedComputePipelineId,
 }
 
 #[derive(Resource)]
@@ -4649,6 +4661,9 @@ fn init_canonical_pipeline(
     let boundary_linearize_first = queue("boundary_linearize_first");
     let boundary_linearize_begin_second = queue("boundary_linearize_begin_second");
     let boundary_linearize_second = queue("boundary_linearize_second");
+    let nonlinear_sample_secants_first = queue("nonlinear_sample_secants_first");
+    let nonlinear_sample_secants_second = queue("nonlinear_sample_secants_second");
+    let nonlinear_node_fields = queue("nonlinear_node_fields");
     commands.insert_resource(CanonicalPipeline {
         layout,
         start_loss,
@@ -4691,6 +4706,9 @@ fn init_canonical_pipeline(
         boundary_linearize_first,
         boundary_linearize_begin_second,
         boundary_linearize_second,
+        nonlinear_sample_secants_first,
+        nonlinear_sample_secants_second,
+        nonlinear_node_fields,
     });
 
     let map_layout = BindGroupLayoutDescriptor::new(
@@ -5270,6 +5288,9 @@ fn compute_canonical_wave(
         pipeline.boundary_linearize_first,
         pipeline.boundary_linearize_begin_second,
         pipeline.boundary_linearize_second,
+        pipeline.nonlinear_sample_secants_first,
+        pipeline.nonlinear_sample_secants_second,
+        pipeline.nonlinear_node_fields,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -5542,10 +5563,21 @@ fn compute_canonical_wave(
             pass.set_pipeline(pipelines[0]);
             pass.dispatch_workgroups(workgroups(handles.scratch_count), 1, 1);
         }
+        // A field-dependent generation solves each site's inverse once per
+        // stage into its cache: the samples' secants before each kick, the
+        // nodes' fields before the drift.
+        if handles.field_laws {
+            pass.set_pipeline(pipelines[36]);
+            pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+        }
         pass.set_pipeline(pipelines[1]);
         pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         if handles.trace_count > 0 {
             encode_boundary_kick(&mut pass, &pipelines, handles, false);
+        }
+        if handles.field_laws {
+            pass.set_pipeline(pipelines[38]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         }
         pass.set_pipeline(pipelines[6]);
         pass.dispatch_workgroups(
@@ -5553,6 +5585,10 @@ fn compute_canonical_wave(
             1,
             1,
         );
+        if handles.field_laws {
+            pass.set_pipeline(pipelines[37]);
+            pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+        }
         pass.set_pipeline(pipelines[7]);
         pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         if handles.trace_count > 0 {

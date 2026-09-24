@@ -11087,3 +11087,39 @@ Stage 9.7.
   - The same scene with a linear law ran 21,489 steps. A nonlinear device
     step costs about 3.5× here, and the rate fell late in the run. Measuring
     and cutting that is 9.8.
+
+## 2026-09-24 — A nonlinear device step solves each site once per stage
+
+Stage 9.8, cost.
+
+- **Harness.** `canonical_gpu_temporal_timing --nonlinear` adds Kerr on the
+  mass row and saturation on the stiffness row to the driven fixture (15,270
+  dofs), at an amplitude where both maps depart from linear.
+- **What cost the time.** Every drift sample solved each of its seven nodes'
+  inverses again, and every node's gathered force each of its samples'. Two
+  changes fix it:
+  - **Stage caches.** Three new passes fill regions appended after the wall's
+    Newton region: `nonlinear_node_fields` (the drift's field, one solve per
+    node) and `nonlinear_sample_secants_first/_second` (each kick's
+    `r/(j|b|)`, one solve per sample). The drift and the gathered force read
+    the caches.
+  - **Plan flag.** `FIELD_LAWS_FLAG` lets a field-linear generation skip the
+    per-node record scan that 9.1 added. The explicit nonlinear kick no
+    longer solves an inverse only to weight a zero source.
+- **Measured** (µs a step, unfenced, 2,000 steps):
+
+  | fixture | before | after | driven linear (after) |
+  | --- | --- | --- | --- |
+  | driven, first-order wall | 417 | 350 | 350 |
+  | nonlinear, first-order wall | 1,241 | 850 | 350 |
+  | driven, second-order wall | 850 | 792 | 792 |
+  | nonlinear, second-order wall | 3,095 | 1,872 | 792 |
+
+  The nonlinear step is about 2.4× the driven linear one on either wall. A
+  driven linear step is faster than before Stage 9, whose first cut had cost
+  it about 10%.
+- **In the app** (the pumped second-order-wall scene, Kerr χ = 0.8, 40 s,
+  scratch HOME): 11,169 steps, up from 6,077. The same scene with a linear
+  law ran 19,777. Both refine adaptively from about 20k to 48k dofs over the
+  run, so the nonlinear estimate does not over-refine.
+- **Parity unchanged:** every example and mode exits 0 with its figures.

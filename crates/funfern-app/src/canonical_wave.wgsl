@@ -148,6 +148,14 @@ fn nonlinear_trace_offset() -> u32 {
     return scratch_count() + 2u * accounting_item_count();
 }
 fn nonlinear_trace() -> bool { return (control.boundary_offsets.w & 16u) != 0u; }
+// Any record carries a field law. The regions below exist only then.
+fn field_laws() -> bool { return (control.boundary_offsets.w & 32u) != 0u; }
+// Per-stage caches of a field-dependent generation, one solve per site:
+// the nodal field at the drift's midpoint, and each sample's secant
+// `r/(j|b|)` at the kick's instant. Every sample then reads a node's field,
+// and every node a sample's secant, without solving it again.
+fn node_field_offset() -> u32 { return nonlinear_trace_offset() + control.counts_b.y; }
+fn sample_secant_offset() -> u32 { return node_field_offset() + control.counts_a.x; }
 fn has_loss_stages() -> bool { return (control.boundary_offsets.w & 1u) != 0u; }
 fn use_force_cache() -> bool { return (control.boundary_offsets.w & 4u) != 0u; }
 fn has_prescribed_trace() -> bool { return (control.boundary_offsets.w & 8u) != 0u; }
@@ -404,6 +412,7 @@ fn field_response(word: u32, r: f32) -> vec3<f32> {
 }
 
 fn node_is_nonlinear(node: u32) -> bool {
+    if !field_laws() { return false; }
     let range = nodes[node].stiffness.zw;
     for (var record = 0u; record < range.y; record += 1u) {
         if field_kind(range.x + record * TEMPORAL_COEFFICIENT_WORDS) != 0u {
@@ -696,8 +705,10 @@ fn gathered_force(node: u32, second: bool) -> f32 {
             let flux = select(
                 accepted_b(index), candidate_b(index), second || has_loss_stages());
             var inverse_factor = 1.0;
-            if driven {
-                inverse_factor = temporal_complementary_secant(index, flux, force_time);
+            if field_laws() {
+                inverse_factor = scratch[sample_secant_offset() + index].values.x;
+            } else if driven {
+                inverse_factor = 1.0 / temporal_complementary_factor(index, force_time);
             }
             result += inverse_factor
                 * dot(vec2<f32>(coefficient_x, table_float(entry, 3u)), flux);
@@ -1701,8 +1712,12 @@ fn kick_nonlinear_node(
         }
         if !converged { reject(STATUS_INVERSE_CONVERGENCE); }
         field = trace_gradient(node, old, next, target_time).x;
-    } else {
+    } else if source != 0.0 {
         field = temporal_primary_field(node, 0.5 * (old + next), target_time);
+    } else {
+        // Nothing to charge: the field would only weight a zero source, so
+        // the solve that finds it is skipped.
+        field = 0.0;
     }
     let source_work = duration * field * source;
     let force_work = duration * field * held_force;
@@ -2261,7 +2276,37 @@ fn temporal_drift_field(node: u32, middle_time: f32) -> f32 {
     if nodes[node].boundary.z != 0u {
         return harmonic_value(nodes[node].prescribed, middle_time);
     }
-    return temporal_primary_field(node, candidate_q(node), middle_time);
+    if field_laws() {
+        return scratch[node_field_offset() + node].values.x;
+    }
+    return candidate_q(node) * temporal_inverse_primary_mass(node, middle_time);
+}
+
+@compute @workgroup_size(128)
+fn nonlinear_node_fields(@builtin(global_invocation_id) id: vec3<u32>) {
+    let node = id.x;
+    if stopped() || node >= control.counts_a.x { return; }
+    let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
+    scratch[node_field_offset() + node].values.x =
+        temporal_primary_field(node, candidate_q(node), middle_time);
+}
+
+fn cache_sample_secant(sample: u32, second: bool) {
+    if stopped() || sample >= control.counts_a.y { return; }
+    let local_time = control.clock_f32.y + select(0.0, control.clock_f32.x, second);
+    let flux = select(accepted_b(sample), candidate_b(sample), second || has_loss_stages());
+    scratch[sample_secant_offset() + sample].values.x =
+        temporal_complementary_secant(sample, flux, local_time);
+}
+
+@compute @workgroup_size(128)
+fn nonlinear_sample_secants_first(@builtin(global_invocation_id) id: vec3<u32>) {
+    cache_sample_secant(id.x, false);
+}
+
+@compute @workgroup_size(128)
+fn nonlinear_sample_secants_second(@builtin(global_invocation_id) id: vec3<u32>) {
+    cache_sample_secant(id.x, true);
 }
 
 @compute @workgroup_size(128)

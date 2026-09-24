@@ -14,6 +14,10 @@
 //! no nodal mass, so a driven generation sweeps it with the stage's own mass
 //! rather than refactorizing, and this is where that sweep's cost is read.
 //!
+//! `--nonlinear` adds Kerr on the mass row and saturation on the stiffness row
+//! to the driven medium, at an amplitude where both maps depart from linear,
+//! so the step pays every inverse and, with `--outgoing`, the wall's Newton.
+//!
 //! Stepping is unfenced, so the figure is what a step costs the device rather
 //! than the readback round trip the interactive lead fence waits on.
 
@@ -52,6 +56,8 @@ struct Timing {
 fn main() -> AppExit {
     let driven = !std::env::args().any(|argument| argument == "--fixed");
     let outgoing = std::env::args().any(|argument| argument == "--outgoing");
+    let nonlinear = std::env::args().any(|argument| argument == "--nonlinear");
+    let amplitude = if nonlinear { 12.0 } else { 1.0 };
     let mut scene = Scene::initial();
     if driven {
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
@@ -68,6 +74,17 @@ fn main() -> AppExit {
         };
     }
 
+    if nonlinear {
+        scene.materials[0].mass_law.field = funfern_core::FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(0.8),
+            amplitude_bound: None,
+        };
+        scene.materials[0].stiffness_law.field = funfern_core::FieldLaw::Saturable {
+            chi: ScalarField::constant(6.0),
+            saturation: ScalarField::constant(0.3),
+        };
+    }
     let mut fixed_scene = scene.clone();
     for material in &mut fixed_scene.materials {
         material.mass_law = CoefficientLaw::linear();
@@ -103,12 +120,12 @@ fn main() -> AppExit {
         .primary_mass()
         .iter()
         .zip(base.node_points())
-        .map(|(mass, point)| mass * (0.03 * (1.3 * point.x - 0.7 * point.y).sin()))
+        .map(|(mass, point)| mass * (amplitude * 0.03 * (1.3 * point.x - 0.7 * point.y).sin()))
         .collect::<Vec<_>>();
     let potential = base
         .node_points()
         .iter()
-        .map(|point| 0.02 * (0.9 * point.x + 1.1 * point.y).cos())
+        .map(|point| amplitude * 0.02 * (0.9 * point.x + 1.1 * point.y).cos())
         .collect::<Vec<_>>();
     let complementary = base.compatible_flux(&potential).expect("timing flux");
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
@@ -125,7 +142,11 @@ fn main() -> AppExit {
             plan.trace_sweeps,
         );
     }
-    let label = if driven { "driven" } else { "fixed" };
+    let label = match (driven, nonlinear) {
+        (_, true) => "nonlinear",
+        (true, false) => "driven",
+        (false, false) => "fixed",
+    };
     println!(
         "gpu {label} timing: {} Q, {} b, dt {time_step:.4e}, {STEPS} steps",
         plan.node_count, plan.sample_count
