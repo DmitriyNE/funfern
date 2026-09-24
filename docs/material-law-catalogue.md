@@ -15,6 +15,8 @@ Status is one of:
 - **runs** - authored, compiled and stepped, with a gate in `docs/checks.md`.
 - **authored** - the type and its persistence exist and round-trip, but
   assembly refuses a material carrying it, so a document using it does not run.
+- **CPU reference** - compiled and stepped by the f64 reference with its
+  gates in the Stage 8 report; the app and device refuse it until Stage 9.
 - **gated** - not admitted until the named design gate closes.
 
 ## Slot M — mass multiplier, `m -> m·g`
@@ -45,8 +47,8 @@ than the Rust variant names.
 
 | ID | Law | Phenomenon | Stored as | Status |
 | --- | --- | --- | --- | --- |
-| M-F1 | Kerr `1 + χu²` | self-focusing, filamentation, self-phase modulation | `FieldLaw::Polynomial` with `chi1 = 0` | gated (C) |
-| M-F2 | saturable Kerr `1 + χu²/(1 + u²/u_s²)` | stable filaments without collapse - the right default | `FieldLaw::Saturable` | gated (C) |
+| M-F1 | Kerr `1 + χu²` | self-focusing, filamentation, self-phase modulation | `FieldLaw::Polynomial` with `chi1 = 0` | CPU reference (direct; χ < 0 needs `amplitude_bound`) |
+| M-F2 | saturable Kerr `1 + χu²/(1 + u²/u_s²)` | stable filaments without collapse - the right default | `FieldLaw::Saturable` | CPU reference (direct; `χu_s² > −8/9`) |
 | M-F3 | quadratic `1 + χu` | asymmetric steepening into shocks, second-harmonic generation | `FieldLaw::Polynomial` with `chi2 = 0` | gated (C) |
 
 Note the sign luck: self-focusing needs the permittivity to rise where the field
@@ -72,9 +74,12 @@ expressible with one drive on each row and `inverted` on one of them, and the
 claim is falsifiable: reflection off the interface must measure zero where M-T1
 alone measures the reflecting coefficient.
 
-The field-driven half is gated (C) with slot M's. A field-dependent `h` also
-needs a symmetric flux argument `h((u_i + u_j)/2)`, because the coefficient is
-no longer per node.
+The field-driven half follows slot M's: Kerr and saturable run on the CPU
+reference on this row too. They act on the direct coefficient `s₀` (ε in TE),
+at quadrature, on the magnitude of the independent complementary field, which
+is the field argument the constitutive map needs. There is no symmetric nodal
+flux argument like `h((u_i + u_j)/2)`. An anisotropic medium refuses a
+nonlinear law on this row (gate C).
 
 ## Slot R — additive restoring term, `+= −V'(u)/m`
 

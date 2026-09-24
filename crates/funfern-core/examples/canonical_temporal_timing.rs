@@ -22,12 +22,18 @@
 //!
 //! Both sides run the same mesh, the same operator and the same forcing at the
 //! same timestep, so the only difference measured is the coefficient work.
+//!
+//! `--nonlinear` replaces the drive with a field-dependent medium (Kerr on the
+//! mass row, saturable on the stiffness row) at an amplitude where both maps
+//! depart from linear by tens of percent. That column is the Stage 8 cost of a
+//! bracketed inverse at every node and sample, plus the discrete-gradient kick
+//! on a nonlinear trace.
 
 use std::time::Instant;
 
 use funfern_core::{
     CanonicalForcing, CanonicalSource, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CanonicalWaveState, CoefficientLaw, InternalBoundary, InternalBoundaryCoupling,
+    CanonicalWaveState, CoefficientLaw, FieldLaw, InternalBoundary, InternalBoundaryCoupling,
     InternalBoundaryId, InternalBoundaryLaw, MeshingOptions, OpenCubicSpline,
     OuterBoundaryCondition, Point2, QuadraticWaveOperator, ScalarField, Scene, TimeDrive,
     TimeSignal, mesh_scene,
@@ -37,7 +43,15 @@ const STEPS: u64 = 64;
 const EDGE: f64 = 0.1;
 
 fn main() {
-    println!("Time-driven incremental cost on the CPU core");
+    let nonlinear = std::env::args().any(|argument| argument == "--nonlinear");
+    println!(
+        "{} incremental cost on the CPU core",
+        if nonlinear {
+            "Field-dependent"
+        } else {
+            "Time-driven"
+        }
+    );
     println!("Same mesh, operator, forcing and timestep on both sides; h={EDGE}, {STEPS} steps.\n");
     println!(
         "{:<26} {:>7} {:>11} {:>11} {:>8}",
@@ -66,7 +80,7 @@ fn main() {
             false,
         ),
     ] {
-        measure(label, boundary, gap, source);
+        measure(label, boundary, gap, source, nonlinear);
     }
 
     println!(
@@ -79,7 +93,13 @@ fn main() {
     );
 }
 
-fn measure(label: &str, boundary: OuterBoundaryCondition, gap: bool, source: bool) {
+fn measure(
+    label: &str,
+    boundary: OuterBoundaryCondition,
+    gap: bool,
+    source: bool,
+    nonlinear: bool,
+) {
     let mut scene = Scene::default();
     if gap {
         scene.internal_boundaries.push(InternalBoundary {
@@ -100,11 +120,24 @@ fn measure(label: &str, boundary: OuterBoundaryCondition, gap: bool, source: boo
             }],
         });
     }
-    scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
-        depth: ScalarField::constant(0.2),
-        frequency_hz: ScalarField::constant(1.1),
-        phase_radians: ScalarField::constant(0.3),
-    };
+    if nonlinear {
+        scene.materials[0].mass_law.field = FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(0.8),
+            amplitude_bound: None,
+        };
+        scene.materials[0].stiffness_law.field = FieldLaw::Saturable {
+            chi: ScalarField::constant(6.0),
+            saturation: ScalarField::constant(0.3),
+        };
+    } else {
+        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(1.1),
+            phase_radians: ScalarField::constant(0.3),
+        };
+    }
+    let amplitude = if nonlinear { 10.0 } else { 1.0 };
 
     let mut fixed_scene = scene.clone();
     for material in &mut fixed_scene.materials {
@@ -146,12 +179,12 @@ fn measure(label: &str, boundary: OuterBoundaryCondition, gap: bool, source: boo
     let primary = base
         .node_points()
         .iter()
-        .map(|point| 0.05 * (1.4 * point.x - 0.9 * point.y).sin())
+        .map(|point| amplitude * 0.05 * (1.4 * point.x - 0.9 * point.y).sin())
         .collect::<Vec<_>>();
     let potential = base
         .node_points()
         .iter()
-        .map(|point| 0.03 * (0.9 * point.x + 1.2 * point.y).cos())
+        .map(|point| amplitude * 0.03 * (0.9 * point.x + 1.2 * point.y).cos())
         .collect::<Vec<_>>();
     let complementary = base.compatible_flux(&potential).expect("timing flux");
 

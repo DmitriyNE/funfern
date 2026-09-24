@@ -10826,3 +10826,18 @@ response is refused by name.
 
 The device path compiles from the same converted material, so it follows. It
 was not re-run in the app.
+
+## 2026-09-24 — Stage 8 closed on the CPU reference
+
+- **Report:**
+  [Stage 8 report](spikes/funfern-material-laws-stage8-report.md). The plan's
+  stage table marks Stage 8 complete. The catalogue gains a "CPU reference"
+  status for M-F1 and M-F2, and the slot K field text now describes the
+  quadrature argument actually used.
+- **Cost:** `canonical_temporal_timing --nonlinear` adds the field-dependent
+  column. The bulk takes 13.8 ms a step at 5,485 dofs, against 3.2 ms pumped
+  and 0.27 ms fixed. The dominant cost is the oracle's repeated full inversions
+  per step, which makes stage-coefficient caching the item to take first if the
+  oracle's speed ever matters.
+- **Next:** Stage 9, the device port. Its f32 inverse criterion is already
+  fixed.

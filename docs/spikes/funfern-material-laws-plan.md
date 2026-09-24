@@ -902,7 +902,7 @@ The [detailed stage plan](funfern-material-laws-review.md#5-implementation-stage
 | 5 (complete) | Latest-state GPU transfer, physical histories, live edits/paused events | No live CPU field calculation; rollback and handoff performance closed in the [Stage 5 report](funfern-material-laws-stage5-report.md) |
 | 6 (complete) | AMR, thin-gap diagnostics, probes/rendering/energy/flow/far-field; shared-skin cutover | First release closed in the [Stage 6 report](funfern-material-laws-stage6-report.md): validated linear common core, both outgoing orders, supported existing scenes |
 | 7 (complete) | Time drives, Switch, reciprocal ramp semantics, modulation-aware AMR/filter/boundaries | Tested time-driven combinations enabled; closed with carried items and three closeout defects in the [Stage 7 report](funfern-material-laws-stage7-report.md) |
-| 8 | CPU nonlinear maps/inverses, tangent bounds, nonlinear boundary/filter/AMR contracts | Kerr/saturable first; unsupported C combinations remain disabled |
+| 8 (complete) | CPU nonlinear maps/inverses, tangent bounds, nonlinear boundary/filter/AMR contracts | Kerr/saturable on the CPU reference with every composition gated in the [Stage 8 report](funfern-material-laws-stage8-report.md); unsupported C combinations remain disabled; the app and device refuse field laws until Stage 9 |
 | 9 | GPU nonlinear execution, admission/recovery and actual-core performance | Enable supported nonlinear combinations only after composition/parity tests |
 | 10 | Complete Simplified/Advanced UI, presets, demonstrations and compatibility docs | Second release: supported instantaneous nonlinear/time-driven catalogue |
 | 11 | Individually derived oscillator/active-media extensions | Enable each only after Gate O equations, transfer and demonstrations pass |
@@ -1021,7 +1021,7 @@ real-time rate; overload is still reported as a speed shortfall.
 
 ### Current implementation handoff
 
-**Status as of 24 September 2026:** Stages 0–7 are complete. The [Stage 7 report](funfern-material-laws-stage7-report.md) supersedes the Stage 7 status paragraphs below, which predate application enablement, mixed static/driven handoffs and AMR. It lists the three defects to fix before Stage 8 begins.
+**Status as of 24 September 2026:** Stages 0–8 are complete; the [Stage 8 report](funfern-material-laws-stage8-report.md) records the CPU nonlinear reference, the three Stage 7 defects and one harness defect found and fixed during it, and what Stage 9 inherits. The [Stage 7 report](funfern-material-laws-stage7-report.md) supersedes the Stage 7 status paragraphs below, which predate application enablement, mixed static/driven handoffs and AMR. It lists the three defects to fix before Stage 8 begins.
 
 Read this specification and the detailed stages; consult reports for derivations, not as competing live plans. Baseline `beca47e` remains the clean numerical reference. Stage 1 coalesced the useful unfinished authoring work, removed superseded semantics, restored all material literals/imports, and added explicit legacy-solver rejection for non-inert laws. Do not copy the spike Python into production, implement bulk gauge machinery, or interpret the green Stage 1 checks as validation of a canonical or nonlinear solver that does not exist yet.
 
