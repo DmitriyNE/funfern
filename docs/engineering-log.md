@@ -10784,3 +10784,45 @@ Stage 8.7, on the CPU reference. The app still refuses field-dependent media.
   and the target state reinverts them. `CanonicalTemporalWaveState::new_at`
   refuses a transferred flux outside its domain, so a remap past a bound fails
   before any state is built.
+
+## 2026-09-24 — A skin change carries every law to its own coefficient, field laws too
+
+This fixes a defect found at the start of 8.8 and completes 8.8.
+
+**The defect.** Since 22 September, `convert_material` reciprocated the
+stiffness-row law on its way to ε, as though the law multiplied the stored
+`k₀`. The solver multiplies `s₀ = 1/k₀` directly, as the 21 September
+"Reciprocal stiffness s₀" relabel measured.
+- So a stiffness-row drive or Switch ran backwards after a skin change. With a
+  pump of depth 0.3 at its crest, Mechanical read `v = b/1.3` (0.2308) and the
+  converted TE read `v = 1.3 b` (0.39). The bases agreed at 0.3.
+- The drive-crossing test pinned the wrong algebra: it asserted `ε = 1/(k₀h)`.
+- The mass row (`ρ ↔ μ`, copied) was correct.
+
+**The fix.**
+- Both rows' laws move unchanged. Only the base expression reciprocates
+  (`ε = 1/k₀`).
+- `CoefficientLaw::reciprocated` had no other caller and is removed.
+- The drive test now asserts `ε(t) = s₀(t) = h(t)/k₀`.
+- Documents that never change skin are unaffected. One that crossed skins
+  with a stiffness-row drive was carrying the inverted drive, and keeps it
+  until it is edited.
+
+**8.8: field laws convert.** Direct Kerr and saturable laws carry to the same
+physical coefficient, which is gate C's Mechanical ↔ TE contract:
+`ξ = s₀(1 + χ|e|²)e ↔ D = ε(1 + χ|E|²)E` and `ρ(u) ↔ μ(H)`. TM ↔ TE was
+already a no-op on the material data. A signed χ₁ or a reciprocal field
+response is refused by name.
+
+**Tests.**
+- `mechanical_and_te_evolve_alike_through_a_skin_change` (new, `canonical_temporal`):
+  a pumped stiffness row with a Switch alternate, and a pumped Kerr medium,
+  step identically for 40 steps before and after conversion, to 1e-12.
+- The extended `physics_material_conversion_preserves_characteristics_and_stays_bounded`
+  covers the saturable round trip and both refusals.
+- `one_unconvertible_material_keeps_the_whole_skin` (new, app): one signed
+  material leaves the whole document unchanged, and the error names it. With
+  that material removed, the Kerr law carries.
+
+The device path compiles from the same converted material, so it follows. It
+was not re-run in the app.

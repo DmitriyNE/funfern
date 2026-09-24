@@ -10589,4 +10589,52 @@ mod tests {
         assert_eq!(span_ids(&editor, angle).len(), 3);
         assert_eq!(editor.document.model.draft.regions.len(), 2);
     }
+
+    /// A skin change converts every material or none: one law with nowhere
+    /// settled to go (a signed χ₁ response) leaves the whole document where it
+    /// was, while a Kerr law beside it would have carried.
+    #[test]
+    fn one_unconvertible_material_keeps_the_whole_skin() {
+        let mut editor = TopologyEditor::default();
+        let kerr_id = editor.add_material().unwrap();
+        let signed_id = editor.add_material().unwrap();
+        let find = |editor: &TopologyEditor, id| {
+            editor
+                .document
+                .model
+                .draft
+                .materials
+                .iter()
+                .find(|material| material.id == id)
+                .unwrap()
+                .clone()
+        };
+        let mut kerr = find(&editor, kerr_id);
+        kerr.mass_law.field = funfern_core::FieldLaw::Polynomial {
+            chi1: funfern_core::ScalarField::constant(0.0),
+            chi2: funfern_core::ScalarField::constant(0.8),
+            amplitude_bound: None,
+        };
+        let kerr_law = kerr.mass_law.field.clone();
+        editor.update_material(kerr).unwrap();
+        let mut signed = find(&editor, signed_id);
+        signed.mass_law.field = funfern_core::FieldLaw::Polynomial {
+            chi1: funfern_core::ScalarField::constant(0.3),
+            chi2: funfern_core::ScalarField::constant(0.0),
+            amplitude_bound: Some(funfern_core::ScalarField::constant(0.5)),
+        };
+        editor.update_material(signed.clone()).unwrap();
+        let with_signed = editor.document.model.draft.clone();
+        let te = funfern_core::PhysicsModel::Electromagnetic {
+            polarization: funfern_core::ElectromagneticPolarization::Te,
+        };
+        let error = editor.set_physics(te).unwrap_err();
+        assert!(error.contains(&signed.name), "{error}");
+        assert_eq!(editor.document.model.draft, with_signed);
+        // Without it the Kerr material carries, law and all.
+        editor.delete_material(signed_id).unwrap();
+        editor.set_physics(te).unwrap();
+        let carried = find(&editor, kerr_id);
+        assert_eq!(carried.stiffness_law.field, kerr_law);
+    }
 }

@@ -203,13 +203,6 @@ impl CoefficientLaw {
     /// Nothing else moves: a drive's depth, frequency, phase and wavevector
     /// live in the material frame, and a Switch's alternate is a factor on a
     /// coefficient that has just become its own reciprocal.
-    pub fn reciprocated(&self) -> Self {
-        Self {
-            inverted: !self.inverted,
-            ..self.clone()
-        }
-    }
-
     pub fn normalized(&self) -> Self {
         if self.is_linear() {
             Self::linear()

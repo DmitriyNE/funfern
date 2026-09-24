@@ -8363,4 +8363,64 @@ mod tests {
             assert!(total.prescribed_exchange.abs() > 1e-4, "{total:?}");
         }
     }
+
+    /// Mechanical ↔ TE is a presentation change: the compiled maps, and so
+    /// the evolution, must be the same before and after. Until 24 September a
+    /// stiffness-row drive crossed reciprocated and ran backwards in TE
+    /// (`v = 1.3 b` against `b / 1.3` at a pump crest).
+    #[test]
+    fn mechanical_and_te_evolve_alike_through_a_skin_change() {
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let mut pumped = Scene::initial();
+        pumped.materials[0].stiffness_law.drive = pump(0.3, 0.9, 0.2);
+        pumped.materials[0].stiffness_law.alternate = Some(ScalarField::constant(1.4));
+        pumped.materials[0].mass_law.drive = pump(0.2, 0.7, -0.1);
+        let mut kerr_medium = kerr_scene();
+        kerr_medium.materials[0].stiffness_law.drive = pump(0.2, 0.9, 0.2);
+        for (label, mechanical) in [("pumped", pumped), ("kerr", kerr_medium)] {
+            let mut electromagnetic = mechanical.clone();
+            electromagnetic.physics = te;
+            electromagnetic.materials = mechanical
+                .materials
+                .iter()
+                .map(|material| {
+                    PhysicsModel::Mechanical
+                        .convert_material(te, material)
+                        .unwrap()
+                })
+                .collect();
+            let left = compile(&mechanical).unwrap();
+            let right = compile(&electromagnetic).unwrap();
+            assert_eq!(left.base().orientation(), right.base().orientation());
+            assert_eq!(left.maximum_time_step(), right.maximum_time_step());
+            let run = |operator: &CanonicalTemporalWaveOperator| {
+                let (primary, complementary) = strong_fluxes(operator, 4.0);
+                let mut state = CanonicalTemporalWaveState::new(
+                    operator,
+                    0.4 * operator.maximum_time_step(),
+                    primary,
+                    complementary,
+                )
+                .unwrap();
+                for _ in 0..40 {
+                    state.step(operator).unwrap();
+                }
+                (
+                    state.primary_flux().to_vec(),
+                    state.complementary_flux().to_vec(),
+                )
+            };
+            let (expected_primary, expected_complementary) = run(&left);
+            let (actual_primary, actual_complementary) = run(&right);
+            let scale = expected_primary.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+            for (a, b) in expected_primary.iter().zip(&actual_primary) {
+                assert!((a - b).abs() <= 1e-12 * scale, "{label}");
+            }
+            for (a, b) in expected_complementary.iter().zip(&actual_complementary) {
+                assert!((*a - *b).norm() <= 1e-12, "{label}");
+            }
+        }
+    }
 }

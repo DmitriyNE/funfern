@@ -305,21 +305,33 @@ impl PhysicsModel {
         // The mechanical adapter is `s₀ = ε = 1/k₀` and `μ = ρ`, so the two
         // stored slots hold different physical quantities in each skin and a
         // law moves with the quantity it was authored against, not with the
-        // slot it happens to sit in. The row that reciprocates carries its law
-        // reciprocated, which `inverted` expresses exactly: that flag divides
-        // by the whole multiplier, and the reciprocal of `h·s` is what a
-        // reciprocated coefficient needs.
+        // slot it happens to sit in. Each law already acts on that quantity:
+        // the mass row on `ρ` or `μ`, and the stiffness row on the reciprocal
+        // stiffness `s₀`, which the solver multiplies directly. So a law moves
+        // unchanged, and only the stored base expression reciprocates
+        // (`ε = 1/k₀`). Reciprocating the law as well, as this did until
+        // 24 September, ran a stiffness-row drive backwards in the other skin.
         //
-        // A field law does not convert. A reciprocal nonlinear coefficient is
-        // not an inverse nonlinear constitutive map, and the physical field the
-        // law reads changes with the skin; that is design gate C. A restoring
-        // law has no counterpart to move to. Loss channels stay attached to
-        // their own physical field and their rate conversion is a contract of
-        // its own, so they are refused rather than guessed at.
+        // The same holds for a field law, which is what gate C's
+        // Mechanical ↔ TE contract asks for: `ξ = s₀(1 + χ|e|²)e` is
+        // `D = ε(1 + χ|E|²)E` with `e ↔ E`, and `ρ(u)` is `μ(H)`. The laws that
+        // do not carry are the ones the solver does not execute either: a
+        // signed χ₁ or a reciprocal field response has no settled vector law
+        // to carry to. A restoring law has no counterpart to move to. Loss
+        // channels stay attached to their own physical field, and their rate
+        // conversion is a contract of its own, so they are refused rather than
+        // guessed at.
         for law in [&material.mass_law, &material.stiffness_law] {
-            if !matches!(law.field, FieldLaw::Linear) {
+            if matches!(law.field, FieldLaw::Linear) {
+                continue;
+            }
+            let signed = matches!(
+                &law.field,
+                FieldLaw::Polynomial { chi1, .. } if chi1.constant_value() != Some(0.0)
+            );
+            if signed || law.inverted {
                 return Err(MaterialError::UnconvertibleMaterialLaw(
-                    "a field-dependent response",
+                    "a signed or reciprocal field response",
                 ));
             }
         }
@@ -337,18 +349,17 @@ impl PhysicsModel {
             converted.mass_density = material.stiffness.reciprocal()?;
             converted.stiffness = material.mass_density.clone();
             converted.damping = material.damping.divide(&material.mass_density)?;
-            converted.mass_law = material.stiffness_law.reciprocated();
+            converted.mass_law = material.stiffness_law.clone();
             converted.stiffness_law = material.mass_law.clone();
         } else {
             converted.mass_density = material.stiffness.clone();
             converted.stiffness = material.mass_density.reciprocal()?;
             converted.damping = material.damping.multiply(&material.stiffness)?;
             converted.mass_law = material.stiffness_law.clone();
-            converted.stiffness_law = material.mass_law.reciprocated();
+            converted.stiffness_law = material.mass_law.clone();
         }
         // An otherwise linear law that only carries `inverted` is the multiplier
-        // one, so it normalizes away rather than accumulating across a round
-        // trip.
+        // one, so it normalizes away.
         converted.mass_law = converted.mass_law.normalized();
         converted.stiffness_law = converted.stiffness_law.normalized();
         Ok(converted)
@@ -1522,25 +1533,43 @@ mod tests {
         let converted = mechanical.convert_material(tm, &inert_reciprocal).unwrap();
         assert_eq!(converted.mass_law, crate::CoefficientLaw::linear());
 
+        // A direct Kerr or saturable law carries to the same physical
+        // coefficient; a signed or reciprocal one has nowhere settled to go.
         let mut nonlinear = material;
-        nonlinear.mass_law.field = crate::FieldLaw::Saturable {
+        let saturable = crate::FieldLaw::Saturable {
             chi: ScalarField::constant(0.2),
             saturation: ScalarField::constant(1.0),
         };
-        assert_eq!(
-            mechanical.convert_material(tm, &nonlinear),
-            Err(MaterialError::UnconvertibleMaterialLaw(
-                "a field-dependent response"
-            ))
-        );
+        nonlinear.mass_law.field = saturable.clone();
+        let converted = mechanical.convert_material(tm, &nonlinear).unwrap();
+        assert_eq!(converted.stiffness_law.field, saturable);
+        assert!(!converted.stiffness_law.inverted);
+        let returned = tm.convert_material(mechanical, &converted).unwrap();
+        assert_eq!(returned.mass_law, nonlinear.mass_law);
+        assert_eq!(returned.stiffness_law, nonlinear.stiffness_law);
+        let refused = Err(MaterialError::UnconvertibleMaterialLaw(
+            "a signed or reciprocal field response",
+        ));
+        let mut signed = nonlinear.clone();
+        signed.mass_law.field = crate::FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.3),
+            chi2: ScalarField::constant(0.0),
+            amplitude_bound: Some(ScalarField::constant(0.5)),
+        };
+        assert_eq!(mechanical.convert_material(tm, &signed), refused);
+        let mut reciprocal = nonlinear;
+        reciprocal.mass_law.inverted = true;
+        assert_eq!(mechanical.convert_material(tm, &reciprocal), refused);
     }
 
     /// A drive follows the physical coefficient it was authored against, not
-    /// the slot it sits in. Under the mechanical adapter `ε = 1/k₀` and `μ = ρ`,
-    /// so a law on the stiffness row lands on the permittivity row and has to
-    /// arrive reciprocated. This measures that: the converted material's
-    /// permittivity must be the reciprocal of the original's stiffness at every
-    /// instant, not merely carry the same drive somewhere.
+    /// the slot it sits in. Under the mechanical adapter `ε = s₀ = 1/k₀` and
+    /// `μ = ρ`, and a law on the stiffness row acts on `s₀`, which the solver
+    /// multiplies directly. So the law lands on the permittivity row
+    /// unchanged. This measures that: the converted permittivity must equal
+    /// the original's `s₀(t) = h(t)/k₀` at every instant. An earlier version
+    /// asserted `1/(k₀ h)`, the stored stiffness driven, and so pinned a
+    /// conversion that ran the drive backwards in the other skin.
     #[test]
     fn a_drive_crosses_a_skin_on_the_coefficient_it_was_authored_against() {
         use crate::{
@@ -1570,10 +1599,9 @@ mod tests {
         material.stiffness_law.alternate = Some(ScalarField::constant(1.6));
 
         let converted = mechanical.convert_material(tm, &material).unwrap();
-        // The law left the stiffness row entirely and arrived reciprocated.
+        // The law left the stiffness row entirely and arrived as it was.
         assert_eq!(converted.stiffness_law, CoefficientLaw::linear());
-        assert!(converted.mass_law.inverted);
-        assert_eq!(converted.mass_law.drive, pump);
+        assert_eq!(converted.mass_law, material.stiffness_law);
 
         let coefficient = |field: &ScalarField, law: &CoefficientLaw, time: f64| {
             let values = law.evaluate_at(origin, &material.parameters).unwrap();
@@ -1588,17 +1616,19 @@ mod tests {
         };
         for step in 0..12 {
             let time = 0.07 * f64::from(step);
-            let stiffness = coefficient(&material.stiffness, &material.stiffness_law, time);
+            let reciprocal_stiffness = coefficient(
+                &material.stiffness.reciprocal().unwrap(),
+                &material.stiffness_law,
+                time,
+            );
             let permittivity = coefficient(&converted.mass_density, &converted.mass_law, time);
             assert!(
-                (permittivity - 1.0 / stiffness).abs() < 1.0e-13,
-                "at t={time}: ε {permittivity:e} against 1/k {:e}",
-                1.0 / stiffness
+                (permittivity - reciprocal_stiffness).abs() < 1.0e-13,
+                "at t={time}: ε {permittivity:e} against s₀ {reciprocal_stiffness:e}"
             );
         }
 
-        // And the round trip is exact, so a user toggling skins does not
-        // accumulate reciprocal flags on a medium that never changed.
+        // And the round trip is exact.
         let returned = tm.convert_material(mechanical, &converted).unwrap();
         assert_eq!(returned, material);
     }
