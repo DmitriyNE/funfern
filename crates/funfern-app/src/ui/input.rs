@@ -730,11 +730,11 @@ impl Playground {
                             if let Some(region) =
                                 self.editor.document.model.draft.face_assignments[index].region
                             {
-                                self.region_selection = region;
+                                self.select_region(region);
                             }
                         }
                     } else if let Some(region) = self.region_at(point) {
-                        self.region_selection = region;
+                        self.select_region(region);
                     }
                 }
             }

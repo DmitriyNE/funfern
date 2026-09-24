@@ -12296,3 +12296,22 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check pass. The UI itself is for the user to
   judge.
+
+## 2026-09-25 — Selecting a region selects its material
+
+- **Asked by the user:** selecting a region, especially by clicking it in the
+  scene, should select the material assigned to it.
+- **Change.** `select_region` sets the region and its material. It is called
+  from all four places that select a region: the scene click, the scene click
+  in the Faces listing, the Regions list and the Faces list. A hole face has
+  no region and changes neither selection.
+- **Unapplied edits.** When the open material has edits not yet applied, the
+  material stays open and a notice says to apply or revert them first,
+  because following the selection would discard them. Clicking a material in
+  the list still discards them, as before.
+- **Revert.** The editor had no revert. A Revert button beside Apply now
+  discards the unapplied edits and the half-typed formula and name text.
+- **Test:** `selecting_a_region_follows_it_to_its_material`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check pass. The scene click calls the same
+  helper and was not exercised through a pointer event.

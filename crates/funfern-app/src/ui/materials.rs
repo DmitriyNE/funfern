@@ -14,6 +14,54 @@ impl Playground {
     /// creation - so it is resolved against the draft each time it is used
     /// rather than trusted: the default material if the draft has it,
     /// otherwise its first.
+    /// Selects a region and, with it, the material it is assigned, so
+    /// clicking a region in the scene opens what it is made of. Edits not yet
+    /// applied to the open material keep it open instead, with a notice,
+    /// since following the selection would discard them.
+    pub(super) fn select_region(&mut self, region: RegionId) {
+        self.region_selection = region;
+        let Some(assigned) = self
+            .editor
+            .document
+            .model
+            .draft
+            .region(region)
+            .map(|region| region.material)
+        else {
+            return;
+        };
+        if assigned == self.material_selection {
+            return;
+        }
+        if self.material_edits_pending() {
+            self.notify(
+                "The open material has edits not yet applied; apply or revert them to follow \
+                 the selection to its material."
+                    .to_owned(),
+            );
+            return;
+        }
+        self.material_selection = assigned;
+    }
+
+    /// Whether the material editor holds edits the draft does not have yet.
+    fn material_edits_pending(&self) -> bool {
+        self.material_edit.as_ref().is_some_and(|edit| {
+            edit.id == self.material_selection
+                && self.editor.document.model.draft.material(edit.id) != Some(edit)
+        })
+    }
+
+    /// Drops the half-typed formula and parameter-name text of one material.
+    fn forget_material_edits(&mut self, material: MaterialId) {
+        self.material_formula_edits
+            .retain(|(owner, _), _| *owner != material.0);
+        self.material_formula_errors
+            .retain(|(owner, _), _| *owner != material.0);
+        self.parameter_name_edits
+            .retain(|(owner, _), _| *owner != material.0);
+    }
+
     pub(super) fn resolved_material_selection(&mut self) -> MaterialId {
         let materials = &self.editor.document.model.draft.materials;
         if !materials
@@ -96,7 +144,7 @@ impl Playground {
                 {
                     self.face_selection = index;
                     if let Some(region) = assignment.region {
-                        self.region_selection = region;
+                        self.select_region(region);
                     }
                 }
                 let mut chosen = assignment.region.and_then(|region| {
@@ -162,7 +210,7 @@ impl Playground {
                     )
                     .clicked()
                 {
-                    self.region_selection = region.id;
+                    self.select_region(region.id);
                 }
                 let mut material = region.material;
                 egui::ComboBox::from_id_salt(("region", region.id.0))
@@ -806,11 +854,22 @@ impl Playground {
                 .material(material.id)
                 .cloned();
             let dirty = stored.as_ref() != Some(&material);
-            if ui.add_enabled(dirty, egui::Button::new("Apply")).clicked() {
-                if let Err(error) = self.editor.update_material(material.clone()) {
+            ui.horizontal(|ui| {
+                if ui.add_enabled(dirty, egui::Button::new("Apply")).clicked()
+                    && let Err(error) = self.editor.update_material(material.clone())
+                {
                     self.notify(error)
                 }
-            }
+                if ui
+                    .add_enabled(dirty, egui::Button::new("Revert"))
+                    .on_hover_text("Discard the edits not yet applied")
+                    .clicked()
+                    && let Some(stored) = stored
+                {
+                    material = stored;
+                    self.forget_material_edits(material.id);
+                }
+            });
             if self.material_selection != DEFAULT_MATERIAL
                 && !self
                     .editor
@@ -1364,6 +1423,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Selecting a region selects its material, unless the open material
+    /// has edits not yet applied, which keeps it open until they are applied
+    /// or reverted.
+    #[test]
+    fn selecting_a_region_follows_it_to_its_material() {
+        let mut state = Playground::default();
+        let region = state.editor.document.model.draft.regions[0].id;
+        let added = state.editor.add_material().unwrap();
+        state.editor.set_region_material(region, added).unwrap();
+        state.material_selection = DEFAULT_MATERIAL;
+        state.select_region(region);
+        assert_eq!(state.region_selection, region);
+        assert_eq!(state.material_selection, added);
+
+        // An unapplied edit on the open material holds it.
+        state
+            .editor
+            .set_region_material(region, DEFAULT_MATERIAL)
+            .unwrap();
+        let mut edit = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(added)
+            .unwrap()
+            .clone();
+        edit.name.push_str(" (edited)");
+        state.material_edit = Some(edit);
+        state.select_region(region);
+        assert_eq!(state.material_selection, added);
+
+        // Once the edit is gone the selection follows.
+        state.material_edit = None;
+        state.select_region(region);
+        assert_eq!(state.material_selection, DEFAULT_MATERIAL);
     }
 
     /// The pump helper offers each enabled source that has a frequency, and
