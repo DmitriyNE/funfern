@@ -17,6 +17,13 @@
 //! second-order outgoing wall, so the Kerr trace kicks through its discrete
 //! gradient: a scalar Newton at an absorbing node, or a budget of Newton
 //! linearizations around the linear trace solve.
+//!
+//! `NONLINEAR_FILTER=1` turns the resident grid filter on, so the device
+//! freezes every site's tangent and filters every sixteenth step beside
+//! whatever else is composed, against the reference's
+//! `apply_grid_filter_with_forcing`. `NONLINEAR_LINEAR=1` drops the field
+//! laws and keeps the pump, which is the driven linear filter beside the same
+//! compositions. `NONLINEAR_AMPLITUDE` scales the initial field (default 1).
 
 use std::time::{Duration, Instant};
 
@@ -28,10 +35,10 @@ use funfern_app::canonical_gpu::{
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
     BACKGROUND_REGION, CanonicalForcing, CanonicalSource, CanonicalTemporalWaveOperator,
-    CanonicalTemporalWaveState, CoefficientLaw, DampingLaw, FieldLaw, InternalBoundary,
-    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw, LossChannel, MeshingOptions,
-    OpenCubicSpline, OuterBoundaryCondition, Point2, QuadraticWaveOperator, RateLaw, ScalarField,
-    Scene, TimeDrive, TimeSignal, mesh_scene,
+    CanonicalTemporalWaveState, CoefficientLaw, DampingLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE,
+    InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw,
+    LossChannel, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition, Point2,
+    QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
 };
 
 const TOTAL_STEPS: u64 = 200;
@@ -39,6 +46,7 @@ const TOTAL_STEPS: u64 = 200;
 #[derive(Resource)]
 struct Pending {
     plan: Option<CanonicalGpuPlan>,
+    filter: bool,
 }
 
 #[derive(Resource)]
@@ -55,7 +63,9 @@ fn main() -> AppExit {
     let flag = |name: &str| std::env::var(name).is_ok_and(|value| value == "1");
     let forced = flag("NONLINEAR_FORCED");
     let gap = flag("NONLINEAR_GAP");
-    let pumped = flag("NONLINEAR_PUMPED") || forced || gap;
+    let filter = flag("NONLINEAR_FILTER");
+    let linear_medium = flag("NONLINEAR_LINEAR");
+    let pumped = flag("NONLINEAR_PUMPED") || forced || gap || linear_medium;
     let wall = match std::env::var("NONLINEAR_WALL").as_deref() {
         Ok("1") => OuterBoundaryCondition::FirstOrderOutgoing,
         Ok("2") => OuterBoundaryCondition::SecondOrderOutgoing,
@@ -92,15 +102,17 @@ fn main() -> AppExit {
             }],
         });
     }
-    scene.materials[0].mass_law.field = FieldLaw::Polynomial {
-        chi1: ScalarField::constant(0.0),
-        chi2: ScalarField::constant(0.8),
-        amplitude_bound: None,
-    };
-    scene.materials[0].stiffness_law.field = FieldLaw::Saturable {
-        chi: ScalarField::constant(6.0),
-        saturation: ScalarField::constant(0.3),
-    };
+    if !linear_medium {
+        scene.materials[0].mass_law.field = FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(0.8),
+            amplitude_bound: None,
+        };
+        scene.materials[0].stiffness_law.field = FieldLaw::Saturable {
+            chi: ScalarField::constant(6.0),
+            saturation: ScalarField::constant(0.3),
+        };
+    }
     if pumped {
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.2),
@@ -126,7 +138,7 @@ fn main() -> AppExit {
         .expect("nonlinear scalar operator");
     let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
         .expect("nonlinear operator");
-    assert!(operator.has_field_laws());
+    assert_eq!(operator.has_field_laws(), !linear_medium);
     let base = operator.base();
     let mut forcing = CanonicalForcing::none(base);
     if forced {
@@ -150,6 +162,10 @@ fn main() -> AppExit {
     }
 
     let time_step = 0.4 * operator.maximum_time_step();
+    let scale = std::env::var("NONLINEAR_AMPLITUDE")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(1.0);
     // A field of about 0.5 and a complementary field of about 0.3: Kerr is
     // 20% above linear at the peak, the saturable row well into its knee.
     let primary = base
@@ -157,14 +173,14 @@ fn main() -> AppExit {
         .iter()
         .zip(base.node_points())
         .map(|(mass, point)| {
-            let u = 0.5 * (1.4 * point.x - 0.9 * point.y).sin();
+            let u = scale * 0.5 * (1.4 * point.x - 0.9 * point.y).sin();
             mass * (1.0 + 0.8 * u * u) * u
         })
         .collect::<Vec<_>>();
     let potential = base
         .node_points()
         .iter()
-        .map(|point| 0.3 * (0.8 * point.x + 1.2 * point.y).cos())
+        .map(|point| scale * 0.3 * (0.8 * point.x + 1.2 * point.y).cos())
         .collect::<Vec<_>>();
     let complementary = base
         .compatible_flux(&potential)
@@ -176,10 +192,25 @@ fn main() -> AppExit {
 
     let mut oracle = state.clone();
     let initial = oracle.energy(&operator).expect("initial energy");
-    for _ in 0..TOTAL_STEPS {
+    let (mut filters, mut skipped, mut removed) = (0, 0, 0.0);
+    for step in 1..=TOTAL_STEPS {
         oracle
             .step_with_forcing(&operator, &forcing)
             .expect("f64 nonlinear step");
+        if filter && step.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
+            filters += 1;
+            // A candidate that gains energy is not taken, on either side.
+            match oracle.apply_grid_filter_with_forcing(&operator, &forcing, 1.0) {
+                Ok(energy) => removed += energy,
+                Err(_) => skipped += 1,
+            }
+        }
+    }
+    if filter {
+        println!(
+            "nonlinear gate: {filters} resident filters, {skipped} not taken, removing \
+             {removed:.4e} of {initial:.4e}"
+        );
     }
     let linear = operator
         .base()
@@ -198,8 +229,13 @@ fn main() -> AppExit {
     let plan = CanonicalGpuPlan::compile_temporal(&operator, &state, &forcing, clock)
         .expect("nonlinear GPU plan");
     println!(
-        "nonlinear gate{}{}{}: {} Q, {} b, {TOTAL_STEPS} steps; energy {initial:.4e}; the field sits \
+        "{} gate{}{}{}: {} Q, {} b, {TOTAL_STEPS} steps; energy {initial:.4e}; the field sits \
          up to {:.0}% from its linear read",
+        if linear_medium {
+            "driven linear"
+        } else {
+            "nonlinear"
+        },
         if pumped { " (pumped)" } else { "" },
         if forced { " + source, pins, loss" } else { "" },
         match wall {
@@ -229,7 +265,10 @@ fn main() -> AppExit {
     }))
     .add_plugins(WaveGpuPlugin)
     .add_plugins(CanonicalWaveGpuPlugin)
-    .insert_resource(Pending { plan: Some(plan) })
+    .insert_resource(Pending {
+        plan: Some(plan),
+        filter,
+    })
     .insert_resource(Expected {
         primary: oracle.primary_flux().to_vec(),
         complementary: oracle.complementary_flux().to_vec(),
@@ -249,6 +288,7 @@ fn install(
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut canonical: ResMut<CanonicalGpuRequest>,
 ) {
+    canonical.set_grid_scale_filter(pending.filter);
     canonical.install(
         &mut assets,
         &mut commands,

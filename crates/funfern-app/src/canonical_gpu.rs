@@ -916,13 +916,13 @@ pub struct CanonicalGpuPlan {
     /// sweeping: a generation whose mass cannot move and whose wall holds no
     /// prescribed row.
     pub trace_direct: bool,
-    /// Whether the resident grid filter is validated for this generation. A
-    /// fixed one is; a driven one only on a conservative bulk, which is all
-    /// the time-driven filter has been derived and tested for.
+    /// Whether the resident grid filter is validated for this generation: any
+    /// the stepper composes, fixed, driven or field-dependent, as on the CPU
+    /// reference.
     grid_filter_admitted: bool,
-    /// Whether any record carries a field law. Pulses, filters and law
-    /// patches are refused on such a generation until their device stages
-    /// read the nonlinear maps.
+    /// Whether any record carries a field law. Pulses and law patches are
+    /// refused on such a generation until their device stages read the
+    /// nonlinear maps; the filter reads them through its site pass.
     pub field_laws: bool,
     needs_loss_stages: bool,
     needs_accounting: bool,
@@ -1052,15 +1052,16 @@ impl CanonicalGpuPlan {
         // discrete gradient at its node, and an outgoing wall runs a fixed
         // budget of Newton linearizations around its linear trace solve.
         self.field_laws = operator.has_field_laws();
+        // After both accounting banks: one word per trace (a nonlinear wall's
+        // Newton), per node (the drift's field) and per sample (the kick's
+        // secant), in that order. Every time-driven generation has them,
+        // because the grid filter freezes its maps there too.
+        self.scratch.extend(std::iter::repeat_n(
+            GpuCanonicalScratchWord::default(),
+            self.trace_count + self.node_count + self.sample_count,
+        ));
+        self.manifest.bytes.scratch = self.scratch.len() * size_of::<GpuCanonicalScratchWord>();
         if self.field_laws {
-            // After both accounting banks: one word per trace (the wall's
-            // Newton), per node (the drift's field) and per sample (the
-            // kick's secant), in that order.
-            self.scratch.extend(std::iter::repeat_n(
-                GpuCanonicalScratchWord::default(),
-                self.trace_count + self.node_count + self.sample_count,
-            ));
-            self.manifest.bytes.scratch = self.scratch.len() * size_of::<GpuCanonicalScratchWord>();
             self.control.boundary_offsets.w |= FIELD_LAWS_FLAG;
             self.manifest.dispatches_per_step += 3;
         }
@@ -1075,7 +1076,10 @@ impl CanonicalGpuPlan {
                 - trace_dispatches(self.trace_count, self.trace_sweeps, false)
                 + nonlinear_trace_dispatches(self.trace_count, self.trace_sweeps);
         }
-        self.grid_filter_admitted = operator.conservative_bulk_supported() && !self.field_laws;
+        // The filter composes wherever the stepper does: the correction keeps
+        // pins, pole currents and gap jumps, and commits only when the total
+        // stored energy does not rise.
+        self.grid_filter_admitted = operator.forced_composition_supported();
         let primary_samples = operator.primary_coefficient_samples().collect::<Vec<_>>();
         let complementary_samples = operator
             .complementary_coefficient_samples()
@@ -1765,7 +1769,7 @@ impl CanonicalGpuPlan {
             ));
         }
         let dispatches = if self.manifest.temporal.is_some() {
-            8
+            9
         } else {
             6
         };
@@ -3494,9 +3498,8 @@ impl CanonicalGpuRequest {
     }
 
     /// Whether the filter is asked for but the installed generation does not
-    /// admit it, so it is not run. A driven medium behind an open wall, with a
-    /// gap, loss or a driven boundary is outside what the time-driven filter
-    /// has been derived for; the CPU reference refuses the same compositions.
+    /// admit it, so it is not run. Every generation the stepper can compose
+    /// admits it today, so this is a guard, not a gap.
     pub fn grid_scale_filter_refused(&self) -> bool {
         self.grid_scale_filter
             && self
@@ -4571,6 +4574,7 @@ struct CanonicalPipeline {
     nonlinear_sample_secants_first: CachedComputePipelineId,
     nonlinear_sample_secants_second: CachedComputePipelineId,
     nonlinear_node_fields: CachedComputePipelineId,
+    filter_temporal_sites: CachedComputePipelineId,
 }
 
 #[derive(Resource)]
@@ -4664,6 +4668,7 @@ fn init_canonical_pipeline(
     let nonlinear_sample_secants_first = queue("nonlinear_sample_secants_first");
     let nonlinear_sample_secants_second = queue("nonlinear_sample_secants_second");
     let nonlinear_node_fields = queue("nonlinear_node_fields");
+    let filter_temporal_sites = queue("filter_temporal_sites");
     commands.insert_resource(CanonicalPipeline {
         layout,
         start_loss,
@@ -4709,6 +4714,7 @@ fn init_canonical_pipeline(
         nonlinear_sample_secants_first,
         nonlinear_sample_secants_second,
         nonlinear_node_fields,
+        filter_temporal_sites,
     });
 
     let map_layout = BindGroupLayoutDescriptor::new(
@@ -5183,6 +5189,44 @@ fn encode_trace_solve(
 /// instead, in one pass. A nonlinear wall wraps prepare, reduce and the solve
 /// in a fixed budget of Newton linearizations; its finalize rejects a kick
 /// whose last step has not settled.
+/// The paired grid filter's passes, between an event's begin and its commit.
+/// A time-driven generation first freezes every site's map at the event
+/// instant, then takes two more sparse passes than a fixed one.
+fn encode_grid_filter(
+    pass: &mut bevy::render::render_resource::ComputePass,
+    pipelines: &[&bevy::render::render_resource::ComputePipeline],
+    handles: &CanonicalGpuBufferHandles,
+) {
+    let workgroups = |count: u32| count.div_ceil(CANONICAL_GPU_WORKGROUP_SIZE).max(1);
+    let temporal = handles.material_runtime_count != 0;
+    if temporal {
+        pass.set_pipeline(pipelines[39]);
+        pass.dispatch_workgroups(workgroups(handles.node_count + handles.sample_count), 1, 1);
+    }
+    pass.set_pipeline(pipelines[16]);
+    pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+    pass.set_pipeline(pipelines[17]);
+    pass.dispatch_workgroups(
+        workgroups(if temporal {
+            handles.sample_count
+        } else {
+            handles.node_count
+        }),
+        1,
+        1,
+    );
+    if temporal {
+        pass.set_pipeline(pipelines[28]);
+        pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+        pass.set_pipeline(pipelines[29]);
+        pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+    }
+    pass.set_pipeline(pipelines[18]);
+    pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
+    pass.set_pipeline(pipelines[19]);
+    pass.dispatch_workgroups(1, 1, 1);
+}
+
 fn encode_boundary_kick(
     pass: &mut bevy::render::render_resource::ComputePass,
     pipelines: &[&bevy::render::render_resource::ComputePipeline],
@@ -5291,6 +5335,7 @@ fn compute_canonical_wave(
         pipeline.nonlinear_sample_secants_first,
         pipeline.nonlinear_sample_secants_second,
         pipeline.nonlinear_node_fields,
+        pipeline.filter_temporal_sites,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -5391,28 +5436,7 @@ fn compute_canonical_wave(
                 pass.dispatch_workgroups(1, 1, 1);
             }
             EVENT_GRID_FILTER => {
-                pass.set_pipeline(pipelines[16]);
-                pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
-                pass.set_pipeline(pipelines[17]);
-                pass.dispatch_workgroups(
-                    workgroups(if handles.material_runtime_count != 0 {
-                        handles.sample_count
-                    } else {
-                        handles.node_count
-                    }),
-                    1,
-                    1,
-                );
-                if handles.material_runtime_count != 0 {
-                    pass.set_pipeline(pipelines[28]);
-                    pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
-                    pass.set_pipeline(pipelines[29]);
-                    pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
-                }
-                pass.set_pipeline(pipelines[18]);
-                pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
-                pass.set_pipeline(pipelines[19]);
-                pass.dispatch_workgroups(1, 1, 1);
+                encode_grid_filter(&mut pass, &pipelines, handles);
             }
             EVENT_LINEAR_LAW_PATCH => {
                 pass.set_pipeline(pipelines[15]);
@@ -5626,28 +5650,7 @@ fn compute_canonical_wave(
                 1,
                 1,
             );
-            pass.set_pipeline(pipelines[16]);
-            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
-            pass.set_pipeline(pipelines[17]);
-            pass.dispatch_workgroups(
-                workgroups(if handles.material_runtime_count != 0 {
-                    handles.sample_count
-                } else {
-                    handles.node_count
-                }),
-                1,
-                1,
-            );
-            if handles.material_runtime_count != 0 {
-                pass.set_pipeline(pipelines[28]);
-                pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
-                pass.set_pipeline(pipelines[29]);
-                pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
-            }
-            pass.set_pipeline(pipelines[18]);
-            pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
-            pass.set_pipeline(pipelines[19]);
-            pass.dispatch_workgroups(1, 1, 1);
+            encode_grid_filter(&mut pass, &pipelines, handles);
             pass.set_pipeline(pipelines[27]);
             pass.dispatch_workgroups(1, 1, 1);
             resident_filters += 1;
@@ -5727,7 +5730,7 @@ fn compute_canonical_wave(
             .saturating_mul(handles.dispatches_per_step)
             .saturating_add(2 * rebases)
             .saturating_add(RESIDENT_FILTER_DISPATCHES * resident_filters)
-            .saturating_add(2 * resident_filters * u64::from(handles.material_runtime_count != 0))
+            .saturating_add(3 * resident_filters * u64::from(handles.material_runtime_count != 0))
             .saturating_add(
                 RESIDENT_FILTER_ACCOUNTING_DISPATCHES
                     * resident_filters
@@ -6420,7 +6423,7 @@ mod tests {
         }
 
         plan.stage_grid_filter(0.1, 1).unwrap();
-        assert_eq!(plan.manifest.event_dispatches, 8);
+        assert_eq!(plan.manifest.event_dispatches, 9);
     }
 
     #[test]
@@ -6469,13 +6472,20 @@ mod tests {
         }
     }
 
-    fn pumped_plan(boundary: OuterBoundaryCondition) -> CanonicalGpuPlan {
+    fn media_plan(boundary: OuterBoundaryCondition, kerr: bool) -> CanonicalGpuPlan {
         let mut scene = Scene::initial();
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.2),
             frequency_hz: ScalarField::constant(0.9),
             phase_radians: ScalarField::constant(0.1),
         };
+        if kerr {
+            scene.materials[0].mass_law.field = funfern_core::FieldLaw::Polynomial {
+                chi1: ScalarField::constant(0.0),
+                chi2: ScalarField::constant(0.8),
+                amplitude_bound: None,
+            };
+        }
         let mut fixed_scene = scene.clone();
         fixed_scene.materials[0].mass_law = CoefficientLaw::linear();
         let mesh = mesh_scene(
@@ -6501,20 +6511,23 @@ mod tests {
         .unwrap()
     }
 
-    /// The resident filter runs where it has been validated: every fixed
-    /// generation, and a driven one only on the conservative bulk the CPU
-    /// reference itself requires.
+    /// The filter composes wherever the stepper does, as on the CPU
+    /// reference: fixed, driven and field-dependent generations beside either
+    /// wall. A field-dependent one solves its sites' tangents in one more pass.
     #[test]
-    fn a_driven_open_scene_does_not_admit_the_grid_filter() {
+    fn every_composed_generation_admits_the_grid_filter() {
         assert!(plan(OuterBoundaryCondition::SecondOrderOutgoing).grid_filter_admitted);
-        assert!(pumped_plan(OuterBoundaryCondition::Reflecting).grid_filter_admitted);
-        for open in [
+        for boundary in [
+            OuterBoundaryCondition::Reflecting,
             OuterBoundaryCondition::FirstOrderOutgoing,
             OuterBoundaryCondition::SecondOrderOutgoing,
         ] {
-            let mut refused = pumped_plan(open);
-            assert!(!refused.grid_filter_admitted, "{open:?}");
-            assert!(refused.stage_grid_filter(0.5, 1).is_err());
+            for (kerr, dispatches) in [(false, 9), (true, 9)] {
+                let mut admitted = media_plan(boundary, kerr);
+                assert!(admitted.grid_filter_admitted, "{boundary:?}, kerr {kerr}");
+                admitted.stage_grid_filter(0.5, 1).unwrap();
+                assert_eq!(admitted.manifest.event_dispatches, dispatches);
+            }
         }
     }
 
@@ -6524,8 +6537,8 @@ mod tests {
         world.init_resource::<Assets<ShaderBuffer>>();
         for (installed, refused) in [
             (
-                pumped_plan(OuterBoundaryCondition::SecondOrderOutgoing),
-                true,
+                media_plan(OuterBoundaryCondition::SecondOrderOutgoing, true),
+                false,
             ),
             (plan(OuterBoundaryCondition::SecondOrderOutgoing), false),
         ] {

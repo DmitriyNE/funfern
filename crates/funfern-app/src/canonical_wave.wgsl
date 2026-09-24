@@ -148,12 +148,14 @@ fn nonlinear_trace_offset() -> u32 {
     return scratch_count() + 2u * accounting_item_count();
 }
 fn nonlinear_trace() -> bool { return (control.boundary_offsets.w & 16u) != 0u; }
-// Any record carries a field law. The regions below exist only then.
+// Any record carries a field law.
 fn field_laws() -> bool { return (control.boundary_offsets.w & 32u) != 0u; }
-// Per-stage caches of a field-dependent generation, one solve per site:
-// the nodal field at the drift's midpoint, and each sample's secant
-// `r/(j|b|)` at the kick's instant. Every sample then reads a node's field,
-// and every node a sample's secant, without solving it again.
+// Per-site words of every time-driven generation. A field-dependent one
+// caches in them, one solve per site and stage, the nodal field at the
+// drift's midpoint and each sample's secant `r/(j|b|)` at the kick's instant,
+// so every sample reads a node's field, and every node a sample's secant,
+// without solving it again. The grid filter borrows the other lanes for its
+// frozen maps at the event instant.
 fn node_field_offset() -> u32 { return nonlinear_trace_offset() + control.counts_b.y; }
 fn sample_secant_offset() -> u32 { return node_field_offset() + control.counts_a.x; }
 fn has_loss_stages() -> bool { return (control.boundary_offsets.w & 1u) != 0u; }
@@ -832,23 +834,42 @@ fn instantaneous_b_energy(sample_index: u32, value: vec2<f32>) -> f32 {
     return reference;
 }
 
+// The filter's inner map at a node, cached by its site pass: `m⁻¹(t)`, or
+// on a field-dependent node the tangent inverse `A = 1/P′(U)`.
+fn filter_node_weight(node: u32) -> f32 {
+    return scratch[node_field_offset() + node].values.z;
+}
+
 fn filter_compatible_flux(sample_index: u32, lane: u32, divide_mass: bool) -> vec2<f32> {
     let sample = samples[sample_index];
     let reference_node = sample_node(sample, 0u);
     var reference = scratch[reference_node].values[lane];
     if divide_mass {
-        reference *= temporal_inverse_primary_mass(reference_node, control.clock_f32.y);
+        reference *= filter_node_weight(reference_node);
     }
     var result = vec2<f32>(0.0);
     for (var local = 1u; local < 7u; local += 1u) {
         let node = sample_node(sample, local);
         var field = scratch[node].values[lane];
         if divide_mass {
-            field *= temporal_inverse_primary_mass(node, control.clock_f32.y);
+            field *= filter_node_weight(node);
         }
         result += sample_curl(sample, local) * (field - reference);
     }
     return control.evolution.y * result;
+}
+
+// `J_b x` in the folded units the force entries carry: `σx + (τ−σ)(n·x)n`,
+// with the secant `σ = r/(j|b|)` and the radial tangent `τ` cached by the
+// site pass at the accepted flux. A linear record has `σ = τ = 1/factor`,
+// which is the frozen-time filter's division.
+fn filter_tangent(sample: u32, flux: vec2<f32>) -> vec2<f32> {
+    let cached = scratch[sample_secant_offset() + sample].values;
+    let b = accepted_b(sample);
+    let magnitude = length(b);
+    if magnitude == 0.0 { return cached.y * flux; }
+    let n = b / magnitude;
+    return cached.y * flux + (cached.z - cached.y) * dot(n, flux) * n;
 }
 
 fn filter_gather(node: u32, second_pair: bool) -> f32 {
@@ -861,9 +882,23 @@ fn filter_gather(node: u32, second_pair: bool) -> f32 {
             let flux = select(value.xy, value.zw, second_pair);
             let coefficient = vec2<f32>(
                 table_float(entry, 2u), table_float(entry, 3u));
-            let inverse_factor = 1.0 / temporal_complementary_factor(
-                sample, control.clock_f32.y);
-            result += inverse_factor * dot(coefficient, flux);
+            result += dot(coefficient, flux);
+        }
+    }
+    return result;
+}
+
+// `Cᵀ W v(b)` at the accepted flux, through the secants the site pass cached.
+fn filter_temporal_force(node: u32) -> f32 {
+    let range = nodes[node].ranges.xy;
+    var result = 0.0;
+    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+        if tables[entry].data.y != FORCE_KIND_GAP {
+            let sample = tables[entry].data.x;
+            let coefficient = vec2<f32>(
+                table_float(entry, 2u), table_float(entry, 3u));
+            result += scratch[sample_secant_offset() + sample].values.y
+                * dot(coefficient, accepted_b(sample));
         }
     }
     return result;
@@ -1153,14 +1188,79 @@ fn event_simple_stage(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+// `(accepted, candidate)` stored energy of one node and one sample at the
+// event instant, through the nonlinear maps on a field-dependent generation.
+fn filter_node_energies(node: u32, candidate: f32) -> vec2<f32> {
+    let time = control.clock_f32.y;
+    let accepted = accepted_q(node);
+    if field_laws() {
+        return vec2<f32>(
+            temporal_primary_energy(node, accepted, time),
+            temporal_primary_energy(node, candidate, time));
+    }
+    let inverse_mass = temporal_inverse_primary_mass(node, time);
+    return 0.5 * inverse_mass * vec2<f32>(accepted * accepted, candidate * candidate);
+}
+
+fn filter_sample_energies(sample: u32, candidate: vec2<f32>) -> vec2<f32> {
+    if field_laws() {
+        let time = control.clock_f32.y;
+        return vec2<f32>(
+            temporal_complementary_energy(sample, accepted_b(sample), time),
+            temporal_complementary_energy(sample, candidate, time));
+    }
+    return vec2<f32>(
+        instantaneous_b_energy(sample, accepted_b(sample)),
+        instantaneous_b_energy(sample, candidate));
+}
+
+// The filter's maps frozen at the event instant, evaluated once per site:
+// each node's field and inverse mass or tangent inverse, and each sample's
+// secant and radial tangent (gate F on a field-dependent medium, the plain
+// time-driven factors otherwise). The step caches share these words but
+// refill them before they are read, so borrowing them between steps costs
+// nothing.
+@compute @workgroup_size(128)
+fn filter_temporal_sites(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if stopped() || !temporal_enabled() { return; }
+    let time = control.clock_f32.y;
+    if i < control.counts_a.x {
+        let field = temporal_primary_field(i, accepted_q(i), time);
+        var weight = temporal_inverse_primary_mass(i, time);
+        if node_is_nonlinear(i) {
+            weight = 1.0 / primary_site(i, time, abs(field)).y;
+        }
+        scratch[node_field_offset() + i].values.y = field;
+        scratch[node_field_offset() + i].values.z = weight;
+        return;
+    }
+    let sample = i - control.counts_a.x;
+    if sample >= control.counts_a.y { return; }
+    let word = samples[sample].nodes_b.w;
+    let factor = temporal_factor(word, time);
+    var secant = 1.0 / factor;
+    var tangent = secant;
+    let magnitude = length(accepted_b(sample));
+    if field_kind(word) != 0u && magnitude > 0.0 {
+        let reference = samples[sample].constitutive.x;
+        let r = solve_complementary_radius(word, factor / reference, magnitude);
+        if r >= 0.0 {
+            secant = r / (reference * magnitude);
+            tangent = 1.0 / (factor * field_response(word, r).y);
+        }
+    }
+    scratch[sample_secant_offset() + sample].values.y = secant;
+    scratch[sample_secant_offset() + sample].values.z = tangent;
+}
+
 @compute @workgroup_size(128)
 fn filter_first(@builtin(global_invocation_id) id: vec3<u32>) {
     let node = id.x;
     if stopped() || node >= control.counts_a.x { return; }
     if temporal_enabled() {
-        scratch[node].values.x = accepted_q(node)
-            * temporal_inverse_primary_mass(node, control.clock_f32.y);
-        scratch[node].values.y = constitutive_force(node);
+        scratch[node].values.x = scratch[node_field_offset() + node].values.y;
+        scratch[node].values.y = filter_temporal_force(node);
         return;
     }
     scratch[node].values.x = stiffness_force(node, control.clock_f32.y);
@@ -1173,8 +1273,8 @@ fn filter_second(@builtin(global_invocation_id) id: vec3<u32>) {
     if stopped() { return; }
     if temporal_enabled() {
         if i >= control.counts_a.y { return; }
-        let first = filter_compatible_flux(i, 0u, false);
-        let second = filter_compatible_flux(i, 1u, true);
+        let first = filter_tangent(i, filter_compatible_flux(i, 0u, false));
+        let second = filter_tangent(i, filter_compatible_flux(i, 1u, true));
         scratch[control.counts_a.x + i].values = vec4<f32>(first, second);
         return;
     }
@@ -1196,12 +1296,15 @@ fn filter_temporal_gather(@builtin(global_invocation_id) id: vec3<u32>) {
 fn filter_temporal_samples(@builtin(global_invocation_id) id: vec3<u32>) {
     let sample = id.x;
     if stopped() || !temporal_enabled() || sample >= control.counts_a.y { return; }
-    let primary_flux = filter_compatible_flux(sample, 2u, true);
+    let primary_flux = filter_tangent(sample, filter_compatible_flux(sample, 2u, true));
     let correction = filter_compatible_flux(sample, 3u, true);
     let next = accepted_b(sample) - bitcast<f32>(control.event.w)
         * control.evolution.x * correction;
-    let stored = scratch[control.counts_a.x + sample].values;
-    scratch[control.counts_a.x + sample].values = vec4<f32>(primary_flux, stored.zw);
+    // The commit test's two energies of this sample, formed here in parallel
+    // so the single-workgroup validation only sums them. The pair lanes are
+    // free again: the finalize reads only the primary flux beside them.
+    scratch[control.counts_a.x + sample].values =
+        vec4<f32>(primary_flux, filter_sample_energies(sample, next));
     set_candidate_b(sample, next);
     if !all(next >= vec2<f32>(-MAX_FINITE))
         || !all(next <= vec2<f32>(MAX_FINITE)) {
@@ -1216,8 +1319,14 @@ fn filter_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
     let scale = bitcast<f32>(control.event.w) * control.evolution.x;
     if temporal_enabled() {
         if i >= control.counts_a.x { return; }
-        let next = accepted_q(i) - scale * filter_gather(i, false);
+        // A pin holds its data at this endpoint; there is nothing to filter
+        // and no exchange to account.
+        var next = accepted_q(i) - scale * filter_gather(i, false);
+        if nodes[i].boundary.z != 0u { next = accepted_q(i); }
         set_candidate_q(i, next);
+        let energies = filter_node_energies(i, next);
+        scratch[i].values.z = energies.x;
+        scratch[i].values.w = energies.y;
         let next_force = candidate_constitutive_force(i);
         set_candidate_force(i, next_force);
         if !finite_scalar(next) || !finite_scalar(next_force) {
@@ -1260,9 +1369,16 @@ fn filter_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
 fn event_validate(@builtin(local_invocation_id) id: vec3<u32>) {
     let local = id.x;
     let participating = !stopped();
+    // A time-driven filter formed every site's energies in its own parallel
+    // passes; the rest are cheap enough to form here.
+    let precomputed = temporal_enabled() && event_operation() == 2u;
     var energies = vec2<f32>(0.0);
     if participating {
         for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
+            if precomputed {
+                energies += scratch[node].values.zw;
+                continue;
+            }
             var inverse_mass = nodes[node].mass_loss.y;
             if temporal_enabled() {
                 inverse_mass = temporal_inverse_primary_mass(node, control.clock_f32.y);
@@ -1272,6 +1388,10 @@ fn event_validate(@builtin(local_invocation_id) id: vec3<u32>) {
             energies += 0.5 * inverse_mass * vec2<f32>(accepted * accepted, candidate * candidate);
         }
         for (var sample = local; sample < control.counts_a.y; sample += WORKGROUP_SIZE) {
+            if precomputed {
+                energies += scratch[control.counts_a.x + sample].values.zw;
+                continue;
+            }
             energies.x += instantaneous_b_energy(sample, accepted_b(sample));
             energies.y += instantaneous_b_energy(sample, candidate_b(sample));
         }
@@ -1384,6 +1504,17 @@ fn commit_event() {
 @compute @workgroup_size(1)
 fn resident_filter_commit() {
     let failure = atomicLoad(&status.candidate);
+    // On a field-dependent medium the tangent polynomial is dissipative only
+    // to first order, so a candidate that gains energy, or leaves the map's
+    // domain, is a filter not taken rather than a fault: the accepted lane
+    // stays and stepping continues. A linear filter cannot gain energy, and
+    // anything non-finite is a fault on either.
+    if failure != 0u && field_laws() && (failure == STATUS_TIMESTEP
+        || failure == STATUS_INVERSE_DOMAIN || failure == STATUS_INVERSE_CONVERGENCE) {
+        control.event.z = accepted_slot();
+        atomicStore(&status.candidate, 0u);
+        return;
+    }
     if failure != 0u {
         atomicMax(&status.latch, failure);
         return;

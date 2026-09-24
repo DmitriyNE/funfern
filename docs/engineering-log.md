@@ -11163,3 +11163,59 @@ forward.
   - Pins, pole currents and gap jumps are unchanged.
   - A free component's total holds to 1e-13.
 - Next: the device port of the tangent filter and the widened admission.
+
+## 2026-09-24 — The device filter runs on driven and nonlinear media beside any wall
+
+Stage 10.1, device half. With this entry the filter the user expected to clear
+Kerr speckle runs on their scene: a Kerr medium behind second-order walls.
+
+- **Admission.** `grid_filter_admitted` is `forced_composition_supported`, as on
+  the CPU, so every generation the device can step admits the filter. The
+  refusal plumbing and the panel note remain as a guard, and the note no longer
+  blames a drive.
+- **Site pass.** A new `filter_temporal_sites` pass runs first on every
+  time-driven plan and freezes the maps at the event instant, once per site.
+  - Each node gets its field and either `m⁻¹(t)` or the tangent inverse
+    `A = 1/P′(U)`.
+  - Each sample gets its secant `σ = r/(j|b|)` and radial tangent
+    `τ = 1/(factor·(ḡ + rḡ′))`, so `J_b x = σx + (τ−σ)(n·x)n`.
+
+  The existing passes read those words. Per-site words now exist on every
+  time-driven plan, not only field-dependent ones.
+- **Pins and the commit test.** Prescribed nodes are skipped, as on the CPU.
+  Each site's commit-test energy is formed in the parallel pass that already
+  touches it, and the one-workgroup validation only sums them.
+- **Rejected candidates.** On a field-dependent plan, a resident candidate that
+  gains energy or leaves the domain is a filter not taken: the accepted lane
+  stays and nothing latches. A linear candidate still latches, since it cannot
+  gain energy.
+- **Parity** (`canonical_gpu_nonlinear` with `NONLINEAR_FILTER=1`: 12 resident
+  filters over 200 steps against `apply_grid_filter_with_forcing`). Every
+  filter commits on both sides.
+
+  | medium | bulk | wall 1 | wall 2 | forced | gap |
+  | --- | --- | --- | --- | --- | --- |
+  | Kerr + saturable, Q | 7.4e-7 | 9.7e-7 | 1.06e-6 | 2.21e-6 | 5.7e-7 |
+  | pumped linear, Q | 1.15e-6 | 1.38e-6 | 1.37e-6 | 2.66e-6 | 4.8e-7 |
+
+  b is within 1.4e-6 everywhere.
+  - **Negative control:** CPU filtering and the device not, 2.3e-2.
+  - **Up to 94% from linear** (`NONLINEAR_AMPLITUDE` 2, 4 and 8): no candidate
+    was ever refused.
+  - **Forced refusal:** a throwaway build that refused every nonlinear
+    candidate matched the unfiltered reference at 1.136e-6 with no latch.
+- **Cost.** `canonical_gpu_temporal_timing --filter`, 15,270 dofs, while
+  another project held four CPU cores, so absolute figures sit about 10%
+  high.
+  - First cut: +30% a step on driven linear, +35% nonlinear. The energy
+    test, with an inverse per site, ran in one 128-thread workgroup, and
+    the driven gathers re-evaluated drive factors about a million times per
+    filter.
+  - After moving the energies into the parallel passes and caching the
+    frozen maps: +2% driven linear (433 → 442 µs), +1% nonlinear (942 →
+    950 µs).
+- **Unchanged:** all 38 other device examples and modes exit 0 with their
+  recorded figures, including the conservative-bulk resident filter at
+  Q 7.24e-7 and b 2.02e-4.
+- **Still open, per the user:** tuning the filter strength, after the
+  milestone. The filter is admitted now but deliberately gentle.

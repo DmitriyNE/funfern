@@ -461,7 +461,10 @@ running; this file covers using it.
   for the rest of the run, and this removes it for well under a percent per half
   minute of a wave resolved as finely as the mesh indicator aims for. It preserves
   constants and stationary force-free complementary flux, so it is not a general
-  DC-removal or terminal-silence control. The default
+  DC-removal or terminal-silence control. It runs on every medium - fixed,
+  time-driven, Kerr or saturable - beside any boundary; on a field-dependent
+  medium it acts through the medium's local response, and a pass that would add
+  energy is skipped. The default
   point source starts on a cosine, which carries no net impulse; any other phase
   hands the field a mean velocity, and a region sealed by reflecting walls has
   nowhere to put one, so its level then rises for as long as the run lasts.

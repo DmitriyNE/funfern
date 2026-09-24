@@ -18,6 +18,9 @@
 //! to the driven medium, at an amplitude where both maps depart from linear,
 //! so the step pays every inverse and, with `--outgoing`, the wall's Newton.
 //!
+//! `--filter` turns the resident grid filter on, which runs every sixteenth
+//! step, so the figure includes its amortized cost.
+//!
 //! Stepping is unfenced, so the figure is what a step costs the device rather
 //! than the readback round trip the interactive lead fence waits on.
 
@@ -41,6 +44,7 @@ const EDGE: f64 = 0.06;
 #[derive(Resource)]
 struct Pending {
     plan: Option<CanonicalGpuPlan>,
+    filter: bool,
 }
 
 #[derive(Resource)]
@@ -57,6 +61,7 @@ fn main() -> AppExit {
     let driven = !std::env::args().any(|argument| argument == "--fixed");
     let outgoing = std::env::args().any(|argument| argument == "--outgoing");
     let nonlinear = std::env::args().any(|argument| argument == "--nonlinear");
+    let filter = std::env::args().any(|argument| argument == "--filter");
     let amplitude = if nonlinear { 12.0 } else { 1.0 };
     let mut scene = Scene::initial();
     if driven {
@@ -164,7 +169,10 @@ fn main() -> AppExit {
     }))
     .add_plugins(WaveGpuPlugin)
     .add_plugins(CanonicalWaveGpuPlugin)
-    .insert_resource(Pending { plan: Some(plan) })
+    .insert_resource(Pending {
+        plan: Some(plan),
+        filter,
+    })
     .insert_resource(Timing {
         label,
         nodes: base.degrees_of_freedom(),
@@ -185,6 +193,7 @@ fn install(
     mut canonical: ResMut<CanonicalGpuRequest>,
 ) {
     canonical.set_unfenced_stepping(true);
+    canonical.set_grid_scale_filter(pending.filter);
     canonical.install(
         &mut assets,
         &mut commands,

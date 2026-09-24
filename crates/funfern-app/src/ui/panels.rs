@@ -593,8 +593,8 @@ impl Playground {
                 if self.grid_filter_refused {
                     ui.label(
                         egui::RichText::new(
-                            "Off for this driven scene: the time-driven filter is derived only \
-                             for a closed, lossless domain without gaps or a driven boundary.",
+                            "Off for this scene: the running generation does not admit the \
+                             filter for its combination of boundaries and media.",
                         )
                         .small()
                         .weak(),
