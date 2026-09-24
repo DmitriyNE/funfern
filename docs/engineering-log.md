@@ -11134,3 +11134,32 @@ Stage 9.8, cost.
   media, an amplitude-aware size rule, pulses and live law patches on such
   plans, and defocusing presets.
 - **Next:** Stage 10, the complete UX, the demonstrations and compatibility.
+
+## 2026-09-24 — The time-driven filter composes with walls, pins, gaps and loss
+
+Stage 10.1, CPU half. Kerr harmonics cascade to element-scale speckle, and the
+filter that should remove it was off: the device refuses it on field-dependent
+plans, and the CPU admitted the time-driven and tangent filters only in a closed
+conservative bulk. That restriction was never a derived failure. The Stage 7
+closeout carried "deriving the time-driven filter for open walls, gaps and loss"
+forward.
+
+- `apply_grid_filter_with_forcing` takes the fixed path's rules. The correction
+  is `Cᵀ(·)` in Q and `C(·)` in b whatever the boundary, so constants, totals
+  and compatibility hold. Prescribed nodes are skipped, and since a temporal pin
+  already holds its data at the endpoint there is no exchange to account. Pole
+  currents and gap jumps are untouched, and their stored energy is now part of
+  the commit test. Before, `after` left it out, which only a closed bulk could
+  afford. The admission is `forced_composition_supported`.
+- `an_inert_filter_beside_each_composition_is_the_fixed_filter`: first- and
+  second-order walls, a prescribed wall, a thin gap and loss all match
+  `CanonicalWaveState::apply_grid_filter` to 1e-12 in Q, b, removed energy and
+  total energy.
+- `a_driven_or_nonlinear_filter_beside_each_composition_only_removes_energy`:
+  pumped, Kerr + saturable and pumped Kerr media, each beside all five
+  compositions, run a full-strength filter every fourth step for 40 steps.
+  - All 150 filters commit, with none rejected.
+  - Each filter's removal is the energy drop.
+  - Pins, pole currents and gap jumps are unchanged.
+  - A free component's total holds to 1e-13.
+- Next: the device port of the tangent filter and the widened admission.

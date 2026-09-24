@@ -2885,10 +2885,36 @@ impl CanonicalTemporalWaveState {
         operator: &CanonicalTemporalWaveOperator,
         strength: f64,
     ) -> Result<f64, WaveError> {
-        if !operator.conservative_bulk_supported() {
+        let forcing = CanonicalForcing::none(operator.base());
+        self.apply_grid_filter_with_forcing(operator, &forcing, strength)
+    }
+
+    /// The grid filter beside the forced composition: open walls of either
+    /// order, thin gaps, loss and prescribed data.
+    ///
+    /// The fixed path's rules carry over unchanged. The correction is a
+    /// `Cᵀ(·)` in `Q` and a `C(·)` in `b`, so constants, component totals and
+    /// compatibility hold whatever the boundary does. A prescribed node is
+    /// skipped: its flux is whatever its data made it at this endpoint, so
+    /// there is no exchange to account. The pole currents and gap jumps are
+    /// left as they are, and their stored energy is part of the commit test,
+    /// which admits only a candidate whose total energy does not rise.
+    pub fn apply_grid_filter_with_forcing(
+        &mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+        strength: f64,
+    ) -> Result<f64, WaveError> {
+        if !operator.forced_composition_supported() {
             return Err(WaveError::Unsupported(
-                "the time-driven grid filter needs a conservative bulk this scene does not have",
+                "the time-driven grid filter needs a composition this scene does not have",
             ));
+        }
+        if forcing.prescribed().len() != operator.base().degrees_of_freedom() {
+            return Err(WaveError::SizeMismatch {
+                expected: operator.base().degrees_of_freedom(),
+                actual: forcing.prescribed().len(),
+            });
         }
         if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
             return Err(WaveError::Unsupported(
@@ -2898,10 +2924,51 @@ impl CanonicalTemporalWaveState {
         if strength == 0.0 {
             return Ok(0.0);
         }
-        if operator.has_field_laws {
-            return self.apply_tangent_grid_filter(operator, strength);
-        }
         let before = self.energy(operator)?;
+        let (primary_correction, complementary_correction) = if operator.has_field_laws {
+            self.tangent_grid_filter_corrections(operator)?
+        } else {
+            self.frozen_grid_filter_corrections(operator)?
+        };
+
+        let eigenvalue_bound = 4.0 / operator.maximum_time_step().powi(2);
+        let scale = strength / eigenvalue_bound.powi(2);
+        let mut next_primary = self.primary_flux.clone();
+        let mut next_complementary = self.complementary_flux.clone();
+        for ((value, correction), pinned) in next_primary
+            .iter_mut()
+            .zip(primary_correction)
+            .zip(forcing.prescribed())
+        {
+            if pinned.is_none() {
+                *value -= scale * correction;
+            }
+        }
+        for (value, correction) in next_complementary.iter_mut().zip(complementary_correction) {
+            *value = *value - correction * scale;
+        }
+        validate_finite(&next_primary)?;
+        if next_complementary.iter().any(|value| !value.finite()) {
+            return Err(WaveError::InvalidState);
+        }
+        let after =
+            operator.energy_at(&next_primary, &next_complementary, self.time, &self.runtime)?
+                + self.history_energy(operator);
+        let tolerance = 2.0e-12 * before.abs().max(after.abs()).max(1.0);
+        if after > before + tolerance {
+            return Err(WaveError::InvalidState);
+        }
+        self.primary_flux = next_primary;
+        self.complementary_flux = next_complementary;
+        Ok((before - after).max(0.0))
+    }
+
+    /// The time-driven linear polynomial's two corrections, every map frozen
+    /// at the event instant.
+    fn frozen_grid_filter_corrections(
+        &self,
+        operator: &CanonicalTemporalWaveOperator,
+    ) -> Result<(Vec<f64>, Vec<Point2>), WaveError> {
         let mass = operator.primary_mass_at(self.time, &self.runtime)?;
         let inverse_mass = |values: Vec<f64>| {
             values
@@ -2914,44 +2981,18 @@ impl CanonicalTemporalWaveState {
             let flux = operator.base().compatible_flux(field)?;
             operator.force_at(&flux, self.time, &self.runtime)
         };
-
-        let old_primary = self.primary_flux.clone();
-        let old_complementary = self.complementary_flux.clone();
-        let primary_field = old_primary
+        let primary_field = self
+            .primary_flux
             .iter()
             .zip(&mass)
             .map(|(flux, mass)| flux / mass)
             .collect::<Vec<_>>();
         let primary_correction = stiffness(&inverse_mass(stiffness(&primary_field)?))?;
-
-        let gathered = operator.force_at(&old_complementary, self.time, &self.runtime)?;
+        let gathered = operator.force_at(&self.complementary_flux, self.time, &self.runtime)?;
         let complementary_correction = operator
             .base()
             .compatible_flux(&inverse_mass(stiffness(&inverse_mass(gathered))?))?;
-
-        let eigenvalue_bound = 4.0 / operator.maximum_time_step().powi(2);
-        let scale = strength / eigenvalue_bound.powi(2);
-        let mut next_primary = old_primary.clone();
-        let mut next_complementary = old_complementary.clone();
-        for (value, correction) in next_primary.iter_mut().zip(primary_correction) {
-            *value -= scale * correction;
-        }
-        for (value, correction) in next_complementary.iter_mut().zip(complementary_correction) {
-            *value = *value - correction * scale;
-        }
-        validate_finite(&next_primary)?;
-        if next_complementary.iter().any(|value| !value.finite()) {
-            return Err(WaveError::InvalidState);
-        }
-        let after =
-            operator.energy_at(&next_primary, &next_complementary, self.time, &self.runtime)?;
-        let tolerance = 2.0e-12 * before.abs().max(after.abs()).max(1.0);
-        if after > before + tolerance {
-            return Err(WaveError::InvalidState);
-        }
-        self.primary_flux = next_primary;
-        self.complementary_flux = next_complementary;
-        Ok((before - after).max(0.0))
+        Ok((primary_correction, complementary_correction))
     }
 
     /// Corrects only roundoff-sized drift from already accounted component
@@ -3051,13 +3092,11 @@ impl CanonicalTemporalWaveState {
     /// the linear filter. The higher orders are not signed, so the commit
     /// keeps the existing rule: only when the nonlinear energy does not rise
     /// and the new state is inside its domain.
-    fn apply_tangent_grid_filter(
-        &mut self,
+    fn tangent_grid_filter_corrections(
+        &self,
         operator: &CanonicalTemporalWaveOperator,
-        strength: f64,
-    ) -> Result<f64, WaveError> {
+    ) -> Result<(Vec<f64>, Vec<Point2>), WaveError> {
         let (time, runtime) = (self.time, &self.runtime);
-        let before = self.energy(operator)?;
         let field = operator.primary_field_at(&self.primary_flux, time, runtime)?;
         let tangent = operator.primary_tangent_inverse_at(&field, time, runtime)?;
         let sample_tangents =
@@ -3083,29 +3122,7 @@ impl CanonicalTemporalWaveState {
         let complementary_correction = operator
             .base()
             .compatible_flux(&weighted(stiffness(&weighted(gathered))?))?;
-
-        let eigenvalue_bound = 4.0 / operator.maximum_time_step().powi(2);
-        let scale = strength / eigenvalue_bound.powi(2);
-        let mut next_primary = self.primary_flux.clone();
-        let mut next_complementary = self.complementary_flux.clone();
-        for (value, correction) in next_primary.iter_mut().zip(primary_correction) {
-            *value -= scale * correction;
-        }
-        for (value, correction) in next_complementary.iter_mut().zip(complementary_correction) {
-            *value = *value - correction * scale;
-        }
-        validate_finite(&next_primary)?;
-        if next_complementary.iter().any(|value| !value.finite()) {
-            return Err(WaveError::InvalidState);
-        }
-        let after = operator.energy_at(&next_primary, &next_complementary, time, runtime)?;
-        let tolerance = 2.0e-12 * before.abs().max(after.abs()).max(1.0);
-        if after > before + tolerance {
-            return Err(WaveError::InvalidState);
-        }
-        self.primary_flux = next_primary;
-        self.complementary_flux = next_complementary;
-        Ok((before - after).max(0.0))
+        Ok((primary_correction, complementary_correction))
     }
 
     pub fn step(
@@ -8420,6 +8437,257 @@ mod tests {
             }
             for (a, b) in expected_complementary.iter().zip(&actual_complementary) {
                 assert!((*a - *b).norm() <= 1e-12, "{label}");
+            }
+        }
+    }
+
+    /// Each composition the stepper admits beside the bulk: both walls, a
+    /// prescribed wall, a thin gap and a constant loss.
+    fn filter_compositions() -> Vec<(&'static str, Scene, OuterBoundaryCondition)> {
+        let mut gapped = Scene::default();
+        gapped.internal_boundaries.push(crate::InternalBoundary {
+            id: crate::InternalBoundaryId(1),
+            spline: crate::OpenCubicSpline::uniform(vec![
+                Point2::new(-0.65, 0.0),
+                Point2::new(-0.2, 0.0),
+                Point2::new(0.2, 0.0),
+                Point2::new(0.65, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![crate::InternalBoundaryLaw {
+                coupling: crate::InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 120.0,
+                },
+                ..crate::InternalBoundaryLaw::REFLECTING
+            }],
+        });
+        let mut lossy = Scene::default();
+        lossy.materials[0].damping = ScalarField::constant(0.45);
+        vec![
+            (
+                "first-order wall",
+                Scene::default(),
+                OuterBoundaryCondition::FirstOrderOutgoing,
+            ),
+            (
+                "second-order wall",
+                Scene::default(),
+                OuterBoundaryCondition::SecondOrderOutgoing,
+            ),
+            (
+                "prescribed wall",
+                Scene::default(),
+                OuterBoundaryCondition::Reflecting,
+            ),
+            ("thin gap", gapped, OuterBoundaryCondition::Reflecting),
+            ("loss", lossy, OuterBoundaryCondition::Reflecting),
+        ]
+    }
+
+    fn filter_operator(
+        scene: &Scene,
+        condition: OuterBoundaryCondition,
+    ) -> CanonicalTemporalWaveOperator {
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            17,
+            MeshingOptions {
+                target_edge_length: 0.2,
+                minimum_angle_degrees: 14.0,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic =
+            QuadraticWaveOperator::assemble_scene(&mesh, &base_scene, condition).unwrap();
+        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap()
+    }
+
+    /// A constant prescribed wall on the left for the case that asks for one.
+    fn filter_forcing(label: &str, base: &CanonicalWaveOperator) -> CanonicalForcing {
+        if label != "prescribed wall" {
+            return CanonicalForcing::none(base);
+        }
+        let prescribed = base
+            .node_points()
+            .iter()
+            .map(|point| {
+                (point.x < -0.999).then_some(TimeSignal::Harmonic {
+                    offset: 0.17,
+                    amplitude: 0.0,
+                    frequency_hz: 0.0,
+                    phase_radians: 0.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(prescribed.iter().any(Option::is_some));
+        CanonicalForcing::from_prescribed(base, prescribed).unwrap()
+    }
+
+    fn filter_fluxes(base: &CanonicalWaveOperator, amplitude: f64) -> (Vec<f64>, Vec<Point2>) {
+        let primary = base
+            .node_points()
+            .iter()
+            .zip(base.primary_mass())
+            .map(|(point, mass)| {
+                // Grid-scale content on a smooth carrier, so the filter has
+                // something to remove.
+                let rough = if (point.x * 37.0 + point.y * 53.0).sin() > 0.0 {
+                    0.3
+                } else {
+                    -0.3
+                };
+                amplitude * mass * ((1.4 * point.x - 0.9 * point.y).sin() + rough)
+            })
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.6 * amplitude * (0.8 * point.x + 1.2 * point.y).cos())
+            .collect::<Vec<_>>();
+        (primary, base.compatible_flux(&potential).unwrap())
+    }
+
+    /// Inert, the filter beside every composition is the fixed path's filter.
+    #[test]
+    fn an_inert_filter_beside_each_composition_is_the_fixed_filter() {
+        for (label, scene, condition) in filter_compositions() {
+            let operator = filter_operator(&scene, condition);
+            let base = operator.base();
+            assert!(operator.forced_composition_supported(), "{label}");
+            // The prescribed wall is forcing handed to the step, not authored
+            // data, so only its operator still reads as a closed bulk.
+            assert_eq!(
+                operator.conservative_bulk_supported(),
+                label == "prescribed wall",
+                "{label}"
+            );
+            let forcing = filter_forcing(label, base);
+            let time_step = 0.4 * operator.maximum_time_step();
+            let (primary, complementary) = filter_fluxes(base, 0.05);
+            let mut temporal =
+                CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+                    .unwrap()
+                    .pinned(&operator, &forcing)
+                    .unwrap();
+            let mut fixed = CanonicalWaveState::new(
+                base,
+                time_step,
+                temporal.primary_flux().to_vec(),
+                temporal.complementary_flux().to_vec(),
+            )
+            .unwrap();
+            for _ in 0..12 {
+                temporal.step_with_forcing(&operator, &forcing).unwrap();
+                fixed.step_with_forcing(base, &forcing).unwrap();
+            }
+            let removed = temporal
+                .apply_grid_filter_with_forcing(&operator, &forcing, 0.8)
+                .unwrap();
+            let accounting = fixed.apply_grid_filter(base, &forcing, 0.8).unwrap();
+            assert!(removed > 0.0, "{label}");
+            assert!(
+                (removed - accounting.filter_removed).abs() <= 1e-12 * removed.max(1e-12),
+                "{label}: {removed:e} against {:e}",
+                accounting.filter_removed
+            );
+            assert!(accounting.prescribed_exchange.abs() < 1e-14, "{label}");
+            for (a, b) in temporal.primary_flux().iter().zip(fixed.primary_flux()) {
+                assert!((a - b).abs() < 1e-12, "{label}");
+            }
+            for (a, b) in temporal
+                .complementary_flux()
+                .iter()
+                .zip(fixed.complementary_flux())
+            {
+                assert!((*a - *b).norm() < 1e-12, "{label}");
+            }
+            assert!(
+                (temporal.energy(&operator).unwrap() - fixed.energy(base).unwrap()).abs() < 1e-12,
+                "{label}"
+            );
+        }
+    }
+
+    /// Driven and field-dependent media beside every composition: each filter
+    /// commits, removes energy, leaves the pins, the pole currents and the gap
+    /// jumps where they were, and keeps a free component's total.
+    #[test]
+    fn a_driven_or_nonlinear_filter_beside_each_composition_only_removes_energy() {
+        type Author = fn(&mut Scene);
+        let media: [(&str, Author); 3] = [
+            ("pumped", |scene| {
+                scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+            }),
+            ("kerr and saturable", |scene| {
+                scene.materials[0].mass_law.field = kerr(0.8);
+                scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+            }),
+            ("pumped kerr", |scene| {
+                scene.materials[0].mass_law.field = kerr(0.8);
+                scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+            }),
+        ];
+        for (label, scene, condition) in filter_compositions() {
+            for (medium, author) in &media {
+                let mut scene = scene.clone();
+                author(&mut scene);
+                let operator = filter_operator(&scene, condition);
+                let base = operator.base();
+                let forcing = filter_forcing(label, base);
+                let (primary, complementary) = filter_fluxes(base, 0.5);
+                let mut state = CanonicalTemporalWaveState::new(
+                    &operator,
+                    0.4 * operator.maximum_time_step(),
+                    primary,
+                    complementary,
+                )
+                .unwrap()
+                .pinned(&operator, &forcing)
+                .unwrap();
+                let mut total_removed = 0.0;
+                for step in 1..=40 {
+                    state.step_with_forcing(&operator, &forcing).unwrap();
+                    if step % 4 != 0 {
+                        continue;
+                    }
+                    let pins = state.primary_flux().to_vec();
+                    let gaps = state.thin_gap_jump().to_vec();
+                    let poles = state.outgoing_pole_currents().to_vec();
+                    let total = state.primary_flux().iter().sum::<f64>();
+                    let before = state.energy(&operator).unwrap();
+                    let removed = state
+                        .apply_grid_filter_with_forcing(&operator, &forcing, 1.0)
+                        .unwrap_or_else(|error| panic!("{label}, {medium}: {error:?}"));
+                    let after = state.energy(&operator).unwrap();
+                    assert!(removed >= 0.0, "{label}, {medium}");
+                    assert!(
+                        (before - after - removed).abs() <= 1e-12 * before.abs().max(1.0),
+                        "{label}, {medium}"
+                    );
+                    total_removed += removed;
+                    assert_eq!(state.thin_gap_jump(), gaps, "{label}, {medium}");
+                    assert_eq!(state.outgoing_pole_currents(), poles, "{label}, {medium}");
+                    for ((after, before), pinned) in state
+                        .primary_flux()
+                        .iter()
+                        .zip(&pins)
+                        .zip(forcing.prescribed())
+                    {
+                        if pinned.is_some() {
+                            assert_eq!(after, before, "{label}, {medium}");
+                        }
+                    }
+                    if forcing.prescribed().iter().all(Option::is_none) {
+                        let scale = pins.iter().map(|value| value.abs()).sum::<f64>();
+                        let moved = state.primary_flux().iter().sum::<f64>() - total;
+                        assert!(moved.abs() <= 1e-13 * scale, "{label}, {medium}");
+                    }
+                }
+                assert!(total_removed > 0.0, "{label}, {medium}");
             }
         }
     }
