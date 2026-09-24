@@ -604,9 +604,6 @@ impl CanonicalTemporalAreaContribution {
         element: QuadraticAreaElement,
         operator: &CanonicalTemporalWaveOperator,
     ) -> Result<Self, WaveError> {
-        if operator.has_field_laws {
-            return Err(WaveError::Unsupported(CONSUMER_FIELD_LAWS));
-        }
         let fixed = canonical_area_contribution(element, operator.base())?;
         let parent = element.element as usize;
         let start = parent
@@ -1482,12 +1479,9 @@ pub fn sample_temporal_canonical_area(
     {
         return Err(WaveError::InvalidState);
     }
-    if operator.has_field_laws {
-        return Err(WaveError::Unsupported(CONSUMER_FIELD_LAWS));
-    }
-    // The assembled nodal map at this instant. Every node's inverse mass is
-    // the one the solver itself would use for a step at `time`.
-    let mass = operator.primary_mass_at(time, runtime)?;
+    // The nodal field the solver would step with at `time`: the assembled
+    // map's inverse, which on a linear node is the division by its mass.
+    let nodal_field = operator.primary_field_at(primary_flux, time, runtime)?;
     let mut primary_integral = 0.0;
     let mut primary_squared = 0.0;
     let mut complementary_squared = 0.0;
@@ -1499,22 +1493,29 @@ pub fn sample_temporal_canonical_area(
         let start = element.element as usize * 6;
 
         let mut sample_fields = [Point2::default(); 6];
+        let mut sample_energy = 0.0;
         for (local, field) in sample_fields.iter_mut().enumerate() {
             let Some(flux) = complementary_flux.get(start + local) else {
                 return Err(WaveError::InvalidState);
             };
-            let factor = compiled.samples[local].factor_at(time, runtime)?;
-            *field = contribution.sample_inverses[local].apply(*flux) / factor;
+            let (value, energy) = operator.complementary_sample_field_and_energy(
+                start + local,
+                *flux,
+                time,
+                runtime,
+            )?;
+            *field = value;
+            sample_energy += energy;
         }
 
         for point in contribution.quadrature {
             let mut value = 0.0;
             for (local, basis) in point.primary_weights.iter().enumerate() {
                 let node = element.nodes[local] as usize;
-                let (Some(flux), Some(mass)) = (primary_flux.get(node), mass.get(node)) else {
+                let Some(field) = nodal_field.get(node) else {
                     return Err(WaveError::InvalidState);
                 };
-                value += basis * flux / mass;
+                value += basis * field;
             }
             let complementary = point
                 .complementary_weights
@@ -1528,23 +1529,21 @@ pub fn sample_temporal_canonical_area(
             complementary_squared += point.physical_weight * complementary.dot(complementary);
         }
 
-        let mut energy = 0.0;
+        // A node's stored energy splits exactly over the materials meeting
+        // there: with `Q = Σ m_c ḡ_c(U) U`, it is `Σ m_c (ḡ_c(U) U² − G_c(U))`,
+        // `G_c` the unit law's co-energy. On a linear contribution that is
+        // `½ m_c U²`, the mass-weighted share it always was.
+        let mut energy = sample_energy;
         for (local, reference) in contribution.node_references.into_iter().enumerate() {
             let node = element.nodes[local] as usize;
-            let (Some(flux), Some(mass)) = (primary_flux.get(node), mass.get(node)) else {
+            let Some(field) = nodal_field.get(node) else {
                 return Err(WaveError::InvalidState);
             };
-            if *mass <= 0.0 {
-                return Err(WaveError::InvalidState);
-            }
-            let factor = compiled.primary[local].factor_at(time, runtime)?;
-            energy += 0.5 * reference * factor * flux * flux / (mass * mass);
-        }
-        for (local, field) in sample_fields.into_iter().enumerate() {
-            let Some(flux) = complementary_flux.get(start + local) else {
-                return Err(WaveError::InvalidState);
-            };
-            energy += 0.5 * contribution.sample_weights[local] * flux.dot(field);
+            let sample = compiled.primary[local];
+            let coefficient = reference * sample.factor_at(time, runtime)?;
+            let r = field.abs();
+            let law = sample.law.field;
+            energy += coefficient * (law.multiplier(r) * r * r - law.coenergy(r));
         }
         total_energy += contribution.covered_fraction * energy;
     }
@@ -2617,6 +2616,37 @@ impl CanonicalTemporalWaveOperator {
         } else {
             Err(WaveError::InvalidState)
         }
+    }
+
+    /// One sample's complementary field and stored energy, its weight
+    /// included, through the same map the solver inverts there.
+    fn complementary_sample_field_and_energy(
+        &self,
+        index: usize,
+        flux: Point2,
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(Point2, f64), WaveError> {
+        let base = self
+            .base
+            .constitutive_samples()
+            .get(index)
+            .ok_or(WaveError::InvalidState)?;
+        let temporal = self
+            .complementary
+            .get(index)
+            .ok_or(WaveError::InvalidState)?;
+        if temporal.coefficient.law.field != FieldLawValues::Linear {
+            let (term, _) = self.complementary_term_at(index, time, runtime)?;
+            let field = radial_inverse(term, flux, temporal.coefficient, runtime)?;
+            let site_terms = [term];
+            let energy = base.integration_weight
+                * ConstitutiveSite::new(&site_terms).energy(flux.norm(), field.norm());
+            return Ok((field, energy));
+        }
+        let factor = coefficient_factor(temporal.coefficient, time, runtime)?;
+        let field = base.complementary_inverse.apply(flux) / factor;
+        Ok((field, 0.5 * base.integration_weight * flux.dot(field)))
     }
 
     fn complementary_energy_and_rate(
@@ -6628,6 +6658,103 @@ mod tests {
             inert.total_energy
         );
         assert!(relative_gap(sample.rms_complementary, inert.rms_complementary) > 1.0e-3);
+    }
+
+    /// On a field-dependent medium the area readout reads fields through the
+    /// maps the solver inverts, and splits each node's stored energy over the
+    /// materials meeting there, so a probe over every face reports exactly
+    /// the solver's energy, junction nodes included.
+    #[test]
+    fn a_nonlinear_area_probe_over_every_face_reports_the_solver_energy() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = kerr(0.8);
+        scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let runtime = operator.initial_runtime();
+        let (primary, complementary) = strong_fluxes(&operator, 6.0);
+        let expected = operator
+            .energy_at(&primary, &complementary, 0.0, &runtime)
+            .unwrap();
+        let mut total = 0.0;
+        for region in &base_scene.regions {
+            let stencil = QuadraticAreaStencil::build(
+                &mesh,
+                &quadratic,
+                &base_scene,
+                crate::AreaProbeShape::Region(region.id),
+            )
+            .unwrap();
+            total += sample_temporal_canonical_area(
+                &stencil,
+                &operator,
+                &primary,
+                &complementary,
+                0.0,
+                &runtime,
+            )
+            .unwrap()
+            .total_energy;
+        }
+        assert!(
+            (total - expected).abs() < 1.0e-9 * expected,
+            "the faces summed to {total} against the solver's {expected}"
+        );
+        let linear = sample_canonical_area_total(
+            &mesh,
+            &quadratic,
+            &base_scene,
+            &operator,
+            &primary,
+            &complementary,
+        );
+        assert!(
+            relative_gap(total, linear) > 1.0e-2,
+            "a strong field must read differently from the linear map: {total} against {linear}"
+        );
+    }
+
+    fn sample_canonical_area_total(
+        mesh: &crate::TriMesh,
+        quadratic: &QuadraticWaveOperator,
+        scene: &Scene,
+        operator: &CanonicalTemporalWaveOperator,
+        primary: &[f64],
+        complementary: &[Point2],
+    ) -> f64 {
+        scene
+            .regions
+            .iter()
+            .map(|region| {
+                let stencil = QuadraticAreaStencil::build(
+                    mesh,
+                    quadratic,
+                    scene,
+                    crate::AreaProbeShape::Region(region.id),
+                )
+                .unwrap();
+                sample_canonical_area(&stencil, operator.base(), primary, complementary)
+                    .unwrap()
+                    .total_energy
+            })
+            .sum()
     }
 
     fn relative_gap(left: f64, right: f64) -> f64 {

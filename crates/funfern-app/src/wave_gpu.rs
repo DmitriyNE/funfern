@@ -1380,12 +1380,6 @@ impl WaveGpuRequest {
         sample_rate: f64,
         context: RecorderContext,
     ) -> Result<(), String> {
-        // The area readout sums linear stores; a field-dependent medium's is
-        // not derived on either side, and a plausible wrong total is worse
-        // than none.
-        if operator.has_field_laws() && probes.iter().any(|probe| probe.stencil.is_some()) {
-            return Err("area readouts are not yet available on a field-dependent medium".into());
-        }
         let index = TemporalTableIndex::build(operator, manifest)?;
         self.update_area_probes_from(
             assets,
@@ -6067,15 +6061,34 @@ mod tests {
         );
 
         let area = include_str!("canonical_area_probe.wgsl");
-        assert!(area.contains("contribution.sample_inverse[local].xyz, accepted_b(start + local)"));
-        // Canonical energy: lumped nodal shares plus the samples' own energies,
-        // scaled by the piece's covered fraction of its parent.
+        assert!(area.contains("area_sample(contribution, local, accepted_b(start + local), time)"));
+        assert!(area.contains(
+            "apply_symmetric(inverse.xyz, flux) / sample_factor(contribution, local, local_time)"
+        ));
+        // Canonical energy: each node's store split over its materials plus
+        // the samples' own energies, scaled by the piece's covered fraction.
         assert!(area.contains("accumulated.w = contribution.node_shares_b.w * energy;"));
-        assert!(area.contains("0.5 * contribution.sample_inverse[local].w"));
-        assert!(area.contains("/ sample_factor(contribution, local, time);"));
-        // The area recorder assembles the nodal map the same way the shared
-        // block does, over every contribution owning the node.
-        assert!(area.contains("if !temporal_enabled() { return nodes[node].mass_loss.y; }"));
+        assert!(area.contains("let linear_energy = 0.5 * inverse.w * dot(flux, linear);"));
+        // The area recorder inverts the nodal map and evaluates the field
+        // laws with exactly the text the point and line probes use.
+        let piece = |source: &'static str, from: &str, to: &str| {
+            let start = source.find(from).expect(from);
+            let end = start + source[start..].find(to).expect(to);
+            source[start..end].to_owned()
+        };
+        for (from, to) in [
+            ("fn field_kind(word: u32)", "fn record_factor(word: u32"),
+            (
+                "fn probe_primary_field(",
+                "// `v(b)` at one of the element's samples",
+            ),
+        ] {
+            let shared = piece(point, from, to);
+            assert!(
+                area.contains(&shared),
+                "the area shader drifted from {from}"
+            );
+        }
         // The area quadrature carries no material law at all now.
         assert!(!area.contains("reference_inverse"));
     }

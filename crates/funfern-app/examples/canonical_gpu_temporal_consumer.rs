@@ -66,8 +66,9 @@ struct Expected {
     line_time: f64,
     area_total_energy: f64,
     area_rms_complementary: f64,
-    /// Whether the area readout is compared. A field-dependent medium's area
-    /// readout is refused on both sides, so its run checks the rest.
+    /// Whether the area readout is compared. It is on every medium now,
+    /// field-dependent ones included; the flag stays so a future refusal
+    /// cannot silently drop the comparison.
     area_checked: bool,
     arrows: Vec<(f64, f64)>,
     started: Instant,
@@ -258,7 +259,7 @@ fn main() -> AppExit {
             (sample.complementary.norm(), sample.energy_flow.norm())
         })
         .collect::<Vec<_>>();
-    let area_sample = (!nonlinear).then(|| {
+    let area_sample = Some(()).map(|()| {
         sample_temporal_canonical_area(
             &area,
             &operator,
@@ -374,7 +375,7 @@ fn install(
             },
         )
         .expect("install temporal line recorder");
-    if !pending.operator.has_field_laws() {
+    {
         recorders
             .update_temporal_canonical_area_probes(
                 &mut assets,

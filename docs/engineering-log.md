@@ -11577,3 +11577,33 @@ driven-document gate run to 400 steps, did the same.
   - The next step, if wanted, is compensated phase arithmetic: an exact
     `ω·t` by `fma` and a two-float anchor, like `add_compensated` for the
     origin.
+
+## 2026-09-24 — The area readout on field-dependent media
+
+Stage 10.7, first half. Stage 9 left the area readout refused on Kerr and
+saturable media on both sides, since a plausible wrong total is worse than none.
+
+- **What the readout reports.** It is the solver's own discrete energy
+  restricted to the area.
+  - A node's stored energy splits exactly over the materials meeting there.
+    With `Q = Σ m_c ḡ_c(U) U`, it is `Σ m_c (ḡ_c(U) U² − G_c(U))`, where
+    `G_c` is the unit law's co-energy. On a linear contribution that is the
+    mass-weighted `½ m_c U²` it always was.
+  - Each sample's energy is `W(|b| r − c G(r))` after the radial solve.
+  - Fields are read through the same inverses the solver steps with.
+- **CPU.** `sample_temporal_canonical_area` and
+  `CanonicalTemporalAreaContribution` drop their refusal, and read nodal fields
+  by `primary_field_at`. The new
+  `CanonicalTemporalWaveOperator::complementary_sample_field_and_energy` shares
+  its evaluation with the solver's energy.
+  `a_nonlinear_area_probe_over_every_face_reports_the_solver_energy`: Kerr ε
+  and saturable μ beside linear materials, summed over every face, equal
+  `energy_at` to 1e-9 and depart from the linear read by more than 1%.
+- **Device.** `canonical_area_probe.wgsl` carries the probes' `field_kind`,
+  `field_response` and `probe_primary_field` verbatim. A test pins them
+  byte-identical to the point probe's block. It also gains a radial sample
+  solve with its energy, and each contribution's store. The host refusal in
+  `update_temporal_canonical_area_probes` is gone.
+- **Gate.** `canonical_gpu_temporal_consumer` with `CONSUMER_NONLINEAR=1` now
+  compares the area readout too: total energy 1.33e-7, complement RMS
+  1.63e-7. The linear mode is unchanged.
