@@ -49,7 +49,7 @@ struct Timing {
     finished: bool,
 }
 
-fn main() {
+fn main() -> AppExit {
     let driven = !std::env::args().any(|argument| argument == "--fixed");
     let outgoing = std::env::args().any(|argument| argument == "--outgoing");
     let mut scene = Scene::initial();
@@ -154,7 +154,7 @@ fn main() {
     })
     .add_systems(Startup, install)
     .add_systems(Update, drive)
-    .run();
+    .run()
 }
 
 fn install(

@@ -10632,3 +10632,28 @@ on the device together.
   authored mass (`mass_loss.y`) on a driven generation too. The oracle uses the
   instantaneous midpoint field, so a pumped medium with a gap departs from its
   reference on the device. No device gate covers a gap under a drive.
+
+## 2026-09-24 — A driven thin gap drifts on the instantaneous field on the device
+
+This fixes the device defect noted in the previous entry.
+
+- **Reproduced:** `canonical_gpu_temporal_forced` gains a `FORCED_GAP=1` mode:
+  a stiff thin gap across a pumped medium on the default square, inside
+  reflecting walls, with no source. Against the f64 oracle the device missed
+  by Q 7.258e-3 and b 8.528e-3.
+- **Cause:** the gap-jump drift divided by the authored mass (`mass_loss.y`)
+  on driven generations too.
+- **Fix:** on a driven generation the gap drift reads `temporal_drift_field`,
+  the same midpoint field the bulk drift reads, including prescribed values.
+  Result: Q 2.464e-7, b 4.914e-7.
+- **The examples could not fail.** Every `main` discarded `App::run`'s
+  `AppExit`, so a failed gate still exited 0; the unfixed gap run above did.
+  All fifteen now return it (`fn main() -> AppExit`), and the unfixed gap run
+  exits 1. Earlier "all examples pass" claims rested on the printed figures,
+  which were read against their thresholds; from now on the exit code carries
+  that.
+- **Mode repaired:** `FORCED_BARE=1` could not run at all. The fixture
+  asserted a non-conservative bulk, which a bare pumped medium in reflecting
+  walls is not. The assertion now expects the conservative bulk exactly in
+  bare mode. Result: Q 2.672e-7, b 4.655e-7.
+- **Verification:** all fifteen examples exit 0 with their figures unchanged.

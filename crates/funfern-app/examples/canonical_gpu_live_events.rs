@@ -49,7 +49,7 @@ enum Phase {
     Done,
 }
 
-fn main() {
+fn main() -> AppExit {
     let scene = Scene::initial();
     let mesh = mesh_scene(
         &scene,
@@ -223,7 +223,7 @@ fn main() {
     .insert_resource(expected)
     .add_systems(Startup, install)
     .add_systems(Update, validate);
-    app.run();
+    app.run()
 }
 
 fn install(

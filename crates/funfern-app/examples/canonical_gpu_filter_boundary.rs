@@ -54,7 +54,7 @@ struct Expected {
     failed: bool,
 }
 
-fn main() {
+fn main() -> AppExit {
     let scene = Scene::initial();
     let mesh = mesh_scene(
         &scene,
@@ -195,7 +195,7 @@ fn main() {
     })
     .add_systems(Startup, install)
     .add_systems(Update, finish_when_ready);
-    app.run();
+    app.run()
 }
 
 fn install(

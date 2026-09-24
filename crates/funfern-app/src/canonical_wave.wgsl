@@ -1879,8 +1879,16 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
         let left = record.x;
         let right = record.y;
         let auxiliary_word = record.z;
-        let difference = candidate_q(left) * nodes[left].mass_loss.y
+        // The gap drifts on the same field and over the same interval as the
+        // bulk does, so a driven one reads the same midpoint field: dividing
+        // by the authored mass under a pump misses by the modulation depth.
+        var difference = candidate_q(left) * nodes[left].mass_loss.y
             - candidate_q(right) * nodes[right].mass_loss.y;
+        if temporal_enabled() {
+            let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
+            difference = temporal_drift_field(left, middle_time)
+                - temporal_drift_field(right, middle_time);
+        }
         let auxiliary = auxiliary_word - auxiliary_offset();
         let next = accepted_auxiliary(auxiliary) + control.clock_f32.x * difference;
         set_candidate_auxiliary(auxiliary, next);

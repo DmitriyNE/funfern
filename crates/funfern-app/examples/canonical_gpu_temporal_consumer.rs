@@ -73,7 +73,7 @@ struct Expected {
     failed: bool,
 }
 
-fn main() {
+fn main() -> AppExit {
     let mut scene = Scene::initial();
     let material = &mut scene.materials[0];
     material.mass_law.drive = TimeDrive::TravellingModulation {
@@ -296,7 +296,7 @@ fn main() {
     .insert_resource(expected)
     .add_systems(Startup, install)
     .add_systems(Update, finish_when_ready);
-    app.run();
+    app.run()
 }
 
 fn install(

@@ -44,11 +44,21 @@ struct Expected {
     failed: bool,
 }
 
-fn main() {
+fn main() -> AppExit {
     // A pumped medium, a volume source driving it, and an absorbing wall for
     // the radiation to leave through: three stages at once, each of which
     // reads the nodal mass somewhere.
-    let mut scene = Scene::initial();
+    // `FORCED_GAP=1` adds a stiff thin gap across a pumped medium, inside
+    // reflecting walls and with no source, so the gap's own drift is the
+    // stage under test: it reads the nodal field at the drift's instant, and
+    // under a pump that field divides by the moving mass. It runs on the
+    // default square, which the gap fixture of the f64 tests is drawn for.
+    let gap = std::env::var("FORCED_GAP").is_ok_and(|value| value == "1");
+    let mut scene = if gap {
+        Scene::default()
+    } else {
+        Scene::initial()
+    };
     scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
         depth: ScalarField::constant(0.24),
         frequency_hz: ScalarField::constant(0.85),
@@ -65,6 +75,32 @@ fn main() {
     // end-to-end driven-document run uses. It exists to tell a configuration
     // difference apart from an assembly-path one.
     let bare = std::env::var("FORCED_BARE").is_ok_and(|value| value == "1");
+    if gap {
+        for target in [&mut scene, &mut fixed_scene] {
+            target
+                .internal_boundaries
+                .push(funfern_core::InternalBoundary {
+                    id: funfern_core::InternalBoundaryId(1),
+                    spline: funfern_core::OpenCubicSpline::uniform(vec![
+                        Point2::new(-0.65, 0.0),
+                        Point2::new(-0.2, 0.0),
+                        Point2::new(0.2, 0.0),
+                        Point2::new(0.65, 0.0),
+                    ])
+                    .expect("gap spline"),
+                    region: funfern_core::BACKGROUND_REGION,
+                    span_laws: vec![funfern_core::InternalBoundaryLaw {
+                        coupling: funfern_core::InternalBoundaryCoupling::ThinGap {
+                            stiffness_ratio: 120.0,
+                        },
+                        ..funfern_core::InternalBoundaryLaw::REFLECTING
+                    }],
+                });
+        }
+    }
+    // A bare fixture is a conservative bulk; everything else must not be.
+    let conservative = bare && !gap;
+    let bare = bare || gap;
     let mesh = mesh_scene(
         &fixed_scene,
         1,
@@ -88,7 +124,8 @@ fn main() {
         .expect("forced temporal operator");
     let base = operator.base();
     assert!(
-        operator.forced_composition_supported() && !operator.conservative_bulk_supported(),
+        operator.forced_composition_supported()
+            && operator.conservative_bulk_supported() == conservative,
         "the fixture must exercise the widened admission"
     );
     assert!(
@@ -97,6 +134,10 @@ fn main() {
             .iter()
             .any(|value| *value != 0.0),
         "the fixture needs an absorbing wall"
+    );
+    assert!(
+        !gap || !base.thin_gap_samples().is_empty(),
+        "the fixture needs a thin gap"
     );
 
     let mut forcing = CanonicalForcing::none(base);
@@ -181,7 +222,7 @@ fn main() {
     })
     .add_systems(Startup, install)
     .add_systems(Update, drive)
-    .run();
+    .run()
 }
 
 fn install(

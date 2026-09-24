@@ -69,7 +69,7 @@ struct FailureSnapshot {
     readbacks: u64,
 }
 
-fn main() {
+fn main() -> AppExit {
     let second_order = std::env::args().any(|argument| argument == "--second-order");
     let first_order = std::env::args().any(|argument| argument == "--first-order");
     let loss = std::env::args().any(|argument| argument == "--loss");
@@ -478,7 +478,7 @@ fn main() {
     .insert_resource(expected)
     .add_systems(Startup, install)
     .add_systems(Update, finish_when_ready);
-    app.run();
+    app.run()
 }
 
 fn install(

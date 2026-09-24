@@ -45,7 +45,7 @@ struct Expected {
     failed: bool,
 }
 
-fn main() {
+fn main() -> AppExit {
     // An authored document, exactly as the editor would hold one.
     let mut document = TopologyEditor::default().document;
     // A zero depth keeps every piece of the temporal path switched on - the
@@ -189,7 +189,7 @@ fn main() {
     })
     .add_systems(Startup, install)
     .add_systems(Update, drive)
-    .run();
+    .run()
 }
 
 fn install(

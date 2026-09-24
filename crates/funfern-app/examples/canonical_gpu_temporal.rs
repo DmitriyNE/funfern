@@ -49,7 +49,7 @@ struct Expected {
     failed: bool,
 }
 
-fn main() {
+fn main() -> AppExit {
     let resident_filter = std::env::args().any(|argument| argument == "--resident-filter");
     let steps = std::env::args()
         .find_map(|argument| argument.strip_prefix("--steps=")?.parse::<u64>().ok())
@@ -320,7 +320,7 @@ fn main() {
     .insert_resource(expected)
     .add_systems(Startup, install)
     .add_systems(Update, finish_when_ready);
-    app.run();
+    app.run()
 }
 
 fn install(

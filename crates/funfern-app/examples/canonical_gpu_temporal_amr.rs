@@ -124,7 +124,7 @@ struct Expected {
     failed: bool,
 }
 
-fn main() {
+fn main() -> AppExit {
     let mut scene = Scene::initial();
     scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
         depth: ScalarField::constant(0.22),
@@ -460,7 +460,7 @@ fn main() {
     })
     .add_systems(Startup, install)
     .add_systems(Update, drive)
-    .run();
+    .run()
 }
 
 /// One estimate, built exactly the way the application will build it: the

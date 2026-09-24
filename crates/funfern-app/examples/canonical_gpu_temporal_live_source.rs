@@ -81,7 +81,7 @@ fn source(
     forcing
 }
 
-fn main() {
+fn main() -> AppExit {
     let mut scene = Scene::initial();
     let material = &mut scene.materials[0];
     material.mass_law.drive = TimeDrive::ParametricPump {
@@ -265,7 +265,7 @@ fn main() {
     .insert_resource(expected)
     .add_systems(Startup, install)
     .add_systems(Update, validate);
-    app.run();
+    app.run()
 }
 
 fn install(

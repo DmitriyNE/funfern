@@ -51,7 +51,7 @@ struct Expected {
     failed: bool,
 }
 
-fn main() {
+fn main() -> AppExit {
     // A deep pump, so the instantaneous mass is a long way from the authored
     // one at the instant the pulse lands.
     let mut scene = Scene::initial();
@@ -166,7 +166,7 @@ fn main() {
     })
     .add_systems(Startup, install)
     .add_systems(Update, drive)
-    .run();
+    .run()
 }
 
 fn install(

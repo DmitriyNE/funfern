@@ -66,7 +66,7 @@ enum Phase {
     Done,
 }
 
-fn main() {
+fn main() -> AppExit {
     let second_order = std::env::args().any(|argument| argument == "--second-order");
     let same_mesh = std::env::args().any(|argument| argument == "--same-mesh");
     let thin_gap = std::env::args().any(|argument| argument == "--thin-gap");
@@ -551,7 +551,7 @@ fn main() {
     .insert_resource(expected)
     .add_systems(Startup, install)
     .add_systems(Update, validate);
-    app.run();
+    app.run()
 }
 
 fn install(
