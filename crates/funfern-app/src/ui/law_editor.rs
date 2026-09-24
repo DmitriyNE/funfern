@@ -205,13 +205,18 @@ pub(super) fn loss_rate_editor(
         && row_channel(material, physics, row)
             .as_ref()
             .is_some_and(|channel| matches!(channel.law.rate, RateLaw::VanDerPol { .. }));
-    if primary {
+    // Choosing the kind is Advanced; the simple view reaches van der Pol
+    // through its medium presets, whose values sit under Response.
+    if primary && advanced {
         loss_kind_editor(ui, material, physics, row, active, formulas);
     }
     let active = primary
         && row_channel(material, physics, row)
             .as_ref()
             .is_some_and(|channel| matches!(channel.law.rate, RateLaw::VanDerPol { .. }));
+    if active && !advanced {
+        return;
+    }
     let label = if legacy {
         "Loss rate (legacy)"
     } else if active {
@@ -340,7 +345,7 @@ fn loss_kind_editor(
 /// Makes a row's loss self-oscillating or constant again. A legacy damping
 /// moves into the named channel first; a channel's rate carries across, and a
 /// fresh one starts at a gain of 0.5 per second against a threshold of 1.
-fn set_self_oscillating(
+pub(super) fn set_self_oscillating(
     material: &mut Material,
     physics: PhysicsModel,
     row: LawPresetRow,
@@ -371,14 +376,14 @@ fn set_self_oscillating(
     }
 }
 
-/// The restoring force on the integrated field (Gate O). It is not a
-/// coefficient, so it has a group of its own: the law, its values, and what
-/// it composes to. Returns an error to report when a preset could not apply.
+/// The restoring force on the integrated field (Gate O), in Advanced. It is
+/// not a coefficient, so it has a group of its own: the law, its slots, and
+/// what it composes to. The simple view offers restoring laws only as medium
+/// presets. Returns an error to report when a preset could not apply.
 pub(super) fn restoring_editor(
     ui: &mut egui::Ui,
     material: &mut Material,
     physics: PhysicsModel,
-    advanced: bool,
     numbers: bool,
     formulas: &mut FormulaEdits,
 ) -> Option<String> {
@@ -447,29 +452,20 @@ pub(super) fn restoring_editor(
             Err(error) => failure = Some(error.to_string()),
         }
     }
-    if advanced {
-        restoring_slots_editor(ui, material, formulas);
-    } else if let Some(found) = identify_restoring_preset(material) {
-        for (variable, name) in found.preset.variables.iter().zip(&found.parameters) {
-            let Some(parameter) = material
-                .parameters
-                .iter_mut()
-                .find(|parameter| parameter.name == *name)
-            else {
-                continue;
-            };
-            ui.horizontal(|ui| {
-                ui.label(variable.label);
-                ui.add(
-                    egui::DragValue::new(&mut parameter.value)
-                        .speed(0.01)
-                        .range(variable.minimum..=variable.maximum)
-                        .update_while_editing(false),
-                );
-            });
-        }
-    }
-    // The cutoff as a frequency, which is what a source is authored in.
+    restoring_slots_editor(ui, material, formulas);
+    cutoff_line(ui, material);
+    failure
+}
+
+/// The cutoff of a Klein-Gordon or sine-Gordon law as a frequency, which is
+/// what a source is authored in.
+pub(super) fn cutoff_line(ui: &mut egui::Ui, material: &Material) {
+    let origin = MaterialCoordinates {
+        x: 0.0,
+        y: 0.0,
+        r: 0.0,
+        theta: 0.0,
+    };
     if let RestoringLaw::KleinGordon { omega0 } | RestoringLaw::SineGordon { omega0 } =
         &material.restoring
         && let Ok(omega0) = omega0.evaluate(origin, &material.parameters)
@@ -483,7 +479,6 @@ pub(super) fn restoring_editor(
              mass row moves it as ω₀√(m₀/m).",
         );
     }
-    failure
 }
 
 /// The restoring slot itself, in Advanced: its kind and each parameter as a
@@ -1180,8 +1175,6 @@ mod tests {
         },
     ];
 
-    /// A legacy material is shown, in either view and every skin, without
-    /// being rewritten: its damping reads as the primary row's loss.
     /// Viewing an oscillator material - sine-Gordon beside van der Pol on the
     /// primary row - rewrites nothing, in either view or any skin.
     #[test]
@@ -1205,14 +1198,9 @@ mod tests {
                             errors: &mut error,
                         };
                         rows(ui, &mut material, physics, advanced, &[], &mut formulas);
-                        restoring_editor(
-                            ui,
-                            &mut material,
-                            physics,
-                            advanced,
-                            advanced,
-                            &mut formulas,
-                        );
+                        if advanced {
+                            restoring_editor(ui, &mut material, physics, true, &mut formulas);
+                        }
                     });
                 }
                 assert_eq!(material, before, "{physics:?}, advanced {advanced}");

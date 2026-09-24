@@ -413,41 +413,50 @@ impl Playground {
             // leaves it Custom rather than being refitted to the preset it came
             // from.
             let physics = self.editor.document.model.draft.physics;
+            let advanced = self.editor.document.presentation.advanced_materials;
+            // The simple view is a linear material or one of the catalogue's
+            // media, whole; composing laws by hand is Advanced, where Response
+            // names only the two rows.
+            if !advanced {
+                self.medium_selector(ui, &mut material, physics);
+            }
             let matched = identify_law_preset(&material);
             let mut chosen = None;
-            ui.horizontal(|ui| {
-                ui.label("Response");
-                egui::ComboBox::from_id_salt(("material-response", material.id.0))
-                    .selected_text(matched.as_ref().map_or_else(
-                        || "Custom".to_owned(),
-                        |found| law_preset_label(found.preset, physics),
-                    ))
-                    .show_ui(ui, |ui| {
-                        // A field-dependent response does not run beside van der
-                        // Pol, so it is not offered there.
-                        let self_oscillating = law_editor::self_oscillating(&material);
-                        for preset in law_presets() {
-                            let current =
-                                matched.as_ref().is_some_and(|found| found.preset == preset);
-                            let offered =
-                                !(self_oscillating && preset.id.starts_with("M-F")) || current;
-                            if ui
-                                .add_enabled(
-                                    offered,
-                                    egui::Button::selectable(
-                                        current,
-                                        law_preset_label(preset, physics),
-                                    ),
-                                )
-                                .on_hover_text(preset.phenomenon)
-                                .on_disabled_hover_text(law_editor::SELF_OSCILLATING_RESPONSE)
-                                .clicked()
-                            {
-                                chosen = Some(preset);
+            if advanced {
+                ui.horizontal(|ui| {
+                    ui.label("Response");
+                    egui::ComboBox::from_id_salt(("material-response", material.id.0))
+                        .selected_text(matched.as_ref().map_or_else(
+                            || "Custom".to_owned(),
+                            |found| law_preset_label(found.preset, physics),
+                        ))
+                        .show_ui(ui, |ui| {
+                            // A field-dependent response does not run beside van der
+                            // Pol, so it is not offered there.
+                            let self_oscillating = law_editor::self_oscillating(&material);
+                            for preset in law_presets() {
+                                let current =
+                                    matched.as_ref().is_some_and(|found| found.preset == preset);
+                                let offered =
+                                    !(self_oscillating && preset.id.starts_with("M-F")) || current;
+                                if ui
+                                    .add_enabled(
+                                        offered,
+                                        egui::Button::selectable(
+                                            current,
+                                            law_preset_label(preset, physics),
+                                        ),
+                                    )
+                                    .on_hover_text(preset.phenomenon)
+                                    .on_disabled_hover_text(law_editor::SELF_OSCILLATING_RESPONSE)
+                                    .clicked()
+                                {
+                                    chosen = Some(preset);
+                                }
                             }
-                        }
-                    });
-            });
+                        });
+                });
+            }
             if let Some(preset) = chosen {
                 match apply_law_preset(preset, &material) {
                     Ok(applied) => material = applied,
@@ -455,17 +464,32 @@ impl Playground {
                 }
             }
             let labels = material_editor_labels(physics);
-            let advanced = self.editor.document.presentation.advanced_materials;
             let sources = source_frequencies(
                 &self.editor.document.model.source,
                 &self.editor.document.model.draft,
             );
             // Recomputed, because applying a preset above changed the material.
-            let matched = identify_law_preset(&material);
-            let preset_owned = matched
-                .as_ref()
-                .map(|found| found.parameters.iter().cloned().collect::<BTreeSet<_>>())
-                .unwrap_or_default();
+            // The simple view shows a preset's values only for a medium it
+            // names; a composed material reads Custom there.
+            let medium = identify_medium_preset(&material, physics);
+            let (matched, preset_owned) = if advanced {
+                let matched = identify_law_preset(&material);
+                let owned = matched
+                    .as_ref()
+                    .map(|found| found.parameters.iter().cloned().collect::<BTreeSet<_>>())
+                    .unwrap_or_default();
+                (matched, owned)
+            } else {
+                let owned = medium
+                    .iter()
+                    .flat_map(MediumPresetMatch::parameters)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                (medium.as_ref().map(|found| found.response.clone()), owned)
+            };
+            if !advanced && let Some(found) = &medium {
+                medium_values(ui, &mut material, found);
+            }
             // A preset acting on both rows at once has one set of values for
             // the pair, so they sit here rather than under either row.
             if matched
@@ -593,26 +617,28 @@ impl Playground {
                     });
             }
             // Gate O: the restoring force on the integrated field, which is
-            // not a coefficient and so is not under either row.
-            egui::CollapsingHeader::new("Restoring force")
-                .id_salt(("material-restoring", material.id.0))
-                .default_open(!material.restoring.is_none())
-                .show(ui, |ui| {
-                    let mut formulas = law_editor::FormulaEdits {
-                        edits: &mut self.material_formula_edits,
-                        errors: &mut self.material_formula_errors,
-                    };
-                    if let Some(error) = law_editor::restoring_editor(
-                        ui,
-                        &mut material,
-                        physics,
-                        advanced,
-                        numbers,
-                        &mut formulas,
-                    ) {
-                        self.notify(error);
-                    }
-                });
+            // not a coefficient and so is not under either row. The simple
+            // view reaches it through the medium presets.
+            if advanced {
+                egui::CollapsingHeader::new("Restoring force")
+                    .id_salt(("material-restoring", material.id.0))
+                    .default_open(!material.restoring.is_none())
+                    .show(ui, |ui| {
+                        let mut formulas = law_editor::FormulaEdits {
+                            edits: &mut self.material_formula_edits,
+                            errors: &mut self.material_formula_errors,
+                        };
+                        if let Some(error) = law_editor::restoring_editor(
+                            ui,
+                            &mut material,
+                            physics,
+                            numbers,
+                            &mut formulas,
+                        ) {
+                            self.notify(error);
+                        }
+                    });
+            }
             egui::CollapsingHeader::new("Anisotropy")
                 .id_salt(("material-anisotropy", material.id.0))
                 .default_open(material.axis_ratio != ScalarField::constant(1.0))
@@ -931,6 +957,115 @@ impl Playground {
     }
 }
 
+/// The medium a simple-view material is, from the catalogue, and a Custom
+/// that says where a composed one is edited.
+fn medium_label(preset: &MediumPreset, physics: PhysicsModel) -> String {
+    let restoring = preset.restoring();
+    match (preset.self_oscillating, restoring.id.is_empty()) {
+        (true, false) => "Van der Pol oscillators".to_owned(),
+        (true, true) => "Self-oscillating medium".to_owned(),
+        (false, false) => restoring_preset_text(restoring, physics).name,
+        (false, true) => law_preset_label(preset.response(), physics),
+    }
+}
+
+fn medium_hover(preset: &MediumPreset, physics: PhysicsModel) -> String {
+    let restoring = preset.restoring();
+    let text = restoring_preset_text(restoring, physics);
+    match (preset.self_oscillating, restoring.id.is_empty()) {
+        (true, false) => format!(
+            "A Klein-Gordon cutoff ω₀ makes every point an oscillator, and van der Pol makes \
+             each one self-sustained: a small field grows to a limit cycle at ω₀.\n\n{}",
+            van_der_pol_text(physics)
+        ),
+        (true, true) => van_der_pol_text(physics),
+        (false, false) => format!("{}.\n\n{}", text.phenomenon, text.equation),
+        (false, true) => preset.response().phenomenon.to_owned(),
+    }
+}
+
+impl Playground {
+    /// Response in the simple view: the whole medium, from the catalogue.
+    fn medium_selector(
+        &mut self,
+        ui: &mut egui::Ui,
+        material: &mut Material,
+        physics: PhysicsModel,
+    ) {
+        let matched = identify_medium_preset(material, physics);
+        let mut chosen = None;
+        ui.horizontal(|ui| {
+            ui.label("Response");
+            egui::ComboBox::from_id_salt(("material-medium", material.id.0))
+                .selected_text(matched.as_ref().map_or_else(
+                    || "Custom".to_owned(),
+                    |found| medium_label(found.preset, physics),
+                ))
+                .show_ui(ui, |ui| {
+                    for preset in medium_presets() {
+                        let current = matched.as_ref().is_some_and(|found| found.preset == preset);
+                        if ui
+                            .selectable_label(current, medium_label(preset, physics))
+                            .on_hover_text(medium_hover(preset, physics))
+                            .clicked()
+                        {
+                            chosen = Some(preset);
+                        }
+                    }
+                });
+        });
+        if matched.is_none() {
+            ui.small("Composed by hand: its laws are edited in Advanced.");
+        }
+        if let Some(preset) = chosen {
+            match apply_medium_preset(preset, material, physics) {
+                Ok(applied) => *material = applied,
+                Err(error) => self.notify(error.to_string()),
+            }
+        }
+    }
+}
+
+/// The values of a medium's restoring law and self-oscillation, which belong
+/// to neither row, and the cutoff they set.
+fn medium_values(ui: &mut egui::Ui, material: &mut Material, found: &MediumPresetMatch) {
+    // The response's own values sit with the row they act on.
+    let rows = found.preset.response().variables.len();
+    for (variable, name) in found.preset.variables().zip(found.parameters()).skip(rows) {
+        preset_variable(ui, material, variable, name, &[]);
+    }
+    law_editor::cutoff_line(ui, material);
+}
+
+/// One value a preset asks for, as the label it gave it.
+fn preset_variable(
+    ui: &mut egui::Ui,
+    material: &mut Material,
+    variable: &LawPresetVariable,
+    name: &str,
+    sources: &[(String, f64)],
+) {
+    let Some(parameter) = material
+        .parameters
+        .iter_mut()
+        .find(|parameter| parameter.name == name)
+    else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label(variable.label);
+        ui.add(
+            egui::DragValue::new(&mut parameter.value)
+                .speed(0.005)
+                .range(variable.minimum..=variable.maximum)
+                .update_while_editing(false),
+        );
+        if variable.parameter == "pump_hz" {
+            double_source_button(ui, sources, &mut parameter.value);
+        }
+    });
+}
+
 /// The preset's own values, as the labels it gave them. With `row`, only a
 /// one-row preset acting on that row; without, only a preset acting on both.
 fn preset_values(
@@ -949,25 +1084,7 @@ fn preset_values(
         return;
     }
     for (variable, name) in found.preset.variables.iter().zip(&found.parameters) {
-        let Some(parameter) = material
-            .parameters
-            .iter_mut()
-            .find(|parameter| parameter.name == *name)
-        else {
-            continue;
-        };
-        ui.horizontal(|ui| {
-            ui.label(variable.label);
-            ui.add(
-                egui::DragValue::new(&mut parameter.value)
-                    .speed(0.005)
-                    .range(variable.minimum..=variable.maximum)
-                    .update_while_editing(false),
-            );
-            if variable.parameter == "pump_hz" {
-                double_source_button(ui, sources, &mut parameter.value);
-            }
-        });
+        preset_variable(ui, material, variable, name, sources);
     }
 }
 
@@ -1168,6 +1285,85 @@ mod tests {
         let saved = funfern_app::topology_persistence::save(&state.editor.document).unwrap();
         let loaded = funfern_app::topology_persistence::parse_document(saved.as_bytes()).unwrap();
         assert!(loaded.presentation.advanced_materials);
+    }
+
+    /// Viewing a material in the panel rewrites nothing, in either view and
+    /// every skin: each medium of the catalogue, and a composition the simple
+    /// view reads as Custom (Kerr beside sine-Gordon, van der Pol on constant
+    /// values).
+    #[test]
+    fn viewing_any_medium_leaves_it_as_authored() {
+        let skins = [
+            PhysicsModel::Mechanical,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            },
+        ];
+        for physics in skins {
+            let base = Scene::initial().materials[0].clone();
+            let mut materials = medium_presets()
+                .iter()
+                .map(|preset| apply_medium_preset(preset, &base, physics).unwrap())
+                .collect::<Vec<_>>();
+            let kerr = law_presets()
+                .iter()
+                .find(|preset| preset.id == "M-F1")
+                .unwrap();
+            let sine_gordon = restoring_presets()
+                .iter()
+                .find(|preset| preset.id == "R2")
+                .unwrap();
+            let composed =
+                apply_restoring_preset(sine_gordon, &apply_law_preset(kerr, &base).unwrap())
+                    .unwrap();
+            assert_eq!(identify_medium_preset(&composed, physics), None);
+            materials.push(composed);
+            let mut constant = base.clone();
+            law_editor::set_self_oscillating(
+                &mut constant,
+                physics,
+                law_editor::legacy_damping_row(physics),
+                true,
+            );
+            assert_eq!(identify_medium_preset(&constant, physics), None);
+            materials.push(constant);
+            for material in materials {
+                for advanced in [false, true] {
+                    let mut state = Playground::default();
+                    state.editor.document.model.draft.physics = physics;
+                    state.editor.document.presentation.advanced_materials = advanced;
+                    let selection = state.resolved_material_selection();
+                    let stored = Material {
+                        id: selection,
+                        ..material.clone()
+                    };
+                    let slot = state
+                        .editor
+                        .document
+                        .model
+                        .draft
+                        .materials
+                        .iter_mut()
+                        .find(|item| item.id == selection)
+                        .unwrap();
+                    *slot = stored.clone();
+                    let context = egui::Context::default();
+                    for _ in 0..2 {
+                        let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                            state.materials_panel(ui);
+                        });
+                    }
+                    assert_eq!(
+                        state.material_edit.as_ref(),
+                        Some(&stored),
+                        "{physics:?}, advanced {advanced}"
+                    );
+                }
+            }
+        }
     }
 
     /// The pump helper offers each enabled source that has a frequency, and

@@ -145,3 +145,14 @@ device.
 
 A preset whose law is not **runs** is filtered out of the selector rather than
 offered and refused, so every document a user can author assembles.
+
+The editor's two views offer these differently. **Simple** is a linear
+material, which may vary in space and carry a constant loss, or one medium
+from the catalogue, whole (`medium_presets`): each response preset alone,
+the three restoring laws R1–R3 on linear rows, a self-oscillating medium
+(D3), and van der Pol oscillators (R1 with D3). Choosing a medium replaces
+the last one, including anything the simple view cannot show, such as a loss
+drive; a constant loss rate stays. Any other composition, for example Kerr
+beside sine-Gordon, reads **Custom** there and is edited in **Advanced**,
+where Response names only the two rows and the restoring law, loss kind and
+drives have their own controls.

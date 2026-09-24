@@ -24,9 +24,17 @@
 //! integrated field `r = ∫u dt`, and a material can carry one beside any
 //! response - sine-Gordon in a Kerr medium is one material. Their names say
 //! what `r` is in each skin ([`restoring_preset_text`]).
+//!
+//! The editor's simple view offers whole media instead ([`medium_presets`]):
+//! each response preset alone, and the Gate O examples on linear rows - the
+//! three restoring laws, a self-oscillating medium and a lattice of van der
+//! Pol oscillators. A material is either one of those or linear there; any
+//! other composition is authored in Advanced.
 
 use crate::material::{MaterialParameter, ScalarField};
-use crate::material_law::{CoefficientLaw, FieldLaw, RestoringLaw, TimeDrive};
+use crate::material_law::{
+    CoefficientLaw, DampingLaw, FieldLaw, LossChannel, RateLaw, RestoringLaw, TimeDrive,
+};
 use crate::{
     ElectromagneticPolarization, MAX_MATERIAL_PARAMETERS, Material, MaterialError, PhysicsModel,
 };
@@ -653,6 +661,300 @@ pub fn van_der_pol_text(physics: PhysicsModel) -> String {
     )
 }
 
+const GAIN: LawPresetVariable = LawPresetVariable {
+    parameter: "gain",
+    label: "Gain rate γ₀",
+    default: 0.5,
+    minimum: 0.0,
+    maximum: 1.0e3,
+};
+const THRESHOLD: LawPresetVariable = LawPresetVariable {
+    parameter: "threshold",
+    label: "Threshold a",
+    default: 1.0,
+    minimum: 1.0e-6,
+    maximum: 1.0e3,
+};
+const SELF_OSCILLATION_VARIABLES: &[LawPresetVariable] = &[GAIN, THRESHOLD];
+// Only a threshold past this is refused; a preset has no amplitude it could
+// promise to stay under.
+const SELF_OSCILLATION_BOUND: f64 = 1.0e3;
+
+/// A whole medium from the catalogue: a response on the two rows, a restoring
+/// law on the integrated field, and whether the primary loss self-oscillates
+/// (catalogue D3). This is what the editor's simple view offers, where a
+/// material is either linear or one of these examples; composing the parts by
+/// hand is Advanced.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MediumPreset {
+    response: usize,
+    restoring: usize,
+    pub self_oscillating: bool,
+}
+
+impl MediumPreset {
+    pub fn response(&self) -> &'static LawPreset {
+        &PRESETS[self.response]
+    }
+
+    pub fn restoring(&self) -> &'static RestoringPreset {
+        &RESTORING_PRESETS[self.restoring]
+    }
+
+    /// Every value the medium asks for, response first, then the restoring
+    /// law, then the self-oscillation.
+    pub fn variables(&self) -> impl Iterator<Item = &'static LawPresetVariable> {
+        let oscillation: &'static [LawPresetVariable] = if self.self_oscillating {
+            SELF_OSCILLATION_VARIABLES
+        } else {
+            &[]
+        };
+        self.response()
+            .variables
+            .iter()
+            .chain(self.restoring().variables)
+            .chain(oscillation)
+    }
+}
+
+const fn medium(response: usize, restoring: usize, self_oscillating: bool) -> MediumPreset {
+    MediumPreset {
+        response,
+        restoring,
+        self_oscillating,
+    }
+}
+
+const MEDIA: &[MediumPreset] = &[
+    medium(0, 0, false),
+    medium(1, 0, false),
+    medium(2, 0, false),
+    medium(3, 0, false),
+    medium(4, 0, false),
+    medium(5, 0, false),
+    medium(6, 0, false),
+    medium(7, 0, false),
+    medium(8, 0, false),
+    medium(9, 0, false),
+    medium(10, 0, false),
+    medium(11, 0, false),
+    // Gate O, on linear rows: the three restoring laws, a medium that
+    // self-oscillates, and the lattice of van der Pol oscillators a
+    // Klein-Gordon cutoff makes of it.
+    medium(0, 1, false),
+    medium(0, 2, false),
+    medium(0, 3, false),
+    medium(0, 0, true),
+    medium(0, 1, true),
+];
+
+/// Every medium the simple view offers, in the order the selector shows them.
+pub fn medium_presets() -> &'static [MediumPreset] {
+    MEDIA
+}
+
+/// Which medium a material is, and the parameters each part is bound to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediumPresetMatch {
+    pub preset: &'static MediumPreset,
+    pub response: LawPresetMatch,
+    pub restoring: RestoringPresetMatch,
+    /// The gain and threshold parameters of a self-oscillating medium.
+    pub self_oscillation: Option<Vec<String>>,
+}
+
+impl MediumPresetMatch {
+    /// One parameter name per entry of [`MediumPreset::variables`], in that
+    /// order.
+    pub fn parameters(&self) -> impl Iterator<Item = &String> {
+        self.response
+            .parameters
+            .iter()
+            .chain(&self.restoring.parameters)
+            .chain(self.self_oscillation.iter().flatten())
+    }
+}
+
+/// Recovers the medium a material is, or `None` for one the simple view could
+/// not show whole: a law written by hand, a response beside a restoring law,
+/// a driven or field-dependent loss. The editor reads that as Custom and
+/// leaves it for Advanced. A constant loss on either row is part of any
+/// medium, since the simple view edits it.
+pub fn identify_medium_preset(
+    material: &Material,
+    physics: PhysicsModel,
+) -> Option<MediumPresetMatch> {
+    let response = identify_law_preset(material)?;
+    let restoring = identify_restoring_preset(material)?;
+    let self_oscillation = identify_self_oscillation(material, physics);
+    let primary_electric = primary_loss_is_electric(physics);
+    for (electric, channel) in [
+        (true, &material.electric_loss),
+        (false, &material.magnetic_loss),
+    ] {
+        let Some(channel) = channel else { continue };
+        let oscillating = electric == primary_electric && self_oscillation.is_some();
+        if !oscillating
+            && (channel.law.rate != RateLaw::Constant || channel.law.drive != TimeDrive::None)
+        {
+            return None;
+        }
+    }
+    let preset = MEDIA.iter().find(|entry| {
+        entry.response() == response.preset
+            && entry.restoring() == restoring.preset
+            && entry.self_oscillating == self_oscillation.is_some()
+    })?;
+    Some(MediumPresetMatch {
+        preset,
+        response,
+        restoring,
+        self_oscillation,
+    })
+}
+
+/// Writes a whole medium onto a material: its rows, its restoring law and its
+/// primary loss kind. What the simple view cannot show goes, so the material
+/// is then exactly that medium: a loss drive, a field-dependent loss rate, a
+/// law another preset left. A constant loss rate stays, and so do values the
+/// user tuned when a part is re-applied.
+pub fn apply_medium_preset(
+    preset: &'static MediumPreset,
+    material: &Material,
+    physics: PhysicsModel,
+) -> Result<Material, MaterialError> {
+    let mut applied = apply_law_preset(preset.response(), material)?;
+    applied = apply_restoring_preset(preset.restoring(), &applied)?;
+    applied = apply_self_oscillation(preset.self_oscillating, &applied, physics)?;
+    let oscillating = preset
+        .self_oscillating
+        .then(|| primary_loss_is_electric(physics));
+    for (electric, channel) in [
+        (true, &mut applied.electric_loss),
+        (false, &mut applied.magnetic_loss),
+    ] {
+        if oscillating == Some(electric) {
+            continue;
+        }
+        if let Some(found) = channel {
+            found.law = DampingLaw::constant();
+            if found.base_rate == ScalarField::constant(0.0) {
+                *channel = None;
+            }
+        }
+    }
+    Ok(applied)
+}
+
+/// Whether a skin's primary loss channel, the one on the displayed field, is
+/// the electric one: in TM it is, and in TE and Mechanical it is the magnetic
+/// one, which the Mechanical adapter puts on the density.
+pub fn primary_loss_is_electric(physics: PhysicsModel) -> bool {
+    matches!(
+        physics,
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm
+        }
+    )
+}
+
+fn primary_loss(material: &Material, physics: PhysicsModel) -> &Option<LossChannel> {
+    if primary_loss_is_electric(physics) {
+        &material.electric_loss
+    } else {
+        &material.magnetic_loss
+    }
+}
+
+fn primary_loss_mut(material: &mut Material, physics: PhysicsModel) -> &mut Option<LossChannel> {
+    if primary_loss_is_electric(physics) {
+        &mut material.electric_loss
+    } else {
+        &mut material.magnetic_loss
+    }
+}
+
+/// The gain and threshold parameters of a primary loss the self-oscillation
+/// preset wrote, or `None`.
+fn identify_self_oscillation(material: &Material, physics: PhysicsModel) -> Option<Vec<String>> {
+    let channel = primary_loss(material, physics).as_ref()?;
+    let RateLaw::VanDerPol {
+        threshold,
+        amplitude_bound,
+    } = &channel.law.rate
+    else {
+        return None;
+    };
+    if channel.law.drive != TimeDrive::None
+        || *amplitude_bound != ScalarField::constant(SELF_OSCILLATION_BOUND)
+    {
+        return None;
+    }
+    [&channel.base_rate, threshold]
+        .into_iter()
+        .map(|slot| {
+            let source = slot.source()?;
+            material
+                .parameters
+                .iter()
+                .any(|parameter| parameter.name == source)
+                .then(|| source.to_owned())
+        })
+        .collect()
+}
+
+/// Makes the primary loss self-oscillating with bound parameters, or takes a
+/// self-oscillating one away. Its rate is a gain, not a loss, so turning it
+/// off removes the channel rather than leaving that rate to damp.
+fn apply_self_oscillation(
+    chosen: bool,
+    material: &Material,
+    physics: PhysicsModel,
+) -> Result<Material, MaterialError> {
+    let outgoing = identify_self_oscillation(material, physics);
+    let existing = outgoing.clone().filter(|_| chosen);
+    let variables: &[LawPresetVariable] = if chosen {
+        SELF_OSCILLATION_VARIABLES
+    } else {
+        &[]
+    };
+    let drop_oscillation = |material: &mut Material| {
+        let channel = primary_loss_mut(material, physics);
+        if channel
+            .as_ref()
+            .is_some_and(|found| matches!(found.law.rate, RateLaw::VanDerPol { .. }))
+        {
+            *channel = None;
+        }
+    };
+    rebind(
+        material,
+        existing,
+        outgoing,
+        variables,
+        drop_oscillation,
+        |material, names| {
+            if !chosen {
+                drop_oscillation(material);
+                return;
+            }
+            let field = |index: usize| ScalarField::formula(&names[index]).expect("parameter name");
+            // A legacy damping on the same field would sum with the gain.
+            material.damping = ScalarField::constant(0.0);
+            *primary_loss_mut(material, physics) = Some(LossChannel {
+                base_rate: field(0),
+                law: DampingLaw {
+                    rate: RateLaw::VanDerPol {
+                        threshold: field(1),
+                        amplitude_bound: ScalarField::constant(SELF_OSCILLATION_BOUND),
+                    },
+                    drive: TimeDrive::None,
+                },
+            });
+        },
+    )
+}
+
 impl LawPreset {
     /// The laws this preset writes when its variables are bound to `names`.
     /// Both applying and matching go through here, so they cannot disagree.
@@ -1177,6 +1479,146 @@ mod tests {
             omega0: ScalarField::constant(2.0),
         };
         assert_eq!(identify_restoring_preset(&custom), None);
+    }
+
+    fn skins() -> [PhysicsModel; 3] {
+        use crate::ElectromagneticPolarization;
+        [
+            PhysicsModel::Mechanical,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            },
+        ]
+    }
+
+    /// The simple view's catalogue lists every response preset on its own
+    /// once, and every medium comes back from what it writes in every skin,
+    /// with its defaults.
+    #[test]
+    fn every_medium_is_recovered_in_every_skin() {
+        for response in PRESETS {
+            let alone = MEDIA
+                .iter()
+                .filter(|entry| {
+                    entry.response() == response
+                        && entry.restoring().id.is_empty()
+                        && !entry.self_oscillating
+                })
+                .count();
+            assert_eq!(alone, 1, "{}", response.name);
+        }
+        for physics in skins() {
+            for entry in MEDIA {
+                let applied =
+                    apply_medium_preset(entry, &Material::default_medium(), physics).unwrap();
+                assert!(applied.valid());
+                let found = identify_medium_preset(&applied, physics).expect("recovered");
+                assert_eq!(found.preset, entry);
+                let names = found.parameters().collect::<Vec<_>>();
+                assert_eq!(names.len(), entry.variables().count());
+                assert_eq!(applied.parameters.len(), names.len());
+                for (name, variable) in names.into_iter().zip(entry.variables()) {
+                    let value = applied
+                        .parameters
+                        .iter()
+                        .find(|parameter| parameter.name == *name)
+                        .unwrap()
+                        .value;
+                    assert_eq!(value, variable.default);
+                }
+                assert_eq!(
+                    primary_loss(&applied, physics).is_some(),
+                    entry.self_oscillating
+                );
+            }
+        }
+    }
+
+    /// Choosing a medium replaces the whole of the last one: nothing the
+    /// simple view cannot show survives it, and cycling the catalogue never
+    /// accumulates parameters. Re-applying keeps a tuned value.
+    #[test]
+    fn a_medium_replaces_the_one_before_it() {
+        let physics = skins()[1];
+        let mut material = Material::default_medium();
+        for entry in MEDIA.iter().cycle().take(MEDIA.len() * 2) {
+            material = apply_medium_preset(entry, &material, physics).unwrap();
+            assert_eq!(material.parameters.len(), entry.variables().count());
+            assert_eq!(
+                identify_medium_preset(&material, physics).unwrap().preset,
+                entry
+            );
+        }
+        let lattice = MEDIA
+            .iter()
+            .find(|entry| entry.self_oscillating && entry.restoring().id == "R1")
+            .unwrap();
+        let mut tuned = apply_medium_preset(lattice, &material, physics).unwrap();
+        for parameter in &mut tuned.parameters {
+            parameter.value *= 1.5;
+        }
+        assert_eq!(
+            apply_medium_preset(lattice, &tuned, physics).unwrap(),
+            tuned
+        );
+        let linear = apply_medium_preset(&MEDIA[0], &tuned, physics).unwrap();
+        assert_eq!(linear.restoring, RestoringLaw::None);
+        assert_eq!(linear.electric_loss, None);
+        assert!(linear.parameters.is_empty());
+    }
+
+    /// A material composed by hand is not a medium, and so reads Custom in
+    /// the simple view: a response beside a restoring law, a driven loss, a
+    /// self-oscillation with a constant threshold. A constant loss is part of
+    /// any medium.
+    #[test]
+    fn a_composed_material_is_not_a_medium() {
+        let physics = skins()[1];
+        let kerr =
+            apply_law_preset(preset("M-F1", "Kerr medium"), &Material::default_medium()).unwrap();
+        let composed = apply_restoring_preset(restoring("R2"), &kerr).unwrap();
+        assert_eq!(identify_medium_preset(&composed, physics), None);
+
+        let mut lossy = kerr.clone();
+        lossy.magnetic_loss = Some(LossChannel {
+            base_rate: ScalarField::constant(0.2),
+            law: DampingLaw::constant(),
+        });
+        assert!(identify_medium_preset(&lossy, physics).is_some());
+        lossy.magnetic_loss.as_mut().unwrap().law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.1),
+            frequency_hz: ScalarField::constant(1.0),
+            phase_radians: ScalarField::constant(0.0),
+        };
+        assert_eq!(identify_medium_preset(&lossy, physics), None);
+        // Applying a medium over it clears the drive and keeps the rate.
+        let cleaned = apply_medium_preset(&MEDIA[0], &lossy, physics).unwrap();
+        assert_eq!(
+            cleaned.magnetic_loss,
+            Some(LossChannel {
+                base_rate: ScalarField::constant(0.2),
+                law: DampingLaw::constant(),
+            })
+        );
+
+        let mut constant = Material::default_medium();
+        constant.electric_loss = Some(LossChannel {
+            base_rate: ScalarField::constant(0.5),
+            law: DampingLaw {
+                rate: RateLaw::VanDerPol {
+                    threshold: ScalarField::constant(1.0),
+                    amplitude_bound: ScalarField::constant(SELF_OSCILLATION_BOUND),
+                },
+                drive: TimeDrive::None,
+            },
+        });
+        assert_eq!(identify_medium_preset(&constant, physics), None);
+        // A self-oscillation in TE sits on the magnetic channel, so the same
+        // electric one is a field-dependent secondary loss there.
+        assert_eq!(identify_medium_preset(&constant, skins()[2]), None);
     }
 
     /// Every skin names each law for what its integrated field is there, and

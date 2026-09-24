@@ -12261,3 +12261,38 @@ Stage 11.1, per [Gate O](spikes/funfern-gate-o.md).
   refuse.
 - **Test:** `a_parameter_is_deleted_unless_a_formula_uses_it`, run under
   `--release` like the rest of the suite.
+
+## 2026-09-25 — The simple material view offers whole media
+
+- **Asked by the user:** hide the restoring force outside Advanced, and give
+  the presets restoring-based behaviour. Simple is for linear materials,
+  which may vary in space, or preset media; fiddling is Advanced.
+- **Core.** `medium_presets` in `law_presets.rs` composes a response preset,
+  a restoring preset and a flag for self-oscillation. The catalogue holds
+  each response preset alone, R1–R3 on linear rows, a self-oscillating medium
+  (D3), and van der Pol oscillators (R1 with D3).
+  - The self-oscillation part binds its gain γ₀ and threshold a to
+    parameters on the skin's primary loss channel: electric in TM, magnetic
+    in TE and Mechanical.
+  - `identify_medium_preset` needs every part to match, and every other loss
+    to be constant and undriven.
+  - `apply_medium_preset` applies the parts through the shared `rebind`, so
+    values tuned on a re-applied part stay and a replaced part's parameters
+    leave. It then makes the remaining losses constant and undriven.
+- **Editor.**
+  - In the simple view, Response lists the media. A restoring or van der Pol
+    medium's values and the cutoff f₀ sit under it.
+  - The Restoring force group and the Loss kind toggle show only in
+    Advanced.
+  - A composed material reads "Custom — composed by hand, edited in
+    Advanced" and is left as it is.
+  - Advanced is unchanged.
+- **Tests.**
+  - `every_medium_is_recovered_in_every_skin`,
+    `a_medium_replaces_the_one_before_it` and
+    `a_composed_material_is_not_a_medium` in the core.
+  - `viewing_any_medium_leaves_it_as_authored` renders the panel for every
+    medium and for two compositions, in both views and every skin.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check pass. The UI itself is for the user to
+  judge.
