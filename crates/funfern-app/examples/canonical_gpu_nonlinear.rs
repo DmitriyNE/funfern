@@ -8,6 +8,10 @@
 //!
 //! `NONLINEAR_PUMPED=1` adds a parametric pump on the Kerr row, so the
 //! coefficient the inverse divides by also moves in time.
+//!
+//! `NONLINEAR_FORCED=1` composes a volume source, a harmonic prescribed wall
+//! and both loss channels with the pumped medium; `NONLINEAR_GAP=1` a stiff
+//! thin gap across it. Each is a stage the device writes through the maps.
 
 use std::time::{Duration, Instant};
 
@@ -18,9 +22,11 @@ use funfern_app::canonical_gpu::{
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
-    CanonicalForcing, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw,
-    FieldLaw, MeshingOptions, OuterBoundaryCondition, Point2, QuadraticWaveOperator, ScalarField,
-    Scene, TimeDrive, mesh_scene,
+    BACKGROUND_REGION, CanonicalForcing, CanonicalSource, CanonicalTemporalWaveOperator,
+    CanonicalTemporalWaveState, CoefficientLaw, DampingLaw, FieldLaw, InternalBoundary,
+    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw, LossChannel, MeshingOptions,
+    OpenCubicSpline, OuterBoundaryCondition, Point2, QuadraticWaveOperator, RateLaw, ScalarField,
+    Scene, TimeDrive, TimeSignal, mesh_scene,
 };
 
 const TOTAL_STEPS: u64 = 200;
@@ -41,8 +47,41 @@ struct Expected {
 }
 
 fn main() -> AppExit {
-    let pumped = std::env::var("NONLINEAR_PUMPED").is_ok_and(|value| value == "1");
+    let flag = |name: &str| std::env::var(name).is_ok_and(|value| value == "1");
+    let forced = flag("NONLINEAR_FORCED");
+    let gap = flag("NONLINEAR_GAP");
+    let pumped = flag("NONLINEAR_PUMPED") || forced || gap;
     let mut scene = Scene::default();
+    if forced {
+        let channel = |rate: f64| LossChannel {
+            base_rate: ScalarField::constant(rate),
+            law: DampingLaw {
+                rate: RateLaw::Constant,
+                drive: TimeDrive::None,
+            },
+        };
+        scene.materials[0].electric_loss = Some(channel(0.4));
+        scene.materials[0].magnetic_loss = Some(channel(0.25));
+    }
+    if gap {
+        scene.internal_boundaries.push(InternalBoundary {
+            id: InternalBoundaryId(1),
+            spline: OpenCubicSpline::uniform(vec![
+                Point2::new(-0.65, 0.0),
+                Point2::new(-0.2, 0.0),
+                Point2::new(0.2, 0.0),
+                Point2::new(0.65, 0.0),
+            ])
+            .expect("gap spline"),
+            region: BACKGROUND_REGION,
+            span_laws: vec![InternalBoundaryLaw {
+                coupling: InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 120.0,
+                },
+                ..InternalBoundaryLaw::REFLECTING
+            }],
+        });
+    }
     scene.materials[0].mass_law.field = FieldLaw::Polynomial {
         chi1: ScalarField::constant(0.0),
         chi2: ScalarField::constant(0.8),
@@ -83,7 +122,26 @@ fn main() -> AppExit {
         .expect("nonlinear operator");
     assert!(operator.has_field_laws());
     let base = operator.base();
-    let forcing = CanonicalForcing::none(base);
+    let mut forcing = CanonicalForcing::none(base);
+    if forced {
+        let mut prescribed = vec![None; base.degrees_of_freedom()];
+        for (node, point) in base.node_points().iter().enumerate() {
+            if point.x < -0.999 {
+                prescribed[node] = Some(TimeSignal::harmonic(0.2, 0.15, 1.3, 0.2));
+            }
+        }
+        forcing = CanonicalForcing::from_prescribed(base, prescribed).expect("prescribed wall");
+        forcing
+            .push_source(
+                CanonicalSource::direct(
+                    base,
+                    base.primary_mass().to_vec(),
+                    TimeSignal::harmonic(0.0, 0.6, 1.4, 0.35),
+                )
+                .expect("volume source"),
+            )
+            .expect("push volume source");
+    }
 
     let time_step = 0.4 * operator.maximum_time_step();
     // A field of about 0.5 and a complementary field of about 0.3: Kerr is
@@ -106,7 +164,9 @@ fn main() -> AppExit {
         .compatible_flux(&potential)
         .expect("compatible nonlinear flux");
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
-        .expect("nonlinear state");
+        .expect("nonlinear state")
+        .pinned(&operator, &forcing)
+        .expect("pinned nonlinear state");
 
     let mut oracle = state.clone();
     let initial = oracle.energy(&operator).expect("initial energy");
@@ -132,9 +192,11 @@ fn main() -> AppExit {
     let plan = CanonicalGpuPlan::compile_temporal(&operator, &state, &forcing, clock)
         .expect("nonlinear GPU plan");
     println!(
-        "nonlinear gate{}: {} Q, {} b, {TOTAL_STEPS} steps; energy {initial:.4e}; the field sits \
+        "nonlinear gate{}{}{}: {} Q, {} b, {TOTAL_STEPS} steps; energy {initial:.4e}; the field sits \
          up to {:.0}% from its linear read",
         if pumped { " (pumped)" } else { "" },
+        if forced { " + source, pins, loss" } else { "" },
+        if gap { " + thin gap" } else { "" },
         plan.node_count,
         plan.sample_count,
         100.0 * departure

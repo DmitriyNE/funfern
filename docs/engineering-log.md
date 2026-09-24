@@ -10918,3 +10918,42 @@ Stage 9.2.
   - **Corrective edit:** an edit clears the latch before its upload begins, so
     its generation hands off from the untouched accepted state.
   - Nothing is clipped or reset.
+
+## 2026-09-24 — Nonlinear media compose with sources, pins, loss and gaps on the device
+
+Stage 9.3.
+
+- **Admission.** `attach_temporal_bulk` now admits field laws everywhere
+  except against an outgoing or absorbing wall, which waits for 9.4.
+- **Kick.** `kick_nonlinear_node` does the kick on a node whose map follows
+  its field.
+  - A pin is written through the forward map
+    `temporal_primary_flux_of_field`, `Q = P(g)`. A field past a declared
+    bound is refused with `STATUS_INVERSE_DOMAIN`.
+  - Its energy lanes charge source and force work at the field of the kick's
+    mean flux. That is a second-order stand-in for the reference's exact
+    discrete gradient: the lanes are diagnostics, and an f32 energy quotient
+    loses more to cancellation.
+- **Found and fixed: a Stage 7 device defect.** On a driven generation the
+  device's loss stages (`start_loss`, `finish_loss_validate`) re-pinned a
+  prescribed node at the authored linear mass. The f64 reference pins only in
+  its kicks, through the map in force at their stage, and decays the pinned
+  flux with everything else.
+  - Pins with loss under a drive had no device gate, so this went unseen.
+  - The new `FORCED_PINNED_LOSS=1` mode of `canonical_gpu_temporal_forced`
+    (a pumped linear medium, a harmonic wall and both loss channels) measured
+    Q 1.276e-2 before the fix and Q 2.702e-7, b 5.092e-7 after.
+  - The fixed path keeps its pins in the loss stages, as its own reference
+    does.
+- **`canonical_gpu_nonlinear` modes:**
+
+  | mode | medium | Q | b |
+  | --- | --- | --- | --- |
+  | `NONLINEAR_FORCED=1` | pumped Kerr/saturable, volume source, harmonic prescribed wall, both loss channels | 2.255e-6 | 1.250e-6 (1.192e-3 on Q before the loss-stage fix) |
+  | `NONLINEAR_GAP=1` | pumped, with a stiff thin gap | 5.484e-7 | 9.219e-7 |
+
+- **Regression check:** all seventeen examples and every mode exit 0. The
+  linear figures are unchanged.
+- **Carried to 9.8:** a driven linear step costs about 10% more
+  (`canonical_gpu_temporal_timing`: 400 → 442 µs a step), because every node
+  now checks its records for a field law. A plan-level flag will skip that.

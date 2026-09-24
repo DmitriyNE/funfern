@@ -1035,14 +1035,20 @@ impl CanonicalGpuPlan {
         clock: CanonicalGpuClock,
     ) -> Result<(), CanonicalGpuBuildError> {
         // A field law runs as its record's fourth word, inverted per stage by
-        // the shader's bracketed solve. The device admits it where that solve
-        // is the whole story so far: the freely evolving bulk. Walls, forcing,
-        // loss and gaps each need their own discrete-gradient stage on the
-        // device first; until then they are refused here rather than run
-        // with a linear kick.
-        if operator.has_field_laws() && !operator.conservative_bulk_supported() {
+        // the shader's bracketed solve. Sources, pins, loss and gaps compose
+        // with it on the device: each adds to or scales `Q` and `b`, and a pin
+        // is written through the forward map. An outgoing or absorbing wall
+        // needs the discrete-gradient kick, which is not ported yet, so it is
+        // refused here rather than run with a linear one.
+        let walled = operator.base().outgoing_boundary().is_some()
+            || operator
+                .base()
+                .first_order_boundary_damping()
+                .iter()
+                .any(|value| *value != 0.0);
+        if operator.has_field_laws() && walled {
             return Err(CanonicalGpuBuildError::Unrepresentable(
-                "field-dependent response runs on the device only in a free bulk so far",
+                "field-dependent response against an outgoing wall is not on the device yet",
             ));
         }
         self.field_laws = operator.has_field_laws();

@@ -54,6 +54,10 @@ fn main() -> AppExit {
     // under a pump that field divides by the moving mass. It runs on the
     // default square, which the gap fixture of the f64 tests is drawn for.
     let gap = std::env::var("FORCED_GAP").is_ok_and(|value| value == "1");
+    // `FORCED_PINNED_LOSS=1` puts a harmonic prescribed wall and both loss
+    // channels on the pumped medium, reflecting walls, no source: the loss
+    // stages' treatment of a pinned node is the stage under test.
+    let pinned_loss = std::env::var("FORCED_PINNED_LOSS").is_ok_and(|value| value == "1");
     let mut scene = if gap {
         Scene::default()
     } else {
@@ -100,7 +104,20 @@ fn main() -> AppExit {
     }
     // A bare fixture is a conservative bulk; everything else must not be.
     let conservative = bare && !gap;
-    let bare = bare || gap;
+    let bare = bare || gap || pinned_loss;
+    if pinned_loss {
+        let channel = |rate: f64| funfern_core::LossChannel {
+            base_rate: ScalarField::constant(rate),
+            law: funfern_core::DampingLaw {
+                rate: funfern_core::RateLaw::Constant,
+                drive: TimeDrive::None,
+            },
+        };
+        scene.materials[0].electric_loss = Some(channel(0.4));
+        scene.materials[0].magnetic_loss = Some(channel(0.25));
+        fixed_scene.materials[0].electric_loss = scene.materials[0].electric_loss.clone();
+        fixed_scene.materials[0].magnetic_loss = scene.materials[0].magnetic_loss.clone();
+    }
     let mesh = mesh_scene(
         &fixed_scene,
         1,
@@ -141,6 +158,15 @@ fn main() -> AppExit {
     );
 
     let mut forcing = CanonicalForcing::none(base);
+    if pinned_loss {
+        let mut prescribed = vec![None; base.degrees_of_freedom()];
+        for (node, point) in base.node_points().iter().enumerate() {
+            if point.x < -0.999 {
+                prescribed[node] = Some(TimeSignal::harmonic(0.03, 0.02, 1.3, 0.2));
+            }
+        }
+        forcing = CanonicalForcing::from_prescribed(base, prescribed).expect("prescribed wall");
+    }
     if !bare {
         forcing
             .push_source(
@@ -170,7 +196,9 @@ fn main() -> AppExit {
         .compatible_flux(&potential)
         .expect("compatible forced flux");
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
-        .expect("forced temporal state");
+        .expect("forced temporal state")
+        .pinned(&operator, &forcing)
+        .expect("pinned forced state");
 
     let mut oracle = state.clone();
     let mut escaped = 0.0;

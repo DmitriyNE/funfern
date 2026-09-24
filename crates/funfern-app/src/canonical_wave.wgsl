@@ -486,6 +486,22 @@ fn temporal_primary_field(node: u32, flux: f32, local_time: f32) -> f32 {
     return select(-r, r, flux >= 0.0);
 }
 
+// The flux a node holds at `field`: `sign·P(|field|)`. A field past a declared
+// bound has no flux on this branch of the map and is refused, as the inverse
+// refuses the flux that would hold it.
+fn temporal_primary_flux_of_field(node: u32, field: f32, local_time: f32) -> f32 {
+    if !node_is_nonlinear(node) {
+        return temporal_primary_mass(node, local_time) * field;
+    }
+    let bound = primary_bracket(node, local_time).y;
+    if bound > 0.0 && abs(field) > bound {
+        reject(STATUS_INVERSE_DOMAIN);
+        return 0.0;
+    }
+    let magnitude = primary_site(node, local_time, abs(field)).x;
+    return select(-magnitude, magnitude, field >= 0.0);
+}
+
 // Stored energy of one node holding `flux`: `|Q|·r − ∫₀ʳ P`, and the linear
 // `Q²/2m` where no law follows the field.
 fn temporal_primary_energy(node: u32, flux: f32, local_time: f32) -> f32 {
@@ -1511,7 +1527,12 @@ fn start_loss(@builtin(global_invocation_id) id: vec3<u32>) {
         let old = accepted_q(i);
         var owned = old;
         var exchange = 0.0;
-        if nodes[i].boundary.z != 0u {
+        // The fixed path holds a pin at both ends of its dissipation, as its
+        // reference does. A driven generation's reference pins only in its
+        // kicks, at their own stage instants and through the map in force
+        // there, and decays the pinned flux with everything else; pinning here
+        // at the authored mass would disagree with it at every pinned node.
+        if nodes[i].boundary.z != 0u && !temporal_enabled() {
             owned = nodes[i].mass_loss.x
                 * harmonic_value(nodes[i].prescribed, control.clock_f32.y);
             exchange = 0.5 * (owned * owned - old * old) * nodes[i].mass_loss.y;
@@ -1556,6 +1577,11 @@ fn kick_node(node: u32, second: bool) {
     }
     let old = select(
         accepted_q(node), candidate_q(node), second || has_loss_stages());
+    if temporal_enabled() && node_is_nonlinear(node) {
+        kick_nonlinear_node(node, old, net, source, held_force, duration, target_time);
+        if second { inject_at(node); }
+        return;
+    }
     // The wall's admittance, the prescribed pin and both energy lanes divide
     // by the nodal mass, and a driven medium's mass moves. The damping itself
     // stays as assembled: that is the frozen reference impedance, which is a
@@ -1591,6 +1617,38 @@ fn kick_node(node: u32, second: bool) {
     }
     if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
     if second { inject_at(node); }
+}
+
+// The kick at a node whose map follows its field. Admission keeps absorbing
+// walls off such a node until the discrete-gradient wall is ported, so the
+// kick itself is explicit; a pin is written through the forward map,
+// `Q = P(g)`. The energy lanes charge source and force work at the field of
+// the kick's mean flux, a second-order stand-in for the reference's exact
+// discrete gradient: these lanes are diagnostics, and an f32 energy quotient
+// would lose more to cancellation than the midpoint rule does.
+fn kick_nonlinear_node(
+    node: u32, old: f32, net: f32, source: f32, held_force: f32,
+    duration: f32, target_time: f32,
+) {
+    let pinned = nodes[node].boundary.z != 0u;
+    var next = old + duration * net;
+    var field: f32;
+    if pinned {
+        field = harmonic_value(nodes[node].prescribed, target_time);
+        next = temporal_primary_flux_of_field(node, field, target_time);
+    } else {
+        field = temporal_primary_field(node, 0.5 * (old + next), target_time);
+    }
+    let source_work = duration * field * source;
+    let force_work = duration * field * held_force;
+    set_candidate_q(node, next);
+    scratch[node].values.x += source_work;
+    if pinned {
+        let energy_change = temporal_primary_energy(node, next, target_time)
+            - temporal_primary_energy(node, old, target_time);
+        scratch[node].values.y += energy_change - source_work + force_work;
+    }
+    if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
 }
 
 @compute @workgroup_size(128)
@@ -2126,7 +2184,7 @@ fn finish_loss_validate(@builtin(global_invocation_id) id: vec3<u32>) {
         let before = candidate_q(i);
         var next = before - before * nodes[i].mass_loss.z;
         scratch[i].values.z += 0.5 * (before * before - next * next) * nodes[i].mass_loss.y;
-        if nodes[i].boundary.z != 0u {
+        if nodes[i].boundary.z != 0u && !temporal_enabled() {
             let owned = nodes[i].mass_loss.x
                 * harmonic_value(nodes[i].prescribed, control.clock_f32.y + control.clock_f32.x);
             scratch[i].values.y += 0.5 * (owned * owned - next * next) * nodes[i].mass_loss.y;
