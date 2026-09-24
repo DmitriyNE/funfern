@@ -11692,3 +11692,16 @@ Also landing with this, for Stage 10.8:
   coefficient, a zero saturation, a pump deeper than the coefficient and an
   overflowing value are each refused at load.
 - README and architecture describe the time-driven and nonlinear media.
+
+## 2026-09-24 — Stage 10 closed
+
+- **Report:** the [Stage 10 report](spikes/funfern-material-laws-stage10-report.md).
+  The plan's stage table marks Stage 10 complete, and the catalogue lists D1
+  as running.
+- **Open, by decision or measured:**
+  - filter calibration, after the milestone;
+  - long-run drift on driven and nonlinear scenes past 1000 steps
+    (compensated phase arithmetic is the candidate);
+  - the size rule for complementary-row field laws.
+- **Next:** Stage 11, the oscillator and active-medium extensions (gate O),
+  on the user's word.

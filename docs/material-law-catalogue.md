@@ -110,13 +110,18 @@ whose `DampingLaw` carries a rate law and its own time drive.
 
 | ID | Law | Phenomenon | Stored as | Status |
 | --- | --- | --- | --- | --- |
-| D1 | time-modulated loss | loss-driven parametric effects, PT-symmetry-flavoured pairs with gain | `DampingLaw::drive` over `RateLaw::Constant` | authored |
+| D1 | time-modulated loss | loss-driven parametric effects, PT-symmetry-flavoured pairs with gain | `DampingLaw::drive` over `RateLaw::Constant` | runs (Advanced view; no preset) |
 | D2 | saturable absorption `1/(1 + u²/u_s²)` | self-limiting, passive mode-locking flavour | `RateLaw::SaturableAbsorption` | gated (C) |
 | D3 | van der Pol `−(1 − u²)` | self-oscillation, spontaneous pattern formation | `RateLaw::VanDerPol` | gated (O) |
 
-A constant loss channel with no drive runs on the fixed path. D1 does not,
-because the time-driven evaluator refuses a material carrying any loss channel -
-that composition is the next thing this slot needs, not a gate.
+A constant loss channel runs on the fixed path. D1 runs on the time-driven one:
+the CPU reference since Stage 7, and the device since 24 September 2026. The
+device reads each loss stage's rate from per-site loss records at the stage's
+own instant, and weighs a node shared by several materials by the masses in
+force. Before that it packed authored rates at compile time and dropped the
+drive; `canonical_gpu_long_run` with `LONG_RUN_LOSS` is the gate. Each row has
+one loss in the editor, the channel on its physical field. Legacy `damping` is
+the channel on the primary field, and the first loss edit moves it there.
 
 D3 is a deliberate instability and stays behind something explicit even once
 gate O closes.
@@ -126,7 +131,8 @@ gate O closes.
 | Path | Refuses |
 | --- | --- |
 | `canonical_wave.rs`, `linear_material_sample` | a non-linear `mass_law` or `stiffness_law`, and any restoring law. Admits loss channels. `is_linear()` includes `drive.is_none()`, which is why a driven generation assembles from a stripped model and compiles its laws separately. |
-| `wave.rs`, `evaluate_timed_directional_material_library_at` | any loss channel, any restoring law, and any non-`Linear` field law. |
+| `wave.rs`, `evaluate_timed_directional_material_library_at` | any loss channel and any restoring law, so there is no adaptive estimate for a driven medium carrying loss. Field laws are read at their small-signal limit; the size rule applies the primary row's tangent separately. |
+| `geometry.rs`, `Material::evaluate_static` | anything but constant loss channels beside linear rows, and legacy damping beside a named channel. It reads the primary field's channel as the static scalar operator's damping. |
 
 A preset whose law is not **runs** is filtered out of the selector rather than
 offered and refused, so every document a user can author assembles.
