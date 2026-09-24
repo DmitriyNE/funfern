@@ -11039,3 +11039,24 @@ Stage 9.5.
   tangent filter (gate F) is not ported. `grid_filter_admitted` stays false on
   these generations, and the checkbox's refusal note says so.
 - **Unchanged:** every example and mode (twenty-six runs) exits 0.
+
+## 2026-09-24 — A handoff into a field-dependent map is admitted against its domain
+
+Stage 9.6.
+
+- **Domain check.** `handoff_finalize` now inverts every node and sample of a
+  field-dependent target at the transferred state. A flux past a declared
+  bound rejects the handoff there with `STATUS_INVERSE_DOMAIN`, and the running
+  generation stays.
+  - Left to the target's first step, the same violation would have failed
+    after the old generation was already gone, which is the "invalid edit
+    preserves the running simulation" contract broken.
+- **Pins.** A pinned node in such a target is written through the forward map.
+- **Modes on `canonical_gpu_temporal_handoff`:**
+
+  | mode | handoff | result |
+  | --- | --- | --- |
+  | `HANDOFF_NONLINEAR=1` | driven linear source → driven Kerr/saturable target | accepted; Q 2.913e-7, b 1.896e-6, clock 1.254e-8 against the f64 reference |
+  | `HANDOFF_REJECT=1` | into a defocusing Kerr target whose bound (0.04) the running field (about 0.07) exceeds | rejected with status 3; the reference refuses the same state; the source then steps on, 24 → 28 accepted steps |
+
+- **Unchanged:** the default mode.

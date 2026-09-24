@@ -1391,10 +1391,25 @@ fn handoff_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
         let before = candidate_q(i);
         var next = before;
         var exchange = 0.0;
+        let nonlinear = temporal_enabled() && node_is_nonlinear(i);
         if nodes[i].boundary.z != 0u {
-            next = nodes[i].mass_loss.x * harmonic_value(nodes[i].prescribed, 0.0);
-            exchange = 0.5 * (next * next - before * before) * nodes[i].mass_loss.y;
+            if nonlinear {
+                next = temporal_primary_flux_of_field(
+                    i, harmonic_value(nodes[i].prescribed, 0.0), 0.0);
+                exchange = temporal_primary_energy(i, next, 0.0)
+                    - temporal_primary_energy(i, before, 0.0);
+            } else {
+                next = nodes[i].mass_loss.x * harmonic_value(nodes[i].prescribed, 0.0);
+                exchange = 0.5 * (next * next - before * before) * nodes[i].mass_loss.y;
+            }
             set_candidate_q(i, next);
+        }
+        // A generation whose map follows its field admits the transferred
+        // flux only where the map can hold it. A node past its declared
+        // bound rejects the handoff here, and the running generation stays;
+        // left to the first step, it would fail after the old one was gone.
+        if nonlinear {
+            temporal_primary_field(i, next, 0.0);
         }
         let next_force = candidate_constitutive_force(i);
         set_candidate_force(i, next_force);
@@ -1411,6 +1426,9 @@ fn handoff_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
         if !all(value >= vec2<f32>(-MAX_FINITE))
             || !all(value <= vec2<f32>(MAX_FINITE)) {
             reject(STATUS_NON_FINITE);
+        }
+        if temporal_enabled() && field_kind(samples[sample].nodes_b.w) != 0u {
+            temporal_complementary_secant(sample, value, 0.0);
         }
         inject_at(i);
         return;

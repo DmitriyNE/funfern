@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
-    CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuHandoffOutcome, CanonicalGpuPlan,
-    CanonicalGpuRequest, CanonicalGpuRuntimeTransfer, CanonicalGpuTransferPlan,
-    CanonicalWaveGpuPlugin,
+    CANONICAL_FAILURE_INVERSE_DOMAIN, CanonicalGpuClock, CanonicalGpuDisplay,
+    CanonicalGpuHandoffOutcome, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuRuntimeTransfer,
+    CanonicalGpuTransferPlan, CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
@@ -38,6 +38,7 @@ struct Expected {
     started: Instant,
     deadline: Instant,
     failed: bool,
+    reject: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,8 @@ enum Phase {
     Warmup,
     Handoff,
     Evolution,
+    /// After a rejected handoff: the source must keep stepping.
+    Continue(u32),
     Done,
 }
 
@@ -83,6 +86,32 @@ fn main() -> AppExit {
         phase_radians: ScalarField::constant(0.63),
         sharpness: ScalarField::constant(2.2),
     };
+
+    // `HANDOFF_NONLINEAR=1` gives the target generation Kerr on its mass row
+    // and saturation on its stiffness row, so the handoff admits the driven
+    // field into a field-dependent map. `HANDOFF_REJECT=1` gives it instead a
+    // defocusing Kerr law whose bound the running field already exceeds: the
+    // device must reject the handoff and keep stepping the source.
+    let flag = |name: &str| std::env::var(name).is_ok_and(|value| value == "1");
+    let reject = flag("HANDOFF_REJECT");
+    if flag("HANDOFF_NONLINEAR") {
+        target_material.mass_law.field = funfern_core::FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(40.0),
+            amplitude_bound: None,
+        };
+        target_material.stiffness_law.field = funfern_core::FieldLaw::Saturable {
+            chi: ScalarField::constant(300.0),
+            saturation: ScalarField::constant(0.03),
+        };
+    }
+    if reject {
+        target_material.mass_law.field = funfern_core::FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(-0.2),
+            amplitude_bound: Some(ScalarField::constant(0.04)),
+        };
+    }
 
     let mut fixed_scene = source_scene.clone();
     for material in &mut fixed_scene.materials {
@@ -157,14 +186,27 @@ fn main() -> AppExit {
         .drive
         .evaluate(&source_scene.materials[0].parameters)
         .expect("source mass drive");
-    let mut target_state = CanonicalTemporalWaveState::new_at(
+    let target_state = CanonicalTemporalWaveState::new_at(
         &target_operator,
         time_step,
         source_state.primary_flux().to_vec(),
         source_state.complementary_flux().to_vec(),
         handoff_time,
-    )
-    .expect("target temporal oracle state");
+    );
+    if reject {
+        // The reference refuses the same state, which is what the device
+        // is held to.
+        assert!(
+            target_state.is_err(),
+            "the fixture must leave the target's domain"
+        );
+    }
+    let mut target_state = if reject {
+        CanonicalTemporalWaveState::zero(&target_operator, time_step)
+            .expect("placeholder for the rejected target")
+    } else {
+        target_state.expect("target temporal oracle state")
+    };
     target_state
         .runtime_mut()
         .begin_switch(material_id, true, 0.0, 1.4)
@@ -179,6 +221,9 @@ fn main() -> AppExit {
         )
         .expect("preserved target mass carrier");
     for _ in 0..TARGET_STEPS {
+        if reject {
+            break;
+        }
         target_state
             .step(&target_operator)
             .expect("target temporal oracle step");
@@ -252,6 +297,7 @@ fn main() -> AppExit {
             .collect(),
         absolute_time: target_state.time(),
         time_step,
+        reject,
         phase: Phase::Warmup,
         settle_after: None,
         started: Instant::now(),
@@ -321,7 +367,14 @@ fn validate(
         });
         return;
     }
-    if Instant::now() >= expected.deadline || request.stats().failure() != 0 {
+    let rejected_as_expected = expected.reject
+        && matches!(
+            request.handoff_outcome(),
+            CanonicalGpuHandoffOutcome::Rejected(_)
+        );
+    if Instant::now() >= expected.deadline
+        || (request.stats().failure() != 0 && !rejected_as_expected)
+    {
         eprintln!("temporal handoff GPU gate timed out or failed");
         expected.failed = true;
         expected.phase = Phase::Done;
@@ -345,9 +398,29 @@ fn validate(
             expected.phase = Phase::Handoff;
         }
         Phase::Handoff => match request.handoff_outcome() {
+            CanonicalGpuHandoffOutcome::Accepted if expected.reject => {
+                eprintln!("the device admitted a handoff past the target's amplitude bound");
+                expected.failed = true;
+                expected.phase = Phase::Done;
+            }
             CanonicalGpuHandoffOutcome::Accepted => {
                 request.request_steps(TARGET_STEPS);
                 expected.phase = Phase::Evolution;
+            }
+            CanonicalGpuHandoffOutcome::Rejected(reason) if expected.reject => {
+                let accepted = display.clock.map_or(0, |clock| clock.accepted_steps);
+                println!(
+                    "temporal handoff into a bounded field law rejected with status {reason} \
+                     ({}); the source kept {accepted} accepted steps",
+                    funfern_app::canonical_gpu::canonical_failure_description(reason)
+                );
+                if reason != CANONICAL_FAILURE_INVERSE_DOMAIN {
+                    expected.failed = true;
+                    expected.phase = Phase::Done;
+                    return;
+                }
+                request.request_steps(4);
+                expected.phase = Phase::Continue(accepted);
             }
             CanonicalGpuHandoffOutcome::Rejected(reason) => {
                 eprintln!("temporal GPU handoff rejected with {reason}");
@@ -399,6 +472,17 @@ fn validate(
                 eprintln!("temporal handoff accuracy gate was exceeded");
             }
             expected.phase = Phase::Done;
+        }
+        Phase::Continue(from) => {
+            let accepted = display.clock.map_or(0, |clock| clock.accepted_steps);
+            if request.stats().failure() != 0 && !rejected_as_expected {
+                eprintln!("the source faulted after the rejected handoff");
+                expected.failed = true;
+                expected.phase = Phase::Done;
+            } else if accepted >= from + 4 {
+                println!("the source stepped on: {from} -> {accepted} accepted steps");
+                expected.phase = Phase::Done;
+            }
         }
         _ => {}
     }
