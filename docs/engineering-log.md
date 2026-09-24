@@ -12352,3 +12352,30 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   b 1.4e-6; starter Q 8.5e-7, b 1.0e-6, inside the Stage 0 bound.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — The GRIN rod becomes a collimator (gallery 3)
+
+- The rod was 1.4 long with a smoothstep profile, which is flat to fourth
+  order on the axis and has no paraxial pitch, so it guided without imaging
+  anything in particular. It is now a quarter-pitch collimator: the profile is
+  parabolic, `n = 1 + dn·max(0, 1 − (y/H)²)` with `H = 0.3`, `dn = 0.6`, whose
+  paraxial pitch is `2πH·√((1 + dn)/(2dn)) = 2.18`. The rod is rectangular and
+  0.544 long, from x = −0.75, and the source sits on its entrance face at 4 Hz.
+  Mass and stiffness stay reciprocal, so the impedance is matched. Renamed
+  "GRIN collimator"; the beam-profile probe sits at x = 0.75.
+- **Measured** at edge 0.08, on a cut across the whole domain height:
+
+  | | Power within the aperture | Half-amplitude width |
+  | --- | --- | --- |
+  | rod, x = 0.2 | 0.75 | 0.60 |
+  | rod, x = 0.75 | 0.83 | 0.55 |
+  | bare source, x = 0.75 | 0.39 | 1.85 |
+
+  Test: `the_grin_collimator_sends_out_a_beam_that_does_not_spread`.
+- **Not claimed:** a flat phase at the exit face. Just outside it the phase
+  ripples by ±0.8 rad (λ/8 is 0.79), because the near field there still holds
+  the rod's reflected and wide-angle waves. The beam further out is what
+  shows the collimation.
+- **Device:** `canonical_gpu_long_run` at 400 steps, Q 1.3e-6, b 1.5e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

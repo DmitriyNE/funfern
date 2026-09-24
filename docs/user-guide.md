@@ -395,7 +395,7 @@ names or with every expression evaluated at the material frame's origin. Each ro
   startup from browser local storage or the native per-user recovery file. Copy
   scene link embeds compressed, validated scene data in a `#scene=v1.…` URL
   fragment; while that fragment is active, later autosaves keep it current.
-  The catalog includes ready-to-run GRIN rod and circular Luneburg profiles with
+  The catalog includes ready-to-run GRIN collimator and circular Luneburg profiles with
   their drivers, probes, and wave-speed view presets. View toggles, field intensity,
   and material-overlay settings travel through files, links, recovery, and examples.
   Camera, selection, open panels, and floating-window layout are not saved. With no

@@ -37,8 +37,9 @@ pub fn catalog() -> &'static [TopologyExample] {
                 material_lens(),
             ),
             example(
-                "GRIN rod",
-                "An off-axis source is guided by a smooth transverse index profile.",
+                "GRIN collimator",
+                "A quarter-pitch graded-index rod turns a point source on one face into a \
+                 collimated beam leaving the other.",
                 grin_rod(),
             ),
             example(
@@ -356,38 +357,47 @@ fn material_lens() -> TopologyDocument {
     document
 }
 
+/// Quarter-pitch GRIN collimator: `n = 1 + dn (1 − (y/H)²)` has paraxial
+/// pitch `2πH √((1 + dn)/(2 dn))`, 2.18 for these values, so a rod a quarter
+/// of that long turns a point on its entrance face into a plane wave at its
+/// exit face.
+const GRIN_H: f64 = 0.3;
+const GRIN_DN: f64 = 0.6;
+const GRIN_ENTRANCE: f64 = -0.75;
+
+fn grin_quarter_pitch() -> f64 {
+    0.25 * std::f64::consts::TAU * GRIN_H * ((1.0 + GRIN_DN) / (2.0 * GRIN_DN)).sqrt()
+}
+
 fn grin_rod() -> TopologyDocument {
+    grin_rod_with(GRIN_DN)
+}
+
+fn grin_rod_with(dn: f64) -> TopologyDocument {
     let mut builder = Builder::new();
     builder.scene.materials.push(Material {
         id: MaterialId(2),
         name: "GRIN profile".into(),
-        mass_density: ScalarField::formula("1 + dn * smoothstep(0, 1, 1 - (y / H)^2)").unwrap(),
-        stiffness: ScalarField::formula("1 / (1 + dn * smoothstep(0, 1, 1 - (y / H)^2))").unwrap(),
+        mass_density: ScalarField::formula("1 + dn * max(0, 1 - (y / H)^2)").unwrap(),
+        stiffness: ScalarField::formula("1 / (1 + dn * max(0, 1 - (y / H)^2))").unwrap(),
         damping: ScalarField::constant(0.0),
         axis_ratio: ScalarField::constant(1.0),
         parameters: vec![
             MaterialParameter {
                 name: "H".into(),
-                value: 0.30,
+                value: GRIN_H,
             },
             MaterialParameter {
                 name: "dn".into(),
-                value: 0.60,
+                value: dn,
             },
         ],
         color: [46, 120, 139],
         ..Material::default_medium()
     });
+    let exit = GRIN_ENTRANCE + grin_quarter_pitch();
     let region = builder.subdomain(
-        PeriodicCubicSpline::polygon(vec![
-            Point2::new(-0.70, -0.24),
-            Point2::new(0.70, -0.24),
-            Point2::new(0.74, 0.0),
-            Point2::new(0.70, 0.24),
-            Point2::new(-0.70, 0.24),
-            Point2::new(-0.74, 0.0),
-        ])
-        .unwrap(),
+        slab(GRIN_ENTRANCE, exit, GRIN_H),
         MaterialId(2),
         MaterialFrame {
             attachment: MaterialFrameAttachment::FollowRegion,
@@ -397,16 +407,16 @@ fn grin_rod() -> TopologyDocument {
     let mut document = builder.document();
     document.model.source = PointSource {
         region,
-        ..source(Point2::new(-0.56, 0.11), 4.0, 16.0, 0.04)
+        ..source(Point2::new(GRIN_ENTRANCE + 0.01, 0.0), 4.0, 16.0, 0.04)
     };
     document.model.probes.push(TopologyProbeDefinition {
         id: ProbeId(1),
-        name: "Rod output profile".into(),
+        name: "Beam profile".into(),
         color: [91, 220, 194],
         enabled: true,
         target: TopologyProbeTarget::Segment {
-            start: Point2::new(0.50, -0.38),
-            end: Point2::new(0.50, 0.38),
+            start: Point2::new(0.75, -0.9),
+            end: Point2::new(0.75, 0.9),
             preset: ProbeSamplingPreset::High,
         },
     });
@@ -967,8 +977,8 @@ mod tests {
             }
         }
 
-        /// `|U|` at the node nearest `point`.
-        fn at(&self, point: Point2) -> f64 {
+        /// `U` at the node nearest `point`.
+        fn complex(&self, point: Point2) -> (f64, f64) {
             let node = self
                 .nodes
                 .iter()
@@ -976,7 +986,12 @@ mod tests {
                 .min_by(|a, b| (*a.1 - point).norm().total_cmp(&(*b.1 - point).norm()))
                 .unwrap()
                 .0;
-            let (re, im) = self.amplitude[node];
+            self.amplitude[node]
+        }
+
+        /// `|U|` at the node nearest `point`.
+        fn at(&self, point: Point2) -> f64 {
+            let (re, im) = self.complex(point);
             re.hypot(im)
         }
 
@@ -1294,5 +1309,43 @@ mod tests {
             "the first dark fringe holds {dark:.3} of the centre"
         );
         assert!(bright > 0.6, "the first bright fringe holds {bright:.3}");
+    }
+
+    /// A beam's cut across the domain at `x`: the share of its power within
+    /// `|y| < 0.3`, and its half-amplitude width about the axis.
+    fn beam(scene: &Harmonic, x: f64) -> (f64, f64) {
+        let line = scene.along(Point2::new(x, -0.9), Point2::new(x, 0.9), 37);
+        let total: f64 = line.iter().map(|value| value * value).sum();
+        let inside: f64 = line[12..=24].iter().map(|value| value * value).sum();
+        let half = 0.5 * line[18];
+        let reach = |step: isize| {
+            (1..=18)
+                .take_while(|offset| line[(18 + step * offset) as usize] >= half)
+                .count() as f64
+        };
+        (inside / total, 0.05 * (reach(1) + reach(-1) + 1.0))
+    }
+
+    /// The collimator gallery claim: behind the rod the beam keeps its width
+    /// and most of its power within the aperture, where the bare source's
+    /// spreads across the domain.
+    #[test]
+    fn the_grin_collimator_sends_out_a_beam_that_does_not_spread() {
+        let rod = Harmonic::run(&grin_rod(), 0.08, 6.0, 4.0, 3.0);
+        let bare = Harmonic::run(&grin_rod_with(0.0), 0.08, 6.0, 4.0, 3.0);
+        let (near, far) = (beam(&rod, 0.2), beam(&rod, 0.75));
+        let spread = beam(&bare, 0.75);
+        assert!(
+            far.0 > 0.7,
+            "the rod's beam keeps {:.2} in the aperture",
+            far.0
+        );
+        assert!(spread.0 < 0.5, "the bare source keeps {:.2}", spread.0);
+        assert!(
+            (far.1 / near.1 - 1.0).abs() < 0.25,
+            "the beam went from {:.2} to {:.2} wide",
+            near.1,
+            far.1
+        );
     }
 }
