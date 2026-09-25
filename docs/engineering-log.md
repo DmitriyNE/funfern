@@ -12678,3 +12678,36 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   with the app's own tools.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — A welded baffle's move fell back to a full rebuild
+
+- **Reported** on the pinned domain wall: moving a baffle showed "repair ·
+  Could not construct a constrained mesh: cavity boundary has a dead end".
+  Reproduced through the runtime with the UI's own drag planners: every move
+  of a baffle welded to the wall at one end, its tip or the whole baffle,
+  failed the carve and fell back to a full rebuild, with one welded baffle
+  as with two. It predates the fix above, which leaves a one-spur face's
+  mesh as it was; the pinned wall was the first scene with welded baffles.
+  The fallback kept the mesh correct, only slower, and the reason reached
+  the status line.
+- **Cause.** Kept atoms find their end vertices by label and parameter. At a
+  welded foot both wall atoms carry the same label and parameter, so both
+  resolve to one of the foot's two sector vertices, the carve reads that as
+  a junction whose sectors changed, and rebuilds every atom ending there
+  from the new plan: conservative and correct. But its `expand` then gave
+  the two wall chains meeting at the foot two new vertices, one per sector
+  trace, and the cavity walk arrived at one and found no edge leaving it.
+  The fresh mesher seeds such a pair as one vertex until the slit is cut
+  back in; the carve had no counterpart.
+- **Fix.** `expand` finds each slit foot on a face's cycle, where the steps
+  either side of a run of slit steps end on two traces at one point, and
+  seeds the second trace to the first one's vertex. Slit recovery, shared
+  with the fresh mesher, splits the foot into sectors again.
+- **Tests:** `a_moved_welded_baffle_is_carved_with_its_foot_split_again`
+  (core: one welded baffle, and two with one moved; the carve meets the
+  adaptation contract, matches a fresh mesh's areas and pairs both sides)
+  and `moving_a_welded_baffle_repairs_by_carving` (runtime, welded through
+  the editor, six moves each carve). The runtime test fails on the old carve
+  with the reported message.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

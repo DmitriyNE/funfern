@@ -1078,9 +1078,51 @@ impl TopologyCarveJob {
             for step in domain.steps.iter().flatten() {
                 *edge_counts.entry(step.edge).or_default() += 1;
             }
+            // A slit's foot on the face's boundary, where the cycle walks out
+            // along the slit and back to the same point: the steps either
+            // side of it end on the foot's two sector traces. As in a fresh
+            // mesh's face cycle they are one vertex until the slit is cut
+            // back in, which splits them again; two vertices there left the
+            // cavity walk with a dead end at a welded baffle's foot.
+            let is_slit =
+                |step: &PlannedFaceStep| edge_counts.get(&step.edge).copied().unwrap_or(0) > 1;
+            let mut feet = BTreeMap::<TraceVertexId, TraceVertexId>::new();
+            for cycle in &domain.steps {
+                let count = cycle.len();
+                for index in 0..count {
+                    let before = &cycle[(index + count - 1) % count];
+                    if !is_slit(&cycle[index]) || is_slit(before) {
+                        continue;
+                    }
+                    let Some(after) = (index..index + count)
+                        .map(|offset| &cycle[offset % count])
+                        .find(|step| !is_slit(step))
+                    else {
+                        continue;
+                    };
+                    let (arrival, departure) =
+                        (before.boundary.traces[1], after.boundary.traces[0]);
+                    if arrival != departure
+                        && trace_points.get(&arrival) == trace_points.get(&departure)
+                    {
+                        feet.insert(arrival, departure);
+                        feet.insert(departure, arrival);
+                    }
+                }
+            }
             for step in domain.steps.iter().flatten() {
                 if !self.changed_new_keys.contains(&atom_key(&step.boundary)) {
                     continue;
+                }
+                for trace in step.boundary.traces {
+                    if !self.trace_vertices.contains_key(&trace)
+                        && let Some(vertex) = feet
+                            .get(&trace)
+                            .and_then(|partner| self.trace_vertices.get(partner))
+                            .copied()
+                    {
+                        self.trace_vertices.insert(trace, vertex);
+                    }
                 }
                 // Walked twice by one face: a slit. A separated one is a
                 // baffle and a transmitting one is a divider that encloses
@@ -2936,5 +2978,79 @@ mod tests {
         assert_contract(&carved, &scene.after_plan, scene.options);
         assert_same_areas(&carved, &scene.fresh);
         assert!(report.kept_triangles > 0, "{report:?}");
+    }
+
+    /// Baffles welded to the ceiling at one end, at `feet` (x, fraction of
+    /// the top side), with their free tips at `tips`.
+    fn welded_geometry(feet: &[f64], tips: &[Point2]) -> TopologyGeometry {
+        let mut geometry = TopologyGeometry::default();
+        for (index, (x, tip)) in feet.iter().zip(tips).enumerate() {
+            let id = 60 + index as u64;
+            let mut curve = TopologyCurve::new(
+                CurveId(id),
+                CurveSpline::Open(
+                    OpenCubicSpline::polyline(vec![Point2::new(*x, 1.0), *tip]).unwrap(),
+                ),
+                spans(id * 10, 1, SpanBehavior::REFLECTING),
+            )
+            .unwrap();
+            curve.nodes[0].vertex = Some(TopologyVertexId(id));
+            geometry.curves.push(curve);
+            geometry.vertices.push(TopologyVertex {
+                id: TopologyVertexId(id),
+                location: TopologyVertexLocation::Outer {
+                    side: OuterSide::Top,
+                    fraction: (1.0 - x) / 2.0,
+                },
+            });
+        }
+        geometry.synchronize_vertices().unwrap();
+        geometry
+    }
+
+    /// Moving a baffle welded to the wall is a carve, not a fallback. Its
+    /// foot's two sector vertices are reached only by kept wall edges once
+    /// the baffle is rebuilt, and the cavity used to dead-end at one of them.
+    /// One welded baffle, then two in one face with only one of them moved.
+    #[test]
+    fn a_moved_welded_baffle_is_carved_with_its_foot_split_again() {
+        let options = options(0.12);
+        for (feet, before_tips, after_tips) in [
+            (
+                vec![0.0],
+                vec![Point2::new(0.0, 0.25)],
+                vec![Point2::new(0.1, 0.25)],
+            ),
+            (
+                vec![-0.4, 0.4],
+                vec![Point2::new(-0.4, 0.2), Point2::new(0.4, 0.2)],
+                vec![Point2::new(-0.25, 0.2), Point2::new(0.4, 0.2)],
+            ),
+        ] {
+            let before_topology =
+                compile_topology(&welded_geometry(&feet, &before_tips), 1).unwrap();
+            let before_plan = single_face_plan(&before_topology, options);
+            let before = mesh_topology_plan(&before_plan, 10, options).unwrap();
+            let after_topology = compile_topology(&welded_geometry(&feet, &after_tips), 2).unwrap();
+            let after_plan = single_face_plan(&after_topology, options);
+            let (carved, report) =
+                carve(&before, &before_plan, &after_plan, &after_topology, options);
+            assert_contract(&carved, &after_plan, options);
+            assert_eq!(report.rebuilt_curves, 1, "{report:?}");
+            assert!(report.kept_triangles > 0, "{report:?}");
+            let fresh = mesh_topology_plan(&after_plan, 11, options).unwrap();
+            assert_same_areas(&carved, &fresh);
+            let sides = |wanted: CurveTraceSide| {
+                carved
+                    .boundary_edges
+                    .iter()
+                    .filter(|edge| {
+                        matches!(edge.label, BoundaryLabel::Curve { side, separated: true, .. } if side == wanted)
+                    })
+                    .count()
+            };
+            assert_eq!(sides(CurveTraceSide::Left), sides(CurveTraceSide::Right));
+            assert!(sides(CurveTraceSide::Left) > 0);
+        }
     }
 }

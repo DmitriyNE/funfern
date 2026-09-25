@@ -3388,6 +3388,88 @@ mod tests {
         });
     }
 
+    /// A baffle welded to the wall at one end moves by carving, with a second
+    /// welded baffle in the same face or without one: its foot is split into
+    /// sectors again rather than leaving the cavity walk a dead end, which
+    /// used to send every such move to a full rebuild.
+    #[test]
+    fn moving_a_welded_baffle_repairs_by_carving() {
+        for count in [1, 2] {
+            let mut editor = TopologyEditor::default();
+            let mut curves = vec![];
+            for (index, (from, to, side)) in [
+                (0.9, 0.25, OuterSide::Top),
+                (-0.9, -0.25, OuterSide::Bottom),
+            ]
+            .into_iter()
+            .take(count)
+            .enumerate()
+            {
+                let curve = editor
+                    .create_open_curve(
+                        OpenCubicSpline::polyline(vec![
+                            Point2::new(0.0, from),
+                            Point2::new(0.0, to),
+                        ])
+                        .unwrap(),
+                        OpenCurvePurpose::BoundaryBaffle,
+                        None,
+                        None,
+                    )
+                    .unwrap()
+                    .curve;
+                settle(&mut editor);
+                editor
+                    .attach_endpoint(
+                        curve,
+                        0,
+                        TopologyAttachment::Boundary(FaceAnchor::Outer {
+                            side,
+                            fraction: 0.5,
+                        }),
+                    )
+                    .unwrap();
+                settle(&mut editor);
+                curves.push((index, curve));
+            }
+            let mut runtime = TopologyRuntime::default();
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            prepare(&mut runtime).unwrap();
+            runtime.commit_ready(token).unwrap();
+            let (_, curve) = curves[0];
+            for step in 1..=6 {
+                editor
+                    .set_control(curve, 3, Point2::new(0.03 * step as f64, 0.25))
+                    .unwrap();
+                settle(&mut editor);
+                let token = runtime
+                    .request(
+                        editor.revision,
+                        &editor.document,
+                        editor.compiled_accepted.clone(),
+                        options(),
+                        false,
+                    )
+                    .unwrap();
+                assert_eq!(prepare(&mut runtime).unwrap(), token);
+                let moved = runtime.commit_ready(token).unwrap();
+                assert!(
+                    moved.carve.is_some(),
+                    "{count} welded, move {step} fell back: {:?}",
+                    moved.repair_fallback
+                );
+            }
+        }
+    }
+
     /// Adaptation checks every constrained edge against the plan it came from,
     /// so a chain the carve recovered has to carry the same lineage a rebuild
     /// would have given it: its interval endpoints hold their traces, and the
