@@ -12582,3 +12582,32 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   No difference beyond the noise.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Symmetry breaking (gallery 8)
+
+- **Scene.** TM, the whole background the "φ⁴ double well" medium with
+  `λ = 60`, `phi4_bound = 3`, and a constant electric loss of 1/s; every wall
+  outgoing; opens on the integrated field. At rest the medium sits on the
+  unstable top of its double well.
+- **The seed had to change.** The plan's single weak point source tipped the
+  whole medium into the + well, at every amplitude tried (0.5 to 20): `r` is
+  the integral of a sine that starts at zero, which has a positive mean, so
+  the source seeds one sign everywhere. The seed is now "frozen noise": a
+  volume source over the background region whose profile is a fixed sum of
+  three sines at wavenumbers 6.5, 6.6 and 6.0, inside the unstable band
+  `k < √λ = 7.7`, at amplitude 1 and 3 Hz. Each patch tips towards its
+  profile's sign. A document cannot hold an initial state, so this stands in
+  for the noise a real quench starts from.
+- **Measured** on a 9 × 9 grid at edge 0.08: no node past `|r| = 0.9` at 1 s;
+  both signs on a tenth of the grid or more at 2 s, with walls between; the
+  smaller domain leaves through the outgoing walls between 3 and 6 s; at 8 s
+  every node sits in one well at `|r| = 1` within 2%. Amplitudes of 0.1 and 1
+  give the same sequence; the seed picks the signs, not the dynamics. With
+  `λ = 0` the same source leaves `|r|` under 0.1. Test:
+  `phi4_breaks_into_domains_of_both_signs_that_then_coarsen`.
+- **Device:** found the loss-share defect fixed in the entry above. After the
+  fix, `canonical_gpu_long_run` at 400 steps Q 8.7e-7, b 9.5e-7; at 1000
+  steps Q 1.2e-5, b 7.2e-5 relative to a `|b|` that has fallen a hundredfold
+  as the walls left, the same absolute error as at 400.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

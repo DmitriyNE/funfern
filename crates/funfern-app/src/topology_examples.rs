@@ -99,6 +99,13 @@ pub fn catalog() -> &'static [TopologyExample] {
                  turn of its phase; each runs down the line as a kink in the integrated field.",
                 josephson_line(),
             ),
+            example(
+                "Symmetry breaking",
+                "A medium resting on the top of a double well is tipped by faint frozen noise: \
+                 it falls into both wells in patches, then the walls between them move until \
+                 one well holds everything. Shown in the integrated field.",
+                symmetry_breaking(),
+            ),
         ]
     })
 }
@@ -1013,13 +1020,65 @@ fn josephson_line_with(restoring: &str, bias: f64) -> TopologyDocument {
     document
 }
 
+/// φ⁴ at rest sits on the unstable top of its double well. A weak source
+/// tips it, the medium falls into the wells at `r = ±1` in patches, and the
+/// walls between them straighten and meet under a constant loss.
+const PHI4_LAMBDA: f64 = 60.0;
+
+/// A fixed pattern of both signs at wavenumbers inside φ⁴'s unstable band
+/// (`k < √λ = 7.7`), standing in for the noise a real quench starts from.
+const FROZEN_NOISE: &str =
+    "sin(6.1*x + 2.3*y) + sin(5.7*y - 3.4*x + 1.3) + sin(4.4*x - 4.1*y + 2.9)";
+
+fn symmetry_breaking() -> TopologyDocument {
+    symmetry_breaking_with(PHI4_LAMBDA, 1.0)
+}
+
+fn symmetry_breaking_with(lambda: f64, amplitude: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    let preset = restoring_presets()
+        .iter()
+        .find(|preset| preset.id == "R3")
+        .expect("the φ⁴ preset");
+    let mut medium = apply_restoring_preset(preset, &builder.scene.materials[0])
+        .expect("a restoring preset applies to the background");
+    medium.name = "Double well".into();
+    for (name, value) in [("lambda", lambda), ("phi4_bound", 3.0)] {
+        medium
+            .parameters
+            .iter_mut()
+            .find(|parameter| parameter.name == name)
+            .expect("the preset names its parameter")
+            .value = value;
+    }
+    medium.electric_loss = Some(LossChannel {
+        base_rate: ScalarField::constant(1.0),
+        law: DampingLaw::constant(),
+    });
+    builder.scene.materials[0] = medium;
+    builder.scene.volume_sources.push(VolumeSource {
+        region: BACKGROUND_REGION,
+        enabled: true,
+        profile: ScalarField::formula(FROZEN_NOISE).unwrap(),
+        parameters: vec![],
+        signal: TimeSignal::harmonic(0.0, amplitude, 3.0, 0.0),
+    });
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    document.presentation.integrated_field = true;
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 14);
+        assert_eq!(catalog().len(), 15);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -1898,5 +1957,50 @@ mod tests {
             furthest < 0.2,
             "the Klein-Gordon line moved to {furthest:.3}"
         );
+    }
+
+    /// The symmetry-breaking gallery claim. From the unstable top, the
+    /// frozen noise tips the medium into both wells at once: at 2 s each sign
+    /// holds a tenth of the grid or more. The walls between the domains then
+    /// move under the loss until one well holds everything, at `|r| = 1`
+    /// within 2%. With no double well the same source leaves `r` near zero.
+    #[test]
+    fn phi4_breaks_into_domains_of_both_signs_that_then_coarsen() {
+        let grid = (0..9)
+            .flat_map(|j| {
+                (0..9).map(move |i| Point2::new(-0.9 + 0.225 * i as f64, 0.9 - 0.225 * j as f64))
+            })
+            .collect::<Vec<_>>();
+        let at = |rows: &[(f64, Vec<f64>, Vec<f64>)], seconds: f64| {
+            rows.iter()
+                .min_by(|a, b| (a.0 - seconds).abs().total_cmp(&(b.0 - seconds).abs()))
+                .unwrap()
+                .1
+                .clone()
+        };
+        let rows = integrated_traces(&symmetry_breaking(), 0.08, 8.0, &grid, 0.5);
+        let early = at(&rows, 2.0);
+        let (up, down) = (
+            early.iter().filter(|r| **r > 0.9).count(),
+            early.iter().filter(|r| **r < -0.9).count(),
+        );
+        assert!(
+            up >= 8 && down >= 8,
+            "at 2 s, {up} up and {down} down of 81"
+        );
+        let late = at(&rows, 8.0);
+        let well = late[0].signum();
+        assert!(
+            late.iter().all(|r| (r * well - 1.0).abs() < 0.02),
+            "at 8 s, r spans {:.3?}",
+            late.iter()
+                .fold((f64::MAX, f64::MIN), |(lo, hi), r| (lo.min(*r), hi.max(*r)))
+        );
+        let flat = integrated_traces(&symmetry_breaking_with(0.0, 1.0), 0.08, 8.0, &grid, 2.0);
+        let furthest = flat
+            .iter()
+            .flat_map(|(_, r, _)| r.iter().map(|v| v.abs()))
+            .fold(0.0, f64::max);
+        assert!(furthest < 0.2, "without the well r reached {furthest:.3}");
     }
 }
