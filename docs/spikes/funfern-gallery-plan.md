@@ -217,6 +217,13 @@ x = 0.3 forms the wall off-centre and it slides into the neck. Top and bottom
 reflect. Building it found and fixed a mesher defect: two baffles welded at
 one end in one face did not mesh.
 
+Revised the same day: with straight baffles a settled wall did not follow
+the neck when the baffles moved, because a straight wall away from the neck
+feels only the exponential tail of its own profile. The neck is now two round
+bumps, arcs of radius 0.6 welded to the floor and the ceiling with the
+pockets behind them left out, so a wall anywhere over them is pushed to the
+waist and follows it when the bumps are dragged.
+
 ### 9. Pacemaker
 
 TM. The "Van der Pol oscillators" medium everywhere, threshold 1, gain 2,

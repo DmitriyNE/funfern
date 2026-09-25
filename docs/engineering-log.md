@@ -12711,3 +12711,45 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   with the reported message.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — The pinned wall's neck becomes two round bumps
+
+- **Reported:** after the scene starts the wall feels frozen, and moving the
+  baffles does nothing interesting. With the carve fixed a move hands the
+  field across quickly, but the wall still stayed put. A wall at the neck is
+  pinned; moved baffles leave behind a straight full-height wall where they
+  were, and a straight wall costs the same anywhere, so the only pull on it
+  is the tail of its own profile reaching the baffles, about `e^{−√2·√λ·d}`,
+  `e^{−11d}` at λ = 60: 4% of the contact pull at 0.3.
+- **Taper.** The neck needs a length gradient over a distance, not a sharp
+  gap. Two shapes were tried, both baffles welded to the floor and the
+  ceiling with the pocket behind them excluded, waist half-width 0.25:
+
+  | Shape | Seed at +0.5 | Settled wall, bumps jumped 0.2 |
+  | --- | --- | --- |
+  | V, half-width 0.6 | captured | stalls at 0.14 |
+  | arc, radius 0.6 | captured | follows to 0.19 |
+
+  A wall meets a reflecting baffle square on, so near a V's sharp point it
+  bends into an arc pinned at the tips rather than straightening across the
+  waist; the arc has no corner to hold it. A seed at +0.8, outside the arcs,
+  still leaves. A single jump of 0.4, two thirds of the arcs' half-width,
+  starts the wall on their outer edge and pushes it out; a drag arrives as
+  small steps and now carves each one.
+- **Scene.** "Pinned domain wall" keeps its medium, seed and walls and trades
+  the straight baffles for the arcs (12 spans each, `Builder::wall_bump`).
+  The background's face anchor moves to the left wall, since the floor's
+  midpoint now lies in a pocket. The straight-baffle helper is gone.
+- **Measured** at edge 0.08, through the runtime's own handoffs (`Session` in
+  the tests: `Q` interpolated without restoring totals across a change of
+  geometry, as the app does, `b` reconstructed, `r` interpolated): the wall
+  from +0.3 is within 0.03 of the waist from 6 to 8 s, wells at ∓0.99; six
+  drags of 0.05 half a second apart, each a carve, and 4 s later it is within
+  0.05 of the new waist. From +0.5 it settles within 0.05 by 10 s; without
+  the bumps that wall drifts away. Tests:
+  `a_domain_wall_settles_at_the_waist_and_follows_it_when_dragged`,
+  `the_bumps_reach_a_wall_a_free_channel_leaves_alone`.
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 9.2e-7, b 9.0e-7; at
+  1000 steps Q 3.9e-6, b 1.3e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

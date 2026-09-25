@@ -109,7 +109,8 @@ pub fn catalog() -> &'static [TopologyExample] {
             example(
                 "Pinned domain wall",
                 "A double-well medium falls into opposite wells either side of a wall that forms \
-                 off-centre, then slides into the neck two baffles leave and stays there.",
+                 off-centre. Two round bumps narrow the channel: the wall slides to their waist \
+                 and stays, and dragging the bumps drags it along.",
                 pinned_domain_wall(),
             ),
         ]
@@ -289,27 +290,43 @@ impl Builder {
         (curve, span)
     }
 
-    /// A reflecting baffle at `x` from the floor or the ceiling, attached to
-    /// it, whose free tip sits at height `tip`.
-    fn wall_baffle(&mut self, x: f64, tip: f64) {
+    /// A reflecting baffle through `points`, from −x to +x, welded to the
+    /// floor or the ceiling at both ends; the pocket between it and the wall
+    /// is left out of the domain. The ends are moved onto the wall vertices
+    /// exactly, as the topology resolves them.
+    fn wall_bump(&mut self, points: &[Point2]) {
         let domain = self.scene.geometry.domain;
-        let (side, y, fraction) = if tip > 0.0 {
-            (
-                OuterSide::Top,
-                domain.max_y,
-                (domain.max_x - x) / domain.width(),
-            )
+        let ceiling = points[points.len() / 2].y > 0.0;
+        let side = if ceiling {
+            OuterSide::Top
         } else {
-            (
-                OuterSide::Bottom,
-                domain.min_y,
-                (x - domain.min_x) / domain.width(),
-            )
+            OuterSide::Bottom
         };
-        let vertex = self.outer_vertex(side, fraction);
-        let curve = self.baffle(
-            OpenCubicSpline::polyline(vec![Point2::new(x, y), Point2::new(x, tip)]).unwrap(),
-        );
+        let fraction = |x: f64| {
+            if ceiling {
+                (domain.max_x - x) / domain.width()
+            } else {
+                (x - domain.min_x) / domain.width()
+            }
+        };
+        let resolved = |x: f64| {
+            if ceiling {
+                Point2::new(domain.max_x - domain.width() * fraction(x), domain.max_y)
+            } else {
+                Point2::new(domain.min_x + domain.width() * fraction(x), domain.min_y)
+            }
+        };
+        let mut points = points.to_vec();
+        let last = points.len() - 1;
+        let (left, right) = (points[0].x, points[last].x);
+        let start = self.outer_vertex(side, fraction(left));
+        let end = self.outer_vertex(side, fraction(right));
+        points[0] = resolved(left);
+        points[last] = resolved(right);
+        let spline = OpenCubicSpline::polyline(points).unwrap();
+        let parameter = spline.span_bounds(0).map(|[a, b]| (a + b) * 0.5).unwrap();
+        let first_span = CurveSpanId(self.next_span);
+        let curve = self.baffle(spline);
         let authored = self
             .scene
             .geometry
@@ -317,7 +334,24 @@ impl Builder {
             .iter_mut()
             .find(|candidate| candidate.id == curve)
             .unwrap();
-        authored.nodes[0].vertex = Some(vertex);
+        let last = authored.nodes.len() - 1;
+        authored.nodes[0].vertex = Some(start);
+        authored.nodes[last].vertex = Some(end);
+        // Running from −x to +x, the ceiling's pocket is on the curve's left
+        // and the floor's on its right.
+        self.scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Curve {
+                curve,
+                span: first_span,
+                side: if ceiling {
+                    CurveTraceSide::Left
+                } else {
+                    CurveTraceSide::Right
+                },
+                parameter,
+            },
+            region: None,
+        });
     }
 
     /// The band between two dividers, from wall to wall, as a region of
@@ -1122,27 +1156,49 @@ fn phi4_document(builder: Builder) -> TopologyDocument {
 }
 
 /// A seed odd about x = 0.3, so the medium falls into opposite wells either
-/// side of there and a wall forms 0.3 away from the neck.
+/// side of there and a wall forms 0.3 away from the waist.
 const PINNING_SEED: &str = "sin(1.5 * (x - 0.3))";
-/// Half the neck's width: a quarter of the channel's height.
-const NECK: f64 = 0.25;
+/// Half the waist's width: a quarter of the channel's height.
+const WAIST: f64 = 0.25;
+/// The bumps are arcs of this radius.
+const BUMP_RADIUS: f64 = 0.6;
 
 fn pinned_domain_wall() -> TopologyDocument {
-    pinned_domain_wall_with(true)
+    pinned_domain_wall_with(PINNING_SEED, true)
 }
 
-/// A φ⁴ wall pinned at a neck. Two baffles welded to the floor and the
-/// ceiling at x = 0 leave a gap a quarter of the channel's height, and a
-/// wall's energy is its tension times its length, so a wall across the neck
-/// costs a quarter of one across the channel. The seed puts the wall 0.3 to
-/// the right, whence it slides into the neck; without the baffles a straight
-/// wall costs the same anywhere and stays roughly where it formed.
-fn pinned_domain_wall_with(neck: bool) -> TopologyDocument {
-    let mut builder = phi4_builder(PHI4_LAMBDA, PINNING_SEED, 1.0);
+/// A φ⁴ wall pinned at a waist. Two round bumps, baffles welded to the floor
+/// and the ceiling with the pockets behind them left out, narrow the channel
+/// to a quarter of its height at x = 0. A wall's energy is its tension times
+/// its length, and anywhere over the bumps a wall is shorter the nearer it
+/// is to the waist, so it is pushed there; moving the bumps drags it along.
+/// Without them a straight wall costs the same anywhere and stays roughly
+/// where it formed.
+fn pinned_domain_wall_with(seed: &str, bumps: bool) -> TopologyDocument {
+    let mut builder = phi4_builder(PHI4_LAMBDA, seed, 1.0);
     builder.scene.outer_boundaries = channel();
-    if neck {
-        builder.wall_baffle(0.0, NECK);
-        builder.wall_baffle(0.0, -NECK);
+    // The background's own anchor, on the floor at x = 0, would sit in the
+    // floor's pocket.
+    builder.scene.face_assignments[0].anchor = FaceAnchor::Outer {
+        side: OuterSide::Left,
+        fraction: 0.5,
+    };
+    if bumps {
+        for sign in [1.0, -1.0] {
+            let centre = sign * (WAIST + BUMP_RADIUS);
+            let reach = (BUMP_RADIUS * BUMP_RADIUS - (1.0 - WAIST - BUMP_RADIUS).powi(2)).sqrt();
+            let half_angle = (reach / BUMP_RADIUS).asin();
+            let points = (0..=12)
+                .map(|index| {
+                    let angle = -half_angle + 2.0 * half_angle * index as f64 / 12.0;
+                    Point2::new(
+                        BUMP_RADIUS * angle.sin(),
+                        centre - sign * BUMP_RADIUS * angle.cos(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            builder.wall_bump(&points);
+        }
     }
     phi4_document(builder)
 }
@@ -2088,38 +2144,233 @@ mod tests {
             .collect()
     }
 
+    /// The CPU reference stepping a document's oscillator medium across edits,
+    /// handing its state from one generation to the next the way the app
+    /// does: `Q` interpolated without restoring component totals across a
+    /// change of geometry, `b` reconstructed, `r` interpolated.
+    struct Session {
+        editor: TopologyEditor,
+        runtime: TopologyRuntime,
+        meshing: MeshingOptions,
+        operator: Arc<CanonicalTemporalWaveOperator>,
+        forcing: Arc<CanonicalForcing>,
+        state: CanonicalTemporalWaveState,
+    }
+
+    impl Session {
+        fn start(document: TopologyDocument, edge: f64) -> Self {
+            let editor = TopologyEditor::from_document(document).unwrap();
+            let meshing = MeshingOptions {
+                target_edge_length: edge,
+                ..MeshingOptions::default()
+            };
+            let mut runtime = TopologyRuntime::default();
+            let prepared = Self::prepare(&mut runtime, &editor, meshing, true);
+            let operator = prepared.canonical_temporal_operator.clone().unwrap();
+            let forcing = prepared.canonical_forcing.clone();
+            let state =
+                CanonicalTemporalWaveState::zero(&operator, prepared.recommended_time_step())
+                    .unwrap()
+                    .pinned(&operator, &forcing)
+                    .unwrap();
+            Self {
+                editor,
+                runtime,
+                meshing,
+                operator,
+                forcing,
+                state,
+            }
+        }
+
+        fn prepare(
+            runtime: &mut TopologyRuntime,
+            editor: &TopologyEditor,
+            meshing: MeshingOptions,
+            fresh: bool,
+        ) -> Arc<crate::topology_runtime::PreparedTopology> {
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    meshing,
+                    fresh,
+                )
+                .unwrap();
+            loop {
+                if let Some(result) = runtime.advance(1 << 16) {
+                    result.unwrap();
+                    return runtime.commit_ready(token).unwrap();
+                }
+            }
+        }
+
+        fn run(&mut self, seconds: f64) {
+            for _ in 0..(seconds / self.state.time_step()).round() as usize {
+                self.state
+                    .step_with_forcing(&self.operator, &self.forcing)
+                    .unwrap();
+            }
+        }
+
+        /// Moves every curve by `shift`, as dragging the selection does, and
+        /// hands the state to the generation the edit prepares.
+        fn drag(&mut self, shift: Point2) {
+            use crate::topology_viewport::{
+                RigidTransform, TopologySpanTarget, plan_rigid_transform,
+            };
+            let geometry = self.editor.document.model.draft.geometry.clone();
+            let spans = geometry
+                .curves
+                .iter()
+                .flat_map(|curve| {
+                    curve
+                        .spans
+                        .iter()
+                        .map(|span| TopologySpanTarget::Curve(span.id))
+                })
+                .collect();
+            let updates = plan_rigid_transform(
+                &geometry,
+                &spans,
+                RigidTransform {
+                    pivot: Point2::default(),
+                    translation: shift,
+                    rotation_radians: 0.0,
+                    scale: 1.0,
+                },
+            )
+            .unwrap();
+            self.editor.begin();
+            self.editor
+                .apply_transform_updates_during_edit(&updates)
+                .unwrap();
+            self.editor.commit();
+            while self.editor.acceptance == crate::topology_editor::TopologyAcceptance::Pending {
+                self.editor.validate_frame(64);
+            }
+            let next = Self::prepare(&mut self.runtime, &self.editor, self.meshing, false);
+            assert!(next.carve.is_some(), "{:?}", next.repair_fallback);
+            let transfer = next
+                .canonical_transfer
+                .clone()
+                .expect("a canonical transfer");
+            let target = next.canonical_temporal_operator.clone().unwrap();
+            let primary = transfer
+                .primary
+                .transfer(
+                    self.state.primary_flux(),
+                    &vec![None; transfer.primary.target_component_count()],
+                    &vec![false; target.base().degrees_of_freedom()],
+                )
+                .unwrap()
+                .0;
+            let complementary = transfer
+                .complementary
+                .transfer(self.state.complementary_flux())
+                .unwrap()
+                .0;
+            let integrated = transfer_integrated_field(
+                next.transfer.as_ref().unwrap(),
+                self.state.integrated_field(),
+                &target,
+            )
+            .unwrap();
+            self.state = CanonicalTemporalWaveState::new_at(
+                &target,
+                next.recommended_time_step(),
+                primary,
+                complementary,
+                self.state.time(),
+            )
+            .unwrap()
+            .with_integrated_field(&target, integrated.field)
+            .unwrap();
+            self.forcing = next.canonical_forcing.clone();
+            self.operator = target;
+        }
+
+        /// `r` at the node nearest `point`.
+        fn r_at(&self, point: Point2) -> f64 {
+            let node = self
+                .operator
+                .base()
+                .node_points()
+                .iter()
+                .enumerate()
+                .min_by(|a, b| (*a.1 - point).norm().total_cmp(&(*b.1 - point).norm()))
+                .unwrap()
+                .0;
+            self.state.integrated_field()[node]
+        }
+
+        /// Where `r` changes sign along the axis.
+        fn walls(&self) -> Vec<f64> {
+            let line = (0..=40)
+                .map(|index| self.r_at(Point2::new(-1.0 + 0.05 * index as f64, 0.0)))
+                .collect::<Vec<_>>();
+            sign_changes(&line, -1.0, 0.05)
+        }
+    }
+
     /// The pinned-wall gallery claim. The wall forms 0.3 to the right of the
-    /// neck, slides into it within a few seconds and stays within 0.03 of it;
-    /// beside the baffles the two wells sit either side of them, so each
-    /// baffle carries the wall's jump. Without the baffles the same seed's
-    /// wall stays where it formed, more than 0.25 away.
+    /// waist, slides into it and stays within 0.03 of it, with the two wells
+    /// either side. Dragging the bumps 0.3 in six steps half a second apart,
+    /// as a drag in the app arrives, takes the wall with them: 4 s after the
+    /// last step it is within 0.05 of the new waist.
     #[test]
-    fn a_domain_wall_slides_into_a_neck_and_stays_pinned_there() {
-        let axis = (0..=40)
-            .map(|index| Point2::new(-1.0 + 0.05 * index as f64, 0.0))
-            .chain([Point2::new(-0.1, 0.6), Point2::new(0.1, 0.6)])
-            .collect::<Vec<_>>();
-        let rows = integrated_traces(&pinned_domain_wall(), 0.08, 12.0, &axis, 0.5);
-        // It reaches the neck near 2 s, overshoots and rings; from 5 s it
-        // stays within 0.03, and within 0.005 by 9 s at this mesh.
-        for (time, r, _) in rows.iter().filter(|row| row.0 >= 5.0) {
-            let walls = sign_changes(&r[..41], -1.0, 0.05);
+    fn a_domain_wall_settles_at_the_waist_and_follows_it_when_dragged() {
+        let mut session = Session::start(pinned_domain_wall(), 0.08);
+        session.run(6.0);
+        for _ in 0..4 {
+            session.run(0.5);
+            let walls = session.walls();
             assert!(
                 walls.len() == 1 && walls[0].abs() < 0.03,
-                "at {time:.1} s the axis crosses zero at {walls:.3?}"
-            );
-            let (left, right) = (r[41], r[42]);
-            assert!(
-                left < -0.9 && right > 0.9,
-                "at {time:.1} s beside the baffle r is {left:.3} and {right:.3}"
+                "at {:.1} s the wall is at {walls:.3?}",
+                session.state.time()
             );
         }
-        let free = integrated_traces(&pinned_domain_wall_with(false), 0.08, 12.0, &axis, 1.0);
-        let (_, r, _) = free.last().unwrap();
-        let walls = sign_changes(&r[..41], -1.0, 0.05);
+        let (left, right) = (
+            session.r_at(Point2::new(-0.7, 0.0)),
+            session.r_at(Point2::new(0.7, 0.0)),
+        );
         assert!(
-            walls.len() == 1 && walls[0] > 0.25,
-            "without the neck the wall sits at {walls:.3?}"
+            left < -0.9 && right > 0.9,
+            "the wells read {left:.3} and {right:.3}"
+        );
+        for _ in 0..6 {
+            session.drag(Point2::new(0.05, 0.0));
+            session.run(0.5);
+        }
+        session.run(4.0);
+        let walls = session.walls();
+        assert!(
+            walls.len() == 1 && (walls[0] - 0.3).abs() < 0.05,
+            "after the drag the wall is at {walls:.3?}"
+        );
+    }
+
+    /// The bumps pull on a wall well away from the waist: one formed 0.5 off
+    /// settles there, which the straight baffles tried first did not manage.
+    /// In a channel without them the same wall drifts away.
+    #[test]
+    fn the_bumps_reach_a_wall_a_free_channel_leaves_alone() {
+        let far = "sin(1.5 * (x - 0.5))";
+        let mut pinned = Session::start(pinned_domain_wall_with(far, true), 0.08);
+        pinned.run(10.0);
+        let walls = pinned.walls();
+        assert!(
+            walls.len() == 1 && walls[0].abs() < 0.05,
+            "with the bumps the wall is at {walls:.3?}"
+        );
+        let mut free = Session::start(pinned_domain_wall_with(far, false), 0.08);
+        free.run(10.0);
+        let walls = free.walls();
+        assert!(
+            walls.iter().all(|wall| wall.abs() > 0.25),
+            "without them the wall is at {walls:.3?}"
         );
     }
 }
