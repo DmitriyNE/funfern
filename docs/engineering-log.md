@@ -13179,3 +13179,41 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   1.7e-5 and 1.3e-5.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Gallery: probes along the two fibers
+
+- At the user's suggestion the parametric fiber amplifier and the bent fiber
+  gain probes along their length. A line or boundary probe reads the flux
+  across its path only, so energy density stands in for the power flow,
+  which the user chose.
+- **Parametric fiber amplifier:** a line probe "Along the fiber" on the axis
+  from x = −0.75, past the source's near field that would set the plot's
+  scale, to 0.9, at the Medium preset.
+- **Bent fiber:** a free transmitting curve along the core's axis, from
+  x = −0.8 to 0.2 short of the top wall, built by `bend_path`, which the
+  edges now share, carries a boundary probe "Along the core" at the High
+  preset. At Medium, 64 samples over 2.1 would alias the energy density's
+  ripple at half the guided wavelength (0.094). The core stays one face.
+  The "Output" point probe moved from y = 0.8 to 0.9, past the curve's end,
+  since a point on a curve is refused.
+- **Explored:** the period-averaged energy density along the axis falls
+  from 64 on the lead-in to 51 on the lead-out at edge 0.05, a ratio of
+  0.80 against the mode projection's 0.76. At edge 0.08 it swings up to
+  1.9× between neighbouring samples, the coarse mesh's own reflection. The
+  app's default adaptation refines the fiber to six elements per
+  wavelength. Considered and set aside: a flux probe on the outer edge.
+  The point source's cladding radiation leaves beside it, peaking at 44
+  against the bend's hump of 5-7 (1e-6), and its beat with the mode's tail
+  ripples ±3-5 everywhere.
+- **Measured again** with the axis curve in the mesh, at edge 0.08: radius
+  0.5 delivers 71.7%; radius 0.3 loses 44.9% and radius 0.7 loses 12.3%,
+  3.6× (was 72.5%, 43.1%, 14.3%).
+- **New test:** `every_gallery_probe_compiles_on_its_scene` prepares each
+  scene at edge 0.16 and requires every probe ready; with "Output" back on
+  the curve it fails naming the probe.
+- **Device:** `canonical_gpu_long_run` on the bent fiber at 400 steps Q
+  1.2e-6, b 1.3e-6; at 1000 steps Q 2.9e-6, b 3.4e-6; at 3000 steps
+  (printed, not judged) 1.8e-5 and 1.3e-5. The amplifier's mesh and fields
+  are unchanged.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

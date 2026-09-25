@@ -5,7 +5,8 @@ use crate::document::{
     ProbeSamplingPreset, VectorOverlay,
 };
 use crate::topology_editor::{
-    TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition, TopologyProbeTarget,
+    TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
+    TopologyProbeTarget,
 };
 use funfern_core::*;
 use std::sync::OnceLock;
@@ -1571,6 +1572,20 @@ fn fiber_amplifier_with(depth: f64, wavenumber: f64, phase: f64) -> TopologyDocu
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(0.85, 0.0)),
     });
+    // From past the source's near field, which would set the plot's scale,
+    // to the far end: its energy density shows the signal growing along the
+    // fiber.
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Along the fiber".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Segment {
+            start: Point2::new(-0.75, 0.0),
+            end: Point2::new(0.9, 0.0),
+            preset: ProbeSamplingPreset::Medium,
+        },
+    });
     document
 }
 
@@ -1580,20 +1595,11 @@ const CORE_WIDTH: f64 = 0.1;
 const CORE_PERMITTIVITY: f64 = 2.25;
 const BEND_HZ: f64 = 4.0;
 
-/// One edge of a bent fiber, `radius` from the bend's centre: along
-/// `y = −radius` from the left wall, a quarter circle about the centre, and
-/// straight up to the top wall. Cubic Bézier pieces joined at C0 knots, the
-/// quarter in two eighths whose departure from the circle is under 5e-6 of
-/// its radius. Its ends are on the walls exactly, as the topology resolves
-/// its vertices.
-fn bend_edge(builder: &mut Builder, radius: f64) -> (CurveId, CurveSpanId, f64) {
-    let domain = builder.scene.geometry.domain;
-    let left = (domain.max_y + radius) / domain.height();
-    let top = (domain.max_x - BEND_CENTRE.x - radius) / domain.width();
-    let start = builder.outer_vertex(OuterSide::Left, left);
-    let end = builder.outer_vertex(OuterSide::Top, top);
-    let entry = Point2::new(domain.min_x, domain.max_y - domain.height() * left);
-    let exit = Point2::new(domain.max_x - domain.width() * top, domain.max_y);
+/// A path `radius` from the bend's centre: from `entry` along `y = −radius`,
+/// a quarter circle about the centre, and straight up to `exit`. Cubic Bézier
+/// pieces joined at C0 knots, the quarter in two eighths whose departure from
+/// the circle is under 5e-6 of its radius.
+fn bend_path(radius: f64, entry: Point2, exit: Point2) -> OpenCubicSpline {
     let at = |angle: f64| BEND_CENTRE + Point2::new(angle.cos(), angle.sin()) * radius;
     let tangent = |angle: f64| Point2::new(-angle.sin(), angle.cos()) * radius;
     // The control reach of a cubic Bézier eighth of a circle.
@@ -1624,7 +1630,21 @@ fn bend_edge(builder: &mut Builder, radius: f64) -> (CurveId, CurveSpanId, f64) 
         radius * quarter / 2.0,
         (exit - arc_end).norm(),
     ];
-    let spline = OpenCubicSpline::new_with_multiplicities(controls, intervals, vec![3; 3]).unwrap();
+    OpenCubicSpline::new_with_multiplicities(controls, intervals, vec![3; 3]).unwrap()
+}
+
+/// One edge of a bent fiber, `radius` from the bend's centre, from the left
+/// wall to the top wall. Its ends are on the walls exactly, as the topology
+/// resolves its vertices.
+fn bend_edge(builder: &mut Builder, radius: f64) -> (CurveId, CurveSpanId, f64) {
+    let domain = builder.scene.geometry.domain;
+    let left = (domain.max_y + radius) / domain.height();
+    let top = (domain.max_x - BEND_CENTRE.x - radius) / domain.width();
+    let start = builder.outer_vertex(OuterSide::Left, left);
+    let end = builder.outer_vertex(OuterSide::Top, top);
+    let entry = Point2::new(domain.min_x, domain.max_y - domain.height() * left);
+    let exit = Point2::new(domain.max_x - domain.width() * top, domain.max_y);
+    let spline = bend_path(radius, entry, exit);
     let parameter = spline.span_bounds(0).map(|[a, b]| (a + b) * 0.5).unwrap();
     let span = CurveSpanId(builder.next_span);
     let curve = builder.open_curve(spline, &[SpanBehavior::Transmitting; 4]);
@@ -1667,6 +1687,12 @@ fn bent_fiber() -> TopologyDocument {
 /// core at its left end launches the mode; round the bend the mode's outer
 /// flank would have to outrun the light in the cladding, and there it leaks
 /// off tangentially.
+///
+/// A free transmitting curve along the core's axis, from just past the
+/// source to 0.2 short of the top wall, carries a probe whose energy density
+/// follows the power the mode carries along its length. Its samples are close
+/// enough to resolve that density's ripple at half the guided wavelength,
+/// 0.094. A point probe past its end reads the output.
 fn bent_fiber_with(radius: f64) -> TopologyDocument {
     let mut builder = glass_builder();
     bend_edge(&mut builder, radius - 0.5 * CORE_WIDTH);
@@ -1704,6 +1730,15 @@ fn bent_fiber_with(radius: f64) -> TopologyDocument {
         },
         region: Some(core),
     });
+    let first = builder.next_span;
+    let axis = builder.open_curve(
+        bend_path(
+            radius,
+            Point2::new(-0.8, -radius),
+            Point2::new(BEND_CENTRE.x + radius, 0.8),
+        ),
+        &[SpanBehavior::Transmitting; 4],
+    );
     let mut document = builder.document();
     document.model.source = PointSource {
         region: core,
@@ -1714,7 +1749,20 @@ fn bent_fiber_with(radius: f64) -> TopologyDocument {
         name: "Output".into(),
         color: [91, 220, 194],
         enabled: true,
-        target: TopologyProbeTarget::Point(Point2::new(BEND_CENTRE.x + radius, 0.8)),
+        target: TopologyProbeTarget::Point(Point2::new(BEND_CENTRE.x + radius, 0.9)),
+    });
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Along the core".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+            curve: axis,
+            spans: (first..first + 4).map(CurveSpanId).collect(),
+            side: CurveTraceSide::Left,
+            reversed: false,
+            preset: ProbeSamplingPreset::High,
+        }),
     });
     document
 }
@@ -1812,6 +1860,34 @@ mod tests {
             if let Some(result) = runtime.advance(1 << 16) {
                 result.unwrap();
                 return runtime.commit_ready(token).unwrap();
+            }
+        }
+    }
+
+    /// Every gallery probe compiles on its scene's mesh. A point probe on a
+    /// curve, or a boundary probe on a span with no trace to read, fails only
+    /// in its readout otherwise.
+    #[test]
+    fn every_gallery_probe_compiles_on_its_scene() {
+        use crate::topology_runtime::TopologyProbeCompilation;
+        for example in catalog() {
+            let prepared = prepare(&example.document, 0.16);
+            assert_eq!(
+                prepared.probes.len(),
+                example.document.model.probes.len(),
+                "{}",
+                example.name
+            );
+            for probe in prepared.probes.iter() {
+                if let TopologyProbeCompilation::Failed(error) = &probe.result {
+                    panic!("{}: probe {:?}: {error}", example.name, probe.id);
+                }
+                assert!(
+                    matches!(probe.result, TopologyProbeCompilation::Ready(_)),
+                    "{}: probe {:?} is disabled",
+                    example.name,
+                    probe.id
+                );
             }
         }
     }
@@ -3324,7 +3400,7 @@ mod tests {
     /// launches into the mode. (On that straight fiber the mode runs at
     /// `n_eff` 1.329 against a slab solve's 1.323, and 1.3238 at edge 0.04.)
     /// The gallery's radius 0.5 delivers more than 60% of it (72%); radius
-    /// 0.3 loses more than twice what radius 0.7 loses (43% against 14%).
+    /// 0.3 loses more than twice what radius 0.7 loses (45% against 12%).
     #[test]
     fn a_bent_fiber_leaks_more_the_sharper_its_bend() {
         let mut builder = glass_builder();
