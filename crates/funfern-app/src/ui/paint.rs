@@ -152,13 +152,21 @@ impl Playground {
             // The canonical primary field is authoritative. Display no longer
             // removes a component mean or reconstructs a gauge-dependent
             // scalar before exposure. On an oscillator, the integrated field
-            // `r` from the latest full snapshot when that view is chosen.
-            let integrated = self.integrated_field_shown()
-                && display.snapshot_integrated.len() == active.operator.degrees_of_freedom();
-            let field_values: Arc<[f32]> = if integrated {
-                display.snapshot_integrated.clone().into()
-            } else {
-                display.current.clone().into()
+            // `r` when that view is chosen: its own live stream, which a
+            // handoff's receipt already seeds for the new generation, and the
+            // latest full snapshot until the first copy lands.
+            let nodes = active.operator.degrees_of_freedom();
+            let integrated = self
+                .integrated_field_shown()
+                .then(|| {
+                    [&display.live_integrated, &display.snapshot_integrated]
+                        .into_iter()
+                        .find(|values| values.len() == nodes)
+                })
+                .flatten();
+            let field_values: Arc<[f32]> = match integrated {
+                Some(values) => values.clone().into(),
+                None => display.current.clone().into(),
             };
             let level = exposure_level(
                 &field_values,

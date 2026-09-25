@@ -1962,6 +1962,19 @@ fn refresh_canonical_wave_display(
     {
         return;
     }
+    // Gate O: `r` arrives on a stream of its own, and the first copy of a new
+    // generation may come with its handoff receipt before any other readback.
+    if display.generation != canonical.generation
+        || display.live_integrated_readbacks != canonical.live_integrated_readbacks
+    {
+        display.live_integrated.clear();
+        if canonical.live_integrated.len() == operator.degrees_of_freedom() {
+            display
+                .live_integrated
+                .extend(canonical.live_integrated.iter().copied());
+        }
+        display.live_integrated_readbacks = canonical.live_integrated_readbacks;
+    }
     if display.generation == canonical.generation && display.readbacks == canonical.readbacks {
         return;
     }

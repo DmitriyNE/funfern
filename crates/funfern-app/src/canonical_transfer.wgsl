@@ -388,6 +388,14 @@ fn correct_primary(@builtin(global_invocation_id) id: vec3<u32>) {
         let target_nodes = new_control.counts_a.x;
         if node < target_nodes {
             transfer[node + 1u].data = bitcast<vec4<u32>>(new_state[node].values);
+            // Gate O: an oscillator target's integrated field follows, from
+            // the last node-count words of its state, so the first frame after
+            // the handoff can paint `r`. Its place comes from the control
+            // block: the header words this receipt overwrites are gone.
+            if (new_control.boundary_offsets.w & 128u) != 0u {
+                transfer[1u + target_nodes + node].data = bitcast<vec4<u32>>(
+                    new_state[new_control.counts_a.w - target_nodes + node].values);
+            }
         }
         if node == 0u {
             let failure = max(

@@ -12910,3 +12910,38 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check. The user confirmed the crack gone in
   the app.
+
+## 2026-09-25 — The integrated-field view no longer blinks at a handoff
+
+- **Reported:** on a φ⁴ handoff the field display blinked strangely. The `r`
+  view painted `r` only from full-state snapshots; a new generation cleared
+  the stored one, and until the new generation's first full readback landed,
+  a few frames later, the view fell back to the displayed field `u`. In a
+  settled φ⁴ scene `u` is nearly zero apart from the seed's shimmer while
+  `r` sits at ±1, and the exposure, restarted at the handoff, amplified that
+  faint `u` for those frames. The view also forced a full-state readback
+  every frame while shown (`Q`, `b` over every sample and every history
+  lane) just to paint `r`.
+- **Now** `r` reaches the display two ways, neither a full snapshot:
+  - the handoff receipt, which already carries the target's primary words
+    so admission and the first display land together, carries its `r`
+    words as well: the receipt pass copies the last node-count words of the
+    target state when the target has a restoring law, reading their place
+    from the control block because the receipt overwrites the transfer
+    header;
+  - while the view is shown, a continuous readback of `r`'s tail of the
+    state alone (`CanonicalGpuRequest::set_integrated_display`), on its own
+    serial so the rule that snapshot lanes are valid only while `readbacks`
+    is unchanged is untouched.
+  The view paints that live `r`, falling back to the snapshot only until the
+  first copy lands, and full snapshots return to their quarter-second pace.
+- **Measured** (`canonical_gpu_oscillator_handoff`, which now runs the view's
+  stream): the first target frame after an accepted handoff carries `r`
+  within 1.5e-7 to 2.6e-7 of the handed `r` in `opened`, `remesh` and
+  `identity`, and exactly zero from a linear source; `to-linear` has none to
+  carry. `canonical_gpu_handoff` still commits in 33 ms, its first display
+  receipt at 17 ms; `canonical_gpu_temporal_handoff`, `canonical_gpu_oscillator`,
+  `canonical_gpu_temporal_amr` and the pinned wall's long run pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check. The blink itself is the user's to
+  confirm in the app.

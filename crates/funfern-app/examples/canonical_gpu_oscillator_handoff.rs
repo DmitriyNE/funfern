@@ -66,6 +66,9 @@ struct Pending {
 
 #[derive(Resource)]
 struct Expected {
+    /// The `r` the reference hands the target, which the device's first
+    /// target frame must already carry, from the handoff receipt.
+    handed_integrated: Vec<f64>,
     /// The bound on `b`: the Stage 0 3e-5, or, where `b` is rebuilt about the
     /// device's own `r`, a bound that admits `r`'s f32 accumulation seen
     /// through a gradient (see the module notes).
@@ -466,6 +469,7 @@ fn main() -> AppExit {
         transfer: Some(transfer),
     })
     .insert_resource(Expected {
+        handed_integrated: integrated.field.clone(),
         complementary_bound: if rebuilt_b { 1.0e-4 } else { 3.0e-5 },
         primary: target_state.primary_flux().to_vec(),
         complementary: target_state.complementary_flux().to_vec(),
@@ -538,6 +542,9 @@ fn validate(
                 .clock
                 .is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS as u32) =>
         {
+            // The integrated-field view's own stream of `r`, as the app runs
+            // it while that view is shown.
+            request.set_integrated_display(&mut commands, true);
             request
                 .begin_handoff(
                     &mut assets,
@@ -555,6 +562,28 @@ fn validate(
                 expected.phase = Phase::Done;
             }
             CanonicalGpuHandoffOutcome::Accepted => {
+                // The first target frame carries `r` from the same receipt as
+                // its primary state, before any other readback.
+                if !expected.handed_integrated.is_empty() {
+                    let error = if display.live_integrated.len() == expected.handed_integrated.len()
+                    {
+                        relative_l2(
+                            display
+                                .live_integrated
+                                .iter()
+                                .map(|value| f64::from(*value)),
+                            expected.handed_integrated.iter().copied(),
+                        )
+                    } else {
+                        f64::INFINITY
+                    };
+                    println!("first target frame r against the handed r: {error:.3e}");
+                    if error > 3.0e-5 {
+                        expected.failed = true;
+                        expected.phase = Phase::Done;
+                        return;
+                    }
+                }
                 request.request_steps(TARGET_STEPS);
                 expected.phase = Phase::Evolution;
             }

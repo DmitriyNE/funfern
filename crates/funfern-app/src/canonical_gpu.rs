@@ -2474,6 +2474,14 @@ impl CanonicalGpuTransferPlan {
         })
     }
 
+    /// The words the combined admission/display receipt overwrites at the
+    /// front of the consumed map: a header, the target's primary state and,
+    /// on an oscillator target, its integrated field, so the first frame after
+    /// a handoff can paint `r`.
+    fn receipt_words(&self) -> usize {
+        1 + self.target_node_count + self.target_integrated_count
+    }
+
     /// Gate O: how many nodes carry the integrated field on each side of
     /// this transfer. `(n, 0)` drops a source's `r`; `(0, n)` starts the
     /// target from `r = 0`.
@@ -2557,7 +2565,7 @@ impl CanonicalGpuTransferPlan {
         );
         self.manifest.word_count = self.words.len();
         self.words.resize(
-            self.words.len().max(self.target_node_count + 1),
+            self.words.len().max(self.receipt_words()),
             GpuCanonicalTransferWord::default(),
         );
         self.words[5].data.y = usize_u32(self.manifest.word_count)?;
@@ -2676,7 +2684,7 @@ impl CanonicalGpuTransferPlan {
         );
         self.manifest.word_count = self.words.len();
         self.words.resize(
-            self.words.len().max(self.target_node_count + 1),
+            self.words.len().max(self.receipt_words()),
             GpuCanonicalTransferWord::default(),
         );
         self.words[5].data.y = usize_u32(self.manifest.word_count)?;
@@ -3545,6 +3553,8 @@ impl CanonicalGpuBufferHandles {
 #[derive(Default)]
 struct CanonicalGpuHandoffReceipt {
     primary: Vec<GpuCanonicalStateWord>,
+    /// Gate O: the target's integrated-field words, empty without `r`.
+    integrated: Vec<GpuCanonicalStateWord>,
     accepted_slot: u32,
 }
 
@@ -3598,6 +3608,10 @@ pub struct CanonicalGpuRequest {
     status_readback_entity: Option<Entity>,
     full_state_readback_entity: Option<Entity>,
     continuous_full_state_readback: bool,
+    /// Gate O: whether the integrated field is read back every frame, for a
+    /// view that paints it, and the readback that does it.
+    integrated_display: bool,
+    integrated_readback_entity: Option<Entity>,
     unfenced_stepping: bool,
     /// Counts cleared failures, so the render world knows to rewind what it
     /// has encoded to the accepted clock rather than carry it across.
@@ -3621,6 +3635,8 @@ impl Default for CanonicalGpuRequest {
             status_readback_entity: None,
             full_state_readback_entity: None,
             continuous_full_state_readback: false,
+            integrated_display: false,
+            integrated_readback_entity: None,
             unfenced_stepping: false,
             cleared_failures: 0,
             grid_scale_filter: false,
@@ -3802,6 +3818,8 @@ impl CanonicalGpuRequest {
         self.readback_entities = vec![state_entity, control_entity, status_entity];
         self.status_readback_entity = Some(status_entity);
         self.full_state_readback_entity = None;
+        self.integrated_readback_entity = None;
+        self.spawn_integrated_readback(commands);
         self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
     }
 
@@ -3826,6 +3844,7 @@ impl CanonicalGpuRequest {
         }
         self.status_readback_entity = None;
         self.full_state_readback_entity = None;
+        self.integrated_readback_entity = None;
         self.manifest = None;
         self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
     }
@@ -3911,6 +3930,53 @@ impl CanonicalGpuRequest {
     /// keeps the fence, which is what stops it queueing unbounded work.
     pub fn set_unfenced_stepping(&mut self, enabled: bool) {
         self.unfenced_stepping = enabled;
+    }
+
+    /// Gate O: reads the integrated field back every frame while `enabled`,
+    /// for a view that paints `r`, instead of waiting for full snapshots. It
+    /// reads only `r`'s tail of the state, so it costs a node-sized copy, and
+    /// a generation without `r` reads nothing.
+    pub fn set_integrated_display(&mut self, commands: &mut Commands, enabled: bool) {
+        if enabled == self.integrated_display {
+            return;
+        }
+        self.integrated_display = enabled;
+        if enabled {
+            self.spawn_integrated_readback(commands);
+        } else if let Some(entity) = self.integrated_readback_entity.take() {
+            commands.entity(entity).despawn();
+            self.readback_entities
+                .retain(|candidate| *candidate != entity);
+        }
+    }
+
+    fn spawn_integrated_readback(&mut self, commands: &mut Commands) {
+        if !self.integrated_display || self.integrated_readback_entity.is_some() {
+            return;
+        }
+        let Some(handles) = self.buffers.as_ref() else {
+            return;
+        };
+        if handles.integrated_count == 0 {
+            return;
+        }
+        let word = size_of::<GpuCanonicalStateWord>() as u64;
+        let first = u64::from(handles.state_count - handles.integrated_count);
+        let entity = commands
+            .spawn((
+                PacedReadback::continuous(Readback::buffer_range(
+                    handles.state.clone(),
+                    first * word,
+                    u64::from(handles.integrated_count) * word,
+                )),
+                CanonicalIntegratedReadback {
+                    generation: self.generation,
+                    integrated_count: handles.integrated_count,
+                },
+            ))
+            .id();
+        self.integrated_readback_entity = Some(entity);
+        self.readback_entities.push(entity);
     }
 
     /// Queues one full physical-state snapshot without changing the continuous
@@ -4156,12 +4222,13 @@ impl CanonicalGpuRequest {
                 PacedReadback::continuous(Readback::buffer_range(
                     transfer_handle.clone(),
                     0,
-                    (added.handles.node_count as u64 + 1)
+                    (added.handles.node_count as u64 + 1 + added.handles.integrated_count as u64)
                         * size_of::<GpuCanonicalTransferWord>() as u64,
                 )),
                 CanonicalHandoffReceiptReadback {
                     stats: stats.clone(),
                     node_count: added.handles.node_count,
+                    integrated_count: added.handles.integrated_count,
                 },
             ))
             .id();
@@ -4353,6 +4420,12 @@ pub struct CanonicalGpuDisplay {
     pub active_gain: f32,
     pub readbacks: u64,
     pub full_readbacks: u64,
+    /// Gate O: the accepted integrated field from its own continuous
+    /// readback or the latest handoff receipt, for a view that paints `r`;
+    /// empty without one. Its own serial, so the full-snapshot rule on
+    /// `readbacks` is untouched.
+    pub live_integrated: Vec<f32>,
+    pub live_integrated_readbacks: u64,
     /// State-readback serial at which the latest full snapshot arrived. Equal
     /// to `readbacks` only while the primary lanes still belong to that same
     /// physical snapshot.
@@ -4476,6 +4549,52 @@ struct CanonicalStateReadback {
     one_shot: bool,
 }
 
+/// Gate O: a continuous copy of the integrated field's tail of the state.
+#[derive(Component)]
+struct CanonicalIntegratedReadback {
+    generation: u64,
+    integrated_count: u32,
+}
+
+fn receive_canonical_integrated(
+    event: On<ReadbackComplete>,
+    tags: Query<&CanonicalIntegratedReadback>,
+    request: Res<CanonicalGpuRequest>,
+    mut display: ResMut<CanonicalGpuDisplay>,
+) {
+    let Ok(tag) = tags.get(event.entity) else {
+        return;
+    };
+    if tag.generation != request.generation || display.generation != tag.generation {
+        return;
+    }
+    let words: Vec<GpuCanonicalStateWord> = event.to_shader_type();
+    if words.len() != tag.integrated_count as usize {
+        return;
+    }
+    // Read against the accepted slot the control stream reports, as the
+    // primary display stream is.
+    let slot = display.accepted_slot;
+    set_live_integrated(&mut display, &words, slot);
+}
+
+/// The integrated field from its state words, in the given accepted slot.
+fn set_live_integrated(
+    display: &mut CanonicalGpuDisplay,
+    words: &[GpuCanonicalStateWord],
+    slot: u32,
+) {
+    display.live_integrated.clear();
+    display.live_integrated.extend(words.iter().map(|word| {
+        if slot != 0 {
+            word.values.y
+        } else {
+            word.values.x
+        }
+    }));
+    display.live_integrated_readbacks = display.live_integrated_readbacks.wrapping_add(1);
+}
+
 #[derive(Component)]
 struct CanonicalControlReadback {
     generation: u64,
@@ -4491,6 +4610,7 @@ struct CanonicalStatusReadback {
 struct CanonicalHandoffReceiptReadback {
     stats: Arc<CanonicalGpuHandoffStats>,
     node_count: u32,
+    integrated_count: u32,
 }
 
 fn receive_canonical_state(
@@ -4591,6 +4711,7 @@ fn begin_canonical_display_generation(display: &mut CanonicalGpuDisplay, generat
     display.raw_state_completed_steps = 0;
     display.raw_primary_self_describing = false;
     display.full_readback_at = u64::MAX;
+    display.live_integrated.clear();
 }
 
 fn receive_canonical_control(
@@ -4753,19 +4874,20 @@ fn receive_canonical_handoff_receipt(
         return;
     }
     let values: Vec<GpuCanonicalTransferWord> = event.to_shader_type();
-    if values.len() != tag.node_count as usize + 1 || values[0].data.x != HANDOFF_RECEIPT_MAGIC {
+    let nodes = tag.node_count as usize;
+    if values.len() != nodes + 1 + tag.integrated_count as usize
+        || values[0].data.x != HANDOFF_RECEIPT_MAGIC
+    {
         return;
     }
     let header = values[0].data;
     let packed_local_step = header.w;
-    let primary = values[1..]
-        .iter()
-        .map(|word| GpuCanonicalStateWord {
-            values: Vec4::from_array(word.data.to_array().map(f32::from_bits)),
-        })
-        .collect();
+    let word = |word: &GpuCanonicalTransferWord| GpuCanonicalStateWord {
+        values: Vec4::from_array(word.data.to_array().map(f32::from_bits)),
+    };
     *tag.stats.receipt.lock().unwrap() = Some(CanonicalGpuHandoffReceipt {
-        primary,
+        primary: values[1..1 + nodes].iter().map(word).collect(),
+        integrated: values[1 + nodes..].iter().map(word).collect(),
         accepted_slot: packed_local_step & 1,
     });
     tag.stats.failure.store(header.y, Ordering::Relaxed);
@@ -4866,6 +4988,7 @@ fn settle_canonical_handoff(
     request.readback_entities = vec![state_entity, control_entity, status_entity];
     request.status_readback_entity = Some(status_entity);
     request.full_state_readback_entity = None;
+    request.integrated_readback_entity = None;
     // Admission and the first target display state came from one GPU receipt.
     // Publish them together, after success, so the UI never waits through a
     // second map and can never observe a rejected candidate generation.
@@ -4879,6 +5002,10 @@ fn settle_canonical_handoff(
     display.raw_primary = receipt.primary;
     refresh_canonical_display(&mut display);
     display.readbacks = display.readbacks.saturating_add(1);
+    // Gate O: `r` from the same receipt, so the first target frame can paint
+    // it rather than falling back to the field until a snapshot arrives.
+    set_live_integrated(&mut display, &receipt.integrated, receipt.accepted_slot);
+    request.spawn_integrated_readback(&mut commands);
     request.handoff_outcome = CanonicalGpuHandoffOutcome::Accepted;
 }
 
@@ -4916,6 +5043,7 @@ impl Plugin for CanonicalWaveGpuPlugin {
             .add_observer(receive_canonical_control)
             .add_observer(receive_canonical_status)
             .add_observer(receive_canonical_handoff_receipt)
+            .add_observer(receive_canonical_integrated)
             .add_systems(
                 Update,
                 (settle_canonical_handoff, settle_canonical_live_event),

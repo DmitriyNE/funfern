@@ -756,15 +756,10 @@ impl Playground {
             .requested_steps()
             .saturating_sub(self.completed_steps);
         // Full physical snapshots are for AMR and energy diagnostics. The
-        // vector overlay has its own compact display-rate GPU sampler.
-        // The integrated-field view paints `r`, which arrives only in full
-        // snapshots, so it takes one every frame while it is shown.
-        let full_snapshot_interval = if self.integrated_field_shown() {
-            0.0
-        } else {
-            0.25
-        };
-        if self.full_snapshot_requested.elapsed().as_secs_f64() >= full_snapshot_interval
+        // vector overlay has its own compact display-rate GPU sampler, and
+        // the integrated-field view its own stream of `r` alone.
+        request.set_integrated_display(commands, self.integrated_field_shown());
+        if self.full_snapshot_requested.elapsed().as_secs_f64() >= 0.25
             && request.request_full_state_readback(commands)
         {
             self.full_snapshot_requested = Instant::now();

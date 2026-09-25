@@ -2838,6 +2838,10 @@ pub struct WaveDisplay {
     /// Gate O: the integrated field `r` from the latest full canonical
     /// snapshot, empty without a restoring law.
     pub snapshot_integrated: Vec<f32>,
+    /// Gate O: `r` from its own continuous readback or the latest handoff
+    /// receipt, for the view that paints it, and that stream's serial.
+    pub live_integrated: Vec<f32>,
+    pub live_integrated_readbacks: u64,
     pub completed_steps: u64,
     pub readbacks: u64,
 }
