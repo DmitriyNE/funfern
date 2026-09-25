@@ -13340,3 +13340,34 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and 6.1e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-26 — Gallery: the ring resonator
+
+- **Scene** "Ring resonator" (gallery item 15), the catalogue's 23rd: the
+  bent fiber's glass as a bus along the floor (`y` −0.6 to −0.5, a `band`)
+  and a ring of mean radius 0.6, width 0.1, 0.02 above it, driven at 3.975
+  Hz by a source in the bus. Probes: "Past the ring" in the bus and "Ring"
+  on the ring's region.
+- **Why not the plan's ring:** at radius 0.35 the 4 Hz mode would shed most
+  of its power each turn (the bent fiber lost 45% per quarter at 0.3), and a
+  stronger core or higher frequency needs a mesh too fine for the test and
+  for real time. At radius 0.6 a quarter turn loses 12-15%.
+- **Explored:** resonances 0.17 Hz apart (3.80, 3.96, 4.13 Hz at gap 0.05).
+  The bus past the ring keeps 0.46 on resonance at gap 0.05, 0.07 at 0.03,
+  and 0.002 at 0.02 (3.968 Hz), near critical coupling; at 0.02 the ring
+  is full by 30 s. The resonance moves from 3.968 Hz at edge 0.08 to 3.980
+  at edge 0.05, which edge 0.04 matched at gap 0.03. The dip is about 0.03
+  Hz wide, so the scene runs at 3.975 Hz, between the two, to stay on
+  resonance as the app's adaptation refines the mesh.
+- **Measured** at edge 0.08, 30 s, against the bus alone at each frequency:
+  on resonance 0.162, at 3.885 Hz 0.916; the ring's field 10.8× that
+  between resonances. Test:
+  `a_ring_on_its_resonance_fills_and_empties_the_fiber_past_it` (under
+  half, over 5×). The suite's `core_mode` takes the frequency, and
+  `guided_power` reads it from the run.
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 1.4e-6, b 1.6e-6; at
+  1000 steps Q 2.3e-6, b 2.8e-6; at 3000 steps 1.6e-5 and 1.1e-5, and at
+  6000 steps, 31 s with the ring full, 2.4e-5 and 1.1e-5 (printed, not
+  judged).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

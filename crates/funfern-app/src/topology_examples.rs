@@ -161,6 +161,15 @@ pub fn catalog() -> &'static [TopologyExample] {
                  tenths of what a straight channel does.",
                 crystal_bend(),
             ),
+            example(
+                "Ring resonator",
+                "A glass ring beside a glass fiber, driven at 3.975 Hz, one of the ring's \
+                 resonances: over half a minute the ring fills to ten times its field between \
+                 resonances, and past it the fiber keeps under a fifth of its power, the rest \
+                 shed from the ring's bend. Tune the source to 3.885 Hz, between resonances, \
+                 and the wave runs past.",
+                ring_resonator(),
+            ),
         ]
     })
 }
@@ -1956,13 +1965,73 @@ fn crystal_bend() -> TopologyDocument {
     document
 }
 
+const RING_RADIUS: f64 = 0.6;
+/// Close to critical coupling: on the ring's resonance the bus keeps 0.2% of
+/// its power at edge 0.08, where 0.05 left 46%.
+const RING_GAP: f64 = 0.02;
+/// Between the ring's resonance at edge 0.08, 3.968 Hz, and at edges 0.05 and
+/// 0.04, 3.98 Hz, so the scene stays on it as adaptation refines the mesh.
+const RING_HZ: f64 = 3.975;
+
+fn ring_resonator() -> TopologyDocument {
+    ring_resonator_with(RING_HZ, true)
+}
+
+/// A TM bus fiber of the bent fiber's glass along the floor, `y` from −0.6
+/// to −0.5 from wall to wall, and, with `ring`, a glass ring of the same
+/// width, mean radius 0.6, 0.02 above it, lit by a source in the bus at its
+/// left end. At one of the ring's resonances the ring fills up and its
+/// output cancels the wave running past it in the bus, the power going out
+/// as the radiation its bend sheds. A probe reads the ring's energy and
+/// another the bus past the ring.
+fn ring_resonator_with(frequency: f64, ring: bool) -> TopologyDocument {
+    let mut builder = glass_builder();
+    let bus = builder.band(-0.6, -0.5, MaterialId(2));
+    let mut region = None;
+    if ring {
+        let centre = Point2::new(0.0, -0.5 + RING_GAP + 0.5 * CORE_WIDTH + RING_RADIUS);
+        region = Some(builder.subdomain(
+            circle(centre, RING_RADIUS + 0.5 * CORE_WIDTH),
+            MaterialId(2),
+            MaterialFrame::world(),
+        ));
+        builder.subdomain(
+            circle(centre, RING_RADIUS - 0.5 * CORE_WIDTH),
+            DEFAULT_MATERIAL,
+            MaterialFrame::world(),
+        );
+    }
+    let mut document = builder.document();
+    document.model.source = PointSource {
+        region: bus,
+        ..source(Point2::new(-0.9, -0.55), frequency, 10.0, 0.03)
+    };
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Past the ring".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(0.8, -0.55)),
+    });
+    if let Some(region) = region {
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(2),
+            name: "Ring".into(),
+            color: [248, 196, 112],
+            enabled: true,
+            target: TopologyProbeTarget::AreaRegion(region),
+        });
+    }
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 22);
+        assert_eq!(catalog().len(), 23);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -3583,9 +3652,9 @@ mod tests {
     /// The fundamental mode of the glass core as a slab, `cos(uy/a)` inside
     /// and `cos(u)·e^{−w(|y|−a)/a}` outside, at `offset` from its axis, with
     /// `u tan u = w` and `u² + w² = V²`.
-    fn core_mode(offset: f64) -> f64 {
+    fn core_mode(offset: f64, frequency: f64) -> f64 {
         let half = 0.5 * CORE_WIDTH;
-        let v = std::f64::consts::TAU * BEND_HZ * half * (CORE_PERMITTIVITY - 1.0).sqrt();
+        let v = std::f64::consts::TAU * frequency * half * (CORE_PERMITTIVITY - 1.0).sqrt();
         let (mut low, mut high) = (0.0, std::f64::consts::FRAC_PI_2);
         for _ in 0..60 {
             let u = 0.5 * (low + high);
@@ -3608,10 +3677,11 @@ mod tests {
     /// `centre`, up to a constant: `|∫ U φ ds / ∫ φ² ds|²` over 0.25 either
     /// side. The cladding's radiation is orthogonal to the mode and drops out.
     fn guided_power(scene: &Harmonic, centre: Point2, across: Point2) -> f64 {
+        let frequency = scene.omega / std::f64::consts::TAU;
         let (mut re, mut im, mut norm) = (0.0, 0.0, 0.0);
         for index in 0..100 {
             let offset = 0.5 * ((index as f64 + 0.5) / 100.0 - 0.5);
-            let mode = core_mode(offset);
+            let mode = core_mode(offset, frequency);
             let (a, b) = scene.interpolated(centre + across * offset);
             re += a * mode;
             im += b * mode;
@@ -3728,5 +3798,48 @@ mod tests {
             "the filled crystal lets out {:.4}",
             filled / straight
         );
+    }
+
+    /// The ring-resonator claims, at edge 0.08, 30 s from rest, with the
+    /// power in the fiber's mode past the ring against the bus alone at the
+    /// same frequency. At 3.975 Hz, on the ring's resonance, the bus keeps
+    /// under half of what it keeps at 3.885 Hz between resonances (0.16
+    /// against 0.92), and the field round the ring's mean circle holds more
+    /// than five times the energy (11×).
+    #[test]
+    fn a_ring_on_its_resonance_fills_and_empties_the_fiber_past_it() {
+        let measure = |frequency: f64| {
+            let ring = Harmonic::run(
+                &ring_resonator_with(frequency, true),
+                0.08,
+                30.0,
+                frequency,
+                4.0,
+            );
+            let bus = Harmonic::run(
+                &ring_resonator_with(frequency, false),
+                0.08,
+                10.0,
+                frequency,
+                4.0,
+            );
+            let past = |scene: &Harmonic| {
+                guided_power(scene, Point2::new(0.8, -0.55), Point2::new(0.0, 1.0))
+            };
+            let centre = Point2::new(0.0, -0.5 + RING_GAP + 0.5 * CORE_WIDTH + RING_RADIUS);
+            let stored = (0..200)
+                .map(|index| {
+                    let angle = std::f64::consts::TAU * (index as f64 + 0.5) / 200.0;
+                    let (a, b) = ring
+                        .interpolated(centre + Point2::new(angle.cos(), angle.sin()) * RING_RADIUS);
+                    a * a + b * b
+                })
+                .sum::<f64>();
+            (past(&ring) / past(&bus), stored)
+        };
+        let (on, filled) = measure(RING_HZ);
+        let (off, idle) = measure(3.885);
+        assert!(on < 0.5 * off, "on resonance {on:.3}, between {off:.3}");
+        assert!(filled > 5.0 * idle, "the ring holds {:.2}×", filled / idle);
     }
 }

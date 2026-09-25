@@ -458,17 +458,39 @@ reflects, so the straight channel is the reference.
 
 ### 15. Ring resonator
 
-TM. A step-index waveguide, `ε = 2.25`, width 0.1, along y = −0.55 between
-the left and right walls, and a ring of the same material, mean radius 0.35,
-width 0.1, centred so the gap to the guide is 0.05. A source in the guide at
-its left end; the frequency is set by a sweep to a resonance, free spectral
-range about 0.3 Hz.
+TM. The bent fiber's glass, `ε = 2.25` and `μ = 1`, width 0.1: a bus fiber
+along the floor, `y` from −0.6 to −0.5 from wall to wall, and a ring of the
+same width, mean radius 0.6, 0.02 above the bus. A point source of 10 in
+the bus at x = −0.9, at 3.975 Hz. A point probe reads the bus past the
+ring, an area probe the ring. Walls outgoing.
 
-Claims: transmission past the ring at resonance under half the off-resonance
-transmission; the ring's energy at resonance more than 5× off-resonance.
+The plan's ring, mean radius 0.35, would shed most of its power every turn
+at 4 Hz: the bent fiber lost 45% per quarter turn at radius 0.3. A
+stronger core or a higher frequency needs a mesh too fine for the test and
+for real time, so the ring is as large as the domain allows, where a
+quarter turn loses 12% to 15%, at the bent fiber's accurate 4 Hz.
 
-Attempted. Dropped if it cannot run accurately in real time: the resonance is
-narrow, the mesh must be fine, and mesh dispersion moves it.
+Explored, with the power in the fiber's mode past the ring against the bus
+alone at the same frequency, and the field round the ring's mean circle.
+The resonances sit 0.17 Hz apart, at 3.80, 3.96 and 4.13 Hz for a gap of
+0.05. There the ring is under-coupled: the bus keeps 0.46 on resonance. At
+0.03 it keeps 0.07; at 0.02, 0.002 at 3.968 Hz, near critical coupling,
+with the ring full by 30 s (its field 1.71e-4 at 30 s, 1.73e-4 at 45 s,
+where the gap 0.03 was still filling). The resonance moves with the mesh:
+at edge 0.05 it sits at 3.980 Hz, and edge 0.04 agreed with 0.05 at gap
+0.03. The dip is about 0.03 Hz wide, so 3.975 Hz, between the two, keeps
+the bus under a fifth on either mesh. Between resonances, at 3.885 Hz, the
+bus keeps 0.92 on both meshes and the ring's field is a tenth.
+
+Claims at edge 0.08, 30 s from rest:
+
+- On resonance, 3.975 Hz, the bus keeps under half of what it keeps at
+  3.885 Hz (0.16 against 0.92).
+- The ring's field holds more than five times the energy it does between
+  resonances (11×).
+
+Real-time cost is the bent fiber's, 8.5k unknowns at a time step of 5.2e-3.
+The ring fills over about 30 s of simulated time.
 
 ### 16. Acoustic whispering gallery
 
