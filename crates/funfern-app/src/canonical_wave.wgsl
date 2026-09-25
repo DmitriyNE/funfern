@@ -382,9 +382,14 @@ fn temporal_inverse_primary_mass(node: u32, local_time: f32) -> f32 {
 }
 
 // `1 − e^{−x}`, kept accurate as `x → 0`, where f32 would cancel it away.
+// The share multiplies the flux every stage, so what matters is its absolute
+// error, and the direct form's is half an f32 unit of one whatever `x` is,
+// with the same sign stage after stage. Its series therefore runs up to
+// 0.02, as its siblings' do: switching at 1e-3 left a common half-step rate
+// such as 3.3e-3 (1/s at h = 6.6e-3) biased by 2e-8 a stage, a linear drift
+// of 4e-5 in 1000 steps against the reference.
 fn one_minus_exp_neg(x: f32) -> f32 {
-    if x < 1.0e-3 { return x * (1.0 - x * (0.5 - x / 6.0)); }
-    return 1.0 - exp(-x);
+    return -exp_minus_one(-x);
 }
 
 // A node's loss rate at `local_time`: its materials' rates weighed by the

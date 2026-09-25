@@ -12536,3 +12536,49 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   emitted), Q 2.8e-6, b 1.8e-6; 400 steps Q 8.8e-7.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — The device's loss share cancelled at common rates
+
+- **Found** by the symmetry-breaking scene, whose whole medium carries a
+  constant electric loss of 1/s: on the device it left the reference by
+  7.4e-6 at 100 steps, 3.4e-5 at 400 and 9.6e-5 at 1000, against the Stage 0
+  3e-5. Without the loss the same scene read 1.9e-7. The f64 reference was
+  checked first: rounding its Q to f32 after every step moved it by 6.8e-8
+  at 100 steps and 2.6e-7 at 400, a hundredth of the device's figure.
+- **Cause.** `one_minus_exp_neg` in `canonical_wave.wgsl`, which forms each
+  half step's loss share on a generation with loss records, used its series
+  only below `x = 1e-3` and `1 − exp(−x)` above. The share multiplies the
+  flux every stage, so its absolute error is what counts, and the direct
+  form's is half an f32 unit of one whatever `x` is, with the same sign
+  stage after stage. At `x = γh/2 = 3.3e-3` it was 2.1e-8 a stage: a linear
+  drift of 4.2e-6 per 100 steps, which is the device's growth. Its two
+  siblings (`exp_minus_one`, `one_minus_exp_neg_over`) already switch at
+  0.02. How large the bias is depends on where `x` falls: at γ = 0.6 it
+  happens to be 1e-9, which is why the pumped slab's loss gate passed.
+- **Fix.** `one_minus_exp_neg(x)` is now `−exp_minus_one(−x)`: the five-term
+  series to 0.02, the direct form above, where its error is a millionth of
+  the share or less. One line; the fixed path's packed shares are formed in
+  f64 on the CPU and were never affected.
+- **After** (symmetry breaking): 2.1e-7 at 100 steps, 8.7e-7 at 400. At 1000
+  steps Q is 1.2e-5 and b 7.2e-5 relative, but the domains have left by then
+  and `|b|` has fallen from 280 to 3.0, so the absolute b error (2.2e-4) is
+  the one it had at 400 (2.7e-4); the f64 reference with f32-rounded Q shows
+  the same tenfold rise over the same stretch (2.2e-7 to 3.0e-6).
+- **Other gates:** pumped slab with a constant and a pumped loss at 1000
+  steps, Q 7.0e-6 both; `canonical_gpu_oscillator` (Klein-Gordon, van der
+  Pol, van der Pol with a composed loss), `canonical_gpu_oscillator_handoff`,
+  `canonical_gpu_temporal` and `canonical_gpu_temporal_work` pass.
+- **Throughput,** `canonical_gpu_temporal_timing`, the two shaders
+  alternated. The machine moved between two clock states during the
+  measurement, so only runs in the same state compare:
+
+  | State | Case | Original µs/step | Fixed µs/step |
+  | --- | --- | --- | --- |
+  | fast | oscillator + loss | 492.5, 500.0, 500.0, 500.1 | 500.0, 500.0, 500.1, 500.3 |
+  | fast | driven | 342.0 | 341.6 |
+  | slow | oscillator + loss | 641.2, 633.5 | 633.3, 640.5, 634.3 |
+  | slow | driven | 433.3, 433.3 | 433.6, 433.7, 432.2 |
+
+  No difference beyond the noise.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.
