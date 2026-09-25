@@ -2159,9 +2159,9 @@ mod tests {
     /// The CPU reference stepping a document's oscillator medium across edits,
     /// handing its state from one generation to the next the way the app
     /// does: `Q` interpolated without restoring component totals across a
-    /// change of geometry, `b` reconstructed, `r` interpolated and, where a
-    /// moved boundary opened new ground, extended from the same neighbours
-    /// as `Q`.
+    /// change of geometry, `r` interpolated and, where a moved boundary opened
+    /// new ground, extended from the same neighbours as `Q`, and `b` rebuilt
+    /// about the new `r` with the invariant `b − ηC r` carried.
     struct Session {
         editor: TopologyEditor,
         runtime: TopologyRuntime,
@@ -2280,11 +2280,7 @@ mod tests {
                 )
                 .unwrap()
                 .0;
-            let complementary = transfer
-                .complementary
-                .transfer(self.state.complementary_flux())
-                .unwrap()
-                .0;
+
             let integrated = transfer_integrated_field(
                 next.transfer.as_ref().unwrap(),
                 &transfer.primary,
@@ -2292,6 +2288,16 @@ mod tests {
                 &target,
             )
             .unwrap();
+            let complementary = transfer_oscillator_flux(
+                &transfer.complementary,
+                self.operator.base(),
+                self.state.complementary_flux(),
+                self.state.integrated_field(),
+                target.base(),
+                &integrated.field,
+            )
+            .unwrap()
+            .0;
             self.state = CanonicalTemporalWaveState::new_at(
                 &target,
                 next.recommended_time_step(),
@@ -2359,6 +2365,19 @@ mod tests {
             session.drag(Point2::new(0.05, 0.0));
             session.run(0.5);
         }
+        // Each handoff rebuilt `b` about the new `r`, so nothing was left for
+        // the field to settle against: `b − ηC r` is still zero.
+        let r = session.state.integrated_field();
+        let b = session.state.complementary_flux();
+        let potential = session.operator.base().compatible_flux(r).unwrap();
+        let parted = b
+            .iter()
+            .zip(&potential)
+            .map(|(b, p)| (*b - *p).norm().powi(2))
+            .sum::<f64>()
+            .sqrt()
+            / b.iter().map(|b| b.norm().powi(2)).sum::<f64>().sqrt();
+        assert!(parted < 1.0e-9, "b − ηC r holds {parted:.3e} of b");
         session.run(4.0);
         let walls = session.walls();
         assert!(

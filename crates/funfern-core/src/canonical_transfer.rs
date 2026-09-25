@@ -1905,6 +1905,52 @@ pub fn transfer_integrated_field(
     })
 }
 
+/// Hands `b` to a generation that carries an integrated field.
+///
+/// With `ḃ = ηC u` and `ṙ = u`, the difference `D = b − ηC r` does not move
+/// while `b` itself carries no loss; loss on the complementary row is the
+/// only thing that changes it. The stiffness force reads `b` and the restoring
+/// force reads `r`, so any `D` a handoff introduces is a stress the field then
+/// settles against and can never shed: moving a boundary through a pinned φ⁴
+/// wall left 60% of `b` in it, imprinted as a crack. So `D` crosses on the
+/// vector map, as `b` used to, and the target's `b` is rebuilt about the
+/// target's own `r`: `b = ηC r_target + V(b_source − ηC r_source)`. Where `D`
+/// is zero, as in a medium with no complementary loss, the target is exactly
+/// consistent; where complementary loss has parted `b` from `ηC r`, that part
+/// is carried. `source_field` and `target_field` are each generation's `r`,
+/// the target's already handed over (`transfer_integrated_field`).
+pub fn transfer_oscillator_flux(
+    vector: &CanonicalVectorTransferMap,
+    source: &CanonicalWaveOperator,
+    source_flux: &[Point2],
+    source_field: &[f64],
+    target: &CanonicalWaveOperator,
+    target_field: &[f64],
+) -> Result<(Vec<Point2>, CanonicalTransferReport), WaveError> {
+    if source_flux.len() != source.complementary_degrees_of_freedom() {
+        return Err(WaveError::SizeMismatch {
+            expected: source.complementary_degrees_of_freedom(),
+            actual: source_flux.len(),
+        });
+    }
+    // By linearity, `V(b) + (ηC r_target − V(ηC r_source))`: a sample the
+    // handoff leaves as it was has its correction exactly zero, so its `b`
+    // is `V(b)` bit for bit, and an identity handoff stays a copy.
+    let (mut flux, report) = vector.transfer(source_flux)?;
+    let (carried, _) = vector.transfer(&source.compatible_flux(source_field)?)?;
+    for ((value, potential), carried) in flux
+        .iter_mut()
+        .zip(target.compatible_flux(target_field)?)
+        .zip(carried)
+    {
+        *value = *value + (potential - carried);
+    }
+    if flux.iter().any(|value| !value.finite()) {
+        return Err(WaveError::InvalidState);
+    }
+    Ok((flux, report))
+}
+
 /// `r` on the target nodes: interpolated where the source covers them, the
 /// plain average of the extension donors where it does not, and zero beyond
 /// their reach; with the counts of the last two.
@@ -2402,6 +2448,75 @@ mod tests {
                 );
             } else {
                 assert!(samples.iter().all(|value| *value == Point2::default()));
+            }
+        }
+    }
+
+    /// `b − ηC r` crosses a handoff unchanged: a source consistent with its
+    /// `r` hands over a target consistent with its own, however the meshes
+    /// differ, and a source that complementary loss has parted from its `r`
+    /// hands over exactly that part, carried on the vector map.
+    #[test]
+    fn the_oscillator_flux_carries_the_invariant_across_a_handoff() {
+        let source_mesh = mesh(1, &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], &[[0, 1, 2]]);
+        let target_mesh = mesh(
+            2,
+            &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            &[[0, 1, 2], [1, 3, 2]],
+        );
+        let (source_quadratic, source) = compile(&source_mesh);
+        let (target_quadratic, target) = compile(&target_mesh);
+        let interpolation = QuadraticTransferMap::build(
+            &source_mesh,
+            &source_quadratic,
+            &target_mesh,
+            &target_quadratic,
+        )
+        .unwrap();
+        let primary = CanonicalPrimaryTransferMap::prepare_with_meshes(
+            &interpolation,
+            &source_mesh,
+            &source,
+            &target_mesh,
+            &target,
+        )
+        .unwrap();
+        let vector =
+            CanonicalVectorTransferMap::prepare(&source_mesh, &source, &target_mesh, &target)
+                .unwrap();
+        let source_r = source
+            .node_points()
+            .iter()
+            .map(|point| 0.8 + 1.3 * point.x - 0.6 * point.y * point.y)
+            .collect::<Vec<_>>();
+        let (target_r, _, _) =
+            integrated_field_values(&interpolation, &primary, &source_r).unwrap();
+        let invariant = |operator: &CanonicalWaveOperator, flux: &[Point2], field: &[f64]| {
+            flux.iter()
+                .zip(operator.compatible_flux(field).unwrap())
+                .map(|(flux, potential)| *flux - potential)
+                .collect::<Vec<_>>()
+        };
+        for parted in [Point2::default(), Point2::new(0.3, -0.1)] {
+            let source_b = source
+                .compatible_flux(&source_r)
+                .unwrap()
+                .into_iter()
+                .map(|potential| potential + parted)
+                .collect::<Vec<_>>();
+            let (target_b, _) = transfer_oscillator_flux(
+                &vector, &source, &source_b, &source_r, &target, &target_r,
+            )
+            .unwrap();
+            let carried = vector
+                .transfer(&invariant(&source, &source_b, &source_r))
+                .unwrap()
+                .0;
+            for (got, want) in invariant(&target, &target_b, &target_r)
+                .iter()
+                .zip(&carried)
+            {
+                assert!((*got - *want).norm() < 1.0e-13, "{got:?} against {want:?}");
             }
         }
     }

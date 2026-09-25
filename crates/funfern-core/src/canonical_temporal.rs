@@ -10435,16 +10435,13 @@ mod tests {
             )
             .unwrap()
             .0;
-        let complementary = crate::CanonicalVectorTransferMap::prepare(
+        let vector = crate::CanonicalVectorTransferMap::prepare(
             &source.0,
             source_base,
             &target.0,
             target_base,
         )
-        .unwrap()
-        .transfer(state.complementary_flux())
-        .unwrap()
-        .0;
+        .unwrap();
         let transfer = crate::transfer_integrated_field(
             &interpolation,
             &primary_map,
@@ -10452,6 +10449,22 @@ mod tests {
             &target.2,
         )
         .unwrap();
+        // Between two generations with `r`, the invariant `b − ηC r` crosses
+        // and `b` is rebuilt about the target's `r`.
+        let complementary = if state.integrated_field().is_empty() || transfer.field.is_empty() {
+            vector.transfer(state.complementary_flux()).unwrap().0
+        } else {
+            crate::transfer_oscillator_flux(
+                &vector,
+                source_base,
+                state.complementary_flux(),
+                state.integrated_field(),
+                target_base,
+                &transfer.field,
+            )
+            .unwrap()
+            .0
+        };
         let mut handed = CanonicalTemporalWaveState::new_at(
             &target.2,
             state.time_step().min(0.4 * target.2.maximum_time_step()),

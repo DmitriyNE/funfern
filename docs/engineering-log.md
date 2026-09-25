@@ -12854,3 +12854,59 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   1000 steps Q 1.6e-6, b 1.5e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — A handoff carries `b − ηC r` instead of `b`
+
+- **Reported:** after the uncovered-node fix a crack-like wall was still
+  imprinted where a boundary had moved from, and could not be moved or
+  smeared. With `ḃ = ηC u` and `ṙ = u`, `D = b − ηC r` does not change
+  unless the complementary row carries loss, and the stiffness force reads
+  `b` while the restoring force reads `r`; a handoff transferred `b` and `r`
+  separately, so wherever they disagreed afterwards the field settled
+  against a stress it could never shed. Measured on the pinned wall's drag:
+  `|D|/|b|` 1.8e-13 settled, 0.45 after the first drag, 0.60 after six, still
+  0.60 8 s later, the wall stopping 0.026 short of the waist. With `b`
+  rebuilt about the new `r` it stays at 1e-13 and the wall reaches 0.299.
+  Gate O had accepted a remesh's offset as the difference of two
+  interpolation errors, measured small on a kink; a moved boundary is not
+  small.
+- **Fix.** Between two generations with `r`, `D` crosses on the vector map
+  and `b = ηC r_target + V(b_source − ηC r_source)`
+  (`transfer_oscillator_flux`). Where complementary loss has parted `b` from
+  `ηC r`, that part is carried, which a plain rebuild would lose. The device
+  does it in one new handoff pass, `canonical_transfer_invariant.wgsl`,
+  after `r`'s transfer and only when both generations carry `r`, in a bind
+  group of its own: both generations' samples beside the transfer table,
+  the eight storage buffers a stage allows. Nothing changes per step. Gate O
+  states the rule.
+- **Device precision.** The device builds `r` up in f32 a step at a time, so
+  by a handoff `r` holds a random walk of roundings, and `b` rebuilt from
+  differences of `r` across each element sees it divided by the element
+  size. `canonical_gpu_oscillator_handoff`, `b` against the reference after
+  1, 60 and 400 warm-up steps: `opened` 1.1e-5, 4.6e-5, 6.7e-5; `remesh`
+  5.8e-6, 1.6e-5, 3.4e-5; `r` 6.1e-8, 1.9e-7, 3.9e-7. The device's own `b`
+  and `r` part by that noise with no handoff (its `|b − ηC r|` grows
+  4e-4 → 1.7e-3 → 2.6e-3 over the same warm-ups), so this is no new error in
+  the physics, and the user sees no effect. Compensated summation would
+  bound it, but wgpu leaves Metal in its default fast-math mode, which may
+  fold the compensation away. The example now holds `b` to 1e-4 across a
+  rebuilt handoff; `Q`, `r` and every other `b` keep the Stage 0 3e-5.
+- **Measured:** all six handoff modes pass (`opened` Q 3.0e-6, b 5.4e-5, r
+  4.0e-7; `remesh` Q 1.2e-5, b 1.5e-5, r 2.6e-7; identity, from-linear,
+  to-linear and reject as before), and `canonical_gpu_handoff` and
+  `canonical_gpu_temporal_handoff`, where the pass returns at once, read as
+  before. The reference's rebuilt `b` meets its own `r` to 1e-13.
+- **Arrangement.** Computed as written, `(b − X) + X` rounds, and the gate
+  caught it: `an_identity_handoff_carries_the_integrated_field_exactly`
+  failed. By linearity the same `b` is `V(b) + (ηC r_target − V(ηC r_source))`,
+  whose correction is exactly zero for a sample the handoff leaves as it
+  was, so an identity handoff is a bit-exact copy again, as is every
+  untouched sample of a repair. The reference and the device use that form.
+- **Tests:** `the_oscillator_flux_carries_the_invariant_across_a_handoff`
+  (a consistent source hands over a consistent target across different
+  meshes, and a parted one hands over exactly its carried part), and the
+  pinned wall's drag test now asserts `|b − ηC r|/|b| < 1e-9` after six
+  drags.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check. The user confirmed the crack gone in
+  the app.

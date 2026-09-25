@@ -23,6 +23,18 @@
 //!
 //! Every mode prepares its primary map with the meshes, as the app's runtime
 //! does, so the extension rows are the production ones.
+//!
+//! Between two generations with `r`, `b` is rebuilt about the target's `r`
+//! with the invariant `b − ηC r` carried (`transfer_oscillator_flux`, and
+//! `canonical_transfer_invariant.wgsl` on the device). The device builds `r`
+//! up in f32 a step at a time, so by the handoff `r` holds a random walk of
+//! roundings; `b`, rebuilt from differences of `r` across each element, sees
+//! that noise divided by the element size. Measured against the reference on
+//! `opened` (`remesh` in brackets), `b` after 1, 60 and 400 warm-up steps:
+//! 1.1e-5 (5.8e-6), 4.6e-5 (1.6e-5), 6.7e-5 (3.4e-5), with `r` itself at
+//! 6.1e-8, 1.9e-7 and 3.9e-7. The device's own `b` and `r` part by the same
+//! noise with no handoff at all, so it is no new error in the physics, and
+//! `b` is held to 1e-4 there; `Q` and `r` keep the Stage 0 3e-5.
 
 use std::time::{Duration, Instant};
 
@@ -39,7 +51,7 @@ use funfern_core::{
     CanonicalVectorTransferMap, CoefficientLaw, MeshingOptions, Obstacle, ObstacleId,
     OuterBoundaryCondition, PeriodicCubicSpline, Point2, QuadraticTransferMap,
     QuadraticWaveOperator, RestoringLaw, ScalarField, Scene, TriMesh, mesh_scene,
-    transfer_integrated_field,
+    transfer_integrated_field, transfer_oscillator_flux,
 };
 
 const WARMUP_STEPS: u64 = 60;
@@ -54,6 +66,10 @@ struct Pending {
 
 #[derive(Resource)]
 struct Expected {
+    /// The bound on `b`: the Stage 0 3e-5, or, where `b` is rebuilt about the
+    /// device's own `r`, a bound that admits `r`'s f32 accumulation seen
+    /// through a gradient (see the module notes).
+    complementary_bound: f64,
     primary: Vec<f64>,
     complementary: Vec<Point2>,
     integrated: Vec<f64>,
@@ -299,10 +315,6 @@ fn main() -> AppExit {
         )
         .expect("primary transfer")
         .0;
-    let target_complementary = vector_map
-        .transfer(source_state.complementary_flux())
-        .expect("vector transfer")
-        .0;
     let integrated = transfer_integrated_field(
         &interpolation,
         &primary_map,
@@ -310,6 +322,43 @@ fn main() -> AppExit {
         &target.operator,
     )
     .expect("integrated transfer");
+    // Between two generations with `r`, the invariant `b − ηC r` crosses and
+    // `b` is rebuilt about the target's `r`; otherwise `b` itself crosses.
+    let rebuilt_b = !source_state.integrated_field().is_empty() && !integrated.field.is_empty();
+    let target_complementary = if !rebuilt_b {
+        vector_map
+            .transfer(source_state.complementary_flux())
+            .expect("vector transfer")
+            .0
+    } else {
+        let flux = transfer_oscillator_flux(
+            &vector_map,
+            source_base,
+            source_state.complementary_flux(),
+            source_state.integrated_field(),
+            target_base,
+            &integrated.field,
+        )
+        .expect("oscillator flux transfer")
+        .0;
+        let rebuilt = target_base
+            .compatible_flux(&integrated.field)
+            .expect("target compatible flux");
+        let offset = flux
+            .iter()
+            .zip(&rebuilt)
+            .map(|(b, p)| (*b - *p).norm().powi(2))
+            .sum::<f64>()
+            .sqrt()
+            / flux
+                .iter()
+                .map(|b| b.norm().powi(2))
+                .sum::<f64>()
+                .sqrt()
+                .max(1.0e-300);
+        println!("target b − ηC r relative to b: {offset:.3e}");
+        flux
+    };
     println!(
         "uncovered target nodes: {} extended from their neighbours, {} at r = 0",
         integrated.extended_nodes, integrated.exposed_nodes
@@ -417,6 +466,7 @@ fn main() -> AppExit {
         transfer: Some(transfer),
     })
     .insert_resource(Expected {
+        complementary_bound: if rebuilt_b { 1.0e-4 } else { 3.0e-5 },
         primary: target_state.primary_flux().to_vec(),
         complementary: target_state.complementary_flux().to_vec(),
         integrated: target_state.integrated_field().to_vec(),
@@ -583,7 +633,10 @@ fn validate(
                  {complementary:.3e}, r {integrated:.3e}",
                 expected.started.elapsed().as_secs_f64() * 1_000.0
             );
-            if primary > 3.0e-5 || complementary > 3.0e-5 || integrated > 3.0e-5 {
+            if primary > 3.0e-5
+                || complementary > expected.complementary_bound
+                || integrated > 3.0e-5
+            {
                 expected.failed = true;
             }
             expected.phase = Phase::Done;

@@ -148,12 +148,19 @@ restoring law tightens the trajectory ceiling:
   rings starts at `r = 0`. (Revised 25 September 2026: starting every such
   node at `r = 0` put a mesh-thin strip on φ⁴'s barrier at each drag of a
   wall, injecting about a third of a pinned domain wall's energy per step
-  and leaving a crack along the moved boundary.) `b` keeps its
-  own reconstruction rather than being rebuilt as `ηC r`, so a remesh leaves
-  `b` and `ηC r` apart by the difference of two interpolation errors, which
-  the step then keeps. Rebuilding `b` would remove that offset, but it would
-  be wrong wherever complementary loss has parted them legitimately, and it
-  measured no better.
+  and leaving a crack along the moved boundary.) Between two
+  generations with `r`, `b` is rebuilt about the target's `r` and the
+  invariant `D = b − ηC r` crosses instead of `b`:
+  `b = ηC r_target + V(b_source − ηC r_source)` (`transfer_oscillator_flux`).
+  With `ḃ = ηC u` and `ṙ = u`, `D` does not move unless the complementary row
+  carries loss, and the stiffness force reads `b` while the restoring force
+  reads `r`, so a `D` a handoff introduces is a stress the field can never
+  shed. `D` is zero wherever complementary loss has not parted them, and
+  carried where it has, which a plain rebuild would have lost. (Revised 25
+  September 2026. The first design let `b` keep its own reconstruction and
+  accepted the difference of two interpolation errors, which a remesh of a
+  kink showed to be small; a moved boundary made it 60% of `b`, and the
+  field imprinted it as a crack.)
 - **Probes and snapshots** carry `r` beside `Q` and `b`. The GPU state gains
   one word per node for its accepted and candidate copies.
 

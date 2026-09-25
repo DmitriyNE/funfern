@@ -4909,6 +4909,7 @@ impl Plugin for CanonicalWaveGpuPlugin {
         embedded_asset!(app, "canonical_transfer.wgsl");
         embedded_asset!(app, "canonical_transfer_runtime.wgsl");
         embedded_asset!(app, "canonical_transfer_energy.wgsl");
+        embedded_asset!(app, "canonical_transfer_invariant.wgsl");
         app.init_resource::<CanonicalGpuRequest>()
             .init_resource::<CanonicalGpuDisplay>()
             .add_observer(receive_canonical_state)
@@ -5003,6 +5004,7 @@ struct CanonicalTransferPipeline {
     map_layout: BindGroupLayoutDescriptor,
     runtime_layout: BindGroupLayoutDescriptor,
     energy_layout: BindGroupLayoutDescriptor,
+    invariant_layout: BindGroupLayoutDescriptor,
     transfer_runtime: CachedComputePipelineId,
     transfer_primary: CachedComputePipelineId,
     transfer_vector: CachedComputePipelineId,
@@ -5014,6 +5016,8 @@ struct CanonicalTransferPipeline {
     correct_primary: CachedComputePipelineId,
     reduce_auxiliary_energy: CachedComputePipelineId,
     account_handoff: CachedComputePipelineId,
+    /// Gate O: `b` rebuilt about the target's `r`, the invariant carried.
+    transfer_invariant: CachedComputePipelineId,
 }
 
 fn init_canonical_pipeline(
@@ -5187,6 +5191,26 @@ fn init_canonical_pipeline(
             ),
         ),
     );
+    // Both generations' samples beside the transfer table: `ηC r` on either
+    // side needs the curl coefficients, which no other layout reaches.
+    let invariant_layout = BindGroupLayoutDescriptor::new(
+        "canonical handoff invariant buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer::<GpuCanonicalControl>(false),
+                storage_buffer::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer::<Vec<GpuCanonicalSample>>(false),
+                storage_buffer::<GpuCanonicalControl>(false),
+                storage_buffer::<GpuCanonicalStatus>(false),
+                storage_buffer::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer::<Vec<GpuCanonicalSample>>(false),
+                storage_buffer::<Vec<GpuCanonicalTransferWord>>(false),
+            ),
+        ),
+    );
+    let invariant_shader =
+        load_embedded_asset!(asset_server.as_ref(), "canonical_transfer_invariant.wgsl");
     let transfer_shader = load_embedded_asset!(asset_server.as_ref(), "canonical_transfer.wgsl");
     let runtime_shader =
         load_embedded_asset!(asset_server.as_ref(), "canonical_transfer_runtime.wgsl");
@@ -5208,6 +5232,7 @@ fn init_canonical_pipeline(
         map_layout: map_layout.clone(),
         runtime_layout: runtime_layout.clone(),
         energy_layout: energy_layout.clone(),
+        invariant_layout: invariant_layout.clone(),
         transfer_runtime: queue_transfer(
             "canonical transfer runtime",
             "transfer_runtime",
@@ -5274,6 +5299,12 @@ fn init_canonical_pipeline(
             energy_layout,
             energy_shader,
         ),
+        transfer_invariant: queue_transfer(
+            "canonical transfer oscillator flux",
+            "transfer_invariant",
+            invariant_layout,
+            invariant_shader,
+        ),
     });
 }
 
@@ -5296,6 +5327,7 @@ struct CanonicalHandoffBindGroups {
     map: BindGroup,
     runtime: BindGroup,
     energy: BindGroup,
+    invariant: BindGroup,
     target: BindGroup,
 }
 
@@ -5515,6 +5547,20 @@ fn prepare_canonical_handoff_bind_groups(
             new_samples.buffer.as_entire_buffer_binding(),
         )),
     );
+    let invariant = render_device.create_bind_group(
+        Some("canonical handoff invariant bind group"),
+        &pipeline_cache.get_bind_group_layout(&transfer_pipeline.invariant_layout),
+        &BindGroupEntries::sequential((
+            old_control.buffer.as_entire_buffer_binding(),
+            old_state.buffer.as_entire_buffer_binding(),
+            old_samples.buffer.as_entire_buffer_binding(),
+            new_control.buffer.as_entire_buffer_binding(),
+            new_status.buffer.as_entire_buffer_binding(),
+            new_state.buffer.as_entire_buffer_binding(),
+            new_samples.buffer.as_entire_buffer_binding(),
+            transfer.buffer.as_entire_buffer_binding(),
+        )),
+    );
     let target_group = render_device.create_bind_group(
         Some("canonical handoff target bind group"),
         &pipeline_cache.get_bind_group_layout(&canonical_pipeline.layout),
@@ -5535,6 +5581,7 @@ fn prepare_canonical_handoff_bind_groups(
         map,
         runtime,
         energy,
+        invariant,
         target: target_group,
     });
 }
@@ -6203,6 +6250,7 @@ fn compute_canonical_handoff(
         canonical.handoff_commit,
         transfer.correct_primary,
         transfer.transfer_integrated,
+        transfer.transfer_invariant,
     ];
     if ids.iter().any(|id| {
         matches!(
@@ -6251,9 +6299,15 @@ fn compute_canonical_handoff(
         1,
         1,
     );
-    // Gate O: the integrated field, on the interpolation rows.
+    // Gate O: the integrated field, on the interpolation rows, and then `b`
+    // rebuilt about it with the invariant `b − ηC r` carried. The rebuild
+    // returns at once unless both generations carry `r`.
     pass.set_pipeline(pipelines[15]);
     pass.dispatch_workgroups(workgroups(target.node_count), 1, 1);
+    pass.set_bind_group(0, &groups.invariant, &[]);
+    pass.set_pipeline(pipelines[16]);
+    pass.dispatch_workgroups(workgroups(target.sample_count), 1, 1);
+    pass.set_bind_group(0, &groups.map, &[]);
     pass.set_pipeline(pipelines[5]);
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(pipelines[6]);
