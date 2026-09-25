@@ -424,6 +424,15 @@ fn sample_loss_rate(sample: u32, local_time: f32) -> f32 {
 // Bernoulli map and whose energy change is active gain.
 fn node_is_active(node: u32) -> bool { return nodes[node].boundary.w != 0u; }
 
+// Gate O: where each sample's short-wave viscosity `τ` sits, four to a word,
+// or 0 when no self-oscillating law acts. The drift leaves `τ η C u` in the
+// sample's scratch `zw`, and an active node's second kick gathers it; see
+// `short_wave_viscosity` on the reference.
+fn short_wave_offset() -> u32 {
+    if !temporal_enabled() { return 0u; }
+    return tables[control.runtime_slots.z + 2u].data.w;
+}
+
 // `e^{−x}`'s complement over `x`, `(1 − e^{−x})/x`, by its series where f32
 // would cancel the direct form away.
 fn one_minus_exp_neg_over(x: f32) -> f32 {
@@ -838,11 +847,18 @@ fn source_rate(node: u32, local_time: f32) -> f32 {
 }
 
 fn gathered_force(node: u32, second: bool) -> f32 {
+    return gathered_forces(node, second, false).x;
+}
+
+// The node's force and, with `short_wave`, the gather of the short-wave
+// stresses the drift left, through the same entries and the same map.
+fn gathered_forces(node: u32, second: bool, short_wave: bool) -> vec2<f32> {
     let range = nodes[node].ranges.xy;
     let driven = temporal_enabled();
     let force_time = control.clock_f32.y
         + select(0.0, control.clock_f32.x, second);
     var result = 0.0;
+    var stress = 0.0;
     for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
         let index = tables[entry].data.x;
         let kind = tables[entry].data.y;
@@ -861,11 +877,15 @@ fn gathered_force(node: u32, second: bool) -> f32 {
             } else if driven {
                 inverse_factor = 1.0 / temporal_complementary_factor(index, force_time);
             }
-            result += inverse_factor
-                * dot(vec2<f32>(coefficient_x, table_float(entry, 3u)), flux);
+            let coefficient = vec2<f32>(coefficient_x, table_float(entry, 3u));
+            result += inverse_factor * dot(coefficient, flux);
+            if short_wave {
+                stress += inverse_factor
+                    * dot(coefficient, scratch[complementary_offset() + index].values.zw);
+            }
         }
     }
-    return result;
+    return vec2<f32>(result, stress);
 }
 
 fn gap_force(node: u32, second: bool) -> f32 {
@@ -2001,7 +2021,19 @@ fn kick_node(node: u32, second: bool) {
     let target_time = control.clock_f32.y
         + select(select(duration, 0.0, temporal_enabled()), control.clock_f32.x, second);
     let source = source_rate(node, source_time);
-    let held_force = force(node, second);
+    // Gate O: an active node's second kick also gathers the short-wave
+    // stresses; a law-carrying generation keeps no force cache, so the
+    // gather is the one the force needs anyway.
+    let short_wave = second && node_is_active(node) && short_wave_offset() != 0u;
+    var held_force: f32;
+    var viscous = 0.0;
+    if short_wave {
+        let forces = gathered_forces(node, second, true);
+        held_force = forces.x + restoring_force(node, second);
+        viscous = forces.y;
+    } else {
+        held_force = force(node, second);
+    }
     let net = source - held_force;
     if nodes[node].boundary.x != NO_INDEX {
         return;
@@ -2040,12 +2072,21 @@ fn kick_node(node: u32, second: bool) {
     let force_work = duration * midpoint * held_force;
     let boundary_loss = duration * damping * midpoint * midpoint;
     let energy_change = 0.5 * (next * next - old * old) * inverse_mass;
-    set_candidate_q(node, next);
     scratch[node].values.x += source_work;
     scratch[node].values.w += boundary_loss;
     if nodes[node].boundary.z != 0u {
         scratch[node].values.y += energy_change - source_work + force_work + boundary_loss;
     }
+    // The short-wave viscosity over the whole step, on the drift's midpoint
+    // gradient, after the kick as the reference applies it. What it takes is
+    // the self-oscillating law's, charged to the loss lane an active node's
+    // reduction books as gain. A pin holds.
+    if short_wave && nodes[node].boundary.z == 0u {
+        let damped = next - control.clock_f32.x * viscous;
+        scratch[node].values.z += 0.5 * (next * next - damped * damped) * inverse_mass;
+        next = damped;
+    }
+    set_candidate_q(node, next);
     if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
     if second { inject_at(node); }
 }
@@ -2733,6 +2774,18 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
         let old = select(accepted_b(i), candidate_b(i), has_loss_stages());
         let next = old + control.evolution.y * control.clock_f32.x * curl;
         set_candidate_b(i, next);
+        // Gate O: a self-oscillating sample's viscous stress `τ η C u` on the
+        // same midpoint gradient, for the second kick to gather. The loss
+        // stage zeroed the lanes, so a sample without it gathers nothing.
+        let short_wave = short_wave_offset();
+        if short_wave != 0u {
+            let viscosity = table_float(short_wave + i / 4u, i % 4u);
+            if viscosity != 0.0 {
+                let stress = viscosity * control.evolution.y * curl;
+                scratch[complementary_offset() + i].values.z = stress.x;
+                scratch[complementary_offset() + i].values.w = stress.y;
+            }
+        }
         if !all(next >= vec2<f32>(-MAX_FINITE))
             || !all(next <= vec2<f32>(MAX_FINITE)) {
             reject(STATUS_NON_FINITE);

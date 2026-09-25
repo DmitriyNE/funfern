@@ -938,20 +938,10 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
 ## Maintenance
 
-- [ ] **Next:** a self-oscillating gain lases on the mesh's shortest waves.
-  The van der Pol rate acts on every nodal pattern alike, including those
-  near three nodes per wavelength, which barely move on the mesh where in the
-  continuum they would travel out. Wherever the main oscillation leaves gain
-  unsaturated, at a region's rim or a node of a standing pattern, they grow:
-  on a disk of "Van der Pol oscillators" in a plasma, 11.5 Hz at edge 0.08
-  and 21-39 Hz at 0.05 at the rim, with phases jumping 110-250° between
-  neighbouring nodes, as large as the main oscillation there; at gain 5 they
-  replace it within 20 s. The self-sustained emitter avoids it with a
-  magnetic loss, which "Self-oscillating medium" cannot use because it has no
-  restoring law. Planned fix: a viscous damping only where a self-oscillating
-  law acts, `κ·γ₀·h²` per element, outweighing the gain at three nodes per
-  wavelength and vanishing as the mesh refines; passive, no new state, on
-  the reference and the device, with its energy counted.
+- [x] A self-oscillating gain lased on the mesh's shortest waves, at a
+  van der Pol region's rim. Fixed on 2026-09-25 by a short-wave viscosity
+  on the self-oscillating elements (`docs/spikes/funfern-gate-o.md`, "The
+  short-wave limit").
 
 - [ ] **Next after the gallery:** a scene change must stop the old field at
   once. Opening an example, New scene, loading a file or a link goes through

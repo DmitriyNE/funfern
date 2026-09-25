@@ -13006,3 +13006,52 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   long run still reads 2.7e-7 under 3e-5.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — A self-oscillating region no longer lases on the mesh
+
+- **Defect** (found building the emitter, and noticed before by the user):
+  the van der Pol rate is local, so it lifts every nodal pattern alike,
+  including those at the mesh's ceiling, which have almost no group
+  velocity and stay wherever the main oscillation leaves gain unsaturated.
+  On the emitter without its magnetic loss, at gain 5, the rim grew an
+  11.5 Hz pattern at edge 0.08 (21-39 Hz at 0.05), phases jumping 110-250°
+  between neighbouring nodes, which replaced the tone within 20 s.
+- **Fix.** Each element carrying the law also carries a viscous stress
+  `τ η C u` on the gradient, gathered by the kick's own `Cᵀ W v(·)`, with
+  `τ = min(κ γ₀, 1/h_max) / G` and `G` the largest Gershgorin bound
+  `Σ|K_ij|/m_i` on the element's nodes: about `κ` times the gain at the
+  element's own ceiling, the square of the share of it on a resolved wave,
+  nothing on a uniform oscillation, and vanishing as the mesh refines. It is
+  formed on the drift's midpoint gradient and applied over the whole step
+  after the second kick (the midpoint rule), skips pins and outgoing traces,
+  and its energy goes to the active-gain lane with the node map's. Written
+  up in `docs/spikes/funfern-gate-o.md`, "The short-wave limit".
+- **Calibrated** on that rim, 78 s at edge 0.08, with `κ` from a throwaway
+  override: 0 lost the tone at 18-21 s; 1 at 21 s; 2 was rising by 27 s; 4
+  held until 50 s, when a 22 Hz mode (absent at edge 0.05) rose to 0.08; 8
+  kept the rim to the tone's own harmonics (6.5 and 10 Hz, 0.013-0.045) for
+  the whole run with the tone unchanged (rim 0.58, centre 1.06). `κ = 8`.
+  Gains 10 and 20 hold clean for 30 s at `κ = 4` already; the cap binds
+  past about 38/s.
+- **Device.** The drift writes the stress into the sample's scratch `zw`,
+  which the first loss stage zeroes; an active node's second kick gathers it
+  in the loop its force already runs (a law-carrying generation keeps no
+  force cache), charges the energy to the lane the reduction books as gain,
+  and skips a pin. `τ` is packed four to a word after the restoring records,
+  its offset in the loss header's spare lane. No new pass, binding or state.
+  With the device's application switched off the emitter's long run parts
+  from the reference by 8.9e-2 at 400 steps, so the term is live there; on,
+  it reads 2.7e-5 as before. `canonical_gpu_oscillator` van der Pol passes
+  with every composition (Q ≤ 4.5e-7, b ≤ 2.0e-6, gain lanes within 1.1e-7)
+  and grows from 0.05 for 1000 steps.
+- **Tests.** `the_short_wave_viscosity_damps_the_mesh_ceiling_and_spares_long_waves`
+  (core): the ceiling mode's energy growth at a linear gain of 2 goes from
+  2.00 to −10.1, a smooth mode's from 2.063 to 2.030, and a uniform
+  oscillation steps bit for bit as without it.
+  `a_self_oscillating_rim_keeps_to_its_tone_without_a_magnetic_loss` (app):
+  the rim's tone moves under 5% from 12 s to 27 s and nothing between 6 and
+  100 Hz passes 0.05. The emitter's claims hold with the term on: 2.998 Hz,
+  centre 1.181, rings 14.46 against 14.03, trapped 1.245 at 3.26 Hz with
+  1.9% of the tone 0.7 away.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

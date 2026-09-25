@@ -2628,4 +2628,51 @@ mod tests {
             "0.7 away the trapped tone is {leaked:.4} against {radiated:.3}"
         );
     }
+    /// The mesh-scale lasing a self-oscillating region used to show. Without
+    /// its magnetic loss, at gain 5, the emitter's rim grew an 11.5 Hz
+    /// pattern three nodes to a wavelength that replaced the tone by 21 s.
+    /// The short-wave viscosity holds the rim to its tone: from 12 s to 27 s
+    /// the tone there moves under 5%, and nothing between 6 and 100 Hz
+    /// passes 0.05 (the tone's own harmonics sit near 0.02).
+    #[test]
+    fn a_self_oscillating_rim_keeps_to_its_tone_without_a_magnetic_loss() {
+        let mut document = emitter_with(PLASMA_CUTOFF_HZ);
+        for scene in [&mut document.model.draft, &mut document.model.accepted] {
+            let disk = &mut scene.materials[1];
+            disk.magnetic_loss = None;
+            disk.parameters
+                .iter_mut()
+                .find(|parameter| parameter.name == "gain")
+                .expect("the oscillators name their gain")
+                .value = 5.0;
+        }
+        let rim = [Point2::new(0.1669, -0.004), Point2::new(0.0, 0.17)];
+        let rows = integrated_traces(&document, 0.08, 27.0, &rim, 0.0);
+        let dt = rows[1].0 - rows[0].0;
+        for (index, point) in rim.iter().enumerate() {
+            let series = rows.iter().map(|row| row.2[index]).collect::<Vec<_>>();
+            let window = |start: f64| {
+                let from = (start / dt) as usize;
+                &series[from..from + (3.0 / dt) as usize]
+            };
+            let magnitude = |chunk: &[f64], frequency: f64| {
+                let (re, im) = phasor(chunk, dt, frequency, 2.99);
+                re.hypot(im)
+            };
+            let early = window(12.0);
+            let frequency = tone(early, dt, 2.0, 4.0, 2.99);
+            let (before, after) = (
+                magnitude(early, frequency),
+                magnitude(window(24.0), frequency),
+            );
+            assert!(
+                (after / before - 1.0).abs() < 0.05,
+                "{point:?}: the tone went from {before:.3} to {after:.3}"
+            );
+            let strongest = (12..=200)
+                .map(|half| magnitude(window(24.0), 0.5 * half as f64))
+                .fold(0.0, f64::max);
+            assert!(strongest < 0.05, "{point:?}: {strongest:.3} above 6 Hz");
+        }
+    }
 }

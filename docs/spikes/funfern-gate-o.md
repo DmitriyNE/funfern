@@ -188,6 +188,44 @@ Beside Klein–Gordon on the same material, it makes a lattice of
 self-oscillators with a limit cycle near `ω₀`. Alone it is a saturable-gain
 wave medium.
 
+### The short-wave limit
+
+The rate is local, so it lifts every nodal pattern alike, the mesh's own
+ceiling included. In the continuum a wave that short travels out of any
+place where the main oscillation leaves the gain unsaturated; on the mesh it
+has almost no group velocity, so it stays there and lases. Found on the
+self-sustained emitter: without its magnetic loss, at gain 5, the rim of a
+van der Pol disk grew an 11.5 Hz pattern at edge 0.08 (21-39 Hz at 0.05),
+three nodes to a wavelength, which replaced the tone within 20 s.
+
+Every element carrying the law now also carries a viscous stress on the
+field's gradient, `τ η C u`, which reaches the nodes through the kick's own
+`Cᵀ W v(·)`:
+
+```text
+τ_e = min(κ γ₀, 1/h_max) / G_e,   G_e = max over the element's nodes of Σ_j |K_ij| / m_i
+```
+
+with `h_max` the generation's largest time step.
+
+It damps a mode of stiffness eigenvalue `λ` at `τλ/2` against the gain's
+`γ₀/2`. `G` bounds the element's own ceiling, so near that ceiling the
+damping is about `κ` times the gain whatever the element's size, order or
+wave speed; a resolved wave loses the square of its share of the ceiling,
+and the whole term vanishes as the mesh refines. A uniform oscillation has
+no gradient and is untouched, so the `2a/√3` limit cycle is exact as before.
+`κ = 8`, calibrated on the emitter's rim: 1 held it to 21 s, 4 to 50 s, 8
+for the 78 s run. The stress is formed on the drift's midpoint gradient and
+applied over the whole step after the second kick: the midpoint rule,
+explicit, stable while `h τ G ≤ 2`, which the cap `τ G ≤ 1/h_max` keeps; past
+a gain of `1/(κ h_max)`, about 38/s at the emitter's step, the suppression is
+partial. A pinned node keeps its pin and an outgoing trace node is the
+wall's. The energy it takes is charged to the same active-gain lane as the
+node map, since it exists only where that law acts; the balance stays closed.
+On the device the drift writes the stress into the sample's scratch lanes and
+an active node's second kick gathers it in the loop the force already runs,
+with `τ` packed four to a word after the restoring records.
+
 ## Skins and names
 
 The equation is the same in every skin; only what `u`, and therefore `r`,

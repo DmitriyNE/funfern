@@ -1368,12 +1368,30 @@ impl CanonicalGpuPlan {
                 }
             }
         }
+        // Gate O: each sample's short-wave viscosity `τ`, four to a word, where
+        // a self-oscillating law acts. The drift reads it; offset 0 means none.
+        let short_wave = operator.short_wave_viscosity();
+        let short_wave_offset = if short_wave.is_empty() {
+            0
+        } else {
+            let offset = self.tables.len();
+            for chunk in short_wave.chunks(4) {
+                let mut data = [0_u32; 4];
+                for (lane, value) in chunk.iter().enumerate() {
+                    data[lane] = finite_f32(*value, "short-wave viscosity")?.to_bits();
+                }
+                self.tables.push(GpuCanonicalTableWord {
+                    data: UVec4::from_array(data),
+                });
+            }
+            offset
+        };
         self.tables[header_offset + 2] = GpuCanonicalTableWord {
             data: UVec4::new(
                 usize_u32(primary_loss_offset)?,
                 usize_u32(complementary_loss_offset)?,
                 usize_u32(restoring_offset)?,
-                0,
+                usize_u32(short_wave_offset)?,
             ),
         };
         if operator.has_loss() {

@@ -246,21 +246,23 @@ Shipped instead: a disk of radius 0.25 of "Van der Pol oscillators", cutoff
 plasma with a 2 Hz cutoff, seeded by a 2.5 Hz point source of 0.01 at its
 centre. Walls outgoing. The magnetic loss limits the gain to the disk's long
 waves: a short wave keeps half its energy in the magnetic field, the disk's
-near-uniform oscillation almost none. Without it the gain lases on the mesh's
-shortest waves at the rim (see "Maintenance" in `docs/plan.md`). The disk
+near-uniform oscillation almost none. Without it the gain lased on the mesh's
+shortest waves at the rim, which the short-wave viscosity added after this
+scene now stops (`docs/spikes/funfern-gate-o.md`). The disk
 rings as one oscillator at its cutoff and radiates rings of wavelength
 `c/√(f² − f_c²) = 0.447`. Raising the plasma's cutoff to 3.6 Hz traps the
 tone.
 
-Claims at edge 0.08 over the last 4 s of 10 s:
+Claims at edge 0.08 over the last 4 s of 10 s, as measured with the
+short-wave viscosity:
 
-- The far field's tone is 3 Hz within 1% (2.999), not the seed's 2.5 Hz,
-  which is under 2% of it (0.5%).
-- The centre's amplitude is `2a/√3 = 1.155` within 5% (1.186).
+- The far field's tone is 3 Hz within 1% (2.998), not the seed's 2.5 Hz,
+  which is under 2% of it (0.7%).
+- The centre's amplitude is `2a/√3 = 1.155` within 5% (1.181).
 - The rings' phase runs along a ray at `2π√(f² − f_c²)` within 5% (14.46
-  against 14.04).
-- With the plasma at 3.6 Hz the disk rings more strongly (1.258 at 3.27 Hz),
-  and its tone 0.7 away is under 5% of the radiating disk's (2.1%).
+  against 14.03).
+- With the plasma at 3.6 Hz the disk rings more strongly (1.245 at 3.26 Hz),
+  and its tone 0.7 away is under 5% of the radiating disk's (1.9%).
 
 ### 10. Plasma-clad whispering gallery
 
