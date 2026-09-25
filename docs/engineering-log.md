@@ -12502,3 +12502,37 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   because the name field takes its whole width. It is now "Advanced view" on
   its own line under the name, the user's choice over the end of the Response
   row or a narrowed name field.
+
+## 2026-09-25 — Josephson line (gallery 7)
+
+- **Scene.** A TM channel of sine-Gordon (the "sine-Gordon" medium, `ω₀ = 12`,
+  kink width `c/ω₀ = 0.083`), top and bottom reflecting, the right wall
+  outgoing and the left wall a Dirichlet drive with a constant offset of 3 and
+  no oscillation. In TM `r` is the junction's phase and `E_z` its voltage, so
+  the end's phase winds at 3 rad/s and the line sheds one fluxon per turn. It
+  opens on the integrated field, which the presentation now keeps. The plan
+  marked this one exploratory: emission from a biased end was unmeasured.
+- **Measured** from rest over 14 s, arrival of each fluxon's centre (r
+  crossing an odd multiple of π):
+
+  | Edge | Gaps at x = −0.5 (2π/3 = 2.094) | Speed, x −0.5 to 0.5 |
+  | --- | --- | --- |
+  | 0.08 | 2.098 2.094 2.092 2.147 2.105 | 0.466–0.470 |
+  | 0.05 | 2.098 2.094 2.094 2.148 2.105 | 0.467–0.471 |
+
+  The emission is mesh-independent. The fourth gap is 3% long at both
+  meshes, after the first fluxons have reached the right wall; the outgoing
+  wall is matched to a wave, not to a kink at 0.47c, and what it sends back
+  meets the next emission. Between fluxons `r` rests within 0.03 turns of a
+  whole number. The speed is observed, not predicted; it is set by the
+  end's energy balance.
+- **Control.** A Klein-Gordon line under the same bias screens it: DC is
+  below its cutoff, so at x = −0.5 `r` stays under 0.1 while the end winds
+  past 16. Test:
+  `a_biased_josephson_line_sheds_one_fluxon_per_turn_of_its_phase` (first
+  three gaps within 1%, one speed within 2% and under 0.9c, rests within
+  0.03 turns, the Klein-Gordon line under 0.2).
+- **Device:** `canonical_gpu_long_run` at 1000 steps (6.7 s, three fluxons
+  emitted), Q 2.8e-6, b 1.8e-6; 400 steps Q 8.8e-7.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

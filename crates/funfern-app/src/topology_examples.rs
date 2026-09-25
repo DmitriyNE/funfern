@@ -93,6 +93,12 @@ pub fn catalog() -> &'static [TopologyExample] {
                  front of the point where the cutoff meets its frequency, and never passes it.",
                 plasma_mirror(),
             ),
+            example(
+                "Josephson line",
+                "A junction line held at a constant voltage on one end sheds one fluxon per \
+                 turn of its phase; each runs down the line as a kink in the integrated field.",
+                josephson_line(),
+            ),
         ]
     })
 }
@@ -964,13 +970,56 @@ fn plasma_mirror_with(omega0: &str, top: f64) -> TopologyDocument {
     document
 }
 
+/// A Josephson transmission line: sine-Gordon in the integrated field, which
+/// in TM is the phase difference across the junction, with its left end held
+/// at a constant voltage. The phase there winds at that rate, and every turn
+/// of 2π leaves the end as a fluxon, a kink in `r` and a voltage pulse in
+/// `E_z`, which runs down the line into the matched right-hand wall.
+const JOSEPHSON_OMEGA0: f64 = 12.0;
+const JOSEPHSON_BIAS: f64 = 3.0;
+
+fn josephson_line() -> TopologyDocument {
+    josephson_line_with("R2", JOSEPHSON_BIAS)
+}
+
+/// The line with restoring preset `restoring` (R1 Klein-Gordon, R2
+/// sine-Gordon) at `omega0 = 12`, biased at `bias` volts on its left end.
+fn josephson_line_with(restoring: &str, bias: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    let mut boundaries = channel();
+    boundaries.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Dirichlet {
+        signal: TimeSignal::harmonic(bias, 0.0, 0.0, 0.0),
+    };
+    builder.scene.outer_boundaries = boundaries;
+    let preset = restoring_presets()
+        .iter()
+        .find(|preset| preset.id == restoring)
+        .expect("a restoring preset");
+    let mut line = apply_restoring_preset(preset, &builder.scene.materials[0])
+        .expect("a restoring preset applies to the background");
+    line.name = "Junction".into();
+    line.parameters
+        .iter_mut()
+        .find(|parameter| parameter.name == "omega0")
+        .expect("the preset names its cutoff")
+        .value = JOSEPHSON_OMEGA0;
+    builder.scene.materials[0] = line;
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    document.presentation.integrated_field = true;
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 13);
+        assert_eq!(catalog().len(), 14);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -1707,6 +1756,147 @@ mod tests {
         assert!(
             (measured - expected).abs() < 0.03,
             "the wall reflects {measured:.3} against {expected:.3}"
+        );
+    }
+
+    /// `r` and `u` at the nodes nearest `points`, every `every` seconds, on a
+    /// document carrying a restoring law, stepped from rest.
+    fn integrated_traces(
+        document: &TopologyDocument,
+        edge: f64,
+        seconds: f64,
+        points: &[Point2],
+        every: f64,
+    ) -> Vec<(f64, Vec<f64>, Vec<f64>)> {
+        let prepared = prepare(document, edge);
+        let operator = prepared
+            .canonical_temporal_operator
+            .clone()
+            .expect("a restoring law prepares a temporal operator");
+        let forcing = prepared.canonical_forcing.clone();
+        let dt = prepared.recommended_time_step();
+        let nodes = points
+            .iter()
+            .map(|point| {
+                operator
+                    .base()
+                    .node_points()
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| (*a.1 - *point).norm().total_cmp(&(*b.1 - *point).norm()))
+                    .unwrap()
+                    .0
+            })
+            .collect::<Vec<_>>();
+        let mut state = CanonicalTemporalWaveState::zero(&operator, dt)
+            .unwrap()
+            .pinned(&operator, &forcing)
+            .unwrap();
+        let stride = ((every / dt).round() as usize).max(1);
+        let steps = (seconds / dt).ceil() as usize;
+        let mut rows = Vec::new();
+        for step in 1..=steps {
+            state.step_with_forcing(&operator, &forcing).unwrap();
+            if step % stride == 0 {
+                let field = operator
+                    .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                    .unwrap();
+                rows.push((
+                    state.time(),
+                    nodes
+                        .iter()
+                        .map(|node| state.integrated_field()[*node])
+                        .collect(),
+                    nodes.iter().map(|node| field[*node]).collect(),
+                ));
+            }
+        }
+        rows
+    }
+
+    /// The times `r` at the `index`th recorded point crosses each odd
+    /// multiple of π, by linear interpolation: when each fluxon's centre
+    /// passes.
+    fn fluxon_arrivals(rows: &[(f64, Vec<f64>, Vec<f64>)], index: usize) -> Vec<f64> {
+        let mut arrivals = Vec::new();
+        let mut next = std::f64::consts::PI;
+        for pair in rows.windows(2) {
+            let (t0, r0) = (pair[0].0, pair[0].1[index]);
+            let (t1, r1) = (pair[1].0, pair[1].1[index]);
+            while r0 < next && r1 >= next {
+                arrivals.push(t0 + (t1 - t0) * (next - r0) / (r1 - r0));
+                next += std::f64::consts::TAU;
+            }
+        }
+        arrivals
+    }
+
+    /// The Josephson gallery claim. Holding the end at a constant voltage V
+    /// winds its phase at V, and the line sheds one fluxon per turn: every
+    /// 2π/V seconds a kink of 2π passes each point, at one steady speed below
+    /// the wave speed, and between kinks `r` rests on a multiple of 2π. A
+    /// Klein-Gordon line under the same bias screens it: DC is below its
+    /// cutoff, so the winding end leaves the line beyond a few `c/ω₀` at rest.
+    #[test]
+    fn a_biased_josephson_line_sheds_one_fluxon_per_turn_of_its_phase() {
+        let tau = std::f64::consts::TAU;
+        let points = [-0.5, 0.0, 0.5].map(|x| Point2::new(x, 0.0));
+        let rows = integrated_traces(&josephson_line(), 0.08, 10.0, &points, 0.02);
+        let arrivals = (0..points.len())
+            .map(|index| fluxon_arrivals(&rows, index))
+            .collect::<Vec<_>>();
+        let period = tau / JOSEPHSON_BIAS;
+        for gap in arrivals[0].windows(2).take(3) {
+            let gap = gap[1] - gap[0];
+            assert!(
+                (gap / period - 1.0).abs() < 0.01,
+                "a fluxon every {gap:.3} s"
+            );
+        }
+        let speeds = arrivals[0]
+            .iter()
+            .zip(&arrivals[2])
+            .map(|(first, last)| 1.0 / (last - first))
+            .collect::<Vec<_>>();
+        assert!(
+            speeds.len() >= 3,
+            "{} fluxons crossed the line",
+            speeds.len()
+        );
+        for speed in &speeds {
+            assert!(
+                *speed < 0.9 && (speed / speeds[0] - 1.0).abs() < 0.02,
+                "fluxons at {speeds:.3?}"
+            );
+        }
+        // Halfway between two fluxons, r rests on a whole number of turns.
+        for pair in arrivals[1].windows(2) {
+            let middle = 0.5 * (pair[0] + pair[1]);
+            let (_, r, _) = rows
+                .iter()
+                .min_by(|a, b| (a.0 - middle).abs().total_cmp(&(b.0 - middle).abs()))
+                .unwrap();
+            let turns = r[1] / tau;
+            assert!(
+                (turns - turns.round()).abs() < 0.03,
+                "r rests at {turns:.3} turns"
+            );
+        }
+
+        let screened = integrated_traces(
+            &josephson_line_with("R1", JOSEPHSON_BIAS),
+            0.08,
+            10.0,
+            &[Point2::new(-0.5, 0.0)],
+            0.1,
+        );
+        let furthest = screened
+            .iter()
+            .map(|(_, r, _)| r[0].abs())
+            .fold(0.0, f64::max);
+        assert!(
+            furthest < 0.2,
+            "the Klein-Gordon line moved to {furthest:.3}"
         );
     }
 }
