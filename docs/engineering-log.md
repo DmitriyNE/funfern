@@ -13134,3 +13134,15 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   the complementary row, where Gate O has no restoring law).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Filed: mixing amplifiers' high-frequency loss; GRIN in an EM skin
+
+- The user saw the parametric fiber amplifier fill with mesh-sized
+  excitations while it amplifies as measured. Filed under "Maintenance" in
+  `docs/plan.md` with the likely cause, not yet measured: a pump travelling
+  at a nearly dispersionless mode's phase velocity phase-matches the whole
+  sum-frequency ladder up to the mesh scale. Also listed there: two options,
+  extending the short-wave viscosity to time-driven coefficients or an
+  authorable gradient-rate loss channel.
+- The GRIN collimator moves to an EM skin after the planned scenes, filed in
+  the gallery plan's "Order" with the TM recipe ε = μ = n.

@@ -536,6 +536,12 @@ its own first run.
 Straight after batch E: a scene change stops the old field at once (the
 first item under "Maintenance" in `docs/plan.md`).
 
+Revisit after the planned scenes, at the user's request: the GRIN collimator
+(scene 3) runs in the Mechanical skin and should run in an EM one, as the
+other optics scenes do. In TM that means ε = μ = n for its impedance-matched
+profile, not the Mechanical `1/n` stiffness (see scene 11); its quarter-pitch
+length and claims are re-measured then.
+
 Proposed by the user on 25 September, after the planned scenes: a plasmonic
 guide. To scope first: a surface plasmon on a flat interface needs a
 permittivity that turns negative acting on the in-plane electric field. In

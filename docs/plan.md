@@ -943,6 +943,20 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   on the self-oscillating elements (`docs/spikes/funfern-gate-o.md`, "The
   short-wave limit").
 
+- [ ] Mixing-based amplifiers need a high-frequency loss. The user saw the
+  parametric fiber amplifier fill with mesh-sized excitations, though it
+  amplifies as measured. The likely cause, not yet measured: the pump
+  travels at the guided mode's phase velocity, and in a fiber this nearly
+  dispersionless it phase-matches the whole sum-frequency ladder (2.5, 7.5,
+  12.5, 17.5 Hz and on), which the pump climbs to the mesh scale. The
+  travelling-modulation scene's up-conversion is the same physics. What stops
+  it in a real guide is dispersion or loss that rises with frequency. Options
+  to weigh: extend the short-wave viscosity (`docs/spikes/funfern-gate-o.md`,
+  "The short-wave limit") to coefficients under a time drive, where the
+  pump is the gain; or an authorable viscous loss channel whose rate grows
+  with the gradient, which would also let a scene band-limit its own gain.
+  Measure the spectrum up the ladder first, on the CPU and in the app.
+
 - [ ] **Next after the gallery:** a scene change must stop the old field at
   once. Opening an example, New scene, loading a file or a link goes through
   `set_document` (`crates/funfern-app/src/ui/session.rs`), which replaces the
