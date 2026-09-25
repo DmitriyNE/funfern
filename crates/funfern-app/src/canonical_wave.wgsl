@@ -113,6 +113,12 @@ struct ScratchWord { values: vec4<f32> }
 var<workgroup> mode_values: array<vec2<f32>, 128>;
 var<workgroup> reduced_values: array<f32, 128>;
 var<workgroup> solved_values: array<f32, 128>;
+// A control flag a workgroup branches on around a barrier. `control` is
+// read-write storage, so WGSL's uniformity analysis takes anything loaded
+// from it as possibly different per invocation, and a barrier under such a
+// branch fails the whole module in the browser, though naga accepts it.
+// `workgroupUniformLoad` of this copy is uniform by definition.
+var<workgroup> uniform_flag: u32;
 
 fn stopped() -> bool {
     return atomicLoad(&status.latch) != 0u || atomicLoad(&status.candidate) != 0u;
@@ -2478,7 +2484,10 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
     // against: a node near zero has no scale of its own, and the sweep's f32
     // floor is set by the whole trace, not by that node.
     var trace_scale = 0.0;
-    if nonlinear_trace() {
+    if local == 0u {
+        uniform_flag = u32(nonlinear_trace());
+    }
+    if workgroupUniformLoad(&uniform_flag) != 0u {
         var partial_scale = 0.0;
         for (var trace = local; trace < trace_count; trace += WORKGROUP_SIZE) {
             partial_scale = max(

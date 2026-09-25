@@ -322,7 +322,9 @@ npm run test:browser
 
 Set `PLAYWRIGHT_CHANNEL=chrome` to use an installed Google Chrome instead of
 Playwright's pinned Chromium. GitHub-hosted runners expose no usable WebGPU
-adapter, so this check runs locally rather than in CI.
+adapter, so this check runs locally rather than in CI. `npm run test:shaders`
+runs only the shader compile in Chrome, which belongs with every shader change;
+see [docs/checks.md](docs/checks.md).
 
 Convergence tests, boundary-reflection tests, mesh benchmarks, GPU/reference
 comparisons and handoff checks are in [docs/checks.md](docs/checks.md).

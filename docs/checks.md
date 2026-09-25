@@ -35,6 +35,15 @@ toolchain is re-fetched into the scratch one.
 Set `PLAYWRIGHT_CHANNEL=chrome` to run the smoke test with an installed Google
 Chrome instead of Playwright's pinned Chromium.
 
+Run `npm run test:shaders` (with `PLAYWRIGHT_CHANNEL=chrome` where the pinned
+Chromium does not start) whenever a shader changes. It compiles every WGSL file
+in Chrome's WebGPU, whose compiler applies WGSL's uniformity rules, as the
+browser build meets them. The workspace tests validate the shaders with naga,
+which the native build also compiles through, and naga accepts shaders the
+browser rejects: twice now a shader has passed every native check and failed
+the whole browser build, most recently a `workgroupBarrier` under a branch on a
+flag read from read-write storage.
+
 GitHub Actions runs formatting, Clippy, the workspace tests, and native and WASM
 release builds for pull requests and pushes to `main`. The Playwright smoke test is
 a local hardware-backed check because GitHub-hosted runners do not expose a usable

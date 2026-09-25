@@ -2,7 +2,8 @@
   "name": "funfern-browser-tests",
   "private": true,
   "scripts": {
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "test:shaders": "playwright test browser-tests/shaders.spec.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.55.0"

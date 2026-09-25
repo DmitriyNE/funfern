@@ -13422,3 +13422,30 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and 1.3e-5.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-26 — The browser build compiles its canonical shader again
+
+- **Reported:** the browser build failed at start-up, every canonical wave
+  pipeline "invalid due to a previous error". Reproduced by compiling each
+  WGSL file in headless Chrome's WebGPU: `canonical_wave.wgsl` alone failed,
+  "'workgroupBarrier' must only be called from uniform control flow", from
+  `reduce_boundary_max` in `boundary_finalize`, under `if nonlinear_trace()`.
+  `control` is read-write storage, so WGSL's uniformity analysis takes the
+  flag as possibly non-uniform, and one such barrier fails the module. It
+  came in with the nonlinear trace kick (072f5cf, 24 September). naga, which
+  the suite validates with and the native build compiles through, accepts it.
+- **Fixed:** invocation 0 copies the flag into a workgroup variable and the
+  branch reads it through `workgroupUniformLoad`, which is uniform by
+  definition, at one barrier. Calling the max reduction unconditionally
+  would have cost every scene with an outgoing wall eight barriers a stage.
+- **Kept fixed:** the repository already had `browser-tests/shaders.spec.mjs`
+  (from 0d3af04, the first such repair), which fails on the old shader with
+  this very message, but nothing ran it. `npm run test:shaders` runs it
+  alone, `docs/checks.md` and the README say to run it with every shader
+  change, and it joins the gate. Playwright's pinned Chromium does not start
+  here (its framework is missing), so it runs with `PLAYWRIGHT_CHANNEL=chrome`.
+- **Checked:** every shader compiles in Chrome; every device example and the
+  `docs/checks.md` variants pass natively, with `NONLINEAR_WALL=1` and `=2`,
+  which run the changed branch.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
