@@ -306,29 +306,37 @@ not add; see "Blocked".
 
 ## Batch C: guides, resonators and amplifiers
 
-### 11. Parametric fiber
+### 11. Parametric fiber amplifier
 
-TM. A GRIN fiber across the whole width, parabolic profile with `H = 0.15`
-and `dn = 0.6`, the face between two wall-attached horizontal dividers. A
-weak signal source at 2.5 Hz sits inside the fiber at its left end. The
-fiber's mass row carries the "Travelling modulation" preset over its graded
-base: pump at 5 Hz, wavenumber `2β` where β is the fundamental mode's
-propagation constant, found in exploration, wave angle 0. The pump travels
-with the signal, which is what phase-matches degenerate parametric gain along
-a line; a pump uniform in space is mismatched by `2k` and its gain averages
-out within a quarter wavelength.
+TM. A graded-index fiber across the whole width, `n(y) = 1 + 0.6·max(0, 1 −
+(y/0.15)²)`, the band between two wall-attached levels at `y = ±0.15`. In TM
+the two rows are ε and μ, so both carry `n`: the index is `√(εμ)` and the
+impedance stays one. (The GRIN rod's `1/n` stiffness is right in its
+Mechanical skin; copied into TM it made `εμ = 1` and the fiber invisible,
+which the first exploration ran into.) The permittivity carries the
+"Travelling modulation" preset over the graded base: pump 5 Hz, depth 0.2,
+wavenumber `2β = 43.88`, phase `3π/4`, angle 0. A 2.5 Hz point source of 4 on
+the axis at x = −0.85, a probe at x = 0.85. Walls outgoing.
 
-The depth is set so the gain from the source to the far wall is between 4×
-and 8×: higher, and the wall reflections at both ends close a round-trip gain
-above one and the fiber oscillates on its own.
+Explored. Unpumped, the fundamental mode runs at β = 21.94 (`n_eff` 1.397;
+a 1D mode solve of the same profile gives 1.391). Pumped at `2β` the gain is
+phase-sensitive, as degenerate parametric gain is: the best and worst pump
+phases are half a turn apart (the plan's quarter turn was wrong), and the
+gain grows as `e^{gx}` with `g ≈ dβ/4`, which put the depth at 0.2. The
+plan expected a pump uniform in space to be merely mismatched; instead it
+conserves wavenumber rather than frequency, couples the forward wave to a
+backward one, and over this length drives an absolute instability: the far
+end grew 5×, 21×, 77× and 411× of the unpumped level at 6, 9, 12 and 16 s.
+That is the scene's contrast now. The plan's "signal off stays quiet" is
+true of any deterministic run from rest and is dropped.
 
-Claims:
+Claims at edge 0.08, at the far end at 2.5 Hz over 2 s windows:
 
-- The amplitude at 2.5 Hz at the far end is more than 4× what it is with the
-  pump off.
-- With the pump phase advanced by π/2 the same quadrature is de-amplified,
-  below 1×.
-- With the signal off, the fiber stays quiet: no self-oscillation.
+- The travelling pump amplifies the signal more than 4× against the pump
+  off (4.85×), and steadily: at 14 s the gain is within 10% of 8 s (4.63×).
+- Advanced by half a turn it squeezes the signal below half (0.13×).
+- Uniform in space, the same pump makes the fiber oscillate: its far end
+  grows more than 3× from 8 s to 12 s (5.7×).
 
 ### 12. Bent fiber
 
@@ -527,6 +535,15 @@ its own first run.
 
 Straight after batch E: a scene change stops the old field at once (the
 first item under "Maintenance" in `docs/plan.md`).
+
+Proposed by the user on 25 September, after the planned scenes: a plasmonic
+guide. To scope first: a surface plasmon on a flat interface needs a
+permittivity that turns negative acting on the in-plane electric field. In
+TM (`E_z`) the Klein-Gordon plasma's negative ε acts on the out-of-plane
+field, which has no surface mode; in TE the in-plane field is the
+complementary row, and Gate O's restoring laws act on the primary field
+only, which there makes a magnetic plasma. So the guide likely needs a Drude
+law on the complementary row first.
 
 Catalogue count after everything: 12 today, 34 after; the catalogue test's
 count and the user guide's example list move with each commit.

@@ -13093,3 +13093,44 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   in; not checked.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Parametric fiber amplifier (gallery 11)
+
+- **Scene.** "Parametric fiber amplifier": a TM graded-index fiber across the
+  domain, `n = 1 + 0.6·max(0, 1 − (y/0.15)²)` carried by both ε and μ, the
+  band between two new wall-attached levels (`Builder::level`,
+  `Builder::band`); its permittivity carries the "Travelling modulation"
+  preset at 5 Hz, depth 0.2, wavenumber 43.88 (twice the mode's β), phase
+  `3π/4`; a 2.5 Hz source of 4 on the axis at the left end and an "Output"
+  probe at the right. It opens in Advanced, its base being a formula.
+- **First exploration found the fiber invisible.** Copied from the GRIN rod,
+  its stiffness was `1/n`: right in the rod's Mechanical skin, but in TM the
+  stiffness slot is μ, so `εμ = 1` and the index was one everywhere. The
+  field was a free cylindrical wave across the core, and the nodal mass was
+  graded as authored. With μ = n too the mode is there: on axis 0.009
+  against 0.0005 off it, β = 21.94 (`n_eff` 1.397 against a 1D mode solve's
+  1.391).
+- **Explored.** Pumped at `2β` over eight phases: depth 0.1 gave 2.57× at
+  best and 0.40× at worst, half a turn apart, and the gain rate matched the
+  coupled-mode `g ≈ dβ/4`; depth 0.18 gave 4.48× and 0.19×, steady from 8 s
+  to 16 s. A pump uniform in space (wavenumber 0) was not merely mismatched,
+  as the plan expected: it couples the forward wave to a backward one and
+  the fiber goes into an absolute instability, 5×, 21×, 77×, 411× of the
+  unpumped level at 6, 9, 12, 16 s. That contrast replaced the plan's
+  "signal off stays quiet", which a deterministic run from rest always is.
+- **Measured** at edge 0.08, far end, 2.5 Hz, 2 s windows: pump off 0.00915;
+  pumped 4.85× at 8 s and 4.63× at 14 s; advanced by π 0.13×; uniform pump
+  0.125 to 0.705 from 8 s to 12 s. Test:
+  `a_pump_running_with_the_signal_amplifies_it_where_a_standing_one_oscillates`
+  (over 4×, steady within 10%, under 0.5×, over 3× growth).
+- **Also:** the gallery's `integrated_traces` helper reads `r` as zero when a
+  document has no restoring law, so it serves any law-carrying scene.
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 1.6e-6, b 1.7e-6; at
+  1000 steps Q 1.4e-5, b 1.4e-5; at 3000 steps (printed, not judged) 3.1e-5
+  and 3.3e-5.
+- Also in this commit: the user's proposal of a plasmonic guide after the
+  planned scenes, filed in the gallery plan with its scoping note (a surface
+  plasmon needs a Drude permittivity on the in-plane field, which in TE is
+  the complementary row, where Gate O has no restoring law).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

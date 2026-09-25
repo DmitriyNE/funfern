@@ -128,6 +128,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  the wall turns transparent.",
                 whispering_gallery(),
             ),
+            example(
+                "Parametric fiber amplifier",
+                "A graded-index fiber whose permittivity is pumped at twice the signal's \
+                 frequency by a wave running with it amplifies the signal about fivefold by the \
+                 far end; shift the pump's phase by half a turn and the same signal is squeezed. \
+                 Stop the pump's wave (wavenumber 0) and the fiber oscillates on its own.",
+                fiber_amplifier(),
+            ),
         ]
     })
 }
@@ -405,6 +413,74 @@ impl Builder {
             frame: MaterialFrame::world(),
         });
         // Running upwards, the divider's right is towards +x.
+        self.scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Curve {
+                curve,
+                span,
+                side: CurveTraceSide::Right,
+                parameter: 0.5,
+            },
+            region: Some(region),
+        });
+        region
+    }
+
+    /// A wall-attached transmitting divider across the whole width at `y`,
+    /// running from the left wall to the right one.
+    fn level(&mut self, y: f64) -> (CurveId, CurveSpanId) {
+        let domain = self.scene.geometry.domain;
+        let left = self.outer_vertex(OuterSide::Left, (domain.max_y - y) / domain.height());
+        let right = self.outer_vertex(OuterSide::Right, (y - domain.min_y) / domain.height());
+        let span = CurveSpanId(self.next_span);
+        let curve = self.open_curve(
+            OpenCubicSpline::polyline(vec![
+                Point2::new(domain.min_x, y),
+                Point2::new(domain.max_x, y),
+            ])
+            .unwrap(),
+            &[SpanBehavior::Transmitting],
+        );
+        let authored = self
+            .scene
+            .geometry
+            .curves
+            .iter_mut()
+            .find(|candidate| candidate.id == curve)
+            .unwrap();
+        authored.nodes[0].vertex = Some(left);
+        authored.nodes[1].vertex = Some(right);
+        (curve, span)
+    }
+
+    /// The band between two levels, from wall to wall, as a region of
+    /// `material`. The background's own anchor, on the floor, names the face
+    /// below it; the face above is a region of its own of the same material.
+    fn band(&mut self, y0: f64, y1: f64, material: MaterialId) -> RegionId {
+        self.level(y0);
+        let (curve, span) = self.level(y1);
+        let above = RegionId(self.next_region);
+        self.next_region += 1;
+        let background = self.scene.regions[0].material;
+        self.scene.regions.push(Region {
+            id: above,
+            material: background,
+            frame: MaterialFrame::world(),
+        });
+        self.scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Outer {
+                side: OuterSide::Top,
+                fraction: 0.5,
+            },
+            region: Some(above),
+        });
+        let region = RegionId(self.next_region);
+        self.next_region += 1;
+        self.scene.regions.push(Region {
+            id: region,
+            material,
+            frame: MaterialFrame::world(),
+        });
+        // Running towards +x, the upper level's right is below it.
         self.scene.face_assignments.push(AuthoredFaceAssignment {
             anchor: FaceAnchor::Curve {
                 curve,
@@ -1400,13 +1476,103 @@ fn whispering_gallery_with(frequency: f64) -> TopologyDocument {
     document
 }
 
+const FIBER_H: f64 = 0.15;
+const FIBER_DN: f64 = 0.6;
+const FIBER_SIGNAL_HZ: f64 = 2.5;
+const FIBER_DEPTH: f64 = 0.2;
+/// Twice the fundamental mode's propagation constant at 2.5 Hz, measured on
+/// the unpumped fiber (β = 21.94, `n_eff` 1.397; a 1D mode solve gives
+/// 1.391), so the pump runs with the signal.
+const FIBER_PUMP_WAVENUMBER: f64 = 43.88;
+/// The pump phase that amplifies the source's quadrature most.
+const FIBER_PUMP_PHASE: f64 = 0.75 * std::f64::consts::PI;
+
+fn fiber_amplifier() -> TopologyDocument {
+    fiber_amplifier_with(FIBER_DEPTH, FIBER_PUMP_WAVENUMBER, FIBER_PUMP_PHASE)
+}
+
+/// A TM graded-index fiber across the whole width, the band between two
+/// levels at `±H`, its permittivity carrying the "Travelling modulation"
+/// preset over the graded base at twice the signal's frequency, with
+/// `depth`, `wavenumber` and `phase`. A weak signal source sits on its axis
+/// at the left end; a probe reads the right end.
+///
+/// A pump that runs with the signal at `2β` keeps its phase against the
+/// signal's all the way along, so it amplifies one quadrature of it and
+/// squeezes the other, steadily, as the signal passes. A pump uniform in
+/// space conserves the wavenumber instead of the frequency and couples the
+/// forward wave to a backward one; over this length that closes a loop
+/// above threshold and the fiber oscillates on its own.
+fn fiber_amplifier_with(depth: f64, wavenumber: f64, phase: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    let graded = Material {
+        id: MaterialId(2),
+        name: "Pumped fiber".into(),
+        // In TM the rows are ε and μ, so both carry the index: `n = √(εμ)` is
+        // graded and the impedance `√(μ/ε)` stays one.
+        mass_density: ScalarField::formula("1 + dn * max(0, 1 - (y / H)^2)").unwrap(),
+        stiffness: ScalarField::formula("1 + dn * max(0, 1 - (y / H)^2)").unwrap(),
+        parameters: vec![
+            MaterialParameter {
+                name: "H".into(),
+                value: FIBER_H,
+            },
+            MaterialParameter {
+                name: "dn".into(),
+                value: FIBER_DN,
+            },
+        ],
+        color: [46, 120, 139],
+        ..Material::default_medium()
+    };
+    let preset = law_presets()
+        .iter()
+        .find(|candidate| {
+            candidate.name == "Travelling modulation" && candidate.row == LawPresetRow::Mass
+        })
+        .expect("the catalogue offers the travelling modulation");
+    let mut fiber = apply_law_preset(preset, &graded).expect("a preset applies to the fiber");
+    for (name, value) in [
+        ("depth", depth),
+        ("pump_hz", 2.0 * FIBER_SIGNAL_HZ),
+        ("pump_phase", phase),
+        ("wavenumber", wavenumber),
+        ("wave_angle", 0.0),
+    ] {
+        fiber
+            .parameters
+            .iter_mut()
+            .find(|parameter| parameter.name == name)
+            .expect("the preset names its parameter")
+            .value = value;
+    }
+    builder.scene.materials.push(fiber);
+    let region = builder.band(-FIBER_H, FIBER_H, MaterialId(2));
+    let mut document = builder.document();
+    document.model.source = PointSource {
+        region,
+        ..source(Point2::new(-0.85, 0.0), FIBER_SIGNAL_HZ, 4.0, 0.04)
+    };
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Output".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(0.85, 0.0)),
+    });
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 18);
+        assert_eq!(catalog().len(), 19);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -2147,7 +2313,8 @@ mod tests {
     }
 
     /// `r` and `u` at the nodes nearest `points`, every `every` seconds, on a
-    /// document carrying a restoring law, stepped from rest.
+    /// document carrying a temporal law, stepped from rest. Without a
+    /// restoring law there is no `r`, and it reads zero.
     fn integrated_traces(
         document: &TopologyDocument,
         edge: f64,
@@ -2159,7 +2326,7 @@ mod tests {
         let operator = prepared
             .canonical_temporal_operator
             .clone()
-            .expect("a restoring law prepares a temporal operator");
+            .expect("a temporal law prepares a temporal operator");
         let forcing = prepared.canonical_forcing.clone();
         let dt = prepared.recommended_time_step();
         let nodes = points
@@ -2192,7 +2359,7 @@ mod tests {
                     state.time(),
                     nodes
                         .iter()
-                        .map(|node| state.integrated_field()[*node])
+                        .map(|node| state.integrated_field().get(*node).copied().unwrap_or(0.0))
                         .collect(),
                     nodes.iter().map(|node| field[*node]).collect(),
                 ));
@@ -2869,6 +3036,61 @@ mod tests {
             "0.35 out the field keeps {:.3} of itself on resonance and {:.3} at 5 Hz",
             reach(&resonant),
             reach(&transparent)
+        );
+    }
+    /// The parametric fiber claims, at edge 0.08, read at the far end at
+    /// 2.5 Hz over 2 s windows. The pump running with the signal amplifies it
+    /// more than 4× against the pump off, and steadily: 6 s later the gain
+    /// is the same within 10%. Advanced by half a turn, the same pump
+    /// squeezes it below half. The same pump uniform in space makes the fiber
+    /// an oscillator: its far-end field grows more than 3× from 8 s to 12 s.
+    #[test]
+    fn a_pump_running_with_the_signal_amplifies_it_where_a_standing_one_oscillates() {
+        let output = Point2::new(0.85, 0.0);
+        let far_end = |document: &TopologyDocument, seconds: f64, windows: &[f64]| {
+            let rows = integrated_traces(document, 0.08, seconds, &[output], 0.0);
+            let dt = rows[1].0 - rows[0].0;
+            let series = rows.iter().map(|row| row.2[0]).collect::<Vec<_>>();
+            windows
+                .iter()
+                .map(|end| {
+                    let (re, im) = phasor(&series[..(end / dt) as usize], dt, FIBER_SIGNAL_HZ, 2.0);
+                    re.hypot(im)
+                })
+                .collect::<Vec<_>>()
+        };
+        let off = far_end(&fiber_amplifier_with(0.0, 0.0, 0.0), 8.0, &[8.0])[0];
+        let pumped = far_end(&fiber_amplifier(), 14.0, &[8.0, 14.0]);
+        let squeezed = far_end(
+            &fiber_amplifier_with(
+                FIBER_DEPTH,
+                FIBER_PUMP_WAVENUMBER,
+                FIBER_PUMP_PHASE + std::f64::consts::PI,
+            ),
+            8.0,
+            &[8.0],
+        )[0];
+        let standing = far_end(
+            &fiber_amplifier_with(FIBER_DEPTH, 0.0, FIBER_PUMP_PHASE),
+            12.0,
+            &[8.0, 12.0],
+        );
+        let (gain, later) = (pumped[0] / off, pumped[1] / off);
+        assert!(gain > 4.0, "the pump amplifies {gain:.3}×");
+        assert!(
+            (later / gain - 1.0).abs() < 0.1,
+            "the gain moved from {gain:.3} to {later:.3}"
+        );
+        assert!(
+            squeezed / off < 0.5,
+            "advanced by π it passes {:.3}×",
+            squeezed / off
+        );
+        assert!(
+            standing[1] > 3.0 * standing[0],
+            "a standing pump's far end went from {:.4} to {:.4}",
+            standing[0],
+            standing[1]
         );
     }
 }
