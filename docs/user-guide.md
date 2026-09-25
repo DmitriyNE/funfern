@@ -149,7 +149,10 @@ running; this file covers using it.
   **Isolate at C0** preserves the curve exactly while freeing a partial span
   selection for rigid motion. A single selected span exposes C2, C1, and C0 choices
   for its end knot; smoothing uses a bounded projection and reports its maximum
-  displacement. Junction knots stay C0. Drag selected geometry to translate it.
+  displacement. Junction knots stay C0. Drag selected geometry to translate it:
+  a press anywhere on a selected span takes the selection, even beside a control
+  point, and only a press on a control's own dot takes the control. With Handles
+  hidden in View, control points and junctions take no clicks.
   Movable selections show a draggable rotation/scale center, a rotation ring, and
   separate uniform, horizontal, and vertical scale grips. Hold Shift while dragging
   to snap world coordinates to `0.05`, angles to 15°, and scale to 0.1 increments.

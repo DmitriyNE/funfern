@@ -301,14 +301,7 @@ impl Playground {
                     });
                     return;
                 }
-                let hit = self.sampled.as_ref().and_then(|sampled| {
-                    sampled.hit_test(
-                        self.transform(r),
-                        screen,
-                        self.hit_tolerance(13.0) as f64,
-                        self.hit_tolerance(9.0) as f64,
-                    )
-                });
+                let hit = self.topology_hit(screen, r);
                 if let Some(hit) = hit {
                     self.selected_probe = None;
                     let shift = ui.input(|i| i.modifiers.shift);
@@ -704,14 +697,7 @@ impl Playground {
                     self.selection = TopologySelection::None;
                     return;
                 }
-                let hit = self.sampled.as_ref().and_then(|sampled| {
-                    sampled.hit_test(
-                        self.transform(r),
-                        ScreenPoint::new(pos.x as f64, pos.y as f64),
-                        self.hit_tolerance(13.0) as f64,
-                        self.hit_tolerance(9.0) as f64,
-                    )
-                });
+                let hit = self.topology_hit(ScreenPoint::new(pos.x as f64, pos.y as f64), r);
                 if let Some(hit) = hit {
                     self.selected_probe = None;
                     self.selection.apply_hit(

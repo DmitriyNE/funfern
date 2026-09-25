@@ -12753,3 +12753,27 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   1000 steps Q 3.9e-6, b 1.3e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — A selected curve moves by its body, and hidden handles take no clicks
+
+- **Reported:** moving a selection of C0-isolated spans in a dense scene is
+  hard; clicks keep going to control points. The viewport's hit test gave any
+  control within 13 px the press outright, and on a polyline every segment
+  carries two controls on the curve itself, at a third and two thirds of its
+  length, so a press on the body of a selected curve nearly always took a
+  control instead. The View panel's Handles switch hid them from the drawing
+  only; hidden, they still took every press near them.
+- **Now** one helper, `topology_hit`, answers the press, the click and the
+  hover cursor alike. Handles take part only while shown. With spans
+  selected, a press within span reach of one of them is the selection's, so
+  a drag moves it, unless it lands within 6 px of a control, the drawn dot
+  and a little margin (`DIRECT_HANDLE_RADIUS`), which keeps controls
+  editable. Unselected curves behave as before. `SampledTopology::span_hit`
+  is the span half of the old hit test, restricted to the spans a caller
+  wants.
+- **Test:** `a_press_on_a_selected_curve_moves_it_rather_than_a_control_beside_it`
+  (a press 8 px along a polyline from its inner control: unselected the
+  control, selected the span; on the dot the control; hidden, the span in
+  both cases).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check. Not exercised in the running app.

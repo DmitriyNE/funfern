@@ -115,6 +115,9 @@ pub(super) enum MaterialFrameGizmoHit {
 }
 
 pub(super) const MATERIAL_FRAME_RADIUS: f32 = 42.0;
+/// How near a control's dot a press must land to take the control rather than
+/// a selected span it lies on: the drawn dot and a little margin.
+pub(super) const DIRECT_HANDLE_RADIUS: f32 = 6.0;
 
 /// What a pointer landed on within a probe. Endpoint and radius grips take
 /// priority over the body so a small probe stays reshapeable.

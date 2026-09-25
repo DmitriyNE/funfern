@@ -225,14 +225,7 @@ impl Playground {
         if let Some(index) = self.hit_domain_corner(pos, r) {
             return Some(Self::domain_corner_cursor(index));
         }
-        let hit = self.sampled.as_ref().and_then(|sampled| {
-            sampled.hit_test(
-                self.transform(r),
-                ScreenPoint::new(pos.x as f64, pos.y as f64),
-                self.hit_tolerance(13.0) as f64,
-                self.hit_tolerance(9.0) as f64,
-            )
-        })?;
+        let hit = self.topology_hit(ScreenPoint::new(pos.x as f64, pos.y as f64), r)?;
         let TopologyHit::Span { target, .. } = hit else {
             return None;
         };

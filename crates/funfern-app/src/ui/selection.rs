@@ -5,7 +5,9 @@ use bevy::prelude::*;
 use bevy_egui::egui::{self};
 use funfern_app::document::ProbeSamplingPreset;
 use funfern_app::topology_editor::TopologyProbeTarget;
-use funfern_app::topology_viewport::{TopologyHit, TopologySelection, TopologySpanTarget};
+use funfern_app::topology_viewport::{
+    ScreenPoint, TopologyHit, TopologySelection, TopologySpanTarget,
+};
 use funfern_core::*;
 use std::collections::BTreeSet;
 
@@ -153,6 +155,48 @@ impl Playground {
             TopologySelection::Spans(spans)
         }
     }
+    /// What a press or a click at `screen` lands on. Handles take part only
+    /// while they are shown. With spans selected, a press within reach of
+    /// one of them is the selection's, so a drag moves it, unless it lands on
+    /// a control's own dot: on a polyline every segment carries two controls
+    /// on the curve itself, and letting the generous handle radius win there
+    /// made a selected curve impossible to move by its body.
+    pub(super) fn topology_hit(&self, screen: ScreenPoint, r: egui::Rect) -> Option<TopologyHit> {
+        let sampled = self.sampled.as_ref()?;
+        let transform = self.transform(r);
+        let handles = self.editor.document.presentation.handles;
+        let span_radius = self.hit_tolerance(9.0) as f64;
+        if let Some(selected) = self.selection.spans().filter(|spans| !spans.is_empty()) {
+            let direct = handles
+                .then(|| {
+                    sampled.hit_test(
+                        transform,
+                        screen,
+                        self.hit_tolerance(DIRECT_HANDLE_RADIUS) as f64,
+                        -1.0,
+                    )
+                })
+                .flatten();
+            if direct.is_some() {
+                return direct;
+            }
+            if let Some(hit) = sampled.span_hit(transform, screen, span_radius, |target| {
+                selected.contains(&target)
+            }) {
+                return Some(hit);
+            }
+        }
+        if handles {
+            sampled.hit_test(
+                transform,
+                screen,
+                self.hit_tolerance(13.0) as f64,
+                span_radius,
+            )
+        } else {
+            sampled.span_hit(transform, screen, span_radius, |_| true)
+        }
+    }
     pub(super) fn drag_starts_inside_span_selection(
         selection: &TopologySelection,
         hit: TopologyHit,
@@ -290,5 +334,67 @@ mod tests {
                 distance: 0.0,
             },
         ));
+    }
+
+    /// A polyline carries two controls on each of its segments, so a press on
+    /// its body is nearly always within the handle radius of one. Unselected,
+    /// that press still takes the control; on a selected curve it takes the
+    /// selection unless it lands on the control's own dot; and with handles
+    /// hidden nothing unseen takes it at all.
+    #[test]
+    fn a_press_on_a_selected_curve_moves_it_rather_than_a_control_beside_it() {
+        let r = test_support::viewport();
+        let mut state = Playground::default();
+        test_support::settle(&mut state.editor);
+        let curve = state
+            .editor
+            .create_boundary_baffle(
+                OpenCubicSpline::polyline(vec![Point2::new(-0.3, 0.8), Point2::new(0.3, 0.8)])
+                    .unwrap(),
+            )
+            .unwrap();
+        test_support::settle(&mut state.editor);
+        state.invalidate_samples();
+        state.refresh_samples(r);
+        let geometry = &state.editor.document.model.draft.geometry;
+        let spans = geometry
+            .curve(curve)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| TopologySpanTarget::Curve(span.id))
+            .collect::<BTreeSet<_>>();
+        let inner = state.screen(Point2::new(-0.1, 0.8), r);
+        let beside = ScreenPoint::new(inner.x as f64 + 8.0, inner.y as f64);
+        let on_dot = ScreenPoint::new(inner.x as f64 + 1.0, inner.y as f64);
+        let is_handle = |hit: Option<TopologyHit>| matches!(hit, Some(TopologyHit::Handle { .. }));
+        let is_selected_span = |hit: Option<TopologyHit>| matches!(hit, Some(TopologyHit::Span { target, .. }) if spans.contains(&target));
+
+        assert!(
+            is_handle(state.topology_hit(beside, r)),
+            "unselected, the control wins"
+        );
+        state.selection = TopologySelection::Spans(spans.clone());
+        assert!(
+            is_selected_span(state.topology_hit(beside, r)),
+            "selected, the body moves the selection"
+        );
+        assert!(
+            is_handle(state.topology_hit(on_dot, r)),
+            "the dot itself still takes the control"
+        );
+        state.editor.document.presentation.handles = false;
+        assert!(
+            is_selected_span(state.topology_hit(on_dot, r)),
+            "a hidden control takes nothing"
+        );
+        state.selection = TopologySelection::None;
+        assert!(
+            matches!(
+                state.topology_hit(on_dot, r),
+                Some(TopologyHit::Span { .. })
+            ),
+            "a hidden control takes nothing from an unselected curve either"
+        );
     }
 }

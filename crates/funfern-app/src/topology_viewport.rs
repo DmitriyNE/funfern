@@ -304,8 +304,21 @@ impl SampledTopologyGeometry {
         if let Some((handle, distance)) = handle {
             return Some(TopologyHit::Handle { handle, distance });
         }
+        self.span_hit(transform, pointer, span_radius, |_| true)
+    }
+
+    /// The nearest span within `span_radius` of `pointer` among those `wanted`
+    /// accepts, ignoring handles.
+    pub fn span_hit(
+        &self,
+        transform: ViewportTransform,
+        pointer: ScreenPoint,
+        span_radius: f64,
+        wanted: impl Fn(TopologySpanTarget) -> bool,
+    ) -> Option<TopologyHit> {
         self.spans
             .iter()
+            .filter(|span| wanted(span.target))
             .filter_map(|span| {
                 span.samples
                     .windows(2)
