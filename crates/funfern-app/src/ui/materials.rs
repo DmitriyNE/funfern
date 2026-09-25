@@ -18,6 +18,23 @@ impl Playground {
     /// clicking a region in the scene opens what it is made of. Edits not yet
     /// applied to the open material keep it open instead, with a notice,
     /// since following the selection would discard them.
+    /// Whether the editor shows `material` in its Advanced view.
+    pub(super) fn material_advanced(&self, material: MaterialId) -> bool {
+        self.editor
+            .document
+            .presentation
+            .advanced_materials
+            .contains(material)
+    }
+
+    pub(super) fn set_material_advanced(&mut self, material: MaterialId, advanced: bool) {
+        let draft = &self.editor.document.model.draft;
+        let shown = &mut self.editor.document.presentation.advanced_materials;
+        // Ids of deleted materials go first, so the set has room.
+        shown.retain(|id| draft.material(id).is_some());
+        shown.set(material, advanced);
+    }
+
     pub(super) fn select_region(&mut self, region: RegionId) {
         self.region_selection = region;
         let Some(assigned) = self
@@ -373,16 +390,6 @@ impl Playground {
         ui.horizontal(|ui| {
             ui.label("Library");
             self.formula_help_toggle(ui);
-            // A view of the same materials, kept with the document's other
-            // view settings rather than as an undoable edit.
-            ui.checkbox(
-                &mut self.editor.document.presentation.advanced_materials,
-                "Advanced",
-            )
-            .on_hover_text(
-                "Every law slot of both rows, the loss channels and the effective law \
-                 in numbers, instead of the preset's named values",
-            );
             if ui.button("+").clicked() {
                 match self.editor.add_material() {
                     Ok(id) => {
@@ -454,14 +461,32 @@ impl Playground {
         }
         if let Some(mut material) = self.material_edit.take() {
             ui.separator();
-            ui.text_edit_singleline(&mut material.name);
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut material.name);
+                // Each material keeps its own view. It is a way of looking at
+                // the material, kept with the document's other view settings
+                // rather than as an undoable edit, and changes nothing in it:
+                // pending edits stay pending.
+                let mut advanced = self.material_advanced(material.id);
+                if ui
+                    .checkbox(&mut advanced, "Advanced")
+                    .on_hover_text(
+                        "Show this material's every law slot, its loss channels and its \
+                         effective law in numbers, instead of the medium's named values. \
+                         Turning it off changes only what is shown.",
+                    )
+                    .changed()
+                {
+                    self.set_material_advanced(material.id, advanced);
+                }
+            });
             // What kind of medium this is, which decides what follows. A preset
             // writes the law slots and creates the parameters it exposes; after
             // that the material stands on its own, so editing a slot by hand
             // leaves it Custom rather than being refitted to the preset it came
             // from.
             let physics = self.editor.document.model.draft.physics;
-            let advanced = self.editor.document.presentation.advanced_materials;
+            let advanced = self.material_advanced(material.id);
             // The simple view is a linear material or one of the catalogue's
             // media, whole; composing laws by hand is Advanced, where Response
             // names only the two rows.
@@ -1335,15 +1360,49 @@ mod tests {
     fn the_advanced_view_is_presentation_not_an_edit() {
         let mut state = Playground::default();
         activate(&mut state);
+        let selection = state.resolved_material_selection();
+        let other = state.editor.add_material().unwrap();
         let model = state.editor.document.model.clone();
         let revision = state.editor.revision;
-        state.editor.document.presentation.advanced_materials = true;
+        state.set_material_advanced(selection, true);
         assert_eq!(state.editor.document.model, model);
         assert_eq!(state.editor.revision, revision);
-        assert!(!state.editor.undo(), "the toggle made an undo step");
+        assert!(state.material_advanced(selection));
+        assert!(
+            !state.material_advanced(other),
+            "the view is the material's own"
+        );
         let saved = funfern_app::topology_persistence::save(&state.editor.document).unwrap();
         let loaded = funfern_app::topology_persistence::parse_document(saved.as_bytes()).unwrap();
-        assert!(loaded.presentation.advanced_materials);
+        assert!(loaded.presentation.advanced_materials.contains(selection));
+        assert!(!loaded.presentation.advanced_materials.contains(other));
+        // The last undo step is still the added material: the view made none.
+        assert!(state.editor.undo());
+        assert!(state.editor.document.model.draft.material(other).is_none());
+        assert!(state.material_advanced(selection));
+    }
+
+    /// Switching a material's view with edits pending leaves them pending,
+    /// and switching it back to the simple view leaves a composition the
+    /// simple view cannot name exactly as it was.
+    #[test]
+    fn switching_a_materials_view_keeps_its_pending_edits() {
+        let mut state = Playground::default();
+        let selection = state.resolved_material_selection();
+        let context = egui::Context::default();
+        let render = |state: &mut Playground| {
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                state.materials_panel(ui);
+            });
+        };
+        render(&mut state);
+        state.material_edit.as_mut().unwrap().name = "Pending".into();
+        state.set_material_advanced(selection, true);
+        render(&mut state);
+        state.set_material_advanced(selection, false);
+        render(&mut state);
+        assert_eq!(state.material_edit.as_ref().unwrap().name, "Pending");
+        assert!(state.material_edits_pending());
     }
 
     /// Viewing a material in the panel rewrites nothing, in either view and
@@ -1393,8 +1452,8 @@ mod tests {
                 for advanced in [false, true] {
                     let mut state = Playground::default();
                     state.editor.document.model.draft.physics = physics;
-                    state.editor.document.presentation.advanced_materials = advanced;
                     let selection = state.resolved_material_selection();
+                    state.set_material_advanced(selection, advanced);
                     let stored = Material {
                         id: selection,
                         ..material.clone()

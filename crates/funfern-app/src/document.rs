@@ -3,7 +3,7 @@
 //! These types are independent of both the retired object-specific editor and
 //! the topology editor. Production topology code imports them from here.
 
-use funfern_core::{ElectromagneticPolarization, PhysicsModel};
+use funfern_core::{ElectromagneticPolarization, MAX_MATERIALS, MaterialId, PhysicsModel};
 
 pub const MAX_PROBES: usize = 16;
 pub const MAX_SEGMENT_PROBE_POINTS: usize = 512;
@@ -160,6 +160,62 @@ impl VectorOverlay {
     }
 }
 
+/// A set of material ids, at most one per material a scene can hold, so it
+/// stays `Copy` with the rest of the view settings. Ids are kept sorted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AdvancedMaterials {
+    ids: [u64; MAX_MATERIALS],
+    len: usize,
+}
+
+impl AdvancedMaterials {
+    pub fn contains(&self, id: MaterialId) -> bool {
+        self.ids[..self.len].binary_search(&id.0).is_ok()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = MaterialId> + '_ {
+        self.ids[..self.len].iter().map(|id| MaterialId(*id))
+    }
+
+    /// Marks `id` as shown in Advanced or not. A set holding ids of materials
+    /// that no longer exist can be full; [`Self::retain`] against the scene
+    /// first, which leaves room for every material it can hold.
+    pub fn set(&mut self, id: MaterialId, advanced: bool) {
+        match (self.ids[..self.len].binary_search(&id.0), advanced) {
+            (Err(index), true) if self.len < MAX_MATERIALS => {
+                self.ids.copy_within(index..self.len, index + 1);
+                self.ids[index] = id.0;
+                self.len += 1;
+            }
+            (Ok(index), false) => {
+                self.ids.copy_within(index + 1..self.len, index);
+                self.len -= 1;
+                self.ids[self.len] = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Keeps only the ids `keep` accepts.
+    pub fn retain(&mut self, keep: impl Fn(MaterialId) -> bool) {
+        let kept = self.iter().filter(|id| keep(*id)).collect::<Vec<_>>();
+        *self = Self::default();
+        for id in kept {
+            self.set(id, true);
+        }
+    }
+}
+
+impl FromIterator<MaterialId> for AdvancedMaterials {
+    fn from_iter<T: IntoIterator<Item = MaterialId>>(ids: T) -> Self {
+        let mut set = Self::default();
+        for id in ids {
+            set.set(id, true);
+        }
+        set
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PresentationSettings {
     pub grid: bool,
@@ -205,10 +261,12 @@ pub struct PresentationSettings {
     pub mesh_edge: f64,
     pub adaptation: AdaptationSettings,
     pub grid_scale_filter: bool,
-    /// Whether the material editor shows every law slot and the numeric
-    /// effective law, rather than the preset's named values. A way of looking
-    /// at the same material, so it is kept with the view and not undone.
-    pub advanced_materials: bool,
+    /// The materials the editor shows in its Advanced view: every law slot and
+    /// the numeric effective law, rather than the medium's named values. Each
+    /// material keeps its own, so it reads as part of the material, but it is
+    /// a way of looking at it: kept with the view, not undone, and never seen
+    /// by the solver.
+    pub advanced_materials: AdvancedMaterials,
     /// Whether the Advanced view writes each row's effective law with its
     /// expressions evaluated, rather than by the names the author gave them.
     pub law_formula_numbers: bool,
@@ -311,7 +369,7 @@ impl Default for PresentationSettings {
             mesh_edge: 0.08,
             adaptation: AdaptationSettings::default(),
             grid_scale_filter: true,
-            advanced_materials: false,
+            advanced_materials: AdvancedMaterials::default(),
             law_formula_numbers: false,
             integrated_field: false,
         }

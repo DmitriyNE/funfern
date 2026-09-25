@@ -153,6 +153,7 @@ the three restoring laws R1–R3 on linear rows, a self-oscillating medium
 (D3), and van der Pol oscillators (R1 with D3). Choosing a medium replaces
 the last one, including anything the simple view cannot show, such as a loss
 drive; a constant loss rate stays. Any other composition, for example Kerr
-beside sine-Gordon, reads **Custom** there and is edited in **Advanced**,
+beside sine-Gordon, reads **Custom** there and is edited in **Advanced**, a
+view each material keeps for itself,
 where Response names only the two rows and the restoring law, loss kind and
 drives have their own controls.

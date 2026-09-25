@@ -103,6 +103,7 @@ fn example(
     mut document: TopologyDocument,
 ) -> TopologyExample {
     document.presentation.boundary_conditions = true;
+    document.presentation.advanced_materials = advanced_materials(&document.model.draft);
     document
         .model
         .accepted
@@ -113,6 +114,17 @@ fn example(
         description,
         document,
     }
+}
+
+/// The materials the simple view cannot name as one medium: those open in the
+/// Advanced view, where their laws are shown as authored.
+fn advanced_materials(scene: &TopologyScene) -> crate::document::AdvancedMaterials {
+    scene
+        .materials
+        .iter()
+        .filter(|material| identify_medium_preset(material, scene.physics).is_none())
+        .map(|material| material.id)
+        .collect()
 }
 
 struct Builder {
@@ -982,6 +994,40 @@ mod tests {
                 PhysicsModel::Electromagnetic { .. }
             )
         }));
+    }
+
+    /// Every gallery material the simple view cannot name opens in Advanced,
+    /// and no other does. The plasma's cutoff is a formula in x, which no
+    /// medium writes.
+    #[test]
+    fn a_gallery_material_opens_in_the_view_that_can_show_it() {
+        for example in catalog() {
+            let scene = &example.document.model.draft;
+            for material in &scene.materials {
+                assert_eq!(
+                    example
+                        .document
+                        .presentation
+                        .advanced_materials
+                        .contains(material.id),
+                    identify_medium_preset(material, scene.physics).is_none(),
+                    "{}: {}",
+                    example.name,
+                    material.name
+                );
+            }
+        }
+        let plasma = catalog()
+            .iter()
+            .find(|example| example.name == "Plasma mirror")
+            .unwrap();
+        assert!(
+            plasma
+                .document
+                .presentation
+                .advanced_materials
+                .contains(DEFAULT_MATERIAL)
+        );
     }
 
     use crate::topology_editor::TopologyEditor;

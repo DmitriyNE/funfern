@@ -12467,3 +12467,34 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   the gap shows, pausing or dropping the old generation without breaking the
   live-edit handoff, undo), and scheduled straight after the gallery in
   `docs/spikes/funfern-gallery-plan.md`. No code changed.
+
+## 2026-09-25 — Each material keeps its own Advanced view
+
+- The Advanced switch was one flag for the whole document, beside the Library
+  heading. It is now per material, beside the material's name, so it reads as
+  part of the material. It stays a view: kept in the presentation as
+  `advanced_materials`, the ids shown in Advanced, never an undo step and
+  never seen by the solver. A field on the core `Material` would have made
+  every toggle a material edit that needs Apply, and since the runtime reuses
+  an operator only when the materials compare equal, a recompile and a live
+  handoff for a view change.
+- The set holds at most one id per material a scene can hold (32), so it is a
+  fixed-size sorted array and the presentation stays `Copy`. It is pruned
+  against the draft's materials when a file is written and read, and before
+  a toggle, so an id never outlives its material.
+- **Old files.** The retired `advanced_materials: bool` is still read: on, it
+  opens every material of the file in Advanced, which is what its author
+  last saw. It is never written. New files carry `advanced_material_ids`,
+  which defaults to empty.
+- **Behaviour unchanged.** Turning a material's Advanced off only changes what
+  is shown, and edits pending in the editor stay pending across the switch.
+- **Gallery.** `example()` opens in Advanced exactly the materials the simple
+  view cannot name as one medium (`identify_medium_preset` is none). Today
+  that is the plasma mirror's background, whose cutoff is a formula in x.
+- **Tests:** `the_advanced_view_is_presentation_not_an_edit` (per material, no
+  undo step, survives the file), `switching_a_materials_view_keeps_its_pending_edits`,
+  `the_retired_advanced_switch_opens_every_material_in_advanced` (migration and
+  pruning), `a_gallery_material_opens_in_the_view_that_can_show_it`;
+  `viewing_any_medium_leaves_it_as_authored` now sets the view per material.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check. Not exercised in the running app.

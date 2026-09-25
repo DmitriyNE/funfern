@@ -357,14 +357,49 @@ fn encode_document(document: &TopologyDocument) -> FileV22 {
                 inset: document.model.far_field.inset,
             },
         },
-        presentation: encode_presentation(document.presentation),
+        presentation: encode_presentation(PresentationSettings {
+            advanced_materials: shown_materials(
+                document.presentation.advanced_materials,
+                &document.model.draft,
+                false,
+            ),
+            ..document.presentation
+        }),
     }
 }
 
+/// The Advanced set kept against the scene's own materials, so an id never
+/// outlives its material in a file; `every` is the retired single switch,
+/// which put every material in Advanced.
+fn shown_materials(
+    shown: crate::document::AdvancedMaterials,
+    scene: &TopologyScene,
+    every: bool,
+) -> crate::document::AdvancedMaterials {
+    if every {
+        return scene.materials.iter().map(|material| material.id).collect();
+    }
+    let mut shown = shown;
+    shown.retain(|id| scene.material(id).is_some());
+    shown
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 fn decode_document(file: FileV22) -> Result<TopologyDocument, String> {
+    let every_material_advanced = file.presentation.advanced_materials;
+    let draft = decode_scene(file.model.draft)?;
+    let mut presentation = decode_presentation(file.presentation)?;
+    presentation.advanced_materials = shown_materials(
+        presentation.advanced_materials,
+        &draft,
+        every_material_advanced,
+    );
     Ok(TopologyDocument {
         model: TopologyDocumentModel {
-            draft: decode_scene(file.model.draft)?,
+            draft,
             accepted: decode_scene(file.model.accepted)?,
             probes: file
                 .model
@@ -384,7 +419,7 @@ fn decode_document(file: FileV22) -> Result<TopologyDocument, String> {
                 inset: file.model.far_field.inset,
             },
         },
-        presentation: decode_presentation(file.presentation)?,
+        presentation,
     })
 }
 
@@ -1133,8 +1168,13 @@ struct StoredPresentation {
     adaptation_maximum_edge: f64,
     #[serde(default = "default_grid_scale_filter")]
     grid_scale_filter: bool,
-    #[serde(default)]
+    /// Retired: the one Advanced switch for every material. Read so a file
+    /// written with it on opens every material in Advanced; never written.
+    #[serde(default, skip_serializing_if = "is_false")]
     advanced_materials: bool,
+    /// The materials shown in the Advanced view, by id.
+    #[serde(default)]
+    advanced_material_ids: Vec<u64>,
     #[serde(default)]
     law_formula_numbers: bool,
     #[serde(default)]
@@ -1832,7 +1872,8 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
         adaptation_minimum_edge: settings.adaptation.minimum_edge,
         adaptation_maximum_edge: settings.adaptation.maximum_edge,
         grid_scale_filter: settings.grid_scale_filter,
-        advanced_materials: settings.advanced_materials,
+        advanced_materials: false,
+        advanced_material_ids: settings.advanced_materials.iter().map(|id| id.0).collect(),
         law_formula_numbers: settings.law_formula_numbers,
         integrated_field: settings.integrated_field,
         vector_overlay: match settings.vector_overlay {
@@ -1897,7 +1938,11 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
             maximum_edge: stored.adaptation_maximum_edge,
         },
         grid_scale_filter: stored.grid_scale_filter,
-        advanced_materials: stored.advanced_materials,
+        advanced_materials: stored
+            .advanced_material_ids
+            .iter()
+            .map(|id| MaterialId(*id))
+            .collect(),
         law_formula_numbers: stored.law_formula_numbers,
         integrated_field: stored.integrated_field,
         vector_overlay: match stored.vector_overlay {
@@ -2419,7 +2464,11 @@ mod tests {
                     maximum_edge: if flag { 0.2 } else { 0.35 },
                 },
                 grid_scale_filter: flag,
-                advanced_materials: flag,
+                advanced_materials: if flag {
+                    [DEFAULT_MATERIAL].into_iter().collect()
+                } else {
+                    Default::default()
+                },
                 law_formula_numbers: !flag,
                 integrated_field: flag,
             };
@@ -2461,8 +2510,9 @@ mod tests {
             "adaptation_minimum_edge",
             "adaptation_maximum_edge",
             "grid_scale_filter",
-            "advanced_materials",
+            "advanced_material_ids",
             "law_formula_numbers",
+            "integrated_field",
             "probe_labels",
             "field_auto_exposure",
             "simulation_speed",
@@ -2483,6 +2533,52 @@ mod tests {
         assert_eq!(
             migrated.presentation.material_overlay,
             MaterialOverlay::AdaptationTarget
+        );
+    }
+
+    /// A file written with the retired single Advanced switch on opens every
+    /// one of its materials in Advanced, which is what its author last saw;
+    /// and an id whose material is gone is not carried into the next file.
+    #[test]
+    fn the_retired_advanced_switch_opens_every_material_in_advanced() {
+        let mut document = TopologyDocument::default();
+        let mut second = Material {
+            id: MaterialId(7),
+            name: "second".into(),
+            ..Material::default_medium()
+        };
+        second.color = [1, 2, 3];
+        document.model.draft.materials.push(second.clone());
+        document.model.accepted.materials.push(second);
+        let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        value["presentation"]["advanced_materials"] = true.into();
+        let migrated = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+        let shown = migrated.presentation.advanced_materials;
+        assert!(shown.contains(DEFAULT_MATERIAL) && shown.contains(MaterialId(7)));
+        let rewritten: serde_json::Value = serde_json::from_str(&save(&migrated).unwrap()).unwrap();
+        assert!(
+            rewritten["presentation"]
+                .get("advanced_materials")
+                .is_none()
+        );
+
+        let mut stale = migrated;
+        stale
+            .presentation
+            .advanced_materials
+            .set(MaterialId(99), true);
+        let reloaded = parse_document(save(&stale).unwrap().as_bytes()).unwrap();
+        assert!(
+            !reloaded
+                .presentation
+                .advanced_materials
+                .contains(MaterialId(99))
+        );
+        assert!(
+            reloaded
+                .presentation
+                .advanced_materials
+                .contains(MaterialId(7))
         );
     }
 
