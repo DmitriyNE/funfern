@@ -153,6 +153,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  the gap, or 2.5 Hz, above it, and most of it passes.",
                 photonic_crystal(),
             ),
+            example(
+                "Crystal bend",
+                "The photonic crystal with a channel of missing rods that turns a right angle. \
+                 At 1.85 Hz, in the band gap, the wave cannot enter the crystal, so it follows \
+                 the channel round the corner and out through the top, delivering about nine \
+                 tenths of what a straight channel does.",
+                crystal_bend(),
+            ),
         ]
     })
 }
@@ -1861,13 +1869,100 @@ fn photonic_crystal_with(frequency: f64, rods: bool) -> TopologyDocument {
     document
 }
 
+/// The lattice sites, three either side of the centre, a crystal bend's
+/// channel runs through: in along the middle row from the left, round the
+/// centre, and out up the middle column.
+fn bend_channel(column: i32, row: i32) -> bool {
+    (row == 0 && column <= 0) || (column == 0 && row >= 0)
+}
+
+/// A TM block of the photonic crystal's rods, seven by seven about the
+/// origin, with the sites `open` names left empty. Every wall is outgoing.
+fn crystal_block(open: fn(i32, i32) -> bool) -> Builder {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Ceramic".into(),
+        mass_density: ScalarField::constant(CRYSTAL_ROD_PERMITTIVITY),
+        color: [66, 105, 151],
+        ..Material::default_medium()
+    });
+    for column in -3..=3 {
+        for row in -3..=3 {
+            if !open(column, row) {
+                builder.subdomain(
+                    octagonal_rod(
+                        Point2::new(column as f64, row as f64) * CRYSTAL_PITCH,
+                        CRYSTAL_ROD_FRACTION * CRYSTAL_PITCH,
+                    ),
+                    MaterialId(2),
+                    MaterialFrame::world(),
+                );
+            }
+        }
+    }
+    builder
+}
+
+/// The crystal's own gap frequency, from inside a channel's entrance.
+fn channel_source() -> PointSource {
+    source(Point2::new(-0.5, 0.0), CRYSTAL_GAP_HZ, 10.0, 0.03)
+}
+
+/// The photonic crystal as a block with a channel of missing rods that turns
+/// a right angle at the centre, lit from inside its entrance at the gap
+/// frequency. The wave cannot enter the crystal, so the channel guides it
+/// round the corner and out through the top. A free transmitting path along
+/// the channel, from past the source round the corner to 0.2 short of the
+/// top wall, carries a probe whose energy density follows the wave along
+/// it; a point probe past its end reads what leaves.
+fn crystal_bend() -> TopologyDocument {
+    let mut builder = crystal_block(bend_channel);
+    let first = builder.next_span;
+    let path = builder.open_curve(
+        OpenCubicSpline::polyline(vec![
+            Point2::new(-0.4, 0.0),
+            Point2::new(0.0, 0.0),
+            Point2::new(0.0, 0.8),
+        ])
+        .unwrap(),
+        &[SpanBehavior::Transmitting; 2],
+    );
+    let mut document = builder.document();
+    document.model.source = channel_source();
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Along the channel".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+            curve: path,
+            spans: (first..first + 2).map(CurveSpanId).collect(),
+            side: CurveTraceSide::Left,
+            reversed: false,
+            preset: ProbeSamplingPreset::Medium,
+        }),
+    });
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Out of the corner".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(0.0, 0.9)),
+    });
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 21);
+        assert_eq!(catalog().len(), 22);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -2058,6 +2153,7 @@ mod tests {
         prepared: Arc<crate::topology_runtime::PreparedTopology>,
         nodes: Vec<Point2>,
         amplitude: Vec<(f64, f64)>,
+        omega: f64,
         wavenumber: f64,
     }
 
@@ -2125,6 +2221,7 @@ mod tests {
                 prepared,
                 nodes,
                 amplitude,
+                omega,
                 wavenumber,
             }
         }
@@ -2141,11 +2238,11 @@ mod tests {
             self.amplitude[node]
         }
 
-        /// `U` at `point`, through the element's own basis.
-        fn interpolated(&self, point: Point2) -> (f64, f64) {
+        /// The element holding `point`, its barycentric coordinates there,
+        /// and their gradients.
+        fn locate(&self, point: Point2) -> (usize, [f64; 3], [Point2; 3]) {
             let mesh = &self.prepared.mesh;
-            let (element, barycentric) = mesh
-                .triangles
+            mesh.triangles
                 .iter()
                 .enumerate()
                 .find_map(|(index, triangle)| {
@@ -2156,12 +2253,22 @@ mod tests {
                         (c - point).cross(a - point) / twice,
                         (a - point).cross(b - point) / twice,
                     ];
+                    let gradients = [
+                        Point2::new(b.y - c.y, c.x - b.x) / twice,
+                        Point2::new(c.y - a.y, a.x - c.x) / twice,
+                        Point2::new(a.y - b.y, b.x - a.x) / twice,
+                    ];
                     weights
                         .iter()
                         .all(|weight| *weight >= -1e-10)
-                        .then_some((index, weights))
+                        .then_some((index, weights, gradients))
                 })
-                .expect("the point is in the domain");
+                .expect("the point is in the domain")
+        }
+
+        /// `U` at `point`, through the element's own basis.
+        fn interpolated(&self, point: Point2) -> (f64, f64) {
+            let (element, barycentric, _) = self.locate(point);
             let nodes = self.prepared.operator.element_nodes()[element];
             enriched_quadratic_basis(barycentric)
                 .iter()
@@ -2170,6 +2277,31 @@ mod tests {
                     let (re, im) = self.amplitude[node as usize];
                     (sum.0 + weight * re, sum.1 + weight * im)
                 })
+        }
+
+        /// The time-averaged power a TM wave with `μ = 1` carries through the
+        /// segment from `start` to `end` towards `normal`, by the midpoint
+        /// rule over `count` pieces: `S = Im(U ∇U*) / 2ω` for
+        /// `u = Re(U e^{iωt})`.
+        fn power_through(&self, start: Point2, end: Point2, normal: Point2, count: usize) -> f64 {
+            let length = (end - start).norm() / count as f64;
+            (0..count)
+                .map(|index| {
+                    let point = start.lerp(end, (index as f64 + 0.5) / count as f64);
+                    let (element, barycentric, gradients) = self.locate(point);
+                    let nodes = self.prepared.operator.element_nodes()[element];
+                    let values = enriched_quadratic_basis(barycentric);
+                    let slopes = enriched_quadratic_basis_gradients(barycentric, gradients);
+                    let (mut u, mut du) = ((0.0, 0.0), (0.0, 0.0));
+                    for local in 0..7 {
+                        let (re, im) = self.amplitude[nodes[local] as usize];
+                        let slope = normal.dot(slopes[local]);
+                        u = (u.0 + values[local] * re, u.1 + values[local] * im);
+                        du = (du.0 + slope * re, du.1 + slope * im);
+                    }
+                    (u.1 * du.0 - u.0 * du.1) / (2.0 * self.omega) * length
+                })
+                .sum()
         }
 
         /// `|U|` at the node nearest `point`.
@@ -3554,5 +3686,47 @@ mod tests {
         assert!(below > 0.9, "1 Hz passes {below:.3}");
         let above = transmission(2.5);
         assert!(above > 0.5, "2.5 Hz passes {above:.3}");
+    }
+
+    /// The crystal-bend claims, at edge 0.08, 12 s from rest at 1.85 Hz, from
+    /// the time-averaged power through a cut across the channel 0.14 inside
+    /// the crystal's exit face, against the same cut across a straight
+    /// channel's exit from the same source. The bend delivers more than 70% of
+    /// it (91%; 91% at edge 0.05). The bend's own small reflection returns to
+    /// the source and moves what it emits, so across the channel's band, 1.65
+    /// to 2.15 Hz, the ratio runs from 0.90 to 1.10. With the channel filled,
+    /// under 1% gets out (under 1e-5).
+    #[test]
+    fn a_channel_through_the_crystal_turns_a_right_angle() {
+        let run =
+            |document: &TopologyDocument| Harmonic::run(document, 0.08, 12.0, CRYSTAL_GAP_HZ, 3.0);
+        let control = |open: fn(i32, i32) -> bool| {
+            let mut document = crystal_block(open).document();
+            document.model.source = channel_source();
+            run(&document)
+        };
+        let across = |scene: &Harmonic, centre: Point2, normal: Point2| {
+            let side = Point2::new(-normal.y, normal.x) * 0.3;
+            scene.power_through(centre - side, centre + side, normal, 120)
+        };
+        let up = Point2::new(0.0, 1.0);
+        let straight = across(
+            &control(|_, row| row == 0),
+            Point2::new(0.5, 0.0),
+            Point2::new(1.0, 0.0),
+        );
+        let bend = across(&run(&crystal_bend()), Point2::new(0.0, 0.5), up);
+        let filled = across(&control(|_, _| false), Point2::new(0.0, 0.5), up);
+        assert!(straight > 0.0);
+        assert!(
+            bend > 0.7 * straight,
+            "the bend delivers {:.3}",
+            bend / straight
+        );
+        assert!(
+            filled.abs() < 0.01 * straight,
+            "the filled crystal lets out {:.4}",
+            filled / straight
+        );
     }
 }

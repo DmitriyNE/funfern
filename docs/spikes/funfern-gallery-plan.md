@@ -425,11 +425,36 @@ The Bragg-stack fallback was not needed.
 
 ### 14. Crystal bend
 
-Stretch on 13. A row of rods removed, with a 90° corner, guiding a
-gap-frequency wave around a bend no fiber could take.
+TM. Scene 13's rods as a block, seven by seven about the origin, pitch 0.2,
+with a channel of missing sites that runs in along the middle row from the
+left, turns at the centre, and leaves up the middle column: 42 rods, within
+the scene's 64 curves. Walls outgoing. A point source of 10 at the gap's
+1.85 Hz sits inside the channel's entrance, at (−0.5, 0), so it feeds the
+channel rather than radiating into the room. A free transmitting path
+along the channel, from (−0.4, 0) round the corner to (0, 0.8), carries a
+boundary probe; a point probe at (0, 0.9) reads what leaves.
 
-Claim: the power at the defect's exit exceeds 30% of the power entering it,
-while the crystal without the defect passes under 1%.
+Explored, with the time-averaged power through a cut 0.6 wide across the
+channel 0.14 inside the exit face, against the same cut on a straight
+channel through the block from the same source. The channel guides from
+1.60 to 2.15 Hz; below 1.6 Hz the straight exit falls to a hundredth. Across
+1.65 to 2.15 Hz the bend delivers 0.90 to 1.10 of the straight channel's
+power, 0.64 at 2.2 Hz at the gap's top. Ratios over one are the source's
+own: the bend's small reflection returns to it and moves what it emits.
+With the channel filled the same cut sees under 0.2% through the band. At
+edge 0.05 the ratio at 1.85 Hz moves from 0.915 to 0.913; at 18 s instead
+of 12, to 0.897. The cuts across the far walls read a little high, because
+the source's backward emission leaves the entrance and wraps round the
+block.
+
+Claims at edge 0.08, 12 s from rest:
+
+- The bend delivers more than 70% of what the straight channel does (91%).
+- With the channel filled, under 1% gets out (under 1e-5).
+
+The plan's "30% of the power entering it" is not the measure: the net
+power entering a lossless channel always leaves it, whatever the bend
+reflects, so the straight channel is the reference.
 
 ### 15. Ring resonator
 

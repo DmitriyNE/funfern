@@ -13311,3 +13311,32 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   2.3e-6. The other 19 device examples pass.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-26 — Gallery: the crystal bend
+
+- **Scene** "Crystal bend" (gallery item 14), the catalogue's 22nd: scene
+  13's octagonal rods as a seven-by-seven block, pitch 0.2, with an
+  L-shaped channel of seven missing sites (`bend_channel`), 42 rods. A
+  point source at 1.85 Hz sits inside the channel's entrance, so it feeds
+  the channel. A free transmitting polyline along the channel carries a
+  boundary probe "Along the channel", and a point probe "Out of the
+  corner" sits past its end. The block is `crystal_block`, which the test's
+  straight and filled controls share.
+- **Measure:** the suite's `Harmonic` gains `locate` and `power_through`,
+  the time-averaged power `Im(U ∇U*)/2ω` of a TM wave with `μ = 1` through a
+  segment. The bend is judged against a straight channel from the same
+  source, since the net power entering a lossless channel always leaves it
+  whatever the bend reflects.
+- **Explored:** the channel guides from 1.60 to 2.15 Hz. Across 1.65 to 2.15
+  Hz the bend delivers 0.90 to 1.10 of the straight channel's power, 0.64
+  at 2.2 Hz. Ratios over one come from the bend's small reflection returning
+  to the source and moving what it emits. The filled crystal passes under
+  0.2% through the band. At 1.85 Hz: 0.913 at edge 0.05, 0.897 at 18 s.
+- **Measured** at edge 0.08, 12 s: 0.913 with the probe's path in the mesh;
+  filled under 1e-5. Test:
+  `a_channel_through_the_crystal_turns_a_right_angle` (over 70%, under 1%).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 6.1e-7, b 1.0e-6; at
+  1000 steps Q 1.2e-6, b 1.9e-6; at 3000 steps (printed, not judged) 3.1e-6
+  and 6.1e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.
