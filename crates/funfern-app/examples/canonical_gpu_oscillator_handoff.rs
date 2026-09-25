@@ -16,6 +16,13 @@
 //! - `reject`: a φ⁴ wall handed to a φ⁴ medium whose bound it passes. The
 //!   device must reject the handoff with the restoring-domain status and keep
 //!   stepping the source, as the reference refuses the same state.
+//! - `opened`: sine-Gordon around a hole that moves by 0.05, so the target
+//!   has nodes the source never covered. Each takes `r` from the neighbours
+//!   `Q`'s extension reads, on the device as on the reference, instead of
+//!   starting at zero.
+//!
+//! Every mode prepares its primary map with the meshes, as the app's runtime
+//! does, so the extension rows are the production ones.
 
 use std::time::{Duration, Instant};
 
@@ -29,9 +36,10 @@ use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
     CanonicalForcing, CanonicalOutgoingHistoryTransferMap, CanonicalPrimaryTransferMap,
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferMap, CoefficientLaw, MeshingOptions, OuterBoundaryCondition, Point2,
-    QuadraticTransferMap, QuadraticWaveOperator, RestoringLaw, ScalarField, Scene, TriMesh,
-    mesh_scene, transfer_integrated_field,
+    CanonicalVectorTransferMap, CoefficientLaw, MeshingOptions, Obstacle, ObstacleId,
+    OuterBoundaryCondition, PeriodicCubicSpline, Point2, QuadraticTransferMap,
+    QuadraticWaveOperator, RestoringLaw, ScalarField, Scene, TriMesh, mesh_scene,
+    transfer_integrated_field,
 };
 
 const WARMUP_STEPS: u64 = 60;
@@ -148,6 +156,20 @@ fn main() -> AppExit {
             generation(&phi4(1.6), 0.12, 1),
             generation(&phi4(0.9), 0.12, 1),
         ),
+        "opened" => {
+            let holed = |x: f64| {
+                let mut scene = sine_gordon(3.0);
+                scene.obstacles = vec![Obstacle::hole(
+                    ObstacleId(1),
+                    PeriodicCubicSpline::rounded(Point2::new(x, 0.1), 0.3),
+                )];
+                scene
+            };
+            (
+                generation(&holed(0.0), 0.12, 1),
+                generation(&holed(0.05), 0.12, 2),
+            )
+        }
         other => panic!("unknown OSCILLATOR_HANDOFF {other}"),
     };
     let reject = mode == "reject";
@@ -241,9 +263,14 @@ fn main() -> AppExit {
     }
     .expect("handoff interpolation");
     let (source_base, target_base) = (source.operator.base(), target.operator.base());
-    let primary_map =
-        CanonicalPrimaryTransferMap::prepare(&interpolation, source_base, target_base)
-            .expect("primary map");
+    let primary_map = CanonicalPrimaryTransferMap::prepare_with_meshes(
+        &interpolation,
+        &source.mesh,
+        source_base,
+        &target.mesh,
+        target_base,
+    )
+    .expect("primary map");
     let vector_map =
         CanonicalVectorTransferMap::prepare(&source.mesh, source_base, &target.mesh, target_base)
             .expect("vector map");
@@ -278,10 +305,21 @@ fn main() -> AppExit {
         .0;
     let integrated = transfer_integrated_field(
         &interpolation,
+        &primary_map,
         source_state.integrated_field(),
         &target.operator,
     )
     .expect("integrated transfer");
+    println!(
+        "uncovered target nodes: {} extended from their neighbours, {} at r = 0",
+        integrated.extended_nodes, integrated.exposed_nodes
+    );
+    if mode == "opened" {
+        assert!(
+            integrated.extended_nodes > 0,
+            "the moved hole uncovered nothing"
+        );
+    }
     println!(
         "oscillator handoff ({mode}): {} → {} nodes; r {}{}{}",
         source_base.degrees_of_freedom(),

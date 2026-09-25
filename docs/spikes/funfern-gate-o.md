@@ -141,7 +141,14 @@ restoring law tightens the trajectory ceiling:
 - **A handoff** carries `r` as a nodal field, interpolated like the displayed
   field, not conserved like `Q`. A static or driven source generation without
   `r` hands over `r = 0`. A target without restoring laws discards it, and
-  says so in the handoff record (`transfer_integrated_field`). `b` keeps its
+  says so in the handoff record (`transfer_integrated_field`). Where a moved
+  boundary opens new ground, a target node the source does not cover takes
+  the average of the neighbours `Q`'s extension reads, the plan's bounded
+  local extension from the correct side; only an island beyond two element
+  rings starts at `r = 0`. (Revised 25 September 2026: starting every such
+  node at `r = 0` put a mesh-thin strip on φ⁴'s barrier at each drag of a
+  wall, injecting about a third of a pinned domain wall's energy per step
+  and leaving a crack along the moved boundary.) `b` keeps its
   own reconstruction rather than being rebuilt as `ηC r`, so a remesh leaves
   `b` and `ηC r` apart by the difference of two interpolation errors, which
   the step then keeps. Rebuilding `b` would remove that offset, but it would

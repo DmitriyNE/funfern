@@ -223,6 +223,13 @@ impl CanonicalPrimaryTransferMap {
         &self.source_support
     }
 
+    /// The source element whose nodes seed an uncovered target node: new
+    /// support within two element rings of the old domain. `None` for a node
+    /// the source covers, for one beyond that reach, and on an identity map.
+    pub fn extension(&self, target_node: usize) -> Option<[u32; 7]> {
+        self.extensions.get(target_node).copied().flatten()
+    }
+
     pub fn target_component_count(&self) -> usize {
         self.component_count
     }
@@ -1835,7 +1842,10 @@ pub struct CanonicalIntegratedFieldTransfer {
     /// The target's `r`, one value per target node, or empty when the target
     /// carries no restoring law.
     pub field: Vec<f64>,
-    /// Target nodes the source does not cover, which start at `r = 0`.
+    /// Uncovered target nodes seeded from their neighbours, as `Q` is: new
+    /// support within two element rings of the old domain.
+    pub extended_nodes: usize,
+    /// Uncovered target nodes beyond that reach, which start at `r = 0`.
     pub exposed_nodes: usize,
     /// The source held an `r` and the target has no restoring law to keep it.
     pub discarded: bool,
@@ -1850,17 +1860,23 @@ pub struct CanonicalIntegratedFieldTransfer {
 /// interpolated as the displayed field is, through the same quadratic map;
 /// nothing about it is conserved. Its uniform part is physical for every
 /// restoring law, so it is carried rather than rebuilt from `b`. A node the
-/// source does not cover starts at `r = 0`: the vacuum of Klein-Gordon and
-/// sine-Gordon, the unstable top of φ⁴. The report says when a target drops
-/// an `r` it has no law for, and when one starts from zero because its
-/// source had none.
+/// source does not cover, where a moved boundary opened new ground, takes the
+/// average of the same neighbouring nodes `Q`'s extension reads, so the
+/// field runs on into it: starting it at `r = 0` put a mesh-thin strip on the
+/// unstable top of φ⁴ at every drag and fed the scene the barrier's energy.
+/// Only a node beyond that reach, an island the source never touched, starts
+/// at `r = 0`, the vacuum of Klein-Gordon and sine-Gordon. The report says
+/// when a target drops an `r` it has no law for, and when one starts from
+/// zero because its source had none.
 pub fn transfer_integrated_field(
     interpolation: &QuadraticTransferMap,
+    primary: &CanonicalPrimaryTransferMap,
     source_field: &[f64],
     target: &CanonicalTemporalWaveOperator,
 ) -> Result<CanonicalIntegratedFieldTransfer, WaveError> {
     let target_nodes = target.base().degrees_of_freedom();
-    if interpolation.samples().len() != target_nodes {
+    if interpolation.samples().len() != target_nodes || primary.target_node_count() != target_nodes
+    {
         return Err(WaveError::SizeMismatch {
             expected: target_nodes,
             actual: interpolation.samples().len(),
@@ -1879,20 +1895,51 @@ pub fn transfer_integrated_field(
             ..CanonicalIntegratedFieldTransfer::default()
         });
     }
+    let (field, extended_nodes, exposed_nodes) =
+        integrated_field_values(interpolation, primary, source_field)?;
+    Ok(CanonicalIntegratedFieldTransfer {
+        field,
+        extended_nodes,
+        exposed_nodes,
+        ..CanonicalIntegratedFieldTransfer::default()
+    })
+}
+
+/// `r` on the target nodes: interpolated where the source covers them, the
+/// plain average of the extension donors where it does not, and zero beyond
+/// their reach; with the counts of the last two.
+fn integrated_field_values(
+    interpolation: &QuadraticTransferMap,
+    primary: &CanonicalPrimaryTransferMap,
+    source_field: &[f64],
+) -> Result<(Vec<f64>, usize, usize), WaveError> {
     if source_field.len() != interpolation.source_dofs() {
         return Err(WaveError::SizeMismatch {
             expected: interpolation.source_dofs(),
             actual: source_field.len(),
         });
     }
-    let field = interpolation
+    let mut field = interpolation
         .interpolate(source_field, 0.0)
         .map_err(|_| WaveError::InvalidState)?;
-    Ok(CanonicalIntegratedFieldTransfer {
-        field,
-        exposed_nodes: interpolation.exposed_nodes(),
-        ..CanonicalIntegratedFieldTransfer::default()
-    })
+    let (mut extended, mut exposed) = (0, 0);
+    for (node, sample) in interpolation.samples().iter().enumerate() {
+        if sample.is_some() {
+            continue;
+        }
+        match primary.extension(node) {
+            Some(donors) => {
+                field[node] = donors
+                    .iter()
+                    .map(|donor| source_field[*donor as usize])
+                    .sum::<f64>()
+                    / donors.len() as f64;
+                extended += 1;
+            }
+            None => exposed += 1,
+        }
+    }
+    Ok((field, extended, exposed))
 }
 
 #[cfg(test)]
@@ -2315,6 +2362,26 @@ mod tests {
                     assert!((density - 2.0).abs() < 2.0e-13);
                 } else {
                     assert_eq!(density, 0.0);
+                }
+            }
+        }
+
+        // The integrated field runs on into the connected new support from
+        // the same neighbours, and only the island starts at zero.
+        let source_r = vec![0.7; source.degrees_of_freedom()];
+        let (target_r, extended, exposed) =
+            integrated_field_values(&interpolation, &transfer, &source_r).unwrap();
+        assert!(
+            extended > 0 && exposed > 0,
+            "{extended} extended, {exposed} exposed"
+        );
+        for (element, nodes) in target.element_nodes().iter().enumerate() {
+            for node in nodes {
+                let value = target_r[*node as usize];
+                if element < 2 {
+                    assert!((value - 0.7).abs() < 1.0e-13, "{value}");
+                } else {
+                    assert_eq!(value, 0.0);
                 }
             }
         }

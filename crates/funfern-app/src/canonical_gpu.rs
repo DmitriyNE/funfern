@@ -2484,7 +2484,9 @@ impl CanonicalGpuTransferPlan {
     /// Adds the integrated field `r` to a prepared transfer whenever either
     /// generation carries one. `r` is a nodal field, not a conserved one, so
     /// it crosses on the primary map's interpolation rows rather than its
-    /// support-weighted ones, and a target node the source does not cover
+    /// support-weighted ones. A target node the source does not cover takes
+    /// the plain average of the primary map's extension donors, the
+    /// neighbours `Q` is extended from, and only one beyond their reach
     /// starts at zero, as on the reference (`transfer_integrated_field`). A
     /// source without `r` hands a restoring target zero everywhere, and a
     /// target without a restoring law drops the source's; the counts say
@@ -2518,10 +2520,13 @@ impl CanonicalGpuTransferPlan {
                         weights[0] = 1.0;
                         (nodes, weights, 1)
                     }
-                    Some(samples) => match &samples[target_node] {
-                        Some(sample) => (sample.nodes, sample.weights, 7),
-                        None => ([0; 7], [0.0; 7], 0),
-                    },
+                    Some(samples) => {
+                        match (&samples[target_node], primary.extension(target_node)) {
+                            (Some(sample), _) => (sample.nodes, sample.weights, 7),
+                            (None, Some(donors)) => (donors, [1.0 / donors.len() as f64; 7], 7),
+                            (None, None) => ([0; 7], [0.0; 7], 0),
+                        }
+                    }
                 };
                 let weight = |index: usize| finite_f32(weights[index], "integrated-field weight");
                 self.words

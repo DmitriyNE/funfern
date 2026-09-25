@@ -12794,3 +12794,35 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   span-drag path.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check. Not exercised in the running app.
+
+## 2026-09-25 — The integrated field runs on into ground a moved boundary opens
+
+- **Found** while narrowing the pinned wall's bumps: dragging them, the wall
+  followed four steps and was then thrown off. Each drag uncovers about 200
+  nodes where the pockets were, and the handoff started `r` at zero there:
+  Gate O's transfer never stated a rule for uncovered nodes, and the code's
+  default was the interpolation's zero fill, on the CPU and on the device.
+  For φ⁴ zero is the barrier's top, λ/4 = 15 per unit area. Measured across
+  three drags of the narrow bumps: each handoff added 1.20, 1.17 and 1.15 to
+  an energy of 3.96 (the wall across the waist holds 3.65), little of which
+  drained before the next step; with the uncovered nodes filled from their
+  neighbours it added 0.03 to 0.10. The user saw the same in the app as a
+  mesh-thin zero-field crack along the moved boundary.
+- **Fix.** An uncovered target node with extension donors, the neighbours
+  `Q`'s bounded extension already reads (new support within two element
+  rings, from the correct region), takes their plain average of `r`; only an
+  island beyond them starts at zero. The plan's §7 already asked for exactly
+  this for newly exposed cells. `transfer_integrated_field` now takes the
+  primary map and reports `extended_nodes` beside `exposed_nodes`
+  (`CanonicalPrimaryTransferMap::extension`); the device's integrated-field
+  rows give such a node its donors at equal weights, which the shader
+  already sums, so no shader changed. Gate O's text states the rule.
+- **Tests:** the connected-support transfer test now checks `r` too (the
+  connected new element takes the old value, the island zero).
+  `canonical_gpu_oscillator_handoff` gained an `opened` mode, sine-Gordon
+  around a hole moved by 0.05, and every mode now prepares its primary map
+  with the meshes as the runtime does: `opened` extends 117 nodes and none
+  start at zero, device against reference Q 2.4e-7, b 1.6e-6, r 3.2e-7;
+  remesh, identity, from-linear, to-linear and reject read as before.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

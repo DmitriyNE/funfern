@@ -2147,7 +2147,9 @@ mod tests {
     /// The CPU reference stepping a document's oscillator medium across edits,
     /// handing its state from one generation to the next the way the app
     /// does: `Q` interpolated without restoring component totals across a
-    /// change of geometry, `b` reconstructed, `r` interpolated.
+    /// change of geometry, `b` reconstructed, `r` interpolated and, where a
+    /// moved boundary opened new ground, extended from the same neighbours
+    /// as `Q`.
     struct Session {
         editor: TopologyEditor,
         runtime: TopologyRuntime,
@@ -2273,6 +2275,7 @@ mod tests {
                 .0;
             let integrated = transfer_integrated_field(
                 next.transfer.as_ref().unwrap(),
+                &transfer.primary,
                 self.state.integrated_field(),
                 &target,
             )

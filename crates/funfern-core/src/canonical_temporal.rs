@@ -10424,16 +10424,17 @@ mod tests {
         }
         .unwrap();
         let (source_base, target_base) = (source.2.base(), target.2.base());
-        let primary =
+        let primary_map =
             crate::CanonicalPrimaryTransferMap::prepare(&interpolation, source_base, target_base)
-                .unwrap()
-                .transfer(
-                    state.primary_flux(),
-                    &vec![None; target_base.component_count()],
-                    &vec![false; target_base.degrees_of_freedom()],
-                )
-                .unwrap()
-                .0;
+                .unwrap();
+        let primary = primary_map
+            .transfer(
+                state.primary_flux(),
+                &vec![None; target_base.component_count()],
+                &vec![false; target_base.degrees_of_freedom()],
+            )
+            .unwrap()
+            .0;
         let complementary = crate::CanonicalVectorTransferMap::prepare(
             &source.0,
             source_base,
@@ -10444,9 +10445,13 @@ mod tests {
         .transfer(state.complementary_flux())
         .unwrap()
         .0;
-        let transfer =
-            crate::transfer_integrated_field(&interpolation, state.integrated_field(), &target.2)
-                .unwrap();
+        let transfer = crate::transfer_integrated_field(
+            &interpolation,
+            &primary_map,
+            state.integrated_field(),
+            &target.2,
+        )
+        .unwrap();
         let mut handed = CanonicalTemporalWaveState::new_at(
             &target.2,
             state.time_step().min(0.4 * target.2.maximum_time_step()),
