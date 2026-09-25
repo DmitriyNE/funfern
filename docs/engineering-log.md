@@ -13371,3 +13371,32 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   judged).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-26 — Gallery: the acoustic whispering gallery
+
+- **Scene** "Acoustic whispering gallery" (gallery item 16), the catalogue's
+  24th: a Mechanical room walled by a reflecting arc of radius 0.85, 300° of
+  it, open over the 60° on the left, with a 4 Hz source 0.05 inside the wall
+  at the top. The plan opened the arc at the bottom, where the point half a
+  turn from the source lies, so the opening moved to the side. A new `arc`
+  helper builds a circular arc from C0-joined Bézier pieces. Two area
+  probes, "Far wall" (radius 0.05 at (0, −0.78)) and "Centre" (radius 0.25),
+  are the claim's own disks.
+- **Explored:** a single point at the centre sits on a node of the standing
+  pattern (37× at the wall), so the claim averages over disks. With the wall
+  the far wall is 1.4× to 4.1× the centre from 3.8 to 4.2 Hz at 15 s. At 4
+  Hz the far wall is steady from 25 s on, while the centre beats slowly
+  with a ringing mode: 3.9× to 7.2× from 25 to 50 s. Edge 0.05: 3.6×.
+  Without the wall 0.70×, near free space's `1/√2`.
+- **Measured** at edge 0.08, 25 s: 3.91× with the wall, 0.701× without.
+  Test: `a_curved_wall_carries_sound_round_to_its_far_side` (over 2×, under
+  1×).
+- **Cost:** 8.8k unknowns at a time step of 3.0e-3. The shortest boundary
+  atoms are 0.043, as the tolerance allows on this radius; the smallest
+  elements, 0.022 to 0.026, grade into the wall beside the arc's tips and
+  between the source and the wall.
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 1.3e-6, b 1.1e-6; at
+  1000 steps Q 2.9e-6, b 3.1e-6; at 3000 steps (printed, not judged) 1.5e-5
+  and 6.9e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

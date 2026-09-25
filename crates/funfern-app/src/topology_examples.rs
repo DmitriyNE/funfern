@@ -170,6 +170,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  and the wave runs past.",
                 ring_resonator(),
             ),
+            example(
+                "Acoustic whispering gallery",
+                "A 4 Hz source just inside a round room's reflecting wall, open on the left: \
+                 the sound clings to the wall all the way round, so the far wall, half a turn \
+                 away and twice as far as the centre, is several times louder than the centre. \
+                 Delete the wall and the centre is the louder.",
+                acoustic_gallery(),
+            ),
         ]
     })
 }
@@ -2025,13 +2033,88 @@ fn ring_resonator_with(frequency: f64, ring: bool) -> TopologyDocument {
     document
 }
 
+/// A circular arc about `center` from angle `from` to `to`, in radians and
+/// counterclockwise, as `pieces` cubic Bézier pieces joined at C0 knots.
+fn arc(center: Point2, radius: f64, from: f64, to: f64, pieces: usize) -> OpenCubicSpline {
+    let step = (to - from) / pieces as f64;
+    let reach = 4.0 / 3.0 * (step / 4.0).tan() * radius;
+    let at = |angle: f64| center + Point2::new(angle.cos(), angle.sin()) * radius;
+    let tangent = |angle: f64| Point2::new(-angle.sin(), angle.cos());
+    let mut controls = vec![at(from)];
+    for piece in 0..pieces {
+        let (a, b) = (from + step * piece as f64, from + step * (piece + 1) as f64);
+        controls.extend([
+            at(a) + tangent(a) * reach,
+            at(b) - tangent(b) * reach,
+            at(b),
+        ]);
+    }
+    OpenCubicSpline::new_with_multiplicities(
+        controls,
+        vec![radius * step; pieces],
+        vec![3; pieces - 1],
+    )
+    .unwrap()
+}
+
+const GALLERY_WALL: f64 = 0.85;
+const ACOUSTIC_HZ: f64 = 4.0;
+/// The far wall's receiver and the centre's, as the scene's area probes read
+/// them: a disk 0.07 inside the wall opposite the source, and a wide one at
+/// the centre, wide enough to average over the room's standing pattern.
+const FAR_WALL: (Point2, f64) = (Point2 { x: 0.0, y: -0.78 }, 0.05);
+const ROOM_CENTRE: (Point2, f64) = (Point2 { x: 0.0, y: 0.0 }, 0.25);
+
+fn acoustic_gallery() -> TopologyDocument {
+    acoustic_gallery_with(true)
+}
+
+/// A Mechanical room walled by a reflecting arc of radius 0.85 about the
+/// origin, 300° of it, open over the 60° on the left so the sound can leave,
+/// and a 4 Hz source 0.05 inside the wall at the top. Sound launched along
+/// the wall clings to it all the way round, so the far wall, half a turn
+/// away, is louder than the centre. Outside, every wall is outgoing.
+fn acoustic_gallery_with(wall: bool) -> TopologyDocument {
+    let mut builder = Builder::new();
+    if wall {
+        let open = std::f64::consts::PI / 6.0;
+        builder.baffle(arc(
+            Point2::default(),
+            GALLERY_WALL,
+            -std::f64::consts::PI + open,
+            std::f64::consts::PI - open,
+            8,
+        ));
+    }
+    let mut document = builder.document();
+    document.model.source = source(
+        Point2::new(0.0, GALLERY_WALL - 0.05),
+        ACOUSTIC_HZ,
+        10.0,
+        0.03,
+    );
+    for (id, name, color, (center, radius)) in [
+        (1, "Far wall", [91, 220, 194], FAR_WALL),
+        (2, "Centre", [248, 196, 112], ROOM_CENTRE),
+    ] {
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(id),
+            name: name.into(),
+            color,
+            enabled: true,
+            target: TopologyProbeTarget::AreaDisk { center, radius },
+        });
+    }
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 23);
+        assert_eq!(catalog().len(), 24);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -3841,5 +3924,44 @@ mod tests {
         let (off, idle) = measure(3.885);
         assert!(on < 0.5 * off, "on resonance {on:.3}, between {off:.3}");
         assert!(filled > 5.0 * idle, "the ring holds {:.2}×", filled / idle);
+    }
+
+    /// The acoustic whispering-gallery claims, at edge 0.08, 25 s from rest at
+    /// 4 Hz, with the RMS over the scene's two probe disks. The far wall, half
+    /// a turn from the source, is more than twice as loud as the centre (3.9×;
+    /// 3.6× at edge 0.05). The centre's disk averages over the room's standing
+    /// pattern, and a slow beat moves it: 3.9× to 7.2× from 25 to 50 s, and
+    /// 2.8× to 4.1× from 3.8 to 4.2 Hz at 15 s. Without the wall, the centre is
+    /// the louder (the far point hears 0.70 of it, near free space's 1/√2).
+    #[test]
+    fn a_curved_wall_carries_sound_round_to_its_far_side() {
+        let loudness = |wall: bool| {
+            let scene = Harmonic::run(&acoustic_gallery_with(wall), 0.08, 25.0, ACOUSTIC_HZ, 4.0);
+            let rms = |(center, radius): (Point2, f64)| {
+                let points = (0..81)
+                    .map(|index| {
+                        let step = Point2::new((index % 9) as f64 - 4.0, (index / 9) as f64 - 4.0);
+                        center + step * (radius / 4.0)
+                    })
+                    .filter(|point| (*point - center).norm() <= radius)
+                    .collect::<Vec<_>>();
+                let sum = points
+                    .iter()
+                    .map(|point| {
+                        let (a, b) = scene.interpolated(*point);
+                        a * a + b * b
+                    })
+                    .sum::<f64>();
+                (sum / points.len() as f64).sqrt()
+            };
+            rms(FAR_WALL) / rms(ROOM_CENTRE)
+        };
+        let walled = loudness(true);
+        assert!(walled > 2.0, "the far wall hears {walled:.2}× the centre");
+        let open = loudness(false);
+        assert!(
+            open < 1.0,
+            "without the wall the far point hears {open:.2}×"
+        );
     }
 }

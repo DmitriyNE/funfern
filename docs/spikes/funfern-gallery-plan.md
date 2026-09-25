@@ -495,12 +495,29 @@ The ring fills over about 30 s of simulated time.
 ### 16. Acoustic whispering gallery
 
 Mechanical. A reflecting arc baffle of radius 0.85 about the origin spanning
-300°, open at the bottom. The source at 4 Hz sits 0.05 inside the wall at the
-top. Walls outgoing; the opening lets sound out.
+300°, open over the 60° on the left, built by `arc` as eight C0-joined
+Bézier pieces. The source at 4 Hz sits 0.05 inside the wall at the top.
+Walls outgoing; the opening lets sound out. The plan opened the arc at the
+bottom, which is where the point half a turn from the source lies, so the
+opening moved to the side: the wall runs unbroken from the source round
+the right to the far point. Two area probes: "Far wall", a disk of radius
+0.05 at (0, −0.78), and "Centre", radius 0.25 at the origin.
 
-Claims: with the arc, the RMS at the wall point a half-turn away exceeds the
-RMS at the centre although it is twice as far; with the arc removed the
-centre is louder.
+Explored. At a single point the centre sits on a node of the room's
+standing pattern, and the far wall read 37× it, which says nothing. Over
+the disks, the far wall is 1.4× to 4.1× the centre from 3.8 to 4.2 Hz at
+15 s, the least at 3.9 Hz; along the right half of the rim the RMS is two
+to four times the centre's. The far wall is steady from 25 s on (0.0102 to
+0.0108); the centre is not, beating slowly with some ringing mode (0.0027,
+0.0014, 0.0023 at 25, 35, 50 s), so the ratio runs 3.9× to 7.2× at 4 Hz.
+Edge 0.05 gives 3.6× at 25 s. Without the wall the far point hears 0.70 of
+the centre, near free space's `1/√2`.
+
+Claims at edge 0.08, 25 s from rest, over the two probe disks:
+
+- With the wall, the far wall is more than twice as loud as the centre
+  although twice as far from the source (3.9×).
+- Without it, the centre is the louder (the far point 0.70×).
 
 ### 17. Dielectric whispering gallery
 
