@@ -13400,3 +13400,25 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and 6.9e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-26 — Gallery: the dielectric whispering gallery
+
+- **Scene** "Dielectric whispering gallery" (gallery item 17), the
+  catalogue's 25th: a TM disk of `ε = 4`, radius 0.3, with a source 0.03
+  inside its rim at 2.55 Hz, its `m = 7` whispering-gallery resonance. A
+  boundary probe "Round the rim" on the disk's own circle (High preset)
+  shows the lobes; a point probe "Opposite rim" sits 0.05 inside it.
+- **Explored:** resonances every 0.3 Hz from `m = 6` at 2.25 Hz to `m = 10`
+  at 3.47 Hz, each with `2m` maxima round the circle 0.05 inside the rim.
+  The plan's `m = 9` is at 3.17 Hz, not near 2.5 Hz, and fills slowly (rim
+  RMS 0.061, 0.105, 0.152 at 15, 30, 60 s); `m = 7` is 88% full by 30 s
+  (0.058, 0.080, 0.091). The mesh hardly moves either: 2.55 Hz at edges
+  0.08 and 0.05, `m = 9` by 0.002 Hz.
+- **Measured** at edge 0.08, 30 s: rim RMS 8.02× that at 2.7 Hz, 14 maxima.
+  Test: `a_dielectric_disk_rings_in_fourteen_lobes_round_its_rim` (over 3×,
+  exactly 14).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 1.0e-6, b 1.5e-6; at
+  1000 steps Q 1.7e-6, b 5.6e-6; at 3000 steps (printed, not judged) 7.9e-6
+  and 1.3e-5.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

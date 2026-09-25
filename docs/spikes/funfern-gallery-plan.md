@@ -521,15 +521,29 @@ Claims at edge 0.08, 25 s from rest, over the two probe disks:
 
 ### 17. Dielectric whispering gallery
 
-TM. A disk of `ε = 4`, radius 0.3, with a source just inside the rim; the
-frequency, near 2.5 Hz, is set by a sweep to a whispering-gallery resonance
-of moderate azimuthal order, about `m = 9`, so the resonance is wide enough to
-hit and builds up within seconds. Walls outgoing.
+TM. A disk of `ε = 4` and `μ = 1`, radius 0.3 about the origin, with a
+point source 0.03 inside the rim at angle 0, at 2.55 Hz. A boundary probe
+runs round the rim itself at the High preset, about nine samples a lobe,
+and a point probe sits 0.05 inside the rim opposite the source. Walls
+outgoing.
 
-Claims: at resonance the rim RMS exceeds the off-resonance rim RMS by more
-than 3×; the intensity around a circle just inside the rim shows `2m`
-maxima. The ring resonator's simpler cousin: if the ring is dropped, this one
-still carries the physics.
+Explored. A sweep from 2.0 to 3.6 Hz finds a whispering-gallery resonance
+every 0.3 Hz, each counted by its `2m` maxima round the circle 0.05 inside
+the rim: `m = 6` at 2.25 Hz, 7 at 2.55, 8 at 2.87, 9 at 3.17 and 10 at 3.47.
+The plan's "near 2.5 Hz" and "about `m = 9`" disagree: `m = 9` sits at 3.17
+Hz, as the first-order estimate `nkR ≈ m + 1.86 (m/2)^{1/3}` puts it. The
+higher the order the longer it takes to fill: at the peak the rim's RMS
+went 0.058, 0.080, 0.091 at 15, 30, 60 s for `m = 7`, and 0.061, 0.105,
+0.152 for `m = 9`, still growing at a minute. So the scene rings `m = 7`,
+at the plan's 2.5 Hz, 88% full by 30 s, the centre 17× quieter than the
+rim. The mesh hardly moves it: the peak is 2.55 Hz at edges 0.08 and 0.05,
+and `m = 9` moved 0.002 Hz.
+
+Claims at edge 0.08, 30 s from rest, on the circle 0.05 inside the rim:
+
+- On the resonance the RMS is more than three times that at 2.7 Hz,
+  between resonances (8.0×; 8.1× at edge 0.05).
+- `|U|` has `2m = 14` maxima round it.
 
 ## Batch D: diffraction and interfaces
 

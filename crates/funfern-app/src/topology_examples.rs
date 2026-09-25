@@ -178,6 +178,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  Delete the wall and the centre is the louder.",
                 acoustic_gallery(),
             ),
+            example(
+                "Dielectric whispering gallery",
+                "A dielectric disk, ε = 4, with a 2.55 Hz source just inside its rim: at this, \
+                 one of its whispering-gallery resonances, total internal reflection holds the \
+                 wave running round inside the rim, and over half a minute it builds to fourteen \
+                 lobes eight times the field at 2.7 Hz, between resonances.",
+                dielectric_gallery(),
+            ),
         ]
     })
 }
@@ -2108,13 +2116,74 @@ fn acoustic_gallery_with(wall: bool) -> TopologyDocument {
     document
 }
 
+const DISK_RADIUS: f64 = 0.3;
+const DISK_PERMITTIVITY: f64 = 4.0;
+/// The disk's `m = 7` whispering-gallery resonance, 2.55 Hz at edges 0.08
+/// and 0.05. It is 88% full at 30 s; `m = 9`, at 3.17 Hz, was still growing
+/// at a minute.
+const DISK_HZ: f64 = 2.55;
+
+fn dielectric_gallery() -> TopologyDocument {
+    dielectric_gallery_with(DISK_HZ)
+}
+
+/// A TM dielectric disk, `ε = 4` and `μ = 1`, radius 0.3 about the origin,
+/// with a point source 0.03 inside its rim. On a whispering-gallery
+/// resonance the field runs round just inside the rim, held there by total
+/// internal reflection, and stands in `2m` lobes. A probe runs round the
+/// rim itself, and a point probe sits opposite the source. Every wall is
+/// outgoing.
+fn dielectric_gallery_with(frequency: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Dielectric".into(),
+        mass_density: ScalarField::constant(DISK_PERMITTIVITY),
+        color: [66, 105, 151],
+        ..Material::default_medium()
+    });
+    let (rim, first) = (CurveId(builder.next_curve), builder.next_span);
+    let spline = circle(Point2::default(), DISK_RADIUS);
+    let spans = spline.intervals().len() as u64;
+    let region = builder.subdomain(spline, MaterialId(2), MaterialFrame::world());
+    let mut document = builder.document();
+    document.model.source = PointSource {
+        region,
+        ..source(Point2::new(DISK_RADIUS - 0.03, 0.0), frequency, 10.0, 0.02)
+    };
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Round the rim".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+            curve: rim,
+            spans: (first..first + spans).map(CurveSpanId).collect(),
+            side: CurveTraceSide::Left,
+            reversed: false,
+            preset: ProbeSamplingPreset::High,
+        }),
+    });
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Opposite rim".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(0.05 - DISK_RADIUS, 0.0)),
+    });
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 24);
+        assert_eq!(catalog().len(), 25);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -3963,5 +4032,51 @@ mod tests {
             open < 1.0,
             "without the wall the far point hears {open:.2}×"
         );
+    }
+
+    /// The dielectric whispering-gallery claims, at edge 0.08, 30 s from rest,
+    /// on the circle 0.05 inside the rim. On the `m = 7` resonance the RMS
+    /// there is more than three times that at 2.7 Hz, between resonances (8.0×;
+    /// 8.1× at edge 0.05), and `|U|` has `2m = 14` maxima round it.
+    #[test]
+    fn a_dielectric_disk_rings_in_fourteen_lobes_round_its_rim() {
+        let round = |frequency: f64| {
+            let scene = Harmonic::run(
+                &dielectric_gallery_with(frequency),
+                0.08,
+                30.0,
+                frequency,
+                4.0,
+            );
+            (0..360)
+                .map(|index| {
+                    let angle = std::f64::consts::TAU * index as f64 / 360.0;
+                    let (a, b) = scene
+                        .interpolated(Point2::new(angle.cos(), angle.sin()) * (DISK_RADIUS - 0.05));
+                    a.hypot(b)
+                })
+                .collect::<Vec<_>>()
+        };
+        let rms =
+            |line: &[f64]| (line.iter().map(|v| v * v).sum::<f64>() / line.len() as f64).sqrt();
+        let on = round(DISK_HZ);
+        let off = round(2.7);
+        assert!(
+            rms(&on) > 3.0 * rms(&off),
+            "the rim rings {:.2}× off resonance",
+            rms(&on) / rms(&off)
+        );
+        let peak = on.iter().cloned().fold(0.0, f64::max);
+        let maxima = (0..on.len())
+            .filter(|&index| {
+                let (before, here, after) = (
+                    on[(index + on.len() - 1) % on.len()],
+                    on[index],
+                    on[(index + 1) % on.len()],
+                );
+                here > before && here >= after && here > 0.2 * peak
+            })
+            .count();
+        assert_eq!(maxima, 14);
     }
 }
