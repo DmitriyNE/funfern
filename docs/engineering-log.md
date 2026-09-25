@@ -13257,3 +13257,19 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   3.5e-6 and 4.8e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-26 — The subdomain listing folds away
+
+- The user found the photonic crystal's 53 faces, one row each with a
+  material dropdown, strained the Materials panel's subdomain assignment and
+  asked for it to collapse. The listing now sits under a
+  `CollapsingState` header, "Subdomain assignment (N)", with the Faces and
+  Regions toggle in the header row and the listing as its body, open by
+  default. The selected subdomain's detail and the library stay below it,
+  and a click in the scene still selects.
+- **Test:** `the_subdomain_listing_folds_away` renders the crystal's panel
+  open and folded: 1603 against 490 points tall, and it asserts that
+  folding removes at least a control's height per face. The user guide's
+  Materials entry says so.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

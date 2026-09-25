@@ -96,8 +96,21 @@ impl Playground {
 
     pub(super) fn materials_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Materials");
-        ui.horizontal(|ui| {
-            ui.label("Subdomain assignment");
+        let draft = &self.editor.document.model.draft;
+        let count = match self.subdomain_listing {
+            SubdomainListing::Faces => draft.face_assignments.len(),
+            SubdomainListing::Regions => draft.regions.len(),
+        };
+        // A scene of many subdomains, such as a crystal's rods, folds its
+        // listing away; the selection's detail below it stays in view, and a
+        // click in the scene still picks one.
+        egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            subdomain_listing_id(ui),
+            true,
+        )
+        .show_header(ui, |ui| {
+            ui.label(format!("Subdomain assignment ({count})"));
             for (mode, label, hint) in [
                 (
                     SubdomainListing::Faces,
@@ -118,13 +131,15 @@ impl Playground {
                     self.subdomain_listing = mode;
                 }
             }
+        })
+        .body(|ui| {
+            let materials = self.editor.document.model.draft.materials.clone();
+            if self.subdomain_listing == SubdomainListing::Faces {
+                self.face_listing(ui, &materials);
+            } else {
+                self.region_listing(ui, &materials);
+            }
         });
-        let materials = self.editor.document.model.draft.materials.clone();
-        if self.subdomain_listing == SubdomainListing::Faces {
-            self.face_listing(ui, &materials);
-        } else {
-            self.region_listing(ui, &materials);
-        }
         self.region_detail(ui);
     }
 
@@ -915,6 +930,11 @@ impl Playground {
     }
 }
 
+/// The persistent id of the Materials panel's subdomain listing fold.
+fn subdomain_listing_id(ui: &egui::Ui) -> egui::Id {
+    ui.make_persistent_id("subdomain-listing")
+}
+
 /// Every enabled source with a frequency, named for the pump helper: the
 /// point source and each region's volume source.
 pub(super) fn source_frequencies(
@@ -1379,6 +1399,49 @@ mod tests {
         assert!(state.editor.undo());
         assert!(state.editor.document.model.draft.material(other).is_none());
         assert!(state.material_advanced(selection));
+    }
+
+    /// The subdomain listing folds away: folding the photonic crystal's
+    /// removes at least a control's height for each of its 53 faces.
+    #[test]
+    fn the_subdomain_listing_folds_away() {
+        let crystal = funfern_app::topology_examples::catalog()
+            .iter()
+            .find(|example| example.name == "Photonic crystal")
+            .expect("the catalog carries the photonic crystal");
+        let mut state = Playground {
+            editor: funfern_app::topology_editor::TopologyEditor::from_document(
+                crystal.document.clone(),
+            )
+            .unwrap(),
+            ..Playground::default()
+        };
+        let context = egui::Context::default();
+        context.all_styles_mut(|style| style.animation_time = 0.0);
+        let mut row = 0.0;
+        let mut height = |open: bool| {
+            let mut height = 0.0;
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                row = ui.spacing().interact_size.y;
+                let mut fold = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    subdomain_listing_id(ui),
+                    true,
+                );
+                fold.set_open(open);
+                fold.store(ui.ctx());
+                state.materials_panel(ui);
+                height = ui.min_rect().height();
+            });
+            height
+        };
+        let (open, folded) = (height(true), height(false));
+        let faces = state.editor.document.model.draft.face_assignments.len();
+        assert_eq!(faces, 53);
+        assert!(
+            open - folded > faces as f32 * row,
+            "the panel is {open:.0} tall open and {folded:.0} folded"
+        );
     }
 
     /// Switching a material's view with edits pending leaves them pending,

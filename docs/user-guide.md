@@ -186,7 +186,10 @@ running; this file covers using it.
   the materials, so a subdomain becomes a hole and back from the same place.
   Emptying a face walls its own boundary and nothing else: a span transmits
   exactly when the faces on both of its sides carry a material. The toggle also
-  steers the viewport, where a click selects a face or a region to match. Each coefficient can be a constant or a formula. Formulas
+  steers the viewport, where a click selects a face or a region to match. The
+  header counts the rows and folds the listing away, which a scene of many
+  subdomains, such as the photonic crystal's fifty rods, wants; the selected
+  subdomain's detail stays below it. Each coefficient can be a constant or a formula. Formulas
   use local `x`, `y`, `r`, and `theta`, constants `pi` and `e`, named material
   parameters, arithmetic, powers, and `sqrt`, `abs`, `sin`, `cos`, `tan`, `exp`,
   `log`, `min`, `max`, `clamp`, and `smoothstep`. For example, a radial profile can
