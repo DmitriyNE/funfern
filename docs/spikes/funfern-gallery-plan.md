@@ -17,6 +17,12 @@ satisfy three things, as the four Stage 10 slabs already do:
 3. A device run through `canonical_gpu_long_run` with the scene's name, inside
    the Stage 0 bound, before the commit.
 
+Every scene must be authorable with the app's own tools: geometry, span and
+wall conditions, regions, materials and their law slots, sources and their
+signals, probes and view settings. A scene never carries state the UI
+cannot make, such as a seeded initial field. The φ⁴ scene's seed is an
+ordinary volume source with a formula profile for that reason.
+
 A scene whose claim cannot be measured is not shipped. A scene whose physics
 needs something the solver does not have is filed under "Blocked" at the end,
 not approximated.
@@ -200,6 +206,16 @@ Claims after 6 s at the test mesh:
 
 The bound of 3 clears the fall's overshoot of √2 with margin; it also sets the
 curvature and with it the step, which the mesh bounds tighter anyway.
+
+### 8b. Pinned domain wall
+
+Added at the user's request after scene 8: a φ⁴ wall that stays. A straight
+wall costs the same anywhere, so on its own it is only neutrally stable. Two
+baffles welded to the floor and the ceiling at x = 0 leave a neck a quarter of
+the channel's height, where a wall costs a quarter as much; a seed odd about
+x = 0.3 forms the wall off-centre and it slides into the neck. Top and bottom
+reflect. Building it found and fixed a mesher defect: two baffles welded at
+one end in one face did not mesh.
 
 ### 9. Pacemaker
 

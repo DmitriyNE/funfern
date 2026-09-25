@@ -106,6 +106,12 @@ pub fn catalog() -> &'static [TopologyExample] {
                  one well holds everything. Shown in the integrated field.",
                 symmetry_breaking(),
             ),
+            example(
+                "Pinned domain wall",
+                "A double-well medium falls into opposite wells either side of a wall that forms \
+                 off-centre, then slides into the neck two baffles leave and stays there.",
+                pinned_domain_wall(),
+            ),
         ]
     })
 }
@@ -281,6 +287,37 @@ impl Builder {
         authored.nodes[0].vertex = Some(bottom);
         authored.nodes[1].vertex = Some(top);
         (curve, span)
+    }
+
+    /// A reflecting baffle at `x` from the floor or the ceiling, attached to
+    /// it, whose free tip sits at height `tip`.
+    fn wall_baffle(&mut self, x: f64, tip: f64) {
+        let domain = self.scene.geometry.domain;
+        let (side, y, fraction) = if tip > 0.0 {
+            (
+                OuterSide::Top,
+                domain.max_y,
+                (domain.max_x - x) / domain.width(),
+            )
+        } else {
+            (
+                OuterSide::Bottom,
+                domain.min_y,
+                (x - domain.min_x) / domain.width(),
+            )
+        };
+        let vertex = self.outer_vertex(side, fraction);
+        let curve = self.baffle(
+            OpenCubicSpline::polyline(vec![Point2::new(x, y), Point2::new(x, tip)]).unwrap(),
+        );
+        let authored = self
+            .scene
+            .geometry
+            .curves
+            .iter_mut()
+            .find(|candidate| candidate.id == curve)
+            .unwrap();
+        authored.nodes[0].vertex = Some(vertex);
     }
 
     /// The band between two dividers, from wall to wall, as a region of
@@ -1035,6 +1072,13 @@ fn symmetry_breaking() -> TopologyDocument {
 }
 
 fn symmetry_breaking_with(lambda: f64, amplitude: f64) -> TopologyDocument {
+    phi4_document(phi4_builder(lambda, FROZEN_NOISE, amplitude))
+}
+
+/// The "φ⁴ double well" medium over the whole background, `λ` and a bound of
+/// 3, with a constant electric loss of 1/s so it settles, seeded by a faint
+/// 3 Hz volume source over the background whose profile is `seed`.
+fn phi4_builder(lambda: f64, seed: &str, amplitude: f64) -> Builder {
     let mut builder = Builder::new();
     builder.scene.physics = PhysicsModel::Electromagnetic {
         polarization: ElectromagneticPolarization::Tm,
@@ -1062,14 +1106,45 @@ fn symmetry_breaking_with(lambda: f64, amplitude: f64) -> TopologyDocument {
     builder.scene.volume_sources.push(VolumeSource {
         region: BACKGROUND_REGION,
         enabled: true,
-        profile: ScalarField::formula(FROZEN_NOISE).unwrap(),
+        profile: ScalarField::formula(seed).unwrap(),
         parameters: vec![],
         signal: TimeSignal::harmonic(0.0, amplitude, 3.0, 0.0),
     });
+    builder
+}
+
+/// A φ⁴ scene opens on the integrated field, where its wells and walls are.
+fn phi4_document(builder: Builder) -> TopologyDocument {
     let mut document = builder.document();
     document.model.source.enabled = false;
     document.presentation.integrated_field = true;
     document
+}
+
+/// A seed odd about x = 0.3, so the medium falls into opposite wells either
+/// side of there and a wall forms 0.3 away from the neck.
+const PINNING_SEED: &str = "sin(1.5 * (x - 0.3))";
+/// Half the neck's width: a quarter of the channel's height.
+const NECK: f64 = 0.25;
+
+fn pinned_domain_wall() -> TopologyDocument {
+    pinned_domain_wall_with(true)
+}
+
+/// A φ⁴ wall pinned at a neck. Two baffles welded to the floor and the
+/// ceiling at x = 0 leave a gap a quarter of the channel's height, and a
+/// wall's energy is its tension times its length, so a wall across the neck
+/// costs a quarter of one across the channel. The seed puts the wall 0.3 to
+/// the right, whence it slides into the neck; without the baffles a straight
+/// wall costs the same anywhere and stays roughly where it formed.
+fn pinned_domain_wall_with(neck: bool) -> TopologyDocument {
+    let mut builder = phi4_builder(PHI4_LAMBDA, PINNING_SEED, 1.0);
+    builder.scene.outer_boundaries = channel();
+    if neck {
+        builder.wall_baffle(0.0, NECK);
+        builder.wall_baffle(0.0, -NECK);
+    }
+    phi4_document(builder)
 }
 
 #[cfg(test)]
@@ -1078,7 +1153,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 15);
+        assert_eq!(catalog().len(), 16);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -2002,5 +2077,49 @@ mod tests {
             .flat_map(|(_, r, _)| r.iter().map(|v| v.abs()))
             .fold(0.0, f64::max);
         assert!(furthest < 0.2, "without the well r reached {furthest:.3}");
+    }
+
+    /// Where `r` changes sign along a sampled line, by interpolation.
+    fn sign_changes(line: &[f64], start: f64, spacing: f64) -> Vec<f64> {
+        line.windows(2)
+            .enumerate()
+            .filter(|(_, pair)| pair[0].signum() != pair[1].signum())
+            .map(|(index, pair)| start + spacing * (index as f64 + pair[0] / (pair[0] - pair[1])))
+            .collect()
+    }
+
+    /// The pinned-wall gallery claim. The wall forms 0.3 to the right of the
+    /// neck, slides into it within a few seconds and stays within 0.03 of it;
+    /// beside the baffles the two wells sit either side of them, so each
+    /// baffle carries the wall's jump. Without the baffles the same seed's
+    /// wall stays where it formed, more than 0.25 away.
+    #[test]
+    fn a_domain_wall_slides_into_a_neck_and_stays_pinned_there() {
+        let axis = (0..=40)
+            .map(|index| Point2::new(-1.0 + 0.05 * index as f64, 0.0))
+            .chain([Point2::new(-0.1, 0.6), Point2::new(0.1, 0.6)])
+            .collect::<Vec<_>>();
+        let rows = integrated_traces(&pinned_domain_wall(), 0.08, 12.0, &axis, 0.5);
+        // It reaches the neck near 2 s, overshoots and rings; from 5 s it
+        // stays within 0.03, and within 0.005 by 9 s at this mesh.
+        for (time, r, _) in rows.iter().filter(|row| row.0 >= 5.0) {
+            let walls = sign_changes(&r[..41], -1.0, 0.05);
+            assert!(
+                walls.len() == 1 && walls[0].abs() < 0.03,
+                "at {time:.1} s the axis crosses zero at {walls:.3?}"
+            );
+            let (left, right) = (r[41], r[42]);
+            assert!(
+                left < -0.9 && right > 0.9,
+                "at {time:.1} s beside the baffle r is {left:.3} and {right:.3}"
+            );
+        }
+        let free = integrated_traces(&pinned_domain_wall_with(false), 0.08, 12.0, &axis, 1.0);
+        let (_, r, _) = free.last().unwrap();
+        let walls = sign_changes(&r[..41], -1.0, 0.05);
+        assert!(
+            walls.len() == 1 && walls[0] > 0.25,
+            "without the neck the wall sits at {walls:.3?}"
+        );
     }
 }

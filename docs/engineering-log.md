@@ -12642,3 +12642,39 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   of them a φ⁴ wall is pinned with each baffle separating the two wells.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Pinned domain wall (gallery 8b)
+
+- **Why.** Asked for a φ⁴ scene with a wall that stays. A straight wall's
+  energy does not depend on where it sits, so it is only neutrally stable,
+  and the symmetry-breaking scene ends in one well. Four authorable holds
+  were tried for 20 s from a wall seeded 0.3 off-centre, at edge 0.08:
+
+  | Hold | Wall |
+  | --- | --- |
+  | none | stays near where it formed: 0.30, 0.42, 0.39 |
+  | a neck of two baffles | slides into it by 2 s, stays within 0.03 |
+  | λ lowered 60% in a stripe at x = 0 | slides to it by 2 s, stays within 0.02 |
+  | DC offset on an odd seed | holds, but the wells creep 1.00 to 1.03 |
+
+  The odd part of the frozen noise did not hold a wall: its patches meet in
+  crossings, which are unstable, and by 6 s one well held everything. The
+  neck was chosen because it is visible; the stripe is invisible to the
+  material overlay. A wall seeded 0.5 away leaves instead of being caught.
+- **Scene.** The symmetry-breaking medium (factored into `phi4_builder`), top
+  and bottom reflecting, two baffles welded to the floor and the ceiling at
+  x = 0 leaving a neck of half-width 0.25, seeded by a 3 Hz volume source over
+  the background with profile `sin(1.5·(x − 0.3))`. It needed the mesher fix
+  in the entry above.
+- **Measured** on the axis: the wall forms at 0.30, reaches the neck near 2 s,
+  overshoots to −0.16, rings, and is within 0.02 by 5 s and 0.005 by 9 s.
+  Beside the baffles `r` sits at ∓0.99, so each baffle carries the wall's
+  jump. Without the baffles the same seed's wall stays at 0.4. Test:
+  `a_domain_wall_slides_into_a_neck_and_stays_pinned_there` (within 0.03
+  from 5 s to 12 s, beside the baffles past ∓0.9, the free wall beyond 0.25).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 1.1e-6, b 1.1e-6; at
+  1000 steps Q 2.9e-6, b 1.4e-6.
+- Also in this commit: the gallery plan's rule that every scene is authorable
+  with the app's own tools.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.
