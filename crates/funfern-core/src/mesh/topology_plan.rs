@@ -2260,13 +2260,90 @@ fn chord_within(topology: &TopologySnapshot, edges: &[usize], coarsening: AtomCo
     })
 }
 
+/// Cuts `chain`, arrangement segments in increasing parameter order whose
+/// joints may all merge, into runs within the tolerance and the cap. Greedy
+/// runs, each as long as it may be, leave the chain's remainder as one short
+/// atom, and the elements beside it set the time step: every span of a small
+/// circle a little longer than the cap ended in a single arrangement segment.
+/// So the chain is also cut into as many runs at the joints nearest equal arc
+/// lengths, and that cut is kept when every run of it is within the tolerance
+/// and the cap and its shortest atom is the longer.
+fn split_chain(
+    topology: &TopologySnapshot,
+    chain: &[usize],
+    coarsening: AtomCoarsening,
+) -> Vec<Vec<usize>> {
+    let mut greedy = vec![];
+    let mut start = 0;
+    while start < chain.len() {
+        let mut end = start;
+        while end + 1 < chain.len() && chord_within(topology, &chain[start..=end + 1], coarsening) {
+            end += 1;
+        }
+        greedy.push(chain[start..=end].to_vec());
+        start = end + 1;
+    }
+    let count = greedy.len();
+    if count < 2 {
+        return greedy;
+    }
+    let length = |edge: usize| {
+        let edge = &topology.edges[edge];
+        (edge.points[1] - edge.points[0]).norm()
+    };
+    // `reached[j]` is the arc length at the joint after segment `j`.
+    let reached = chain
+        .iter()
+        .scan(0.0, |sum, &edge| {
+            *sum += length(edge);
+            Some(*sum)
+        })
+        .collect::<Vec<_>>();
+    let total = reached[chain.len() - 1];
+    let mut even = vec![];
+    let mut start = 0;
+    for index in 1..count {
+        let target = total * index as f64 / count as f64;
+        // Leave at least one segment for each run still to come.
+        let last = chain.len() - 1 - (count - index);
+        let cut = (start..=last)
+            .min_by(|a, b| {
+                (reached[*a] - target)
+                    .abs()
+                    .total_cmp(&(reached[*b] - target).abs())
+            })
+            .unwrap_or(start);
+        even.push(chain[start..=cut].to_vec());
+        start = cut + 1;
+    }
+    even.push(chain[start..].to_vec());
+    let shortest = |runs: &[Vec<usize>]| {
+        runs.iter()
+            .map(|run| {
+                let first = &topology.edges[run[0]];
+                let last = &topology.edges[run[run.len() - 1]];
+                (last.points[1] - first.points[0]).norm()
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let valid = even
+        .iter()
+        .all(|run| chord_within(topology, run, coarsening));
+    if valid && shortest(&even) > shortest(&greedy) {
+        even
+    } else {
+        greedy
+    }
+}
+
 impl TopologyMeshPlan {
     /// Merges runs of arrangement segments into mesh atoms. The arrangement
     /// samples curves finely enough to intersect them robustly, and this plan
     /// used every one of those segments as a boundary edge, which pinned the
     /// boundary resolution and the time step far below the target. Runs merge
     /// while their joints stay within the chord tolerance and the chord under
-    /// the cap; they never cross an authored vertex, a span boundary, an outer
+    /// the cap, cut evenly along each chain that may merge ([`split_chain`]);
+    /// they never cross an authored vertex, a span boundary, an outer
     /// corner, a change of the faces or behaviour beside them, or any trace
     /// vertex shared with another source. Both sides of a span merge over the
     /// same runs, so paired traces stay paired. Face cycles, boundary atoms and
@@ -2336,12 +2413,12 @@ impl TopologyMeshPlan {
                         && signature(edges[end]) == signature(edges[end + 1])
                         && !protected.contains(&joint.traces[1].left)
                         && !protected.contains(&joint.traces[1].right);
-                    if !continues || !chord_within(topology, &edges[start..=end + 1], coarsening) {
+                    if !continues {
                         break;
                     }
                     end += 1;
                 }
-                runs.push(edges[start..=end].to_vec());
+                runs.extend(split_chain(topology, &edges[start..=end], coarsening));
                 start = end + 1;
             }
         }
@@ -3005,6 +3082,51 @@ mod tests {
         assert!(
             coarse_step > 3.0 * fine_step,
             "time step {fine_step:.3e} fine against {coarse_step:.3e} coarse"
+        );
+    }
+
+    /// Greedy runs, each as long as the cap allows, end a chain in whatever
+    /// is left; the even cut keeps their count and evens their lengths. One
+    /// span of the rounded hole, `n` segments, under a cap that fits `n − 1`
+    /// of them, was a run of `n − 1` and a single segment.
+    #[test]
+    fn an_even_cut_replaces_a_greedy_remainder() {
+        let topology = rounded_hole_topology(SpanBehavior::REFLECTING);
+        let span = topology
+            .edges
+            .iter()
+            .find_map(|edge| match edge.source {
+                CompiledEdgeSource::Curve(span) => Some(span),
+                CompiledEdgeSource::Outer(_) => None,
+            })
+            .unwrap();
+        let mut chain = (0..topology.edges.len())
+            .filter(|index| topology.edges[*index].source == CompiledEdgeSource::Curve(span))
+            .collect::<Vec<_>>();
+        chain.sort_by(|a, b| {
+            topology.edges[*a].parameter[0].total_cmp(&topology.edges[*b].parameter[0])
+        });
+        let count = chain.len();
+        assert!(count >= 4, "{count} segments");
+        let chord = |run: &[usize]| {
+            (topology.edges[run[run.len() - 1]].points[1] - topology.edges[run[0]].points[0]).norm()
+        };
+        let coarsening = AtomCoarsening {
+            tolerance: 1.0,
+            maximum_chord: chord(&chain[..count - 1]) * (1.0 + 1.0e-9),
+        };
+        let runs = split_chain(&topology, &chain, coarsening);
+        assert_eq!(runs.len(), 2);
+        assert!(
+            runs[0].len().abs_diff(runs[1].len()) <= 1,
+            "runs of {} and {} segments",
+            runs[0].len(),
+            runs[1].len()
+        );
+        assert_eq!(runs.concat(), chain);
+        assert!(
+            runs.iter()
+                .all(|run| chord_within(&topology, run, coarsening))
         );
     }
 

@@ -1523,8 +1523,14 @@ the meshing curve tolerance of the chord and the chord stays under the target
 edge. Runs never cross an authored vertex, a span boundary, an outer corner, a
 change of the faces or behaviour beside them, or a trace shared with another
 source, and both sides of a span merge over the same runs so paired traces stay
-paired. Before this, every curved span was cut into segments about 7e-3 long and
-the time step followed; the coarsened plan on a single-hole scene gave a time
+paired. Within each chain of segments that may merge, runs as long as they may be
+left the chain's remainder as one short atom, down to a single segment, and the
+elements beside it set the time step; so the chain is also cut into as many runs
+at the joints nearest equal arc lengths, kept when every run is within the
+tolerance and the cap and its shortest atom is the longer (`split_chain`). The
+remaining short atoms are the joints' own spacing: a chain of 32 segments that
+needs 11 runs has runs of two. Before any merging, every curved span was cut into
+segments about 7e-3 long and the time step followed; the coarsened plan on a single-hole scene gave a time
 step more than three times larger with the same interior mesh. Refinement
 linearly subdivides an atom, which the chord tolerance keeps within the same
 distance of the curve, and coarsening cannot cross

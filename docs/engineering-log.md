@@ -13273,3 +13273,41 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   Materials entry says so.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-26 — Curves cut into even mesh atoms
+
+- **Found** while building the photonic crystal: spline-circle rods of
+  radius 0.04 cost the scene six times the time step of octagons. The
+  mesh plan merges a curve's arrangement segments into atoms within the
+  curve tolerance, never across a span boundary, and it merged greedily:
+  each run as long as it may be, the chain's remainder left as one atom,
+  down to a single segment. The gallery's `circle` has sixteen spans, each
+  0.0157 long on a rod against an allowed chord of 0.0126, so every span
+  ended in a segment of 0.004, and the elements beside it set the time
+  step. In every gallery scene with curves the shortest mesh edge was such
+  an atom.
+- **Fixed** in `TopologyMeshPlan::coarsened`: runs split first into the
+  chains whose joints may merge, as before, and `split_chain` cuts each
+  chain greedily and also into as many runs at the joints nearest equal arc
+  lengths, keeping the even cut when every run of it is within the
+  tolerance and the cap and its shortest atom is the longer. Both sides of
+  a span still share the runs. What short atoms remain are the joints' own
+  spacing: the bent fiber's inner arc, 32 segments of 0.011 per span
+  against three per atom, needs 11 runs and some of two.
+- **Measured** at edge 0.08, time step before and after: Phased array
+  8.6e-4 to 2.40e-3 (2.8×, unknowns 11.1k to 10.2k); Starter obstacle
+  2.53e-3 to 4.02e-3 (1.6×); Self-sustained emitter 2.96e-3 to 4.58e-3
+  (1.5×); Anisotropic crystal 3.50e-3 to 3.39e-3 (3% down, its shortest
+  edge unchanged at 0.021, its mesh otherwise changed); every other scene
+  unchanged.
+- **Test:** `an_even_cut_replaces_a_greedy_remainder` cuts one span of the
+  rounded hole, 32 segments, under a cap that fits 31: greedy gave 31 and
+  1, the even cut 16 and 16. The existing coarsening tests and every
+  gallery claim pass unchanged.
+- **Device:** `canonical_gpu_long_run` on the re-meshed scenes at 400 and
+  1000 steps: Starter obstacle Q 1.1e-6 and 3.3e-6; Phased array 9.0e-7 and
+  2.6e-6; Self-sustained emitter 1.5e-5 and 9.8e-6 (bound 1e-4, its
+  fastest rate now 0.057 per half step); Anisotropic crystal 9.2e-7 and
+  2.3e-6. The other 19 device examples pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.
