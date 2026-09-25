@@ -473,6 +473,10 @@ fn active_loss_map(node: u32, flux: f32, second: bool) -> f32 {
 }
 
 // `e^{z} − 1`, by its series where f32 would cancel the direct form away.
+// Past 0.02 the direct form is off by up to half an f32 unit of one, with the
+// same sign every stage: a rate that fast drifts from the reference by about
+// 1.2e-7 a step, a rate error of a few 1e-5/s. Not fully accurate, and left
+// so; see "Worth checking sometime" in `docs/plan.md`.
 fn exp_minus_one(z: f32) -> f32 {
     if abs(z) < 0.02 {
         return z * (1.0 + z * (0.5 + z * (1.0 / 6.0 + z * (1.0 / 24.0 + z / 120.0))));

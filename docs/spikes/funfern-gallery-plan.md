@@ -226,29 +226,41 @@ waist and follows it when the bumps are dragged. Narrowed again at the user's re
 each bump is now half an ellipse, ±0.35 along the wall and 0.75 deep, drawn as
 two Bézier quarters with seven controls, and the seed is a tenth as strong.
 
-### 9. Pacemaker
+### 9. Self-sustained emitter (was: Pacemaker)
 
-TM. The "Van der Pol oscillators" medium everywhere, threshold 1, gain 2,
-cutoff 2 Hz. A disk of radius 0.25 at the centre carries the same medium with
-cutoff 3 Hz: the pacemaker. A seed source of amplitude 0.01 at 2.5 Hz at
-(−0.6, 0.4), since exact rest never grows. Walls outgoing, reflecting if the
-walls distort the pattern.
+The pacemaker was explored first and does not happen in this medium. A 3 Hz
+disk of "Van der Pol oscillators" in a 2 Hz lattice of them, gain 2: the bulk
+locks at 2.05 Hz and the disk is suppressed. With the disk's gain at 10 its
+rings fill the domain by 6 s, but they thin with distance below what
+suppresses the bulk's own mode, which takes over by 15 s; switched on in a
+bulk already oscillating, the disk rings in itself and its waves never get
+past. The gain lifts every mode alike, the modes are coupled by waves rather
+than diffusion, and cross-saturation is twice self-saturation, so whichever
+pattern saturates first holds; the pacemaker effect of heart tissue and the
+BZ reaction needs diffusive coupling. The planned fallback, a uniform lattice,
+failed its amplitude claim too: 0.25 to 1.05 with outgoing walls, competing
+modes for 27 s with reflecting ones.
 
-The gain acts on `u = ṙ`, so the limit cycle is Rayleigh's, not van der Pol's:
-the amplitude of `u` is `2a/√3 = 1.155`, independent of gain, cutoff and
-seed. The disk's waves run into the bulk with `k = √(ω_p² − ω₀²)/c`,
-wavelength 0.45, as target waves.
+Shipped instead: a disk of radius 0.25 of "Van der Pol oscillators", cutoff
+3 Hz, gain 15, threshold 1 and a magnetic loss of 25/s, in a Klein-Gordon
+plasma with a 2 Hz cutoff, seeded by a 2.5 Hz point source of 0.01 at its
+centre. Walls outgoing. The magnetic loss limits the gain to the disk's long
+waves: a short wave keeps half its energy in the magnetic field, the disk's
+near-uniform oscillation almost none. Without it the gain lases on the mesh's
+shortest waves at the rim (see "Maintenance" in `docs/plan.md`). The disk
+rings as one oscillator at its cutoff and radiates rings of wavelength
+`c/√(f² − f_c²) = 0.447`. Raising the plasma's cutoff to 3.6 Hz traps the
+tone.
 
-Claims:
+Claims at edge 0.08 over the last 4 s of 10 s:
 
-- Far from the disk, the `u` amplitude is 1.155 within 10%, for seeds of
-  0.01 and 1.0 alike.
-- Far from the disk, the spectrum peaks at 3 Hz above 2 Hz: the bulk is
-  entrained.
-
-Entrainment is established by exploration first. If the bulk does not lock,
-the scene ships uniform with the first claim and the frequency at 2 Hz
-whatever the seed's.
+- The far field's tone is 3 Hz within 1% (2.999), not the seed's 2.5 Hz,
+  which is under 2% of it (0.5%).
+- The centre's amplitude is `2a/√3 = 1.155` within 5% (1.186).
+- The rings' phase runs along a ray at `2π√(f² − f_c²)` within 5% (14.46
+  against 14.04).
+- With the plasma at 3.6 Hz the disk rings more strongly (1.258 at 3.27 Hz),
+  and its tone 0.7 away is under 5% of the radiating disk's (2.1%).
 
 ### 10. Plasma-clad whispering gallery
 
@@ -487,7 +499,7 @@ modulation at rest.
 
 Batch A first, including the groundwork and the todo. Then B, C, D, E. Before
 their scene text is fixed, CPU exploration in the scratchpad settles: the
-fluxon emission (7), the pacemaker's entrainment (9), the clad disk's
+fluxon emission (7), the pacemaker's entrainment (9, which failed), the clad disk's
 resonance (10), the fiber's β and stable depth (11), the crystal's gap (13),
 the ring's resonance (15), the dielectric disk's resonance (17) and the
 Doppler grating's depth (27). Every other scene gets its claim tolerance from

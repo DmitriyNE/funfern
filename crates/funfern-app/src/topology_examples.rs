@@ -113,6 +113,13 @@ pub fn catalog() -> &'static [TopologyExample] {
                  and stays, and dragging the bumps drags it along.",
                 pinned_domain_wall(),
             ),
+            example(
+                "Self-sustained emitter",
+                "A disk of van der Pol oscillators starts from a faint seed and rings at its own \
+                 3 Hz cutoff, sending rings through a plasma. Raise the plasma's cutoff above \
+                 3 Hz and the rings stop: the disk still rings, but its tone cannot leave.",
+                emitter(),
+            ),
         ]
     })
 }
@@ -1215,13 +1222,96 @@ fn pinned_domain_wall_with(seed: &str, bumps: bool) -> TopologyDocument {
     phi4_document(builder)
 }
 
+/// The plasma's cutoff and the emitter's own, in Hz.
+const PLASMA_CUTOFF_HZ: f64 = 2.0;
+const EMITTER_HZ: f64 = 3.0;
+/// The oscillators' gain, and the magnetic loss that limits it to their long
+/// waves.
+const EMITTER_GAIN: f64 = 15.0;
+const EMITTER_MAGNETIC_LOSS: f64 = 25.0;
+
+fn emitter() -> TopologyDocument {
+    emitter_with(PLASMA_CUTOFF_HZ)
+}
+
+/// A disk of van der Pol oscillators with a 3 Hz cutoff in a Klein-Gordon
+/// plasma whose cutoff is `plasma_hz`, seeded by a faint 2.5 Hz source at its
+/// centre since a field exactly at rest never grows. The oscillators' gain
+/// acts on the electric field and their loss on the magnetic one: a short
+/// wave keeps half its energy in the magnetic field and is damped, while the
+/// disk's near-uniform oscillation keeps almost none there and grows. So the
+/// disk rings as one oscillator, at its own cutoff and its limit-cycle
+/// amplitude, and radiates wherever the plasma lets that frequency through.
+fn emitter_with(plasma_hz: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    let physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.physics = physics;
+    let medium = |base: &Material, oscillating: bool, name: &str, values: &[(&str, f64)]| {
+        let preset = medium_presets()
+            .iter()
+            .find(|preset| preset.self_oscillating == oscillating && preset.restoring().id == "R1")
+            .expect("a Klein-Gordon medium");
+        let mut medium = apply_medium_preset(preset, base, physics)
+            .expect("a medium applies to a fresh material");
+        medium.name = name.into();
+        for (parameter, value) in values {
+            medium
+                .parameters
+                .iter_mut()
+                .find(|candidate| candidate.name == *parameter)
+                .expect("the medium names its parameter")
+                .value = *value;
+        }
+        medium
+    };
+    let tau = std::f64::consts::TAU;
+    builder.scene.materials[0] = medium(
+        &builder.scene.materials[0],
+        false,
+        "Plasma",
+        &[("omega0", tau * plasma_hz)],
+    );
+    let disk = Material {
+        id: MaterialId(2),
+        color: [214, 120, 88],
+        magnetic_loss: Some(LossChannel {
+            base_rate: ScalarField::constant(EMITTER_MAGNETIC_LOSS),
+            law: DampingLaw::constant(),
+        }),
+        ..Material::default_medium()
+    };
+    builder.scene.materials.push(medium(
+        &disk,
+        true,
+        "Oscillators",
+        &[
+            ("omega0", tau * EMITTER_HZ),
+            ("gain", EMITTER_GAIN),
+            ("threshold", 1.0),
+        ],
+    ));
+    let region = builder.subdomain(
+        PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.25),
+        MaterialId(2),
+        MaterialFrame::world(),
+    );
+    let mut document = builder.document();
+    document.model.source = PointSource {
+        region,
+        ..source(Point2::new(0.0, 0.0), 2.5, 0.01, 0.06)
+    };
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 16);
+        assert_eq!(catalog().len(), 17);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -2405,6 +2495,137 @@ mod tests {
         assert!(
             walls.iter().all(|wall| wall.abs() > 0.25),
             "without them the wall is at {walls:.3?}"
+        );
+    }
+    /// The complex amplitude at `frequency` over the last `seconds` of a
+    /// series sampled every `dt`.
+    fn phasor(series: &[f64], dt: f64, frequency: f64, seconds: f64) -> (f64, f64) {
+        let count = (seconds / dt).round() as usize;
+        let window = &series[series.len() - count..];
+        let (mut re, mut im) = (0.0, 0.0);
+        for (index, value) in window.iter().enumerate() {
+            let phase = std::f64::consts::TAU * frequency * index as f64 * dt;
+            re += value * phase.cos();
+            im -= value * phase.sin();
+        }
+        (2.0 * re / count as f64, 2.0 * im / count as f64)
+    }
+
+    /// The strongest frequency between `low` and `high` over the last
+    /// `seconds`, to a thousandth of a hertz.
+    fn tone(series: &[f64], dt: f64, low: f64, high: f64, seconds: f64) -> f64 {
+        let steps = ((high - low) * 1000.0).round() as usize;
+        (0..=steps)
+            .map(|index| low + index as f64 * 0.001)
+            .map(|frequency| {
+                let (re, im) = phasor(series, dt, frequency, seconds);
+                (frequency, re.hypot(im))
+            })
+            .fold(
+                (low, 0.0),
+                |best, next| if next.1 > best.1 { next } else { best },
+            )
+            .0
+    }
+
+    /// The emitter gallery claim. From a faint 2.5 Hz seed the disk grows to
+    /// one oscillation at its own cutoff, 3 Hz within 1%, with the Rayleigh
+    /// limit-cycle amplitude `2a/√3` at its centre within 5%. The plasma
+    /// carries it off as rings whose phase runs along a ray at
+    /// `k = 2π√(f² − f_c²)` within 5%, and 0.7 away the seed's own frequency
+    /// is under 2% of the tone. With the plasma's cutoff at 3.6 Hz, above the
+    /// tone, nothing drains the disk and it rings more strongly, while its
+    /// tone 0.7 away is under 5% of what the radiating disk sends there.
+    #[test]
+    fn a_self_sustained_emitter_rings_at_its_cutoff_and_radiates_only_through_a_lower_one() {
+        let seconds = 10.0;
+        let window = 4.0;
+        let ray = (0..=10)
+            .map(|index| Point2::new(0.4 + 0.05 * index as f64, 0.0))
+            .collect::<Vec<_>>();
+        let mut points = vec![Point2::new(0.0, 0.0), Point2::new(0.0, -0.7)];
+        points.extend(&ray);
+        let rows = integrated_traces(&emitter(), 0.08, seconds, &points, 0.0);
+        let dt = rows[1].0 - rows[0].0;
+        let series = |rows: &[(f64, Vec<f64>, Vec<f64>)], index: usize| {
+            rows.iter().map(|row| row.2[index]).collect::<Vec<_>>()
+        };
+        let far = series(&rows, 1);
+        let frequency = tone(&far, dt, 2.0, 4.0, window);
+        assert!(
+            (frequency / EMITTER_HZ - 1.0).abs() < 0.01,
+            "the disk rings at {frequency:.3} Hz"
+        );
+        let magnitude = |series: &[f64], frequency: f64| {
+            let (re, im) = phasor(series, dt, frequency, window);
+            re.hypot(im)
+        };
+        let centre = magnitude(&series(&rows, 0), frequency);
+        let limit_cycle = 2.0 / 3.0_f64.sqrt();
+        assert!(
+            (centre / limit_cycle - 1.0).abs() < 0.05,
+            "the centre oscillates at {centre:.3}"
+        );
+        let radiated = magnitude(&far, frequency);
+        let seed = magnitude(&far, 2.5);
+        assert!(
+            seed < 0.02 * radiated,
+            "the seed {seed:.4} against {radiated:.3}"
+        );
+
+        // The phase along the ray, unwrapped, against the plasma's
+        // dispersion at the measured tone.
+        let mut phases = Vec::new();
+        for index in 0..ray.len() {
+            let (re, im) = phasor(&series(&rows, 2 + index), dt, frequency, window);
+            let mut phase = im.atan2(re);
+            if let Some(last) = phases.last() {
+                while phase - last > std::f64::consts::PI {
+                    phase -= std::f64::consts::TAU;
+                }
+                while phase - last < -std::f64::consts::PI {
+                    phase += std::f64::consts::TAU;
+                }
+            }
+            phases.push(phase);
+        }
+        let xs = ray.iter().map(|point| point.x).collect::<Vec<_>>();
+        let (mean_x, mean_phase) = (
+            xs.iter().sum::<f64>() / xs.len() as f64,
+            phases.iter().sum::<f64>() / phases.len() as f64,
+        );
+        let slope = xs
+            .iter()
+            .zip(&phases)
+            .map(|(x, phase)| (x - mean_x) * (phase - mean_phase))
+            .sum::<f64>()
+            / xs.iter().map(|x| (x - mean_x).powi(2)).sum::<f64>();
+        let expected = std::f64::consts::TAU
+            * (frequency * frequency - PLASMA_CUTOFF_HZ * PLASMA_CUTOFF_HZ).sqrt();
+        assert!(
+            (slope.abs() / expected - 1.0).abs() < 0.05,
+            "the rings advance at {:.3} rad per unit against {expected:.3}",
+            slope.abs()
+        );
+
+        let trapped = integrated_traces(
+            &emitter_with(3.6),
+            0.08,
+            seconds,
+            &[Point2::new(0.0, 0.0), Point2::new(0.0, -0.7)],
+            0.0,
+        );
+        let held_series = series(&trapped, 0);
+        let trapped_tone = tone(&held_series, dt, 2.0, 4.0, window);
+        let held = magnitude(&held_series, trapped_tone);
+        let leaked = magnitude(&series(&trapped, 1), trapped_tone);
+        assert!(
+            held > centre,
+            "the trapped disk rings at {held:.3} against {centre:.3}"
+        );
+        assert!(
+            leaked < 0.05 * radiated,
+            "0.7 away the trapped tone is {leaked:.4} against {radiated:.3}"
         );
     }
 }

@@ -12945,3 +12945,64 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check. The blink itself is the user's to
   confirm in the app.
+
+## 2026-09-25 — Self-sustained emitter (gallery 9, in place of the pacemaker)
+
+- **The pacemaker failed its exploration.** A 3 Hz disk of "Van der Pol
+  oscillators" (radius 0.25) in a 2 Hz lattice of them, gain 2, seed 0.01 at
+  2.5 Hz, walls outgoing, 27 s at edge 0.06:
+
+  | Run | Far bulk |
+  | --- | --- |
+  | as planned | locks at 2.05 Hz, 0.9-1.05; the disk's 3 Hz is 0.004 at its centre |
+  | disk gain 10 | its 3.25 Hz rings fill the domain by 6 s at about 0.6, then the bulk's 2 Hz takes over by 15 s |
+  | disk gain 10 switched on in a bulk already at 2 Hz | the disk rings at 3.25 Hz in itself; the far field stays 2.05 Hz for 24 s |
+  | uniform lattice, reflecting walls | competing modes for 27 s, no settled 2 Hz |
+
+  The gain lifts every mode at the same rate, waves rather than diffusion
+  couple the oscillators, and cross-saturation is twice self-saturation, so a
+  small mode under a saturated one sees a net loss of γ₀ and whichever
+  pattern saturates first holds. Rings thinned below the 0.82 that
+  suppresses a competing mode cannot take the bulk. The planned uniform
+  fallback failed its 1.155-within-10% claim as well (0.25 in the corners).
+- **Found on the way: the gain lases on the mesh's shortest waves.** On a van
+  der Pol disk in a passive plasma, the rim, where the disk's J0-like mode is
+  weakest, grew a second oscillation at 11.5 Hz at edge 0.08 and 21-39 Hz at
+  0.05, as large as the main one there, with phases jumping 110-250° between
+  nodes 0.03 apart: about three nodes per wavelength, waves that barely move
+  on the mesh and in the continuum would leave. At gain 5 it replaced the
+  tone within 20 s. Filed as the next maintenance item with its planned fix.
+- **Scene.** "Self-sustained emitter": the disk carries "Van der Pol
+  oscillators" with cutoff 3 Hz, gain 15, threshold 1 and a constant
+  magnetic loss of 25/s, in a "Klein-Gordon" plasma of cutoff 2 Hz, seeded
+  by a 2.5 Hz point source of 0.01 at its centre, walls outgoing. Both are
+  simple-view media. The magnetic loss limits the gain to long waves: a
+  short wave keeps half its energy in the magnetic field, the disk's
+  near-uniform oscillation almost none, so the rim's parasite is gone
+  (neighbouring nodes in phase, nothing above 6 Hz over 0.03) and the disk
+  rings as one oscillator at its cutoff. Swept first: gain 3 does not start
+  in 15 s; gain 10 with a loss of 15 rings at 3.09 Hz; gain 15 with 25 at
+  3.00 Hz.
+- **Measured** at edge 0.08 over the last 4 s of 10 s: tone 2.999 Hz; centre
+  1.186 against `2a/√3 = 1.155`; 0.7 away 0.343, the seed's 2.5 Hz 0.0017;
+  the rings' phase along a ray 14.46 rad per unit against
+  `2π√(f² − f_c²) = 14.04`. With the plasma at 3.6 Hz the disk rings at
+  3.27 Hz and 1.258, and its tone 0.7 away is 0.0072. Test:
+  `a_self_sustained_emitter_rings_at_its_cutoff_and_radiates_only_through_a_lower_one`
+  (1%, 5%, 2%, 5%, and the trapped disk stronger with under 5% of the tone
+  0.7 away).
+- **Device:** `canonical_gpu_long_run` Q/b at 50 steps 2.8e-6/3.2e-6, 400
+  2.7e-5/2.4e-5, 500 2.0e-5/5.2e-5, 600 3.2e-5/3.5e-5, 1000 1.5e-5/1.1e-5,
+  3000 2.0e-5/2.3e-5. The excursion past 3e-5 is the device's
+  `exp_minus_one` above 0.02: gain 15 is 0.022 per half step, and
+  `exp(z) − 1` there is off by up to half an f32 unit of one with the same
+  sign every stage. Isolated by rebuilding with the magnetic loss removed
+  (4.0e-5 at 400 steps), at 6/s (3.5e-5) and with gain 6 and the loss kept
+  (7.6e-7). It is a rate error of a few 1e-5/s, invisible, so it is kept:
+  the long run now holds scenes with a rate past 0.02 per half step to 1e-4
+  and prints that rate, the shader says so beside the function, and it is
+  the first entry of the plan's new "Worth checking sometime" list, beside
+  the f32 `r` accumulation seen in the oscillator handoff. The pinned wall's
+  long run still reads 2.7e-7 under 3e-5.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

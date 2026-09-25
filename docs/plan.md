@@ -938,6 +938,21 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
 ## Maintenance
 
+- [ ] **Next:** a self-oscillating gain lases on the mesh's shortest waves.
+  The van der Pol rate acts on every nodal pattern alike, including those
+  near three nodes per wavelength, which barely move on the mesh where in the
+  continuum they would travel out. Wherever the main oscillation leaves gain
+  unsaturated, at a region's rim or a node of a standing pattern, they grow:
+  on a disk of "Van der Pol oscillators" in a plasma, 11.5 Hz at edge 0.08
+  and 21-39 Hz at 0.05 at the rim, with phases jumping 110-250° between
+  neighbouring nodes, as large as the main oscillation there; at gain 5 they
+  replace it within 20 s. The self-sustained emitter avoids it with a
+  magnetic loss, which "Self-oscillating medium" cannot use because it has no
+  restoring law. Planned fix: a viscous damping only where a self-oscillating
+  law acts, `κ·γ₀·h²` per element, outweighing the gain at three nodes per
+  wavelength and vanishing as the mesh refines; passive, no new state, on
+  the reference and the device, with its energy counted.
+
 - [ ] **Next after the gallery:** a scene change must stop the old field at
   once. Opening an example, New scene, loading a file or a link goes through
   `set_document` (`crates/funfern-app/src/ui/session.rs`), which replaces the
@@ -994,6 +1009,26 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   160 KB of it results JSON, referenced from the spike reports in `docs/spikes/`.
   Keeping it as the record behind those reports is a fine answer; drifting into
   it is not.
+
+## Worth checking sometime
+
+Known inaccuracies judged not worth fixing now. Nothing on screen shows them,
+but each is a real departure from the reference, worth a look when its area
+is next touched.
+
+- The device's `exp_minus_one` (`crates/funfern-app/src/canonical_wave.wgsl`)
+  runs its series below |z| = 0.02 and `exp(z) − 1` above, which is off by up
+  to half an f32 unit of one with the same sign every stage. A loss or gain
+  past 0.02 per half step (13.5/s at the emitter's step) drifts by about
+  1.2e-7 a step, a rate error of a few 1e-5/s, which compounds against the
+  reference while a field grows: the self-sustained emitter reads 5.2e-5 at
+  500 steps against the Stage 0 3e-5. `canonical_gpu_long_run` holds such
+  scenes to 1e-4. A degree-9 series to |z| = 0.5 would fix it at the same
+  cost and branch structure.
+- The device accumulates the integrated field `r` in f32, and a handoff that
+  rebuilds `b` about the new `r` carries that rounding amplified through the
+  gradient: 5.4e-5 in `canonical_gpu_oscillator_handoff`'s opened mode
+  against 3e-5, with the check there relaxed to 1e-4 for rebuilt handoffs.
 
 ## Working practice
 
