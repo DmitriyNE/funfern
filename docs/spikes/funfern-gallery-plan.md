@@ -264,23 +264,41 @@ short-wave viscosity:
 - With the plasma at 3.6 Hz the disk rings more strongly (1.245 at 3.26 Hz),
   and its tone 0.7 away is under 5% of the radiating disk's (1.9%).
 
-### 10. Plasma-clad whispering gallery
+### 10. Plasma whispering gallery (was: Plasma-clad whispering gallery)
 
-TM. A vacuum disk of radius 0.4 at (0.05, 0) in a Klein-Gordon background
-with cutoff 3.5 Hz. A source just inside the rim at 3 Hz, below the cutoff:
-the cladding is a Drude plasma, the mode hugs the rim and its skin in the
-plasma is `c/√(ω₀² − ω²) = 0.088`. The drive frequency is set by a sweep to a
-whispering-gallery resonance of the clad disk. Walls outgoing; nothing
-reaches them.
+TM. A vacuum disk of radius 0.4 at (0.05, 0), drawn as a sixteen-control
+circle (flat to 1e-4), in a "Klein-Gordon" plasma with a 3.5 Hz cutoff. A
+point source 0.06 inside the rim, amplitude 10, width 0.03, and a point probe
+opposite it on an antinode. Walls outgoing; nothing reaches them. Lossless:
+below the cutoff the plasma turns every wave back, so the disk's modes have
+nowhere to leak.
 
-Claims:
+Explored by ringdown (a bump near the rim, the spectrum over 32 rim points
+and the angular order of each peak): the fundamental radial order runs m = 3
+at 2.265 Hz, 4 at 2.690, 5 at 3.095, 6 at 3.495 (the cutoff) and 7 at 3.880
+(above it, leaky). The m = 5 mode sits at 3.098-3.099 Hz on meshes from edge
+0.04 to 0.16, so the lossless resonance survives every resolution preset; the
+scene drives it at 3.1 Hz, where it builds for minutes.
 
-- The RMS one skin depth outside the rim is `e^{−1}` of the RMS at the rim,
-  within 30%.
-- At the resonance the rim RMS exceeds the off-resonance rim RMS by more
-  than 3×, and the intensity around the rim shows `2m` lobes.
-- Driven at 4 Hz, above the cutoff, the field two skin depths outside the
-  disk is more than 10× what it is at 3 Hz: the cladding turns transparent.
+The plan's skin `c/√(ω₀² − ω²)` holds only for a mode without angular
+structure. Outside the rim a mode of order m falls as `K_m(κr)`, whose local
+rate `√(κ² + m²/r²)` is steeper, so the claim is made against K_5. The plan's
+4 Hz for the transparent cladding lands beside the m = 8 mode at 4.005 Hz,
+which its own angular barrier holds near the rim, and the plasma above the
+cutoff is optically thinner than vacuum (n = 0.48 at 4 Hz) and still turns
+back every wave past 29°; 5 Hz shows the transparency plainly.
+
+Claims at edge 0.08 over the last 2 s of 12 s:
+
+- Driven at 3.1 Hz, the half of the rim away from the source rings more than
+  3× as strongly as when driven between resonances at 3.225 Hz (0.169
+  against 0.037), with `2m = 10` lobes around the rim.
+- From 0.02 to 0.11 outside the rim, opposite the source, the field falls to
+  K_5's ratio within 25% (0.288 against 0.250), nearer it than to the plain
+  skin `e^{−κ·0.09}` (0.399).
+- Driven at 5 Hz, above the cutoff, the field 0.35 outside the rim keeps more
+  than half of its strength 0.02 outside (1.2), where on resonance it keeps
+  under 5% (1.4%).
 
 This is the nearest thing to a polariton the catalogue can make. A true
 polariton needs a Lorentz law with a second auxiliary state, which Gate O did

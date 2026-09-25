@@ -120,6 +120,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  3 Hz and the rings stop: the disk still rings, but its tone cannot leave.",
                 emitter(),
             ),
+            example(
+                "Plasma whispering gallery",
+                "A vacuum disk walled by a plasma, driven at 3.1 Hz below the plasma's cutoff: \
+                 ten lobes of a whispering-gallery mode build up around the rim, and outside it \
+                 the field dies within a few hundredths. Drive it at 5 Hz, above the cutoff, and \
+                 the wall turns transparent.",
+                whispering_gallery(),
+            ),
         ]
     })
 }
@@ -1305,13 +1313,100 @@ fn emitter_with(plasma_hz: f64) -> TopologyDocument {
     document
 }
 
+/// A circle of `radius` about `center`: sixteen controls, whose uniform
+/// B-spline sits 0.9746 of their radius in and departs from a circle by under
+/// 1e-4 of it.
+fn circle(center: Point2, radius: f64) -> PeriodicCubicSpline {
+    let reach = radius / 0.974_6;
+    PeriodicCubicSpline::uniform(
+        (0..16)
+            .map(|index| {
+                let angle = index as f64 * std::f64::consts::TAU / 16.0;
+                center + Point2::new(angle.cos(), angle.sin()) * reach
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+const GALLERY_CENTRE: Point2 = Point2 { x: 0.05, y: 0.0 };
+const GALLERY_RADIUS: f64 = 0.4;
+const GALLERY_CUTOFF_HZ: f64 = 3.5;
+/// The clad disk's `m = 5` whispering-gallery resonance, 3.098-3.099 Hz by
+/// ringdown on meshes from edge 0.04 to 0.16.
+const GALLERY_HZ: f64 = 3.1;
+
+fn whispering_gallery() -> TopologyDocument {
+    whispering_gallery_with(GALLERY_HZ)
+}
+
+/// A TM vacuum disk walled by a Klein-Gordon plasma with a 3.5 Hz cutoff,
+/// driven at `frequency` by a point source just inside its rim. Below the
+/// cutoff the plasma is a Drude metal: every wave meeting the rim turns
+/// back, and the disk's whispering-gallery modes ring with nothing to leak
+/// into, their field outside falling as `K_m(κr)` with
+/// `κ = √(ω₀² − ω²)/c`. A probe sits opposite the source, on an antinode of
+/// the `m = 5` mode, so its build-up shows in the probe plot.
+fn whispering_gallery_with(frequency: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    let physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.physics = physics;
+    let preset = medium_presets()
+        .iter()
+        .find(|preset| !preset.self_oscillating && preset.restoring().id == "R1")
+        .expect("the Klein-Gordon medium");
+    let mut plasma = apply_medium_preset(preset, &builder.scene.materials[0], physics)
+        .expect("a medium applies to a fresh material");
+    plasma.name = "Plasma".into();
+    plasma
+        .parameters
+        .iter_mut()
+        .find(|parameter| parameter.name == "omega0")
+        .expect("the medium names its cutoff")
+        .value = std::f64::consts::TAU * GALLERY_CUTOFF_HZ;
+    builder.scene.materials[0] = plasma;
+    builder.scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Vacuum".into(),
+        color: [40, 58, 72],
+        ..Material::default_medium()
+    });
+    let region = builder.subdomain(
+        circle(GALLERY_CENTRE, GALLERY_RADIUS),
+        MaterialId(2),
+        MaterialFrame::world(),
+    );
+    let mut document = builder.document();
+    document.model.source = PointSource {
+        region,
+        ..source(
+            GALLERY_CENTRE + Point2::new(GALLERY_RADIUS - 0.06, 0.0),
+            frequency,
+            10.0,
+            0.03,
+        )
+    };
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Opposite rim".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(
+            GALLERY_CENTRE - Point2::new(GALLERY_RADIUS - 0.06, 0.0),
+        ),
+    });
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 17);
+        assert_eq!(catalog().len(), 18);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -2674,5 +2769,106 @@ mod tests {
                 .fold(0.0, f64::max);
             assert!(strongest < 0.05, "{point:?}: {strongest:.3} above 6 Hz");
         }
+    }
+    /// The plasma whispering-gallery claims, at edge 0.08 over the last 2 s
+    /// of 12. Driven on its `m = 5` resonance, the rim away from the source
+    /// rings more than 3× as strongly as when driven between resonances at
+    /// 3.225 Hz, with `2m = 10` lobes around it. Outside the rim, opposite
+    /// the source, the field falls as `K_5(κr)` with `κ = √(ω₀² − ω²)/c`:
+    /// from 0.02 to 0.11 out its ratio is K_5's within 25%, and nearer that
+    /// than the plasma's own skin `e^{−κ·0.09}`, since the mode's angular
+    /// order steepens the fall. Driven at 5 Hz, above the cutoff, the wall is
+    /// transparent: 0.35 out the field keeps more than half its strength
+    /// 0.02 out, where on resonance it keeps under 5%.
+    #[test]
+    fn a_plasma_walled_disk_rings_in_a_whispering_gallery_mode_below_the_cutoff() {
+        // The angular order of the resonance `GALLERY_HZ` drives.
+        const GALLERY_ORDER: u32 = 5;
+        let seconds = 12.0;
+        let angles = 32;
+        let ring = (0..angles)
+            .map(|index| {
+                let angle = index as f64 * std::f64::consts::TAU / angles as f64;
+                GALLERY_CENTRE + Point2::new(angle.cos(), angle.sin()) * (GALLERY_RADIUS - 0.04)
+            })
+            .collect::<Vec<_>>();
+        let outside = |depth: f64| GALLERY_CENTRE - Point2::new(GALLERY_RADIUS + depth, 0.0);
+        let mut points = ring.clone();
+        points.extend([outside(0.02), outside(0.11), outside(0.35)]);
+        let run = |frequency: f64| {
+            let rows = integrated_traces(
+                &whispering_gallery_with(frequency),
+                0.08,
+                seconds,
+                &points,
+                0.0,
+            );
+            let tail = &rows[rows.len() * 5 / 6..];
+            (0..points.len())
+                .map(|index| {
+                    (tail.iter().map(|row| row.2[index].powi(2)).sum::<f64>() / tail.len() as f64)
+                        .sqrt()
+                })
+                .collect::<Vec<_>>()
+        };
+        let resonant = run(GALLERY_HZ);
+        let detuned = run(3.225);
+        let transparent = run(5.0);
+        // The half of the ring away from the source.
+        let far_rim = |rms: &[f64]| {
+            (angles / 4..3 * angles / 4)
+                .map(|index| rms[index].powi(2))
+                .sum::<f64>()
+                .sqrt()
+        };
+        assert!(
+            far_rim(&resonant) > 3.0 * far_rim(&detuned),
+            "the rim rings at {:.4} on resonance and {:.4} off it",
+            far_rim(&resonant),
+            far_rim(&detuned)
+        );
+        let lobes = &resonant[..angles];
+        let mean = lobes.iter().sum::<f64>() / angles as f64;
+        let crossings = (0..angles)
+            .filter(|index| (lobes[*index] - mean) * (lobes[(index + 1) % angles] - mean) < 0.0)
+            .count();
+        assert_eq!(
+            crossings,
+            4 * GALLERY_ORDER as usize,
+            "{crossings} crossings"
+        );
+
+        // `K_m(x) = ∫₀^∞ e^{−x cosh t} cosh(mt) dt`.
+        let bessel_k = |order: f64, x: f64| {
+            let step = 1.0e-3;
+            (0..20_000)
+                .map(|index| {
+                    let t = (index as f64 + 0.5) * step;
+                    (-x * t.cosh()).exp() * (order * t).cosh() * step
+                })
+                .sum::<f64>()
+        };
+        let kappa = std::f64::consts::TAU
+            * (GALLERY_CUTOFF_HZ * GALLERY_CUTOFF_HZ - GALLERY_HZ * GALLERY_HZ).sqrt();
+        let order = f64::from(GALLERY_ORDER);
+        let expected = bessel_k(order, kappa * (GALLERY_RADIUS + 0.11))
+            / bessel_k(order, kappa * (GALLERY_RADIUS + 0.02));
+        let measured = resonant[angles + 1] / resonant[angles];
+        assert!(
+            (measured / expected - 1.0).abs() < 0.25,
+            "the field falls to {measured:.3} of itself against K_5's {expected:.3}"
+        );
+        let skin = (-kappa * 0.09).exp();
+        assert!(
+            (measured - expected).abs() < (measured - skin).abs(),
+            "the fall {measured:.3} is nearer the plasma's skin {skin:.3} than K_5's {expected:.3}"
+        );
+        let reach = |rms: &[f64]| rms[angles + 2] / rms[angles];
+        assert!(
+            reach(&resonant) < 0.05 && reach(&transparent) > 0.5,
+            "0.35 out the field keeps {:.3} of itself on resonance and {:.3} at 5 Hz",
+            reach(&resonant),
+            reach(&transparent)
+        );
     }
 }

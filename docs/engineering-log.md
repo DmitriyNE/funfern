@@ -13055,3 +13055,41 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   1.9% of the tone 0.7 away.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Plasma whispering gallery (gallery 10)
+
+- **Scene.** "Plasma whispering gallery": a TM vacuum disk, radius 0.4 at
+  (0.05, 0), in a "Klein-Gordon" plasma with a 3.5 Hz cutoff; a point source
+  0.06 inside the rim at 3.1 Hz, amplitude 10, width 0.03; a probe opposite
+  it on an antinode; walls outgoing; no loss. The disk is a new
+  sixteen-control `circle` in the builder, flat to 1e-4 where `rounded`'s
+  eight controls ripple 0.6%.
+- **Explored.** A ringdown from a bump near the rim, the spectrum summed over
+  32 rim points and each peak's angular order: m = 3, 4, 5, 6, 7 at 2.265,
+  2.690, 3.095, 3.495 and 3.880 Hz, second radial orders between. m = 5 is at
+  3.098-3.099 Hz at edges 0.04, 0.08 and 0.16 alike, so the scene drives it
+  lossless: a plasma loss of 2/s halved the build-up and the resonance needs
+  no widening to survive a resolution change. A sweep from 2.95 to 3.25 Hz
+  put the ring's peak at 3.10 and its floor between resonances near 3.2.
+- **Plan corrected.** The plan's skin `c/√(ω₀² − ω²) = 0.088` is the m = 0
+  one; outside the rim a mode of order m falls as `K_m(κr)`, steeper by its
+  angular wavenumber, e-folding in about 0.06 here. Its 4 Hz for a
+  transparent wall sits beside the m = 8 mode at 4.005 Hz, which its angular
+  barrier holds to the rim (0.35 out the field was only 1.5× the resonant
+  tail), and above the cutoff the plasma is optically thinner than vacuum;
+  at 5 Hz the field outside is flat.
+- **Measured** at edge 0.08 over the last 2 s of 12 s: the far half of the
+  rim 0.169 on resonance against 0.037 at 3.225 Hz; 10 lobes; from 0.02 to
+  0.11 out the field falls to 0.288 against K_5's 0.250 and the plain skin's
+  0.399; 0.35 out it keeps 1.4% of its value 0.02 out on resonance and 120%
+  at 5 Hz. Test:
+  `a_plasma_walled_disk_rings_in_a_whispering_gallery_mode_below_the_cutoff`
+  (3×, 10 lobes, K_5 within 25% and nearer than the skin, under 5% against
+  over half).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 3.4e-6, b 1.5e-6; at
+  1000 steps Q 3.6e-6, b 7.9e-6. At 3000 steps (20 s, printed, not judged)
+  Q reads 1.1e-4 while b stays at 2.8e-6. Q's norm is dominated by the point
+  source's near field, so the likely cause is that field's phase in f32 20 s
+  in; not checked.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.
