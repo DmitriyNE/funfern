@@ -12456,3 +12456,14 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
 - **Device:** `canonical_gpu_long_run` at 400 steps, Q 2.1e-6, b 7.4e-7.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Filed: a scene change must stop the old field
+
+- Reported: on opening another scene the previous one keeps running for a
+  while. `set_document` replaces the document and requests a fresh
+  generation, but the outgoing generation keeps stepping and stays on screen
+  until the new one is prepared, by design until now. Filed as the first
+  Maintenance item in `docs/plan.md` with the questions to settle first (what
+  the gap shows, pausing or dropping the old generation without breaking the
+  live-edit handoff, undo), and scheduled straight after the gallery in
+  `docs/spikes/funfern-gallery-plan.md`. No code changed.

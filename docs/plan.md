@@ -938,6 +938,28 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
 ## Maintenance
 
+- [ ] **Next after the gallery:** a scene change must stop the old field at
+  once. Opening an example, New scene, loading a file or a link goes through
+  `set_document` (`crates/funfern-app/src/ui/session.rs`), which replaces the
+  document and requests a fresh generation, but the outgoing generation keeps
+  stepping, and stays on screen, until the new one is meshed, compiled and
+  admitted. On a large or law-carrying scene that is seconds of the previous
+  scene still running under the new one's geometry and panels. Today this is
+  deliberate: the comment there keeps the field scale because "the outgoing
+  scene is still on display until its replacement is prepared". Questions to
+  settle before wiring it:
+  - What is shown in the gap: a cleared field over the new geometry, the
+    still last frame, or nothing. Probes, the far field, the energy readouts
+    and the recorder all read the active generation and need the same answer.
+  - Whether the old generation is paused or dropped at once, on the CPU and
+    on the device, and how that meets the handoff machinery that exists
+    precisely to keep the accepted generation live while a candidate prepares
+    (live edits must keep that behaviour; only a document replacement drops
+    it).
+  - Undo of a scene change, which also goes through `set_document`.
+  - A test that a replacement leaves no step of the old generation after it,
+    and a scratch-HOME app run clicking through the gallery.
+
 - Enable fat LTO and `codegen-units = 1` for the native release build. The
   browser bundle already gets both through `scripts/trunk`, which exports
   `CARGO_PROFILE_RELEASE_LTO` and `CARGO_PROFILE_RELEASE_CODEGEN_UNITS`; that

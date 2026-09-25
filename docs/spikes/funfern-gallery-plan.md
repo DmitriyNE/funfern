@@ -468,6 +468,9 @@ the ring's resonance (15), the dielectric disk's resonance (17) and the
 Doppler grating's depth (27). Every other scene gets its claim tolerance from
 its own first run.
 
+Straight after batch E: a scene change stops the old field at once (the
+first item under "Maintenance" in `docs/plan.md`).
+
 Catalogue count after everything: 12 today, 34 after; the catalogue test's
 count and the user guide's example list move with each commit.
 
