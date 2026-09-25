@@ -13217,3 +13217,43 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   are unchanged.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Gallery: the photonic crystal
+
+- **Scene** "Photonic crystal" (gallery item 13), the catalogue's 21st: a TM
+  channel lit at 1.85 Hz by a launcher at x = −0.85, with a square lattice
+  of ceramic rods, `ε = 9`, radius 0.2 of the pitch, pitch 0.2, five
+  columns deep and ten rows filling the height. With the pitch dividing
+  the height the reflecting walls sit on the lattice's mirror planes, so
+  the channel is the infinite crystal at normal incidence. This is
+  Joannopoulos's textbook crystal, not the plan's pitch 0.16 and radius
+  0.3. A line probe "Along the channel" runs on the midline between two
+  rows, and a point probe "Behind the crystal" reads the transmitted wave.
+- **Rods are octagons** (`octagonal_rod`) with the circle's area. Meshed
+  as spline circles of radius 0.04 the scene took 36.6k unknowns and a
+  time step of 1.0e-3 at edge 0.08, its shortest edge 0.004; as octagons
+  it takes 9.4k and 6.5e-3, about 25× less work per simulated second.
+  12-gons: 11.6k and 4.8e-3; 16-gons: 15.5k and 3.8e-3.
+- **Found, not fixed:** axis-aligned square rods in this lattice fail to
+  mesh with "Could not construct a constrained mesh: topology ear clipping
+  stalled"; the same squares turned 45°, and octagons with flats facing
+  the axes, mesh. Reported to the user. The spline circles' shortest edge,
+  0.004, is a third of what a 5e-4 curve tolerance needs on a circle of
+  radius 0.04 (0.013); also reported, not diagnosed.
+- **Explored:** transmission sweeps of circles and octagons from 1 to 3 Hz
+  agree within a point or two. Five columns pass under 3.4% from 1.40 to
+  2.20 Hz (0.28 to 0.44 of the pitch over the wavelength), 12% at 1.35 and
+  27% at 2.25, 48% to 100% below and 48% to 88% above up to 2.85 Hz. The
+  gap's top matches the textbook's 0.443; its bottom, 0.275, is band 1's
+  edge at X, under the complete gap's 0.302 set at M. At edge 0.05 the
+  claims' frequencies move by under 1.5 points.
+- **Measured** at edge 0.08, from the phasor averaged across the channel
+  0.25 behind the crystal against the empty channel: 0.073% at 1.85 Hz,
+  99.85% at 1 Hz, 79.2% at 2.5 Hz. Test:
+  `a_rod_crystal_turns_back_its_gap_and_passes_either_side` (under 1%,
+  over 90%, over 50%).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 6.8e-7, b 9.6e-7; at
+  1000 steps Q 1.3e-6, b 3.4e-6; at 3000 steps (printed, not judged)
+  3.5e-6 and 4.8e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

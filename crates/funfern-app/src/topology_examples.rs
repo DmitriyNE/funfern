@@ -145,6 +145,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  beam off tangentially; drag the bend tighter and it sheds more.",
                 bent_fiber(),
             ),
+            example(
+                "Photonic crystal",
+                "A plane wave at 1.85 Hz meets five columns of ceramic rods, ε = 9, in a square \
+                 lattice: the frequency is in the crystal's band gap, the wave turns back, and \
+                 under a thousandth of its power gets through. Tune the launcher to 1 Hz, below \
+                 the gap, or 2.5 Hz, above it, and most of it passes.",
+                photonic_crystal(),
+            ),
         ]
     })
 }
@@ -1767,13 +1775,99 @@ fn bent_fiber_with(radius: f64) -> TopologyDocument {
     document
 }
 
+const CRYSTAL_PITCH: f64 = 0.2;
+const CRYSTAL_ROD_FRACTION: f64 = 0.2;
+const CRYSTAL_ROD_PERMITTIVITY: f64 = 9.0;
+const CRYSTAL_GAP_HZ: f64 = 1.85;
+
+/// A regular octagon about `center` with the area of a circle of `radius`,
+/// its flats facing the axes. Meshed as spline circles of radius 0.04, the
+/// crystal's rods brought its shortest edge down to 0.004 and its time step
+/// to a sixth of the octagons', at four times the unknowns.
+fn octagonal_rod(center: Point2, radius: f64) -> PeriodicCubicSpline {
+    let eighth = std::f64::consts::TAU / 8.0;
+    let reach = radius * (std::f64::consts::PI / (4.0 * eighth.sin())).sqrt();
+    PeriodicCubicSpline::polygon(
+        (0..8)
+            .map(|index| {
+                let angle = (index as f64 + 0.5) * eighth;
+                center + Point2::new(angle.cos(), angle.sin()) * reach
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+fn photonic_crystal() -> TopologyDocument {
+    photonic_crystal_with(CRYSTAL_GAP_HZ, true)
+}
+
+/// A TM channel lit by a launcher at `frequency` at the left, with a square
+/// lattice of ceramic rods, `ε = 9` and 0.2 of the pitch in radius, five
+/// columns deep and ten rows filling the height. The reflecting walls sit on
+/// the lattice's mirror planes, so the channel is the infinite crystal at
+/// normal incidence, whose TM gap runs from 0.275 to 0.445 of the pitch over
+/// the wavelength. A line probe runs along the midline, between two rows,
+/// and a point probe reads the transmitted wave.
+fn photonic_crystal_with(frequency: f64, rods: bool) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    builder.launcher(-0.85, frequency, 40.0);
+    builder.scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Ceramic".into(),
+        mass_density: ScalarField::constant(CRYSTAL_ROD_PERMITTIVITY),
+        color: [66, 105, 151],
+        ..Material::default_medium()
+    });
+    if rods {
+        for column in 0..5 {
+            for row in 0..10 {
+                let centre = Point2::new(
+                    (column as f64 - 2.0) * CRYSTAL_PITCH,
+                    -1.0 + (row as f64 + 0.5) * CRYSTAL_PITCH,
+                );
+                builder.subdomain(
+                    octagonal_rod(centre, CRYSTAL_ROD_FRACTION * CRYSTAL_PITCH),
+                    MaterialId(2),
+                    MaterialFrame::world(),
+                );
+            }
+        }
+    }
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Along the channel".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Segment {
+            start: Point2::new(-0.75, 0.0),
+            end: Point2::new(0.9, 0.0),
+            preset: ProbeSamplingPreset::Medium,
+        },
+    });
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Behind the crystal".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(0.75, 0.0)),
+    });
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 20);
+        assert_eq!(catalog().len(), 21);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -3424,5 +3518,41 @@ mod tests {
             sharp > 2.0 * gentle,
             "radius 0.3 loses {sharp:.3}, radius 0.7 {gentle:.3}"
         );
+    }
+
+    /// The photonic-crystal claims, at edge 0.08, from the transmitted plane
+    /// wave: the phasor averaged across the channel 0.25 behind the last
+    /// column, where every other diffraction order has died, against the
+    /// empty channel. In the gap, at 1.85 Hz, five columns pass under 1% of
+    /// the power (0.07%); below it, at 1 Hz, more than 90% (99.9%); above
+    /// it, at 2.5 Hz, more than half (79%). At edge 0.05 the three are 0.08%,
+    /// 99.5% and 79%.
+    #[test]
+    fn a_rod_crystal_turns_back_its_gap_and_passes_either_side() {
+        let transmission = |frequency: f64| {
+            let behind = |rods: bool| {
+                let scene = Harmonic::run(
+                    &photonic_crystal_with(frequency, rods),
+                    0.08,
+                    10.0,
+                    frequency,
+                    3.0,
+                );
+                let (re, im) = (0..40)
+                    .map(|index| {
+                        let y = -1.0 + 2.0 * (index as f64 + 0.5) / 40.0;
+                        scene.interpolated(Point2::new(0.75, y))
+                    })
+                    .fold((0.0, 0.0), |sum, (a, b)| (sum.0 + a, sum.1 + b));
+                re.hypot(im)
+            };
+            (behind(true) / behind(false)).powi(2)
+        };
+        let gap = transmission(CRYSTAL_GAP_HZ);
+        assert!(gap < 0.01, "the gap passes {gap:.4}");
+        let below = transmission(1.0);
+        assert!(below > 0.9, "1 Hz passes {below:.3}");
+        let above = transmission(2.5);
+        assert!(above > 0.5, "2.5 Hz passes {above:.3}");
     }
 }

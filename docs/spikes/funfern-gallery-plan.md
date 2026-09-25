@@ -389,20 +389,39 @@ right wall:
 
 ### 13. Photonic crystal
 
-TM. A channel with a launcher at the left. A square lattice of dielectric
-rods, `ε = 9`, radius 0.3 of the pitch, pitch 0.16, five rows deep, filling
-the channel height. The gap is found by a transmission sweep in exploration;
-for these rods it is expected near a pitch-over-wavelength of 0.27 to 0.36,
-that is 1.7 to 2.25 Hz. The scene's mesh edge is set fine enough for the
-rods.
+TM. A channel with a launcher at x = −0.85. A square lattice of ceramic
+rods, `ε = 9`, radius 0.2 of the pitch, pitch 0.2, five columns deep
+centred on the origin and ten rows filling the channel height. With the
+pitch dividing the height the reflecting walls sit on the lattice's mirror
+planes, so the channel is the infinite crystal at normal incidence. (The
+plan's pitch 0.16 does not divide the height, and its radius 0.3 is not
+the textbook crystal: Joannopoulos's rods of `ε = 8.9` and radius 0.2 open
+a TM gap from 0.302 to 0.443 of the pitch over the wavelength.) Each rod
+is a regular octagon with the circle's area, its flats facing the axes. A
+line probe runs along the midline between two rows, and a point probe
+reads the transmitted wave 0.25 behind the crystal.
 
-Claims: transmission through the five rows under 10% at the gap frequency and
-over 50% at a pass frequency.
+Explored. Meshed as spline circles the rods cost the scene 36.6k unknowns
+and a time step of 1.0e-3 at edge 0.08, its shortest edge 0.004. As
+octagons the scene takes 9.4k and 6.5e-3, cheaper than the fiber, and
+12-gons 11.6k and 4.8e-3. The transmission sweeps of both, from 1 to 3 Hz,
+agree within a point or two: five columns pass under 3.4% from 1.40 to
+2.20 Hz (0.28 to 0.44 of the pitch over the wavelength), 0.04% to 0.2%
+through the middle, 12% at 1.35 and 27% at 2.25. Below, from 1 to 1.3 Hz,
+they pass 48% to 100%; above, from 2.3 to 2.85 Hz, 48% to 88%; the next
+stop band begins by 2.9 Hz. The gap's top matches the textbook's; its
+bottom, 0.275, is band 1's edge at X, below the complete gap's 0.302,
+which band 1 sets at M. At edge 0.05 the claims' three frequencies move
+by under 1.5 points. The scene runs at 1.85 Hz, mid-gap.
 
-Fallback if the sweep is not clean at an affordable mesh: a quarter-wave
-Bragg stack of six pairs, `n = 1` and `n = 2`, whose gap is analytic, 2.35 to
-3.65 Hz at a design frequency of 3 Hz, with a defect layer that puts a
-transmission resonance inside the gap.
+Claims at edge 0.08, from the phasor averaged across the channel 0.25
+behind the last column, against the empty channel:
+
+- In the gap, at 1.85 Hz, five columns pass under 1% of the power (0.07%).
+- Below it, at 1 Hz, more than 90% (99.9%).
+- Above it, at 2.5 Hz, more than half (79%).
+
+The Bragg-stack fallback was not needed.
 
 ### 14. Crystal bend
 
