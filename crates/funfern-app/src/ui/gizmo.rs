@@ -118,6 +118,23 @@ impl Playground {
             Stroke::new(1.5, Color32::WHITE),
         );
         let diagonal = radius * std::f32::consts::FRAC_1_SQRT_2;
+        // The move grip: four arrows on the diagonal opposite uniform scale.
+        let grip = center + egui::vec2(-diagonal, diagonal);
+        painter.circle_filled(grip, 9.0, Color32::from_rgb(16, 23, 31));
+        painter.circle_stroke(grip, 9.0, Stroke::new(1.5, SELECT));
+        let arrow = Stroke::new(1.5, SELECT);
+        for direction in [
+            egui::vec2(1.0, 0.0),
+            egui::vec2(-1.0, 0.0),
+            egui::vec2(0.0, 1.0),
+            egui::vec2(0.0, -1.0),
+        ] {
+            let tip = grip + direction * 6.0;
+            let across = egui::vec2(-direction.y, direction.x);
+            painter.line_segment([grip, tip], arrow);
+            painter.line_segment([tip, tip - direction * 2.5 + across * 2.5], arrow);
+            painter.line_segment([tip, tip - direction * 2.5 - across * 2.5], arrow);
+        }
         painter.rect_filled(
             Rect::from_center_size(
                 center + egui::vec2(diagonal, diagonal),
@@ -208,7 +225,7 @@ impl Playground {
         }
         if let Some((hit, _)) = self.hit_transform_gizmo(pos, r) {
             return Some(match hit {
-                TransformGizmoHit::Pivot => egui::CursorIcon::Move,
+                TransformGizmoHit::Pivot | TransformGizmoHit::Move => egui::CursorIcon::Move,
                 TransformGizmoHit::Rotate => egui::CursorIcon::Grab,
                 TransformGizmoHit::Scale(axis) => Self::scale_axis_cursor(axis),
             });
@@ -252,6 +269,9 @@ impl Playground {
             return Some((TransformGizmoHit::Pivot, pivot));
         }
         let diagonal = radius * std::f32::consts::FRAC_1_SQRT_2;
+        if (center + egui::vec2(-diagonal, diagonal)).distance(point) <= 10.0 {
+            return Some((TransformGizmoHit::Move, pivot));
+        }
         for (axis, offset) in [
             (GizmoScaleAxis::Uniform, egui::vec2(diagonal, diagonal)),
             (GizmoScaleAxis::X, egui::vec2(x_radius, 0.0)),
@@ -439,6 +459,71 @@ mod tests {
             state.drag_cursor(),
             None,
             "a marquee needs no cursor of its own"
+        );
+    }
+
+    /// The gizmo's move grip sits on the diagonal opposite uniform scale and
+    /// starts the drag the selection's own body starts, from where it was
+    /// pressed; the centre still takes the pivot and the corner still scales.
+    #[test]
+    fn the_move_grip_starts_the_selection_drag() {
+        let mut state = Playground::default();
+        let r = viewport();
+        crate::ui::test_support::settle(&mut state.editor);
+        let curve = state
+            .editor
+            .create_boundary_baffle(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.3, 0.25),
+                    Point2::new(0.0, 0.45),
+                    Point2::new(0.3, 0.25),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        crate::ui::test_support::settle(&mut state.editor);
+        state.invalidate_samples();
+        state.refresh_samples(r);
+        state.selection = TopologySelection::Spans(
+            state
+                .editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(curve)
+                .unwrap()
+                .spans
+                .iter()
+                .map(|span| TopologySpanTarget::Curve(span.id))
+                .collect(),
+        );
+        let (_, center, radius, _, _) = state.transform_gizmo(r).expect("a movable selection");
+        let diagonal = radius * std::f32::consts::FRAC_1_SQRT_2;
+        let grip = center + egui::vec2(-diagonal, diagonal);
+        assert_eq!(
+            state.hit_transform_gizmo(grip, r).map(|(hit, _)| hit),
+            Some(TransformGizmoHit::Move)
+        );
+        assert_eq!(state.hover_cursor(grip, r), Some(egui::CursorIcon::Move));
+        assert_eq!(
+            state.hit_transform_gizmo(center, r).map(|(hit, _)| hit),
+            Some(TransformGizmoHit::Pivot)
+        );
+        assert_eq!(
+            state
+                .hit_transform_gizmo(center + egui::vec2(diagonal, diagonal), r)
+                .map(|(hit, _)| hit),
+            Some(TransformGizmoHit::Scale(GizmoScaleAxis::Uniform))
+        );
+        let DragGesture::Spans { start, pivot, .. } = state.span_drag(grip, r) else {
+            panic!("the grip starts a span drag");
+        };
+        assert!((start - state.world(grip, r)).norm() < 1.0e-9);
+        let expected = state.transform_gizmo(r).unwrap().0;
+        assert!(
+            (pivot - expected).norm() < 1.0e-9,
+            "the drag keeps the selection's pivot"
         );
     }
 }

@@ -12777,3 +12777,20 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   both cases).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check. Not exercised in the running app.
+
+## 2026-09-25 — A move grip on the transform gizmo
+
+- Asked for with the click fixes: the gizmo's centre moves the pivot, so it
+  had no grip that moves the selection itself. It now has one, a four-way
+  arrow on the ring's lower-left diagonal, opposite the uniform-scale grip
+  (`TransformGizmoHit::Move`). Pressing it starts the same rigid drag a
+  selected span's body starts, which carries a custom pivot along and snaps
+  with Shift; that drag's construction is now one helper, `span_drag`, for
+  both. The grip shows the Move cursor.
+- **Test:** `the_move_grip_starts_the_selection_drag` (the grip hits as Move
+  with the Move cursor, the centre still as the pivot and the corner as
+  uniform scale; the drag starts at the press with the selection's pivot).
+  No test drives an egui drag end to end; the drag's update is the existing
+  span-drag path.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check. Not exercised in the running app.

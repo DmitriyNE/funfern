@@ -197,6 +197,32 @@ impl Playground {
             sampled.span_hit(transform, screen, span_radius, |_| true)
         }
     }
+    /// The drag that translates the selected spans rigidly from `pos`,
+    /// carrying a custom pivot along with them. Pressing a selected span's
+    /// body starts it, and so does the gizmo's move grip.
+    pub(super) fn span_drag(&self, pos: egui::Pos2, r: egui::Rect) -> DragGesture {
+        let selected = self.selection.spans().cloned().unwrap_or_default();
+        let curve_spans = selected
+            .iter()
+            .filter_map(|target| match target {
+                TopologySpanTarget::Curve(span) => Some(*span),
+                TopologySpanTarget::Outer(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let custom_pivot = self
+            .gizmo_pivot
+            .as_ref()
+            .is_some_and(|(selection, _)| selection == &selected);
+        DragGesture::Spans {
+            start: self.world(pos, r),
+            pivot: self
+                .gizmo_pivot_for(&selected, &curve_spans)
+                .unwrap_or_default(),
+            custom_pivot,
+            gizmo_before: self.gizmo_pivot.clone(),
+            geometry: self.editor.document.model.draft.geometry.clone(),
+        }
+    }
     pub(super) fn drag_starts_inside_span_selection(
         selection: &TopologySelection,
         hit: TopologyHit,

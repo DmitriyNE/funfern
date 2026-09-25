@@ -152,7 +152,11 @@ impl ProbeHit {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TransformGizmoHit {
+    /// The centre, which moves the pivot the other grips act about.
     Pivot,
+    /// The four-way grip, which translates the selection as dragging its body
+    /// does.
+    Move,
     Rotate,
     Scale(GizmoScaleAxis),
 }

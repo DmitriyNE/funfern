@@ -153,8 +153,10 @@ running; this file covers using it.
   a press anywhere on a selected span takes the selection, even beside a control
   point, and only a press on a control's own dot takes the control. With Handles
   hidden in View, control points and junctions take no clicks.
-  Movable selections show a draggable rotation/scale center, a rotation ring, and
-  separate uniform, horizontal, and vertical scale grips. Hold Shift while dragging
+  Movable selections show a draggable rotation/scale center, a rotation ring,
+  separate uniform, horizontal, and vertical scale grips, and a four-way move grip
+  on the lower-left of the ring that translates the selection as dragging its
+  body does. Hold Shift while dragging
   to snap world coordinates to `0.05`, angles to 15°, and scale to 0.1 increments.
   Numeric translation, rotation, and scale use the same topology-aware transform;
   each geometry gesture or command is one history action.

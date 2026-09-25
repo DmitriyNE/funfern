@@ -8,7 +8,6 @@ use funfern_app::topology_viewport::{
     TopologySpanTarget, plan_axis_scale, plan_handle_drag, plan_rigid_transform,
 };
 use funfern_core::*;
-use std::collections::BTreeSet;
 
 use super::*;
 
@@ -220,6 +219,10 @@ impl Playground {
                 if let Some((hit, pivot)) = self.hit_transform_gizmo(grab, r) {
                     let relative = self.world(pos, r) - pivot;
                     self.drag = Some(match hit {
+                        TransformGizmoHit::Move => {
+                            self.editor.begin();
+                            self.span_drag(pos, r)
+                        }
                         TransformGizmoHit::Pivot => DragGesture::Pivot {
                             previous: self.gizmo_pivot.clone(),
                             offset: pivot - self.world(pos, r),
@@ -346,29 +349,7 @@ impl Playground {
                     } else {
                         match hit {
                             TopologyHit::Handle { handle, .. } => DragGesture::Handle { handle },
-                            TopologyHit::Span { .. } => {
-                                let selected = self.selection.spans().cloned().unwrap_or_default();
-                                let curve_spans = selected
-                                    .iter()
-                                    .filter_map(|target| match target {
-                                        TopologySpanTarget::Curve(span) => Some(*span),
-                                        TopologySpanTarget::Outer(_) => None,
-                                    })
-                                    .collect::<BTreeSet<_>>();
-                                let custom_pivot = self
-                                    .gizmo_pivot
-                                    .as_ref()
-                                    .is_some_and(|(selection, _)| selection == &selected);
-                                DragGesture::Spans {
-                                    start: self.world(pos, r),
-                                    pivot: self
-                                        .gizmo_pivot_for(&selected, &curve_spans)
-                                        .unwrap_or_default(),
-                                    custom_pivot,
-                                    gizmo_before: self.gizmo_pivot.clone(),
-                                    geometry: self.editor.document.model.draft.geometry.clone(),
-                                }
-                            }
+                            TopologyHit::Span { .. } => self.span_drag(pos, r),
                         }
                     });
                 } else {
