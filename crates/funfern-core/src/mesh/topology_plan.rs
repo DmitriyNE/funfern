@@ -565,14 +565,44 @@ fn prepare_topology_builder(
             //
             // Starting just after the first removal keeps a stretch that spans
             // the cycle's own start in one piece.
+            //
+            // A run of removed steps that comes back to the point it left is
+            // a spur instead: a baffle attached at one end, or a tree of them.
+            // It joins nothing, so the stretch carries on through its foot,
+            // where the cut goes back in later, and the traces either side of
+            // the foot are one mesh vertex until then, as at a stretch that
+            // closes on a spur. Closing at every removal broke a face with two
+            // spurs into a stretch from one foot to the other, which cannot
+            // close.
             let start = cycle.iter().position(&is_slit).map_or(0, |index| index + 1);
             let mut polygon = vec![];
             let mut ends: Option<[TraceVertexId; 2]> = None;
+            // While removed steps are being skipped: the trace the stretch
+            // left from, if it had begun.
+            let mut run: Option<Option<TraceVertexId>> = None;
             for offset in 0..cycle.len() {
                 let step = &cycle[(start + offset) % cycle.len()];
                 if is_slit(step) {
-                    close_face_cycle(&trace_points, &mut polygon, &mut ends, &mut cycles)?;
+                    if run.is_none() {
+                        run = Some(ends.map(|ends| ends[1]));
+                    }
                     continue;
+                }
+                if let Some(departure) = run.take() {
+                    let spur = departure.is_some_and(|departure| {
+                        trace_points.get(&departure) == trace_points.get(&step.boundary.traces[0])
+                    });
+                    if spur {
+                        if let Some(vertex) =
+                            departure.and_then(|departure| trace_vertices.get(&departure).copied())
+                        {
+                            trace_vertices
+                                .entry(step.boundary.traces[0])
+                                .or_insert(vertex);
+                        }
+                    } else {
+                        close_face_cycle(&trace_points, &mut polygon, &mut ends, &mut cycles)?;
+                    }
                 }
                 let separated =
                     matches!(step.boundary.behavior, Some(SpanBehavior::Separated { .. }));
@@ -3472,6 +3502,75 @@ mod tests {
             .filter_map(|vertex| vertex.trace)
             .collect::<BTreeSet<_>>();
         assert_eq!(actual_traces, expected_traces);
+    }
+
+    /// Two baffles each attached at one end, in one face: the floor and the
+    /// ceiling, then both from the ceiling. Each is a spur of the face's
+    /// boundary; the face's one cycle carries on through both feet, and both
+    /// baffles come back as cut walls with a trace on each side.
+    #[test]
+    fn topology_mesher_handles_two_one_ended_baffles_in_one_face() {
+        let baffle = |id: u64, from: [f64; 2], to: [f64; 2]| {
+            TopologyCurve::new(
+                CurveId(id),
+                CurveSpline::Open(
+                    OpenCubicSpline::polyline(vec![
+                        Point2::new(from[0], from[1]),
+                        Point2::new(to[0], to[1]),
+                    ])
+                    .unwrap(),
+                ),
+                spans(100 * id, 1, SpanBehavior::REFLECTING),
+            )
+            .unwrap()
+        };
+        for ends in [
+            [
+                (crate::OuterSide::Top, 0.5, [0.0, 1.0], [0.0, 0.25]),
+                (crate::OuterSide::Bottom, 0.5, [0.0, -1.0], [0.0, -0.25]),
+            ],
+            [
+                (crate::OuterSide::Top, 0.75, [-0.5, 1.0], [-0.5, 0.2]),
+                (crate::OuterSide::Top, 0.25, [0.5, 1.0], [0.5, 0.2]),
+            ],
+        ] {
+            let mut curves = vec![];
+            let mut vertices = vec![];
+            for (index, (side, fraction, from, to)) in ends.into_iter().enumerate() {
+                let id = index as u64 + 1;
+                let mut curve = baffle(id, from, to);
+                curve.nodes[0].vertex = Some(TopologyVertexId(id));
+                curves.push(curve);
+                vertices.push(TopologyVertex {
+                    id: TopologyVertexId(id),
+                    location: TopologyVertexLocation::Outer { side, fraction },
+                });
+            }
+            let topology = compile_topology(
+                &TopologyGeometry {
+                    curves,
+                    vertices,
+                    ..TopologyGeometry::default()
+                },
+                21,
+            )
+            .unwrap();
+            let plan = TopologyMeshPlan::new(&topology, &assign_each_face(&topology)).unwrap();
+            let expected_traces = plan
+                .vertices
+                .iter()
+                .map(|vertex| vertex.id)
+                .collect::<BTreeSet<_>>();
+            let mesh = mesh_topology_plan(&plan, 78, mesh_options()).unwrap();
+            assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9);
+            let actual_traces = mesh
+                .vertices
+                .iter()
+                .filter_map(|vertex| vertex.trace)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual_traces, expected_traces);
+            assert_eq!(orphan_vertices(&mesh), 0);
+        }
     }
 
     #[test]

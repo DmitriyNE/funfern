@@ -12611,3 +12611,34 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   as the walls left, the same absolute error as at 400.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Two baffles welded at one end in one face did not mesh
+
+- **Reported** while building a pinned φ⁴ wall: two baffles, one welded to
+  the ceiling and one to the floor, failed to mesh with "topology face cycle
+  is incomplete". Reproduced through the editor's own `attach_endpoint`, the
+  call the weld tool makes: one welded baffle meshes, two in one face do not,
+  on opposite walls or on the same one, wherever they sit.
+- **Cause.** `prepare_topology_builder` leaves every slit (an edge a face's
+  cycle crosses twice) out of the boundary polygon and cuts it back in after
+  triangulation. It closed the current stretch at every removed step. That is
+  right for a slit that bridges two cycles, a hole to the outer boundary say,
+  but a baffle welded at one end is a spur: the cycle walks out along it and
+  back to the same point. One spur worked only because the stretch starts
+  just after the first removal, so its closing point is the spur's foot. With
+  two, the stretch between them runs from one foot to the other and cannot
+  close.
+- **Fix.** A run of removed steps that comes back to the point it left is a
+  spur: the stretch carries on through its foot, and the traces either side
+  of the foot are seeded as one mesh vertex, as the one-spur case already
+  was at its closing point, until `split_slit_trace_vertices` separates them
+  once the slit is cut. A run that arrives elsewhere still closes the
+  stretch. The face-cycle walk exists only here, so the repair path needed
+  nothing.
+- **Test:** `topology_mesher_handles_two_one_ended_baffles_in_one_face` (floor
+  and ceiling, then two from the ceiling: full area, every planned trace in
+  the mesh, no orphan vertices). It fails on the old code with the reported
+  error. The editor's weld of the same two baffles now meshes, and at a neck
+  of them a φ⁴ wall is pinned with each baffle separating the two wells.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.
