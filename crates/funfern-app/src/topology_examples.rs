@@ -290,13 +290,15 @@ impl Builder {
         (curve, span)
     }
 
-    /// A reflecting baffle through `points`, from −x to +x, welded to the
-    /// floor or the ceiling at both ends; the pocket between it and the wall
-    /// is left out of the domain. The ends are moved onto the wall vertices
-    /// exactly, as the topology resolves them.
-    fn wall_bump(&mut self, points: &[Point2]) {
+    /// A reflecting baffle, the clamped cubic with `controls` and one knot
+    /// span per interval joined at `multiplicities`, running from −x to +x
+    /// and welded to the floor or the ceiling at both ends; the pocket
+    /// between it and the wall is left out of the domain. Its end controls
+    /// are moved onto the wall vertices exactly, as the topology resolves
+    /// them.
+    fn wall_bump(&mut self, controls: Vec<Point2>, multiplicities: Vec<u8>) {
         let domain = self.scene.geometry.domain;
-        let ceiling = points[points.len() / 2].y > 0.0;
+        let ceiling = controls[controls.len() / 2].y > 0.0;
         let side = if ceiling {
             OuterSide::Top
         } else {
@@ -316,14 +318,16 @@ impl Builder {
                 Point2::new(domain.min_x + domain.width() * fraction(x), domain.min_y)
             }
         };
-        let mut points = points.to_vec();
+        let mut points = controls;
         let last = points.len() - 1;
         let (left, right) = (points[0].x, points[last].x);
         let start = self.outer_vertex(side, fraction(left));
         let end = self.outer_vertex(side, fraction(right));
         points[0] = resolved(left);
         points[last] = resolved(right);
-        let spline = OpenCubicSpline::polyline(points).unwrap();
+        let intervals = vec![1.0; multiplicities.len() + 1];
+        let spline =
+            OpenCubicSpline::new_with_multiplicities(points, intervals, multiplicities).unwrap();
         let parameter = spline.span_bounds(0).map(|[a, b]| (a + b) * 0.5).unwrap();
         let first_span = CurveSpanId(self.next_span);
         let curve = self.baffle(spline);
@@ -1160,22 +1164,25 @@ fn phi4_document(builder: Builder) -> TopologyDocument {
 const PINNING_SEED: &str = "sin(1.5 * (x - 0.3))";
 /// Half the waist's width: a quarter of the channel's height.
 const WAIST: f64 = 0.25;
-/// The bumps are arcs of this radius.
-const BUMP_RADIUS: f64 = 0.6;
+/// Each bump is half an ellipse this wide either side of x = 0 along the
+/// wall, and deep enough to leave the waist.
+const BUMP_HALF_WIDTH: f64 = 0.35;
 
 fn pinned_domain_wall() -> TopologyDocument {
     pinned_domain_wall_with(PINNING_SEED, true)
 }
 
-/// A φ⁴ wall pinned at a waist. Two round bumps, baffles welded to the floor
-/// and the ceiling with the pockets behind them left out, narrow the channel
-/// to a quarter of its height at x = 0. A wall's energy is its tension times
-/// its length, and anywhere over the bumps a wall is shorter the nearer it
-/// is to the waist, so it is pushed there; moving the bumps drags it along.
-/// Without them a straight wall costs the same anywhere and stays roughly
-/// where it formed.
+/// A φ⁴ wall pinned at a waist. Two half-elliptic bumps, baffles welded to
+/// the floor and the ceiling with the pockets behind them left out, narrow
+/// the channel to a quarter of its height at x = 0. A wall's energy is its
+/// tension times its length, and anywhere over the bumps a wall is shorter
+/// the nearer it is to the waist, so it is pushed there; moving the bumps
+/// drags it along. Without them a straight wall costs the same anywhere and
+/// stays roughly where it formed.
 fn pinned_domain_wall_with(seed: &str, bumps: bool) -> TopologyDocument {
-    let mut builder = phi4_builder(PHI4_LAMBDA, seed, 1.0);
+    // A tenth of the symmetry-breaking seed: it still decides the fall, and
+    // its 3 Hz shimmer in the field is ten times fainter.
+    let mut builder = phi4_builder(PHI4_LAMBDA, seed, 0.1);
     builder.scene.outer_boundaries = channel();
     // The background's own anchor, on the floor at x = 0, would sit in the
     // floor's pocket.
@@ -1184,20 +1191,25 @@ fn pinned_domain_wall_with(seed: &str, bumps: bool) -> TopologyDocument {
         fraction: 0.5,
     };
     if bumps {
+        // Two cubic Bézier quarters of the ellipse, joined where they meet
+        // below the wall: seven controls, smooth at the waist and square to
+        // the wall at the feet.
+        let (a, b) = (BUMP_HALF_WIDTH, 1.0 - WAIST);
+        let k = 4.0 / 3.0 * (std::f64::consts::SQRT_2 - 1.0);
         for sign in [1.0, -1.0] {
-            let centre = sign * (WAIST + BUMP_RADIUS);
-            let reach = (BUMP_RADIUS * BUMP_RADIUS - (1.0 - WAIST - BUMP_RADIUS).powi(2)).sqrt();
-            let half_angle = (reach / BUMP_RADIUS).asin();
-            let points = (0..=12)
-                .map(|index| {
-                    let angle = -half_angle + 2.0 * half_angle * index as f64 / 12.0;
-                    Point2::new(
-                        BUMP_RADIUS * angle.sin(),
-                        centre - sign * BUMP_RADIUS * angle.cos(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            builder.wall_bump(&points);
+            let at = |x: f64, depth: f64| Point2::new(x, sign * (1.0 - depth));
+            builder.wall_bump(
+                vec![
+                    at(-a, 0.0),
+                    at(-a, k * b),
+                    at(-k * a, b),
+                    at(0.0, b),
+                    at(k * a, b),
+                    at(a, k * b),
+                    at(a, 0.0),
+                ],
+                vec![3],
+            );
         }
     }
     phi4_document(builder)

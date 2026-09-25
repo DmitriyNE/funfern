@@ -222,7 +222,9 @@ the neck when the baffles moved, because a straight wall away from the neck
 feels only the exponential tail of its own profile. The neck is now two round
 bumps, arcs of radius 0.6 welded to the floor and the ceiling with the
 pockets behind them left out, so a wall anywhere over them is pushed to the
-waist and follows it when the bumps are dragged.
+waist and follows it when the bumps are dragged. Narrowed again at the user's request:
+each bump is now half an ellipse, ±0.35 along the wall and 0.75 deep, drawn as
+two Bézier quarters with seven controls, and the seed is a tenth as strong.
 
 ### 9. Pacemaker
 

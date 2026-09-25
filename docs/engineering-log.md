@@ -12826,3 +12826,31 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   remesh, identity, from-linear, to-linear and reject read as before.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Narrower bumps for the pinned domain wall
+
+- **Asked:** the bumps' footprint too wide. Each is now half an ellipse,
+  ±0.35 along the wall (was ±0.58) and 0.75 deep, leaving the same waist of
+  0.5. A circular arc cannot do it: one through the feet and the waist's
+  tip would bulge out beyond its own footprint. The ellipse meets the wall
+  square on and is drawn as two cubic Bézier quarters joined at the waist,
+  seven controls per bump instead of the polyline's 37, which also leaves
+  far fewer controls on the curve to catch a press (`Builder::wall_bump`
+  now takes a spline's controls and breakpoint multiplicities).
+- **Drag.** With the old handoff the wall followed four steps and was thrown
+  off at the sixth; with `r` extended into the opened ground (entry above)
+  it follows the whole drag. `a_domain_wall_settles_at_the_waist_and_follows_it_when_dragged`
+  and `the_bumps_reach_a_wall_a_free_channel_leaves_alone` pass unchanged,
+  a wall formed 0.5 off still being caught.
+- **Seed.** The user noted the always-on seed should keep nudging the wall.
+  Measured over 8–12 s the settled wall stays at −0.006 ± 0.006 at amplitude
+  1 and −0.007 ± 0.010 at 0.1, under an element either way, and the ripple
+  in `r` beside it is 0.006 at both: the source does not measurably move it.
+  Its 3 Hz shimmer in the field view is linear in the amplitude, so the seed
+  is now 0.1, which still decides the fall.
+- **Cost.** The sharper bumps refine the mesh near them: 6901 dofs, `dt`
+  3.7e-3 (was 5503 and 6.3e-3).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 2.7e-7, b 7.4e-7; at
+  1000 steps Q 1.6e-6, b 1.5e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.
