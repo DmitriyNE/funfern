@@ -12420,3 +12420,39 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
 - The presentation round-trip test sets the flag.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check.
+
+## 2026-09-25 — Plasma mirror, and the outgoing wall on a dispersive medium (gallery 6)
+
+- **Scene.** A TM channel, top and bottom reflecting, ends outgoing, whose
+  background is Klein-Gordon with cutoff `ω₀ = W·smoothstep(0, 1, (x + 0.2)/0.8)`,
+  `W = 2π·4`. A plane wave at 3 Hz from a launcher at x = −0.82 climbs it,
+  turns where `ω₀` meets its frequency near x = 0.34, and stands in front of
+  that point. The builder gained outer-attached dividers, a region strip
+  between two of them, and the launcher: a strip of the background material
+  carrying a uniform volume source, so it is transparent to the returning
+  wave. A region owns one face, so the face behind the strip gets its own
+  region of the same material.
+- **The wall, measured.** The 24 September entry derived that both outgoing
+  walls reflect `R = (ω − ck)/(ω + ck)` of a Klein-Gordon wave, because they
+  are tuned for `k = ω/c`, and left it for this scene. A flat plasma (cutoff
+  2.5 Hz, drive 3 Hz) with the right wall outgoing, fitted as
+  `A e^{−ikx} + B e^{ikx}` on the axis over k:
+
+  | Edge | k (10.42) | R (0.288) |
+  | --- | --- | --- |
+  | 0.08 | 10.40 | 0.293 |
+  | 0.06 | 10.44 | 0.288 |
+  | 0.045 | 10.44 | 0.289 |
+
+  The derivation holds. At 1.2ω₀ it gives 0.29 in amplitude, 8% in energy,
+  and all of it at cutoff, which is what a plasma scene with an outgoing wall
+  shows.
+- **Ramp, measured** at edge 0.08: standing-wave nodes under 0.15 of the peak
+  in front of the ramp, under 2% of the peak at x = 0.8; without the plasma
+  the channel carries one travelling wave, above 0.8 at both. The node
+  spacing grows too little before the turning point to measure at a usable
+  sampling, so it is not claimed.
+- Test: `a_plasma_ramp_turns_the_wave_back_and_the_wall_reflects_as_derived`.
+- **Device:** `canonical_gpu_long_run` at 400 steps, Q 2.1e-6, b 7.4e-7.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

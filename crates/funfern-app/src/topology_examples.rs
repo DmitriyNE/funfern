@@ -87,6 +87,12 @@ pub fn catalog() -> &'static [TopologyExample] {
                  against the wave, it barely does.",
                 travelling_slab(),
             ),
+            example(
+                "Plasma mirror",
+                "A plane wave climbs a plasma whose cutoff rises along the channel, stands in \
+                 front of the point where the cutoff meets its frequency, and never passes it.",
+                plasma_mirror(),
+            ),
         ]
     })
 }
@@ -114,6 +120,7 @@ struct Builder {
     next_curve: u64,
     next_span: u64,
     next_region: u64,
+    next_vertex: u64,
 }
 
 impl Builder {
@@ -123,6 +130,7 @@ impl Builder {
             next_curve: 1,
             next_span: 1,
             next_region: 2,
+            next_vertex: 1,
         }
     }
 
@@ -211,6 +219,102 @@ impl Builder {
             .curves
             .push(TopologyCurve::new(curve, CurveSpline::Open(spline), spans).unwrap());
         curve
+    }
+
+    fn outer_vertex(&mut self, side: OuterSide, fraction: f64) -> TopologyVertexId {
+        let id = TopologyVertexId(self.next_vertex);
+        self.next_vertex += 1;
+        self.scene.geometry.vertices.push(TopologyVertex {
+            id,
+            location: TopologyVertexLocation::Outer { side, fraction },
+        });
+        id
+    }
+
+    /// A transmitting line across the domain at `x`, from the floor to the
+    /// ceiling and attached to both.
+    fn divider(&mut self, x: f64) -> (CurveId, CurveSpanId) {
+        let domain = self.scene.geometry.domain;
+        let bottom = self.outer_vertex(OuterSide::Bottom, (x - domain.min_x) / domain.width());
+        let top = self.outer_vertex(OuterSide::Top, (domain.max_x - x) / domain.width());
+        let span = CurveSpanId(self.next_span);
+        let curve = self.open_curve(
+            OpenCubicSpline::polyline(vec![
+                Point2::new(x, domain.min_y),
+                Point2::new(x, domain.max_y),
+            ])
+            .unwrap(),
+            &[SpanBehavior::Transmitting],
+        );
+        let authored = self
+            .scene
+            .geometry
+            .curves
+            .iter_mut()
+            .find(|candidate| candidate.id == curve)
+            .unwrap();
+        authored.nodes[0].vertex = Some(bottom);
+        authored.nodes[1].vertex = Some(top);
+        (curve, span)
+    }
+
+    /// The band between two dividers, from wall to wall, as a region of
+    /// `material`.
+    fn strip(&mut self, x0: f64, x1: f64, material: MaterialId) -> RegionId {
+        let (curve, span) = self.divider(x0);
+        self.divider(x1);
+        // The background's own anchor sits on the floor at x = 0, so it
+        // names the face right of the strip; the face left of it is a
+        // region of its own, of the same material.
+        assert!(x1 < 0.0, "a strip left of the centre");
+        let behind = RegionId(self.next_region);
+        self.next_region += 1;
+        let background = self.scene.regions[0].material;
+        self.scene.regions.push(Region {
+            id: behind,
+            material: background,
+            frame: MaterialFrame::world(),
+        });
+        self.scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Outer {
+                side: OuterSide::Left,
+                fraction: 0.5,
+            },
+            region: Some(behind),
+        });
+        let region = RegionId(self.next_region);
+        self.next_region += 1;
+        self.scene.regions.push(Region {
+            id: region,
+            material,
+            frame: MaterialFrame::world(),
+        });
+        // Running upwards, the divider's right is towards +x.
+        self.scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Curve {
+                curve,
+                span,
+                side: CurveTraceSide::Right,
+                parameter: 0.5,
+            },
+            region: Some(region),
+        });
+        region
+    }
+
+    /// A plane-wave launcher: a thin strip at `x` across the whole height,
+    /// radiating both ways, of the background material so it is transparent.
+    fn launcher(&mut self, x: f64, frequency: f64, amplitude: f64) -> RegionId {
+        let background = self.scene.regions[0].material;
+        let region = self.strip(x - 0.03, x + 0.03, background);
+        self.scene.volume_sources.push(VolumeSource {
+            region,
+            enabled: true,
+            profile: ScalarField::constant(1.0),
+            parameters: vec![],
+            signal: TimeSignal::harmonic(0.0, amplitude, frequency, 0.0),
+        });
+        region
     }
 
     fn document(self) -> TopologyDocument {
@@ -804,13 +908,57 @@ fn travelling_slab() -> TopologyDocument {
     modulated_slab("Travelling modulation", &TRAVELLING, 0.6, false)
 }
 
+/// Top and bottom reflect, so a wave uniform in y stays uniform; the ends
+/// are outgoing.
+fn channel() -> OuterBoundaryConditions {
+    let mut boundaries = OuterBoundaryConditions::default();
+    boundaries.sides[OuterSide::Bottom.index()] = OuterBoundaryCondition::Reflecting;
+    boundaries.sides[OuterSide::Top.index()] = OuterBoundaryCondition::Reflecting;
+    boundaries
+}
+
+const PLASMA_HZ: f64 = 3.0;
+
+fn plasma_mirror() -> TopologyDocument {
+    plasma_mirror_with(
+        "W * smoothstep(0, 1, (x - x0) / L)",
+        std::f64::consts::TAU * 4.0,
+    )
+}
+
+/// A TM channel of Klein-Gordon plasma whose cutoff is `omega0`, a formula in
+/// `x` over `W`, `x0 = −0.2` and `L = 0.8`, lit by a plane wave at 3 Hz.
+fn plasma_mirror_with(omega0: &str, top: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    let background = &mut builder.scene.materials[0];
+    background.name = "Plasma".into();
+    background.restoring = RestoringLaw::KleinGordon {
+        omega0: ScalarField::formula(omega0).unwrap(),
+    };
+    background.parameters = [("W", top), ("x0", -0.2), ("L", 0.8)]
+        .into_iter()
+        .map(|(name, value)| MaterialParameter {
+            name: name.into(),
+            value,
+        })
+        .collect();
+    builder.launcher(-0.82, PLASMA_HZ, 40.0);
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 12);
+        assert_eq!(catalog().len(), 13);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -1411,5 +1559,108 @@ mod tests {
                 "the spot's flank holds {flank:.3} of {peak:.3}"
             );
         }
+    }
+
+    /// The reflection `|B/A|` of `U = A e^{−ikx} + B e^{ikx}` fitted by least
+    /// squares on the axis from `x0` to `x1`, at the `k` that fits best.
+    fn reflection(scene: &Harmonic, x0: f64, x1: f64) -> (f64, f64) {
+        let samples = (0..=80)
+            .map(|index| {
+                let x = x0 + (x1 - x0) * index as f64 / 80.0;
+                (x, scene.complex(Point2::new(x, 0.0)))
+            })
+            .collect::<Vec<_>>();
+        let fit = |k: f64| {
+            // Normal equations for two complex unknowns, written out.
+            type C = (f64, f64);
+            let mul = |a: C, b: C| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
+            let conj = |a: C| (a.0, -a.1);
+            let add = |a: C, b: C| (a.0 + b.0, a.1 + b.1);
+            let (mut g12, mut r1, mut r2) = ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0));
+            let n = samples.len() as f64;
+            for (x, u) in &samples {
+                let forward = ((k * x).cos(), -(k * x).sin());
+                let backward = conj(forward);
+                g12 = add(g12, mul(conj(forward), backward));
+                r1 = add(r1, mul(conj(forward), *u));
+                r2 = add(r2, mul(conj(backward), *u));
+            }
+            // [n g12; conj(g12) n] [a; b] = [r1; r2]
+            let det = n * n - (g12.0 * g12.0 + g12.1 * g12.1);
+            let a = mul(
+                (1.0 / det, 0.0),
+                add(mul((n, 0.0), r1), mul((-g12.0, -g12.1), r2)),
+            );
+            let b = mul(
+                (1.0 / det, 0.0),
+                add(mul((n, 0.0), r2), mul((-g12.0, g12.1), r1)),
+            );
+            let residual: f64 = samples
+                .iter()
+                .map(|(x, u)| {
+                    let forward = ((k * x).cos(), -(k * x).sin());
+                    let model = add(mul(a, forward), mul(b, conj(forward)));
+                    (u.0 - model.0).powi(2) + (u.1 - model.1).powi(2)
+                })
+                .sum();
+            (residual, b.0.hypot(b.1) / a.0.hypot(a.1))
+        };
+        (0..=400)
+            .map(|index| 5.0 + 15.0 * index as f64 / 400.0)
+            .map(|k| (k, fit(k)))
+            .min_by(|a, b| a.1.0.total_cmp(&b.1.0))
+            .map(|(k, (_, r))| (k, r))
+            .unwrap()
+    }
+
+    /// The plasma-mirror gallery claim. Where the cutoff reaches the drive
+    /// the wave turns back whole: in front of the turning point the field
+    /// stands with nodes near zero, and beyond it nothing arrives, where the
+    /// same channel without the plasma carries one travelling wave end to end.
+    /// A flat plasma below the drive measures the outgoing wall, which is
+    /// tuned for `k = ω/c` and so reflects `(ω − ck)/(ω + ck)` of a wave with
+    /// `ck = √(ω² − ω₀²)`: 0.288 for 3 Hz over a 2.5 Hz cutoff.
+    #[test]
+    fn a_plasma_ramp_turns_the_wave_back_and_the_wall_reflects_as_derived() {
+        let ramp = Harmonic::run(&plasma_mirror(), 0.08, 10.0, PLASMA_HZ, 3.0);
+        let vacuum = Harmonic::run(
+            &plasma_mirror_with("W * smoothstep(0, 1, (x - x0) / L)", 0.0),
+            0.08,
+            10.0,
+            PLASMA_HZ,
+            3.0,
+        );
+        let front = |scene: &Harmonic| {
+            let line = scene.along(Point2::new(-0.75, 0.0), Point2::new(-0.3, 0.0), 46);
+            let peak = line.iter().cloned().fold(0.0, f64::max);
+            let node = line.iter().cloned().fold(f64::MAX, f64::min);
+            (peak, node / peak, scene.at(Point2::new(0.8, 0.0)) / peak)
+        };
+        let (_, node, beyond) = front(&ramp);
+        assert!(
+            node < 0.15,
+            "the plasma's standing wave keeps {node:.3} at a node"
+        );
+        assert!(
+            beyond < 0.02,
+            "{beyond:.3} of the wave got past the turning point"
+        );
+        let (_, node, beyond) = front(&vacuum);
+        assert!(node > 0.8 && beyond > 0.8, "vacuum: {node:.3}, {beyond:.3}");
+
+        let omega = std::f64::consts::TAU * PLASMA_HZ;
+        let cutoff = std::f64::consts::TAU * 2.5;
+        let flat = Harmonic::run(&plasma_mirror_with("W", cutoff), 0.08, 10.0, PLASMA_HZ, 3.0);
+        let (k, measured) = reflection(&flat, -0.7, 0.9);
+        let expected_k = (omega * omega - cutoff * cutoff).sqrt();
+        let expected = (omega - expected_k) / (omega + expected_k);
+        assert!(
+            (k / expected_k - 1.0).abs() < 0.02,
+            "k {k:.3} against {expected_k:.3}"
+        );
+        assert!(
+            (measured - expected).abs() < 0.03,
+            "the wall reflects {measured:.3} against {expected:.3}"
+        );
     }
 }
