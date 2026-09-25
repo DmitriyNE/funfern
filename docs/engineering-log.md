@@ -13146,3 +13146,36 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   authorable gradient-rate loss channel.
 - The GRIN collimator moves to an EM skin after the planned scenes, filed in
   the gallery plan's "Order" with the TM recipe ε = μ = n.
+
+## 2026-09-25 — Gallery: the bent fiber
+
+- **Scene** "Bent fiber" (gallery item 12), the catalogue's 20th: a TM
+  step-index core of glass, `ε = 2.25` and `μ = 1` at the user's
+  preference for a plain dielectric over the matched `ε = μ = n`. Width
+  0.1, single-mode at 4 Hz (`V = 1.40`). In along y = −0.5, a quarter turn
+  of radius 0.5 about (−0.4, 0), out to the top wall. Its two edges are
+  wall-attached open curves: straight Bézier pieces and the quarter circle
+  in two eighths, joined at C0 knots, built by `bend_edge`. The glass and
+  the TM physics come from `glass_builder`, which the test's straight
+  control shares.
+- **Mode first.** On a straight fiber the mode runs at `n_eff` 1.329 (edge
+  0.08) and 1.3238 (edge 0.04) against a slab solve's 1.3234, its profile
+  within 4% of the slab's.
+- **Explored.** The share of the straight fiber's guided power delivered to
+  the top, from projections onto the slab mode, converges by edge 0.05:
+  at edge 0.04 radii 0.3 to 0.7 lose 45%, 33%, 23%, 15% and 12%. −ln of the
+  share over `R·e^{−2γ³R/3β²}` stays between 11.3 and 12.9 from radius 0.3
+  to 0.6 (14.5 at 0.7), so the loss follows Marcuse's exponent. His
+  asymptotic prefactor is about three times the measured one at bends this
+  sharp. The point source radiates into the cladding too; the projection
+  leaves those rings out.
+- **Measured** at edge 0.08: radius 0.5 delivers 72.5%; radius 0.3 loses
+  43.1% and radius 0.7 loses 14.3%, 3.0×. Test:
+  `a_bent_fiber_leaks_more_the_sharper_its_bend` (over 60%, over 2×). The
+  suite's `Harmonic` gains `interpolated`, the field at a point through
+  the element's own basis.
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 1.1e-6, b 1.2e-6; at
+  1000 steps Q 2.7e-6, b 3.2e-6; at 3000 steps (printed, not judged)
+  1.7e-5 and 1.3e-5.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build and the wasm32 check.

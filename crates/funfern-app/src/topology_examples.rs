@@ -136,6 +136,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  Stop the pump's wave (wavenumber 0) and the fiber oscillates on its own.",
                 fiber_amplifier(),
             ),
+            example(
+                "Bent fiber",
+                "A glass fiber, single-mode at 4 Hz, carries its mode round a quarter turn of \
+                 radius 0.5 and delivers about three quarters of it to the top. Round the bend \
+                 the mode's outer flank would have to outrun the light outside, so it sheds a \
+                 beam off tangentially; drag the bend tighter and it sheds more.",
+                bent_fiber(),
+            ),
         ]
     })
 }
@@ -1566,13 +1574,158 @@ fn fiber_amplifier_with(depth: f64, wavenumber: f64, phase: f64) -> TopologyDocu
     document
 }
 
+const BEND_CENTRE: Point2 = Point2 { x: -0.4, y: 0.0 };
+const BEND_RADIUS: f64 = 0.5;
+const CORE_WIDTH: f64 = 0.1;
+const CORE_PERMITTIVITY: f64 = 2.25;
+const BEND_HZ: f64 = 4.0;
+
+/// One edge of a bent fiber, `radius` from the bend's centre: along
+/// `y = −radius` from the left wall, a quarter circle about the centre, and
+/// straight up to the top wall. Cubic Bézier pieces joined at C0 knots, the
+/// quarter in two eighths whose departure from the circle is under 5e-6 of
+/// its radius. Its ends are on the walls exactly, as the topology resolves
+/// its vertices.
+fn bend_edge(builder: &mut Builder, radius: f64) -> (CurveId, CurveSpanId, f64) {
+    let domain = builder.scene.geometry.domain;
+    let left = (domain.max_y + radius) / domain.height();
+    let top = (domain.max_x - BEND_CENTRE.x - radius) / domain.width();
+    let start = builder.outer_vertex(OuterSide::Left, left);
+    let end = builder.outer_vertex(OuterSide::Top, top);
+    let entry = Point2::new(domain.min_x, domain.max_y - domain.height() * left);
+    let exit = Point2::new(domain.max_x - domain.width() * top, domain.max_y);
+    let at = |angle: f64| BEND_CENTRE + Point2::new(angle.cos(), angle.sin()) * radius;
+    let tangent = |angle: f64| Point2::new(-angle.sin(), angle.cos()) * radius;
+    // The control reach of a cubic Bézier eighth of a circle.
+    let reach = 4.0 / 3.0 * (std::f64::consts::PI / 16.0).tan();
+    let quarter = std::f64::consts::FRAC_PI_2;
+    let (arc_start, arc_end) = (at(-quarter), at(0.0));
+    let mut controls = vec![
+        entry,
+        entry.lerp(arc_start, 1.0 / 3.0),
+        entry.lerp(arc_start, 2.0 / 3.0),
+    ];
+    for (from, to) in [(-quarter, -quarter / 2.0), (-quarter / 2.0, 0.0)] {
+        controls.extend([
+            at(from),
+            at(from) + tangent(from) * reach,
+            at(to) - tangent(to) * reach,
+        ]);
+    }
+    controls.extend([
+        arc_end,
+        arc_end.lerp(exit, 1.0 / 3.0),
+        arc_end.lerp(exit, 2.0 / 3.0),
+        exit,
+    ]);
+    let intervals = vec![
+        (arc_start - entry).norm(),
+        radius * quarter / 2.0,
+        radius * quarter / 2.0,
+        (exit - arc_end).norm(),
+    ];
+    let spline = OpenCubicSpline::new_with_multiplicities(controls, intervals, vec![3; 3]).unwrap();
+    let parameter = spline.span_bounds(0).map(|[a, b]| (a + b) * 0.5).unwrap();
+    let span = CurveSpanId(builder.next_span);
+    let curve = builder.open_curve(spline, &[SpanBehavior::Transmitting; 4]);
+    let authored = builder
+        .scene
+        .geometry
+        .curves
+        .iter_mut()
+        .find(|candidate| candidate.id == curve)
+        .unwrap();
+    let last = authored.nodes.len() - 1;
+    authored.nodes[0].vertex = Some(start);
+    authored.nodes[last].vertex = Some(end);
+    (curve, span, parameter)
+}
+
+/// A TM scene whose second material is glass, `ε = 2.25` and `μ = 1`.
+fn glass_builder() -> Builder {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Glass".into(),
+        mass_density: ScalarField::constant(CORE_PERMITTIVITY),
+        color: [66, 105, 151],
+        ..Material::default_medium()
+    });
+    builder
+}
+
+fn bent_fiber() -> TopologyDocument {
+    bent_fiber_with(BEND_RADIUS)
+}
+
+/// A TM step-index fiber of glass, `ε = 2.25` and `μ = 1`, 0.1 wide, which is
+/// single-mode at 4 Hz: in from the left wall along `y = −radius`, a quarter
+/// turn of `radius` about (−0.4, 0), and out to the top wall. A source in the
+/// core at its left end launches the mode; round the bend the mode's outer
+/// flank would have to outrun the light in the cladding, and there it leaks
+/// off tangentially.
+fn bent_fiber_with(radius: f64) -> TopologyDocument {
+    let mut builder = glass_builder();
+    bend_edge(&mut builder, radius - 0.5 * CORE_WIDTH);
+    let (outer, span, parameter) = bend_edge(&mut builder, radius + 0.5 * CORE_WIDTH);
+    // The background's own anchor, on the floor, names the face outside the
+    // bend; the face inside it is a region of its own of the same material.
+    let inside = RegionId(builder.next_region);
+    builder.next_region += 1;
+    builder.scene.regions.push(Region {
+        id: inside,
+        material: DEFAULT_MATERIAL,
+        frame: MaterialFrame::world(),
+    });
+    builder.scene.face_assignments.push(AuthoredFaceAssignment {
+        anchor: FaceAnchor::Outer {
+            side: OuterSide::Top,
+            fraction: 0.9,
+        },
+        region: Some(inside),
+    });
+    let core = RegionId(builder.next_region);
+    builder.next_region += 1;
+    builder.scene.regions.push(Region {
+        id: core,
+        material: MaterialId(2),
+        frame: MaterialFrame::world(),
+    });
+    // Running towards +x, the outer edge's left is the core above it.
+    builder.scene.face_assignments.push(AuthoredFaceAssignment {
+        anchor: FaceAnchor::Curve {
+            curve: outer,
+            span,
+            side: CurveTraceSide::Left,
+            parameter,
+        },
+        region: Some(core),
+    });
+    let mut document = builder.document();
+    document.model.source = PointSource {
+        region: core,
+        ..source(Point2::new(-0.9, -radius), BEND_HZ, 10.0, 0.03)
+    };
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Output".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(BEND_CENTRE.x + radius, 0.8)),
+    });
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 19);
+        assert_eq!(catalog().len(), 20);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -1816,6 +1969,37 @@ mod tests {
                 .unwrap()
                 .0;
             self.amplitude[node]
+        }
+
+        /// `U` at `point`, through the element's own basis.
+        fn interpolated(&self, point: Point2) -> (f64, f64) {
+            let mesh = &self.prepared.mesh;
+            let (element, barycentric) = mesh
+                .triangles
+                .iter()
+                .enumerate()
+                .find_map(|(index, triangle)| {
+                    let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+                    let twice = (b - a).cross(c - a);
+                    let weights = [
+                        (b - point).cross(c - point) / twice,
+                        (c - point).cross(a - point) / twice,
+                        (a - point).cross(b - point) / twice,
+                    ];
+                    weights
+                        .iter()
+                        .all(|weight| *weight >= -1e-10)
+                        .then_some((index, weights))
+                })
+                .expect("the point is in the domain");
+            let nodes = self.prepared.operator.element_nodes()[element];
+            enriched_quadratic_basis(barycentric)
+                .iter()
+                .zip(nodes)
+                .fold((0.0, 0.0), |sum, (weight, node)| {
+                    let (re, im) = self.amplitude[node as usize];
+                    (sum.0 + weight * re, sum.1 + weight * im)
+                })
         }
 
         /// `|U|` at the node nearest `point`.
@@ -3091,6 +3275,78 @@ mod tests {
             "a standing pump's far end went from {:.4} to {:.4}",
             standing[0],
             standing[1]
+        );
+    }
+
+    /// The fundamental mode of the glass core as a slab, `cos(uy/a)` inside
+    /// and `cos(u)·e^{−w(|y|−a)/a}` outside, at `offset` from its axis, with
+    /// `u tan u = w` and `u² + w² = V²`.
+    fn core_mode(offset: f64) -> f64 {
+        let half = 0.5 * CORE_WIDTH;
+        let v = std::f64::consts::TAU * BEND_HZ * half * (CORE_PERMITTIVITY - 1.0).sqrt();
+        let (mut low, mut high) = (0.0, std::f64::consts::FRAC_PI_2);
+        for _ in 0..60 {
+            let u = 0.5 * (low + high);
+            if u * u.tan() > (v * v - u * u).sqrt() {
+                high = u;
+            } else {
+                low = u;
+            }
+        }
+        let u = 0.5 * (low + high);
+        let w = (v * v - u * u).sqrt();
+        if offset.abs() <= half {
+            (u * offset / half).cos()
+        } else {
+            u.cos() * (-w * (offset.abs() - half) / half).exp()
+        }
+    }
+
+    /// The power the core's mode carries through a cut `across` it at
+    /// `centre`, up to a constant: `|∫ U φ ds / ∫ φ² ds|²` over 0.25 either
+    /// side. The cladding's radiation is orthogonal to the mode and drops out.
+    fn guided_power(scene: &Harmonic, centre: Point2, across: Point2) -> f64 {
+        let (mut re, mut im, mut norm) = (0.0, 0.0, 0.0);
+        for index in 0..100 {
+            let offset = 0.5 * ((index as f64 + 0.5) / 100.0 - 0.5);
+            let mode = core_mode(offset);
+            let (a, b) = scene.interpolated(centre + across * offset);
+            re += a * mode;
+            im += b * mode;
+            norm += mode * mode;
+        }
+        (re * re + im * im) / (norm * norm)
+    }
+
+    /// The bent-fiber claims, at edge 0.08, from the power in the core's mode
+    /// 0.2 short of the top wall, against a straight fiber from the same
+    /// source 0.2 short of the right wall, whose power is all the source
+    /// launches into the mode. (On that straight fiber the mode runs at
+    /// `n_eff` 1.329 against a slab solve's 1.323, and 1.3238 at edge 0.04.)
+    /// The gallery's radius 0.5 delivers more than 60% of it (72%); radius
+    /// 0.3 loses more than twice what radius 0.7 loses (43% against 14%).
+    #[test]
+    fn a_bent_fiber_leaks_more_the_sharper_its_bend() {
+        let mut builder = glass_builder();
+        let core = builder.band(-0.55, -0.45, MaterialId(2));
+        let mut straight = builder.document();
+        straight.model.source = PointSource {
+            region: core,
+            ..source(Point2::new(-0.9, -0.5), BEND_HZ, 10.0, 0.03)
+        };
+        let straight = Harmonic::run(&straight, 0.08, 8.0, BEND_HZ, 4.0);
+        let launched = guided_power(&straight, Point2::new(0.8, -0.5), Point2::new(0.0, 1.0));
+        let delivered = |radius: f64| {
+            let bent = Harmonic::run(&bent_fiber_with(radius), 0.08, 8.0, BEND_HZ, 4.0);
+            let exit = Point2::new(BEND_CENTRE.x + radius, 0.8);
+            guided_power(&bent, exit, Point2::new(1.0, 0.0)) / launched
+        };
+        let gallery = delivered(BEND_RADIUS);
+        assert!(gallery > 0.6, "radius 0.5 delivers {gallery:.3}");
+        let (sharp, gentle) = (1.0 - delivered(0.3), 1.0 - delivered(0.7));
+        assert!(
+            sharp > 2.0 * gentle,
+            "radius 0.3 loses {sharp:.3}, radius 0.7 {gentle:.3}"
         );
     }
 }

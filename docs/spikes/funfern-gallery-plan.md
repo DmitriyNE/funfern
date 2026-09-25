@@ -340,20 +340,40 @@ Claims at edge 0.08, at the far end at 2.5 Hz over 2 s windows:
 
 ### 12. Bent fiber
 
-TM. A classic step-index core, `ε = 2.25`, width 0.10, which is single-mode
-at 4 Hz (`V = 1.4`). Lead-in along y = −0.5 from the left wall to x = −0.4, a
-90° arc of radius 0.5 centred at (−0.4, 0), lead-out from (0.1, 0) straight
-up to the top wall. The core is the face between two open curves, inner and
-outer edge, each attached to the walls at both ends with transmitting spans;
-or a closed polygon stopping 0.02 short of the walls if the attached form is
-awkward. The source sits in the core at the left end, 4 Hz. The leak radiates
-tangentially from the arc toward the lower right and leaves through the
-outgoing walls.
+TM. A classic step-index core of glass, `ε = 2.25` and `μ = 1`, width 0.10,
+which is single-mode at 4 Hz (`V = 1.40`). Lead-in along y = −0.5 from the
+left wall to x = −0.4, a 90° arc of radius 0.5 centred at (−0.4, 0), lead-out
+from (0.1, 0) straight up to the top wall. The core is the face between two
+open curves, its inner and outer edges, each attached to the left and top
+walls with transmitting spans: a straight Bézier piece, the quarter circle
+in two eighths (under 5e-6 of the radius off the circle), and a straight
+piece, joined at C0 knots. The face inside the bend is a background region
+of its own. A point source of 10, width 0.03, sits in the core at
+x = −0.9; a probe reads the lead-out 0.2 short of the top wall. Walls
+outgoing.
 
-Claims, with the power measured across the core near the top wall:
+Explored. The straight fiber carries the slab's mode: `n_eff` 1.329 at
+edge 0.08 and 1.3238 at edge 0.04 against a 1D solve's 1.3234, its profile
+across the core within 4% of the slab's. The point source also radiates
+into the cladding, rings that leave through the left wall and the floor;
+the measurement projects each cut onto the slab mode, which the cladding's
+radiation is orthogonal to. The share delivered to the top, against a
+straight fiber at the same distance from its end wall, converges by edge
+0.05 (within two points of 0.04): at edge 0.04 radii 0.3 to 0.7 in steps of
+0.1 lose 45%, 33%, 23%, 15% and 12%. The loss falls with the radius as
+Marcuse's exponent `e^{−2γ³R/3β²}` (`2γ³/3β² = 6.24`): −ln of the share
+delivered, over `R·e^{−6.24R}`, stays between 11.3 and 12.9 from radius 0.3
+to 0.6, and is 14.5 at 0.7. His asymptotic prefactor is about three times
+the measured one at these sharp bends.
 
-- The gallery's radius 0.5 delivers most of the launched power.
-- The test's radius 0.3 loses at least twice what radius 0.7 loses.
+Claims at edge 0.08, with the power in the core's mode through a cut 0.2
+short of the top wall, against a straight fiber's cut 0.2 short of the
+right wall:
+
+- The gallery's radius 0.5 delivers more than 60% of the launched power
+  (72%).
+- Radius 0.3 loses more than twice what radius 0.7 loses (43% against 14%,
+  3.0×).
 
 ### 13. Photonic crystal
 
