@@ -217,8 +217,8 @@ names or with every expression evaluated at the material frame's origin. Each ro
   that row's physical field (electric with ε, magnetic with μ; in Mechanical,
   the displacement loss with density and the stress loss with s₀). An older
   document's Damping σ appears as its primary row's loss, marked legacy, and
-  moves to that named loss the first time it is edited. **Advanced**, beside
-  the material's name, opens every law slot of each row - field response,
+  moves to that named loss the first time it is edited. **Advanced view**,
+  under the material's name, opens every law slot of each row - field response,
   drive, Switch alternate, divide, and a driven loss - with the effective law
   evaluated at the frame origin.
   In Mechanical it presents the stiffness row as the reciprocal stiffness

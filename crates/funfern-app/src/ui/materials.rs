@@ -461,25 +461,24 @@ impl Playground {
         }
         if let Some(mut material) = self.material_edit.take() {
             ui.separator();
-            ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut material.name);
-                // Each material keeps its own view. It is a way of looking at
-                // the material, kept with the document's other view settings
-                // rather than as an undoable edit, and changes nothing in it:
-                // pending edits stay pending.
-                let mut advanced = self.material_advanced(material.id);
-                if ui
-                    .checkbox(&mut advanced, "Advanced")
-                    .on_hover_text(
-                        "Show this material's every law slot, its loss channels and its \
-                         effective law in numbers, instead of the medium's named values. \
-                         Turning it off changes only what is shown.",
-                    )
-                    .changed()
-                {
-                    self.set_material_advanced(material.id, advanced);
-                }
-            });
+            ui.text_edit_singleline(&mut material.name);
+            // Each material keeps its own view, on a line of its own because
+            // the name takes the panel's width. It is a way of looking at the
+            // material, kept with the document's other view settings rather
+            // than as an undoable edit, and changes nothing in it: pending
+            // edits stay pending.
+            let mut advanced = self.material_advanced(material.id);
+            if ui
+                .checkbox(&mut advanced, "Advanced view")
+                .on_hover_text(
+                    "Show this material's every law slot, its loss channels and its \
+                     effective law in numbers, instead of the medium's named values. \
+                     Turning it off changes only what is shown.",
+                )
+                .changed()
+            {
+                self.set_material_advanced(material.id, advanced);
+            }
             // What kind of medium this is, which decides what follows. A preset
             // writes the law slots and creates the parameters it exposes; after
             // that the material stands on its own, so editing a slot by hand

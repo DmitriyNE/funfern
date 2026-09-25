@@ -12498,3 +12498,7 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   `viewing_any_medium_leaves_it_as_authored` now sets the view per material.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build and the wasm32 check. Not exercised in the running app.
+- **Follow-up, same day:** beside the name the box ran past the panel,
+  because the name field takes its whole width. It is now "Advanced view" on
+  its own line under the name, the user's choice over the end of the Response
+  row or a narrowed name field.
