@@ -316,7 +316,9 @@ Mechanical skin; copied into TM it made `εμ = 1` and the fiber invisible,
 which the first exploration ran into.) The permittivity carries the
 "Travelling modulation" preset over the graded base: pump 5 Hz, depth 0.2,
 wavenumber `2β = 43.88`, phase `3π/4`, angle 0. A 2.5 Hz point source of 4 on
-the axis at x = −0.85, a probe at x = 0.85. Walls outgoing.
+the axis at x = −0.85, a probe at x = 0.85, and a line probe along the axis
+from x = −0.75, past the source's near field, to 0.9, whose energy density
+shows the signal growing along the fiber. Walls outgoing.
 
 Explored. Unpumped, the fundamental mode runs at β = 21.94 (`n_eff` 1.397;
 a 1D mode solve of the same profile gives 1.391). Pumped at `2β` the gain is
@@ -349,8 +351,13 @@ walls with transmitting spans: a straight Bézier piece, the quarter circle
 in two eighths (under 5e-6 of the radius off the circle), and a straight
 piece, joined at C0 knots. The face inside the bend is a background region
 of its own. A point source of 10, width 0.03, sits in the core at
-x = −0.9; a probe reads the lead-out 0.2 short of the top wall. Walls
-outgoing.
+x = −0.9. A free transmitting curve along the core's axis, the same path
+from x = −0.8 to 0.2 short of the top wall, carries a boundary probe at the
+High preset: the flux along a curve is not a readout, so its energy density
+stands in for the power the mode carries along the length, and 128 samples
+resolve that density's ripple at half the guided wavelength, 0.094. A point
+probe reads the output 0.1 short of the top wall, past the curve's end,
+since a point probe on a curve is refused. Walls outgoing.
 
 Explored. The straight fiber carries the slab's mode: `n_eff` 1.329 at
 edge 0.08 and 1.3238 at edge 0.04 against a 1D solve's 1.3234, its profile
@@ -364,7 +371,12 @@ straight fiber at the same distance from its end wall, converges by edge
 Marcuse's exponent `e^{−2γ³R/3β²}` (`2γ³/3β² = 6.24`): −ln of the share
 delivered, over `R·e^{−6.24R}`, stays between 11.3 and 12.9 from radius 0.3
 to 0.6, and is 14.5 at 0.7. His asymptotic prefactor is about three times
-the measured one at these sharp bends.
+the measured one at these sharp bends. Along the axis, the energy density
+averaged over a period falls from 64 on the lead-in to 51 on the lead-out
+at edge 0.05 (0.80, against 0.76 from the mode's projection), smoothly; at
+edge 0.08 it swings up to 1.9× between neighbouring samples, a coarse
+mesh's own reflection. The app's adaptation refines the fiber to six
+elements per wavelength by default.
 
 Claims at edge 0.08, with the power in the core's mode through a cut 0.2
 short of the top wall, against a straight fiber's cut 0.2 short of the
@@ -372,8 +384,8 @@ right wall:
 
 - The gallery's radius 0.5 delivers more than 60% of the launched power
   (72%).
-- Radius 0.3 loses more than twice what radius 0.7 loses (43% against 14%,
-  3.0×).
+- Radius 0.3 loses more than twice what radius 0.7 loses (45% against 12%,
+  3.6×).
 
 ### 13. Photonic crystal
 
