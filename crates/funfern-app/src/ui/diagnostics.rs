@@ -1200,7 +1200,7 @@ mod tests {
             .expect("the catalog still carries the Luneburg lens");
         assert!(matches!(
             example.document.presentation.material_overlay,
-            MaterialOverlay::Property(MaterialProperty::WaveSpeed)
+            MaterialOverlay::Property(MaterialProperty::Density)
         ));
         let preview = build_example_preview(example);
         let shades = preview

@@ -684,6 +684,17 @@ fn source(position: Point2, frequency: f64, amplitude: f64, width: f64) -> Point
     }
 }
 
+/// The gain of a gallery scene's arrows. Their scale is the 90th percentile
+/// of what is on screen, and with a source in view most of a domain sits well
+/// under it: at the default gain of 1 most arrows were a few pixels long.
+const ARROW_GAIN: f32 = 2.0;
+
+/// Arrows of the power flow: where it goes is what the scene is about.
+fn power_flow(presentation: &mut PresentationSettings) {
+    presentation.vector_overlay = VectorOverlay::RelativeEnergyFlow;
+    presentation.vector_overlay_gain = ARROW_GAIN;
+}
+
 /// Outgoing on every side but the floor.
 fn reflecting_floor() -> OuterBoundaryConditions {
     let mut boundaries = OuterBoundaryConditions::default();
@@ -799,7 +810,8 @@ fn material_lens() -> TopologyDocument {
     );
     let mut document = builder.document();
     document.model.source = source(Point2::new(-0.72, 0.0), 3.5, 16.0, 0.045);
-    document.presentation.vector_overlay = VectorOverlay::ComplementaryField;
+    // The power converging behind the lens.
+    power_flow(&mut document.presentation);
     document
 }
 
@@ -866,8 +878,10 @@ fn grin_rod_with(dn: f64) -> TopologyDocument {
             preset: ProbeSamplingPreset::High,
         },
     });
-    document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
-    document.presentation.material_overlay_opacity = 0.55;
+    // The rod's index as its density, 1 in the vacuum: the wave speed puts
+    // the vacuum at the top of the palette and paints the domain over.
+    document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::Density);
+    document.presentation.material_overlay_opacity = 0.45;
     document
 }
 
@@ -898,8 +912,11 @@ fn anisotropic_crystal() -> TopologyDocument {
     document.model.source = source(Point2::new(-0.72, 0.0), 3.2, 15.0, 0.045);
     document.presentation.material_overlay =
         MaterialOverlay::Property(MaterialProperty::Anisotropy);
-    document.presentation.material_overlay_opacity = 0.56;
+    document.presentation.material_overlay_opacity = 0.22;
     document.presentation.material_overlay_logarithmic = true;
+    // Inside, the energy walks off: it runs along the arrows, not normal to
+    // the elliptic wavefronts.
+    power_flow(&mut document.presentation);
     document
 }
 
@@ -988,8 +1005,10 @@ fn luneburg_lens_with(lens: bool) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::AreaRegion(region),
     });
-    document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
-    document.presentation.vector_overlay = VectorOverlay::ComplementaryField;
+    // The permittivity, 1 in the vacuum, and the rays' power bending onto
+    // the focus.
+    document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::Density);
+    power_flow(&mut document.presentation);
     document
 }
 
@@ -1027,6 +1046,8 @@ fn phased_array() -> TopologyDocument {
     document.presentation.material_overlay =
         MaterialOverlay::Property(MaterialProperty::VolumeSource);
     document.presentation.material_overlay_opacity = 0.62;
+    // The beam the phase ramp steers.
+    power_flow(&mut document.presentation);
     document
 }
 
@@ -2094,6 +2115,8 @@ fn bent_fiber_with(radius: f64) -> TopologyDocument {
             preset: ProbeSamplingPreset::High,
         }),
     });
+    // The beam the bend sheds, leaving tangentially.
+    power_flow(&mut document.presentation);
     document
 }
 
@@ -2180,6 +2203,9 @@ fn photonic_crystal_with(frequency: f64, rods: bool) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(0.75, 0.0)),
     });
+    // Fifty rods' control polygons and handles would hide the crystal.
+    document.presentation.control_polygons = false;
+    document.presentation.handles = false;
     document
 }
 
@@ -2267,6 +2293,11 @@ fn crystal_bend() -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(0.0, 0.9)),
     });
+    // The power following the channel round the corner, over rods without
+    // their control polygons and handles.
+    power_flow(&mut document.presentation);
+    document.presentation.control_polygons = false;
+    document.presentation.handles = false;
     document
 }
 
@@ -2327,6 +2358,8 @@ fn ring_resonator_with(frequency: f64, ring: bool) -> TopologyDocument {
             target: TopologyProbeTarget::AreaRegion(region),
         });
     }
+    // The power circulating in the ring.
+    power_flow(&mut document.presentation);
     document
 }
 
@@ -2534,7 +2567,9 @@ fn fisheye_with(lens: bool) -> TopologyDocument {
             preset: ProbeSamplingPreset::Medium,
         }),
     });
-    document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
+    // The permittivity, 1 at the rim and 4 at the centre.
+    document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::Density);
+    document.presentation.material_overlay_opacity = 0.36;
     document
 }
 
@@ -2708,6 +2743,9 @@ fn brewster_with(polarization: ElectromagneticPolarization, glass: bool) -> Topo
             preset: ProbeSamplingPreset::Medium,
         }),
     });
+    // The in-plane electric field, whose direction is what Brewster is about.
+    document.presentation.vector_overlay = VectorOverlay::ComplementaryField;
+    document.presentation.vector_overlay_gain = ARROW_GAIN;
     document
 }
 
@@ -2835,6 +2873,8 @@ fn tunnelling_with(gap: f64, glass: bool) -> TopologyDocument {
             target: TopologyProbeTarget::Point(point),
         });
     }
+    // The power tunnelling across the gap and leaving as a tilted beam.
+    power_flow(&mut document.presentation);
     document
 }
 
@@ -2961,6 +3001,8 @@ fn drum_with(frequency: f64) -> TopologyDocument {
             target: TopologyProbeTarget::Point(point),
         });
     }
+    // The membrane's elements.
+    document.presentation.mesh = true;
     document
 }
 
@@ -3042,6 +3084,9 @@ fn rods_with(sites: &[Point2]) -> TopologyDocument {
             preset: ProbeSamplingPreset::Medium,
         },
     });
+    // Fifty rods' control polygons and handles would hide the scatterers.
+    document.presentation.control_polygons = false;
+    document.presentation.handles = false;
     document
 }
 
@@ -3137,6 +3182,9 @@ fn slab_channel(material: Material) -> TopologyDocument {
         // channel.
         target: TopologyProbeTarget::Point(Point2::new(0.5, 0.0)),
     });
+    // The lossy slab takes power, so its flow runs forward and fades; the
+    // plasma takes none, so its flow swings back and forth about nothing.
+    power_flow(&mut document.presentation);
     document
 }
 

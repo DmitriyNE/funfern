@@ -14016,3 +14016,47 @@ meshes on the CI runner (AMD EPYC, glibc).
   on the fiber amplifier: "Output is 0.000 from Along the fiber".
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery scenes open showing what they are about
+
+- The view-settings pass, at the user's request: sane, not overloaded,
+  varied, and the arrows used more. Before it, 29 of the 36 scenes opened on
+  the default view, and three of the seven that did not painted the vacuum
+  over. Judged on a screenshot of each scene 12 s from its own launch, at
+  the fitted view of a maximized laptop window.
+- **Power-flow arrows** on ten scenes, where the power has somewhere to go:
+  - material lens and Luneburg lens (the flow converging on the focus;
+    both were `ComplementaryField` arrows too faint to read);
+  - anisotropic crystal (the energy walks off its elliptic wavefronts);
+  - phased array (the steered beam);
+  - bent fiber (the shed beam);
+  - crystal bend (round the corner);
+  - ring resonator (circulating);
+  - FTIR (the beam leaving into the block);
+  - skin depth and plasma skin depth, a pair: forward and fading in the
+    lossy slab, swinging with no net flow in the plasma.
+- **Brewster** shows its in-plane electric field.
+- **Arrow gain:** every arrow scene uses a gain of 2 (`ARROW_GAIN`, through
+  `power_flow`). An arrow's scale is the 90th percentile of what is on
+  screen, and with a source in view most of a domain flows well under it:
+  at 1 most arrows were a few pixels.
+- **Overlays:** GRIN, Luneburg and the fisheye showed wave speed. That puts
+  the vacuum at the top of the palette, so the domain was washed yellow and
+  orange and the lens was the darkest thing in it. They now show density
+  (the Mechanical GRIN's `n`) or permittivity: the vacuum sits dark and the
+  profile lights up. The fisheye's overlay is at 0.36, the GRIN's at 0.45.
+  The anisotropy overlay went from 0.56 to 0.22, so the arrows inside the
+  crystal read.
+- **Decluttered:** the photonic crystal, the crystal bend and the disordered
+  crystal hide control polygons and handles, which drew an octagon and eight
+  dots on each of 45 to 50 rods.
+- **The drum shows its mesh**, the gallery's one view of the elements.
+- The time-driven slabs, the plasma mirror, the oscillator scenes, the
+  galleries, Talbot, the double slit and the obstacles keep the plain field.
+- Updated `a_radial_material_profile_reaches_the_thumbnail`: the Luneburg
+  thumbnail is drawn from its permittivity now, which is as radial as the
+  wave speed was.
+- Not taken up: 2× speed for the three half-minute resonators, which are
+  still dim at 12 s. It was offered as optional and not chosen.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

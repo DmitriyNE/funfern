@@ -556,7 +556,8 @@ runs from 2 at the centre to 1 at the rim, where it meets the vacuum. The
 region's frame follows it, so a dragged lens keeps its profile. A 3 Hz
 source 0.03 inside the rim on the left; a boundary probe on the rim itself,
 whose peak is the image. (A point probe on the image, 0.03 inside the rim,
-sat on the rim probe's line; the view pass dropped it.) The view shows the wave speed. Walls outgoing.
+sat on the rim probe's line; the view pass dropped it.) The view shows the
+permittivity. Walls outgoing.
 
 Explored, with `|U|` on the circle 0.03 inside the rim. Away from the source
 the rim is brightest at the antipode, which is as bright as the rim beside
@@ -898,6 +899,32 @@ every gallery scene's view settings, so each opens showing what it is about
 (field or energy, the vector overlays, the material overlay, exposure, the
 readouts a probe opens with where that becomes storable). The toy is FEM
 and vector-valued, and the scenes should show it.
+
+Done on 26 September, judged on a screenshot of every scene 12 s from its
+own launch. The pass also moved probes that overlapped
+(`no_gallery_probe_sits_on_another`), and turned up that auto exposure
+carried one scene's loudest level into the next.
+
+- **Power-flow arrows** where the power has somewhere to go, at gain 2 (at
+  1 most arrows were a few pixels):
+  - the material lens and the Luneburg lens, converging on the focus;
+  - the anisotropic crystal, walking off its wavefronts;
+  - the phased array's steered beam;
+  - the bent fiber's shed beam;
+  - the crystal bend's corner;
+  - the ring's circulation;
+  - the FTIR beam leaving into the block;
+  - the two skin depths, forward and fading in the lossy slab and swinging
+    about nothing in the plasma.
+- **Electric-field arrows** in Brewster's TE skin, since the in-plane field's
+  direction is the point there.
+- **Material overlays:** the GRIN rod, the Luneburg lens and the fisheye show
+  density or permittivity instead of wave speed. That keeps the vacuum at the
+  bottom of the palette rather than painting the domain over. The
+  anisotropy overlay is lighter (0.22), so the arrows inside read.
+- **Decluttered:** the three rod lattices hide control polygons and handles.
+- **The drum shows its mesh.**
+- The rest keep the plain field, which is what they are about.
 
 Revisit after the planned scenes, at the user's request: the GRIN collimator
 (scene 3) runs in the Mechanical skin and should run in an EM one, as the
