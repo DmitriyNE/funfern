@@ -253,6 +253,15 @@ pub fn catalog() -> &'static [TopologyExample] {
                  and about a hundredth of the field gets through.",
                 skin_depth(),
             ),
+            example(
+                "Plasma skin depth",
+                "The skin-depth slab as a cold plasma whose cutoff, 4 Hz, lies above the 3 Hz \
+                 wave: the field reaching into it falls by e every 0.060, κ = √(ωp² − ω²)/c, \
+                 but it stands there without a travelling phase and takes no power, so the \
+                 wave in front stands with nodes near zero, all of it reflected. Compare the \
+                 lossy slab, which absorbs.",
+                plasma_skin_depth(),
+            ),
         ]
     })
 }
@@ -2853,13 +2862,7 @@ fn skin_depth() -> TopologyDocument {
 /// shortcut, would put the depth at 0.053. A line probe runs along the
 /// channel through the slab and a point probe sits behind it.
 fn skin_with(rate: f64) -> TopologyDocument {
-    let mut builder = Builder::new();
-    builder.scene.physics = PhysicsModel::Electromagnetic {
-        polarization: ElectromagneticPolarization::Tm,
-    };
-    builder.scene.outer_boundaries = channel();
-    builder.launcher(-0.85, SKIN_HZ, 40.0);
-    builder.scene.materials.push(Material {
+    slab_channel(Material {
         id: MaterialId(2),
         name: "Lossy medium".into(),
         electric_loss: Some(LossChannel {
@@ -2868,11 +2871,25 @@ fn skin_with(rate: f64) -> TopologyDocument {
         }),
         color: [139, 92, 66],
         ..Material::default_medium()
-    });
+    })
+}
+
+/// A TM channel lit by a 3 Hz launcher at the left, with a slab of
+/// `material` from `x = −0.35` to `−0.05`, a line probe along the channel
+/// through it and a point probe behind it.
+fn slab_channel(material: Material) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    builder.launcher(-0.85, SKIN_HZ, 40.0);
+    let slab = material.id;
+    builder.scene.materials.push(material);
     let (front, span) = builder.divider(SKIN_FRONT);
     builder.divider(SKIN_BACK);
     for (material, side) in [
-        (MaterialId(2), CurveTraceSide::Right),
+        (slab, CurveTraceSide::Right),
         (DEFAULT_MATERIAL, CurveTraceSide::Left),
     ] {
         let region = RegionId(builder.next_region);
@@ -2916,13 +2933,54 @@ fn skin_with(rate: f64) -> TopologyDocument {
     document
 }
 
+/// The Klein-Gordon plasma's cutoff, above the 3 Hz drive.
+const PLASMA_SKIN_CUTOFF_HZ: f64 = 4.0;
+
+fn plasma_skin_depth() -> TopologyDocument {
+    plasma_skin_with(PLASMA_SKIN_CUTOFF_HZ)
+}
+
+/// The skin-depth scene's slab as a collisionless plasma, the Klein-Gordon
+/// medium with a cutoff of `cutoff` Hz above the 3 Hz drive: below its
+/// cutoff a cold plasma is a mirror, and the field reaching into it falls as
+/// `e^{−κx}` with `κ = √(ω_p² − ω²)/c`, 16.6 for a 4 Hz cutoff, a depth of
+/// 0.060, without the travelling phase a lossy slab has and without taking
+/// power: it all comes back. `c/ω_p`, the depth far below the cutoff, would
+/// put it at 0.040.
+fn plasma_skin_with(cutoff: f64) -> TopologyDocument {
+    let physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    let preset = medium_presets()
+        .iter()
+        .find(|preset| !preset.self_oscillating && preset.restoring().id == "R1")
+        .expect("the Klein-Gordon medium");
+    let mut plasma = apply_medium_preset(
+        preset,
+        &Material {
+            id: MaterialId(2),
+            ..Material::default_medium()
+        },
+        physics,
+    )
+    .expect("a medium applies to a fresh material");
+    plasma.name = "Plasma".into();
+    plasma
+        .parameters
+        .iter_mut()
+        .find(|parameter| parameter.name == "omega0")
+        .expect("the medium names its cutoff")
+        .value = std::f64::consts::TAU * cutoff;
+    slab_channel(plasma)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 33);
+        assert_eq!(catalog().len(), 34);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -5185,6 +5243,79 @@ mod tests {
         assert!(
             (decay / conductor - 1.0).abs() > 0.15,
             "the good conductor's {conductor:.2} is within 15% of {decay:.2}"
+        );
+    }
+
+    /// The plasma skin-depth claims, at edge 0.08, 8 s from rest at 3 Hz,
+    /// from the phasor along the slab's front, 0.02 to 0.18 in, and in front
+    /// of it from x = −0.8 to −0.4. The slope of `ln|U|` is
+    /// `κ = √(ω_p² − ω²)/c` within 3% (16.63 against 16.62; 16.64 at edge
+    /// 0.05), and `c/ω_p` is more than 15% off it (51%). The phase turns under
+    /// 0.1 rad across that stretch (0.018), where the lossy slab's turns 3.8.
+    /// In front the standing wave's least `|U|` is under a tenth of its
+    /// greatest (0.014), where the lossy slab's is 0.49, its
+    /// `(1 − |r|)/(1 + |r|)`.
+    #[test]
+    fn a_plasma_below_its_cutoff_turns_the_wave_back_at_its_skin_depth() {
+        let scene = Harmonic::run(&plasma_skin_depth(), 0.08, 8.0, SKIN_HZ, 4.0);
+        let at = |x: f64| scene.interpolated(Point2::new(x, 0.3));
+        let inside = (0..=40)
+            .map(|index| SKIN_FRONT + 0.02 + 0.16 * index as f64 / 40.0)
+            .collect::<Vec<_>>();
+        let logs = inside.iter().map(|x| {
+            let (u, v) = at(*x);
+            u.hypot(v).ln()
+        });
+        let count = inside.len() as f64;
+        let mean_x = inside.iter().sum::<f64>() / count;
+        let logs = logs.collect::<Vec<_>>();
+        let mean_log = logs.iter().sum::<f64>() / count;
+        let decay = -inside
+            .iter()
+            .zip(&logs)
+            .map(|(x, log)| (x - mean_x) * (log - mean_log))
+            .sum::<f64>()
+            / inside.iter().map(|x| (x - mean_x).powi(2)).sum::<f64>();
+        let omega = std::f64::consts::TAU * SKIN_HZ;
+        let cutoff = std::f64::consts::TAU * PLASMA_SKIN_CUTOFF_HZ;
+        let kappa = (cutoff * cutoff - omega * omega).sqrt();
+        assert!(
+            (decay / kappa - 1.0).abs() < 0.03,
+            "the field decays at {decay:.2} against {kappa:.2}"
+        );
+        assert!(
+            (decay / cutoff - 1.0).abs() > 0.15,
+            "c/ω_p's {cutoff:.2} is within 15% of {decay:.2}"
+        );
+        let mut phases = inside
+            .iter()
+            .map(|x| {
+                let (u, v) = at(*x);
+                v.atan2(u)
+            })
+            .collect::<Vec<_>>();
+        for index in 1..phases.len() {
+            let mut step = phases[index] - phases[index - 1];
+            step -= (step / std::f64::consts::TAU).round() * std::f64::consts::TAU;
+            phases[index] = phases[index - 1] + step;
+        }
+        let turn = phases.iter().cloned().fold(f64::MIN, f64::max)
+            - phases.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(turn < 0.1, "the phase turns {turn:.3} rad inside");
+        let front = (0..=90)
+            .map(|index| {
+                let (u, v) = at(-0.8 + 0.4 * index as f64 / 90.0);
+                u.hypot(v)
+            })
+            .collect::<Vec<_>>();
+        let (least, greatest) = (
+            front.iter().cloned().fold(f64::MAX, f64::min),
+            front.iter().cloned().fold(0.0, f64::max),
+        );
+        assert!(
+            least < 0.1 * greatest,
+            "the standing wave's nodes keep {:.3}",
+            least / greatest
         );
     }
 }

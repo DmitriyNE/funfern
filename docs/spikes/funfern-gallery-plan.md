@@ -774,6 +774,32 @@ Claims at edge 0.08, 8 s from rest:
 - The good conductor's `√(ωγ/2)` is more than 15% off the measured decay
   (21%).
 
+### 25b. Plasma skin depth
+
+Added at the user's request on 26 September, as scene 25's lossless twin.
+TM. The same channel, launcher and slab, the slab a Klein-Gordon plasma
+with a 4 Hz cutoff above the 3 Hz drive. Below its cutoff a cold plasma is
+a mirror: the field reaching into it falls as `e^{−κx}` with
+`κ = √(ω_p² − ω²)/c = 16.62`, a depth of 0.060 beside the lossy slab's
+0.068, while `c/ω_p`, the depth far below the cutoff, would say 0.040. This
+is the collisionless, or inertial, skin depth; a Debye length would need
+the thermal charges this cold model has no pressure for. The slab and its
+probes are the lossy slab's, through `slab_channel`.
+
+Explored, at edges 0.08 and 0.05: the slope of `ln|U|` 0.02 to 0.18 inside
+is 16.634 and 16.642; the phase turns 0.018 rad across that stretch, where
+the lossy slab's turns 3.83; and in front the standing wave's least `|U|` is
+0.014 of its greatest, 0.011 at edge 0.05, where the lossy slab's is 0.486,
+its `(1 − |r|)/(1 + |r|)` exactly.
+
+Claims at edge 0.08, 8 s from rest:
+
+- The decay constant is `κ` within 3% (16.63), and `c/ω_p` is more than 15%
+  off it (51%).
+- The phase turns under 0.1 rad inside (0.018).
+- In front, the standing wave's nodes keep under a tenth of its peak
+  (0.014).
+
 ## Batch E: nonlinear extras
 
 ### 26. Spatial soliton

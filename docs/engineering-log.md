@@ -13660,3 +13660,23 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and the sixth default. The user guide's line-probe entry says so.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: the plasma skin depth
+
+- **Scene** "Plasma skin depth" (gallery item 25b, at the user's request),
+  the catalogue's 34th: the skin-depth scene's slab as the Klein-Gordon
+  plasma with a 4 Hz cutoff, above the 3 Hz drive. The two scenes share
+  `slab_channel` (channel, launcher, slab, probes); the lossy one's device
+  and claim numbers are unchanged by it. The depth is the collisionless
+  skin depth `c/√(ω_p² − ω²)`; the user's "Debye depth" would need the
+  thermal charges this cold model lacks, which the plan's entry says.
+- **Measured** at edge 0.08, 8 s: decay 16.634 against `κ = 16.624` (16.642
+  at edge 0.05), `c/ω_p = 25.13` 51% off; the phase turns 0.018 rad over the
+  fitted 0.16 (the lossy slab's 3.83); the front's nodes keep 0.014 of the
+  peak (the lossy slab's 0.486, its `(1 − |r|)/(1 + |r|)`). Test:
+  `a_plasma_below_its_cutoff_turns_the_wave_back_at_its_skin_depth`.
+- **Device:** `canonical_gpu_long_run` (temporal) at 400 steps Q 1.2e-6,
+  b 7.9e-7; at 1000 steps Q 3.1e-6, b 2.7e-6; at 3000 steps (printed, not
+  judged) 8.4e-6 and 1.1e-5.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
