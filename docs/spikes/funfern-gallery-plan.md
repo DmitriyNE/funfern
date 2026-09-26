@@ -926,6 +926,23 @@ carried one scene's loudest level into the next.
 - **The drum shows its mesh.**
 - The rest keep the plain field, which is what they are about.
 
+Each probe's readout is kept with its scene too, since readouts became
+storable (see the log's "Probe readouts are kept with the scene"). Every
+gallery probe opens on what its claim reads, one or two plots
+(`every_gallery_probe_opens_on_one_or_two_plots`):
+
+- **Point probes:** the field alone. On the plasma and dielectric
+  galleries' opposite rims and on the drum, it covers the whole ten-second
+  history, so the build-up shows.
+- **Line and boundary probes:** the average energy density along them, where
+  the fringes, the focus, the decay, the rim lobes, the Talbot images and the
+  beam's width are read. The disordered crystal's cut adds the average flux
+  integrated across it, the power through.
+- **Area probes:** the ring's total energy over the whole history, as it
+  fills; the Luneburg lens's total and its focus's mean energy density; and
+  the mean energy density of the acoustic gallery's two disks.
+- **Far fields** (double slit, phased array): the polar patterns alone.
+
 Revisit after the planned scenes, at the user's request: the GRIN collimator
 (scene 3) runs in the Mechanical skin and should run in an EM one, as the
 other optics scenes do. In TM that means ε = μ = n for its impedance-matched

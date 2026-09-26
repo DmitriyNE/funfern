@@ -14097,3 +14097,31 @@ meshes on the CI runner (AMD EPYC, glibc).
   `only_what_the_user_changes_reaches_the_document`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery probes open on what their claims read
+
+- With readouts kept (the previous entry), every gallery probe now opens on
+  one or two plots instead of the defaults, which drew six for a line probe:
+  - `field_readout`: a point probe's field alone. The plasma and dielectric
+    galleries' opposite rims and the drum's two points span the whole
+    ten-second history (`WHOLE_HISTORY`), so their build-up shows. The other
+    points use 2 s; the Doppler probes keep it, as it holds two periods of
+    the 1 Hz wave and six of the 3 Hz reflection.
+  - `profile_readout`: a line or boundary probe's average energy density
+    along it. The fringes, the focus, the decay, the rim lobes, the Talbot
+    images and the soliton's width are all read there. The disordered
+    crystal's cut adds the average flux integrated across it, the power
+    through.
+  - `area_readout`: the ring's total energy over the whole history, as it
+    fills; the Luneburg lens's total and its focus's mean energy density; the
+    acoustic gallery's two disks' mean energy density.
+  - `polar_readout`: the double slit's and phased array's far field show
+    their polar patterns only.
+- **Checked** on the double slit, Luneburg, fiber amplifier, ring, drum,
+  disordered crystal and Doppler, with every readout window open 12 s into a
+  fresh run: each shows its one or two plots.
+- Test: `every_gallery_probe_opens_on_one_or_two_plots`. Every probe has a
+  readout of one or two plots of its own kind, none names a probe the scene
+  lacks, and every far field opens on its polar pattern.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

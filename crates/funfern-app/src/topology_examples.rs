@@ -1,8 +1,9 @@
 //! Built-in examples authored directly in the unified topology model.
 
 use crate::document::{
-    FarFieldSettings, MaterialOverlay, MaterialProperty, PresentationSettings, ProbeId,
-    ProbeReadouts, ProbeSamplingPreset, VectorOverlay,
+    FarFieldSettings, LineProbeQuantity, LineProbeRepresentation, MaterialOverlay,
+    MaterialProperty, PresentationSettings, ProbeId, ProbeReadout, ProbeReadouts,
+    ProbeSamplingPreset, VectorOverlay,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -696,6 +697,47 @@ fn power_flow(presentation: &mut PresentationSettings) {
     presentation.vector_overlay_gain = ARROW_GAIN;
 }
 
+/// The seconds a readout keeps: a probe on a mode that takes that long to
+/// build up shows all of it.
+const WHOLE_HISTORY: f64 = 10.0;
+
+/// A gallery probe opens on what its claim reads and nothing else. A point
+/// probe: its field, over `span` seconds.
+fn field_readout(span: f64) -> ProbeReadout {
+    ProbeReadout {
+        span,
+        field: true,
+        ..ProbeReadout::blank()
+    }
+}
+
+/// A line or boundary probe: the average energy density along it, the profile
+/// a fringe, a focus, a decay or a beam's width is read from.
+fn profile_readout() -> ProbeReadout {
+    ProbeReadout::blank().with_line_plot(
+        LineProbeQuantity::MeanEnergy,
+        LineProbeRepresentation::Arclength,
+    )
+}
+
+/// An area probe: the total energy it holds, or its mean energy density.
+fn area_readout(total: bool, span: f64) -> ProbeReadout {
+    ProbeReadout {
+        span,
+        area_total_energy: total,
+        area_mean_energy: !total,
+        ..ProbeReadout::blank()
+    }
+}
+
+/// The far field: its polar pattern, where the lobes and zeros are read.
+fn polar_readout() -> ProbeReadout {
+    ProbeReadout {
+        far_polar: true,
+        ..ProbeReadout::blank()
+    }
+}
+
 /// Outgoing on every side but the floor.
 fn reflecting_floor() -> OuterBoundaryConditions {
     let mut boundaries = OuterBoundaryConditions::default();
@@ -716,6 +758,7 @@ fn starter_obstacle() -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(0.5, 0.15)),
     });
+    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
     document
 }
 
@@ -780,6 +823,8 @@ fn double_slit_with(half_width: f64, back: f64, source_x: f64) -> TopologyDocume
             preset: ProbeSamplingPreset::High,
         },
     });
+    document.readouts.set_probe(ProbeId(1), profile_readout());
+    document.readouts.far_field = polar_readout();
     document
 }
 
@@ -883,6 +928,7 @@ fn grin_rod_with(dn: f64) -> TopologyDocument {
     // the vacuum at the top of the palette and paints the domain over.
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::Density);
     document.presentation.material_overlay_opacity = 0.45;
+    document.readouts.set_probe(ProbeId(1), profile_readout());
     document
 }
 
@@ -1011,6 +1057,12 @@ fn luneburg_lens_with(lens: bool) -> TopologyDocument {
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::Density);
     power_flow(&mut document.presentation);
     document
+        .readouts
+        .set_probe(ProbeId(1), area_readout(false, 2.0));
+    document
+        .readouts
+        .set_probe(ProbeId(2), area_readout(true, 2.0));
+    document
 }
 
 fn phased_array() -> TopologyDocument {
@@ -1049,6 +1101,7 @@ fn phased_array() -> TopologyDocument {
     document.presentation.material_overlay_opacity = 0.62;
     // The beam the phase ramp steers.
     power_flow(&mut document.presentation);
+    document.readouts.far_field = polar_readout();
     document
 }
 
@@ -1149,6 +1202,7 @@ fn kerr_slab_with(chi: f64, amplitude: f64) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(0.55, 0.0)),
     });
+    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
     document
 }
 
@@ -1188,6 +1242,7 @@ fn pumped_slab_with(depth: f64, pump_hz: f64, phase: f64) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(0.6, 0.0)),
     });
+    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
     document
 }
 
@@ -1236,6 +1291,7 @@ fn modulated_slab(
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(side * (half_width + 0.15), 0.0)),
     });
+    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
     document
 }
 
@@ -1346,6 +1402,8 @@ fn spatial_soliton_with(amplitude: f64) -> TopologyDocument {
             preset: ProbeSamplingPreset::High,
         },
     });
+    document.readouts.set_probe(ProbeId(1), profile_readout());
+    document.readouts.set_probe(ProbeId(2), profile_readout());
     document
 }
 
@@ -1427,6 +1485,8 @@ fn doppler_mirror_with(pump_hz: f64) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(DOPPLER_BEHIND),
     });
+    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
+    document.readouts.set_probe(ProbeId(2), field_readout(2.0));
     document
 }
 
@@ -1831,6 +1891,10 @@ fn whispering_gallery_with(frequency: f64) -> TopologyDocument {
             GALLERY_CENTRE - Point2::new(GALLERY_RADIUS - 0.06, 0.0),
         ),
     });
+    // The mode building up over the run.
+    document
+        .readouts
+        .set_probe(ProbeId(1), field_readout(WHOLE_HISTORY));
     document
 }
 
@@ -1935,6 +1999,8 @@ fn fiber_amplifier_with(depth: f64, wavenumber: f64, phase: f64) -> TopologyDocu
             preset: ProbeSamplingPreset::Medium,
         },
     });
+    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
+    document.readouts.set_probe(ProbeId(2), profile_readout());
     document
 }
 
@@ -2118,6 +2184,8 @@ fn bent_fiber_with(radius: f64) -> TopologyDocument {
     });
     // The beam the bend sheds, leaving tangentially.
     power_flow(&mut document.presentation);
+    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
+    document.readouts.set_probe(ProbeId(2), profile_readout());
     document
 }
 
@@ -2207,6 +2275,8 @@ fn photonic_crystal_with(frequency: f64, rods: bool) -> TopologyDocument {
     // Fifty rods' control polygons and handles would hide the crystal.
     document.presentation.control_polygons = false;
     document.presentation.handles = false;
+    document.readouts.set_probe(ProbeId(1), profile_readout());
+    document.readouts.set_probe(ProbeId(2), field_readout(2.0));
     document
 }
 
@@ -2299,6 +2369,8 @@ fn crystal_bend() -> TopologyDocument {
     power_flow(&mut document.presentation);
     document.presentation.control_polygons = false;
     document.presentation.handles = false;
+    document.readouts.set_probe(ProbeId(1), profile_readout());
+    document.readouts.set_probe(ProbeId(2), field_readout(2.0));
     document
 }
 
@@ -2361,6 +2433,11 @@ fn ring_resonator_with(frequency: f64, ring: bool) -> TopologyDocument {
     }
     // The power circulating in the ring.
     power_flow(&mut document.presentation);
+    // The ring filling over the run.
+    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
+    document
+        .readouts
+        .set_probe(ProbeId(2), area_readout(true, WHOLE_HISTORY));
     document
 }
 
@@ -2440,6 +2517,12 @@ fn acoustic_gallery_with(wall: bool) -> TopologyDocument {
         });
     }
     document
+        .readouts
+        .set_probe(ProbeId(1), area_readout(false, 2.0));
+    document
+        .readouts
+        .set_probe(ProbeId(2), area_readout(false, 2.0));
+    document
 }
 
 const DISK_RADIUS: f64 = 0.3;
@@ -2500,6 +2583,10 @@ fn dielectric_gallery_with(frequency: f64) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(0.05 - DISK_RADIUS, 0.0)),
     });
+    document.readouts.set_probe(ProbeId(1), profile_readout());
+    document
+        .readouts
+        .set_probe(ProbeId(2), field_readout(WHOLE_HISTORY));
     document
 }
 
@@ -2571,6 +2658,7 @@ fn fisheye_with(lens: bool) -> TopologyDocument {
     // The permittivity, 1 at the rim and 4 at the centre.
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::Density);
     document.presentation.material_overlay_opacity = 0.36;
+    document.readouts.set_probe(ProbeId(1), profile_readout());
     document
 }
 
@@ -2664,6 +2752,8 @@ fn zone_plate_with(plate: bool) -> TopologyDocument {
             preset: ProbeSamplingPreset::Medium,
         },
     });
+    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
+    document.readouts.set_probe(ProbeId(2), profile_readout());
     document
 }
 
@@ -2747,6 +2837,7 @@ fn brewster_with(polarization: ElectromagneticPolarization, glass: bool) -> Topo
     // The in-plane electric field, whose direction is what Brewster is about.
     document.presentation.vector_overlay = VectorOverlay::ComplementaryField;
     document.presentation.vector_overlay_gain = ARROW_GAIN;
+    document.readouts.set_probe(ProbeId(1), profile_readout());
     document
 }
 
@@ -2876,6 +2967,8 @@ fn tunnelling_with(gap: f64, glass: bool) -> TopologyDocument {
     }
     // The power tunnelling across the gap and leaving as a tilted beam.
     power_flow(&mut document.presentation);
+    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
+    document.readouts.set_probe(ProbeId(2), field_readout(2.0));
     document
 }
 
@@ -2937,6 +3030,8 @@ fn talbot_with(grating: bool) -> TopologyDocument {
             },
         });
     }
+    document.readouts.set_probe(ProbeId(1), profile_readout());
+    document.readouts.set_probe(ProbeId(2), profile_readout());
     document
 }
 
@@ -3004,6 +3099,13 @@ fn drum_with(frequency: f64) -> TopologyDocument {
     }
     // The membrane's elements.
     document.presentation.mesh = true;
+    // The lobes building up, and the diameter staying still.
+    document
+        .readouts
+        .set_probe(ProbeId(1), field_readout(WHOLE_HISTORY));
+    document
+        .readouts
+        .set_probe(ProbeId(2), field_readout(WHOLE_HISTORY));
     document
 }
 
@@ -3088,6 +3190,14 @@ fn rods_with(sites: &[Point2]) -> TopologyDocument {
     // Fifty rods' control polygons and handles would hide the scatterers.
     document.presentation.control_polygons = false;
     document.presentation.handles = false;
+    // The profile, and the power through the cut: the average flux across it.
+    document.readouts.set_probe(
+        ProbeId(1),
+        profile_readout().with_line_plot(
+            LineProbeQuantity::MeanFlux,
+            LineProbeRepresentation::Integral,
+        ),
+    );
     document
 }
 
@@ -3186,6 +3296,8 @@ fn slab_channel(material: Material) -> TopologyDocument {
     // The lossy slab takes power, so its flow runs forward and fades; the
     // plasma takes none, so its flow swings back and forth about nothing.
     power_flow(&mut document.presentation);
+    document.readouts.set_probe(ProbeId(1), profile_readout());
+    document.readouts.set_probe(ProbeId(2), field_readout(2.0));
     document
 }
 
@@ -3350,6 +3462,68 @@ mod tests {
                     "{}: probe {:?} is disabled",
                     example.name,
                     probe.id
+                );
+            }
+        }
+    }
+
+    /// Every gallery probe opens on what its claim reads: one or two plots of
+    /// its own kind, chosen by the scene rather than the defaults, and the far
+    /// field on its polar pattern alone. No readout names a probe the scene
+    /// does not have.
+    #[test]
+    fn every_gallery_probe_opens_on_one_or_two_plots() {
+        for example in catalog() {
+            let document = &example.document;
+            for id in document.readouts.probes.keys() {
+                assert!(
+                    document.model.probes.iter().any(|probe| probe.id == *id),
+                    "{}: a readout for probe {id:?}, which it does not have",
+                    example.name
+                );
+            }
+            for probe in &document.model.probes {
+                let readout = document.readouts.probes.get(&probe.id).unwrap_or_else(|| {
+                    panic!("{}: {} opens on the defaults", example.name, probe.name)
+                });
+                let plots = match probe.target {
+                    TopologyProbeTarget::Point(_) => [
+                        readout.field,
+                        readout.secondary_field,
+                        readout.transverse_field,
+                        readout.poynting,
+                        readout.energy,
+                    ]
+                    .iter()
+                    .filter(|shown| **shown)
+                    .count(),
+                    TopologyProbeTarget::Segment { .. } | TopologyProbeTarget::Boundary(_) => {
+                        readout.line_plots.iter().filter(|shown| **shown).count()
+                    }
+                    TopologyProbeTarget::AreaDisk { .. } | TopologyProbeTarget::AreaRegion(_) => [
+                        readout.area_mean_field,
+                        readout.area_rms_field,
+                        readout.area_rms_transverse,
+                        readout.area_mean_energy,
+                        readout.area_total_energy,
+                    ]
+                    .iter()
+                    .filter(|shown| **shown)
+                    .count(),
+                };
+                assert!(
+                    (1..=2).contains(&plots),
+                    "{}: {} opens on {plots} plots",
+                    example.name,
+                    probe.name
+                );
+            }
+            if document.model.far_field.enabled {
+                assert_eq!(
+                    document.readouts.far_field,
+                    polar_readout(),
+                    "{}",
+                    example.name
                 );
             }
         }
