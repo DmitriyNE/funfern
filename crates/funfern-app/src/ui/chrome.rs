@@ -9,134 +9,190 @@ use funfern_core::*;
 
 use super::*;
 
+/// How far the top bar has folded to fit its width, least first. Each step
+/// keeps what the ones before it did, and the bar takes the first that fits,
+/// measured in its own fonts, so no width is hard-coded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum ToolbarFold {
+    /// Every label, and the inspector tabs in the bar.
+    Full,
+    /// The tabs in a Panels menu.
+    Tabs,
+    /// Undo, Redo, Fit view and the three run controls as icons.
+    Icons,
+    /// Redo, Fit view, Step and Reset in a … menu at the right end.
+    Overflow,
+    /// + Draw as +, and Panels as ☰.
+    Compact,
+    /// Examples as its picture alone.
+    Minimal,
+}
+
+impl ToolbarFold {
+    pub(super) const ALL: [Self; 6] = [
+        Self::Full,
+        Self::Tabs,
+        Self::Icons,
+        Self::Overflow,
+        Self::Compact,
+        Self::Minimal,
+    ];
+
+    /// The least folded bar that fits `width` in `ui`'s fonts, or the most
+    /// folded when none does.
+    pub(super) fn fitting(ui: &egui::Ui, width: f32) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|fold| fold.width(ui) <= width)
+            .unwrap_or(Self::Minimal)
+    }
+
+    /// The width the bar takes at this fold with its two ends pushed
+    /// together. An item with two labels is counted at the wider, so Run
+    /// turning into Pause never changes the fold.
+    pub(super) fn width(self, ui: &egui::Ui) -> f32 {
+        let (left, right) = self.items();
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let padding = 2.0 * ui.spacing().button_padding.x;
+        let text = |label: &str| {
+            ui.ctx().fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE)
+                    .size()
+                    .x
+            })
+        };
+        let buttons = left
+            .iter()
+            .chain(&right)
+            .map(|item| {
+                item.labels(self)
+                    .iter()
+                    .map(|label| text(label))
+                    .fold(0.0, f32::max)
+                    + padding
+            })
+            .sum::<f32>();
+        buttons + ui.spacing().item_spacing.x * (left.len() + right.len() - 1) as f32
+    }
+
+    /// What the bar holds at this fold: the items from its left end, and
+    /// those at its right end, left to right.
+    fn items(self) -> (Vec<ToolbarItem>, Vec<ToolbarItem>) {
+        use ToolbarItem::*;
+        let overflow = self >= Self::Overflow;
+        let mut left = vec![Undo];
+        if !overflow {
+            left.push(Redo);
+        }
+        left.extend([File, Examples]);
+        if !overflow {
+            left.push(FitView);
+        }
+        if self == Self::Full {
+            left.extend(InspectorPanel::ALL.map(Tab));
+        } else {
+            left.push(Panels);
+        }
+        left.push(Draw);
+        let right = if overflow {
+            vec![RunPause, More]
+        } else {
+            vec![RunPause, Step, Reset]
+        };
+        (left, right)
+    }
+}
+
+/// One control in the top bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolbarItem {
+    Undo,
+    Redo,
+    File,
+    Examples,
+    FitView,
+    Tab(InspectorPanel),
+    Panels,
+    Draw,
+    RunPause,
+    Step,
+    Reset,
+    More,
+}
+
+impl ToolbarItem {
+    /// What it shows at `fold`. Run/Pause has both, Run first.
+    fn labels(self, fold: ToolbarFold) -> &'static [&'static str] {
+        let icons = fold >= ToolbarFold::Icons;
+        let compact = fold >= ToolbarFold::Compact;
+        match self {
+            Self::Undo if icons => &["⟲"],
+            Self::Undo => &["Undo"],
+            Self::Redo if icons => &["⟳"],
+            Self::Redo => &["Redo"],
+            Self::File => &["File"],
+            Self::Examples if fold >= ToolbarFold::Minimal => &["🖼"],
+            Self::Examples => &["🖼 Examples"],
+            Self::FitView if icons => &["⛶"],
+            Self::FitView => &["Fit view"],
+            Self::Tab(panel) => match panel {
+                InspectorPanel::Edit => &["Edit"],
+                InspectorPanel::View => &["View"],
+                InspectorPanel::Simulation => &["Simulation"],
+                InspectorPanel::Materials => &["Materials"],
+                InspectorPanel::Probes => &["Probes"],
+            },
+            Self::Panels if compact => &["☰"],
+            Self::Panels => &["Panels"],
+            Self::Draw if compact => &["+"],
+            Self::Draw => &["+ Draw"],
+            Self::RunPause if icons => &["⏵", "⏸"],
+            Self::RunPause => &["Run", "Pause"],
+            Self::Step if icons => &["⏭"],
+            Self::Step => &["Step"],
+            Self::Reset if icons => &["⏮"],
+            Self::Reset => &["Reset"],
+            Self::More => &["…"],
+        }
+    }
+}
+
+/// Where the top bar's two ends landed, for the tests that hold them apart.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ToolbarFit {
+    pub(super) fold: ToolbarFold,
+    pub(super) bar: egui::Rect,
+    pub(super) left: egui::Rect,
+    pub(super) right: egui::Rect,
+}
+
 impl Playground {
-    pub(super) fn top_bar(&mut self, root: &mut egui::Ui) {
-        let fold_panels = root.available_width() < 1080.0;
+    pub(super) fn top_bar(&mut self, root: &mut egui::Ui) -> ToolbarFit {
+        let mut fit = ToolbarFit {
+            fold: ToolbarFold::Full,
+            bar: egui::Rect::NOTHING,
+            left: egui::Rect::NOTHING,
+            right: egui::Rect::NOTHING,
+        };
         egui::Panel::top("top").exact_size(42.0).show(root, |ui| {
             ui.horizontal(|ui| {
-                let undo_shortcut = ui.ctx().format_shortcut(&session::UNDO_SHORTCUT);
-                if ui.button("Undo").on_hover_text(undo_shortcut).clicked() {
-                    self.undo();
+                let fold = ToolbarFold::fitting(ui, ui.available_width());
+                let (left, right) = fold.items();
+                fit.fold = fold;
+                fit.bar = ui.max_rect();
+                for item in left {
+                    self.toolbar_item(ui, item, fold);
                 }
-                let redo_shortcut = ui.ctx().format_shortcut(&session::REDO_SHORTCUT);
-                if ui.button("Redo").on_hover_text(redo_shortcut).clicked() {
-                    self.redo();
-                }
-                ui.menu_button("File", |ui| {
-                    if ui.button("New").clicked() {
-                        self.new_scene();
-                        ui.close();
-                    }
-                    if ui.button("Examples…").clicked() {
-                        self.examples_open = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Open…").clicked() {
-                        self.file_busy = true;
-                        files::load(self.sender.clone());
-                        ui.close();
-                    }
-                    if ui.button("Save…").clicked() {
-                        self.save_scene();
-                        ui.close();
-                    }
-                    if ui.button("Copy scene link").clicked() {
-                        self.copy_link(ui.ctx());
-                        ui.close();
-                    }
-                    let capture_ready = self.snapshot_state == SnapshotState::Idle
-                        && self.recording_state == RecordingState::Idle;
-                    if ui
-                        .add_enabled(capture_ready, egui::Button::new("Export viewport PNG"))
-                        .clicked()
-                    {
-                        self.export_viewport_png();
-                        ui.close();
-                    }
-                    let recording_label = if matches!(
-                        self.recording_state,
-                        RecordingState::Starting | RecordingState::Recording
-                    ) {
-                        "Stop recording"
-                    } else if self.recording_state != RecordingState::Idle {
-                        "Preparing recording…"
-                    } else {
-                        "Record viewport"
-                    };
-                    if ui
-                        .add_enabled(
-                            capture_ready
-                                || matches!(
-                                    self.recording_state,
-                                    RecordingState::Starting | RecordingState::Recording
-                                ),
-                            egui::Button::new(recording_label),
-                        )
-                        .clicked()
-                    {
-                        if self.recording_state == RecordingState::Idle {
-                            self.request_video_recording();
-                        } else {
-                            self.stop_video_recording();
+                fit.left = ui.min_rect();
+                fit.right = ui
+                    .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        for item in right.into_iter().rev() {
+                            self.toolbar_item(ui, item, fold);
                         }
-                        ui.close();
-                    }
-                });
-                // A button like its neighbours, set a little apart by its
-                // picture, rather than a panel tab: it opens a window, as
-                // + Draw does.
-                if ui
-                    .button("🖼 Examples")
-                    .on_hover_text("Ready-to-run scenes")
-                    .clicked()
-                {
-                    self.examples_open = !self.examples_open;
-                }
-                if ui.button("Fit view").clicked() {
-                    self.fit = true;
-                }
-                let panels = [
-                    (InspectorPanel::Edit, "Edit"),
-                    (InspectorPanel::View, "View"),
-                    (InspectorPanel::Simulation, "Simulation"),
-                    (InspectorPanel::Materials, "Materials"),
-                    (InspectorPanel::Probes, "Probes"),
-                ];
-                if fold_panels {
-                    ui.menu_button("Panels", |ui| {
-                        for (panel, label) in panels {
-                            let selected = self.inspector == Some(panel);
-                            if ui.selectable_label(selected, label).clicked() {
-                                self.inspector = (!selected).then_some(panel);
-                            }
-                        }
-                    });
-                } else {
-                    for (panel, label) in panels {
-                        let selected = self.inspector == Some(panel);
-                        if ui.selectable_label(selected, label).clicked() {
-                            self.inspector = (!selected).then_some(panel);
-                        }
-                    }
-                }
-                if ui.button("+ Draw").clicked() {
-                    self.draw_open = !self.draw_open;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Reset").clicked() {
-                        self.reset_requested = true;
-                    }
-                    if ui.button("Step").clicked() {
-                        self.wave_step = true;
-                    }
-                    if ui
-                        .button(if self.wave_running { "Pause" } else { "Run" })
-                        .clicked()
-                    {
-                        self.wave_running = !self.wave_running;
-                    }
-                });
+                    })
+                    .response
+                    .rect;
             });
         });
         // The palette stays up across draws - one primitive after another is the
@@ -216,16 +272,203 @@ impl Playground {
                 });
             self.draw_open = open;
         }
+        fit
     }
+
+    /// One control of the top bar as `fold` shows it. An icon names what it
+    /// stands for on hover.
+    fn toolbar_item(&mut self, ui: &mut egui::Ui, item: ToolbarItem, fold: ToolbarFold) {
+        let labels = item.labels(fold);
+        let label = labels[usize::from(item == ToolbarItem::RunPause && self.wave_running)];
+        let icon = fold >= ToolbarFold::Icons;
+        let named = |response: egui::Response, name: &str| {
+            if icon {
+                response.on_hover_text(name)
+            } else {
+                response
+            }
+        };
+        match item {
+            ToolbarItem::Undo => {
+                let shortcut = ui.ctx().format_shortcut(&session::UNDO_SHORTCUT);
+                if ui
+                    .button(label)
+                    .on_hover_text(format!("Undo ({shortcut})"))
+                    .clicked()
+                {
+                    self.undo();
+                }
+            }
+            ToolbarItem::Redo => {
+                let shortcut = ui.ctx().format_shortcut(&session::REDO_SHORTCUT);
+                if ui
+                    .button(label)
+                    .on_hover_text(format!("Redo ({shortcut})"))
+                    .clicked()
+                {
+                    self.redo();
+                }
+            }
+            ToolbarItem::File => {
+                ui.menu_button(label, |ui| self.file_menu(ui));
+            }
+            // A button like its neighbours, set a little apart by its
+            // picture, rather than a panel tab: it opens a window, as
+            // + Draw does.
+            ToolbarItem::Examples => {
+                if ui
+                    .button(label)
+                    .on_hover_text("Ready-to-run scenes")
+                    .clicked()
+                {
+                    self.examples_open = !self.examples_open;
+                }
+            }
+            ToolbarItem::FitView => {
+                if named(ui.button(label), "Fit view").clicked() {
+                    self.fit = true;
+                }
+            }
+            ToolbarItem::Tab(panel) => {
+                let selected = self.inspector == Some(panel);
+                if ui.selectable_label(selected, label).clicked() {
+                    self.inspector = (!selected).then_some(panel);
+                }
+            }
+            ToolbarItem::Panels => {
+                let menu = ui.menu_button(label, |ui| {
+                    for panel in InspectorPanel::ALL {
+                        let selected = self.inspector == Some(panel);
+                        if ui.selectable_label(selected, panel.title()).clicked() {
+                            self.inspector = (!selected).then_some(panel);
+                        }
+                    }
+                });
+                if fold >= ToolbarFold::Compact {
+                    menu.response.on_hover_text("Panels");
+                }
+            }
+            ToolbarItem::Draw => {
+                let button = ui.button(label);
+                let button = if fold >= ToolbarFold::Compact {
+                    button.on_hover_text("Draw")
+                } else {
+                    button
+                };
+                if button.clicked() {
+                    self.draw_open = !self.draw_open;
+                }
+            }
+            ToolbarItem::RunPause => {
+                let name = if self.wave_running { "Pause" } else { "Run" };
+                if named(ui.button(label), name).clicked() {
+                    self.wave_running = !self.wave_running;
+                }
+            }
+            ToolbarItem::Step => {
+                if named(ui.button(label), "Step").clicked() {
+                    self.wave_step = true;
+                }
+            }
+            ToolbarItem::Reset => {
+                if named(ui.button(label), "Reset").clicked() {
+                    self.reset_requested = true;
+                }
+            }
+            // What the narrowest bars have no room for, by name. Step keeps
+            // the menu open, since stepping is done a step at a time.
+            ToolbarItem::More => {
+                ui.menu_button(label, |ui| {
+                    let redo = ui.ctx().format_shortcut(&session::REDO_SHORTCUT);
+                    if ui
+                        .add(egui::Button::new("Redo").shortcut_text(redo))
+                        .clicked()
+                    {
+                        self.redo();
+                        ui.close();
+                    }
+                    if ui.button("Fit view").clicked() {
+                        self.fit = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Step").clicked() {
+                        self.wave_step = true;
+                    }
+                    if ui.button("Reset").clicked() {
+                        self.reset_requested = true;
+                        ui.close();
+                    }
+                });
+            }
+        }
+    }
+
+    fn file_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.button("New").clicked() {
+            self.new_scene();
+            ui.close();
+        }
+        if ui.button("Examples…").clicked() {
+            self.examples_open = true;
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Open…").clicked() {
+            self.file_busy = true;
+            files::load(self.sender.clone());
+            ui.close();
+        }
+        if ui.button("Save…").clicked() {
+            self.save_scene();
+            ui.close();
+        }
+        if ui.button("Copy scene link").clicked() {
+            self.copy_link(ui.ctx());
+            ui.close();
+        }
+        let capture_ready = self.snapshot_state == SnapshotState::Idle
+            && self.recording_state == RecordingState::Idle;
+        if ui
+            .add_enabled(capture_ready, egui::Button::new("Export viewport PNG"))
+            .clicked()
+        {
+            self.export_viewport_png();
+            ui.close();
+        }
+        let recording_label = if matches!(
+            self.recording_state,
+            RecordingState::Starting | RecordingState::Recording
+        ) {
+            "Stop recording"
+        } else if self.recording_state != RecordingState::Idle {
+            "Preparing recording…"
+        } else {
+            "Record viewport"
+        };
+        if ui
+            .add_enabled(
+                capture_ready
+                    || matches!(
+                        self.recording_state,
+                        RecordingState::Starting | RecordingState::Recording
+                    ),
+                egui::Button::new(recording_label),
+            )
+            .clicked()
+        {
+            if self.recording_state == RecordingState::Idle {
+                self.request_video_recording();
+            } else {
+                self.stop_video_recording();
+            }
+            ui.close();
+        }
+    }
+
     pub(super) fn side_panel(&mut self, root: &mut egui::Ui) {
         let Some(panel) = self.inspector else { return };
-        let title = match panel {
-            InspectorPanel::Edit => "Edit",
-            InspectorPanel::View => "View",
-            InspectorPanel::Simulation => "Simulation",
-            InspectorPanel::Materials => "Materials",
-            InspectorPanel::Probes => "Probes",
-        };
+        let title = panel.title();
         // On a narrow layout the inspector floats over the viewport instead of
         // docking beside it, which would put a panel inside the capture crop.
         if self.capturing() && root.available_width() < 700.0 {
@@ -289,6 +532,91 @@ impl Playground {
             }
             TopologySelection::Handle(handle) => self.handle_inspector(ui, handle),
             TopologySelection::Spans(spans) => self.span_inspector(ui, spans),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The top bar laid out alone on a screen `width` wide, in the app's look.
+    fn bar_at(state: &mut Playground, context: &egui::Context, width: f32) -> ToolbarFit {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 800.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let mut fit = None;
+        let _ = context.run_ui(input, |ui| fit = Some(state.top_bar(ui)));
+        fit.unwrap()
+    }
+
+    /// From a phone held upright to a wide desktop, the bar's two ends never
+    /// meet and nothing leaves it, and it only ever folds further as the
+    /// screen narrows.
+    #[test]
+    fn the_top_bar_fits_from_a_phone_to_a_desktop() {
+        let mut state = Playground::default();
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let spacing = 8.0;
+        let mut wider_fold = ToolbarFold::Full;
+        for width in (320..=1600).rev().step_by(4) {
+            let fit = bar_at(&mut state, &context, width as f32);
+            assert!(
+                fit.fold >= wider_fold,
+                "unfolded to {:?} at {width}",
+                fit.fold
+            );
+            wider_fold = fit.fold;
+            assert!(
+                fit.left.right() + spacing <= fit.right.left() + 0.5,
+                "the ends meet at {width} ({:?}): {:?} against {:?}",
+                fit.fold,
+                fit.left,
+                fit.right
+            );
+            assert!(fit.left.left() >= fit.bar.left() - 0.5, "{width}");
+            assert!(fit.right.right() <= fit.bar.right() + 0.5, "{width}");
+        }
+        assert_eq!(bar_at(&mut state, &context, 1280.0).fold, ToolbarFold::Full);
+        assert_eq!(bar_at(&mut state, &context, 700.0).fold, ToolbarFold::Tabs);
+        assert!(bar_at(&mut state, &context, 360.0).fold <= ToolbarFold::Compact);
+    }
+
+    /// Pressing Run turns it into Pause, which is wider; the fold was chosen
+    /// for the wider already, so nothing else moves.
+    #[test]
+    fn running_or_pausing_keeps_the_fold() {
+        let mut state = Playground::default();
+        let context = egui::Context::default();
+        theme::apply(&context);
+        for width in (320..=1600).step_by(4) {
+            state.wave_running = false;
+            let paused = bar_at(&mut state, &context, width as f32).fold;
+            state.wave_running = true;
+            assert_eq!(bar_at(&mut state, &context, width as f32).fold, paused);
+        }
+    }
+
+    #[test]
+    fn every_toolbar_label_is_in_the_fonts() {
+        let context = egui::Context::default();
+        let _ = context.run_ui(egui::RawInput::default(), |_| {});
+        let font = egui::TextStyle::Button.resolve(&context.global_style());
+        for fold in ToolbarFold::ALL {
+            let (left, right) = fold.items();
+            for item in left.into_iter().chain(right) {
+                for label in item.labels(fold) {
+                    assert!(
+                        context.fonts_mut(|fonts| fonts.has_glyphs(&font, label)),
+                        "{label} ({item:?} at {fold:?})"
+                    );
+                }
+            }
         }
     }
 }

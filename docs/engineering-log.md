@@ -14248,3 +14248,52 @@ meshes on the CI runner (AMD EPYC, glibc).
   egui's default fonts (U+1F5BC, measured at 11.6 px in the button font).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — A top bar that folds to fit, down to a phone
+
+- The bar used to fold its five panel tabs into a menu below a hand-set
+  1080 px, and fold nothing else. Measured in the app's own fonts (13 px, 8 px
+  padding and spacing), the full bar needs 865 px and the folded one 600, so
+  the threshold was far off, and on a phone upright (360–430 px) the right end
+  (Pause, Step, Reset) was drawn over the left and Panels and + Draw fell off.
+- `ToolbarFold` now names six steps, each keeping the ones before it. Each
+  frame the bar takes the first that fits, measured from the labels it would
+  show, so no width is hard-coded:
+
+  | Step | Change | Needs |
+  |---|---|---|
+  | Full | every label, the tabs inline | 865 px |
+  | Tabs | the tabs in a Panels menu | 600 |
+  | Icons | ⟲ ⟳ ⛶ ⏵/⏸ ⏭ ⏮ for Undo, Redo, Fit view, Run/Pause, Step, Reset; names on hover | 471 |
+  | Overflow | Redo, Fit view, Step, Reset in a … menu at the right end, Step leaving it open | 365 |
+  | Compact | + Draw as +, Panels as ☰ | 305 |
+  | Minimal | Examples as 🖼 | 247 |
+
+  With the panel's margins the screen widths are 882, 617, 487, 381 and 322:
+  a 360 or 375 phone gets Compact, a 390–430 one Overflow, a 768 tablet Tabs.
+  File and Examples keep their words on every phone.
+- One definition drives both: `ToolbarFold::items` lists what the bar holds,
+  `ToolbarItem::labels` what each shows, and the same lists are measured and
+  drawn. Run/Pause is measured at the wider label, so pressing it never
+  changes the fold. The File menu moved into its own function; the app's style
+  moved into `theme::apply` so the tests lay the bar out in it.
+- Every icon was checked against egui's default fonts first: ⋯, ✏, ↶ and ↷
+  are missing and would draw as boxes.
+- Tests:
+  - `the_top_bar_fits_from_a_phone_to_a_desktop` lays the real bar out at
+    every fourth width from 1600 to 320: the two ends never meet, nothing
+    leaves the bar, and it never unfolds as the screen narrows. With folding
+    turned off it fails at 880.
+  - `running_or_pausing_keeps_the_fold`.
+  - `every_toolbar_label_is_in_the_fonts`.
+- **Checked in the browser build** (release trunk bundle, Playwright on WebGPU
+  Chrome in mobile emulation) at 360×740, 375×667, 390×844, 412×915, 768×1024
+  and 1280×800: the fold each width predicts, nothing overlapping.
+- **A trap in that check:** headless Chrome's device-pixel-ratio emulation
+  leaves the canvas backing at CSS size (1280×800 at DPR 2) while the app takes
+  the emulated ratio, so every point comes out DPR² pixels and the UI twice or
+  three times too large. Real headed Chrome on the Retina display sizes it
+  right (1512×1724 for 756×862 at DPR 2), so this is the emulation, not the
+  app. Layout depends only on the CSS width, so the phone checks run at DPR 1.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

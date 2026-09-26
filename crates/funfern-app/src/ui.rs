@@ -175,6 +175,26 @@ enum InspectorPanel {
     Probes,
 }
 
+impl InspectorPanel {
+    const ALL: [Self; 5] = [
+        Self::Edit,
+        Self::View,
+        Self::Simulation,
+        Self::Materials,
+        Self::Probes,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Edit => "Edit",
+            Self::View => "View",
+            Self::Simulation => "Simulation",
+            Self::Materials => "Materials",
+            Self::Probes => "Probes",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ClosedPurpose {
     #[default]
@@ -2140,12 +2160,7 @@ pub fn frame(
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     if !state.ready {
-        ctx.set_visuals(egui::Visuals::dark());
-        ctx.style_mut_of(egui::Theme::Dark, |style| {
-            style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-            style.spacing.button_padding = egui::vec2(8.0, 4.0);
-            style.visuals.selection.bg_fill = Color32::from_rgb(38, 94, 135);
-        });
+        theme::apply(ctx);
         state.ready = true;
         #[cfg(target_arch = "wasm32")]
         if let Some(element) = web_sys::window()

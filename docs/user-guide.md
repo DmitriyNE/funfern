@@ -4,9 +4,15 @@ What the editor does and how it behaves. The README covers building and
 running; this file covers using it.
 
 
-- **UI shell:** the top bar keeps Undo/Redo, scene files, Fit View, five
-  hideable inspector panels, Draw, and wave playback controls visible;
-  the solver starts running once its initial mesh is ready. Edit contains
+- **UI shell:** the top bar keeps Undo/Redo, scene files, Examples, Fit View,
+  five hideable inspector panels, Draw, and wave playback controls visible;
+  the solver starts running once its initial mesh is ready. On a narrower
+  screen the bar folds, a step at a time and only as far as it must: the panel
+  tabs go into a Panels menu, then Undo, Redo, Fit view, Run/Pause, Step and
+  Reset become icons (their names on hover), then Redo, Fit view, Step and
+  Reset move into a … menu at the right end, then + Draw and Panels shrink to
+  + and ☰, and last Examples to its picture. A phone held upright keeps File
+  and Examples in words. Edit contains
   selection, transforms, topology, and boundary tools; View contains visual
   overlays and field intensity; Simulation contains mesh and solver settings;
   Materials contains the material library; Probes contains receivers and recording

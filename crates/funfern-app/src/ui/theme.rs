@@ -11,6 +11,17 @@ pub(super) const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 pub(super) const RED: Color32 = Color32::from_rgb(255, 106, 123);
 pub(super) const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 
+/// The app's look: dark, with a little more room between and inside
+/// controls than egui's own.
+pub(super) fn apply(ctx: &egui::Context) {
+    ctx.set_visuals(egui::Visuals::dark());
+    ctx.style_mut_of(egui::Theme::Dark, |style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.button_padding = egui::vec2(8.0, 4.0);
+        style.visuals.selection.bg_fill = Color32::from_rgb(38, 94, 135);
+    });
+}
+
 /// Whose work the status bar reports as in flight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Activity {
