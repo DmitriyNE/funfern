@@ -13470,3 +13470,24 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and 4.7e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: the Fresnel zone plate
+
+- **Scene** "Fresnel zone plate" (gallery item 19), the catalogue's 27th:
+  a Mechanical 4 Hz launcher at the left and reflecting baffles at `x = 0`
+  over the even Fresnel zones for a focus at 0.4 (`zone_edges`), the last,
+  even zone closed out to the walls with wall-attached baffles. Probes:
+  "Focus" and "Along the axis".
+- **Why not the plan's numbers:** its `F = 0.6` plate focuses at 1.48× the
+  plane wave (1.76× at the axial peak, 0.715). Its "twice the plane wave" is
+  a 3D ring plate's; in 2D the zones are slits whose contributions fall off,
+  and `F` from 0.3 to 0.6 with every odd zone open gives 1.57× to 1.68× at
+  the focus. `F = 0.4` fits three open zones and focuses tightest.
+- **Measured** at edge 0.08, 10 s: 1.68× the bare wave at (0.4, 0), 3.4×
+  the field at (0.4, ±0.4); 1.67× at edge 0.05, 1.68× at 15 s. Test:
+  `a_zone_plate_gathers_a_plane_wave_into_its_focus` (over 1.5×, over 2×).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 6.2e-7, b 9.5e-7; at
+  1000 steps Q 1.3e-6, b 1.6e-6; at 3000 steps (printed, not judged) 1.9e-6
+  and 2.7e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

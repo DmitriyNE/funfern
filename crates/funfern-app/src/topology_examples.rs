@@ -194,6 +194,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  the profile to 1 and the far rim is no brighter anywhere.",
                 fisheye(),
             ),
+            example(
+                "Fresnel zone plate",
+                "A plane wave meets a screen of reflecting strips open over the odd Fresnel zones \
+                 for a focus 0.4 behind it: the waves from the open zones arrive there in step \
+                 and gather into a spot 1.7 times the plane wave's amplitude, nearly three times \
+                 its energy, and over three times the field 0.4 to either side.",
+                zone_plate(),
+            ),
         ]
     })
 }
@@ -2261,13 +2269,103 @@ fn fisheye_with(lens: bool) -> TopologyDocument {
     document
 }
 
+const ZONE_HZ: f64 = 4.0;
+/// Short enough that three open zones fit inside the walls; in 2D more zones
+/// barely raise the focus, 1.64× to 1.68× the plane wave for 0.3 to 0.5.
+const ZONE_FOCUS: f64 = 0.4;
+
+/// The edges inside the domain of the zones of a plate focusing a plane wave
+/// of `frequency` at `focus` behind it, `y_n = √(nλF + (nλ/2)²)`.
+fn zone_edges(frequency: f64, focus: f64, reach: f64) -> Vec<f64> {
+    let wavelength = 1.0 / frequency;
+    (1..)
+        .map(|n| {
+            let n = n as f64;
+            (n * wavelength * focus + (0.5 * n * wavelength).powi(2)).sqrt()
+        })
+        .take_while(|edge| *edge < reach)
+        .collect()
+}
+
+fn zone_plate() -> TopologyDocument {
+    zone_plate_with(true)
+}
+
+/// A Mechanical plane wave from a 4 Hz launcher at the left, and, with
+/// `plate`, a screen of reflecting baffles at `x = 0` over the even Fresnel
+/// zones for a focus 0.4 behind it, open over the odd ones, whose waves
+/// arrive there in step; a last zone cut by the wall is closed out to it when
+/// it is even. A point probe sits on the focus and a line probe runs along
+/// the axis behind the screen. Every wall is outgoing.
+fn zone_plate_with(plate: bool) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.launcher(-0.85, ZONE_HZ, 40.0);
+    if plate {
+        let domain = builder.scene.geometry.domain;
+        let edges = zone_edges(ZONE_HZ, ZONE_FOCUS, domain.max_y);
+        for sign in [1.0, -1.0] {
+            for (index, pair) in edges.windows(2).enumerate() {
+                // Zone `index + 2` runs from `pair[0]` to `pair[1]`.
+                if index % 2 == 0 {
+                    builder.baffle(straight_baffle(sign * pair[0], sign * pair[1]));
+                }
+            }
+            if edges.len() % 2 == 1 {
+                // The zone the wall cuts is even: closed out to the wall.
+                let (side, fraction) = if sign > 0.0 {
+                    (OuterSide::Top, (domain.max_x - 0.0) / domain.width())
+                } else {
+                    (OuterSide::Bottom, (0.0 - domain.min_x) / domain.width())
+                };
+                let wall = builder.outer_vertex(side, fraction);
+                let end = if sign > 0.0 {
+                    domain.max_y
+                } else {
+                    domain.min_y
+                };
+                let curve = builder.baffle(straight_baffle(sign * edges[edges.len() - 1], end));
+                let authored = builder
+                    .scene
+                    .geometry
+                    .curves
+                    .iter_mut()
+                    .find(|candidate| candidate.id == curve)
+                    .unwrap();
+                let last = authored.nodes.len() - 1;
+                authored.nodes[last].vertex = Some(wall);
+            }
+        }
+    }
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Focus".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(ZONE_FOCUS, 0.0)),
+    });
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Along the axis".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Segment {
+            start: Point2::new(0.05, 0.0),
+            end: Point2::new(0.95, 0.0),
+            preset: ProbeSamplingPreset::Medium,
+        },
+    });
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 26);
+        assert_eq!(catalog().len(), 27);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -4192,5 +4290,31 @@ mod tests {
         let vacuum = rim(false);
         let flat = vacuum(0.0) / vacuum(45.0).max(vacuum(-45.0));
         assert!(flat < 1.2, "without the lens the antipode is {flat:.2}×");
+    }
+
+    /// The zone-plate claims, at edge 0.08, 10 s from rest at 4 Hz, with `|U|`
+    /// at the focus. It exceeds 1.5× the bare plane wave there (1.68×; 1.67×
+    /// at edge 0.05), and twice the field 0.4 to either side (3.4×). The
+    /// axis peaks a little past the focus, 1.76× at 0.46. The plan's "twice
+    /// the plane wave" is a 3D ring plate's: in 2D the zones are slits, whose
+    /// contributions fall off, and more of them barely raise the focus.
+    #[test]
+    fn a_zone_plate_gathers_a_plane_wave_into_its_focus() {
+        let field = |plate: bool| {
+            let scene = Harmonic::run(&zone_plate_with(plate), 0.08, 10.0, ZONE_HZ, 4.0);
+            move |y: f64| {
+                let (a, b) = scene.interpolated(Point2::new(ZONE_FOCUS, y));
+                a.hypot(b)
+            }
+        };
+        let (plate, bare) = (field(true), field(false));
+        let gain = plate(0.0) / bare(0.0);
+        assert!(gain > 1.5, "the focus holds {gain:.2}× the plane wave");
+        let flank = plate(0.4).max(plate(-0.4));
+        assert!(
+            plate(0.0) > 2.0 * flank,
+            "the focus is {:.2}× its flanks",
+            plate(0.0) / flank
+        );
     }
 }

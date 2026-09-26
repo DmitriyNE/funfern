@@ -574,13 +574,31 @@ Claims at edge 0.08, 10 s from rest:
 
 ### 19. Fresnel zone plate
 
-Mechanical. A launcher at the left, 4 Hz. A screen of baffles at x = 0 open
-over the odd Fresnel zones for a focus at `F = 0.6`: zone edges at
-`y_n = √(nλF + (nλ/2)²)`, 0.41, 0.60, 0.77, 0.92, so the openings are
-|y| < 0.41 and 0.60 < |y| < 0.77, the baffles fill the rest. Walls outgoing.
+Mechanical. A launcher at the left, 4 Hz. A screen of reflecting baffles at
+x = 0 closed over the even Fresnel zones for a focus at `F = 0.4`, zone
+edges `y_n = √(nλF + (nλ/2)²)`: 0.34, 0.51, 0.66, 0.81, 0.94, so the
+openings are |y| < 0.34, 0.51 < |y| < 0.66 and 0.81 < |y| < 0.94, and the
+last, even zone is closed out to the walls, to which those baffles attach.
+A point probe on the focus and a line probe along the axis behind the
+screen. Walls outgoing.
 
-Claim: the RMS at (0.6, 0) exceeds twice the RMS of the bare plane wave
-there, and exceeds the RMS at (0.6, ±0.4).
+Explored. The plan's plate, `F = 0.6`, focuses at 1.48× the bare plane
+wave's amplitude at (0.6, 0), and its axis peaks at 1.76× beyond it, at
+0.715. The plan's "twice the plane wave" belongs to a 3D ring plate, whose
+zones contribute equally: in 2D the zones are slits, whose contributions
+fall off (a single first-zone slit peaks on the axis near 0.9), and more
+zones barely help. Opening the odd zones out to the walls, `F` from 0.3
+to 0.6 gives 1.57× to 1.68× at the focus and 1.72× to 1.76× at the axial
+peak, which sits 10% to 20% past `F`. `F = 0.4` fits three open zones and
+focuses tightest: 1.68× (1.67× at edge 0.05, the same at 15 s), a spot
+about 0.1 wide, and 3.4× the field 0.4 to either side. An amplitude of
+1.7× is nearly three times the energy; doubling it would take a phase
+plate.
+
+Claims at edge 0.08, 10 s from rest, at the focus (0.4, 0):
+
+- The RMS exceeds 1.5× the bare plane wave's (1.68×).
+- It exceeds twice the RMS 0.4 to either side (3.4×).
 
 ### 20. Brewster angle
 
