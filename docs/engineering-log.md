@@ -14326,3 +14326,19 @@ meshes on the CI runner (AMD EPYC, glibc).
   and a cut message at 412, the middle form at 768, the full one at 1280.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — No inspector at launch on a narrow screen
+
+- Below 700 px the inspector floats over the viewport rather than docking,
+  and the app opened with Edit showing, so a first launch on a phone put the
+  Edit window over the scene and over the example's card.
+- `fit_inspector_to_screen` runs once, on the first frame: narrower than
+  `FLOATING_INSPECTOR_BELOW` (the 700 the side panel already used, now named
+  and shared), no inspector opens. A panel is a tap away in the top bar.
+  Turning the phone later changes nothing.
+- Test: `a_narrow_screen_launches_without_an_inspector`.
+- **Checked in the browser build** at 360, 375, 390 and 412 px: the scene and
+  its card with nothing over them; at 768 and 1280 the docked Edit panel as
+  before.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -12,7 +12,9 @@ running; this file covers using it.
   Reset become icons (their names on hover), then Redo, Fit view, Step and
   Reset move into a … menu at the right end, then + Draw and Panels shrink to
   + and ☰, and last Examples to its picture. A phone held upright keeps File
-  and Examples in words. Edit contains
+  and Examples in words. Below 700 px the inspector floats over the viewport
+  instead of docking beside it, and a launch opens none, so the scene and its
+  card are what a phone shows first. Edit contains
   selection, transforms, topology, and boundary tools; View contains visual
   overlays and field intensity; Simulation contains mesh and solver settings;
   Materials contains the material library; Probes contains receivers and recording

@@ -158,6 +158,10 @@ impl ToolbarItem {
     }
 }
 
+/// Below this width the inspector floats over the viewport rather than
+/// docking beside it.
+pub(super) const FLOATING_INSPECTOR_BELOW: f32 = 700.0;
+
 /// Where the top bar's two ends landed, for the tests that hold them apart.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ToolbarFit {
@@ -466,15 +470,24 @@ impl Playground {
         }
     }
 
+    /// A launch on a narrow screen opens no inspector: there it would float
+    /// over the scene, and over its card, and the scene is what a launch is
+    /// for. A panel is a tap away in the top bar.
+    pub(super) fn fit_inspector_to_screen(&mut self, width: f32) {
+        if width < FLOATING_INSPECTOR_BELOW {
+            self.inspector = None;
+        }
+    }
+
     pub(super) fn side_panel(&mut self, root: &mut egui::Ui) {
         let Some(panel) = self.inspector else { return };
         let title = panel.title();
         // On a narrow layout the inspector floats over the viewport instead of
         // docking beside it, which would put a panel inside the capture crop.
-        if self.capturing() && root.available_width() < 700.0 {
+        if self.capturing() && root.available_width() < FLOATING_INSPECTOR_BELOW {
             return;
         }
-        if root.available_width() < 700.0 {
+        if root.available_width() < FLOATING_INSPECTOR_BELOW {
             let mut open = true;
             let maximum_height = (root.ctx().viewport_rect().height() - 54.0).max(96.0);
             egui::Window::new(title)
@@ -600,6 +613,16 @@ mod tests {
             state.wave_running = true;
             assert_eq!(bar_at(&mut state, &context, width as f32).fold, paused);
         }
+    }
+
+    #[test]
+    fn a_narrow_screen_launches_without_an_inspector() {
+        let mut phone = Playground::default();
+        phone.fit_inspector_to_screen(390.0);
+        assert_eq!(phone.inspector, None);
+        let mut desktop = Playground::default();
+        desktop.fit_inspector_to_screen(1280.0);
+        assert_eq!(desktop.inspector, Some(InspectorPanel::Edit));
     }
 
     #[test]

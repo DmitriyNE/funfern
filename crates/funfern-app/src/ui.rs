@@ -2177,6 +2177,7 @@ pub fn frame(
     state.begin_capture_frame();
     if !state.startup_done {
         state.startup_done = true;
+        state.fit_inspector_to_screen(ctx.content_rect().width());
         if let Some(bytes) = crate::sharing::initial_fragment() {
             match bytes.and_then(|bytes| persistence::parse(&bytes)) {
                 Ok(candidate) => {
