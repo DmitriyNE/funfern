@@ -14342,3 +14342,18 @@ meshes on the CI runner (AMD EPYC, glibc).
   before.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — Reset stays in the top bar
+
+- At the user's request Reset no longer goes into the … menu: from the Icons
+  step on it stays beside Run/Pause as ⏮, and the menu holds Redo, Fit view
+  and Step.
+- Its icon costs 36 px, so the measured fold points below Icons move: Overflow
+  from 417 px (was 381), Compact from 358 (was 322), Minimal below. Phones
+  from 360 to 412 now get Compact (☰ and + for Panels and + Draw); a 430 one
+  keeps Overflow's words. A 360 phone fits with 2 px to spare, exact by
+  measurement and held by `the_top_bar_fits_from_a_phone_to_a_desktop`.
+- **Checked in the browser build** at 360, 375, 390 and 412 px: ⟲ File
+  🖼 Examples ☰ + on the left, ⏸ ⏮ … on the right.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

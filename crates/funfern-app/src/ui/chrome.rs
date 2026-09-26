@@ -20,7 +20,7 @@ pub(super) enum ToolbarFold {
     Tabs,
     /// Undo, Redo, Fit view and the three run controls as icons.
     Icons,
-    /// Redo, Fit view, Step and Reset in a … menu at the right end.
+    /// Redo, Fit view and Step in a … menu at the right end. Reset stays.
     Overflow,
     /// + Draw as +, and Panels as ☰.
     Compact,
@@ -96,7 +96,7 @@ impl ToolbarFold {
         }
         left.push(Draw);
         let right = if overflow {
-            vec![RunPause, More]
+            vec![RunPause, Reset, More]
         } else {
             vec![RunPause, Step, Reset]
         };
@@ -398,10 +398,6 @@ impl Playground {
                     ui.separator();
                     if ui.button("Step").clicked() {
                         self.wave_step = true;
-                    }
-                    if ui.button("Reset").clicked() {
-                        self.reset_requested = true;
-                        ui.close();
                     }
                 });
             }

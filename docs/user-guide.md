@@ -9,10 +9,10 @@ running; this file covers using it.
   the solver starts running once its initial mesh is ready. On a narrower
   screen the bar folds, a step at a time and only as far as it must: the panel
   tabs go into a Panels menu, then Undo, Redo, Fit view, Run/Pause, Step and
-  Reset become icons (their names on hover), then Redo, Fit view, Step and
-  Reset move into a … menu at the right end, then + Draw and Panels shrink to
-  + and ☰, and last Examples to its picture. A phone held upright keeps File
-  and Examples in words. Below 700 px the inspector floats over the viewport
+  Reset become icons (their names on hover), then Redo, Fit view and Step
+  move into a … menu at the right end, then + Draw and Panels shrink to + and
+  ☰, and last Examples to its picture. A phone held upright keeps File,
+  Examples and Reset. Below 700 px the inspector floats over the viewport
   instead of docking beside it, and a launch opens none, so the scene and its
   card are what a phone shows first. Edit contains
   selection, transforms, topology, and boundary tools; View contains visual
