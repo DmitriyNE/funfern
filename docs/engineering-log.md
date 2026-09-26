@@ -14147,3 +14147,22 @@ meshes on the CI runner (AMD EPYC, glibc).
   `the_undo_shortcut_cancels_a_gesture_rather_than_stepping_under_it`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Catalogue in sections, and the starter obstacle renamed
+
+- First of the onboarding steps: each example carries an `ExampleGroup`, and
+  the catalogue is reordered so it runs through the sections in the gallery's
+  order. The next steps show the gallery in sections and step the open
+  example with ◂ ▸, which then walks the gallery as it is shown.
+- Seven sections: basics; interfaces and media; lenses and imaging; guides
+  and crystals; resonators; time-varying media; nonlinear and self-organizing.
+  The six first proposed had no place for Brewster, the two skin depths, the
+  plasma mirror and the anisotropic crystal, hence the second.
+- "Starter obstacle" is now "Obstacle over a mirror": a point source
+  scattering off a round obstacle above a reflecting floor. The app has not
+  started on it for a long time. It stays first.
+- Test: `the_catalog_runs_section_by_section` (sections contiguous and in
+  order, none empty, no two names alike). An editor test that took the
+  catalogue's fourth entry now finds the GRIN collimator by name.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

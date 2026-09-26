@@ -5410,7 +5410,12 @@ mod tests {
 
     #[test]
     fn loaded_material_and_probe_ids_are_reseeded_and_document_edits_are_atomic() {
-        let document = crate::topology_examples::catalog()[3].document.clone();
+        let document = crate::topology_examples::catalog()
+            .iter()
+            .find(|example| example.name == "GRIN collimator")
+            .unwrap()
+            .document
+            .clone();
         let maximum_material = document
             .model
             .draft

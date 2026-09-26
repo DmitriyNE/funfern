@@ -13,9 +13,48 @@ use funfern_core::*;
 use std::sync::OnceLock;
 
 pub struct TopologyExample {
+    pub group: ExampleGroup,
     pub name: &'static str,
     pub description: &'static str,
     pub document: TopologyDocument,
+}
+
+/// The gallery's sections. The catalog runs through them in this order, one
+/// section after another, so stepping from one example to the next walks the
+/// gallery as it is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ExampleGroup {
+    Basics,
+    InterfacesAndMedia,
+    LensesAndImaging,
+    GuidesAndCrystals,
+    Resonators,
+    TimeVaryingMedia,
+    NonlinearAndSelfOrganizing,
+}
+
+impl ExampleGroup {
+    pub const ALL: [Self; 7] = [
+        Self::Basics,
+        Self::InterfacesAndMedia,
+        Self::LensesAndImaging,
+        Self::GuidesAndCrystals,
+        Self::Resonators,
+        Self::TimeVaryingMedia,
+        Self::NonlinearAndSelfOrganizing,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Basics => "Basics",
+            Self::InterfacesAndMedia => "Interfaces and media",
+            Self::LensesAndImaging => "Lenses and imaging",
+            Self::GuidesAndCrystals => "Guides and crystals",
+            Self::Resonators => "Resonators",
+            Self::TimeVaryingMedia => "Time-varying media",
+            Self::NonlinearAndSelfOrganizing => "Nonlinear and self-organizing",
+        }
+    }
 }
 
 pub fn catalog() -> &'static [TopologyExample] {
@@ -23,187 +62,47 @@ pub fn catalog() -> &'static [TopologyExample] {
     CATALOG.get_or_init(|| {
         vec![
             example(
-                "Starter obstacle",
+                ExampleGroup::Basics,
+                "Obstacle over a mirror",
                 "A point source scatters from a rounded obstacle above a reflecting floor.",
-                starter_obstacle(),
+                obstacle_over_a_mirror(),
             ),
             example(
+                ExampleGroup::Basics,
                 "Double slit",
                 "A source boxed in black walls lights two slits; the screen and the far field show \
                  the fringes.",
                 double_slit(),
             ),
             example(
-                "Material lens",
-                "A TM electric-field source illuminates a slower dielectric region with absorbing edges.",
-                material_lens(),
-            ),
-            example(
-                "GRIN collimator",
-                "A quarter-pitch graded-index rod turns a point source on one face into a \
-                 collimated beam leaving the other.",
-                grin_rod(),
-            ),
-            example(
-                "Anisotropic crystal",
-                "A rotated directional inclusion turns circular wavefronts into ellipses.",
-                anisotropic_crystal(),
-            ),
-            example(
-                "Luneburg lens",
-                "A TE plane wave arriving at 30° focuses on the far rim of a radial-index lens, \
-                 wherever it comes from.",
-                luneburg_lens(),
-            ),
-            example(
-                "Phased array",
-                "Five compact region sources use a phase ramp to steer a radiated beam.",
-                phased_array(),
-            ),
-            example(
+                ExampleGroup::Basics,
                 "Obstacle array",
                 "A point source drives multiple scattering through eight reflecting obstacles.",
                 obstacle_array(),
             ),
             example(
-                "Kerr slab",
-                "A strong source drives a Kerr slab: the wave slows where it is strong, and the \
-                 receiver hears the source's third harmonic.",
-                kerr_slab(),
+                ExampleGroup::Basics,
+                "Phased array",
+                "Five compact region sources use a phase ramp to steer a radiated beam.",
+                phased_array(),
             ),
             example(
-                "Parametric pump",
-                "A slab pumped at twice the source frequency amplifies what it transmits, by an \
-                 amount the pump's phase sets.",
-                pumped_slab(),
+                ExampleGroup::Basics,
+                "Talbot carpet",
+                "A plane wave through a grating of period 0.4 at 4 Hz: behind it the grating's \
+                 image comes back at the Talbot distance, 1.14 rather than the paraxial 1.28, \
+                 bright behind the slits, and halfway there shifted by half a period, bright \
+                 behind the bars.",
+                talbot(),
             ),
             example(
-                "Time crystal",
-                "A slab whose permittivity steps up and down once a second splits the wave into \
-                 sidebands; its sharp edges reach three steps out.",
-                time_crystal_slab(),
+                ExampleGroup::InterfacesAndMedia,
+                "Anisotropic crystal",
+                "A rotated directional inclusion turns circular wavefronts into ellipses.",
+                anisotropic_crystal(),
             ),
             example(
-                "Travelling modulation",
-                "A modulation running with the wave converts it to higher frequencies; mirrored, \
-                 against the wave, it barely does.",
-                travelling_slab(),
-            ),
-            example(
-                "Plasma mirror",
-                "A plane wave climbs a plasma whose cutoff rises along the channel, stands in \
-                 front of the point where the cutoff meets its frequency, and never passes it.",
-                plasma_mirror(),
-            ),
-            example(
-                "Josephson line",
-                "A junction line held at a constant voltage on one end sheds one fluxon per \
-                 turn of its phase; each runs down the line as a kink in the integrated field.",
-                josephson_line(),
-            ),
-            example(
-                "Symmetry breaking",
-                "A medium resting on the top of a double well is tipped by faint frozen noise: \
-                 it falls into both wells in patches, then the walls between them move until \
-                 one well holds everything. Shown in the integrated field.",
-                symmetry_breaking(),
-            ),
-            example(
-                "Pinned domain wall",
-                "A double-well medium falls into opposite wells either side of a wall that forms \
-                 off-centre. Two round bumps narrow the channel: the wall slides to their waist \
-                 and stays, and dragging the bumps drags it along.",
-                pinned_domain_wall(),
-            ),
-            example(
-                "Self-sustained emitter",
-                "A disk of van der Pol oscillators starts from a faint seed and rings at its own \
-                 3 Hz cutoff, sending rings through a plasma. Raise the plasma's cutoff above \
-                 3 Hz and the rings stop: the disk still rings, but its tone cannot leave.",
-                emitter(),
-            ),
-            example(
-                "Plasma whispering gallery",
-                "A vacuum disk walled by a plasma, driven at 3.1 Hz below the plasma's cutoff: \
-                 ten lobes of a whispering-gallery mode build up around the rim, and outside it \
-                 the field dies within a few hundredths. Drive it at 5 Hz, above the cutoff, and \
-                 the wall turns transparent.",
-                whispering_gallery(),
-            ),
-            example(
-                "Parametric fiber amplifier",
-                "A graded-index fiber whose permittivity is pumped at twice the signal's \
-                 frequency by a wave running with it amplifies the signal about fivefold by the \
-                 far end; shift the pump's phase by half a turn and the same signal is squeezed. \
-                 Stop the pump's wave (wavenumber 0) and the fiber oscillates on its own.",
-                fiber_amplifier(),
-            ),
-            example(
-                "Bent fiber",
-                "A glass fiber, single-mode at 4 Hz, carries its mode round a quarter turn of \
-                 radius 0.5 and delivers about three quarters of it to the top. Round the bend \
-                 the mode's outer flank would have to outrun the light outside, so it sheds a \
-                 beam off tangentially; drag the bend tighter and it sheds more.",
-                bent_fiber(),
-            ),
-            example(
-                "Photonic crystal",
-                "A plane wave at 1.85 Hz meets five columns of ceramic rods, ε = 9, in a square \
-                 lattice: the frequency is in the crystal's band gap, the wave turns back, and \
-                 under a thousandth of its power gets through. Tune the launcher to 1 Hz, below \
-                 the gap, or 2.5 Hz, above it, and most of it passes.",
-                photonic_crystal(),
-            ),
-            example(
-                "Crystal bend",
-                "The photonic crystal with a channel of missing rods that turns a right angle. \
-                 At 1.85 Hz, in the band gap, the wave cannot enter the crystal, so it follows \
-                 the channel round the corner and out through the top, delivering about nine \
-                 tenths of what a straight channel does.",
-                crystal_bend(),
-            ),
-            example(
-                "Ring resonator",
-                "A glass ring beside a glass fiber, driven at 3.975 Hz, one of the ring's \
-                 resonances: over half a minute the ring fills to ten times its field between \
-                 resonances, and past it the fiber keeps under a fifth of its power, the rest \
-                 shed from the ring's bend. Tune the source to 3.885 Hz, between resonances, \
-                 and the wave runs past.",
-                ring_resonator(),
-            ),
-            example(
-                "Acoustic whispering gallery",
-                "A 4 Hz source just inside a round room's reflecting wall, open on the left: \
-                 the sound clings to the wall all the way round, so the far wall, half a turn \
-                 away and twice as far as the centre, is several times louder than the centre. \
-                 Delete the wall and the centre is the louder.",
-                acoustic_gallery(),
-            ),
-            example(
-                "Dielectric whispering gallery",
-                "A dielectric disk, ε = 4, with a 2.55 Hz source just inside its rim: at this, \
-                 one of its whispering-gallery resonances, total internal reflection holds the \
-                 wave running round inside the rim, and over half a minute it builds to fourteen \
-                 lobes eight times the field at 2.7 Hz, between resonances.",
-                dielectric_gallery(),
-            ),
-            example(
-                "Maxwell's fisheye",
-                "A disk whose index falls from 2 at its centre to 1 at its rim, n = 2/(1 + (r/R)²): \
-                 every ray a source on the rim sends inward curves round to the opposite point, \
-                 so the far rim lights up there five times brighter than 45° either side. Set \
-                 the profile to 1 and the far rim is no brighter anywhere.",
-                fisheye(),
-            ),
-            example(
-                "Fresnel zone plate",
-                "A plane wave meets a screen of reflecting strips open over the odd Fresnel zones \
-                 for a focus 0.4 behind it: the waves from the open zones arrive there in step \
-                 and gather into a spot 1.7 times the plane wave's amplitude, nearly three times \
-                 its energy, and over three times the field 0.4 to either side.",
-                zone_plate(),
-            ),
-            example(
+                ExampleGroup::InterfacesAndMedia,
                 "Brewster angle",
                 "A point source in front of glass, ε = 2.25, in the H_z skin: each ray meets the \
                  glass at its own angle, and the one meeting it at the Brewster angle, atan 1.5 = \
@@ -213,40 +112,7 @@ pub fn catalog() -> &'static [TopologyExample] {
                 brewster(),
             ),
             example(
-                "Frustrated total internal reflection",
-                "A glass fiber holds its light by total internal reflection, and outside the core \
-                 the field dies away within a few hundredths. Lower a glass block to 0.05 above it \
-                 and the reflection is frustrated: the light tunnels across the gap and leaves \
-                 into the block as a tilted beam, draining 40% of the fiber's power. Raise the \
-                 block to 0.15 and under a hundredth tunnels.",
-                tunnelling(),
-            ),
-            example(
-                "Talbot carpet",
-                "A plane wave through a grating of period 0.4 at 4 Hz: behind it the grating's \
-                 image comes back at the Talbot distance, 1.14 rather than the paraxial 1.28, \
-                 bright behind the slits, and halfway there shifted by half a period, bright \
-                 behind the bars.",
-                talbot(),
-            ),
-            example(
-                "Drum modes",
-                "A clamped round membrane driven at 1.36 Hz, j₂₁/(2πa), its (2,1) mode: it \
-                 stands in four lobes, rising and falling in turn, with two still diameters \
-                 between them that keep under a tenth of the lobes' motion. Drive it 0.01 Hz \
-                 off and the lobes fall.",
-                drum(),
-            ),
-            example(
-                "Disordered crystal",
-                "The photonic crystal's fifty rods scattered at random, a fixed seed, and lit at \
-                 2.5 Hz, where the ordered crystal lets 80% of the power through: scattered from \
-                 rod to rod, about an eighth gets through, nearly all of it thrown off the \
-                 straight path. A slab this thin cannot show Anderson localization itself; this \
-                 is the scattering that leads to it.",
-                disordered_crystal(),
-            ),
-            example(
+                ExampleGroup::InterfacesAndMedia,
                 "Skin depth",
                 "A plane wave at 3 Hz meets a slab whose electric loss is twice its angular \
                  frequency: inside, the wave falls by e every 0.068 while its crests stand 0.26 \
@@ -255,6 +121,7 @@ pub fn catalog() -> &'static [TopologyExample] {
                 skin_depth(),
             ),
             example(
+                ExampleGroup::InterfacesAndMedia,
                 "Plasma skin depth",
                 "The skin-depth slab as a cold plasma whose cutoff, 4 Hz, lies above the 3 Hz \
                  wave: the field reaching into it falls by e every 0.060, κ = √(ωp² − ω²)/c, \
@@ -264,6 +131,193 @@ pub fn catalog() -> &'static [TopologyExample] {
                 plasma_skin_depth(),
             ),
             example(
+                ExampleGroup::InterfacesAndMedia,
+                "Plasma mirror",
+                "A plane wave climbs a plasma whose cutoff rises along the channel, stands in \
+                 front of the point where the cutoff meets its frequency, and never passes it.",
+                plasma_mirror(),
+            ),
+            example(
+                ExampleGroup::LensesAndImaging,
+                "Material lens",
+                "A TM electric-field source illuminates a slower dielectric region with absorbing edges.",
+                material_lens(),
+            ),
+            example(
+                ExampleGroup::LensesAndImaging,
+                "GRIN collimator",
+                "A quarter-pitch graded-index rod turns a point source on one face into a \
+                 collimated beam leaving the other.",
+                grin_rod(),
+            ),
+            example(
+                ExampleGroup::LensesAndImaging,
+                "Luneburg lens",
+                "A TE plane wave arriving at 30° focuses on the far rim of a radial-index lens, \
+                 wherever it comes from.",
+                luneburg_lens(),
+            ),
+            example(
+                ExampleGroup::LensesAndImaging,
+                "Maxwell's fisheye",
+                "A disk whose index falls from 2 at its centre to 1 at its rim, n = 2/(1 + (r/R)²): \
+                 every ray a source on the rim sends inward curves round to the opposite point, \
+                 so the far rim lights up there five times brighter than 45° either side. Set \
+                 the profile to 1 and the far rim is no brighter anywhere.",
+                fisheye(),
+            ),
+            example(
+                ExampleGroup::LensesAndImaging,
+                "Fresnel zone plate",
+                "A plane wave meets a screen of reflecting strips open over the odd Fresnel zones \
+                 for a focus 0.4 behind it: the waves from the open zones arrive there in step \
+                 and gather into a spot 1.7 times the plane wave's amplitude, nearly three times \
+                 its energy, and over three times the field 0.4 to either side.",
+                zone_plate(),
+            ),
+            example(
+                ExampleGroup::GuidesAndCrystals,
+                "Bent fiber",
+                "A glass fiber, single-mode at 4 Hz, carries its mode round a quarter turn of \
+                 radius 0.5 and delivers about three quarters of it to the top. Round the bend \
+                 the mode's outer flank would have to outrun the light outside, so it sheds a \
+                 beam off tangentially; drag the bend tighter and it sheds more.",
+                bent_fiber(),
+            ),
+            example(
+                ExampleGroup::GuidesAndCrystals,
+                "Frustrated total internal reflection",
+                "A glass fiber holds its light by total internal reflection, and outside the core \
+                 the field dies away within a few hundredths. Lower a glass block to 0.05 above it \
+                 and the reflection is frustrated: the light tunnels across the gap and leaves \
+                 into the block as a tilted beam, draining 40% of the fiber's power. Raise the \
+                 block to 0.15 and under a hundredth tunnels.",
+                tunnelling(),
+            ),
+            example(
+                ExampleGroup::GuidesAndCrystals,
+                "Photonic crystal",
+                "A plane wave at 1.85 Hz meets five columns of ceramic rods, ε = 9, in a square \
+                 lattice: the frequency is in the crystal's band gap, the wave turns back, and \
+                 under a thousandth of its power gets through. Tune the launcher to 1 Hz, below \
+                 the gap, or 2.5 Hz, above it, and most of it passes.",
+                photonic_crystal(),
+            ),
+            example(
+                ExampleGroup::GuidesAndCrystals,
+                "Crystal bend",
+                "The photonic crystal with a channel of missing rods that turns a right angle. \
+                 At 1.85 Hz, in the band gap, the wave cannot enter the crystal, so it follows \
+                 the channel round the corner and out through the top, delivering about nine \
+                 tenths of what a straight channel does.",
+                crystal_bend(),
+            ),
+            example(
+                ExampleGroup::GuidesAndCrystals,
+                "Disordered crystal",
+                "The photonic crystal's fifty rods scattered at random, a fixed seed, and lit at \
+                 2.5 Hz, where the ordered crystal lets 80% of the power through: scattered from \
+                 rod to rod, about an eighth gets through, nearly all of it thrown off the \
+                 straight path. A slab this thin cannot show Anderson localization itself; this \
+                 is the scattering that leads to it.",
+                disordered_crystal(),
+            ),
+            example(
+                ExampleGroup::Resonators,
+                "Drum modes",
+                "A clamped round membrane driven at 1.36 Hz, j₂₁/(2πa), its (2,1) mode: it \
+                 stands in four lobes, rising and falling in turn, with two still diameters \
+                 between them that keep under a tenth of the lobes' motion. Drive it 0.01 Hz \
+                 off and the lobes fall.",
+                drum(),
+            ),
+            example(
+                ExampleGroup::Resonators,
+                "Acoustic whispering gallery",
+                "A 4 Hz source just inside a round room's reflecting wall, open on the left: \
+                 the sound clings to the wall all the way round, so the far wall, half a turn \
+                 away and twice as far as the centre, is several times louder than the centre. \
+                 Delete the wall and the centre is the louder.",
+                acoustic_gallery(),
+            ),
+            example(
+                ExampleGroup::Resonators,
+                "Dielectric whispering gallery",
+                "A dielectric disk, ε = 4, with a 2.55 Hz source just inside its rim: at this, \
+                 one of its whispering-gallery resonances, total internal reflection holds the \
+                 wave running round inside the rim, and over half a minute it builds to fourteen \
+                 lobes eight times the field at 2.7 Hz, between resonances.",
+                dielectric_gallery(),
+            ),
+            example(
+                ExampleGroup::Resonators,
+                "Plasma whispering gallery",
+                "A vacuum disk walled by a plasma, driven at 3.1 Hz below the plasma's cutoff: \
+                 ten lobes of a whispering-gallery mode build up around the rim, and outside it \
+                 the field dies within a few hundredths. Drive it at 5 Hz, above the cutoff, and \
+                 the wall turns transparent.",
+                whispering_gallery(),
+            ),
+            example(
+                ExampleGroup::Resonators,
+                "Ring resonator",
+                "A glass ring beside a glass fiber, driven at 3.975 Hz, one of the ring's \
+                 resonances: over half a minute the ring fills to ten times its field between \
+                 resonances, and past it the fiber keeps under a fifth of its power, the rest \
+                 shed from the ring's bend. Tune the source to 3.885 Hz, between resonances, \
+                 and the wave runs past.",
+                ring_resonator(),
+            ),
+            example(
+                ExampleGroup::TimeVaryingMedia,
+                "Parametric pump",
+                "A slab pumped at twice the source frequency amplifies what it transmits, by an \
+                 amount the pump's phase sets.",
+                pumped_slab(),
+            ),
+            example(
+                ExampleGroup::TimeVaryingMedia,
+                "Time crystal",
+                "A slab whose permittivity steps up and down once a second splits the wave into \
+                 sidebands; its sharp edges reach three steps out.",
+                time_crystal_slab(),
+            ),
+            example(
+                ExampleGroup::TimeVaryingMedia,
+                "Travelling modulation",
+                "A modulation running with the wave converts it to higher frequencies; mirrored, \
+                 against the wave, it barely does.",
+                travelling_slab(),
+            ),
+            example(
+                ExampleGroup::TimeVaryingMedia,
+                "Doppler mirror",
+                "A 1 Hz plane wave meets a slab whose permittivity is a grating running \
+                 toward it at half the wave speed. The grating reflects it as a moving mirror \
+                 would, at (c + v)/(c − v) = 3 times its frequency: the probe in front hears \
+                 3 Hz about as loud as the wave itself. The reflection carries more power than \
+                 the wave lost, since the grating does work on it, but it returns one wave \
+                 quantum for each one it takes. At rest the grating reflects nothing.",
+                doppler_mirror(),
+            ),
+            example(
+                ExampleGroup::TimeVaryingMedia,
+                "Parametric fiber amplifier",
+                "A graded-index fiber whose permittivity is pumped at twice the signal's \
+                 frequency by a wave running with it amplifies the signal about fivefold by the \
+                 far end; shift the pump's phase by half a turn and the same signal is squeezed. \
+                 Stop the pump's wave (wavenumber 0) and the fiber oscillates on its own.",
+                fiber_amplifier(),
+            ),
+            example(
+                ExampleGroup::NonlinearAndSelfOrganizing,
+                "Kerr slab",
+                "A strong source drives a Kerr slab: the wave slows where it is strong, and the \
+                 receiver hears the source's third harmonic.",
+                kerr_slab(),
+            ),
+            example(
+                ExampleGroup::NonlinearAndSelfOrganizing,
                 "Spatial soliton",
                 "A 4 Hz beam enters a slab of saturable Kerr medium whose index at 4 Hz is 1, \
                  so a weak wave does not see it. Weak, the beam spreads to three times its \
@@ -275,20 +329,42 @@ pub fn catalog() -> &'static [TopologyExample] {
                 spatial_soliton(),
             ),
             example(
-                "Doppler mirror",
-                "A 1 Hz plane wave meets a slab whose permittivity is a grating running \
-                 toward it at half the wave speed. The grating reflects it as a moving mirror \
-                 would, at (c + v)/(c − v) = 3 times its frequency: the probe in front hears \
-                 3 Hz about as loud as the wave itself. The reflection carries more power than \
-                 the wave lost, since the grating does work on it, but it returns one wave \
-                 quantum for each one it takes. At rest the grating reflects nothing.",
-                doppler_mirror(),
+                ExampleGroup::NonlinearAndSelfOrganizing,
+                "Josephson line",
+                "A junction line held at a constant voltage on one end sheds one fluxon per \
+                 turn of its phase; each runs down the line as a kink in the integrated field.",
+                josephson_line(),
+            ),
+            example(
+                ExampleGroup::NonlinearAndSelfOrganizing,
+                "Symmetry breaking",
+                "A medium resting on the top of a double well is tipped by faint frozen noise: \
+                 it falls into both wells in patches, then the walls between them move until \
+                 one well holds everything. Shown in the integrated field.",
+                symmetry_breaking(),
+            ),
+            example(
+                ExampleGroup::NonlinearAndSelfOrganizing,
+                "Pinned domain wall",
+                "A double-well medium falls into opposite wells either side of a wall that forms \
+                 off-centre. Two round bumps narrow the channel: the wall slides to their waist \
+                 and stays, and dragging the bumps drags it along.",
+                pinned_domain_wall(),
+            ),
+            example(
+                ExampleGroup::NonlinearAndSelfOrganizing,
+                "Self-sustained emitter",
+                "A disk of van der Pol oscillators starts from a faint seed and rings at its own \
+                 3 Hz cutoff, sending rings through a plasma. Raise the plasma's cutoff above \
+                 3 Hz and the rings stop: the disk still rings, but its tone cannot leave.",
+                emitter(),
             ),
         ]
     })
 }
 
 fn example(
+    group: ExampleGroup,
     name: &'static str,
     description: &'static str,
     mut document: TopologyDocument,
@@ -301,6 +377,7 @@ fn example(
         .compile(0)
         .expect("built-in topology example must compile");
     TopologyExample {
+        group,
         name,
         description,
         document,
@@ -745,7 +822,7 @@ fn reflecting_floor() -> OuterBoundaryConditions {
     boundaries
 }
 
-fn starter_obstacle() -> TopologyDocument {
+fn obstacle_over_a_mirror() -> TopologyDocument {
     let mut builder = Builder::new();
     builder.scene.outer_boundaries = reflecting_floor();
     builder.hole(PeriodicCubicSpline::rounded(Point2::new(0.1, 0.05), 0.22));
@@ -3349,7 +3426,7 @@ mod tests {
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
         assert_eq!(catalog().len(), 36);
-        assert_eq!(catalog()[0].name, "Starter obstacle");
+        assert_eq!(catalog()[0].name, "Obstacle over a mirror");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
             assert_eq!(
@@ -3372,6 +3449,32 @@ mod tests {
                 PhysicsModel::Electromagnetic { .. }
             )
         }));
+    }
+
+    /// The catalog runs section by section in the gallery's order, every
+    /// section has something in it, and no two scenes share a name.
+    #[test]
+    fn the_catalog_runs_section_by_section() {
+        let groups = catalog()
+            .iter()
+            .map(|example| example.group)
+            .collect::<Vec<_>>();
+        assert!(
+            ExampleGroup::ALL.is_sorted(),
+            "ALL is not the declared order"
+        );
+        assert!(
+            groups.is_sorted(),
+            "a section is split or out of order: {groups:?}"
+        );
+        for group in ExampleGroup::ALL {
+            assert!(groups.contains(&group), "{} is empty", group.label());
+        }
+        let names = catalog()
+            .iter()
+            .map(|example| example.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names.len(), catalog().len());
     }
 
     /// Every gallery material the simple view cannot name opens in Advanced,

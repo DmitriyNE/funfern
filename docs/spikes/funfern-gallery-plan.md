@@ -81,7 +81,7 @@ Claims, with the screen 0.85 behind the slits, spacing 0.5, wavelength 1/3:
 Nothing leaves the box except through the slits, so the far-field pattern is
 the two-slit pattern alone.
 
-### 2. Starter obstacle
+### 2. Obstacle over a mirror (was: Starter obstacle)
 
 The description says "above a reflecting floor" but both walls reflect. The
 top wall becomes outgoing; the floor stays.
@@ -960,6 +960,29 @@ law on the complementary row first.
 
 Catalogue count after everything: 12 when the plan began, 36 with the
 planned scenes and 25b; the catalogue test's count moves with each commit.
+
+Grouped on 26 September, for onboarding: the gallery shows the catalogue in
+sections, and the catalogue runs through them in order, so stepping from one
+example to the next walks the gallery as it is shown
+(`the_catalog_runs_section_by_section`):
+
+- **Basics:** obstacle over a mirror, double slit, obstacle array, phased
+  array, Talbot carpet.
+- **Interfaces and media:** anisotropic crystal, Brewster angle, skin depth,
+  plasma skin depth, plasma mirror.
+- **Lenses and imaging:** material lens, GRIN collimator, Luneburg lens,
+  Maxwell's fisheye, Fresnel zone plate.
+- **Guides and crystals:** bent fiber, frustrated TIR, photonic crystal,
+  crystal bend, disordered crystal.
+- **Resonators:** drum modes, the acoustic, dielectric and plasma whispering
+  galleries, ring resonator.
+- **Time-varying media:** parametric pump, time crystal, travelling
+  modulation, Doppler mirror, parametric fiber amplifier.
+- **Nonlinear and self-organizing:** Kerr slab, spatial soliton, Josephson
+  line, symmetry breaking, pinned domain wall, self-sustained emitter.
+
+The starter obstacle became "Obstacle over a mirror" then, since it had long
+stopped being where the app starts.
 
 ## Blocked
 
