@@ -427,3 +427,214 @@ impl Default for FarFieldSettings {
         }
     }
 }
+
+/// A quantity a line or boundary probe samples along its path. The GPU records
+/// four of these every frame; `MeanFlux` and `MeanEnergy` are derived from
+/// `Flux` and `Energy` by a trailing mean. A readout chooses which to draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineProbeQuantity {
+    Field,
+    Transverse,
+    Flux,
+    MeanFlux,
+    Energy,
+    MeanEnergy,
+}
+
+impl LineProbeQuantity {
+    pub const ALL: [Self; 6] = [
+        Self::Field,
+        Self::Transverse,
+        Self::Flux,
+        Self::MeanFlux,
+        Self::Energy,
+        Self::MeanEnergy,
+    ];
+
+    /// The quantity's row in `ProbeReadout::line_plots`, three to a row.
+    pub const fn offset(self) -> usize {
+        match self {
+            Self::Field => 0,
+            Self::Transverse => 3,
+            Self::Flux => 6,
+            Self::MeanFlux => 9,
+            Self::Energy => 12,
+            Self::MeanEnergy => 15,
+        }
+    }
+
+    /// Whether the row is drawn from the trailing mean of the recorded flux or
+    /// energy density rather than from the record the GPU wrote.
+    pub const fn averaged(self) -> bool {
+        matches!(self, Self::MeanFlux | Self::MeanEnergy)
+    }
+}
+
+/// How a line probe's quantity is drawn: along the path at one time, as a
+/// waterfall of the path over time, or integrated along the path over time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineProbeRepresentation {
+    Arclength,
+    Waterfall,
+    Integral,
+}
+
+impl LineProbeRepresentation {
+    pub const ALL: [Self; 3] = [Self::Arclength, Self::Waterfall, Self::Integral];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Arclength => "vs s",
+            Self::Waterfall => "Waterfall",
+            Self::Integral => "∫ vs t",
+        }
+    }
+
+    /// The representation's column in `ProbeReadout::line_plots`.
+    pub const fn offset(self) -> usize {
+        match self {
+            Self::Arclength => 0,
+            Self::Waterfall => 1,
+            Self::Integral => 2,
+        }
+    }
+}
+
+/// What a probe's readout shows: which plots, over how many seconds, and the
+/// averaging and waterfall scale behind them. Like the rest of the view it is
+/// a way of looking at the scene: kept with the document so a scene opens its
+/// probes on what they are there to show, but not undone, and never seen by
+/// the solver. Each probe kind reads its own plots and leaves the others; the
+/// far-field readout uses the same type.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProbeReadout {
+    /// Seconds of history in view.
+    pub span: f64,
+    /// A point probe's field, its rate, the transverse field's magnitude, the
+    /// energy flow's magnitude and the energy density.
+    pub field: bool,
+    pub secondary_field: bool,
+    pub transverse_field: bool,
+    pub poynting: bool,
+    pub energy: bool,
+    /// An area probe's mean and RMS field, RMS transverse field, mean energy
+    /// density and total energy.
+    pub area_mean_field: bool,
+    pub area_rms_field: bool,
+    pub area_rms_transverse: bool,
+    pub area_mean_energy: bool,
+    pub area_total_energy: bool,
+    /// A line or boundary probe's plots, by `LineProbeQuantity::offset` plus
+    /// `LineProbeRepresentation::offset`.
+    pub line_plots: [bool; 18],
+    /// Seconds the `MeanFlux` and `MeanEnergy` rows average over. Fixed rather
+    /// than tied to the visible window, so panning and zooming move the view
+    /// over the same data instead of rewriting it.
+    pub mean_window: f64,
+    pub waterfall_gain: f32,
+    /// The far field's waterfall, polar patterns and radiated power.
+    pub far_waterfall: bool,
+    pub far_polar: bool,
+    pub far_power: bool,
+}
+
+impl Default for ProbeReadout {
+    fn default() -> Self {
+        Self {
+            span: 2.0,
+            field: true,
+            secondary_field: false,
+            transverse_field: false,
+            poynting: false,
+            energy: true,
+            area_mean_field: false,
+            area_rms_field: true,
+            area_rms_transverse: false,
+            area_mean_energy: false,
+            area_total_energy: true,
+            // Field versus arclength and its waterfall, the mean flux and mean
+            // energy profiles, and the two integrals. The mean energy profile
+            // is what shows a wave gaining or losing power along a path.
+            line_plots: [
+                true, true, false, // primary component
+                false, false, false, // transverse magnitude
+                false, false, true, // normal flux
+                true, false, false, // trailing mean of the normal flux
+                false, false, true, // energy density
+                true, false, false, // trailing mean of the energy density
+            ],
+            // Two and a half periods of the default source, five of the flux,
+            // which oscillates at twice the driven frequency.
+            mean_window: 1.0,
+            waterfall_gain: 1.0,
+            far_waterfall: true,
+            far_polar: true,
+            far_power: true,
+        }
+    }
+}
+
+impl ProbeReadout {
+    /// Nothing drawn, at the default window and scales: the base a scene
+    /// builds a probe's readout up from.
+    pub fn blank() -> Self {
+        Self {
+            field: false,
+            energy: false,
+            area_rms_field: false,
+            area_total_energy: false,
+            line_plots: [false; 18],
+            far_waterfall: false,
+            far_polar: false,
+            far_power: false,
+            ..Self::default()
+        }
+    }
+
+    pub fn line_plot(&self, quantity: LineProbeQuantity, view: LineProbeRepresentation) -> bool {
+        self.line_plots[quantity.offset() + view.offset()]
+    }
+
+    /// This readout with one more line plot drawn.
+    pub fn with_line_plot(
+        mut self,
+        quantity: LineProbeQuantity,
+        view: LineProbeRepresentation,
+    ) -> Self {
+        self.line_plots[quantity.offset() + view.offset()] = true;
+        self
+    }
+
+    pub fn valid(&self) -> bool {
+        self.span.is_finite()
+            && self.span > 0.0
+            && self.mean_window.is_finite()
+            && self.mean_window > 0.0
+            && self.waterfall_gain.is_finite()
+            && self.waterfall_gain > 0.0
+    }
+}
+
+/// The document's readouts: each probe's, by id, and the far field's. A probe
+/// without an entry reads the defaults.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProbeReadouts {
+    pub probes: std::collections::BTreeMap<ProbeId, ProbeReadout>,
+    pub far_field: ProbeReadout,
+}
+
+impl ProbeReadouts {
+    pub fn probe(&self, id: ProbeId) -> ProbeReadout {
+        self.probes.get(&id).copied().unwrap_or_default()
+    }
+
+    /// Keeps `readout` for `id`, holding an entry only where it differs from
+    /// the defaults so a document carries only what was chosen.
+    pub fn set_probe(&mut self, id: ProbeId, readout: ProbeReadout) {
+        if readout == ProbeReadout::default() {
+            self.probes.remove(&id);
+        } else {
+            self.probes.insert(id, readout);
+        }
+    }
+}

@@ -14060,3 +14060,40 @@ meshes on the CI runner (AMD EPYC, glibc).
   still dim at 12 s. It was offered as optional and not chosen.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Probe readouts are kept with the scene
+
+- Asked for: the gallery's probes opened on "a lot of useless" plots. What a
+  readout showed lived only in the UI (`ProbeViewState`), so every probe
+  opened on the same defaults: six plots for a line or boundary probe, field
+  and energy for a point probe. A scene had no way to say which plots its
+  claim reads.
+- **Kept now:**
+  - `ProbeReadout` (in `document`) holds a readout's choices: each kind's
+    plots, the span in view, the mean window and the waterfall gain, and the
+    far field's waterfall, polar and power plots.
+  - `TopologyDocument::readouts` holds one per probe that differs from the
+    defaults, plus the far field's. Like `presentation`, it is kept with the
+    view: not undone, and never seen by the solver. It travels through
+    files, links, autosave and the gallery.
+  - `LineProbeQuantity` and `LineProbeRepresentation` moved to `document` so
+    a scene can name its plots; their labels and colours stay in the UI
+    (`LineProbeQuantityView`).
+- **The readout window** takes its readout from the document every frame and
+  keeps only where its window sits. It writes back only what the user
+  changed (`edited_readout`). It clamps the span and mean window to the
+  history recorded so far, and those clamps stay the display's: a look early
+  in a run would otherwise have shortened a stored window for good.
+- **File:** version 22 keeps `presentation.probe_readouts` (by probe id, with
+  plots named, such as `{"quantity": "mean_energy", "view": "arclength"}`) and
+  `presentation.far_field_readout`. Both have serde defaults and are written
+  only when they differ from the defaults, so a scene that chose none reads
+  in an older build. A deleted probe's readout is still held in the session,
+  so Undo restores the probe as it was, but only the readouts of a scene's
+  own probes are written. A file naming a probe it does not have is refused.
+- The defaults for a new probe are unchanged, at the user's word.
+- Tests: `probe_readouts_round_trip`, `default_readouts_are_not_written`,
+  `only_a_scenes_own_probes_keep_readouts`,
+  `only_what_the_user_changes_reaches_the_document`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

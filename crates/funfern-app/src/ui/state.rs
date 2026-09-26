@@ -406,7 +406,7 @@ impl Default for Playground {
             probe_metadata_token: None,
             probe_name_edit: None,
             probe_history_seconds: 10.0,
-            far_field_view: ProbeViewState::new(10.0),
+            far_field_view: ProbeViewState::new(funfern_app::document::ProbeReadout::default()),
             probe_readback: 0,
             curve_probe_readback: 0,
             area_probe_readback: 0,

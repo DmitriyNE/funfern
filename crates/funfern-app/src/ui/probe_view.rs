@@ -12,30 +12,19 @@ pub(super) struct ProbeTrace {
     pub(super) last_time: f64,
 }
 
-/// A quantity a line or boundary probe samples along its path. The GPU records
-/// four of these every frame; `MeanFlux` and `MeanEnergy` are derived here from
-/// `Flux` and `Energy`. The readout chooses which to draw.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LineProbeQuantity {
-    Field,
-    Transverse,
-    Flux,
-    MeanFlux,
-    Energy,
-    MeanEnergy,
+use funfern_app::document::ProbeReadout;
+pub(super) use funfern_app::document::{LineProbeQuantity, LineProbeRepresentation};
+
+/// What the readout draws for each line-probe quantity: its name in this skin,
+/// its colour, and whether the skin has it.
+pub(super) trait LineProbeQuantityView {
+    fn label_for(self, physics: PhysicsModel) -> &'static str;
+    fn color(self) -> Color32;
+    fn applies(self, physics: PhysicsModel) -> bool;
 }
 
-impl LineProbeQuantity {
-    pub(super) const ALL: [Self; 6] = [
-        Self::Field,
-        Self::Transverse,
-        Self::Flux,
-        Self::MeanFlux,
-        Self::Energy,
-        Self::MeanEnergy,
-    ];
-
-    pub(super) const fn label_for(self, physics: PhysicsModel) -> &'static str {
+impl LineProbeQuantityView for LineProbeQuantity {
+    fn label_for(self, physics: PhysicsModel) -> &'static str {
         match self {
             Self::Field => primary_field_label(physics),
             Self::Transverse => transverse_field_magnitude_label(physics),
@@ -51,7 +40,7 @@ impl LineProbeQuantity {
         }
     }
 
-    pub(super) const fn color(self) -> Color32 {
+    fn color(self) -> Color32 {
         match self {
             Self::Field => SELECT,
             Self::Transverse => Color32::from_rgb(188, 139, 255),
@@ -62,119 +51,52 @@ impl LineProbeQuantity {
         }
     }
 
-    pub(super) const fn offset(self) -> usize {
-        match self {
-            Self::Field => 0,
-            Self::Transverse => 3,
-            Self::Flux => 6,
-            Self::MeanFlux => 9,
-            Self::Energy => 12,
-            Self::MeanEnergy => 15,
-        }
-    }
-
-    pub(super) const fn applies(self, _physics: PhysicsModel) -> bool {
+    fn applies(self, _physics: PhysicsModel) -> bool {
         true
     }
-
-    /// Whether the row is drawn from the trailing mean of the recorded flux or
-    /// energy density rather than from the record the GPU wrote.
-    pub(super) const fn averaged(self) -> bool {
-        matches!(self, Self::MeanFlux | Self::MeanEnergy)
-    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LineProbeRepresentation {
-    Arclength,
-    Waterfall,
-    Integral,
-}
-
-impl LineProbeRepresentation {
-    pub(super) const ALL: [Self; 3] = [Self::Arclength, Self::Waterfall, Self::Integral];
-
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::Arclength => "vs s",
-            Self::Waterfall => "Waterfall",
-            Self::Integral => "∫ vs t",
-        }
-    }
-
-    pub(super) const fn offset(self) -> usize {
-        match self {
-            Self::Arclength => 0,
-            Self::Waterfall => 1,
-            Self::Integral => 2,
-        }
-    }
-}
-
-/// Per-readout presentation: which traces are drawn and the shared time window
-/// every trace in that window pans and zooms together.
+/// Per-readout presentation: where the shared time window sits, and the
+/// document's `ProbeReadout` for which traces are drawn over how long. Every
+/// trace in a readout pans and zooms together.
 #[derive(Clone, Debug)]
 pub(super) struct ProbeViewState {
     pub(super) live: bool,
     pub(super) end_time: f64,
-    pub(super) span: f64,
-    pub(super) field: bool,
-    pub(super) secondary_field: bool,
-    pub(super) transverse_field: bool,
-    pub(super) poynting: bool,
-    pub(super) energy: bool,
-    pub(super) area_mean_field: bool,
-    pub(super) area_rms_field: bool,
-    pub(super) area_rms_transverse: bool,
-    pub(super) area_mean_energy: bool,
-    pub(super) area_total_energy: bool,
-    pub(super) line_plots: [bool; 18],
-    /// Seconds the `MeanFlux` and `MeanEnergy` rows average over. Fixed rather
-    /// than tied to the visible window, so panning and zooming move the view
-    /// over the same data instead of rewriting it.
-    pub(super) mean_window: f64,
-    pub(super) far_waterfall: bool,
-    pub(super) far_polar: bool,
-    pub(super) far_power: bool,
-    pub(super) waterfall_gain: f32,
+    pub(super) readout: ProbeReadout,
 }
 
 impl ProbeViewState {
-    pub(super) fn new(span: f64) -> Self {
+    pub(super) fn new(readout: ProbeReadout) -> Self {
         Self {
             live: true,
             end_time: 0.0,
-            span: span.min(2.0),
-            field: true,
-            secondary_field: false,
-            transverse_field: false,
-            poynting: false,
-            energy: true,
-            area_mean_field: false,
-            area_rms_field: true,
-            area_rms_transverse: false,
-            area_mean_energy: false,
-            area_total_energy: true,
-            // Field versus arclength and its waterfall, the mean flux and mean
-            // energy profiles, and the two integrals. The mean energy profile
-            // is what shows a wave gaining or losing power along a path.
-            line_plots: [
-                true, true, false, // primary component
-                false, false, false, // transverse magnitude
-                false, false, true, // normal flux
-                true, false, false, // trailing mean of the normal flux
-                false, false, true, // energy density
-                true, false, false, // trailing mean of the energy density
-            ],
-            // Two and a half periods of the default source, five of the flux,
-            // which oscillates at twice the driven frequency.
-            mean_window: 1.0,
-            far_waterfall: true,
-            far_polar: true,
-            far_power: true,
-            waterfall_gain: 1.0,
+            readout,
         }
     }
+}
+
+/// What a readout's window changed of its document readout, if anything. The
+/// window shows `shown`, which is `stored` with its span and mean window
+/// clamped to the history recorded so far; those clamps are the display's, so
+/// a span or window the user left alone keeps its stored value rather than
+/// being shortened for good by a look early in a run.
+pub(super) fn edited_readout(
+    stored: ProbeReadout,
+    shown: ProbeReadout,
+    after: ProbeReadout,
+) -> Option<ProbeReadout> {
+    if after == shown {
+        return None;
+    }
+    let mut edited = after;
+    if after.span == shown.span {
+        edited.span = stored.span;
+    }
+    if after.mean_window == shown.mean_window {
+        edited.mean_window = stored.mean_window;
+    }
+    Some(edited)
 }
 
 pub(super) struct CurveTrace {

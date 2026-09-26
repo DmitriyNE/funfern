@@ -66,12 +66,13 @@ impl Playground {
                 }) as f64;
                 let anchored_time = minimum_time + fraction * visible_span;
                 view.live = false;
-                view.span = (visible_span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+                view.readout.span =
+                    (visible_span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
                 let first = samples.first().unwrap().time;
                 let last = samples.last().unwrap().time;
-                let zoomed_span = view.span.min(last - first);
+                let zoomed_span = view.readout.span.min(last - first);
                 let fullest_span = maximum_span.min(last - first);
-                if view.span >= fullest_span * (1.0 - 1.0e-9) {
+                if view.readout.span >= fullest_span * (1.0 - 1.0e-9) {
                     view.live = true;
                     view.end_time = last;
                 } else {
@@ -441,7 +442,7 @@ impl Playground {
             let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
             if wheel != 0.0 {
                 view.live = false;
-                view.span = (span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+                view.readout.span = (span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
             }
         }
         let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, view) else {
@@ -459,7 +460,7 @@ impl Playground {
             .map(f32::abs)
             .fold(0.0, f32::max)
             .max(1.0e-12)
-            / view.waterfall_gain;
+            / view.readout.waterfall_gain;
         for (row, frame) in visible.iter().enumerate() {
             let samples = Self::curve_probe_values(frame, quantity);
             let count = samples.len();
@@ -549,8 +550,8 @@ impl Playground {
             let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
             if wheel != 0.0 {
                 view.live = false;
-                view.span = (span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
-                if view.span >= maximum_span * (1.0 - 1.0e-9) {
+                view.readout.span = (span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+                if view.readout.span >= maximum_span * (1.0 - 1.0e-9) {
                     view.live = true;
                 }
             }
@@ -570,7 +571,7 @@ impl Playground {
             .map(f32::abs)
             .fold(0.0, f32::max)
             .max(1.0e-12)
-            / view.waterfall_gain;
+            / view.readout.waterfall_gain;
         for (row, frame) in visible.iter().enumerate() {
             let count = frame.amplitude.len();
             if count == 0 {
@@ -799,10 +800,14 @@ impl Playground {
                 })
                 .collect::<Vec<_>>();
             let status = self.probe_status.get(&id).cloned();
+            // The document holds what the readout shows; the view only where
+            // its window sits.
+            let stored = self.editor.document.readouts.probe(id);
             let mut view = self
                 .probe_views
                 .remove(&id)
-                .unwrap_or_else(|| ProbeViewState::new(history));
+                .unwrap_or_else(|| ProbeViewState::new(stored));
+            view.readout = stored;
             let newest_time = point_samples
                 .last()
                 .map(|sample| sample.time)
@@ -813,8 +818,9 @@ impl Playground {
             {
                 view.end_time = time;
             }
-            view.span = view.span.clamp(0.02, history);
-            view.mean_window = view.mean_window.clamp(0.05, mean_limit);
+            view.readout.span = view.readout.span.clamp(0.02, history);
+            view.readout.mean_window = view.readout.mean_window.clamp(0.05, mean_limit);
+            let shown = view.readout;
             let kind = match probe.target {
                 TopologyProbeTarget::Point(_) => "point probe",
                 TopologyProbeTarget::Segment { .. } => "line probe",
@@ -853,7 +859,7 @@ impl Playground {
                                         },
                                     )
                                 })
-                                .filter(|index| view.line_plots[*index])
+                                .filter(|index| view.readout.line_plots[*index])
                                 .count();
                             egui::containers::menu::MenuButton::new(format!("Plots ({active})"))
                                 .config(
@@ -879,26 +885,35 @@ impl Playground {
                                                 for representation in LineProbeRepresentation::ALL {
                                                     let index =
                                                         quantity.offset() + representation.offset();
-                                                    ui.checkbox(&mut view.line_plots[index], "")
-                                                        .on_hover_text(format!(
-                                                            "{} {}",
-                                                            quantity.label_for(physics),
-                                                            representation.label()
-                                                        ));
+                                                    ui.checkbox(
+                                                        &mut view.readout.line_plots[index],
+                                                        "",
+                                                    )
+                                                    .on_hover_text(format!(
+                                                        "{} {}",
+                                                        quantity.label_for(physics),
+                                                        representation.label()
+                                                    ));
                                                 }
                                                 ui.end_row();
                                             }
                                         });
                                     ui.separator();
                                     ui.add(
-                                        egui::Slider::new(&mut view.waterfall_gain, 0.1..=10.0)
-                                            .logarithmic(true)
-                                            .text("Waterfall gain"),
+                                        egui::Slider::new(
+                                            &mut view.readout.waterfall_gain,
+                                            0.1..=10.0,
+                                        )
+                                        .logarithmic(true)
+                                        .text("Waterfall gain"),
                                     );
                                     ui.add(
-                                        egui::Slider::new(&mut view.mean_window, 0.05..=mean_limit)
-                                            .logarithmic(true)
-                                            .text("Mean window"),
+                                        egui::Slider::new(
+                                            &mut view.readout.mean_window,
+                                            0.05..=mean_limit,
+                                        )
+                                        .logarithmic(true)
+                                        .text("Mean window"),
                                     )
                                     .on_hover_text(
                                         "Seconds the averaged flux and energy rows look back \
@@ -909,11 +924,11 @@ impl Playground {
                                 });
                         } else if is_area {
                             let active = [
-                                view.area_mean_field,
-                                view.area_rms_field,
-                                view.area_rms_transverse,
-                                view.area_mean_energy,
-                                view.area_total_energy,
+                                view.readout.area_mean_field,
+                                view.readout.area_rms_field,
+                                view.readout.area_rms_transverse,
+                                view.readout.area_mean_energy,
+                                view.readout.area_total_energy,
                             ]
                             .into_iter()
                             .filter(|enabled| *enabled)
@@ -926,33 +941,36 @@ impl Playground {
                                 )
                                 .ui(ui, |ui| {
                                     ui.checkbox(
-                                        &mut view.area_mean_field,
+                                        &mut view.readout.area_mean_field,
                                         format!("Mean {}", primary_field_label(physics)),
                                     );
                                     ui.checkbox(
-                                        &mut view.area_rms_field,
+                                        &mut view.readout.area_rms_field,
                                         format!("RMS {}", primary_field_label(physics)),
                                     );
                                     ui.checkbox(
-                                        &mut view.area_rms_transverse,
+                                        &mut view.readout.area_rms_transverse,
                                         format!(
                                             "RMS {}",
                                             transverse_field_magnitude_label(physics)
                                         ),
                                     );
-                                    ui.checkbox(&mut view.area_mean_energy, "Mean energy density");
                                     ui.checkbox(
-                                        &mut view.area_total_energy,
+                                        &mut view.readout.area_mean_energy,
+                                        "Mean energy density",
+                                    );
+                                    ui.checkbox(
+                                        &mut view.readout.area_total_energy,
                                         total_energy_label(physics),
                                     );
                                 });
                         } else {
                             let active = [
-                                view.field,
-                                view.secondary_field,
-                                view.transverse_field,
-                                view.poynting,
-                                view.energy,
+                                view.readout.field,
+                                view.readout.secondary_field,
+                                view.readout.transverse_field,
+                                view.readout.poynting,
+                                view.readout.energy,
                             ]
                             .into_iter()
                             .filter(|enabled| *enabled)
@@ -964,20 +982,23 @@ impl Playground {
                                     ),
                                 )
                                 .ui(ui, |ui| {
-                                    ui.checkbox(&mut view.field, primary_field_label(physics));
                                     ui.checkbox(
-                                        &mut view.secondary_field,
+                                        &mut view.readout.field,
+                                        primary_field_label(physics),
+                                    );
+                                    ui.checkbox(
+                                        &mut view.readout.secondary_field,
                                         primary_field_rate_label(physics),
                                     );
                                     ui.checkbox(
-                                        &mut view.transverse_field,
+                                        &mut view.readout.transverse_field,
                                         transverse_field_magnitude_label(physics),
                                     );
                                     ui.checkbox(
-                                        &mut view.poynting,
+                                        &mut view.readout.poynting,
                                         energy_flow_magnitude_label(physics),
                                     );
-                                    ui.checkbox(&mut view.energy, "Energy density");
+                                    ui.checkbox(&mut view.readout.energy, "Energy density");
                                 });
                         }
                         if ui.small_button("Clear").clicked() {
@@ -1008,11 +1029,12 @@ impl Playground {
                                 LineProbeRepresentation::ALL
                                     .into_iter()
                                     .any(|representation| {
-                                        view.line_plots[quantity.offset() + representation.offset()]
+                                        view.readout.line_plots
+                                            [quantity.offset() + representation.offset()]
                                     })
                             });
                         let (mean_frames, mean_filled) = if averaged {
-                            Self::curve_probe_running_mean(&curve_frames, view.mean_window)
+                            Self::curve_probe_running_mean(&curve_frames, view.readout.mean_window)
                         } else {
                             (Vec::new(), 1.0)
                         };
@@ -1021,7 +1043,7 @@ impl Playground {
                                 GOLD,
                                 format!(
                                     "Filling the {:.2} s mean window · {:.0}%",
-                                    view.mean_window,
+                                    view.readout.mean_window,
                                     mean_filled * 100.0
                                 ),
                             );
@@ -1035,14 +1057,14 @@ impl Playground {
                             } else {
                                 &curve_frames
                             };
-                            if view.line_plots
+                            if view.readout.line_plots
                                 [quantity.offset() + LineProbeRepresentation::Arclength.offset()]
                             {
                                 Self::curve_probe_profile(
                                     ui, frames, &view, quantity, length, physics,
                                 );
                             }
-                            if view.line_plots
+                            if view.readout.line_plots
                                 [quantity.offset() + LineProbeRepresentation::Waterfall.offset()]
                             {
                                 Self::curve_probe_waterfall(
@@ -1055,7 +1077,7 @@ impl Playground {
                                     physics,
                                 );
                             }
-                            if view.line_plots
+                            if view.readout.line_plots
                                 [quantity.offset() + LineProbeRepresentation::Integral.offset()]
                             {
                                 // A frame the averaging window does not cover
@@ -1107,31 +1129,31 @@ impl Playground {
                         };
                         for (enabled, label, values, color) in [
                             (
-                                view.area_mean_field,
+                                view.readout.area_mean_field,
                                 format!("Mean {}", primary_field_label(physics)),
                                 history_of(|s| s.mean_displacement),
                                 SELECT,
                             ),
                             (
-                                view.area_rms_field,
+                                view.readout.area_rms_field,
                                 format!("RMS {}", primary_field_label(physics)),
                                 history_of(|s| s.rms_displacement),
                                 TEAL,
                             ),
                             (
-                                view.area_rms_transverse,
+                                view.readout.area_rms_transverse,
                                 format!("RMS {}", transverse_field_magnitude_label(physics)),
                                 history_of(|s| s.rms_transverse_magnitude),
                                 Color32::from_rgb(188, 139, 255),
                             ),
                             (
-                                view.area_mean_energy,
+                                view.readout.area_mean_energy,
                                 "Mean energy density".to_owned(),
                                 history_of(|s| s.mean_energy_density),
                                 GOLD,
                             ),
                             (
-                                view.area_total_energy,
+                                view.readout.area_total_energy,
                                 total_energy_label(physics).to_owned(),
                                 history_of(|s| s.total_energy),
                                 RED,
@@ -1150,7 +1172,7 @@ impl Playground {
                             }
                         }
                     } else {
-                        if view.field {
+                        if view.readout.field {
                             Self::probe_plot(
                                 ui,
                                 primary_field_label(physics),
@@ -1161,7 +1183,7 @@ impl Playground {
                                 history,
                             );
                         }
-                        if view.secondary_field {
+                        if view.readout.secondary_field {
                             Self::probe_plot(
                                 ui,
                                 primary_field_rate_label(physics),
@@ -1172,7 +1194,7 @@ impl Playground {
                                 history,
                             );
                         }
-                        if view.transverse_field {
+                        if view.readout.transverse_field {
                             Self::probe_plot(
                                 ui,
                                 transverse_field_magnitude_label(physics),
@@ -1183,7 +1205,7 @@ impl Playground {
                                 history,
                             );
                         }
-                        if view.poynting {
+                        if view.readout.poynting {
                             Self::probe_plot(
                                 ui,
                                 energy_flow_magnitude_label(physics),
@@ -1194,7 +1216,7 @@ impl Playground {
                                 history,
                             );
                         }
-                        if view.energy {
+                        if view.readout.energy {
                             Self::probe_plot(
                                 ui,
                                 "Local energy density",
@@ -1217,6 +1239,9 @@ impl Playground {
             }
             if !open {
                 self.probe_windows.remove(&id);
+            }
+            if let Some(edited) = edited_readout(stored, shown, view.readout) {
+                self.editor.document.readouts.set_probe(id, edited);
             }
             self.probe_views.insert(id, view);
         }
@@ -1255,12 +1280,15 @@ impl Playground {
             })
             .collect::<Vec<_>>();
         let newest_time = frames.last().map(|frame| frame.time);
+        let stored = self.editor.document.readouts.far_field;
+        self.far_field_view.readout = stored;
         if self.far_field_view.live
             && let Some(time) = newest_time
         {
             self.far_field_view.end_time = time;
         }
-        self.far_field_view.span = self.far_field_view.span.clamp(0.02, history);
+        self.far_field_view.readout.span = self.far_field_view.readout.span.clamp(0.02, history);
+        let shown = self.far_field_view.readout;
         let status = self
             .runtime
             .active()
@@ -1286,9 +1314,9 @@ impl Playground {
                         }
                     }
                     let active = [
-                        self.far_field_view.far_waterfall,
-                        self.far_field_view.far_polar,
-                        self.far_field_view.far_power,
+                        self.far_field_view.readout.far_waterfall,
+                        self.far_field_view.readout.far_polar,
+                        self.far_field_view.readout.far_power,
                     ]
                     .into_iter()
                     .filter(|enabled| *enabled)
@@ -1299,18 +1327,30 @@ impl Playground {
                                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
                         )
                         .ui(ui, |ui| {
-                            ui.checkbox(&mut self.far_field_view.far_waterfall, "Waterfall");
-                            ui.checkbox(&mut self.far_field_view.far_polar, "Polar patterns");
-                            ui.checkbox(&mut self.far_field_view.far_power, "Radiated power")
-                                .on_hover_text(
-                                    "Directional intensity integrated over observation angle",
-                                );
+                            ui.checkbox(
+                                &mut self.far_field_view.readout.far_waterfall,
+                                "Waterfall",
+                            );
+                            ui.checkbox(
+                                &mut self.far_field_view.readout.far_polar,
+                                "Polar patterns",
+                            );
+                            ui.checkbox(
+                                &mut self.far_field_view.readout.far_power,
+                                "Radiated power",
+                            )
+                            .on_hover_text(
+                                "Directional intensity integrated over observation angle",
+                            );
                         });
-                    if self.far_field_view.far_waterfall {
+                    if self.far_field_view.readout.far_waterfall {
                         ui.add(
-                            egui::Slider::new(&mut self.far_field_view.waterfall_gain, 0.2..=5.0)
-                                .logarithmic(true)
-                                .text("gain"),
+                            egui::Slider::new(
+                                &mut self.far_field_view.readout.waterfall_gain,
+                                0.2..=5.0,
+                            )
+                            .logarithmic(true)
+                            .text("gain"),
                         );
                     }
                     if ui.small_button("Clear").clicked() {
@@ -1330,7 +1370,7 @@ impl Playground {
                         format!("Recording the delay window · {:.0}%", recorded * 100.0),
                     );
                 }
-                if self.far_field_view.far_waterfall {
+                if self.far_field_view.readout.far_waterfall {
                     Self::far_field_waterfall(
                         ui,
                         &frames,
@@ -1339,7 +1379,7 @@ impl Playground {
                         history,
                     );
                 }
-                if self.far_field_view.far_polar {
+                if self.far_field_view.readout.far_polar {
                     let instantaneous = frames
                         .iter()
                         .min_by(|a, b| {
@@ -1356,7 +1396,7 @@ impl Playground {
                         Self::far_field_polar(&mut columns[1], "Time-averaged", &averaged);
                     });
                 }
-                if self.far_field_view.far_power {
+                if self.far_field_view.readout.far_power {
                     Self::probe_plot(
                         ui,
                         "Radiated power",
@@ -1373,6 +1413,9 @@ impl Playground {
             });
         if clear {
             self.far_field_trace = FarFieldTrace::default();
+        }
+        if let Some(edited) = edited_readout(stored, shown, self.far_field_view.readout) {
+            self.editor.document.readouts.far_field = edited;
         }
         self.far_field_window = open;
     }
@@ -1430,15 +1473,56 @@ mod tests {
     use super::*;
     use crate::wave_gpu::CurveProbeRecord;
 
+    /// Early in a run a readout shows its span and mean window clamped to what
+    /// has been recorded. Those clamps are the display's: only what the user
+    /// changes reaches the document, so a look does not shorten a window for
+    /// good.
+    #[test]
+    fn only_what_the_user_changes_reaches_the_document() {
+        use funfern_app::document::ProbeReadout;
+        let stored = ProbeReadout {
+            span: 4.0,
+            ..ProbeReadout::default()
+        };
+        let shown = ProbeReadout {
+            span: 0.5,
+            mean_window: 0.3,
+            ..stored
+        };
+        assert_eq!(edited_readout(stored, shown, shown), None);
+        let toggled = ProbeReadout {
+            energy: false,
+            ..shown
+        };
+        assert_eq!(
+            edited_readout(stored, shown, toggled),
+            Some(ProbeReadout {
+                energy: false,
+                ..stored
+            })
+        );
+        let zoomed = ProbeReadout {
+            span: 0.25,
+            ..shown
+        };
+        assert_eq!(
+            edited_readout(stored, shown, zoomed),
+            Some(ProbeReadout {
+                span: 0.25,
+                ..stored
+            })
+        );
+    }
+
     #[test]
     fn the_plot_matrix_addresses_every_cell_exactly_once() {
-        let view = ProbeViewState::new(10.0);
+        let view = ProbeViewState::new(funfern_app::document::ProbeReadout::default());
         let mut seen = BTreeSet::new();
         for quantity in LineProbeQuantity::ALL {
             for representation in LineProbeRepresentation::ALL {
                 let index = quantity.offset() + representation.offset();
                 assert!(
-                    index < view.line_plots.len(),
+                    index < view.readout.line_plots.len(),
                     "{quantity:?} {representation:?}"
                 );
                 assert!(
@@ -1447,12 +1531,12 @@ mod tests {
                 );
             }
         }
-        assert_eq!(seen.len(), view.line_plots.len());
+        assert_eq!(seen.len(), view.readout.line_plots.len());
 
         // A new readout opens on the field's profile and waterfall, the mean
         // flux and mean energy profiles, and the two integrals.
         let enabled = |quantity: LineProbeQuantity, representation: LineProbeRepresentation| {
-            view.line_plots[quantity.offset() + representation.offset()]
+            view.readout.line_plots[quantity.offset() + representation.offset()]
         };
         assert!(enabled(
             LineProbeQuantity::Field,
@@ -1478,7 +1562,10 @@ mod tests {
             LineProbeQuantity::MeanEnergy,
             LineProbeRepresentation::Arclength
         ));
-        assert_eq!(view.line_plots.iter().filter(|plot| **plot).count(), 6);
+        assert_eq!(
+            view.readout.line_plots.iter().filter(|plot| **plot).count(),
+            6
+        );
     }
 
     /// The average energy density of a wave running past a probe is the mean

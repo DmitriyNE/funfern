@@ -6,8 +6,9 @@
 //! one file.
 
 use crate::document::{
-    AdaptationSettings, MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty,
-    PresentationSettings, ProbeId, ProbeSamplingPreset, VectorOverlay,
+    AdaptationSettings, LineProbeQuantity, LineProbeRepresentation, MAX_PROBES,
+    MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty, PresentationSettings, ProbeId,
+    ProbeReadout, ProbeReadouts, ProbeSamplingPreset, VectorOverlay,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -285,6 +286,81 @@ struct StoredFarField {
     inset: f64,
 }
 
+/// A readout's choices, named rather than indexed so a file says what each
+/// probe opens on.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredProbeReadout {
+    span: f64,
+    point: StoredPointPlots,
+    area: StoredAreaPlots,
+    line: Vec<StoredLinePlot>,
+    mean_window: f64,
+    waterfall_gain: f32,
+    far_field: StoredFarFieldPlots,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredPointPlots {
+    field: bool,
+    rate: bool,
+    transverse: bool,
+    flow: bool,
+    energy: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredAreaPlots {
+    mean_field: bool,
+    rms_field: bool,
+    rms_transverse: bool,
+    mean_energy: bool,
+    total_energy: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredLinePlot {
+    quantity: StoredLineQuantity,
+    view: StoredLineView,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredLineQuantity {
+    Field,
+    Transverse,
+    Flux,
+    MeanFlux,
+    Energy,
+    MeanEnergy,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredLineView {
+    Arclength,
+    Waterfall,
+    Integral,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredFarFieldPlots {
+    waterfall: bool,
+    polar: bool,
+    power: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredProbeReadoutEntry {
+    probe: u64,
+    readout: StoredProbeReadout,
+}
+
 pub fn save(document: &TopologyDocument) -> Result<String, String> {
     validate_document(document)?;
     serde_json::to_string_pretty(&encode_document(document)).map_err(|error| error.to_string())
@@ -357,15 +433,123 @@ fn encode_document(document: &TopologyDocument) -> FileV22 {
                 inset: document.model.far_field.inset,
             },
         },
-        presentation: encode_presentation(PresentationSettings {
-            advanced_materials: shown_materials(
-                document.presentation.advanced_materials,
-                &document.model.draft,
-                false,
-            ),
-            ..document.presentation
-        }),
+        presentation: StoredPresentation {
+            // Only a probe the scene still has keeps its readout: one deleted
+            // this session is still held, so Undo brings it back as it was.
+            probe_readouts: document
+                .model
+                .probes
+                .iter()
+                .filter_map(|probe| {
+                    Some(StoredProbeReadoutEntry {
+                        probe: probe.id.0,
+                        readout: encode_readout(document.readouts.probes.get(&probe.id)?),
+                    })
+                })
+                .collect(),
+            far_field_readout: (document.readouts.far_field != ProbeReadout::default())
+                .then(|| encode_readout(&document.readouts.far_field)),
+            ..encode_presentation(PresentationSettings {
+                advanced_materials: shown_materials(
+                    document.presentation.advanced_materials,
+                    &document.model.draft,
+                    false,
+                ),
+                ..document.presentation
+            })
+        },
     }
+}
+
+fn encode_readout(readout: &ProbeReadout) -> StoredProbeReadout {
+    StoredProbeReadout {
+        span: readout.span,
+        point: StoredPointPlots {
+            field: readout.field,
+            rate: readout.secondary_field,
+            transverse: readout.transverse_field,
+            flow: readout.poynting,
+            energy: readout.energy,
+        },
+        area: StoredAreaPlots {
+            mean_field: readout.area_mean_field,
+            rms_field: readout.area_rms_field,
+            rms_transverse: readout.area_rms_transverse,
+            mean_energy: readout.area_mean_energy,
+            total_energy: readout.area_total_energy,
+        },
+        line: LineProbeQuantity::ALL
+            .into_iter()
+            .flat_map(|quantity| {
+                LineProbeRepresentation::ALL
+                    .into_iter()
+                    .map(move |view| (quantity, view))
+            })
+            .filter(|(quantity, view)| readout.line_plot(*quantity, *view))
+            .map(|(quantity, view)| StoredLinePlot {
+                quantity: match quantity {
+                    LineProbeQuantity::Field => StoredLineQuantity::Field,
+                    LineProbeQuantity::Transverse => StoredLineQuantity::Transverse,
+                    LineProbeQuantity::Flux => StoredLineQuantity::Flux,
+                    LineProbeQuantity::MeanFlux => StoredLineQuantity::MeanFlux,
+                    LineProbeQuantity::Energy => StoredLineQuantity::Energy,
+                    LineProbeQuantity::MeanEnergy => StoredLineQuantity::MeanEnergy,
+                },
+                view: match view {
+                    LineProbeRepresentation::Arclength => StoredLineView::Arclength,
+                    LineProbeRepresentation::Waterfall => StoredLineView::Waterfall,
+                    LineProbeRepresentation::Integral => StoredLineView::Integral,
+                },
+            })
+            .collect(),
+        mean_window: readout.mean_window,
+        waterfall_gain: readout.waterfall_gain,
+        far_field: StoredFarFieldPlots {
+            waterfall: readout.far_waterfall,
+            polar: readout.far_polar,
+            power: readout.far_power,
+        },
+    }
+}
+
+fn decode_readout(stored: StoredProbeReadout) -> ProbeReadout {
+    let mut readout = ProbeReadout {
+        span: stored.span,
+        field: stored.point.field,
+        secondary_field: stored.point.rate,
+        transverse_field: stored.point.transverse,
+        poynting: stored.point.flow,
+        energy: stored.point.energy,
+        area_mean_field: stored.area.mean_field,
+        area_rms_field: stored.area.rms_field,
+        area_rms_transverse: stored.area.rms_transverse,
+        area_mean_energy: stored.area.mean_energy,
+        area_total_energy: stored.area.total_energy,
+        line_plots: [false; 18],
+        mean_window: stored.mean_window,
+        waterfall_gain: stored.waterfall_gain,
+        far_waterfall: stored.far_field.waterfall,
+        far_polar: stored.far_field.polar,
+        far_power: stored.far_field.power,
+    };
+    for plot in stored.line {
+        readout = readout.with_line_plot(
+            match plot.quantity {
+                StoredLineQuantity::Field => LineProbeQuantity::Field,
+                StoredLineQuantity::Transverse => LineProbeQuantity::Transverse,
+                StoredLineQuantity::Flux => LineProbeQuantity::Flux,
+                StoredLineQuantity::MeanFlux => LineProbeQuantity::MeanFlux,
+                StoredLineQuantity::Energy => LineProbeQuantity::Energy,
+                StoredLineQuantity::MeanEnergy => LineProbeQuantity::MeanEnergy,
+            },
+            match plot.view {
+                StoredLineView::Arclength => LineProbeRepresentation::Arclength,
+                StoredLineView::Waterfall => LineProbeRepresentation::Waterfall,
+                StoredLineView::Integral => LineProbeRepresentation::Integral,
+            },
+        );
+    }
+    readout
 }
 
 /// The Advanced set kept against the scene's own materials, so an id never
@@ -388,8 +572,25 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-fn decode_document(file: FileV22) -> Result<TopologyDocument, String> {
+fn decode_document(mut file: FileV22) -> Result<TopologyDocument, String> {
     let every_material_advanced = file.presentation.advanced_materials;
+    let mut readouts = ProbeReadouts {
+        far_field: file
+            .presentation
+            .far_field_readout
+            .take()
+            .map_or_else(ProbeReadout::default, decode_readout),
+        ..ProbeReadouts::default()
+    };
+    for entry in std::mem::take(&mut file.presentation.probe_readouts) {
+        let id = ProbeId(entry.probe);
+        if !file.model.probes.iter().any(|probe| probe.id == id.0)
+            || readouts.probes.contains_key(&id)
+        {
+            return Err("Scene contains a readout for no probe of its own".into());
+        }
+        readouts.probes.insert(id, decode_readout(entry.readout));
+    }
     let draft = decode_scene(file.model.draft)?;
     let mut presentation = decode_presentation(file.presentation)?;
     presentation.advanced_materials = shown_materials(
@@ -420,6 +621,7 @@ fn decode_document(file: FileV22) -> Result<TopologyDocument, String> {
             },
         },
         presentation,
+        readouts,
     })
 }
 
@@ -811,7 +1013,15 @@ fn validate_document(document: &TopologyDocument) -> Result<(), String> {
     {
         return Err("Scene contains an invalid point source".into());
     }
-    if !document.model.far_field.valid() || !document.presentation.valid() {
+    if !document.model.far_field.valid()
+        || !document.presentation.valid()
+        || !document.readouts.far_field.valid()
+        || document
+            .readouts
+            .probes
+            .values()
+            .any(|readout| !readout.valid())
+    {
         return Err("Scene contains invalid presentation settings".into());
     }
     validate_probes(&document.model.probes, &document.model.draft)
@@ -1179,6 +1389,13 @@ struct StoredPresentation {
     law_formula_numbers: bool,
     #[serde(default)]
     integrated_field: bool,
+    /// Each probe's readout where it differs from the defaults, and the far
+    /// field's. Written only then, so a scene that chose none stays readable
+    /// by a build from before readouts were kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    probe_readouts: Vec<StoredProbeReadoutEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    far_field_readout: Option<StoredProbeReadout>,
 }
 
 fn default_mesh_edge() -> f64 {
@@ -1907,6 +2124,8 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
         material_overlay_logarithmic: settings.material_overlay_logarithmic,
         material_overlay_manual_min: settings.material_overlay_manual_min,
         material_overlay_manual_max: settings.material_overlay_manual_max,
+        probe_readouts: vec![],
+        far_field_readout: None,
     }
 }
 
@@ -2744,5 +2963,89 @@ mod tests {
                 "a file with a {name} loaded"
             );
         }
+    }
+
+    /// A scene with its own readouts: the probe's and the far field's.
+    fn readout_scene() -> (TopologyDocument, ProbeId) {
+        let mut document = crate::topology_examples::catalog()
+            .iter()
+            .find(|example| example.name == "Double slit")
+            .unwrap()
+            .document
+            .clone();
+        let screen = document.model.probes[0].id;
+        document.readouts.set_probe(
+            screen,
+            ProbeReadout {
+                span: 4.0,
+                mean_window: 0.5,
+                ..ProbeReadout::blank()
+            }
+            .with_line_plot(
+                LineProbeQuantity::MeanEnergy,
+                LineProbeRepresentation::Arclength,
+            )
+            .with_line_plot(LineProbeQuantity::Flux, LineProbeRepresentation::Integral),
+        );
+        document.readouts.far_field = ProbeReadout {
+            far_polar: true,
+            ..ProbeReadout::blank()
+        };
+        (document, screen)
+    }
+
+    /// Readouts travel with the scene, in files and in links alike, and read
+    /// back as they were chosen.
+    #[test]
+    fn probe_readouts_round_trip() {
+        let (document, screen) = readout_scene();
+        let pretty = save(&document).unwrap();
+        assert!(pretty.contains("\"mean_energy\""), "{pretty}");
+        let decoded = parse_document(pretty.as_bytes()).unwrap();
+        assert_eq!(decoded.readouts, document.readouts);
+        assert!(decoded.readouts.probe(screen).line_plot(
+            LineProbeQuantity::MeanEnergy,
+            LineProbeRepresentation::Arclength
+        ));
+        assert_eq!(
+            parse_document(&save_compact(&document).unwrap()).unwrap(),
+            document
+        );
+    }
+
+    /// A scene that chose no readouts writes none, so it stays readable by a
+    /// build from before they were kept, and one from such a build reads the
+    /// defaults.
+    #[test]
+    fn default_readouts_are_not_written() {
+        let mut document = readout_scene().0;
+        document.readouts = ProbeReadouts::default();
+        let value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        let presentation = value["presentation"].as_object().unwrap();
+        assert!(!presentation.contains_key("probe_readouts"));
+        assert!(!presentation.contains_key("far_field_readout"));
+        let decoded = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+        assert_eq!(decoded.readouts, ProbeReadouts::default());
+    }
+
+    /// A deleted probe's readout is still held, so Undo brings the probe back
+    /// as it was, but a file keeps only the readouts of probes it has; and a
+    /// file naming a probe it does not have is refused.
+    #[test]
+    fn only_a_scenes_own_probes_keep_readouts() {
+        let (mut document, screen) = readout_scene();
+        document.model.probes.clear();
+        let decoded = parse_document(save(&document).unwrap().as_bytes()).unwrap();
+        assert!(decoded.readouts.probes.is_empty());
+        assert!(document.readouts.probes.contains_key(&screen));
+
+        let (document, _) = readout_scene();
+        let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        value["presentation"]["probe_readouts"][0]["probe"] = 99.into();
+        let issue = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap_err();
+        assert!(issue.contains("readout"), "{issue}");
+        value["presentation"]["probe_readouts"][0]["probe"] = screen.0.into();
+        value["presentation"]["probe_readouts"][0]["readout"]["span"] = (-1.0).into();
+        assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
     }
 }

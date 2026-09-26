@@ -4,7 +4,7 @@
 //! commands; no legacy object-role adapter belongs here.
 
 use crate::document::{
-    FarFieldSettings, MAX_PROBES, PresentationSettings, ProbeId, ProbeSamplingPreset,
+    FarFieldSettings, MAX_PROBES, PresentationSettings, ProbeId, ProbeReadouts, ProbeSamplingPreset,
 };
 use crate::topology_viewport::TopologyTransformUpdate;
 use funfern_core::*;
@@ -72,6 +72,9 @@ impl Default for TopologyDocumentModel {
 pub struct TopologyDocument {
     pub model: TopologyDocumentModel,
     pub presentation: PresentationSettings,
+    /// What each probe's readout shows. Kept with the view, like
+    /// `presentation`: not undone, and never seen by the solver.
+    pub readouts: ProbeReadouts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

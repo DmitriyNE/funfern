@@ -312,7 +312,10 @@ names or with every expression evaluated at the material frame's origin. Each ro
   change the time span. The widest view returns to Live automatically; Live can also
   be selected directly. Sampling follows
   solver time rather than browser frame rate. Definitions are saved and undoable;
-  recorded traces are transient. Every trace runs on the solver's own clock,
+  recorded traces are transient. What each readout shows (its plots, time span,
+  mean window and waterfall gain, and the far field's plots) is saved with the
+  scene too, like the View settings: not undone, and only where it differs from
+  the defaults, so a gallery scene opens each probe on what it is there to show. Every trace runs on the solver's own clock,
   which a remesh carries across, so adaptation leaves the recording continuous
   rather than stepping its time axis forward. A new mesh over the same recorders
   also takes over the GPU rings they were filling, so the samples written between

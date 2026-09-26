@@ -2,7 +2,7 @@
 
 use crate::document::{
     FarFieldSettings, MaterialOverlay, MaterialProperty, PresentationSettings, ProbeId,
-    ProbeSamplingPreset, VectorOverlay,
+    ProbeReadouts, ProbeSamplingPreset, VectorOverlay,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -670,6 +670,7 @@ impl Builder {
                 far_field: FarFieldSettings::default(),
             },
             presentation: PresentationSettings::default(),
+            readouts: ProbeReadouts::default(),
         }
     }
 }

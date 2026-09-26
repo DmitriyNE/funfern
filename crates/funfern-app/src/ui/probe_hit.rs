@@ -372,7 +372,7 @@ impl Playground {
         if !available.is_finite() || available <= f64::EPSILON {
             return None;
         }
-        let span = view.span.min(available);
+        let span = view.readout.span.min(available);
         if view.live {
             view.end_time = last;
         }
