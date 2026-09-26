@@ -13449,3 +13449,24 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   which run the changed branch.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: Maxwell's fisheye
+
+- **Scene** "Maxwell's fisheye" (gallery item 18), the catalogue's 26th:
+  TM, `ε = n²` with `n = 2/(1 + (r/R)²)` and `μ = 1`, in a disk of radius
+  0.45 whose frame follows it, a 3 Hz source 0.03 inside the rim on the
+  left. The plan said Mechanical; the user asked for graded optics in an EM
+  skin with plain `μ = 1` media. Probes: "Round the rim" on the disk's
+  circle and "Image" at the antipode; the view shows the wave speed.
+- **Explored:** the rim away from the source peaks at the antipode, as
+  bright as beside the source (0.0116 against 0.013). The antipode is 4.9×,
+  5.0× and 3.7× the rim 45° either side at 2.5, 3 and 3.5 Hz, 5.1× at edge
+  0.05, steady by 10 s. With the disk vacuum, 1.04×.
+- **Measured** at edge 0.08, 10 s: 4.99×, peak at 0°, vacuum 1.04×. Test:
+  `a_fisheye_images_a_rim_source_onto_the_opposite_rim` (over 3×, the peak
+  at the antipode within 5°, the vacuum under 1.2×).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 9.8e-7, b 1.2e-6; at
+  1000 steps Q 2.0e-6, b 2.4e-6; at 3000 steps (printed, not judged) 4.9e-6
+  and 4.7e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

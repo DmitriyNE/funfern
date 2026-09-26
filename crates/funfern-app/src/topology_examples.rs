@@ -186,6 +186,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  lobes eight times the field at 2.7 Hz, between resonances.",
                 dielectric_gallery(),
             ),
+            example(
+                "Maxwell's fisheye",
+                "A disk whose index falls from 2 at its centre to 1 at its rim, n = 2/(1 + (r/R)²): \
+                 every ray a source on the rim sends inward curves round to the opposite point, \
+                 so the far rim lights up there five times brighter than 45° either side. Set \
+                 the profile to 1 and the far rim is no brighter anywhere.",
+                fisheye(),
+            ),
         ]
     })
 }
@@ -2177,13 +2185,89 @@ fn dielectric_gallery_with(frequency: f64) -> TopologyDocument {
     document
 }
 
+const FISHEYE_RADIUS: f64 = 0.45;
+const FISHEYE_HZ: f64 = 3.0;
+
+fn fisheye() -> TopologyDocument {
+    fisheye_with(true)
+}
+
+/// A TM Maxwell fisheye, `n = 2/(1 + (r/R)²)` as `ε = n²` with `μ = 1`, in a
+/// disk of radius 0.45 about the origin: the index falls from 2 at the centre
+/// to 1 at the rim, where it meets the vacuum outside. Every ray a point on
+/// the rim sends inward runs on a circular arc to the opposite point, so a
+/// 3 Hz source 0.03 inside the rim on the left images onto the right. A
+/// probe runs round the rim, and a point probe sits on the image. Without the
+/// `lens` the disk is vacuum. Every wall is outgoing.
+fn fisheye_with(lens: bool) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Maxwell fisheye".into(),
+        mass_density: ScalarField::formula(if lens { "(2 / (1 + (r / R)^2))^2" } else { "1" })
+            .unwrap(),
+        parameters: vec![MaterialParameter {
+            name: "R".into(),
+            value: FISHEYE_RADIUS,
+        }],
+        color: [66, 105, 151],
+        ..Material::default_medium()
+    });
+    let (rim, first) = (CurveId(builder.next_curve), builder.next_span);
+    let spline = circle(Point2::default(), FISHEYE_RADIUS);
+    let spans = spline.intervals().len() as u64;
+    let region = builder.subdomain(
+        spline,
+        MaterialId(2),
+        MaterialFrame {
+            attachment: MaterialFrameAttachment::FollowRegion,
+            ..MaterialFrame::world()
+        },
+    );
+    let mut document = builder.document();
+    document.model.source = PointSource {
+        region,
+        ..source(
+            Point2::new(0.03 - FISHEYE_RADIUS, 0.0),
+            FISHEYE_HZ,
+            10.0,
+            0.03,
+        )
+    };
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Round the rim".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+            curve: rim,
+            spans: (first..first + spans).map(CurveSpanId).collect(),
+            side: CurveTraceSide::Left,
+            reversed: false,
+            preset: ProbeSamplingPreset::Medium,
+        }),
+    });
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Image".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(FISHEYE_RADIUS - 0.03, 0.0)),
+    });
+    document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 25);
+        assert_eq!(catalog().len(), 26);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -4078,5 +4162,35 @@ mod tests {
             })
             .count();
         assert_eq!(maxima, 14);
+    }
+
+    /// The fisheye claims, at edge 0.08, 10 s from rest at 3 Hz, with `|U|` on
+    /// the circle 0.03 inside the rim. With the lens the rim is brightest,
+    /// away from the source, at the antipode, and there more than three times
+    /// what it is 45° either side (5.0×; 5.1× at edge 0.05, 4.9× at 2.5 Hz and
+    /// 3.7× at 3.5 Hz). With the disk vacuum the antipode is within a fifth of
+    /// its neighbours 45° away (1.04×).
+    #[test]
+    fn a_fisheye_images_a_rim_source_onto_the_opposite_rim() {
+        let rim = |lens: bool| {
+            let scene = Harmonic::run(&fisheye_with(lens), 0.08, 10.0, FISHEYE_HZ, 4.0);
+            move |degrees: f64| {
+                let angle = degrees.to_radians();
+                let (a, b) = scene
+                    .interpolated(Point2::new(angle.cos(), angle.sin()) * (FISHEYE_RADIUS - 0.03));
+                a.hypot(b)
+            }
+        };
+        let lens = rim(true);
+        let focus = lens(0.0) / lens(45.0).max(lens(-45.0));
+        assert!(focus > 3.0, "the image is {focus:.2}× its flanks");
+        let brightest = (-29..=29)
+            .map(|step| 5.0 * step as f64)
+            .max_by(|a, b| lens(*a).total_cmp(&lens(*b)))
+            .unwrap();
+        assert_eq!(brightest, 0.0, "the far rim peaks at {brightest}°");
+        let vacuum = rim(false);
+        let flat = vacuum(0.0) / vacuum(45.0).max(vacuum(-45.0));
+        assert!(flat < 1.2, "without the lens the antipode is {flat:.2}×");
     }
 }

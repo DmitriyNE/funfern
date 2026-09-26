@@ -549,12 +549,28 @@ Claims at edge 0.08, 30 s from rest, on the circle 0.05 inside the rim:
 
 ### 18. Maxwell's fisheye
 
-Mechanical. `n = 2/(1 + (r/R)²)` in a disk of radius `R = 0.45`, so the index
-runs from 2 at the centre to 1 at the rim. A source at 3 Hz just inside the
-rim on the left. Walls outgoing.
+TM, not the plan's Mechanical: the user asked on 25 September for graded
+optics to run in an EM skin, and for plain `μ = 1` media, so the profile is
+`ε = n²` with `n = 2/(1 + (r/R)²)`, in a disk of radius `R = 0.45`: the index
+runs from 2 at the centre to 1 at the rim, where it meets the vacuum. The
+region's frame follows it, so a dragged lens keeps its profile. A 3 Hz
+source 0.03 inside the rim on the left; a boundary probe on the rim itself,
+a point probe on the image. The view shows the wave speed. Walls outgoing.
 
-Claim: the RMS on the rim peaks at the antipode, more than 3× the RMS at rim
-points 45° away.
+Explored, with `|U|` on the circle 0.03 inside the rim. Away from the source
+the rim is brightest at the antipode, which is as bright as the rim beside
+the source (0.0116 against 0.013): the rays launched inward all arrive,
+those launched outward leave. The antipode is 4.9×, 5.0× and 3.7× the rim
+45° either side at 2.5, 3 and 3.5 Hz, 5.1× at edge 0.05, and steady by 10 s.
+With the disk vacuum it is 1.04×, and the rim is brightest beside the
+source.
+
+Claims at edge 0.08, 10 s from rest:
+
+- With the lens the rim is brightest away from the source at the antipode,
+  more than 3× the rim 45° either side (5.0×).
+- With the disk vacuum the antipode is within a fifth of those points
+  (1.04×).
 
 ### 19. Fresnel zone plate
 
