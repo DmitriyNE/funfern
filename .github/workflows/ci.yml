@@ -90,7 +90,11 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --workspace --locked
+        # Release, as the local checks run them: the gallery's scene tests
+        # simulate seconds of a wave, which in a debug build took the step
+        # from 9 to over 45 minutes, and the optimized arithmetic is what
+        # ships.
+        run: cargo test --workspace --release --locked
 
       - name: Build native release
         run: cargo build --release -p funfern-app --locked
