@@ -602,12 +602,35 @@ Claims at edge 0.08, 10 s from rest, at the focus (0.4, 0):
 
 ### 20. Brewster angle
 
-Electromagnetic, one document per skin. A slab of `ε = 2.25` and a tilted
-launcher whose beam meets it at `θ_B = atan(1.5) = 56.3°`. In the H_z skin the
-reflection vanishes at that angle; in the E_z skin it does not, `|r|² = 0.15`.
-Walls outgoing. The gallery ships the H_z scene; the test builds its E_z twin.
+Electromagnetic, one document per skin. Glass, `ε = 2.25` and `μ = 1`,
+fills everything beyond a divider at `x = 0.2`, and a 4 Hz point source
+sits 0.2 in front of it. Each ray meets the face at its own angle and
+reflects as if from the source's mirror image, so the reflection is read
+on an arc of radius 0.8 about that image, the rays meeting the face from
+20° to 72° crossing it in turn; a free transmitting arc there carries a
+boundary probe, along which the fringes the reflection makes with the
+direct wave fade out at the Brewster angle. Walls outgoing. The gallery
+ships the `H_z` (TE) scene; the test builds its `E_z` (TM) twin.
 
-Claim: the reflected RMS in E_z exceeds 5× the reflected RMS in H_z.
+Explored. The plan's tilted beam cannot show the null: the radiator this
+domain holds, 0.8 long, spreads its beam over about ±15°, and its ends
+diffract into the reflected cut, which read 0.054 of the power in `H_z`
+at every angle. A plane wave from a launcher meeting a tilted interface at
+56.3° was better, but it grazes the outgoing walls on its way and is not
+plane enough: `E_z` read 8% to 25% above Fresnel and `H_z` about 0.1 with no
+minimum at 56°. The point source is clean. The reflected field, the field
+with the glass less the field without it on the same mesh, over the direct
+field, follows Fresnel's `|r_s|` in `E_z` within 15% from 20° to 72°. In
+`H_z` it ripples by about 0.06 about `|r_p|` and falls to 0.013 at 58° (0.012
+at 56° at edge 0.05).
+
+Claims at edge 0.08, 8 s from rest, on the arc:
+
+- In `H_z` the reflection is least, over rays meeting the glass from 44° to
+  70°, within 3° of `atan 1.5 = 56.3°` (58°).
+- There `E_z` reflects more than 5× as strongly (7.2×).
+- `H_z` reflects more than 3× as strongly at 72° as at the Brewster angle
+  (5.5×).
 
 ### 21. Frustrated total internal reflection
 

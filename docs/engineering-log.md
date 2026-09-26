@@ -13491,3 +13491,30 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and 2.7e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: the Brewster angle
+
+- **Scene** "Brewster angle" (gallery item 20), the catalogue's 28th: glass,
+  `ε = 2.25`, beyond a divider at `x = 0.2`, a 4 Hz point source 0.2 in
+  front of it, in the `H_z` skin (TE); the test builds the `E_z` (TM) twin.
+  A free transmitting arc of radius 0.8 about the source's mirror image
+  carries a boundary probe "Reflected 20° to 72°".
+- **Why not the plan's beam:** a tilted radiator 0.8 long spreads its beam
+  over about ±15° and its ends diffract into the reflected cut (`H_z` read
+  0.054 of the power at every angle). A launcher's plane wave on a tilted
+  interface grazes the outgoing walls and is not plane enough (`E_z` 8-25%
+  over Fresnel, `H_z` about 0.1 with no minimum). The point source reflects
+  each ray at its own angle, as if from its mirror image.
+- **Explored:** the reflected field (with glass less without, on the same
+  mesh, over the direct field) follows `|r_s|` in `E_z` within 15% from 20°
+  to 72°; in `H_z` it ripples by about 0.06 about `|r_p|` and falls to 0.013
+  at 58° (0.012 at 56° at edge 0.05).
+- **Measured** at edge 0.08, 8 s: `H_z` least at 58°; at 56.3° `E_z` 0.328
+  against `H_z` 0.046, 7.2×; `H_z` 0.252 at 72°, 5.5×. Test:
+  `glass_reflects_nothing_at_the_brewster_angle_in_one_skin` (within 3°,
+  over 5×, over 3×).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 2.3e-6, b 2.5e-6; at
+  1000 steps Q 9.2e-6, b 8.7e-6; at 3000 steps (printed, not judged) 9.1e-6
+  and 9.2e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

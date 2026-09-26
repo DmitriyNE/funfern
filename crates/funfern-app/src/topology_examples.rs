@@ -202,6 +202,15 @@ pub fn catalog() -> &'static [TopologyExample] {
                  its energy, and over three times the field 0.4 to either side.",
                 zone_plate(),
             ),
+            example(
+                "Brewster angle",
+                "A point source in front of glass, ε = 2.25, in the H_z skin: each ray meets the \
+                 glass at its own angle, and the one meeting it at the Brewster angle, atan 1.5 = \
+                 56°, reflects nothing, so the fringes the reflection makes with the direct wave \
+                 fade out along its direction. Switch to E_z and every ray reflects, at 56° seven \
+                 times as strongly.",
+                brewster(),
+            ),
         ]
     })
 }
@@ -2359,13 +2368,93 @@ fn zone_plate_with(plate: bool) -> TopologyDocument {
     document
 }
 
+const BREWSTER_HZ: f64 = 4.0;
+/// The glass's face, and the source 0.2 in front of it.
+const BREWSTER_FACE: f64 = 0.2;
+const BREWSTER_SOURCE: Point2 = Point2 { x: 0.0, y: 0.0 };
+/// The radius, about the source's mirror image in the face, of the arc the
+/// reflection is read on and the probe runs along.
+const BREWSTER_ARC: f64 = 0.8;
+
+/// The source's mirror image in the glass's face, from which every reflected
+/// ray leaves.
+fn brewster_image() -> Point2 {
+    Point2::new(2.0 * BREWSTER_FACE - BREWSTER_SOURCE.x, BREWSTER_SOURCE.y)
+}
+
+fn brewster() -> TopologyDocument {
+    brewster_with(ElectromagneticPolarization::Te, true)
+}
+
+/// A point source at 4 Hz 0.2 in front of glass, `ε = 2.25` and `μ = 1`,
+/// filling everything beyond `x = 0.2`, in the skin whose out-of-plane field
+/// `polarization` names. Each ray meets the face at its own angle, and in
+/// the `H_z` skin (TE) the one meeting it at the Brewster angle, `atan 1.5`,
+/// reflects nothing, where in the `E_z` skin (TM) every ray reflects. A free
+/// transmitting arc about the source's mirror image, through the directions
+/// the rays meeting the face from 20° to 72° reflect into, carries a probe:
+/// the fringes the reflection makes with the direct wave fade out along it
+/// at 56°. Without `glass` the half-plane is vacuum. Every wall is outgoing.
+fn brewster_with(polarization: ElectromagneticPolarization, glass: bool) -> TopologyDocument {
+    let mut builder = glass_builder();
+    builder.scene.physics = PhysicsModel::Electromagnetic { polarization };
+    if !glass {
+        builder.scene.materials[1].mass_density = ScalarField::constant(1.0);
+    }
+    let (curve, span) = builder.divider(BREWSTER_FACE);
+    let region = RegionId(builder.next_region);
+    builder.next_region += 1;
+    builder.scene.regions.push(Region {
+        id: region,
+        material: MaterialId(2),
+        frame: MaterialFrame::world(),
+    });
+    // Running upwards, the divider's right is the glass.
+    builder.scene.face_assignments.push(AuthoredFaceAssignment {
+        anchor: FaceAnchor::Curve {
+            curve,
+            span,
+            side: CurveTraceSide::Right,
+            parameter: 0.5,
+        },
+        region: Some(region),
+    });
+    let first = builder.next_span;
+    let path = builder.open_curve(
+        arc(
+            brewster_image(),
+            BREWSTER_ARC,
+            std::f64::consts::PI - 72f64.to_radians(),
+            std::f64::consts::PI - 20f64.to_radians(),
+            2,
+        ),
+        &[SpanBehavior::Transmitting; 2],
+    );
+    let mut document = builder.document();
+    document.model.source = source(BREWSTER_SOURCE, BREWSTER_HZ, 10.0, 0.03);
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Reflected 20° to 72°".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+            curve: path,
+            spans: (first..first + 2).map(CurveSpanId).collect(),
+            side: CurveTraceSide::Left,
+            reversed: false,
+            preset: ProbeSamplingPreset::Medium,
+        }),
+    });
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 27);
+        assert_eq!(catalog().len(), 28);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -4315,6 +4404,78 @@ mod tests {
             plate(0.0) > 2.0 * flank,
             "the focus is {:.2}× its flanks",
             plate(0.0) / flank
+        );
+    }
+
+    /// The Brewster angle of air on glass, `atan(1.5)`.
+    fn brewster_angle() -> f64 {
+        CORE_PERMITTIVITY.sqrt().atan()
+    }
+
+    /// The point on the reading arc a ray meeting the face at `incidence`
+    /// from the normal reflects through.
+    fn brewster_arc_point(incidence: f64) -> Point2 {
+        brewster_image() + Point2::new(-incidence.cos(), incidence.sin()) * BREWSTER_ARC
+    }
+
+    /// The Brewster claims, at edge 0.08, 8 s from rest at 4 Hz. The reflected
+    /// field is the field with the glass less the field without it, on the arc
+    /// about the source's mirror image, over the direct field there. In `H_z`
+    /// it is least, over rays meeting the glass from 44° to 70°, within 3° of
+    /// `atan 1.5` (58°; 56° at edge 0.05). There `E_z` reflects more than five
+    /// times as strongly (7.2×), and `H_z` itself more than three times as
+    /// strongly at 72° (5.5×). `E_z` follows Fresnel's `|r_s|` within 15% from
+    /// 20° to 72°; `H_z` ripples by about 0.06 about `|r_p|`. The plan's tilted
+    /// beam could not show it: a beam this domain holds spreads over ±15°, and
+    /// a plane wave across it at 56° is not clean enough to null.
+    #[test]
+    fn glass_reflects_nothing_at_the_brewster_angle_in_one_skin() {
+        let reflection = |polarization: ElectromagneticPolarization| {
+            let with = Harmonic::run(
+                &brewster_with(polarization, true),
+                0.08,
+                8.0,
+                BREWSTER_HZ,
+                4.0,
+            );
+            let without = Harmonic::run(
+                &brewster_with(polarization, false),
+                0.08,
+                8.0,
+                BREWSTER_HZ,
+                4.0,
+            );
+            move |degrees: f64| {
+                let point = brewster_arc_point(degrees.to_radians());
+                let (a, b) = with.interpolated(point);
+                let (c, d) = without.interpolated(point);
+                (a - c).hypot(b - d) / c.hypot(d)
+            }
+        };
+        let (te, tm) = (
+            reflection(ElectromagneticPolarization::Te),
+            reflection(ElectromagneticPolarization::Tm),
+        );
+        let brewster = brewster_angle().to_degrees();
+        let least = (44..=70)
+            .map(f64::from)
+            .min_by(|a, b| te(*a).total_cmp(&te(*b)))
+            .unwrap();
+        assert!(
+            (least - brewster).abs() < 3.0,
+            "H_z reflects least at {least}°, the Brewster angle is {brewster:.1}°"
+        );
+        assert!(
+            tm(brewster) > 5.0 * te(brewster),
+            "at the Brewster angle E_z reflects {:.3}, H_z {:.3}",
+            tm(brewster),
+            te(brewster)
+        );
+        assert!(
+            te(72.0) > 3.0 * te(brewster),
+            "H_z reflects {:.3} at 72° and {:.3} at the Brewster angle",
+            te(72.0),
+            te(brewster)
         );
     }
 }
