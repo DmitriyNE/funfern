@@ -16,6 +16,13 @@ use std::sync::atomic::Ordering;
 
 use super::*;
 
+pub(super) const UNDO_SHORTCUT: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z);
+pub(super) const REDO_SHORTCUT: egui::KeyboardShortcut = egui::KeyboardShortcut::new(
+    egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+    egui::Key::Z,
+);
+
 impl Playground {
     pub(super) fn set_document(
         &mut self,
@@ -47,6 +54,30 @@ impl Playground {
         let replaces = self.editor.redo_replaces_scene();
         if self.editor.redo() {
             self.history_moved(replaces);
+        }
+    }
+
+    /// Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z, the two buttons' own steps. A focused
+    /// text field keeps them for its own text. A gesture still under way is
+    /// only cancelled, as Escape cancels it: its edit is not in the history
+    /// yet, and stepping the history beneath it would strand it.
+    pub(super) fn history_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        // The shifted one first, since the plain one would match it as well.
+        let (redo, undo) = ctx.input_mut(|input| {
+            let redo = input.consume_shortcut(&REDO_SHORTCUT);
+            (redo, input.consume_shortcut(&UNDO_SHORTCUT))
+        });
+        if self.interaction_in_progress() {
+            if undo || redo {
+                self.cancel_interaction();
+            }
+        } else if undo {
+            self.undo();
+        } else if redo {
+            self.redo();
         }
     }
 
@@ -323,6 +354,110 @@ mod tests {
             state.vector_overlay_exposure.update(quiet, 0.016),
             Some(quiet)
         );
+    }
+
+    /// One frame that presses Z with `modifiers` and runs the shortcuts first,
+    /// as the app's frame does, then shows a text field when one is given.
+    fn press_z(
+        state: &mut Playground,
+        context: &egui::Context,
+        modifiers: egui::Modifiers,
+        mut field: Option<(egui::Id, &mut String)>,
+    ) {
+        let input = egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..egui::RawInput::default()
+        };
+        let _ = context.run_ui(input, |ui| {
+            state.history_shortcuts(ui.ctx());
+            if let Some((id, text)) = field.as_mut() {
+                ui.add(egui::TextEdit::singleline(*text).id(*id));
+            }
+        });
+    }
+
+    /// A scene one edit into its history, the edit being a wider domain.
+    fn one_edit_in() -> Playground {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        settle(&mut state.editor);
+        state
+            .editor
+            .set_domain(DomainRect {
+                max_x: 1.4,
+                ..DomainRect::UNIT
+            })
+            .unwrap();
+        settle(&mut state.editor);
+        state
+    }
+
+    #[test]
+    fn the_keyboard_steps_the_history_as_the_buttons_do() {
+        let mut state = one_edit_in();
+        let edited = state.editor.document.model.clone();
+        let context = egui::Context::default();
+        press_z(&mut state, &context, egui::Modifiers::COMMAND, None);
+        assert_eq!(state.editor.history_len(), (0, 1));
+        assert_ne!(state.editor.document.model, edited);
+        press_z(
+            &mut state,
+            &context,
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            None,
+        );
+        assert_eq!(state.editor.history_len(), (1, 0));
+        assert_eq!(state.editor.document.model, edited);
+        press_z(&mut state, &context, egui::Modifiers::NONE, None);
+        assert_eq!(state.editor.history_len(), (1, 0), "a bare Z stepped");
+    }
+
+    #[test]
+    fn a_focused_text_field_keeps_the_undo_shortcut() {
+        let mut state = one_edit_in();
+        let context = egui::Context::default();
+        let field = egui::Id::new("typing");
+        let mut text = String::new();
+        let _ = context.run_ui(egui::RawInput::default(), |ui| {
+            ui.add(egui::TextEdit::singleline(&mut text).id(field));
+            ui.memory_mut(|memory| memory.request_focus(field));
+        });
+        assert!(context.egui_wants_keyboard_input());
+        press_z(
+            &mut state,
+            &context,
+            egui::Modifiers::COMMAND,
+            Some((field, &mut text)),
+        );
+        assert_eq!(state.editor.history_len(), (1, 0));
+    }
+
+    /// Mid-gesture, the shortcut does what Escape does and nothing more.
+    #[test]
+    fn the_undo_shortcut_cancels_a_gesture_rather_than_stepping_under_it() {
+        let mut state = one_edit_in();
+        let context = egui::Context::default();
+        state.begin_draw(DrawTool::Polygon);
+        press_z(&mut state, &context, egui::Modifiers::COMMAND, None);
+        assert!(state.draw.is_none(), "the draw survived");
+        assert_eq!(state.editor.history_len(), (1, 0));
+
+        let edited = state.editor.document.model.clone();
+        state.editor.begin();
+        state.editor.document.model.source.width *= 2.0;
+        press_z(&mut state, &context, egui::Modifiers::COMMAND, None);
+        assert!(!state.editor.editing(), "the edit session survived");
+        assert_eq!(state.editor.document.model, edited);
+        assert_eq!(state.editor.history_len(), (1, 0));
     }
 
     /// Undo and redo across an opened scene are scene replacements too;

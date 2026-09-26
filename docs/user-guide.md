@@ -396,6 +396,8 @@ names or with every expression evaluated at the material frame's origin. Each ro
   Invalid edits remain after release. Escape during a drag restores its starting
   document; Undo can restore earlier accepted snapshots.
 - **History:** Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes outside text editing.
+  Pressed during a drag, a draw or a placement, either only cancels it, as
+  Escape does. The Undo and Redo buttons show the shortcuts on hover.
   Each drag, coordinate edit, insertion, removal, creation, or deletion is one
   action. History keeps up to 100 actions, including invalid drafts.
 - **Files:** New starts an empty scene: one background material, every wall

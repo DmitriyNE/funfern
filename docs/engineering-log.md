@@ -14125,3 +14125,25 @@ meshes on the CI runner (AMD EPYC, glibc).
   lacks, and every far field opens on its polar pattern.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Undo and redo shortcuts restored
+
+- The guide promised Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z, but nothing handled
+  them: the handler and its tests were dropped with the switch to the unified
+  topology (eddad77), leaving only the two buttons.
+- `history_shortcuts` runs once a frame before any panel, so the pointer's
+  position does not matter, and goes through the buttons' own `undo` and
+  `redo`, so stepping across a whole scene still starts its field afresh.
+  - A focused text field keeps both for its own text.
+  - During a drag, a draw or a placement either only cancels it, as Escape
+    does. The gesture's edit is not in the history yet (the editor's `undo`
+    drops an open edit session's start), so stepping beneath it would strand
+    it.
+- The buttons show the platform's spelling of the shortcuts on hover.
+- Tests send real key events through an egui context:
+  `the_keyboard_steps_the_history_as_the_buttons_do`,
+  `a_focused_text_field_keeps_the_undo_shortcut` (fails with the focus check
+  removed) and
+  `the_undo_shortcut_cancels_a_gesture_rather_than_stepping_under_it`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

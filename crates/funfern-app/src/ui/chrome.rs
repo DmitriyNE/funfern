@@ -14,10 +14,12 @@ impl Playground {
         let fold_panels = root.available_width() < 1080.0;
         egui::Panel::top("top").exact_size(42.0).show(root, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Undo").clicked() {
+                let undo_shortcut = ui.ctx().format_shortcut(&session::UNDO_SHORTCUT);
+                if ui.button("Undo").on_hover_text(undo_shortcut).clicked() {
                     self.undo();
                 }
-                if ui.button("Redo").clicked() {
+                let redo_shortcut = ui.ctx().format_shortcut(&session::REDO_SHORTCUT);
+                if ui.button("Redo").on_hover_text(redo_shortcut).clicked() {
                     self.redo();
                 }
                 ui.menu_button("File", |ui| {

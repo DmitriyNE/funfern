@@ -636,6 +636,16 @@ impl Playground {
         });
         self.selection = TopologySelection::None;
     }
+    /// Whether a gesture or a placement is under way: anything Escape would
+    /// cancel.
+    fn interaction_in_progress(&self) -> bool {
+        self.drag.is_some()
+            || self.draw.is_some()
+            || self.editor.editing()
+            || self.pending_merge.is_some()
+            || self.pulse_mode
+            || self.probe_mode.is_some()
+    }
     fn cancel_interaction(&mut self) {
         match &self.drag {
             Some(DragGesture::Pivot { previous, .. }) => {
@@ -676,6 +686,7 @@ impl Playground {
                 egui::TextureOptions::LINEAR,
             ));
         }
+        self.history_shortcuts(root.ctx());
         self.top_bar(root);
         self.status_bar(root);
         self.side_panel(root);
