@@ -13723,3 +13723,15 @@ meshes on the CI runner (AMD EPYC, glibc).
   `mesh_timing --slices` at 32 obstacles 328-331 → 318-321 ms.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — CI runs the tests in release
+
+- CI ran `cargo test --workspace` in debug while the local checks ran it in
+  release. As the gallery grew, its scene tests (each simulates seconds of a
+  wave on a real mesh) took the test step from 9 minutes (2026-09-24) to 18,
+  then over 45 (2026-09-26, `funfern-app`'s unit tests alone 2458 s against
+  118 s in release here). The step is now `--release`, as the README's checks
+  and the local gate are, which also tests the optimized arithmetic that
+  ships. The native release build that follows reuses its dependencies.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

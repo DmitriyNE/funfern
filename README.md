@@ -302,7 +302,7 @@ The normal checks are:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+cargo test --workspace --release --locked
 cargo build --release -p funfern-app --locked
 scripts/trunk build --release --locked
 ```
