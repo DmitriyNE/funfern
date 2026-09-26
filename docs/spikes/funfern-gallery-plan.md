@@ -804,15 +804,39 @@ Claims at edge 0.08, 8 s from rest:
 
 ### 26. Spatial soliton
 
-TM. A slab of the saturable Kerr medium from x = −0.6 to 0.6. A narrow beam
-from a source strip of width 0.3 at 4 Hz: the weak beam diffracts, Fresnel
-number 0.3; the strong one self-traps where the Kerr index rise reaches about
-`(λ/πw)²/2 = 0.035`. Walls outgoing.
+TM. A slab of the "Saturable medium" preset at its defaults (χ = 0.8,
+saturation 1) from x = −0.6 to 0.6, half-height 0.9 so it stops short of
+the outgoing walls. A 4 Hz Gaussian beam, `exp(−(y/w)²)` with w = 0.2, from
+a wall-to-wall launcher at x = −0.85, strength 1000; the weak beam is the
+same at 10. Walls second-order outgoing. Probes along the axis and across
+the beam just behind the slab, at x = 0.65 (a probe on the face itself
+would sit on a boundary with two traces).
 
-Claim: the strong beam's RMS width at the slab's exit is under 0.6× the weak
-beam's. The risk is the third harmonic the Kerr slab also makes, which is
-phase-matched in a non-dispersive medium; the beam is kept wide and the
-nonlinearity moderate to keep it small.
+The plan's risk came true: without dispersion the third harmonic is
+phase-matched and builds, 17% of the fundamental on the axis at mid-slab
+at 3 s and 35% by 20 s, with the stored energy still climbing at 20 s. At
+the user's choice the slab is also a Klein-Gordon medium with a 1.5 Hz
+cutoff and `ε = 1/(1 − (1.5/4)²) = 1.164`, so `n² = ε(1 − f₀²/f²)` is 1 at
+4 Hz and the slab stays invisible to the weak beam, while 12 Hz runs out of
+step within about 0.6: the harmonic is 5% at mid-slab and 13% at the exit
+at 3 s, 7% and 11% at 12 s, and the energy levels off at 12 s.
+
+Explored at edges 0.08, 0.07 and 0.05 (without the dispersion): the weak
+beam's RMS width at the far face 0.3277, 0.3273, 0.3271 (Gaussian optics
+0.305); the strong beam's 0.156, 0.157, 0.152. The strong beam is held, not
+focused: from x = 0 to 0.6 its width stays at 0.16 while the weak beam's
+grows by half. With the dispersion it breathes a little, 0.15 to 0.18 at
+12 s. Its steady state is chaotic at this strength: two CPU runs whose
+strengths differ by 1e-7 part at about 0.9 per second, so the device leaves
+the reference after about 1500 steps as any two runs do (0.15 at 3000
+steps), where the Kerr slab keeps 4.8e-5.
+
+Claims at edge 0.08, 3 s from rest, against the weak beam:
+
+- At the far face the strong beam is under 0.6 of the weak one's width
+  (0.49).
+- Across the slab's second half the strong beam widens by under a fifth
+  (9%) and the weak one by over 40% (55%).
 
 ### 27. Doppler mirror
 

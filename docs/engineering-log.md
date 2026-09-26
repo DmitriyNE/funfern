@@ -13735,3 +13735,32 @@ meshes on the CI runner (AMD EPYC, glibc).
   ships. The native release build that follows reuses its dependencies.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: the spatial soliton
+
+- **Scene** "Spatial soliton" (gallery item 26), the catalogue's 35th: a
+  4 Hz Gaussian beam (waist 0.2, launcher strength 1000) into a slab of the
+  saturable preset at its defaults, which a weak beam (strength 10) does not
+  see. The slab stops short of the walls so the outgoing traces stay
+  linear, since a nonlinear primary map there is refused.
+- **Dispersion, at the user's choice.** Without it the third harmonic is
+  phase-matched and builds (17% of the fundamental on the axis at mid-slab
+  at 3 s, 35% by 20 s), and the stored energy is still climbing at 20 s. A
+  Klein-Gordon term with a 1.5 Hz cutoff and `ε = 1.164` keeps the index 1
+  at 4 Hz and puts 12 Hz out of step: 5-13% at 3 s, 7-11% at 12 s, and the
+  energy levels off.
+- **Measured** at edge 0.08, 3 s: RMS width at the far face 0.165 strong
+  against 0.334 weak (ratio 0.49); from x = 0 to 0.6 the strong beam widens
+  9% and the weak one 55%. Without dispersion the widths converge across
+  edges 0.08/0.07/0.05 (weak 0.3277/0.3273/0.3271, strong
+  0.156/0.157/0.152). Test:
+  `a_strong_beam_holds_its_width_where_a_weak_one_spreads`, 23 s in release.
+- **Chaotic at this strength:** two CPU runs 1e-7 apart in strength part at
+  about 0.9 per second of simulated time, the same rate at which the device
+  leaves the reference, so a long device run cannot match past about 1500
+  steps. The Kerr slab keeps 4.8e-5 at 3000 steps.
+- **Device:** `canonical_gpu_long_run` (temporal, 8343 dofs) at 400 steps
+  Q 3.6e-6, b 3.4e-6; at 1000 steps Q 1.8e-5, b 1.5e-5; at 3000 steps
+  (printed, not judged) 0.15 and 0.14, the divergence above.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

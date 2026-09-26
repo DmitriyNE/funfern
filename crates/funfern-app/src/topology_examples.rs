@@ -262,6 +262,17 @@ pub fn catalog() -> &'static [TopologyExample] {
                  lossy slab, which absorbs.",
                 plasma_skin_depth(),
             ),
+            example(
+                "Spatial soliton",
+                "A 4 Hz beam enters a slab of saturable Kerr medium whose index at 4 Hz is 1, \
+                 so a weak wave does not see it. Weak, the beam spreads to three times its \
+                 width by the far face; strong, it raises the index where it is brightest, and \
+                 that holds it together, breathing a little, at half the weak beam's width: a \
+                 spatial soliton. Turn the launcher down to watch it spread. The slab is \
+                 slightly dispersive, as real media are, which keeps its third harmonic, the \
+                 fine ripple on the strong beam, small.",
+                spatial_soliton(),
+            ),
         ]
     })
 }
@@ -1208,6 +1219,98 @@ const TRAVELLING: [(&str, f64); 5] = [
     ("wavenumber", std::f64::consts::TAU),
     ("wave_angle", 0.0),
 ];
+
+const SOLITON_HZ: f64 = 4.0;
+/// The launcher's strength that makes the soliton; a hundredth of it is the
+/// weak beam, which the slab does not see.
+const SOLITON_AMPLITUDE: f64 = 1000.0;
+/// The slab's Klein-Gordon cutoff. Without dispersion the Kerr slab's third
+/// harmonic runs in step with the beam and builds up, to 35% of it on the
+/// axis by 20 s with the stored energy still climbing; this cutoff, with the
+/// permittivity that keeps the index 1 at 4 Hz, puts 12 Hz out of step
+/// within about 0.6 and holds it to 5-13%.
+const SOLITON_CUTOFF_HZ: f64 = 1.5;
+
+fn spatial_soliton() -> TopologyDocument {
+    spatial_soliton_with(SOLITON_AMPLITUDE)
+}
+
+/// A 4 Hz Gaussian beam, waist 0.2, launched at `x = −0.85` into a slab of
+/// the saturable medium at the preset's own χ = 0.8 and saturation 1, made
+/// slightly dispersive by a Klein-Gordon term: `n² = ε(1 − f₀²/f²)` is 1 at
+/// 4 Hz, so the slab is the vacuum to a weak beam. The slab stops short of
+/// the walls, where the outgoing conditions stay linear.
+fn spatial_soliton_with(amplitude: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries =
+        OuterBoundaryConditions::uniform(OuterBoundaryCondition::SecondOrderOutgoing);
+    builder.launcher(-0.85, SOLITON_HZ, amplitude);
+    let launcher = builder.scene.volume_sources.last_mut().unwrap();
+    launcher.profile = ScalarField::formula("exp(-(y / w)^2)").unwrap();
+    launcher.parameters = vec![MaterialParameter {
+        name: "w".into(),
+        value: 0.2,
+    }];
+    builder.scene.materials.push(preset_material(
+        2,
+        "Saturable slab",
+        [178, 102, 62],
+        "Saturable medium",
+        LawPresetRow::Mass,
+        &[("kerr_chi", 0.8), ("saturation", 1.0)],
+    ));
+    let klein_gordon = restoring_presets()
+        .iter()
+        .find(|preset| preset.id == "R1")
+        .expect("the Klein-Gordon preset");
+    let slab_material = builder.scene.materials.last_mut().unwrap();
+    *slab_material = apply_restoring_preset(klein_gordon, slab_material)
+        .expect("a restoring preset applies beside a response");
+    slab_material
+        .parameters
+        .iter_mut()
+        .find(|parameter| parameter.name == "omega0")
+        .expect("the preset names its cutoff")
+        .value = std::f64::consts::TAU * SOLITON_CUTOFF_HZ;
+    slab_material.mass_density =
+        ScalarField::constant(1.0 / (1.0 - (SOLITON_CUTOFF_HZ / SOLITON_HZ).powi(2)));
+    builder.subdomain(
+        slab(-0.6, 0.6, 0.9),
+        MaterialId(2),
+        MaterialFrame {
+            attachment: MaterialFrameAttachment::FollowRegion,
+            ..MaterialFrame::world()
+        },
+    );
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Along the beam".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Segment {
+            start: Point2::new(-0.8, 0.0),
+            end: Point2::new(0.9, 0.0),
+            preset: ProbeSamplingPreset::High,
+        },
+    });
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Behind the slab".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Segment {
+            start: Point2::new(0.65, -0.9),
+            end: Point2::new(0.65, 0.9),
+            preset: ProbeSamplingPreset::High,
+        },
+    });
+    document
+}
 
 fn kerr_slab() -> TopologyDocument {
     kerr_slab_with(40.0, 60.0)
@@ -2994,7 +3097,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 34);
+        assert_eq!(catalog().len(), 35);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -3395,6 +3498,37 @@ mod tests {
             }
             re.hypot(im)
         }
+    }
+
+    /// The RMS width of the time-averaged intensity across `x`.
+    fn beam_width(scene: &Harmonic, x: f64) -> f64 {
+        let (mut total, mut moment) = (0.0, 0.0);
+        for index in 0..=190 {
+            let y = -0.95 + index as f64 * 0.01;
+            let (re, im) = scene.interpolated(Point2::new(x, y));
+            total += re * re + im * im;
+            moment += y * y * (re * re + im * im);
+        }
+        (moment / total).sqrt()
+    }
+
+    /// The spatial soliton's claims, against the same beam at a hundredth of
+    /// the strength, which the slab does not see: at the far face the strong
+    /// beam is under 0.6 of the weak one's width (0.49); and across the
+    /// slab's second half it widens by under a fifth (9%), where the weak
+    /// beam widens by over 40% (55%), so it is held, not focused.
+    #[test]
+    fn a_strong_beam_holds_its_width_where_a_weak_one_spreads() {
+        let widths = |amplitude| {
+            let scene = Harmonic::run(&spatial_soliton_with(amplitude), 0.08, 3.0, SOLITON_HZ, 4.0);
+            [0.0, 0.6].map(|x| beam_width(&scene, x))
+        };
+        let strong = widths(SOLITON_AMPLITUDE);
+        let weak = widths(SOLITON_AMPLITUDE / 100.0);
+        let report = format!("strong {strong:.4?}, weak {weak:.4?}");
+        assert!(strong[1] / weak[1] < 0.6, "{report}");
+        assert!(strong[1] / strong[0] < 1.2, "{report}");
+        assert!(weak[1] / weak[0] > 1.4, "{report}");
     }
 
     /// The Kerr gallery claim: behind the slab, the receiver hears the
