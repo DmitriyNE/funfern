@@ -551,7 +551,7 @@ fn limits_terminate_once_and_obsolete_jobs_can_be_replaced() {
     );
     loop {
         if let Some(result) = job.advance(1000) {
-            assert!(matches!(result, Err(MeshError::RefinementLimit(_))));
+            assert!(matches!(result, Err(MeshError::RefinementLimit { .. })));
             assert_eq!(job.stats().refinement_insertions, 1);
             assert!(job.advance(1000).is_none());
             break;
@@ -1737,4 +1737,45 @@ fn adaptation_scheduling_and_fallback_are_explicit() {
         MeshUpdateFailureKind::MotionTooLarge
     );
     assert_eq!(result.report.repair_attempts, 1);
+}
+
+/// The default caps stop the empty 2 × 2 domain short of an edge of 0.032:
+/// refinement runs out of insertions with edges still longer than asked, and
+/// says so. The caps sized for the domain's area mesh it, and for a small
+/// domain they are the defaults.
+#[test]
+fn caps_sized_for_the_domain_mesh_what_the_defaults_refuse() {
+    let scene = Scene::default();
+    let area = scene.domain.width() * scene.domain.height();
+    let options = MeshingOptions {
+        target_edge_length: 0.032,
+        ..Default::default()
+    };
+    let refused = mesh_scene(&scene, 0, options).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            MeshError::RefinementLimit {
+                insertions: 8_000,
+                ..
+            }
+        ),
+        "{refused}"
+    );
+    assert!(
+        refused.to_string().contains("against the 0.032 asked for"),
+        "{refused}"
+    );
+    let sized = options.sized_for_area(area);
+    let mesh = mesh_scene(&scene, 0, sized).unwrap();
+    assert!(
+        mesh.quality.maximum_edge_length <= 0.032 * 1.1,
+        "{:?}",
+        mesh.quality
+    );
+    assert!(mesh.triangles.len() < sized.max_triangles / 3);
+    assert_eq!(
+        MeshingOptions::default().sized_for_area(0.01),
+        MeshingOptions::default()
+    );
 }

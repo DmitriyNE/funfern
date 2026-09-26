@@ -189,6 +189,43 @@ pub struct MeshingOptions {
     pub max_refinement_steps: usize,
 }
 
+impl MeshingOptions {
+    /// The triangles this mesher makes over a domain of `area` at
+    /// `target_edge_length`: 1.9 times the equilateral count
+    /// `area / (√3/4 · h²)`, because it refines until no edge exceeds the
+    /// target, which leaves the mean edge shorter. Measured 1.92 to 1.95 on
+    /// the empty 2 × 2 domain at 0.08 to 0.03, and 1.90 on a scene with a
+    /// curved hole at 0.04 to 0.02.
+    pub fn expected_triangles(area: f64, target_edge_length: f64) -> f64 {
+        1.9 * area / (3.0_f64.sqrt() / 4.0 * target_edge_length * target_edge_length)
+    }
+
+    /// These options with their caps sized for a domain of `area`: four
+    /// times the triangles expected at the target edge, half that in
+    /// vertices and insertions, and never below the defaults. The caps are
+    /// there to stop runaway refinement. Fixed, they refused the finer end of
+    /// the resolutions the application offers: a 2 × 2 domain could not mesh
+    /// below an edge of about 0.034.
+    pub fn sized_for_area(mut self, area: f64) -> Self {
+        let triangles = 4.0 * Self::expected_triangles(area, self.target_edge_length);
+        if !triangles.is_finite() {
+            return self;
+        }
+        let defaults = Self::default();
+        self.max_triangles = self
+            .max_triangles
+            .max(defaults.max_triangles)
+            .max(triangles.ceil() as usize);
+        let half = (triangles / 2.0).ceil() as usize;
+        self.max_vertices = self.max_vertices.max(defaults.max_vertices).max(half);
+        self.max_refinement_steps = self
+            .max_refinement_steps
+            .max(defaults.max_refinement_steps)
+            .max(half);
+        self
+    }
+}
+
 impl Default for MeshingOptions {
     fn default() -> Self {
         Self {
@@ -212,7 +249,14 @@ pub enum MeshError {
         triangles: usize,
     },
     Topology(&'static str),
-    RefinementLimit(MeshQuality),
+    /// Refinement used up its insertions with triangles still too large or
+    /// too sharp: the quality it reached, the insertions spent, and the
+    /// edge that was asked for.
+    RefinementLimit {
+        quality: MeshQuality,
+        insertions: usize,
+        target_edge_length: f64,
+    },
     /// A repair's refill produced elements below the angle floor. The carve
     /// is refused rather than handing the solver a collapsed timestep, and
     /// the error names the defect so a fallback in the panel says what it is.
@@ -238,10 +282,15 @@ impl std::fmt::Display for MeshError {
                 "Mesh capacity reached at {vertices} vertices and {triangles} triangles"
             ),
             Self::Topology(reason) => write!(f, "Could not construct a constrained mesh: {reason}"),
-            Self::RefinementLimit(quality) => write!(
+            Self::RefinementLimit {
+                quality,
+                insertions,
+                target_edge_length,
+            } => write!(
                 f,
-                "Refinement limit reached (minimum angle {:.1}°, maximum edge {:.3})",
-                quality.minimum_angle_degrees, quality.maximum_edge_length
+                "Refinement stopped after {insertions} insertions with edges still up to \
+                 {:.3} against the {target_edge_length:.3} asked for (smallest angle {:.1}°)",
+                quality.maximum_edge_length, quality.minimum_angle_degrees
             ),
             Self::DegenerateRepair {
                 count,
@@ -1076,6 +1125,15 @@ impl MeshBuilder {
 
     fn triangle_quality(&self, triangle: MeshTriangle) -> MeshQuality {
         triangle_quality_of(self.triangle_points(triangle))
+    }
+
+    /// The error for refinement that ran out of insertions.
+    pub(crate) fn refinement_limit(&self) -> MeshError {
+        MeshError::RefinementLimit {
+            quality: self.quality(),
+            insertions: self.stats.refinement_insertions,
+            target_edge_length: self.options.target_edge_length,
+        }
     }
 
     fn quality(&self) -> MeshQuality {
@@ -2810,7 +2868,7 @@ impl MeshingJob {
                 if !b.bad_triangles.is_empty()
                     && b.stats.refinement_insertions >= b.options.max_refinement_steps
                 {
-                    return Err(MeshError::RefinementLimit(b.quality()));
+                    return Err(b.refinement_limit());
                 }
                 if b.refine_once()? {
                     b.internal_chains.push(Vec::new());
@@ -2974,7 +3032,7 @@ impl MeshingJob {
                 if !b.bad_triangles.is_empty()
                     && b.stats.refinement_insertions >= b.options.max_refinement_steps
                 {
-                    return Err(MeshError::RefinementLimit(b.quality()));
+                    return Err(b.refinement_limit());
                 }
                 if b.refine_once()? {
                     MeshingJobState::VerifyTriangles {

@@ -220,7 +220,7 @@ impl TopologyMeshingJob {
                 if !b.bad_triangles.is_empty()
                     && b.stats.refinement_insertions >= b.options.max_refinement_steps
                 {
-                    return Err(MeshError::RefinementLimit(b.quality()));
+                    return Err(b.refinement_limit());
                 }
                 if b.refine_once()? {
                     TopologyMeshingState::CutSlits { index: 0 }

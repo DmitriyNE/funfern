@@ -137,11 +137,13 @@ impl Playground {
         {
             return;
         }
+        let domain = self.editor.document.model.accepted.geometry.domain;
         let options = MeshingOptions {
             target_edge_length: self.editor.document.presentation.mesh_edge,
             curve_tolerance: (self.editor.document.presentation.mesh_edge * 0.02).min(5e-4),
             ..MeshingOptions::default()
-        };
+        }
+        .sized_for_area(domain.width() * domain.height());
         // This revision is accounted for when a preparation is in flight for
         // it, when it is already the accepted generation, or when preparing it
         // has already failed. Without that last case a revision that cannot be

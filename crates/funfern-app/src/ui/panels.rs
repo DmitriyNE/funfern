@@ -298,6 +298,26 @@ impl Playground {
             .text("Target edge"),
         );
         self.mesh_edge_dragging = slider.dragged();
+        let domain = self.editor.document.model.draft.geometry.domain;
+        let (triangles, dofs) = mesh_estimate(
+            domain.width() * domain.height(),
+            self.editor.document.presentation.mesh_edge,
+        );
+        ui.weak(format!(
+            "≈ {} triangles · ≈ {} DOFs",
+            compact_count(triangles),
+            compact_count(dofs)
+        ))
+        .on_hover_text(
+            "Estimated from the domain's area at the target edge; curves, grading and holes \
+             move it either way",
+        );
+        if dofs > LARGE_MESH_DOFS {
+            ui.colored_label(
+                GOLD,
+                "Large mesh: preparing it takes a while and the solver steps slower",
+            );
+        }
         ui.horizontal(|ui| {
             if ui
                 .button("Remesh")
@@ -633,5 +653,64 @@ impl Playground {
                     );
                 }
             });
+    }
+}
+
+/// Above this many solver unknowns the Simulation panel warns that the mesh
+/// is large: an edge of about 0.03 on the 2 × 2 domain, where preparing takes
+/// several seconds natively and the solver steps about twice as slowly as at
+/// the Fine preset's 34 thousand.
+const LARGE_MESH_DOFS: f64 = 60_000.0;
+
+/// Triangles and solver unknowns a domain of `area` holds at `edge`. The
+/// enriched quadratic element has seven nodes; shared, that is half a vertex,
+/// one and a half edge midpoints and a bubble for each triangle, so three
+/// unknowns a triangle, as a scene at 0.02 measured (123,422 on 40,945).
+fn mesh_estimate(area: f64, edge: f64) -> (f64, f64) {
+    let triangles = MeshingOptions::expected_triangles(area, edge);
+    (triangles, 3.0 * triangles)
+}
+
+/// A count for a glance: 800, 9.2k, 41k, 1.2M.
+fn compact_count(value: f64) -> String {
+    match value {
+        v if v >= 1.0e6 => format!("{:.1}M", v / 1.0e6),
+        v if v >= 1.0e4 => format!("{:.0}k", v / 1.0e3),
+        v if v >= 1.0e3 => format!("{:.1}k", v / 1.0e3),
+        v => format!("{v:.0}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The estimate under the slider against meshes actually built: the
+    /// empty 2 × 2 domain at 0.08, 0.04 and 0.03 (2,772, 11,190 and 20,031
+    /// triangles), and a 1.854 × 2 domain with a curved hole at 0.02 (40,945
+    /// triangles, 123,422 unknowns). The warning starts between the Fine
+    /// preset and the finest of these.
+    #[test]
+    fn the_mesh_estimate_follows_meshes_actually_built() {
+        for (area, edge, built) in [
+            (4.0, 0.08, 2_772.0),
+            (4.0, 0.04, 11_190.0),
+            (4.0, 0.03, 20_031.0),
+            (1.8538 * 2.0, 0.02, 40_945.0),
+        ] {
+            let (triangles, _) = mesh_estimate(area, edge);
+            assert!(
+                (triangles / built - 1.0).abs() < 0.1,
+                "{triangles:.0} estimated against {built} built at {edge}"
+            );
+        }
+        let (_, dofs) = mesh_estimate(1.8538 * 2.0, 0.02);
+        assert!((dofs / 123_422.0 - 1.0).abs() < 0.1, "{dofs:.0}");
+        assert!(mesh_estimate(4.0, 0.04).1 < LARGE_MESH_DOFS);
+        assert!(mesh_estimate(4.0, 0.025).1 > LARGE_MESH_DOFS);
+        assert_eq!(compact_count(812.0), "812");
+        assert_eq!(compact_count(9_216.0), "9.2k");
+        assert_eq!(compact_count(40_945.0), "41k");
+        assert_eq!(compact_count(1_234_567.0), "1.2M");
     }
 }

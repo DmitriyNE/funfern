@@ -13905,3 +13905,39 @@ meshes on the CI runner (AMD EPYC, glibc).
   `a_cleared_request_owes_no_steps`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — The mesher's caps follow the requested edge
+
+- Reported: the autosaved scene could not build a mesh. Reproduced on a copy:
+  "Refinement limit reached (minimum angle 16.0°, maximum edge 0.033)". The
+  scene is a 1.854 × 2 Mechanical domain with one curved hole at edge 0.02,
+  the slider's minimum.
+- **Cause:** the application meshed with the fixed defaults, 8,000
+  refinement insertions, 12,000 vertices and 24,000 triangles, which were
+  never sized to the slider's 0.02 to 0.25. On a 2 × 2 domain they run out at
+  an edge of about 0.034. The empty scene failed at 0.025 and 0.02, and the
+  reported one at 0.03. The mesher from before eb3a687 failed the same way
+  (0.035), so this was not that change.
+- **Fix, the user's option C:**
+  - `MeshingOptions::sized_for_area` gives caps of four times the triangles
+    expected at the target edge, half that in vertices and insertions, and
+    never below the defaults. The application's requests use it.
+  - `expected_triangles` carries the mesher's measured 1.9 times the
+    equilateral count (1.92 to 1.95 on the empty domain at 0.08 to 0.03, and
+    1.90 on the reported scene at 0.04 to 0.02): it refines until no edge
+    exceeds the target, which leaves the mean edge shorter.
+  - `MeshError::RefinementLimit` now names the insertions spent and the
+    edge asked for: "Refinement stopped after 8000 insertions with edges
+    still up to 0.035 against the 0.032 asked for".
+  - The Simulation panel shows "≈ triangles · ≈ DOFs" under the Target edge
+    slider, at three unknowns a triangle for the seven-node element (123,422
+    on 40,945 measured), and a gold warning above 60,000.
+- **The reported scene now builds** at 0.02: 40,945 triangles, 123,422 DOFs,
+  28 s natively. Of that, meshing is 2.1 s and the canonical constitutive
+  compile 25.7 s. That compile grows faster than the mesh (from 0.04 to 0.02
+  the DOFs go up four times and the whole preparation eleven), a lead for a
+  separate look.
+- Tests: `caps_sized_for_the_domain_mesh_what_the_defaults_refuse`
+  (core, 0.86 s) and `the_mesh_estimate_follows_meshes_actually_built`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

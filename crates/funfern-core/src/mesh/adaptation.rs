@@ -183,7 +183,7 @@ fn classify_failure(error: &MeshError) -> MeshUpdateFailure {
         MeshError::InvalidGeometry(_) => MeshUpdateFailureKind::InvalidGeometry,
         MeshError::Sampling(_) => MeshUpdateFailureKind::BoundarySampling,
         MeshError::Capacity { .. } => MeshUpdateFailureKind::Capacity,
-        MeshError::RefinementLimit(_) => MeshUpdateFailureKind::RefinementLimit,
+        MeshError::RefinementLimit { .. } => MeshUpdateFailureKind::RefinementLimit,
         // Only a carve refuses its own refill; the legacy path never sees it.
         MeshError::DegenerateRepair { .. } => MeshUpdateFailureKind::ElementInversion,
         MeshError::Topology(reason) => {
@@ -1666,10 +1666,14 @@ mod tests {
         assert_eq!(job.phase(), "Expanding local repair");
         assert!(job.builder.as_ref().unwrap().vertices.is_empty());
 
-        job.handle_local_failure(MeshError::RefinementLimit(MeshQuality {
-            minimum_angle_degrees: 4.0,
-            maximum_edge_length: 0.2,
-        }));
+        job.handle_local_failure(MeshError::RefinementLimit {
+            quality: MeshQuality {
+                minimum_angle_degrees: 4.0,
+                maximum_edge_length: 0.2,
+            },
+            insertions: 1,
+            target_edge_length: 0.1,
+        });
         assert_eq!(job.attempt, 2);
         assert_eq!(job.report.repair_attempts, 3);
         assert_eq!(job.report.retry_failures.len(), 2);
@@ -1690,10 +1694,14 @@ mod tests {
             MeshError::Topology("edge split reached the fixed patch boundary"),
             MeshError::Topology("mesh contains an inverted triangle"),
             MeshError::Topology("local boundary subdivision limit"),
-            MeshError::RefinementLimit(MeshQuality {
-                minimum_angle_degrees: 1.0,
-                maximum_edge_length: 1.0,
-            }),
+            MeshError::RefinementLimit {
+                quality: MeshQuality {
+                    minimum_angle_degrees: 1.0,
+                    maximum_edge_length: 1.0,
+                },
+                insertions: 1,
+                target_edge_length: 0.5,
+            },
         ] {
             assert!(retryable(classify_failure(&error).kind));
         }

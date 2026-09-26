@@ -437,7 +437,12 @@ names or with every expression evaluated at the material frame's origin. Each ro
   rebuilds the accepted mesh when the control is released, without touching
   geometry or history, and carries the running field across. Remesh rebuilds at
   the current resolution, which also leaves an adapted mesh. Resolution is not
-  stored in scene files.
+  stored in scene files. Under the slider is an estimate of the triangles and
+  solver unknowns the domain holds at that edge; above 60 thousand unknowns,
+  about an edge of 0.03 on the 2 × 2 domain, it warns that the mesh is large,
+  because preparing it takes seconds and the solver steps slower. The mesher's
+  capacity follows the requested edge, so every setting the slider offers can
+  be built.
   A full Fine build can take a second when spread across frames, so geometry
   edits repair the active mesh instead: moving a control or a junction, adding
   or deleting a curve, and changing a span's behaviour carve out the band the
