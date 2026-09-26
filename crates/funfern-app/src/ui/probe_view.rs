@@ -13,8 +13,8 @@ pub(super) struct ProbeTrace {
 }
 
 /// A quantity a line or boundary probe samples along its path. The GPU records
-/// four of these every frame; `MeanFlux` is derived here from `Flux`. The
-/// readout chooses which to draw.
+/// four of these every frame; `MeanFlux` and `MeanEnergy` are derived here from
+/// `Flux` and `Energy`. The readout chooses which to draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LineProbeQuantity {
     Field,
@@ -22,15 +22,17 @@ pub(super) enum LineProbeQuantity {
     Flux,
     MeanFlux,
     Energy,
+    MeanEnergy,
 }
 
 impl LineProbeQuantity {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::Field,
         Self::Transverse,
         Self::Flux,
         Self::MeanFlux,
         Self::Energy,
+        Self::MeanEnergy,
     ];
 
     pub(super) const fn label_for(self, physics: PhysicsModel) -> &'static str {
@@ -45,6 +47,7 @@ impl LineProbeQuantity {
             // font has no glyph for those and drew them as tofu.
             Self::MeanFlux => "Average flux",
             Self::Energy => "Energy density",
+            Self::MeanEnergy => "Average energy density",
         }
     }
 
@@ -55,6 +58,7 @@ impl LineProbeQuantity {
             Self::Flux => TEAL,
             Self::MeanFlux => RED,
             Self::Energy => GOLD,
+            Self::MeanEnergy => Color32::from_rgb(240, 150, 90),
         }
     }
 
@@ -65,6 +69,7 @@ impl LineProbeQuantity {
             Self::Flux => 6,
             Self::MeanFlux => 9,
             Self::Energy => 12,
+            Self::MeanEnergy => 15,
         }
     }
 
@@ -72,10 +77,10 @@ impl LineProbeQuantity {
         true
     }
 
-    /// Whether the row is drawn from the trailing mean of the recorded flux
-    /// rather than from the record the GPU wrote.
+    /// Whether the row is drawn from the trailing mean of the recorded flux or
+    /// energy density rather than from the record the GPU wrote.
     pub(super) const fn averaged(self) -> bool {
-        matches!(self, Self::MeanFlux)
+        matches!(self, Self::MeanFlux | Self::MeanEnergy)
     }
 }
 
@@ -123,10 +128,10 @@ pub(super) struct ProbeViewState {
     pub(super) area_rms_transverse: bool,
     pub(super) area_mean_energy: bool,
     pub(super) area_total_energy: bool,
-    pub(super) line_plots: [bool; 15],
-    /// Seconds of flux the `MeanFlux` row averages over. Fixed rather than tied
-    /// to the visible window, so panning and zooming move the view over the
-    /// same data instead of rewriting it.
+    pub(super) line_plots: [bool; 18],
+    /// Seconds the `MeanFlux` and `MeanEnergy` rows average over. Fixed rather
+    /// than tied to the visible window, so panning and zooming move the view
+    /// over the same data instead of rewriting it.
     pub(super) mean_window: f64,
     pub(super) far_waterfall: bool,
     pub(super) far_polar: bool,
@@ -150,14 +155,16 @@ impl ProbeViewState {
             area_rms_transverse: false,
             area_mean_energy: false,
             area_total_energy: true,
-            // Field versus arclength and its waterfall, the mean flux profile,
-            // and the two integrals.
+            // Field versus arclength and its waterfall, the mean flux and mean
+            // energy profiles, and the two integrals. The mean energy profile
+            // is what shows a wave gaining or losing power along a path.
             line_plots: [
                 true, true, false, // primary component
                 false, false, false, // transverse magnitude
                 false, false, true, // normal flux
                 true, false, false, // trailing mean of the normal flux
                 false, false, true, // energy density
+                true, false, false, // trailing mean of the energy density
             ],
             // Two and a half periods of the default source, five of the flux,
             // which oscillates at twice the driven frequency.

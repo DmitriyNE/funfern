@@ -148,14 +148,17 @@ impl Playground {
             LineProbeQuantity::Field => &frame.displacement,
             LineProbeQuantity::Transverse => &frame.transverse_magnitude,
             LineProbeQuantity::Flux | LineProbeQuantity::MeanFlux => &frame.normal_flux,
-            LineProbeQuantity::Energy => &frame.energy_density,
+            LineProbeQuantity::Energy | LineProbeQuantity::MeanEnergy => &frame.energy_density,
         }
     }
-    /// A causal trailing mean of the recorded normal flux: every frame carries
-    /// the average of the `window` seconds ending at its own time, sample point
-    /// by sample point. The instantaneous flux of a standing wave swings
-    /// symmetrically about zero at twice the driven frequency, so only this
-    /// average says how much power a path actually carries.
+    /// A causal trailing mean of the recorded normal flux and energy density:
+    /// every frame carries the average of the `window` seconds ending at its
+    /// own time, sample point by sample point. The instantaneous flux of a
+    /// standing wave swings symmetrically about zero at twice the driven
+    /// frequency, so only this average says how much power a path actually
+    /// carries; the energy density swings with it, and its average says how
+    /// much a wave holds along the path, which is what shows it gaining or
+    /// losing power over the distance.
     ///
     /// The window is fixed rather than taken from the visible one, so panning
     /// and zooming move over the same numbers instead of rewriting them. A
@@ -202,37 +205,31 @@ impl Playground {
             return (Vec::new(), 0.0);
         }
         let mut means = Vec::with_capacity(frames.len());
-        let mut sums: Vec<f64> = Vec::new();
-        let mut counts: Vec<u32> = Vec::new();
+        let mut flux = RunningRow::default();
+        let mut energy = RunningRow::default();
         // The first frame of the run of equal-width records the accumulator was
         // built for, and the oldest frame still inside the window.
         let mut run = 0;
         let mut oldest = 0;
         let mut filled = 0.0;
         for (index, frame) in frames.iter().enumerate() {
-            if frame.normal_flux.len() != sums.len() {
+            if frame.normal_flux.len() != flux.sums.len()
+                || frame.energy_density.len() != energy.sums.len()
+            {
                 // A sampling-preset change or a boundary remesh leaves rows of
                 // another length in the same trace, and two layouts have no
                 // common average. The window starts again here.
-                sums = vec![0.0; frame.normal_flux.len()];
-                counts = vec![0; frame.normal_flux.len()];
+                flux = RunningRow::sized(frame.normal_flux.len());
+                energy = RunningRow::sized(frame.energy_density.len());
                 run = index;
                 oldest = index;
             }
-            for (point, value) in frame.normal_flux.iter().enumerate() {
-                if value.is_finite() {
-                    sums[point] += *value as f64;
-                    counts[point] += 1;
-                }
-            }
+            flux.add(&frame.normal_flux, 1.0);
+            energy.add(&frame.energy_density, 1.0);
             let begin = frame.time - window;
             while oldest < index && frames[oldest].time < begin {
-                for (point, value) in frames[oldest].normal_flux.iter().enumerate() {
-                    if value.is_finite() {
-                        sums[point] -= *value as f64;
-                        counts[point] -= 1;
-                    }
-                }
+                flux.add(&frames[oldest].normal_flux, -1.0);
+                energy.add(&frames[oldest].energy_density, -1.0);
                 oldest += 1;
             }
             // Either a frame has already left the window, or the run itself
@@ -248,17 +245,8 @@ impl Playground {
             means.push(CurveProbeRecord {
                 probe_id: frame.probe_id,
                 time: frame.time,
-                normal_flux: counts
-                    .iter()
-                    .zip(&sums)
-                    .map(|(count, sum)| {
-                        if covered && *count > 0 {
-                            (sum / *count as f64) as f32
-                        } else {
-                            f32::NAN
-                        }
-                    })
-                    .collect(),
+                normal_flux: flux.mean(covered),
+                energy_density: energy.mean(covered),
                 ..Default::default()
             });
         }
@@ -913,9 +901,9 @@ impl Playground {
                                             .text("Mean window"),
                                     )
                                     .on_hover_text(
-                                        "Seconds the averaged flux row looks back over. \
-                                         Cover several periods of the flux, which swings at \
-                                         twice the driven frequency. It stops at what the \
+                                        "Seconds the averaged flux and energy rows look back \
+                                         over. Cover several periods of the flux, which swings \
+                                         at twice the driven frequency. It stops at what the \
                                          recorded trace can reach back over.",
                                     );
                                 });
@@ -1011,15 +999,18 @@ impl Playground {
                                 ui.small(format!("Valid coverage {:.0}%", coverage * 100.0));
                             }
                         }
-                        // One pass over the trace serves all three averaged
-                        // views, and none of them asks for it unless drawn.
-                        let averaged =
-                            LineProbeRepresentation::ALL
-                                .into_iter()
-                                .any(|representation| {
-                                    view.line_plots[LineProbeQuantity::MeanFlux.offset()
-                                        + representation.offset()]
-                                });
+                        // One pass over the trace serves every averaged view,
+                        // and none of them asks for it unless drawn.
+                        let averaged = LineProbeQuantity::ALL
+                            .into_iter()
+                            .filter(|quantity| quantity.averaged())
+                            .any(|quantity| {
+                                LineProbeRepresentation::ALL
+                                    .into_iter()
+                                    .any(|representation| {
+                                        view.line_plots[quantity.offset() + representation.offset()]
+                                    })
+                            });
                         let (mean_frames, mean_filled) = if averaged {
                             Self::curve_probe_running_mean(&curve_frames, view.mean_window)
                         } else {
@@ -1387,6 +1378,53 @@ impl Playground {
     }
 }
 
+/// The sums and counts of one recorded row over a trailing window, point by
+/// point; a non-finite sample counts for nothing.
+#[derive(Default)]
+struct RunningRow {
+    sums: Vec<f64>,
+    counts: Vec<u32>,
+}
+
+impl RunningRow {
+    fn sized(length: usize) -> Self {
+        Self {
+            sums: vec![0.0; length],
+            counts: vec![0; length],
+        }
+    }
+
+    /// Adds a row (`sign` 1) or takes one out (`sign` −1).
+    fn add(&mut self, row: &[f32], sign: f64) {
+        for (point, value) in row.iter().enumerate() {
+            if value.is_finite() {
+                self.sums[point] += sign * *value as f64;
+                if sign > 0.0 {
+                    self.counts[point] += 1;
+                } else {
+                    self.counts[point] -= 1;
+                }
+            }
+        }
+    }
+
+    /// The mean at every point, or NaN where the window is not yet covered
+    /// or held nothing finite.
+    fn mean(&self, covered: bool) -> Vec<f32> {
+        self.counts
+            .iter()
+            .zip(&self.sums)
+            .map(|(count, sum)| {
+                if covered && *count > 0 {
+                    (sum / *count as f64) as f32
+                } else {
+                    f32::NAN
+                }
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1412,7 +1450,7 @@ mod tests {
         assert_eq!(seen.len(), view.line_plots.len());
 
         // A new readout opens on the field's profile and waterfall, the mean
-        // flux profile, and the two integrals.
+        // flux and mean energy profiles, and the two integrals.
         let enabled = |quantity: LineProbeQuantity, representation: LineProbeRepresentation| {
             view.line_plots[quantity.offset() + representation.offset()]
         };
@@ -1436,7 +1474,46 @@ mod tests {
             LineProbeQuantity::Energy,
             LineProbeRepresentation::Integral
         ));
-        assert_eq!(view.line_plots.iter().filter(|plot| **plot).count(), 5);
+        assert!(enabled(
+            LineProbeQuantity::MeanEnergy,
+            LineProbeRepresentation::Arclength
+        ));
+        assert_eq!(view.line_plots.iter().filter(|plot| **plot).count(), 6);
+    }
+
+    /// The average energy density of a wave running past a probe is the mean
+    /// of its `sin²` swing, half its peak, once the window is full; before
+    /// that the row is NaN, as the average flux's is.
+    #[test]
+    fn the_mean_energy_row_averages_a_swinging_density() {
+        let frequency = 2.0;
+        let frames = (0..400)
+            .map(|index| {
+                let time = index as f64 / 200.0;
+                let density = (std::f64::consts::TAU * frequency * time).sin().powi(2);
+                CurveProbeRecord {
+                    probe_id: 1,
+                    time,
+                    energy_density: vec![density as f32, 2.0 * density as f32],
+                    normal_flux: vec![0.0; 2],
+                    ..Default::default()
+                }
+            })
+            .collect::<Vec<_>>();
+        let (means, filled) = Playground::curve_probe_running_mean(&frames, 1.0);
+        assert_eq!(filled, 1.0);
+        let last = &means[means.len() - 1];
+        assert!(
+            (last.energy_density[0] - 0.5).abs() < 0.01,
+            "{:?}",
+            last.energy_density
+        );
+        assert!(
+            (last.energy_density[1] - 1.0).abs() < 0.02,
+            "{:?}",
+            last.energy_density
+        );
+        assert!(means[10].energy_density.iter().all(|value| value.is_nan()));
     }
 
     /// The window slider stopped at the preset's nominal rate, which the

@@ -318,10 +318,14 @@ names or with every expression evaluated at the material frame's origin. Each ro
   the flux sign together. Low, Medium, and High presets record 32/64/128 spatial samples at
   30/60/120 samples per simulated second. A compact Plots menu exposes the signed
   primary field, transverse-field magnitude, signed normal Poynting flux, its
-  average over a trailing window, and energy as a waterfall, versus arclength, or
-  integrated versus time. Mechanical scenes retain field, normal energy flux, its
-  average, and energy. New readouts initially show field versus arclength, its
-  waterfall, the Average flux profile, normal power, and integrated energy. All
+  average over a trailing window, and energy density and its average, as a
+  waterfall, versus arclength, or integrated versus time. Mechanical scenes retain
+  field, normal energy flux, its average, and energy density and its average. New
+  readouts initially show field versus arclength, its waterfall, the Average flux
+  and Average energy density profiles, normal power, and integrated energy. The
+  average energy density along a path is what shows a wave losing or gaining
+  power over the distance, where the instantaneous density swings at twice the
+  driven frequency. All
   active views share one time window; drag waterfalls vertically and time traces
   horizontally.
   Portions outside the simulated domain or on a two-trace boundary appear as gaps;
@@ -330,7 +334,8 @@ names or with every expression evaluated at the material frame's origin. Each ro
   wave averages to nothing while a travelling one keeps the power it carries. Its
   window is a slider in the same menu, independent of the visible one so navigating
   never rewrites the numbers, and bounded by what the 512-frame trace holds at that
-  preset. The readout says how much of the window is recorded until it is full.
+  preset, and Average energy density shares it. The readout says how much of the
+  window is recorded until it is full.
 - **Boundary probes:** select one contiguous run of outer, loop, or baffle spans and
   choose **+ From selected spans** in Probes. The probe follows spline edits and
   uses the same twelve curve readouts, sixteen in EM scenes. Choose the sampled

@@ -13640,3 +13640,23 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and 6.1e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Average energy density on line and boundary probes
+
+- At the user's request: line and boundary probes gain "Average energy
+  density", the trailing mean of the energy density they already record,
+  over the Average flux's window, so a scene that moves power along a path
+  (the fibers, the coupler, the bend, the crystals, the skin depths) shows
+  its gain or loss over the distance instead of a density swinging at twice
+  the drive. No device change: the running mean, now `RunningRow` for each
+  averaged row, averages the flux and the energy density in one pass, and
+  only when an averaged view is drawn.
+- New readouts open with its profile beside the existing defaults (plot
+  choices are not stored in documents, so a default is how the gallery
+  shows it). The plot matrix grows from 15 to 18 cells.
+- **Test:** `the_mean_energy_row_averages_a_swinging_density` (a `sin²`
+  density averages to half its peak once the window is full, NaN before);
+  `the_plot_matrix_addresses_every_cell_exactly_once` covers the new cells
+  and the sixth default. The user guide's line-probe entry says so.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
