@@ -11,6 +11,90 @@ pub(super) const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 pub(super) const RED: Color32 = Color32::from_rgb(255, 106, 123);
 pub(super) const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 
+/// Whose work the status bar reports as in flight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Activity {
+    Idle,
+    /// Something the user did: an edit, a remesh, a reset.
+    Requested,
+    /// The app's own: mesh adaptation estimating, adapting or handing off.
+    Automatic,
+}
+
+/// The thin-film tints the sheen passes through: pale rose, lilac and teal,
+/// like light on oil.
+const SHEEN_TINTS: [Color32; 3] = [
+    Color32::from_rgb(255, 214, 226),
+    Color32::from_rgb(226, 214, 255),
+    Color32::from_rgb(196, 242, 232),
+];
+
+/// The colour of character `index` of `count` in a busy status line at
+/// `time` seconds: a soft band, a Gaussian about five characters wide,
+/// sweeps across the text once a period and lifts the `base` colour towards
+/// a tint that drifts along the text and over time. `Requested` work
+/// shimmers plainly; `Automatic` work much more faintly and more slowly, so
+/// the line stays calm.
+pub(super) fn sheen_color(
+    base: Color32,
+    activity: Activity,
+    index: usize,
+    count: usize,
+    time: f64,
+) -> Color32 {
+    let (strength, period) = match activity {
+        Activity::Idle => return base,
+        Activity::Requested => (0.8, 2.2),
+        Activity::Automatic => (0.18, 3.6),
+    };
+    const WIDTH: f64 = 5.0;
+    let span = count as f64 + 6.0 * WIDTH;
+    let centre = (time / period).rem_euclid(1.0) * span - 3.0 * WIDTH;
+    let lift = strength * (-((index as f64 - centre) / WIDTH).powi(2)).exp();
+    let drift = (time / 7.0 + 0.35 * index as f64 / count.max(1) as f64).rem_euclid(1.0) * 3.0;
+    let from = drift.floor() as usize % 3;
+    let tint = mix(
+        SHEEN_TINTS[from],
+        SHEEN_TINTS[(from + 1) % 3],
+        drift.fract(),
+    );
+    mix(base, tint, lift)
+}
+
+fn mix(from: Color32, to: Color32, fraction: f64) -> Color32 {
+    let channel = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * fraction).round() as u8;
+    Color32::from_rgb(
+        channel(from.r(), to.r()),
+        channel(from.g(), to.g()),
+        channel(from.b(), to.b()),
+    )
+}
+
+/// `text` laid out one character at a time in its sheen colours.
+pub(super) fn sheen_text(
+    text: &str,
+    base: Color32,
+    activity: Activity,
+    font: egui::FontId,
+    time: f64,
+) -> egui::text::LayoutJob {
+    let count = text.chars().count();
+    let mut job = egui::text::LayoutJob::default();
+    let mut buffer = [0; 4];
+    for (index, character) in text.chars().enumerate() {
+        job.append(
+            character.encode_utf8(&mut buffer),
+            0.0,
+            egui::TextFormat {
+                font_id: font.clone(),
+                color: sheen_color(base, activity, index, count, time),
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
 pub(super) fn face_condition_color(condition: FaceBoundaryCondition) -> Color32 {
     match condition {
         FaceBoundaryCondition::Reflecting => Color32::from_rgb(184, 201, 211),

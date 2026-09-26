@@ -1371,6 +1371,10 @@ pub struct TopologyRuntime {
     preparing: Option<TopologyPreparationJob>,
     ready: Option<PreparedTopology>,
     requested: Option<TopologyToken>,
+    /// Whether `requested` came from adaptation rather than an edit. Any
+    /// preparation or upload in flight belongs to it, since an edit's request
+    /// replaces an adaptation's.
+    requested_adaptation: bool,
     next_mesh_revision: u64,
     last_error: Option<TopologyPreparationError>,
     /// Consumed by the next `request`: rebuild the mesh even for an unchanged
@@ -1388,6 +1392,7 @@ impl Default for TopologyRuntime {
             preparing: None,
             ready: None,
             requested: None,
+            requested_adaptation: false,
             next_mesh_revision: 1,
             last_error: None,
             force_rebuild: false,
@@ -1457,6 +1462,7 @@ impl TopologyRuntime {
         self.preparing = Some(job);
         self.ready = None;
         self.requested = Some(token);
+        self.requested_adaptation = false;
         self.last_error = None;
         Ok(token)
     }
@@ -1478,8 +1484,15 @@ impl TopologyRuntime {
         self.preparing = Some(job);
         self.ready = None;
         self.requested = Some(token);
+        self.requested_adaptation = true;
         self.last_error = None;
         Ok(token)
+    }
+
+    /// Whether the latest request came from adaptation rather than an edit,
+    /// so whether what is preparing or uploading is the app's own work.
+    pub fn requested_adaptation(&self) -> bool {
+        self.requested_adaptation
     }
 
     pub fn phase(&self) -> Option<TopologyPreparationPhase> {
@@ -2447,9 +2460,11 @@ mod tests {
         let active = runtime.commit_ready(initial).unwrap();
         let mut adapted_mesh = active.mesh.as_ref().clone();
         adapted_mesh.mesh_revision = runtime.reserve_mesh_revision();
+        assert!(!runtime.requested_adaptation());
         let adapted = runtime
             .request_adapted(editor.revision, &editor.document, adapted_mesh)
             .unwrap();
+        assert!(runtime.requested_adaptation());
         assert_eq!(adapted.document_revision, initial.document_revision);
         assert_eq!(adapted.topology_revision, initial.topology_revision);
         assert_ne!(adapted.mesh_generation, initial.mesh_generation);

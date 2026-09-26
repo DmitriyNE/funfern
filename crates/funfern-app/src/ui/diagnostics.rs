@@ -6,6 +6,7 @@ use crate::wave_gpu::MAX_STEPS_PER_FRAME;
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, Pos2, Sense, Stroke};
 use funfern_app::topology_editor::{TopologyAcceptance, TopologyDocument};
+use funfern_app::topology_runtime::TopologyPreparationPhase;
 use funfern_core::*;
 
 use super::*;
@@ -690,20 +691,68 @@ impl Playground {
                     });
             });
     }
+    /// What the status bar says, and whose work is in flight: the user's
+    /// (an edit's topology or preparation), the app's own (adaptation
+    /// estimating, computing a mesh, or preparing the one it computed), or
+    /// none. The latest request owns whatever is preparing or uploading, and
+    /// an edit's request replaces an adaptation's.
+    pub(super) fn status(&self) -> (String, Activity) {
+        let phase = match self.editor.acceptance {
+            TopologyAcceptance::Invalid(issue) => {
+                return (format!("Geometry invalid: {issue}"), Activity::Idle);
+            }
+            TopologyAcceptance::Pending => {
+                return (
+                    "Topology rebuilding: tracing faces".into(),
+                    Activity::Requested,
+                );
+            }
+            TopologyAcceptance::Valid => self.preparation_phase(),
+        };
+        match phase {
+            Some(phase) => {
+                let text = self.preparation_detail().unwrap_or(phase.label());
+                if phase == TopologyPreparationPhase::Failed {
+                    (text.into(), Activity::Idle)
+                } else if self.runtime.requested_adaptation() {
+                    let mut characters = text.chars();
+                    let lowered = characters
+                        .next()
+                        .map(|first| first.to_lowercase().chain(characters).collect::<String>())
+                        .unwrap_or_default();
+                    (format!("Adapting mesh: {lowered}"), Activity::Automatic)
+                } else {
+                    (text.into(), Activity::Requested)
+                }
+            }
+            None if self.adaptation_in_flight() => ("Adapting mesh".into(), Activity::Automatic),
+            None if self.estimate_in_flight() => ("Simulation ready".into(), Activity::Automatic),
+            None => ("Simulation ready".into(), Activity::Idle),
+        }
+    }
+
     pub(super) fn status_bar(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("status")
             .exact_size(29.0)
             .show(root, |ui| {
                 ui.horizontal(|ui| {
-                    let status = match self.editor.acceptance {
-                        TopologyAcceptance::Invalid(issue) => format!("Geometry invalid: {issue}"),
-                        TopologyAcceptance::Pending => "Topology rebuilding: tracing faces".into(),
-                        TopologyAcceptance::Valid => self.preparation_phase().map_or_else(
-                            || "Simulation ready".into(),
-                            |phase| self.preparation_detail().unwrap_or(phase.label()).into(),
-                        ),
-                    };
-                    ui.label(status);
+                    let (status, activity) = self.status();
+                    if activity == Activity::Idle {
+                        ui.label(status);
+                    } else {
+                        let base = match activity {
+                            Activity::Requested => GOLD,
+                            _ => ui.visuals().text_color(),
+                        };
+                        let font = egui::TextStyle::Body.resolve(ui.style());
+                        let time = ui.input(|input| input.time);
+                        ui.label(sheen_text(&status, base, activity, font, time));
+                        // The band moves only while frames are drawn; a paused
+                        // simulation draws none, and 30 a second is plenty for
+                        // a band this soft.
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(33));
+                    }
                     if self.recording_state == RecordingState::SelectingDestination {
                         ui.colored_label(GOLD, "Choosing recording destination…");
                     } else if matches!(
@@ -802,6 +851,121 @@ fn time_step_bound_line(bound: CanonicalTimeStepBound, physics: PhysicsModel) ->
 mod tests {
     use super::*;
     use crate::material_overlay::MaterialProperty;
+    use crate::ui::test_support::*;
+    use funfern_app::topology_editor::TopologyEditor;
+    use std::sync::Arc;
+
+    /// The status bar tells the user's work from the app's own: an edit's
+    /// topology and preparation, through to the upload, are the user's; the
+    /// preparation of an adapted mesh, an adaptation computing one and an
+    /// error estimate are the app's; an edit made meanwhile is the user's
+    /// again; and a finished or failed preparation is neither.
+    #[test]
+    fn the_status_bar_tells_the_users_work_from_the_apps_own() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        assert_eq!(state.status(), ("Simulation ready".into(), Activity::Idle));
+
+        let options = MeshingOptions {
+            target_edge_length: 0.18,
+            ..MeshingOptions::default()
+        };
+        let request = |state: &mut Playground| {
+            state
+                .runtime
+                .request(
+                    state.editor.revision,
+                    &state.editor.document,
+                    state.editor.compiled_accepted.clone(),
+                    options,
+                    false,
+                )
+                .unwrap()
+        };
+        let finish = |state: &mut Playground, token| {
+            while state.runtime.advance(4096).is_none() {}
+            let ready = state.status();
+            state.runtime.commit_ready(token).unwrap();
+            ready
+        };
+
+        let token = request(&mut state);
+        assert_eq!(state.status().1, Activity::Requested);
+        let ready = finish(&mut state, token);
+        assert_eq!(ready, ("Ready for GPU upload".into(), Activity::Requested));
+        assert_eq!(state.status().1, Activity::Idle);
+
+        let mut mesh = active.mesh.as_ref().clone();
+        mesh.mesh_revision = state.runtime.reserve_mesh_revision();
+        state
+            .runtime
+            .request_adapted(state.editor.revision, &state.editor.document, mesh)
+            .unwrap();
+        let (text, activity) = state.status();
+        assert_eq!(activity, Activity::Automatic);
+        assert!(text.starts_with("Adapting mesh: "), "{text}");
+        let token = request(&mut state);
+        assert_eq!(state.status().1, Activity::Requested);
+        finish(&mut state, token);
+
+        let active = state.runtime.active().unwrap().clone();
+        state.amr_adaptation_job = Some(MeshAdaptationJob::new_topology(
+            active.mesh.clone(),
+            &active.bundle.plan,
+            MeshAdaptationState::from_mesh(&active.mesh),
+            state.runtime.reserve_mesh_revision(),
+            Arc::new(|_, _| 0.09),
+            MeshAdaptationOptions::default(),
+        ));
+        assert_eq!(
+            state.status(),
+            ("Adapting mesh".into(), Activity::Automatic)
+        );
+        state.amr_adaptation_job = None;
+
+        state.editor.acceptance = TopologyAcceptance::Pending;
+        assert_eq!(state.status().1, Activity::Requested);
+    }
+
+    /// The sheen: idle text keeps its colour; a busy line's band lifts the
+    /// characters under it towards a tint and leaves distant ones alone; and
+    /// the app's own work shimmers present but far fainter than the user's.
+    #[test]
+    fn the_sheen_is_plain_for_the_users_work_and_faint_for_the_apps() {
+        let apart = |a: Color32, b: Color32| {
+            [(a.r(), b.r()), (a.g(), b.g()), (a.b(), b.b())]
+                .into_iter()
+                .map(|(x, y)| x.abs_diff(y))
+                .max()
+                .unwrap()
+        };
+        let strongest = |activity| {
+            (0..400)
+                .flat_map(|step| {
+                    (0..20).map(move |index| {
+                        apart(
+                            GOLD,
+                            sheen_color(GOLD, activity, index, 20, step as f64 * 0.01),
+                        )
+                    })
+                })
+                .max()
+                .unwrap()
+        };
+        assert_eq!(strongest(Activity::Idle), 0);
+        let (requested, automatic) = (
+            strongest(Activity::Requested),
+            strongest(Activity::Automatic),
+        );
+        assert!(automatic > 0, "the app's own work still shimmers");
+        assert!(requested > 3 * automatic, "{requested} against {automatic}");
+        // At t = 0 the band sits before the text: the far end is untouched.
+        assert_eq!(sheen_color(GOLD, Activity::Requested, 19, 20, 0.0), GOLD);
+    }
 
     /// Every shape the catalogue offers is explained in the Laws section, so
     /// the reference cannot fall behind the presets.

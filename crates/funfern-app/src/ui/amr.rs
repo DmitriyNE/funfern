@@ -42,6 +42,20 @@ impl Playground {
         }
     }
 
+    /// Whether an adaptation is computing a new mesh, here or on the worker,
+    /// or holds one not yet handed to preparation.
+    pub(super) fn adaptation_in_flight(&self) -> bool {
+        self.amr_adaptation_job.is_some()
+            || self.amr_adaptation_completed.is_some()
+            || self.background_amr_kind() == Some(BackgroundAmrKind::Adaptation)
+    }
+
+    /// Whether an error estimate is running, here or on the worker.
+    pub(super) fn estimate_in_flight(&self) -> bool {
+        self.amr_indicator_job.is_some()
+            || self.background_amr_kind() == Some(BackgroundAmrKind::Indicator)
+    }
+
     pub(super) fn background_amr_kind(&self) -> Option<BackgroundAmrKind> {
         self.background_amr.as_ref().and_then(|worker| worker.kind)
     }
@@ -118,9 +132,7 @@ impl Playground {
         // it. Its result is only meaningful against the mesh it started from,
         // so once another mesh is active the job is dropped here instead of
         // finishing and being rejected at the handoff as an error.
-        let adaptation_in_progress = self.amr_adaptation_job.is_some()
-            || self.amr_adaptation_completed.is_some()
-            || self.background_amr_kind() == Some(BackgroundAmrKind::Adaptation);
+        let adaptation_in_progress = self.adaptation_in_flight();
         if adaptation_in_progress
             && self.amr_adaptation_source.is_some_and(|source| {
                 self.runtime

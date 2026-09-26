@@ -10,7 +10,11 @@ running; this file covers using it.
   selection, transforms, topology, and boundary tools; View contains visual
   overlays and field intensity; Simulation contains mesh and solver settings;
   Materials contains the material library; Probes contains receivers and recording
-  controls. The lower-right status control shows
+  controls. The status line at the lower left says what is being rebuilt. While
+  work you started is in flight - a topology trace, a preparation, its upload -
+  it turns gold and a soft iridescent sheen runs across it; while the app works
+  on its own, estimating or adapting the mesh, the same sheen runs much fainter
+  over the ordinary colour. The lower-right status control shows
   FPS, solver steps per second, DOFs, mesh size, and solver dt; clicking it opens
   the full frame, topology, mesh, handoff, and solver diagnostics. Under the frame
   graph, above the sections that change height, is a Log of what those sections

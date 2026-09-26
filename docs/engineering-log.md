@@ -13827,3 +13827,37 @@ meshes on the CI runner (AMD EPYC, glibc).
   Stage 0 bound.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — The status line shimmers while work is in flight
+
+- Asked for: make it obvious that a rebuild is running, with something more
+  fun than a spinner, and tell user-triggered work from automatic work. The
+  status line was plain text whether busy or not.
+- `Playground::status` returns the line and whose work is in flight, as an
+  `Activity`:
+  - `Requested` is an edit's topology trace, its preparation, and its upload
+    up to the device's acknowledgement, while the phase reads "Ready for GPU
+    upload".
+  - `Automatic` is an adapted mesh's preparation (prefixed "Adapting mesh:"),
+    an adaptation computing a mesh, and an error estimate.
+  - `Idle` is everything else, a failed preparation included.
+- The origin is one bit on the runtime, `requested_adaptation`: any
+  preparation or upload in flight belongs to the latest request, and an
+  edit's request replaces an adaptation's, so the bit holds across the
+  worker thread and the upload without either carrying it.
+  `adaptation_in_flight` and `estimate_in_flight` name the AMR checks the
+  update already made.
+- `sheen_text` lays the line out one character at a time. A Gaussian band
+  about five characters wide sweeps across it and lifts the colour towards a
+  thin-film tint (pale rose, lilac, teal) that drifts along the text and in
+  time. User work is gold at strength 0.8 once every 2.2 s; the app's own is
+  the ordinary text colour at 0.18 every 3.6 s, much dimmer. Busy frames
+  request a repaint after 33 ms, so the band moves at about 30 fps with the
+  simulation paused and costs nothing extra while it runs.
+- Tests: `the_status_bar_tells_the_users_work_from_the_apps_own`,
+  `the_sheen_is_plain_for_the_users_work_and_faint_for_the_apps`, and the
+  adapted-token test checks the runtime bit. The look itself was not seen
+  here; its strength, periods, width and tints are the constants in
+  `theme.rs`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
