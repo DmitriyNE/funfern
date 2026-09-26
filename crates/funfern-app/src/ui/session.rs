@@ -301,6 +301,30 @@ mod tests {
         ));
     }
 
+    /// A replaced scene is measured against its own loudest level, not the
+    /// outgoing scene's. Carried over, the Josephson line's integrated field,
+    /// 34.8, floored every quieter scene opened after it at a hundredth of that
+    /// and left it painting black.
+    #[test]
+    fn a_replaced_scene_starts_its_scales_from_nothing() {
+        let mut state = Playground::default();
+        state.field_exposure.update(34.8, 0.016);
+        state.vector_overlay_exposure.update(2.0, 0.016);
+        let example = &funfern_app::topology_examples::catalog()[0];
+        state
+            .set_document(example.document.clone(), true, true)
+            .unwrap();
+        state.drop_requested = false;
+        state.drop_generation();
+        let quiet = 5.0e-3;
+        assert_eq!(state.field_exposure.update(quiet, 0.016), Some(quiet));
+        assert_eq!(state.field_exposure.visibility(quiet), 1.0);
+        assert_eq!(
+            state.vector_overlay_exposure.update(quiet, 0.016),
+            Some(quiet)
+        );
+    }
+
     /// Undo and redo across an opened scene are scene replacements too;
     /// across an edit they are not, and a live edit never drops anything.
     #[test]

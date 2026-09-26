@@ -156,8 +156,9 @@ impl Playground {
             // handoff's receipt already seeds for the new generation, and the
             // latest full snapshot until the first copy lands.
             let nodes = active.operator.degrees_of_freedom();
-            let integrated = self
-                .integrated_field_shown()
+            let integrated_shown = self.integrated_field_shown();
+            self.follow_field_quantity(integrated_shown);
+            let integrated = integrated_shown
                 .then(|| {
                     [&display.live_integrated, &display.snapshot_integrated]
                         .into_iter()

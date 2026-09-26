@@ -274,7 +274,10 @@ names or with every expression evaluated at the material frame's origin. Each ro
   back slowly — slower than a field drains away, so a domain that has emptied goes
   dark instead of being renormalized back to full brightness. A placed pulse
   therefore holds the scale for some seconds before the view returns to normal. It
-  will not fall below a hundredth of the loudest level seen. Below that floor the
+  will not fall below a hundredth of the loudest level seen since the scene opened;
+  opening another scene, or switching between the field and the integrated field,
+  starts the scale from nothing, so a quiet scene is never floored by a loud one
+  before it. Below that floor the
   drawing fades smoothly, so a field that has decayed into rounding noise is not
   magnified back into view; sparse arrow outliers cannot override that shared fade.
   Field

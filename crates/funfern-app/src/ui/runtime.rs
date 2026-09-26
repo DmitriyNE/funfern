@@ -77,7 +77,7 @@ impl Playground {
         self.pending_switch = None;
         self.probe_upload = None;
         self.restart_probe_traces();
-        self.restart_exposures_after_handoff(true);
+        self.clear_exposures();
         self.reset_adaptation();
     }
 

@@ -13941,3 +13941,41 @@ meshes on the CI runner (AMD EPYC, glibc).
   (core, 0.86 s) and `the_mesh_estimate_follows_meshes_actually_built`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — A replaced scene starts its exposure from nothing
+
+- Found in the view-settings pass, walking the gallery in one session: from
+  the plasma whispering gallery on, every scene painted black, although its
+  field ran. Reproduced by opening the Josephson line and then the plasma
+  whispering gallery: that scene's field reference was 0.35 for a field
+  about 0.07.
+- **Cause:** auto exposure never lets its reference fall below a hundredth
+  of the loudest level it has seen. That floor keeps a field that has
+  decayed into rounding noise from being magnified back into view. Nothing
+  ever cleared the remembered level: a scene change restarted the reference
+  and kept the peak, the same as a Reset. The Josephson line's integrated
+  field reaches 34.8, so every quieter scene after it faded out.
+  `AutoExposure::clear()`, written for "a genuinely different displayed
+  quantity", had no caller for the field. The arrows' exposure had the same
+  path.
+- **Fix:**
+  - Dropping a replaced scene's generation clears both exposures and the
+    arrows' AC state (`clear_exposures`), as launch has them.
+  - Switching the view between the field and the integrated field clears
+    the field's exposure (`follow_field_quantity`). It is keyed on what the
+    view asks for rather than on which copy arrived, since a handoff can
+    leave a frame without `r`.
+  - A Reset, a fresh start and a mesh handoff keep their behaviour: same
+    scene, same scale history.
+- **Measured** by opening scenes 13 to 17 in one session: each scene's peak
+  is now its own (34.8, 1.31, 1.33, 1.02, 0.073), and the gallery's field
+  reference follows its own level. The first frames after a switch rise
+  smoothly from 1.5e-10 to 5e-3 over 0.4 s as the wave spreads, the same
+  start as at launch; there is no one-frame dust latch.
+- Tests: `a_replaced_scene_starts_its_scales_from_nothing`,
+  `switching_to_or_from_the_integrated_field_starts_its_scale_again`. The
+  doc comment of `asking_for_a_new_field_does_not_magnify_the_outgoing_one`
+  no longer claims a load keeps the outgoing field on display; it has not
+  since the scene-change drop.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

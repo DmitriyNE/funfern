@@ -59,9 +59,10 @@ impl AutoExposure {
     /// frame cannot drop the scale by an unbounded factor in one go.
     pub(super) const MAX_STEP_SECONDS: f32 = 1.0;
 
-    /// Starts the scale again for a field that has been replaced with zeros.
+    /// Starts the scale again for a field of the same scene that has been
+    /// replaced with zeros, by a reset or a fresh start.
     ///
-    /// How loud the session has been is kept. The first frames of a new field
+    /// How loud the run has been is kept. The first frames of a new field
     /// are numerical dust — measured at 3.5e-10 — and an instant attack onto a
     /// scale with nothing behind it latches straight onto that and paints it at
     /// full colour. The remembered peak holds the quiet floor above the dust
@@ -70,8 +71,9 @@ impl AutoExposure {
         self.reference = 0.0;
     }
 
-    /// Starts a genuinely different displayed quantity. Unlike a fresh field
-    /// in the same run, it must not inherit a peak measured in different units.
+    /// Starts a genuinely different displayed quantity, or another scene's
+    /// field. Unlike a fresh field in the same run, it must not inherit a peak
+    /// measured in different units or from a louder scene.
     pub(super) fn clear(&mut self) {
         *self = Self::default();
     }
@@ -420,12 +422,13 @@ mod tests {
         assert_eq!(state.vector_overlay_ac_owner, None);
     }
 
-    /// Loading a document and pressing Reset both leave the scale alone. Each
-    /// zeroes the field on the GPU, but the outgoing scene stays on display
-    /// until the replacement arrives — a reset for a few frames, a load for as
-    /// long as the new mesh takes. A scale cleared at the request measures that
-    /// residue and paints it at full brightness: measured at 0.09 % before, 100 %
-    /// after, for a tenth of a second on a reset and four tenths on a load.
+    /// Asking for a new field leaves the scale alone. A reset zeroes the field
+    /// on the GPU, but the outgoing field stays on display until the
+    /// replacement arrives, a few frames; a scale cleared at the request
+    /// measures that residue and paints it at full brightness: measured at
+    /// 0.09 % before, 100 % after, for a tenth of a second. A loaded scene
+    /// clears the scales only where it drops the outgoing generation, when
+    /// nothing of the old field is left on display.
     #[test]
     fn asking_for_a_new_field_does_not_magnify_the_outgoing_one() {
         let mut state = Playground::default();
@@ -443,6 +446,22 @@ mod tests {
             "the outgoing field was magnified to {:.0}%",
             100.0 * residue / after
         );
+    }
+
+    /// The integrated field and the field are measured apart: showing one
+    /// after the other starts the scale again, and asking for the same one
+    /// again, as every frame does, keeps it.
+    #[test]
+    fn switching_to_or_from_the_integrated_field_starts_its_scale_again() {
+        let mut state = Playground::default();
+        state.follow_field_quantity(true);
+        state.field_exposure.update(34.8, 0.016);
+        state.follow_field_quantity(true);
+        assert_eq!(state.field_exposure.reference(), Some(34.8));
+        state.follow_field_quantity(false);
+        let rate = 0.3;
+        assert_eq!(state.field_exposure.update(rate, 0.016), Some(rate));
+        assert_eq!(state.field_exposure.visibility(rate), 1.0);
     }
 
     /// The first frames of a replaced field are numerical dust, and an instant

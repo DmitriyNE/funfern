@@ -190,6 +190,30 @@ impl Playground {
         }
     }
 
+    /// A replaced scene starts both scales from nothing, as launch does. The
+    /// loudest level a run has seen is what holds a decayed field below view,
+    /// and it belongs to that run's scene: carried into the next one it floored
+    /// every quieter scene at a hundredth of it. Opening the Josephson line,
+    /// whose integrated field reaches 34.8, left the plasma whispering gallery
+    /// and every fiber and crystal after it painting black.
+    pub(super) fn clear_exposures(&mut self) {
+        self.restart_exposures_after_handoff(true);
+        self.field_exposure.clear();
+        self.vector_overlay_exposure.clear();
+    }
+
+    /// The integrated field `r` is another quantity than the field, in other
+    /// units, so switching between them starts the field's scale again rather
+    /// than measuring one against the other's loudest level. Keyed on what the
+    /// view asks for, not on which copy arrived this frame: a handoff can leave
+    /// a frame without `r`, and that must not cost the scale its history.
+    pub(super) fn follow_field_quantity(&mut self, integrated: bool) {
+        if integrated != self.field_exposure_integrated {
+            self.field_exposure.clear();
+            self.field_exposure_integrated = integrated;
+        }
+    }
+
     pub(super) fn refresh_vector_overlay(
         &mut self,
         recorders: &mut WaveGpuRequest,
