@@ -887,7 +887,7 @@ const LUNEBURG_DEGREES: f64 = 30.0;
 
 fn luneburg_direction() -> Point2 {
     let angle = LUNEBURG_DEGREES.to_radians();
-    Point2::new(angle.cos(), angle.sin())
+    direction(angle)
 }
 
 /// Where the lens focuses its plane wave: the rim point it runs towards.
@@ -1515,6 +1515,14 @@ fn emitter_with(plasma_hz: f64) -> TopologyDocument {
     document
 }
 
+/// The unit direction at `angle`, from the portable sine and cosine, so a
+/// scene built here has the same geometry, and meshes the same, on every
+/// platform.
+fn direction(angle: f64) -> Point2 {
+    let (sin, cos) = portable_sin_cos(angle);
+    Point2::new(cos, sin)
+}
+
 /// A circle of `radius` about `center`: sixteen controls, whose uniform
 /// B-spline sits 0.9746 of their radius in and departs from a circle by under
 /// 1e-4 of it.
@@ -1524,7 +1532,7 @@ fn circle(center: Point2, radius: f64) -> PeriodicCubicSpline {
         (0..16)
             .map(|index| {
                 let angle = index as f64 * std::f64::consts::TAU / 16.0;
-                center + Point2::new(angle.cos(), angle.sin()) * reach
+                center + direction(angle) * reach
             })
             .collect(),
     )
@@ -1717,10 +1725,13 @@ const BEND_HZ: f64 = 4.0;
 /// pieces joined at C0 knots, the quarter in two eighths whose departure from
 /// the circle is under 5e-6 of its radius.
 fn bend_path(radius: f64, entry: Point2, exit: Point2) -> OpenCubicSpline {
-    let at = |angle: f64| BEND_CENTRE + Point2::new(angle.cos(), angle.sin()) * radius;
-    let tangent = |angle: f64| Point2::new(-angle.sin(), angle.cos()) * radius;
+    let at = |angle: f64| BEND_CENTRE + direction(angle) * radius;
+    let tangent = |angle: f64| {
+        let along = direction(angle);
+        Point2::new(-along.y, along.x) * radius
+    };
     // The control reach of a cubic Bézier eighth of a circle.
-    let reach = 4.0 / 3.0 * (std::f64::consts::PI / 16.0).tan();
+    let reach = 4.0 / 3.0 * portable_tan(std::f64::consts::PI / 16.0);
     let quarter = std::f64::consts::FRAC_PI_2;
     let (arc_start, arc_end) = (at(-quarter), at(0.0));
     let mut controls = vec![
@@ -1895,12 +1906,12 @@ const CRYSTAL_GAP_HZ: f64 = 1.85;
 /// to a sixth of the octagons', at four times the unknowns.
 fn octagonal_rod(center: Point2, radius: f64) -> PeriodicCubicSpline {
     let eighth = std::f64::consts::TAU / 8.0;
-    let reach = radius * (std::f64::consts::PI / (4.0 * eighth.sin())).sqrt();
+    let reach = radius * (std::f64::consts::PI / (4.0 * portable_sin_cos(eighth).0)).sqrt();
     PeriodicCubicSpline::polygon(
         (0..8)
             .map(|index| {
                 let angle = (index as f64 + 0.5) * eighth;
-                center + Point2::new(angle.cos(), angle.sin()) * reach
+                center + direction(angle) * reach
             })
             .collect(),
     )
@@ -2121,9 +2132,12 @@ fn ring_resonator_with(frequency: f64, ring: bool) -> TopologyDocument {
 /// counterclockwise, as `pieces` cubic Bézier pieces joined at C0 knots.
 fn arc(center: Point2, radius: f64, from: f64, to: f64, pieces: usize) -> OpenCubicSpline {
     let step = (to - from) / pieces as f64;
-    let reach = 4.0 / 3.0 * (step / 4.0).tan() * radius;
-    let at = |angle: f64| center + Point2::new(angle.cos(), angle.sin()) * radius;
-    let tangent = |angle: f64| Point2::new(-angle.sin(), angle.cos());
+    let reach = 4.0 / 3.0 * portable_tan(step / 4.0) * radius;
+    let at = |angle: f64| center + direction(angle) * radius;
+    let tangent = |angle: f64| {
+        let along = direction(angle);
+        Point2::new(-along.y, along.x)
+    };
     let mut controls = vec![at(from)];
     for piece in 0..pieces {
         let (a, b) = (from + step * piece as f64, from + step * (piece + 1) as f64);

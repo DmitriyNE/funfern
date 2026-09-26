@@ -48,8 +48,14 @@ jobs:
       - name: CPU
         run: grep -m1 "model name" /proc/cpuinfo; grep -m1 -o "\bfma\b" /proc/cpuinfo || true
 
-      - name: Diagnose (debug)
-        run: cargo test -p funfern-app --locked --lib diagnose_welded_baffle_carve -- --ignored --nocapture
+      - name: Pinned meshes (debug)
+        run: cargo test -p funfern-app --locked --lib welded_baffles_mesh_the_same_on_every_platform -- --nocapture
 
-      - name: Failing test (debug)
-        run: cargo test -p funfern-app --locked --lib moving_a_welded_baffle_repairs_by_carving -- --nocapture || true
+      - name: Carve retry (debug)
+        run: cargo test -p funfern-app --locked --lib a_refill_under_the_floor_carves_again_with_a_wider_cavity -- --nocapture
+
+      - name: Welded baffle carve (debug)
+        run: cargo test -p funfern-app --locked --lib moving_a_welded_baffle_repairs_by_carving -- --nocapture
+
+      - name: Workspace tests (debug, as CI)
+        run: cargo test --workspace --locked

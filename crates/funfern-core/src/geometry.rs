@@ -1252,10 +1252,8 @@ impl Scene {
                 arms.append(&mut incident);
             }
             arms.sort_by(|left, right| {
-                left.direction
-                    .y
-                    .atan2(left.direction.x)
-                    .total_cmp(&right.direction.y.atan2(right.direction.x))
+                crate::pseudo_angle(left.direction.x, left.direction.y)
+                    .total_cmp(&crate::pseudo_angle(right.direction.x, right.direction.y))
             });
             if matches!(junction.location, JunctionLocation::Interior) {
                 if arms.len() < 3 {

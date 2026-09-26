@@ -3470,140 +3470,156 @@ mod tests {
         }
     }
 
-    /// Diagnostic twin of `moving_a_welded_baffle_repairs_by_carving`: prints,
-    /// per move, whether it carved, a digest of the mesh, and its smallest
-    /// angle, so a platform where the test fails can be compared move by move.
-    #[test]
-    #[ignore]
-    fn diagnose_welded_baffle_carve() {
-        let digest = |mesh: &TriMesh| {
-            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-            let mut mix = |value: u64| {
-                for byte in value.to_le_bytes() {
-                    hash ^= byte as u64;
-                    hash = hash.wrapping_mul(0x0100_0000_01b3);
-                }
-            };
-            for vertex in &mesh.vertices {
-                mix(vertex.point.x.to_bits());
-                mix(vertex.point.y.to_bits());
-            }
-            for triangle in &mesh.triangles {
-                for index in triangle.vertices {
-                    mix(index as u64);
-                }
-            }
-            hash
-        };
-        let smallest = |mesh: &TriMesh| {
-            mesh.triangles
-                .iter()
-                .flat_map(|triangle| {
-                    let p = triangle.vertices.map(|index| mesh.vertices[index].point);
-                    (0..3).map(move |corner| {
-                        let (a, b, c) = (p[corner], p[(corner + 1) % 3], p[(corner + 2) % 3]);
-                        let (u, v) = (b - a, c - a);
-                        (u.dot(v) / (u.norm() * v.norm()))
-                            .clamp(-1.0, 1.0)
-                            .acos()
-                            .to_degrees()
-                    })
-                })
-                .fold(f64::INFINITY, f64::min)
-        };
-        eprintln!(
-            "libm: tan(10deg) {:016x} atan2(0.3,0.7) {:016x} acos(0.2) {:016x} hypot(0.3,0.4) {:016x} sin(1) {:016x}",
-            10f64.to_radians().tan().to_bits(),
-            0.3f64.atan2(0.7).to_bits(),
-            0.2f64.acos().to_bits(),
-            0.3f64.hypot(0.4).to_bits(),
-            1f64.sin().to_bits()
-        );
-        for count in [1, 2] {
-            let mut editor = TopologyEditor::default();
-            let mut curves = vec![];
-            for (index, (from, to, side)) in [
-                (0.9, 0.25, OuterSide::Top),
-                (-0.9, -0.25, OuterSide::Bottom),
-            ]
-            .into_iter()
-            .take(count)
-            .enumerate()
-            {
-                let curve = editor
-                    .create_open_curve(
-                        OpenCubicSpline::polyline(vec![
-                            Point2::new(0.0, from),
-                            Point2::new(0.0, to),
-                        ])
+    /// The moving welded baffles' first and last meshes, with one baffle and
+    /// with two.
+    const PINNED_DIGESTS: [u64; 4] = [
+        0x5131_04f0_bb40_dd41,
+        0xaf1d_5f7e_65d6_4fe2,
+        0xc9c7_76eb_cd0e_b1ef,
+        0x8f78_cc60_a87e_9280,
+    ];
+
+    /// Welds one or two baffles to the walls, meshes, then moves the first
+    /// baffle's free end `spacing` further right per step for `steps` steps,
+    /// handing each prepared generation to `visit` with its step (0 for the
+    /// first mesh).
+    fn move_welded_baffles(
+        count: usize,
+        spacing: f64,
+        steps: usize,
+        mut visit: impl FnMut(usize, &PreparedTopology),
+    ) {
+        let mut editor = TopologyEditor::default();
+        let mut curves = vec![];
+        for (from, to, side) in [
+            (0.9, 0.25, OuterSide::Top),
+            (-0.9, -0.25, OuterSide::Bottom),
+        ]
+        .into_iter()
+        .take(count)
+        {
+            let curve = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![Point2::new(0.0, from), Point2::new(0.0, to)])
                         .unwrap(),
-                        OpenCurvePurpose::BoundaryBaffle,
-                        None,
-                        None,
-                    )
-                    .unwrap()
-                    .curve;
-                settle(&mut editor);
-                editor
-                    .attach_endpoint(
-                        curve,
-                        0,
-                        TopologyAttachment::Boundary(FaceAnchor::Outer {
-                            side,
-                            fraction: 0.5,
-                        }),
-                    )
-                    .unwrap();
-                settle(&mut editor);
-                curves.push((index, curve));
-            }
-            let mut runtime = TopologyRuntime::default();
+                    OpenCurvePurpose::BoundaryBaffle,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .curve;
+            settle(&mut editor);
+            editor
+                .attach_endpoint(
+                    curve,
+                    0,
+                    TopologyAttachment::Boundary(FaceAnchor::Outer {
+                        side,
+                        fraction: 0.5,
+                    }),
+                )
+                .unwrap();
+            settle(&mut editor);
+            curves.push(curve);
+        }
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        visit(0, &runtime.commit_ready(token).unwrap());
+        for step in 1..=steps {
+            editor
+                .set_control(curves[0], 3, Point2::new(spacing * step as f64, 0.25))
+                .unwrap();
+            settle(&mut editor);
             let token = runtime
                 .request(
                     editor.revision,
                     &editor.document,
                     editor.compiled_accepted.clone(),
                     options(),
-                    true,
+                    false,
                 )
                 .unwrap();
             prepare(&mut runtime).unwrap();
-            let first = runtime.commit_ready(token).unwrap();
-            eprintln!(
-                "count {count} start: vertices {} triangles {} digest {:016x} smallest {:.4}",
-                first.mesh.vertices.len(),
-                first.mesh.triangles.len(),
-                digest(&first.mesh),
-                smallest(&first.mesh)
-            );
-            let (_, curve) = curves[0];
-            for step in 1..=6 {
-                editor
-                    .set_control(curve, 3, Point2::new(0.03 * step as f64, 0.25))
-                    .unwrap();
-                settle(&mut editor);
-                let token = runtime
-                    .request(
-                        editor.revision,
-                        &editor.document,
-                        editor.compiled_accepted.clone(),
-                        options(),
-                        false,
-                    )
-                    .unwrap();
-                prepare(&mut runtime).unwrap();
-                let moved = runtime.commit_ready(token).unwrap();
-                eprintln!(
-                    "count {count} move {step}: carved {} vertices {} triangles {} digest {:016x} smallest {:.4} fallback {:?}",
-                    moved.carve.is_some(),
-                    moved.mesh.vertices.len(),
-                    moved.mesh.triangles.len(),
-                    digest(&moved.mesh),
-                    smallest(&moved.mesh),
-                    moved.repair_fallback
-                );
+            visit(step, &runtime.commit_ready(token).unwrap());
+        }
+    }
+
+    /// FNV-1a over a mesh's vertex bits and triangles.
+    fn mesh_digest(mesh: &TriMesh) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |value: u64| {
+            for byte in value.to_le_bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        for vertex in &mesh.vertices {
+            mix(vertex.point.x.to_bits());
+            mix(vertex.point.y.to_bits());
+        }
+        for triangle in &mesh.triangles {
+            for index in triangle.vertices {
+                mix(index as u64);
             }
         }
+        hash
+    }
+
+    /// Meshing is the same, bit for bit, on every platform: the moving
+    /// welded baffles' first and last meshes hash to pinned values. Their
+    /// failing twin on Linux CI meshed the same geometry differently from
+    /// the first mesh on, because the refinement ranked triangles by the
+    /// platform's `acos`, a last bit apart; the mesher now forms every
+    /// decision from the four operations and `sqrt`. When the mesher changes
+    /// on purpose these pins move with it; a mismatch on one platform alone
+    /// means a platform-dependent operation has crept back in.
+    #[test]
+    fn welded_baffles_mesh_the_same_on_every_platform() {
+        let mut digests = vec![];
+        for count in [1, 2] {
+            move_welded_baffles(count, 0.03, 6, |step, prepared| {
+                if step == 0 || step == 6 {
+                    digests.push(mesh_digest(&prepared.mesh));
+                }
+            });
+        }
+        assert_eq!(digests, PINNED_DIGESTS, "{digests:016x?}");
+    }
+
+    /// A refill refused for an element under the quality floor is carved
+    /// again with the cavity a ring wider, as many times as it takes up to
+    /// the limit, rather than falling back to a full rebuild. Moving a
+    /// welded baffle 0.025 and 0.038 a step, with one baffle and two, puts
+    /// first refills under the floor that one to five extra rings carve.
+    #[test]
+    fn a_refill_under_the_floor_carves_again_with_a_wider_cavity() {
+        let mut retried = 0;
+        for spacing in [0.025, 0.038] {
+            for count in [1, 2] {
+                move_welded_baffles(count, spacing, 8, |step, prepared| {
+                    if step == 0 {
+                        return;
+                    }
+                    let carve = prepared.carve.unwrap_or_else(|| {
+                        panic!(
+                            "{count} welded at {spacing}, move {step} fell back: {:?}",
+                            prepared.repair_fallback
+                        )
+                    });
+                    retried += usize::from(carve.quality_retries > 0);
+                });
+            }
+        }
+        assert!(retried >= 3, "only {retried} carves needed a wider cavity");
     }
 
     /// Adaptation checks every constrained edge against the plan it came from,

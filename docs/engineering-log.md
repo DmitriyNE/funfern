@@ -13680,3 +13680,46 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   judged) 8.4e-6 and 1.1e-5.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — The same mesh on every platform, and a failed refill carves wider
+
+CI on Linux failed `moving_a_welded_baffle_repairs_by_carving`: two welded
+baffles, move 5 fell back with a 4.11° refill element against the 5° floor,
+where macOS passed at 5.03°. A diagnostic branch (`diagnose-carve`) printed the
+meshes on the CI runner (AMD EPYC, glibc).
+
+- **Cause:** the initial meshes differed with the same counts. The
+  refinement queue orders bad triangles by `score.to_bits()`, the score comes
+  from the minimum angle through `acos`, and macOS and glibc return
+  `acos(0.2)` one ulp apart (`…d0` and `…d1`). One ulp reordered refinement,
+  every later carve started from a different mesh, and one landed on the other
+  side of the floor.
+- **Determinism:** `portable.rs` holds the fdlibm `acos`, `sin`/`cos` (with the
+  Cody-Waite reduction) and `tan`, written with `+ - * /` and `sqrt` only,
+  which IEEE rounds exactly and Rust never fuses. `pseudo_angle` orders
+  directions exactly as `atan2` does with one division; it replaces `atan2`
+  in the half-edge sort, the cavity walk and the junction arm validation.
+  `Point2::norm` is an explicit square root (`hypot` differs by platform).
+  Triangle quality computes one angle, the one opposite the shortest side,
+  instead of three. The gallery geometry (circles, arcs, rods, bends,
+  directions) uses `portable_sin_cos`. The portable functions match macOS to
+  the last bit over the tested ranges (`portable_acos_matches_the_platform_to_a_last_bit`,
+  sine and cosine within 1 ulp).
+- **Carve retry:** a refill under the floor carves again one ring wider, up to
+  `MAX_CARVE_MARGIN = 6`; `CarveReport::quality_retries` counts it. Over 416
+  carves of welded baffles at several spacings, 15 first refills fell under
+  the floor and 1 to 5 extra rings carved all of them. A 0/2/5 jump schedule
+  left four failed: wider is not monotone, so the retry steps one ring at a
+  time.
+- **Tests:** `welded_baffles_mesh_the_same_on_every_platform` pins four FNV
+  digests (one and two baffles, start and after six moves);
+  `a_refill_under_the_floor_carves_again_with_a_wider_cavity` requires every
+  move at two spacings to carve and at least three retries, and fails with
+  the margin set to 0.
+- **Performance**, before/after interleaved three times on this machine:
+  `mesh_edit_timing --paced` full build 408-420 → 331-333 ms at h=0.04 and
+  4474-4579 → 3266-3280 ms at h=0.02 (the single-angle quality); edit active
+  times overlap within noise (73-175 ms at h=0.04 both ways);
+  `mesh_timing --slices` at 32 obstacles 328-331 → 318-321 ms.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
