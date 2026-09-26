@@ -14238,3 +14238,13 @@ meshes on the CI runner (AMD EPYC, glibc).
   folded, and under the gallery.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Examples as a button
+
+- The top bar's Examples toggle was a selectable label, the same look as the
+  inspector tabs beside it, so it read as a panel. It is now a framed button
+  like Undo and File, "🖼 Examples", set a little apart by the picture, and
+  like + Draw it does not stay lit while its window is open. The glyph is in
+  egui's default fonts (U+1F5BC, measured at 11.6 px in the button font).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

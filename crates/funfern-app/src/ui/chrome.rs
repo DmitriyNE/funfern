@@ -83,8 +83,11 @@ impl Playground {
                         ui.close();
                     }
                 });
+                // A button like its neighbours, set a little apart by its
+                // picture, rather than a panel tab: it opens a window, as
+                // + Draw does.
                 if ui
-                    .selectable_label(self.examples_open, "Examples")
+                    .button("🖼 Examples")
                     .on_hover_text("Ready-to-run scenes")
                     .clicked()
                 {
