@@ -233,14 +233,23 @@ enum ControlRemovalTarget {
     OpenEnd { from_end: usize },
 }
 
+/// One step of the undo or redo history: the model to return to, and
+/// whether moving across the step swaps the whole scene, as New, an opened
+/// example or a load does, rather than edit it.
+#[derive(Clone, Debug)]
+struct HistoryStep {
+    model: TopologyDocumentModel,
+    replaces_scene: bool,
+}
+
 pub struct TopologyEditor {
     pub document: TopologyDocument,
     pub revision: u64,
     pub acceptance: TopologyAcceptance,
     pub compiled_draft: Option<CompiledTopologyScene>,
     pub compiled_accepted: CompiledTopologyScene,
-    undo: Vec<TopologyDocumentModel>,
-    redo: Vec<TopologyDocumentModel>,
+    undo: Vec<HistoryStep>,
+    redo: Vec<HistoryStep>,
     before: Option<TopologyDocumentModel>,
     job: Option<TopologySceneJob>,
     next_curve: u64,
@@ -365,7 +374,10 @@ impl TopologyEditor {
         if before == self.document.model {
             return;
         }
-        self.undo.push(before);
+        self.undo.push(HistoryStep {
+            model: before,
+            replaces_scene: false,
+        });
         if self.undo.len() > HISTORY_LIMIT {
             self.undo.remove(0);
         }
@@ -384,8 +396,10 @@ impl TopologyEditor {
             return false;
         };
         self.before = None;
-        self.redo
-            .push(std::mem::replace(&mut self.document.model, previous));
+        self.redo.push(HistoryStep {
+            model: std::mem::replace(&mut self.document.model, previous.model),
+            replaces_scene: previous.replaces_scene,
+        });
         self.changed();
         true
     }
@@ -395,10 +409,23 @@ impl TopologyEditor {
             return false;
         };
         self.before = None;
-        self.undo
-            .push(std::mem::replace(&mut self.document.model, next));
+        self.undo.push(HistoryStep {
+            model: std::mem::replace(&mut self.document.model, next.model),
+            replaces_scene: next.replaces_scene,
+        });
         self.changed();
         true
+    }
+
+    /// Whether the next undo swaps in a whole other scene: it steps back over
+    /// a New, an opened example or a load rather than an edit.
+    pub fn undo_replaces_scene(&self) -> bool {
+        self.undo.last().is_some_and(|step| step.replaces_scene)
+    }
+
+    /// Whether the next redo swaps in a whole other scene.
+    pub fn redo_replaces_scene(&self) -> bool {
+        self.redo.last().is_some_and(|step| step.replaces_scene)
     }
 
     pub fn history_len(&self) -> (usize, usize) {
@@ -421,7 +448,10 @@ impl TopologyEditor {
         let mut loaded = Self::from_document(document)?;
         let previous = self.document.model.clone();
         let mut undo = std::mem::take(&mut self.undo);
-        undo.push(previous);
+        undo.push(HistoryStep {
+            model: previous,
+            replaces_scene: true,
+        });
         if undo.len() > HISTORY_LIMIT {
             undo.remove(0);
         }
@@ -5190,6 +5220,31 @@ mod tests {
             }
         }
         panic!("topology editor validation did not finish");
+    }
+
+    /// A replaced document is a scene-replacing history step both ways; an
+    /// edit is not.
+    #[test]
+    fn history_knows_which_steps_replace_the_scene() {
+        let mut editor = TopologyEditor::default();
+        editor
+            .replace_validated_with_history(TopologyDocument::default())
+            .unwrap();
+        assert!(editor.undo_replaces_scene());
+        editor
+            .set_domain(DomainRect {
+                max_x: 1.4,
+                ..DomainRect::UNIT
+            })
+            .unwrap();
+        assert!(!editor.undo_replaces_scene());
+        assert!(editor.undo());
+        assert!(!editor.redo_replaces_scene());
+        assert!(editor.undo_replaces_scene());
+        assert!(editor.undo());
+        assert!(editor.redo_replaces_scene());
+        assert!(editor.redo());
+        assert!(editor.undo_replaces_scene());
     }
 
     #[test]

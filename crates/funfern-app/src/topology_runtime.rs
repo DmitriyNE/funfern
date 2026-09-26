@@ -1539,6 +1539,19 @@ impl TopologyRuntime {
         self.active.as_ref()
     }
 
+    /// Forgets the active topology and whatever was prepared or preparing,
+    /// as at launch. A document replacement drops the outgoing scene rather
+    /// than keep it running under the new one, and the new scene's first
+    /// preparation is then a fresh full build. Mesh revisions keep counting.
+    pub fn clear_active(&mut self) {
+        self.active = None;
+        self.preparing = None;
+        self.ready = None;
+        self.requested = None;
+        self.requested_adaptation = false;
+        self.last_error = None;
+    }
+
     pub fn ready(&self) -> Option<&PreparedTopology> {
         self.ready.as_ref()
     }
@@ -2472,6 +2485,39 @@ mod tests {
         assert_eq!(runtime.active().unwrap().bundle.token, initial);
         assert!(runtime.ready().unwrap().adapted);
         assert_eq!(runtime.commit_ready(adapted).unwrap().bundle.token, adapted);
+    }
+
+    /// Cleared, the runtime is as at launch: nothing active, and the same
+    /// document's next preparation is a full build, where without the clear
+    /// it reuses the mesh.
+    #[test]
+    fn a_cleared_runtime_prepares_the_next_document_from_scratch() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let run = |runtime: &mut TopologyRuntime| {
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            prepare(runtime).unwrap();
+            runtime.commit_ready(token).unwrap()
+        };
+        run(&mut runtime);
+        assert!(matches!(
+            run(&mut runtime).mesh_action,
+            TopologyMeshUpdateAction::Reuse
+        ));
+        runtime.clear_active();
+        assert!(runtime.active().is_none() && runtime.phase().is_none());
+        assert!(matches!(
+            run(&mut runtime).mesh_action,
+            TopologyMeshUpdateAction::FullRebuild(_)
+        ));
     }
 
     #[test]

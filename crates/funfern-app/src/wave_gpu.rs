@@ -829,6 +829,18 @@ impl WaveGpuRequest {
         Ok(())
     }
 
+    /// Releases every recorder and the arrow overlay, as at launch. A
+    /// replaced scene's generation is dropped with the canonical request's
+    /// `clear`, and nothing may go on reading what it left: without this the
+    /// probe bind groups of that generation outlive its buffers.
+    pub fn clear_recorders(&mut self, assets: &mut Assets<ShaderBuffer>, commands: &mut Commands) {
+        self.clear_probe_buffers(assets, commands);
+        self.clear_curve_probe_buffers(assets, commands);
+        self.clear_area_probe_buffers(assets, commands);
+        self.clear_far_field_buffers(assets, commands);
+        self.clear_vector_overlay(assets, commands);
+    }
+
     pub fn clear_vector_overlay(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,

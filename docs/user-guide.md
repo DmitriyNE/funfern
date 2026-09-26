@@ -399,7 +399,12 @@ names or with every expression evaluated at the material frame's origin. Each ro
   replacement. Successful loading clears history; malformed files leave the
   current document intact. Examples opens a thumbnail gallery with a
   description beside each scene; opening one is undoable and leaves the gallery
-  up, so the catalog can be clicked through. A thumbnail draws the scene's own
+  up, so the catalog can be clicked through. New, Load scene, an example, a
+  scene link, and Undo or Redo across any of them replace the whole scene: the
+  outgoing field stops and disappears at once, the new scene's geometry shows
+  while its mesh is built, and its field starts from zero, as at startup. An
+  ordinary edit keeps the field running and carries it across. A thumbnail
+  draws the scene's own
   faces in their material colours, its walls in their boundary-condition
   colours, and, for an example whose view preset names a material property, that
   property across the face it varies over. Export can write a geometry SVG, a PNG snapshot, or a silent 60 FPS

@@ -42,6 +42,34 @@ impl Playground {
         }
     }
 
+    /// Cancels every estimate and adaptation in flight, here and on the
+    /// worker, and forgets their results.
+    pub(super) fn stop_adaptation_work(&mut self) {
+        self.cancel_background_amr();
+        self.amr_indicator_job = None;
+        self.amr_indicator_completed = None;
+        self.amr_indicator_source = None;
+        self.amr_adaptation_job = None;
+        self.amr_adaptation_completed = None;
+        self.amr_adaptation_source = None;
+        self.amr_pending_state = None;
+        self.amr_indicator_result = None;
+        self.amr_coarsen_streak = 0;
+    }
+
+    /// Adaptation as at launch, for a scene whose mesh has no history: its
+    /// work stopped, and what it knew of the outgoing mesh forgotten too.
+    pub(super) fn reset_adaptation(&mut self) {
+        self.stop_adaptation_work();
+        self.amr_adaptation_state = None;
+        self.amr_report = None;
+        self.amr_error = None;
+        self.amr_last_started = None;
+        self.amr_last_analyzed_step = None;
+        self.amr_energy_peak = 0.0;
+        self.amr_status = "waiting for solution".into();
+    }
+
     /// Whether an adaptation is computing a new mesh, here or on the worker,
     /// or holds one not yet handed to preparation.
     pub(super) fn adaptation_in_flight(&self) -> bool {
@@ -115,16 +143,7 @@ impl Playground {
     ) {
         self.drain_background_amr();
         if !self.editor.document.presentation.adaptation.enabled {
-            self.cancel_background_amr();
-            self.amr_indicator_job = None;
-            self.amr_indicator_completed = None;
-            self.amr_indicator_source = None;
-            self.amr_adaptation_job = None;
-            self.amr_adaptation_completed = None;
-            self.amr_adaptation_source = None;
-            self.amr_pending_state = None;
-            self.amr_indicator_result = None;
-            self.amr_coarsen_streak = 0;
+            self.stop_adaptation_work();
             self.amr_status = "off".into();
             return;
         }

@@ -28,20 +28,55 @@ impl Playground {
         } else {
             self.editor.replace_validated(document)?;
         }
+        self.example_opened = None;
+        self.scene_replaced(fresh);
+        Ok(())
+    }
+
+    /// The Undo button. Stepping back over a New, an opened example or a
+    /// load swaps the whole scene, and is treated as one.
+    pub(super) fn undo(&mut self) {
+        let replaces = self.editor.undo_replaces_scene();
+        if self.editor.undo() {
+            self.history_moved(replaces);
+        }
+    }
+
+    /// The Redo button, the same way round.
+    pub(super) fn redo(&mut self) {
+        let replaces = self.editor.redo_replaces_scene();
+        if self.editor.redo() {
+            self.history_moved(replaces);
+        }
+    }
+
+    fn history_moved(&mut self, replaced_scene: bool) {
+        self.material_edit = None;
+        self.material_formula_edits.clear();
+        self.material_formula_errors.clear();
+        if replaced_scene {
+            self.example_opened = None;
+            self.scene_replaced(true);
+        } else {
+            self.invalidate_samples();
+        }
+    }
+
+    /// What follows a whole scene coming in, whether opened, loaded or
+    /// reached by undo or redo across one: nothing of the outgoing scene's
+    /// selection or tools carries over, and its generation is dropped at the
+    /// next runtime update so none of it runs on under the new geometry.
+    pub(super) fn scene_replaced(&mut self, fresh: bool) {
         self.selection = TopologySelection::None;
         self.selected_probe = None;
         self.draw = None;
-        self.example_opened = None;
         self.pending_merge = None;
         self.requested_revision = None;
         self.fresh_requested = fresh;
-        // The scale is left alone here and started again when the new field
-        // actually arrives, for the reason the reset path gives: the outgoing
-        // scene is still on display until its replacement is prepared, and a
-        // scale cleared now would measure that — magnifying a residue for as
-        // long as the new mesh takes.
+        self.drop_requested = true;
+        // The scale is started again when the new field arrives: with the
+        // outgoing generation dropped there is no field to measure until then.
         self.invalidate_samples();
-        Ok(())
     }
     pub(super) fn update_files(&mut self) {
         let events = self.receiver.lock().unwrap().try_iter().collect::<Vec<_>>();
@@ -226,7 +261,91 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::test_support::*;
+    use funfern_app::topology_editor::TopologyEditor;
     use funfern_app::topology_viewport::TopologySpanTarget;
+
+    /// Opening another scene drops the outgoing generation, as at launch:
+    /// the host forgets the active topology and its clock, and the new
+    /// scene's first preparation is a fresh full build rather than a repair
+    /// of the old mesh running on underneath it.
+    #[test]
+    fn a_replaced_scene_drops_the_outgoing_generation() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        settle(&mut state.editor);
+        activate(&mut state);
+        state.uploaded_time_step = 0.01;
+        state.sim_time_offset = 3.0;
+        state.amr_status = "monitoring solution".into();
+        let example = &funfern_app::topology_examples::catalog()[0];
+        state
+            .set_document(example.document.clone(), true, true)
+            .unwrap();
+        assert!(state.drop_requested && state.fresh_requested);
+        state.drop_requested = false;
+        state.drop_generation();
+        assert!(state.runtime.active().is_none());
+        assert_eq!(
+            (state.uploaded_time_step, state.sim_time_offset),
+            (0.0, 0.0)
+        );
+        assert_eq!(state.amr_status, "waiting for solution");
+        settle(&mut state.editor);
+        let next = activate(&mut state);
+        assert!(matches!(
+            next.mesh_action,
+            TopologyMeshUpdateAction::FullRebuild(_)
+        ));
+    }
+
+    /// Undo and redo across an opened scene are scene replacements too;
+    /// across an edit they are not, and a live edit never drops anything.
+    #[test]
+    fn undoing_an_opened_scene_drops_its_generation_and_undoing_an_edit_does_not() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        settle(&mut state.editor);
+        let example = &funfern_app::topology_examples::catalog()[0];
+        state
+            .set_document(example.document.clone(), true, true)
+            .unwrap();
+        settle(&mut state.editor);
+        state.drop_requested = false;
+        state.fresh_requested = false;
+
+        state
+            .editor
+            .set_domain(DomainRect {
+                max_x: 1.4,
+                ..DomainRect::UNIT
+            })
+            .unwrap();
+        settle(&mut state.editor);
+        assert!(!state.drop_requested, "a live edit dropped the generation");
+        state.undo();
+        assert!(
+            !state.drop_requested,
+            "undoing an edit dropped the generation"
+        );
+
+        state.undo();
+        assert!(
+            state.drop_requested && state.fresh_requested,
+            "undoing the opened scene kept its generation"
+        );
+        state.drop_requested = false;
+        state.fresh_requested = false;
+        state.redo();
+        assert!(
+            state.drop_requested && state.fresh_requested,
+            "redoing the opened scene kept the other one's generation"
+        );
+    }
 
     /// A capture crops to the viewport, so what has to be suppressed is the
     /// chrome inside the crop, not the panels outside it.

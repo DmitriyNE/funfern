@@ -3865,6 +3865,11 @@ impl CanonicalGpuRequest {
         self.integrated_readback_entity = None;
         self.manifest = None;
         self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
+        // With the generation gone nothing it was asked for can still run, so
+        // nothing is outstanding: a backlog left here kept `caught_up` false
+        // for good, and the next generation's upload, which waits on it,
+        // never started. `install` sets its own count after this.
+        self.desired_steps = self.stats.completed_steps();
     }
 
     pub fn request_steps(&mut self, count: u64) {
@@ -6773,6 +6778,30 @@ mod tests {
             display.accepted_material_runtime(&authored).is_none(),
             "the clock's epoch began after the snapshot was taken"
         );
+    }
+
+    /// Cleared with steps still outstanding, as a scene replacement drops a
+    /// running generation, the request is caught up: the next generation's
+    /// upload waits on that and would otherwise wait forever.
+    #[test]
+    fn a_cleared_request_owes_no_steps() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            request.install(
+                &mut assets,
+                &mut commands,
+                plan(OuterBoundaryCondition::Reflecting),
+            );
+            request.request_steps(40);
+            assert!(!request.caught_up());
+            request.clear(&mut assets, &mut commands);
+            assert!(request.caught_up());
+            assert!(request.buffer_handles().is_none());
+        });
     }
 
     #[test]

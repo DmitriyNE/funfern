@@ -14,17 +14,11 @@ impl Playground {
         let fold_panels = root.available_width() < 1080.0;
         egui::Panel::top("top").exact_size(42.0).show(root, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Undo").clicked() && self.editor.undo() {
-                    self.material_edit = None;
-                    self.material_formula_edits.clear();
-                    self.material_formula_errors.clear();
-                    self.invalidate_samples();
+                if ui.button("Undo").clicked() {
+                    self.undo();
                 }
-                if ui.button("Redo").clicked() && self.editor.redo() {
-                    self.material_edit = None;
-                    self.material_formula_edits.clear();
-                    self.material_formula_errors.clear();
-                    self.invalidate_samples();
+                if ui.button("Redo").clicked() {
+                    self.redo();
                 }
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {

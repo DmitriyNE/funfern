@@ -55,6 +55,32 @@ impl Playground {
         })
     }
 
+    /// The host side of dropping a replaced scene's generation, beside the
+    /// device's `CanonicalGpuRequest::clear`: no active topology, nothing
+    /// uploading or committing, and the clock, the live-event serials, the
+    /// probe traces, the exposures and adaptation back where launch has them.
+    /// The new scene's first request then sees nothing active and prepares a
+    /// fresh full build, which is the launch path.
+    pub(super) fn drop_generation(&mut self) {
+        self.runtime.clear_active();
+        self.uploading = None;
+        self.source_commit = None;
+        self.gpu_upload_preparation = None;
+        self.uploaded_time_step = 0.0;
+        self.sim_time_offset = 0.0;
+        self.accumulator = 0.0;
+        self.step_backlog = 0;
+        self.canonical_event_serial = 0;
+        self.canonical_event_observed = 0;
+        self.solver_fault = None;
+        self.pending_pulse = None;
+        self.pending_switch = None;
+        self.probe_upload = None;
+        self.restart_probe_traces();
+        self.restart_exposures_after_handoff(true);
+        self.reset_adaptation();
+    }
+
     pub(super) fn preparation_in_progress(&self) -> bool {
         self.preparation_phase().is_some()
     }
@@ -286,6 +312,11 @@ impl Playground {
         commands: &mut Commands,
         delta: f64,
     ) {
+        if std::mem::take(&mut self.drop_requested) {
+            request.clear(assets, commands);
+            recorders.clear_recorders(assets, commands);
+            self.drop_generation();
+        }
         request.set_grid_scale_filter(self.editor.document.presentation.grid_scale_filter);
         self.finish_source_commit(request);
         self.supervise_solver_fault(request, assets, commands);

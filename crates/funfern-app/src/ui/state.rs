@@ -109,6 +109,11 @@ pub struct Playground {
     /// reset the outgoing scene, which then ran on for the seconds its
     /// replacement took to prepare and handed over a full-amplitude field.
     pub(super) fresh_requested: bool,
+    /// Set when a whole document is replaced, spent by the next runtime
+    /// update: the outgoing scene's generation is dropped on the device and
+    /// the host, as at launch, so nothing of it runs or shows while the new
+    /// one prepares. See `drop_generation`.
+    pub(super) drop_requested: bool,
     pub(super) accumulator: f64,
     /// Largest solver batch a frame may ask for, so the display is never held
     /// behind one. Starts at the floor rather than the ceiling so the first
@@ -363,6 +368,7 @@ impl Default for Playground {
             wave_step: false,
             reset_requested: false,
             fresh_requested: false,
+            drop_requested: false,
             accumulator: 0.0,
             frame_budget: 1.0,
             last_batch: FrameBatch::default(),

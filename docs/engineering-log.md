@@ -13861,3 +13861,47 @@ meshes on the CI runner (AMD EPYC, glibc).
   `theme.rs`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — A scene change drops the outgoing generation
+
+- The plan's first item after the gallery. Opening an example, New, a load
+  or a link went through `set_document`, which asked for a fresh generation
+  while the outgoing one kept stepping and showing, for as long as the new
+  mesh took: seconds of the old scene running under the new geometry.
+- **Drop, not pause**, at the user's suggestion: launch is already the state
+  "a document, nothing active", handled everywhere. `scene_replaced` raises
+  `drop_requested`, and the next `refresh_runtime` spends it before anything
+  is requested:
+  - on the device, `CanonicalGpuRequest::clear` and a new
+    `WaveGpuRequest::clear_recorders` (point, curve, area and far-field
+    recorders and the arrow overlay; otherwise the old generation's probe
+    bind groups would outlive its buffers);
+  - on the host, `drop_generation`: `TopologyRuntime::clear_active`, no upload
+    or source commit in flight, and the clock, live-event serials, probe
+    traces and uploads, exposures and adaptation back at launch values.
+    `reset_adaptation` extends the stop that switching adaptation off already
+    ran, now named `stop_adaptation_work`.
+- The new scene's first request then sees nothing active and is a fresh full
+  build. Nothing paints, steps or samples in the gap, because all of it
+  already required an active topology. Live edits never raise the drop.
+- **Undo and redo:** the editor's history steps now carry `replaces_scene`,
+  set by `replace_validated_with_history`. `undo_replaces_scene` and
+  `redo_replaces_scene` let the toolbar treat stepping across a New, an
+  example or a load as a replacement too. Before, undoing an opened example
+  restored the previous scene as an edit and carried the example's field onto
+  its mesh.
+- **Found by a mid-run check:** a temporary env hook opened three examples 10 s
+  apart in a scratch-HOME run. After the first switch the new scene sat at
+  "Ready for GPU upload" for good: `clear` kept the old generation's requested
+  steps, the upload waits on `caught_up`, and a backlog that can no longer
+  run never retires. `clear` now sets the requested count to the completed
+  one, as `clear_failure` does. Rerun, each switch dropped a live generation,
+  installed the next within two seconds from step zero, and reconfigured its
+  probes.
+- Tests: `a_replaced_scene_drops_the_outgoing_generation`,
+  `undoing_an_opened_scene_drops_its_generation_and_undoing_an_edit_does_not`,
+  `history_knows_which_steps_replace_the_scene`,
+  `a_cleared_runtime_prepares_the_next_document_from_scratch`,
+  `a_cleared_request_owes_no_steps`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
