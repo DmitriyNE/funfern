@@ -14535,3 +14535,16 @@ meshes on the CI runner (AMD EPYC, glibc).
   that has fallen a hundredfold, and has no point source.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — A replaced scene opens framed
+
+- Opening an example, New, a load, a link, and Undo or Redo across one of
+  them kept the view where the last scene had left it; only launch and Fit
+  view framed the domain. Harmless while every scene is the 2×2 square,
+  and wrong the moment one is not. `scene_replaced` now asks for the fit,
+  so a whole-scene replacement opens as launch does, and a history step
+  within a scene leaves the view alone. Test:
+  `a_replaced_scene_opens_fitted_to_the_view`. The guide says so under the
+  viewport.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

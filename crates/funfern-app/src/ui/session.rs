@@ -105,6 +105,9 @@ impl Playground {
         self.requested_revision = None;
         self.fresh_requested = fresh;
         self.drop_requested = true;
+        // Framed as at launch: the new domain need not be where, or as
+        // large as, the old one.
+        self.fit = true;
         // The scale is started again when the new field arrives: with the
         // outgoing generation dropped there is no field to measure until then.
         self.invalidate_samples();
@@ -295,6 +298,28 @@ mod tests {
     use crate::ui::test_support::*;
     use funfern_app::topology_editor::TopologyEditor;
     use funfern_app::topology_viewport::TopologySpanTarget;
+
+    /// A scene that replaces the whole document opens framed, as launch
+    /// does: its domain need not be where, or as large as, the last one's.
+    /// A history step within a scene leaves the view where it is.
+    #[test]
+    fn a_replaced_scene_opens_fitted_to_the_view() {
+        let mut state = Playground {
+            fit: false,
+            ..Playground::default()
+        };
+        state.open_example(0);
+        assert!(state.fit, "an opened example");
+        state.fit = false;
+        state.new_scene();
+        assert!(state.fit, "a new scene");
+        state.fit = false;
+        state.undo();
+        assert!(state.fit, "undo across a new scene");
+        state.fit = false;
+        state.history_moved(false);
+        assert!(!state.fit, "a step within the scene");
+    }
 
     /// Opening another scene drops the outgoing generation, as at launch:
     /// the host forgets the active topology and its clock, and the new

@@ -402,7 +402,8 @@ names or with every expression evaluated at the material frame's origin. Each ro
   the live Replace/Add/Subtract operation and Enclosed/Crossing hit mode. Shift adds,
   Alt subtracts, and either modifier can change while dragging; left-to-right fully
   encloses spans while right-to-left selects crossings. Fit View frames the
-  current domain. Panel scrolling and text editing do not manipulate the viewport.
+  current domain, and a scene that replaces the whole document (New, a load, an
+  example, or Undo/Redo across one) opens framed, as launch does. Panel scrolling and text editing do not manipulate the viewport.
 - **Drafts:** green curves are accepted, amber curves are being checked, red
   curves are invalid. The last accepted scene stays as a subdued reference.
   Invalid edits remain after release. Escape during a drag restores its starting
