@@ -273,6 +273,16 @@ pub fn catalog() -> &'static [TopologyExample] {
                  fine ripple on the strong beam, small.",
                 spatial_soliton(),
             ),
+            example(
+                "Doppler mirror",
+                "A 1 Hz plane wave meets a slab whose permittivity is a grating running \
+                 toward it at half the wave speed. The grating reflects it as a moving mirror \
+                 would, at (c + v)/(c − v) = 3 times its frequency: the probe in front hears \
+                 3 Hz about as loud as the wave itself. The reflection carries more power than \
+                 the wave lost, since the grating does work on it, but it returns one wave \
+                 quantum for each one it takes. At rest the grating reflects nothing.",
+                doppler_mirror(),
+            ),
         ]
     })
 }
@@ -1311,6 +1321,97 @@ fn spatial_soliton_with(amplitude: f64) -> TopologyDocument {
     });
     document
 }
+
+const DOPPLER_HZ: f64 = 1.0;
+const DOPPLER_DEPTH: f64 = 0.2;
+
+fn doppler_mirror() -> TopologyDocument {
+    doppler_mirror_with(2.0 * DOPPLER_HZ)
+}
+
+/// A TM channel lit at 1 Hz from `x = −0.85`, with a slab from −0.55 to 0.75
+/// whose permittivity carries a travelling modulation of depth 0.2 at
+/// `pump_hz` and wavenumber `4k`, running toward the source: at 2 Hz a
+/// grating moving at `c/2`, at 0 Hz the same grating at rest.
+fn doppler_mirror_with(pump_hz: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    builder.launcher(-0.85, DOPPLER_HZ, 40.0);
+    // Started on a sine, the launcher's plane wave carries a static part as
+    // large as the wave, which the channel keeps, and the grating turns it
+    // into lines at 2 and 4 Hz; started on a cosine it carries none.
+    *builder.scene.volume_sources[0]
+        .signal
+        .harmonic_parameters_mut()
+        .3 = std::f64::consts::FRAC_PI_2;
+    // The background's floor anchor moves beyond the slab, which crosses
+    // the centre where it sat.
+    builder.scene.face_assignments[0].anchor = FaceAnchor::Outer {
+        side: OuterSide::Bottom,
+        fraction: 0.95,
+    };
+    builder.scene.materials.push(preset_material(
+        2,
+        "Moving grating",
+        [120, 92, 178],
+        "Travelling modulation",
+        LawPresetRow::Mass,
+        &[
+            ("depth", DOPPLER_DEPTH),
+            ("pump_hz", pump_hz),
+            ("pump_phase", 0.0),
+            ("wavenumber", 4.0 * std::f64::consts::TAU * DOPPLER_HZ),
+            ("wave_angle", std::f64::consts::PI),
+        ],
+    ));
+    let (front, span) = builder.divider(-0.55);
+    builder.divider(0.75);
+    for (material, side) in [
+        (MaterialId(2), CurveTraceSide::Right),
+        (DEFAULT_MATERIAL, CurveTraceSide::Left),
+    ] {
+        let region = RegionId(builder.next_region);
+        builder.next_region += 1;
+        builder.scene.regions.push(Region {
+            id: region,
+            material,
+            frame: MaterialFrame::world(),
+        });
+        // Running upwards, a divider's right is towards +x.
+        builder.scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Curve {
+                curve: front,
+                span,
+                side,
+                parameter: 0.5,
+            },
+            region: Some(region),
+        });
+    }
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "In front of the slab".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(DOPPLER_FRONT),
+    });
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Behind the slab".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Point(DOPPLER_BEHIND),
+    });
+    document
+}
+
+const DOPPLER_FRONT: Point2 = Point2::new(-0.7, 0.3);
+const DOPPLER_BEHIND: Point2 = Point2::new(0.9, 0.3);
 
 fn kerr_slab() -> TopologyDocument {
     kerr_slab_with(40.0, 60.0)
@@ -3097,7 +3198,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 35);
+        assert_eq!(catalog().len(), 36);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -3224,6 +3325,17 @@ mod tests {
         seconds: f64,
         point: Point2,
     ) -> (Vec<f64>, f64, f64) {
+        let (mut series, dt, strongest) = traces(document, edge, seconds, &[point]);
+        (series.pop().unwrap(), dt, strongest)
+    }
+
+    /// `trace` at each of `points`, from one run.
+    fn traces(
+        document: &TopologyDocument,
+        edge: f64,
+        seconds: f64,
+        points: &[Point2],
+    ) -> (Vec<Vec<f64>>, f64, f64) {
         let prepared = prepare(document, edge);
         let operator = prepared
             .canonical_temporal_operator
@@ -3231,27 +3343,34 @@ mod tests {
             .expect("a law-carrying document prepares a temporal operator");
         let forcing = prepared.canonical_forcing.clone();
         let dt = prepared.recommended_time_step();
-        let node = operator
-            .base()
-            .node_points()
+        let nodes = points
             .iter()
-            .enumerate()
-            .min_by(|a, b| (*a.1 - point).norm().total_cmp(&(*b.1 - point).norm()))
-            .unwrap()
-            .0;
+            .map(|point| {
+                operator
+                    .base()
+                    .node_points()
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| (*a.1 - *point).norm().total_cmp(&(*b.1 - *point).norm()))
+                    .unwrap()
+                    .0
+            })
+            .collect::<Vec<_>>();
         let mut state = CanonicalTemporalWaveState::zero(&operator, dt)
             .unwrap()
             .pinned(&operator, &forcing)
             .unwrap();
         let steps = (seconds / dt).ceil() as usize;
-        let mut series = Vec::with_capacity(steps);
+        let mut series = vec![Vec::with_capacity(steps); points.len()];
         let mut strongest = 0.0_f64;
         for step in 0..steps {
             state.step_with_forcing(&operator, &forcing).unwrap();
             let field = operator
                 .primary_field_at(state.primary_flux(), state.time(), state.runtime())
                 .unwrap();
-            series.push(field[node]);
+            for (series, node) in series.iter_mut().zip(&nodes) {
+                series.push(field[*node]);
+            }
             if step % 50 == 0 {
                 for strength in operator
                     .nonlinear_strength(
@@ -3529,6 +3648,46 @@ mod tests {
         assert!(strong[1] / weak[1] < 0.6, "{report}");
         assert!(strong[1] / strong[0] < 1.2, "{report}");
         assert!(weak[1] / weak[0] > 1.4, "{report}");
+    }
+
+    /// The Doppler mirror's claims, from the lines at 1 to 5 Hz in front of
+    /// the slab and behind it. In front, the reflection at 3 Hz is over half
+    /// the carrier (1.04) and over five times any other line (7.3 times), and
+    /// with the grating at rest under a hundredth of it (4e-4). Wave quanta
+    /// are conserved where energy is not: the transmitted power and a third
+    /// of the reflected make the incident power within 5% (0.99), while the
+    /// two powers make over 1.5 times it (1.71), the grating's work.
+    #[test]
+    fn a_grating_running_at_half_the_wave_speed_reflects_at_three_times_the_frequency() {
+        let lines = |pump_hz| {
+            let (series, dt, _) = traces(
+                &doppler_mirror_with(pump_hz),
+                0.08,
+                8.0,
+                &[DOPPLER_FRONT, DOPPLER_BEHIND],
+            );
+            let spectrum = |series: &Vec<f64>| {
+                [1.0, 2.0, 3.0, 4.0, 5.0].map(|n| amplitude_at(series, dt, n * DOPPLER_HZ, 4.0 * n))
+            };
+            [spectrum(&series[0]), spectrum(&series[1])]
+        };
+        let [front, behind] = lines(2.0 * DOPPLER_HZ);
+        let [rest, _] = lines(0.0);
+        let report = format!("front {front:.4?}, behind {behind:.4?}, at rest {rest:.4?}");
+        let reflected = front[2] / front[0];
+        assert!(reflected > 0.5, "{report}");
+        for other in [1, 3, 4] {
+            assert!(front[2] > 5.0 * front[other], "{report}");
+        }
+        assert!(rest[2] < 0.01 * rest[0], "{report}");
+        let transmitted = (behind[0] / front[0]).powi(2);
+        let returned = reflected.powi(2);
+        assert!(
+            (transmitted + returned / 3.0 - 1.0).abs() < 0.05,
+            "{report}: quanta {:.4}",
+            transmitted + returned / 3.0
+        );
+        assert!(transmitted + returned > 1.5, "{report}");
     }
 
     /// The Kerr gallery claim: behind the slab, the receiver hears the

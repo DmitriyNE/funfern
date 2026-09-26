@@ -13764,3 +13764,34 @@ meshes on the CI runner (AMD EPYC, glibc).
   (printed, not judged) 0.15 and 0.14, the divergence above.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: the Doppler mirror
+
+- **Scene** "Doppler mirror" (gallery item 27, the last planned), the
+  catalogue's 36th: a TM channel lit at 1 Hz, and a slab whose ε carries
+  the travelling modulation (depth 0.2, 2 Hz, `4k`, angle π), a grating
+  running toward the source at `c/2`. It reflects at `3f`, the only
+  phase-matched line.
+- **Measured** at edge 0.08, 8 s: in front, 3 Hz at 1.04 of the carrier
+  and 7.4 times the next line (5 Hz), 4e-4 at rest. Wave quanta balance:
+  transmitted power plus a third of the reflected is 0.988 of the incident,
+  energy 1.71. Explored at depths 0.1/0.2/0.3, the reflection matches three
+  times the carrier's loss to 1-3%. Test:
+  `a_grating_running_at_half_the_wave_speed_reflects_at_three_times_the_frequency`.
+  `traces` records several points from one run; `trace` is its one-point
+  case.
+- **Found:** a launcher started on a sine radiates a plane wave with a
+  static part as large as the wave, 0.191 at every probe of this channel,
+  because a constant satisfies the outgoing walls and the reflecting sides
+  keep it. Here the grating turned it into 2 and 4 Hz lines (0.19, 0.014).
+  This scene starts its launcher on a cosine (4e-5 left, both lines gone).
+  The six other channel scenes (plasma mirror, photonic crystal, Talbot,
+  disordered crystal, both skin depths) still show the offset in their
+  field; their claims, at the drive frequency, are unaffected. In the open
+  soliton scene the offset spreads away (under 0.005). Reported, not yet
+  changed.
+- **Device:** `canonical_gpu_long_run` (temporal, 8447 dofs) at 400 steps
+  Q 9.7e-7, b 1.1e-6; at 1000 steps Q 4.8e-6, b 4.5e-6; at 3000 steps
+  (printed, not judged) 5.4e-6 and 5.4e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

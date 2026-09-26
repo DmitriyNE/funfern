@@ -840,14 +840,38 @@ Claims at edge 0.08, 3 s from rest, against the weak beam:
 
 ### 27. Doppler mirror
 
-TM. The "Travelling modulation" preset on a slab, moving toward the source:
-wave angle 180°, pump at `2f`, wavenumber `4k`. That is the Bragg condition
-for backward scattering off a grating moving at `c/2`, and the reflected
-wave comes back at `f(c + v)/(c − v) = 3f`. Depth from exploration; no new
-law.
+TM channel. A 1 Hz launcher at x = −0.85 and a wall-to-wall slab from
+−0.55 to 0.75 carrying the "Travelling modulation" preset on ε: depth 0.2,
+pump 2 Hz, wavenumber `4k = 8π`, angle π, so the grating runs toward the
+source at `c/2`. Incident `(ω, k)` plus the grating's `(2ω, −4k)` is
+`(3ω, −3k)`, on the light line: the Bragg condition off a mirror moving at
+`c/2`, which returns `f(c + v)/(c − v) = 3f`. Nothing else is
+phase-matched. At 1 Hz the grating's period 0.25 and the 3 Hz wavelength
+0.33 are both resolved at edge 0.08. The background's floor anchor moves
+beyond the slab, which crosses the centre. Probes: points in front of the
+slab (−0.7, 0.3) and behind it (0.9, 0.3).
 
-Claim: the spectrum on the source side peaks at `3f`, and does not with the
-modulation at rest.
+The launcher starts on a cosine. Started on a sine, as every other
+launcher is, its plane wave carries a static part as large as the wave
+(0.191 at every probe), which a channel keeps because a constant satisfies
+its outgoing walls, and the grating turned it into lines at 2 and 4 Hz
+(0.19 and 0.014 of the carrier). A cosine start leaves 4e-5 and removes
+both, with the odd lines unchanged.
+
+Explored at depths 0.1, 0.2 and 0.3: the 3 Hz line in front is 0.58, 1.00
+and 1.23 of the carrier; at rest 2e-4; with the grating running away 0.03.
+The powers follow Manley-Rowe at every depth: the reflection is three times
+the power the carrier lost, 0.605 predicted against 0.587 measured, 1.065
+against 1.053, 1.36 against 1.35.
+
+Claims at edge 0.08, 8 s from rest, the lines over the last 4 s:
+
+- In front, the 3 Hz line is over half the carrier (1.04) and over five
+  times any other line (7.4, the 5 Hz one); with the grating at rest it is
+  under a hundredth (4e-4).
+- The transmitted power and a third of the reflected make the incident
+  power within 5% (0.988), while the two powers make over 1.5 of it
+  (1.71): the grating's work.
 
 ## Order
 
@@ -883,8 +907,8 @@ complementary row, and Gate O's restoring laws act on the primary field
 only, which there makes a magnetic plasma. So the guide likely needs a Drude
 law on the complementary row first.
 
-Catalogue count after everything: 12 today, 34 after; the catalogue test's
-count and the user guide's example list move with each commit.
+Catalogue count after everything: 12 when the plan began, 36 with the
+planned scenes and 25b; the catalogue test's count moves with each commit.
 
 ## Blocked
 
