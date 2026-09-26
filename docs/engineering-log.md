@@ -14409,3 +14409,44 @@ meshes on the CI runner (AMD EPYC, glibc).
   left the analysis for later. "Blocked" is unchanged.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — Diagnosed: the ear clipper stalls on a vertex bridged twice
+
+- Reported twice and not filed: "Could not construct a constrained mesh:
+  topology ear clipping stalled", first on axis-aligned square rods in the
+  photonic crystal's lattice, then on the first 0.6 of the disordered
+  crystal's slab, 35 octagons. Diagnosed, not fixed.
+- **Reproduced** on the 35 octagons (the disordered sites with x < 0.1) at
+  edges 0.16, 0.08 and 0.05, every time; the full fifty mesh at each. The
+  square rods mesh now at every edge from 0.04 to 0.16; which mesher change
+  since fixed them was not traced.
+- **The polygon at the stall**, dumped from `step_clip`: 26 vertices, one
+  of them present three times, seven convex corners, and every convex
+  corner's diagonal meets an edge or its triangle holds a vertex, so
+  neither pass finds an ear. Replaying the three ear tests on it in exact
+  arithmetic gives the same seven refusals, so the predicates are not the
+  problem; the polygon is.
+- **The polygon after bridging**, dumped from `step_bridge` for that face:
+  446 vertices, area 3.464. Every vertex that is in it twice has two wedges
+  that do not overlap, as a bridged vertex should. One vertex is in it
+  three times, and its wedges overlap: (prev 169, next 249) spanning 326°,
+  (prev 249, next 174) and (prev 180, next 169). It is a rod vertex that
+  received two bridges, 169–181 first and 181–249 later. The first bridge
+  had split its wedge, from 174 at 0° round to 180 at 225°, into
+  [0°, 108°] and [108°, 225°]. The second bridge leaves at 142°, in the
+  second wedge, but was spliced into the first copy, the one with the
+  [0°, 108°] wedge, so the polygon now crosses itself at that vertex.
+- **Why the splice lands there:** `step_bridge` seeds the bridge by the
+  shortest outer–hole pair, and the two copies of the vertex are the same
+  length from the hole, so the strict `<` keeps the first copy in index
+  order. Visibility (`step_bridge_visibility`) then tests the bridge
+  segment against the polygon's edges for a proper intersection and skips
+  every edge that contains either endpoint; a bridge that leaves a
+  bridged vertex through the wrong wedge crosses the earlier bridge at the
+  vertex itself, which is not a proper intersection, so it passes.
+- **The fix, when taken:** among a vertex's copies, splice at the one
+  whose wedge (from its next edge round to its previous) contains the new
+  bridge's direction, or refuse the pair when none does; the two `orient2d`
+  signs against the copy's two edges decide it. Not done here: the mesher
+  is shared by every scene and the change wants its own gate, with the 35
+  octagons as the test.
