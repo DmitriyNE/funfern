@@ -14548,3 +14548,54 @@ meshes on the CI runner (AMD EPYC, glibc).
   viewport.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — Low-passed flow arrows
+
+- The energy-flow arrows drew the instantaneous Poynting vector, which
+  ripples at twice the source frequency by as much as its mean, so the
+  transport was there only on average of what the eye saw. The retired arrow
+  smoothing (`0.82 old + 0.18 new` per readback at 15 Hz: first order, about
+  0.5 Hz, in frames) went with the move to display-cadence readbacks, which
+  changed its time constant. Flow arrows now go through a presentation-only
+  low-pass: three identical first-order stages at a corner the View panel
+  sets in Hz (`[ ] Low-pass [0.50] Hz`, on by default), advanced by the
+  chain's exact response to the sample held over the simulated time since the
+  previous readback, on the per-element state the AC coupler keeps, with its
+  owner, remesh rebase and reset rules. The corner is the user's because it
+  has to sit between the ripple and whatever slow envelope is worth seeing,
+  and neither is derivable for the emitter, a pulse or a modulation sideband.
+- **Measured** with a throwaway CPU probe: the flow every step at 256
+  lattice points on eight scenes (GRIN, ring, double slit, photonic crystal,
+  bent fiber, parametric pump, drum, obstacle over a mirror), each point's
+  flow split into its one-period mean and the ripple about it, fed through
+  candidate averages at 60 Hz. The ripple equals the mean at a travelling
+  point (max/mean 2.00, textbook), 3–8× it where the wave stands, 35× at the
+  worst crystal point. The most ripple any arrow keeps, of the level the
+  exposure is set from, as ordinary scenes / drum and crystal against the raw
+  level / 90 % of a step: one stage at 0.5 Hz 19–70 % / 26 %, 81 % / 0.7 s;
+  two at 0.5 Hz ≤ 7 % / 5.8 %, 12 % / 1.2 s; two at 0.25 Hz ≤ 3 % / 2.1 %,
+  4.7 % / 2.5 s; three at 0.5 Hz ≤ 1.5 % / 2.3 %, 2.5 % / 1.7 s. Medians are
+  a tenth of the maxima; readbacks at speeds 0.25, 1 and 2 agree. Three
+  stages at the default: 0.6 px on the longest arrow at the default spacing.
+- **Exposure** stays measured on the raw samples. On the averaged ones a
+  standing region renormalises the leakage (the crystal's is 28 % of its tiny
+  mean even with three stages). The raw 90th percentile breathes with the
+  lattice's aliased phases (0.64–1.41× the mean level on the GRIN scene) and
+  the exposure's instant attack holds its peak, so a travelling scene draws
+  its mean about as long as its peaks drew before, the drum at half, the
+  crystal at a tenth.
+- **New arrows** seed from the nearest arrow updated at the previous
+  readback within 1.5 spacings, else start silent: a silent start alone would
+  blank the overlay for the settle time on every spacing change.
+- Persisted as `vector_overlay_lowpass` and `vector_overlay_lowpass_hz`
+  (0.1–5 Hz, validated); earlier files take the defaults. The AC coupler's
+  state, owner and step are renamed to the filter's, since they serve both.
+- Tests: `a_low_pass_keeps_a_steady_flow_and_removes_its_ripple`,
+  `a_low_pass_runs_in_simulated_time`,
+  `a_new_flow_arrow_seeds_from_a_live_neighbour_or_starts_silent`,
+  `a_reset_clears_the_low_pass`,
+  `low_pass_history_survives_a_handoff_and_is_rebased_across_a_remesh`,
+  `low_passed_flow_arrows_are_exposed_by_the_raw_level`, and the
+  presentation round trip and earlier-build defaults carry the two keys.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -245,6 +245,12 @@ pub struct PresentationSettings {
     /// Presentation-only high-pass for complementary-field arrows. The
     /// authoritative canonical field, probes and energy remain untouched.
     pub vector_overlay_ac_coupled: bool,
+    /// Presentation-only low-pass for energy-flow arrows, whose time average
+    /// is the transport. The corner is the view's to set: it has to sit under
+    /// the ripple at twice the source's frequency and above whatever slow
+    /// envelope is worth seeing, and neither is derivable for every scene.
+    pub vector_overlay_lowpass: bool,
+    pub vector_overlay_lowpass_hz: f64,
     pub vector_overlay_density: f32,
     pub vector_overlay_gain: f32,
     pub material_overlay: MaterialOverlay,
@@ -316,6 +322,11 @@ impl Default for AdaptationSettings {
     }
 }
 
+/// The corners the low-pass control offers. Under 0.1 Hz the average takes
+/// longer than a scene's own build-up to form; above 5 Hz it no longer removes
+/// the ripple of any gallery source.
+pub const VECTOR_LOWPASS_HZ_RANGE: std::ops::RangeInclusive<f64> = 0.1..=5.0;
+
 impl PresentationSettings {
     pub fn valid(self) -> bool {
         self.simulation_speed.is_finite()
@@ -326,6 +337,8 @@ impl PresentationSettings {
             && (28.0..=120.0).contains(&self.vector_overlay_density)
             && self.vector_overlay_gain.is_finite()
             && (0.1..=5.0).contains(&self.vector_overlay_gain)
+            && self.vector_overlay_lowpass_hz.is_finite()
+            && VECTOR_LOWPASS_HZ_RANGE.contains(&self.vector_overlay_lowpass_hz)
             && self.material_overlay_opacity.is_finite()
             && (0.05..=1.0).contains(&self.material_overlay_opacity)
             && self.material_overlay_manual_min.is_finite()
@@ -358,6 +371,10 @@ impl Default for PresentationSettings {
             field_auto_exposure: true,
             vector_overlay: VectorOverlay::Off,
             vector_overlay_ac_coupled: true,
+            vector_overlay_lowpass: true,
+            // Four times under the lowest gallery source's ripple; the
+            // measurements behind it are with `VECTOR_LOW_PASS_STAGES`.
+            vector_overlay_lowpass_hz: 0.5,
             vector_overlay_density: 54.0,
             vector_overlay_gain: 1.0,
             material_overlay: MaterialOverlay::Regions,

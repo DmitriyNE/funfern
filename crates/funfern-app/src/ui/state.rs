@@ -235,12 +235,13 @@ pub struct Playground {
     /// remains drawable while a camera/remesh replacement is in flight, so
     /// arrows reproject with the view instead of blinking out.
     pub(super) vector_overlay_previous_layout: Option<VectorOverlayLayout>,
-    /// Presentation-only DC-blocker state for complementary-field arrows. It
-    /// never feeds the canonical solver or physical consumers.
-    pub(super) vector_overlay_ac_state: BTreeMap<u32, VectorAcState>,
-    pub(super) vector_overlay_ac_owner: Option<VectorOverlayAcOwner>,
-    pub(super) vector_overlay_dc_step: u64,
-    pub(super) vector_overlay_dc_active: bool,
+    /// Presentation-only per-arrow filter state: the complementary field's
+    /// DC blocker or the energy flow's low-pass, whichever is drawn. It never
+    /// feeds the canonical solver or physical consumers.
+    pub(super) vector_overlay_filter_state: BTreeMap<u32, VectorFilterState>,
+    pub(super) vector_overlay_filter_owner: Option<VectorOverlayFilterOwner>,
+    pub(super) vector_overlay_filter_step: u64,
+    pub(super) vector_overlay_filter: Option<VectorFilter>,
     pub(super) vector_overlay_mode: VectorOverlay,
     pub(super) vector_overlay_exposure: AutoExposure,
     pub(super) field_exposure: AutoExposure,
@@ -449,10 +450,10 @@ impl Default for Playground {
             viewport_rect: Rect::NOTHING,
             vector_overlay_layout: None,
             vector_overlay_previous_layout: None,
-            vector_overlay_ac_state: BTreeMap::new(),
-            vector_overlay_ac_owner: None,
-            vector_overlay_dc_step: u64::MAX,
-            vector_overlay_dc_active: false,
+            vector_overlay_filter_state: BTreeMap::new(),
+            vector_overlay_filter_owner: None,
+            vector_overlay_filter_step: u64::MAX,
+            vector_overlay_filter: None,
             vector_overlay_mode: VectorOverlay::Off,
             vector_overlay_exposure: AutoExposure::default(),
             field_exposure: AutoExposure::default(),

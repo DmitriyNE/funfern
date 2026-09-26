@@ -588,19 +588,34 @@ impl AmrIndicatorSource {
     }
 }
 
+/// One arrow's presentation filter, keyed by the mesh element it samples.
+/// The AC coupler works in `input` and `output`; the low-pass runs its stages
+/// through `inner` into `output`. Nothing here reaches the solver, a probe
+/// or the energy.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct VectorAcState {
+struct VectorFilterState {
     input: Point2,
     output: Point2,
+    /// The low-pass's stages before its last, which is `output`.
+    inner: [Point2; VECTOR_LOW_PASS_STAGES - 1],
     step: u64,
     time: f64,
     origin: Pos2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct VectorOverlayAcOwner {
+struct VectorOverlayFilterOwner {
     mesh_revision: u64,
     physics: PhysicsModel,
+}
+
+/// Which presentation filter the arrows are drawn through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VectorFilter {
+    /// Complementary-field arrows less a slow baseline.
+    AcCoupled,
+    /// Energy-flow arrows averaged below the view's corner.
+    LowPass,
 }
 
 impl Playground {

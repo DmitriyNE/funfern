@@ -184,9 +184,7 @@ impl Playground {
         if fresh {
             self.field_exposure.restart();
             self.vector_overlay_exposure.restart();
-            self.vector_overlay_ac_state.clear();
-            self.vector_overlay_ac_owner = None;
-            self.vector_overlay_dc_step = u64::MAX;
+            self.clear_vector_overlay_filter();
         }
     }
 

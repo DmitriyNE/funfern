@@ -292,7 +292,7 @@ impl Playground {
                 // transferred old lattice over the new mesh, but a skin
                 // change changes the physical meaning of both vectors.
                 .filter(|layout| layout.key.physics == active.bundle.authored.physics);
-            let owner = layout.map(|layout| VectorOverlayAcOwner {
+            let owner = layout.map(|layout| VectorOverlayFilterOwner {
                 mesh_revision: layout.key.mesh_revision,
                 physics: layout.key.physics,
             });
@@ -321,7 +321,7 @@ impl Playground {
             self.draw_vector_overlay(
                 painter,
                 samples,
-                owner.unwrap_or(VectorOverlayAcOwner {
+                owner.unwrap_or(VectorOverlayFilterOwner {
                     mesh_revision: active.mesh.mesh_revision,
                     physics: active.bundle.authored.physics,
                 }),
@@ -329,18 +329,23 @@ impl Playground {
                 vector_display.absolute_time,
             );
         } else {
-            self.vector_overlay_ac_state.clear();
-            self.vector_overlay_ac_owner = None;
-            self.vector_overlay_dc_step = u64::MAX;
-            self.vector_overlay_dc_active = false;
+            self.clear_vector_overlay_filter();
+            self.vector_overlay_filter = None;
         }
+    }
+
+    /// Drops every arrow's filter history and the mesh it belonged to.
+    pub(super) fn clear_vector_overlay_filter(&mut self) {
+        self.vector_overlay_filter_state.clear();
+        self.vector_overlay_filter_owner = None;
+        self.vector_overlay_filter_step = u64::MAX;
     }
 
     pub(super) fn draw_vector_overlay(
         &mut self,
         painter: &egui::Painter,
         mut samples: Vec<(u32, Pos2, Point2, Point2)>,
-        owner: VectorOverlayAcOwner,
+        owner: VectorOverlayFilterOwner,
         completed_steps: u64,
         absolute_time: f64,
     ) {
@@ -349,46 +354,74 @@ impl Playground {
             .vector_overlay
             .resolved(self.editor.document.model.draft.physics);
         if self.vector_overlay_mode != mode {
-            self.vector_overlay_ac_state.clear();
-            self.vector_overlay_ac_owner = None;
-            self.vector_overlay_dc_step = u64::MAX;
-            self.vector_overlay_dc_active = false;
+            self.clear_vector_overlay_filter();
+            self.vector_overlay_filter = None;
             self.vector_overlay_exposure.clear();
             self.vector_overlay_mode = mode;
         }
-        let dc_active =
-            mode == VectorOverlay::ComplementaryField && settings.vector_overlay_ac_coupled;
-        if self.vector_overlay_dc_active != dc_active {
-            self.vector_overlay_ac_state.clear();
-            self.vector_overlay_ac_owner = None;
-            self.vector_overlay_dc_step = u64::MAX;
+        let filter = match mode {
+            VectorOverlay::ComplementaryField if settings.vector_overlay_ac_coupled => {
+                Some(VectorFilter::AcCoupled)
+            }
+            VectorOverlay::RelativeEnergyFlow if settings.vector_overlay_lowpass => {
+                Some(VectorFilter::LowPass)
+            }
+            _ => None,
+        };
+        if self.vector_overlay_filter != filter {
+            self.clear_vector_overlay_filter();
             self.vector_overlay_exposure.clear();
-            self.vector_overlay_dc_active = dc_active;
+            self.vector_overlay_filter = filter;
         }
-        if dc_active {
-            self.retain_vector_overlay_ac_owner(
-                owner,
-                &samples,
-                completed_steps,
-                absolute_time,
-                settings.vector_overlay_density * 1.5,
-            );
-            self.ac_couple_vector_samples(
-                &mut samples,
-                completed_steps,
-                absolute_time,
-                resident_filter_boundary(self.grid_filter_running(), completed_steps),
-            );
-        } else {
-            self.vector_overlay_ac_state.clear();
-            self.vector_overlay_ac_owner = Some(owner);
-            self.vector_overlay_dc_step = completed_steps;
+        let magnitudes_of = |samples: &[(u32, Pos2, Point2, Point2)]| {
+            samples
+                .iter()
+                .map(|(_, _, value, _)| value.norm())
+                .filter(|magnitude| magnitude.is_finite() && *magnitude > 0.0)
+                .collect::<Vec<_>>()
+        };
+        // The low-pass is exposed by what it is fed. Measured on its own
+        // output, a region where the wave stands has next to no mean flow and
+        // the scale renormalises the ripple the average leaves there back to
+        // full length; measured on the raw samples, that region draws short,
+        // which is the physics, and a travelling one draws about as long as
+        // its peaks do unaveraged.
+        let raw_magnitudes =
+            (filter == Some(VectorFilter::LowPass)).then(|| magnitudes_of(&samples));
+        let remap_radius = settings.vector_overlay_density * 1.5;
+        match filter {
+            Some(filter) => {
+                self.retain_vector_overlay_filter_owner(
+                    filter,
+                    owner,
+                    &samples,
+                    completed_steps,
+                    absolute_time,
+                    remap_radius,
+                );
+                match filter {
+                    VectorFilter::AcCoupled => self.ac_couple_vector_samples(
+                        &mut samples,
+                        completed_steps,
+                        absolute_time,
+                        resident_filter_boundary(self.grid_filter_running(), completed_steps),
+                    ),
+                    VectorFilter::LowPass => self.low_pass_vector_samples(
+                        &mut samples,
+                        completed_steps,
+                        absolute_time,
+                        std::f64::consts::TAU * settings.vector_overlay_lowpass_hz,
+                        remap_radius,
+                    ),
+                }
+            }
+            None => {
+                self.vector_overlay_filter_state.clear();
+                self.vector_overlay_filter_owner = Some(owner);
+                self.vector_overlay_filter_step = completed_steps;
+            }
         }
-        let mut magnitudes = samples
-            .iter()
-            .map(|(_, _, value, _)| value.norm())
-            .filter(|magnitude| magnitude.is_finite() && *magnitude > 0.0)
-            .collect::<Vec<_>>();
+        let mut magnitudes = raw_magnitudes.unwrap_or_else(|| magnitudes_of(&samples));
         if magnitudes.is_empty() {
             return;
         }
@@ -434,22 +467,26 @@ impl Playground {
         }
     }
 
-    pub(super) fn retain_vector_overlay_ac_owner(
+    /// Keeps the arrows' filter history across a solver handoff on the same
+    /// mesh and physics, carries it to the nearest new sample across a
+    /// same-physics remesh, and drops it for anything else.
+    pub(super) fn retain_vector_overlay_filter_owner(
         &mut self,
-        owner: VectorOverlayAcOwner,
+        filter: VectorFilter,
+        owner: VectorOverlayFilterOwner,
         samples: &[(u32, Pos2, Point2, Point2)],
         completed_steps: u64,
         absolute_time: f64,
         remap_radius: f32,
     ) {
-        if self.vector_overlay_ac_owner != Some(owner) {
+        if self.vector_overlay_filter_owner != Some(owner) {
             let compatible_remesh = self
-                .vector_overlay_ac_owner
+                .vector_overlay_filter_owner
                 .is_some_and(|previous| previous.physics == owner.physics)
-                && completed_steps >= self.vector_overlay_dc_step
+                && completed_steps >= self.vector_overlay_filter_step
                 && absolute_time.is_finite();
             if compatible_remesh {
-                let previous = std::mem::take(&mut self.vector_overlay_ac_state);
+                let previous = std::mem::take(&mut self.vector_overlay_filter_state);
                 let radius_squared = remap_radius * remap_radius;
                 for (key, origin, value, _) in samples {
                     let nearest = previous
@@ -461,14 +498,23 @@ impl Playground {
                         .min_by(|left, right| left.0.total_cmp(&right.0));
                     if let Some((_, state)) = nearest {
                         let elapsed = (absolute_time - state.time).max(0.0);
-                        self.vector_overlay_ac_state.insert(
+                        // Remeshing is a zero-duration representation change.
+                        // The raw input is rebased to the transferred new
+                        // sample either way; the visible AC state is carried
+                        // through its own decay, and the average is carried
+                        // whole, since it is of the same flow on the new mesh.
+                        let output = match filter {
+                            VectorFilter::AcCoupled => {
+                                state.output * (-VECTOR_DC_REJECTION_RATE * elapsed).exp()
+                            }
+                            VectorFilter::LowPass => state.output,
+                        };
+                        self.vector_overlay_filter_state.insert(
                             *key,
-                            VectorAcState {
-                                // Remeshing is a zero-duration representation
-                                // change. Carry the visible AC state, but rebase
-                                // its raw input to the transferred new sample.
+                            VectorFilterState {
                                 input: *value,
-                                output: state.output * (-VECTOR_DC_REJECTION_RATE * elapsed).exp(),
+                                output,
+                                inner: state.inner,
                                 step: completed_steps,
                                 time: absolute_time,
                                 origin: *origin,
@@ -476,12 +522,12 @@ impl Playground {
                         );
                     }
                 }
-                self.vector_overlay_dc_step = completed_steps;
+                self.vector_overlay_filter_step = completed_steps;
             } else {
-                self.vector_overlay_ac_state.clear();
-                self.vector_overlay_dc_step = u64::MAX;
+                self.vector_overlay_filter_state.clear();
+                self.vector_overlay_filter_step = u64::MAX;
             }
-            self.vector_overlay_ac_owner = Some(owner);
+            self.vector_overlay_filter_owner = Some(owner);
         }
     }
 
@@ -496,18 +542,19 @@ impl Playground {
         absolute_time: f64,
         maintenance_discontinuity: bool,
     ) {
-        let restarted = self.vector_overlay_dc_step == u64::MAX
-            || completed_steps < self.vector_overlay_dc_step
+        let restarted = self.vector_overlay_filter_step == u64::MAX
+            || completed_steps < self.vector_overlay_filter_step
             || !absolute_time.is_finite();
         if restarted {
-            self.vector_overlay_ac_state.clear();
+            self.vector_overlay_filter_state.clear();
         }
         for (key, origin, value, pre_filter_value) in samples {
-            match self.vector_overlay_ac_state.entry(*key) {
+            match self.vector_overlay_filter_state.entry(*key) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(VectorAcState {
+                    entry.insert(VectorFilterState {
                         input: *value,
                         output: Point2::default(),
+                        inner: Default::default(),
                         step: completed_steps,
                         time: absolute_time,
                         origin: *origin,
@@ -550,8 +597,87 @@ impl Playground {
                 }
             }
         }
-        if restarted || completed_steps > self.vector_overlay_dc_step {
-            self.vector_overlay_dc_step = completed_steps;
+        if restarted || completed_steps > self.vector_overlay_filter_step {
+            self.vector_overlay_filter_step = completed_steps;
+        }
+    }
+
+    /// Averages the sampled energy flow below the corner `rate` (radians per
+    /// simulated second), presentation only. `VECTOR_LOW_PASS_STAGES`
+    /// identical first-order stages, advanced by the chain's exact response
+    /// to the new sample held over the simulated time since the previous
+    /// readback, so the corner does not move with readback cadence or
+    /// simulation speed.
+    ///
+    /// A key without history would take the whole settle time to grow in
+    /// from silence, and every key is new when the spacing changes, so it
+    /// seeds instead from the nearest arrow updated at the previous readback
+    /// within `remap_radius`: a changed spacing or a pan keeps the picture,
+    /// and the seed converges from there. With no such neighbour it starts
+    /// silent and grows in as the average forms, which is the honest
+    /// picture of a first enable.
+    pub(super) fn low_pass_vector_samples(
+        &mut self,
+        samples: &mut [(u32, Pos2, Point2, Point2)],
+        completed_steps: u64,
+        absolute_time: f64,
+        rate: f64,
+        remap_radius: f32,
+    ) {
+        let restarted = self.vector_overlay_filter_step == u64::MAX
+            || completed_steps < self.vector_overlay_filter_step
+            || !absolute_time.is_finite();
+        if restarted {
+            self.vector_overlay_filter_state.clear();
+        }
+        // Seeds are chosen before any arrow is updated, so the order of the
+        // samples does not decide which arrows count as live.
+        let previous_step = self.vector_overlay_filter_step;
+        let radius_squared = remap_radius * remap_radius;
+        let seeded = samples
+            .iter()
+            .filter(|(key, ..)| !self.vector_overlay_filter_state.contains_key(key))
+            .map(|(key, origin, value, _)| {
+                let nearest = self
+                    .vector_overlay_filter_state
+                    .values()
+                    .filter(|state| state.step == previous_step)
+                    .filter_map(|state| {
+                        let distance = state.origin.distance_sq(*origin);
+                        (distance <= radius_squared).then_some((distance, state))
+                    })
+                    .min_by(|left, right| left.0.total_cmp(&right.0));
+                let seed = nearest.map_or_else(Default::default, |(_, state)| *state);
+                (
+                    *key,
+                    VectorFilterState {
+                        input: *value,
+                        step: completed_steps,
+                        time: absolute_time,
+                        origin: *origin,
+                        ..seed
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        self.vector_overlay_filter_state.extend(seeded);
+        for (key, origin, value, _) in samples {
+            let state = self
+                .vector_overlay_filter_state
+                .get_mut(key)
+                .expect("every sample was seeded above");
+            state.origin = *origin;
+            if completed_steps > state.step {
+                let elapsed = (absolute_time - state.time).max(0.0);
+                low_pass_advance(state, *value, rate * elapsed);
+                state.input = *value;
+                state.step = completed_steps;
+                state.time = absolute_time;
+            }
+            *value = state.output;
+        }
+        if restarted || completed_steps > self.vector_overlay_filter_step {
+            self.vector_overlay_filter_step = completed_steps;
         }
     }
     pub(super) fn draw_sampled(
@@ -1219,6 +1345,32 @@ impl Playground {
     }
 }
 
+/// Advances the low-pass chain by every stage's response to the sample
+/// `input` held for `a = rate × elapsed`. With `d` a stage's deviation from
+/// the held input, `d₁ → d₁e^{−a}`, `d₂ → (d₂ + a d₁)e^{−a}`,
+/// `d₃ → (d₃ + a d₂ + a²d₁/2)e^{−a}`, and so on down the chain: exact for a
+/// held input, so the readback cadence is not in the answer.
+fn low_pass_advance(state: &mut VectorFilterState, input: Point2, a: f64) {
+    let decay = (-a).exp();
+    let mut stages = [Point2::default(); VECTOR_LOW_PASS_STAGES];
+    stages[..VECTOR_LOW_PASS_STAGES - 1].copy_from_slice(&state.inner);
+    stages[VECTOR_LOW_PASS_STAGES - 1] = state.output;
+    let deviations = stages.map(|stage| stage - input);
+    for (index, stage) in stages.iter_mut().enumerate() {
+        let mut sum = Point2::default();
+        let mut weight = 1.0;
+        for (order, deviation) in deviations[..=index].iter().rev().enumerate() {
+            sum = sum + *deviation * weight;
+            weight *= a / (order + 1) as f64;
+        }
+        *stage = input + sum * decay;
+    }
+    state
+        .inner
+        .copy_from_slice(&stages[..VECTOR_LOW_PASS_STAGES - 1]);
+    state.output = stages[VECTOR_LOW_PASS_STAGES - 1];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1493,11 +1645,18 @@ mod tests {
     #[test]
     fn arrow_ac_history_survives_a_compatible_generation_handoff() {
         let mut state = Playground::default();
-        let owner = VectorOverlayAcOwner {
+        let owner = VectorOverlayFilterOwner {
             mesh_revision: 17,
             physics: PhysicsModel::Mechanical,
         };
-        state.retain_vector_overlay_ac_owner(owner, &[], 100, 2.0, 80.0);
+        state.retain_vector_overlay_filter_owner(
+            VectorFilter::AcCoupled,
+            owner,
+            &[],
+            100,
+            2.0,
+            80.0,
+        );
         let mut first = vec![(3, Pos2::ZERO, Point2::new(1.0, 0.0), Point2::new(1.0, 0.0))];
         state.ac_couple_vector_samples(&mut first, 100, 2.0, false);
         let mut changing = vec![(3, Pos2::ZERO, Point2::new(1.4, 0.0), Point2::new(1.4, 0.0))];
@@ -1507,13 +1666,21 @@ mod tests {
         // A GPU generation is deliberately absent from the owner. Rebinding
         // material-dependent stencils on the same mesh therefore retains the
         // temporal baseline and continues at the transferred absolute time.
-        state.retain_vector_overlay_ac_owner(owner, &[], 120, 2.2, 80.0);
+        state.retain_vector_overlay_filter_owner(
+            VectorFilter::AcCoupled,
+            owner,
+            &[],
+            120,
+            2.2,
+            80.0,
+        );
         let mut after_handoff = vec![(3, Pos2::ZERO, Point2::new(1.5, 0.0), Point2::new(1.5, 0.0))];
         state.ac_couple_vector_samples(&mut after_handoff, 120, 2.2, false);
         assert!(after_handoff[0].2.x > 0.45, "handoff cold-started arrows");
 
-        state.retain_vector_overlay_ac_owner(
-            VectorOverlayAcOwner {
+        state.retain_vector_overlay_filter_owner(
+            VectorFilter::AcCoupled,
+            VectorOverlayFilterOwner {
                 mesh_revision: 18,
                 ..owner
             },
@@ -1530,11 +1697,18 @@ mod tests {
     #[test]
     fn arrow_ac_history_is_spatially_rebased_across_a_remesh() {
         let mut state = Playground::default();
-        let old_owner = VectorOverlayAcOwner {
+        let old_owner = VectorOverlayFilterOwner {
             mesh_revision: 17,
             physics: PhysicsModel::Mechanical,
         };
-        state.retain_vector_overlay_ac_owner(old_owner, &[], 100, 2.0, 80.0);
+        state.retain_vector_overlay_filter_owner(
+            VectorFilter::AcCoupled,
+            old_owner,
+            &[],
+            100,
+            2.0,
+            80.0,
+        );
         let mut first = vec![(
             3,
             Pos2::new(40.0, 50.0),
@@ -1557,8 +1731,9 @@ mod tests {
             Point2::new(1.45, 0.0),
             Point2::new(1.45, 0.0),
         )];
-        state.retain_vector_overlay_ac_owner(
-            VectorOverlayAcOwner {
+        state.retain_vector_overlay_filter_owner(
+            VectorFilter::AcCoupled,
+            VectorOverlayFilterOwner {
                 mesh_revision: 18,
                 ..old_owner
             },
@@ -1570,7 +1745,234 @@ mod tests {
         let mut accepted = new_samples;
         state.ac_couple_vector_samples(&mut accepted, 110, 2.1, false);
         assert_eq!(accepted[0].2, before, "remesh blinked the AC arrows");
-        assert_eq!(state.vector_overlay_ac_state[&91].input.x, 1.45);
+        assert_eq!(state.vector_overlay_filter_state[&91].input.x, 1.45);
+    }
+
+    /// The point of the low-pass: a harmonic flow ripples at twice its
+    /// source's frequency by as much as its mean, and comes out as the mean.
+    #[test]
+    fn a_low_pass_keeps_a_steady_flow_and_removes_its_ripple() {
+        let mut state = Playground::default();
+        let rate = std::f64::consts::TAU * 0.5;
+        let mean = Point2::new(0.8, -0.6);
+        let (mut least, mut greatest) = (f64::INFINITY, 0.0_f64);
+        for frame in 0..600_u64 {
+            let time = frame as f64 / 60.0;
+            // A 4 Hz source.
+            let value = mean * (1.0 + (std::f64::consts::TAU * 8.0 * time).cos());
+            let mut samples = vec![(0, Pos2::ZERO, value, value)];
+            state.low_pass_vector_samples(&mut samples, frame * 10, time, rate, 80.0);
+            if time >= 6.0 {
+                let magnitude = samples[0].2.norm();
+                least = least.min(magnitude);
+                greatest = greatest.max(magnitude);
+                assert!(samples[0].2.dot(mean) > 0.0, "the average turned round");
+            }
+        }
+        let magnitude = mean.norm();
+        assert!(
+            (greatest - magnitude).abs() < 0.005 * magnitude,
+            "settled at {greatest} against {magnitude}"
+        );
+        assert!(
+            greatest - least < 0.005 * magnitude,
+            "ripple left: {:.4} of the mean",
+            (greatest - least) / magnitude
+        );
+    }
+
+    /// The corner is in simulated time: a step held for two seconds reaches
+    /// the chain's own response, `1 − e^{−λt}(1 + λt + λ²t²/2)`, whether the
+    /// display sampled it twelve times a second or sixty.
+    #[test]
+    fn a_low_pass_runs_in_simulated_time() {
+        let rate = std::f64::consts::TAU * 0.5;
+        let value = Point2::new(1.0, 0.0);
+        let run = |per_second: u64| {
+            let mut state = Playground::default();
+            let mut samples = vec![(0, Pos2::ZERO, value, value)];
+            for frame in 0..=2 * per_second {
+                samples[0].2 = value;
+                let time = frame as f64 / per_second as f64;
+                state.low_pass_vector_samples(&mut samples, frame, time, rate, 80.0);
+            }
+            samples[0].2.x
+        };
+        let x = rate * 2.0;
+        let expected = 1.0 - (-x).exp() * (1.0 + x + x * x / 2.0);
+        for per_second in [12, 60] {
+            let reached = run(per_second);
+            assert!(
+                (reached - expected).abs() < 1.0e-12,
+                "{per_second} a second reached {reached} against {expected}"
+            );
+        }
+        // And in 1.7 s at 0.5 Hz the average is nine tenths of the way.
+        let x = rate * 1.7;
+        let settled = 1.0 - (-x).exp() * (1.0 + x + x * x / 2.0);
+        assert!((0.9..0.91).contains(&settled), "{settled}");
+    }
+
+    /// A key without history takes the average of the nearest arrow updated
+    /// at the previous readback, so a changed spacing keeps the picture. A
+    /// stale or distant one does not count, and the arrow starts silent.
+    #[test]
+    fn a_new_flow_arrow_seeds_from_a_live_neighbour_or_starts_silent() {
+        let mut state = Playground::default();
+        let rate = std::f64::consts::TAU * 0.5;
+        let value = Point2::new(1.0, 0.0);
+        let at = |state: &mut Playground, keys: &[(u32, Pos2)], step: u64, time: f64| {
+            let mut samples = keys
+                .iter()
+                .map(|(key, origin)| (*key, *origin, value, value))
+                .collect::<Vec<_>>();
+            state.low_pass_vector_samples(&mut samples, step, time, rate, 80.0);
+            samples
+                .into_iter()
+                .map(|sample| sample.2)
+                .collect::<Vec<_>>()
+        };
+        let (near, far) = (Pos2::new(40.0, 50.0), Pos2::new(400.0, 50.0));
+        at(&mut state, &[(3, near), (7, far)], 100, 2.0);
+        // Key 7 leaves the lattice and its history goes stale.
+        let settled = at(&mut state, &[(3, near)], 110, 2.1)[0];
+        assert!(settled.x > 0.0);
+
+        let appeared = at(
+            &mut state,
+            &[
+                (3, near),
+                (91, Pos2::new(43.0, 48.0)),
+                (92, Pos2::new(403.0, 52.0)),
+                (93, Pos2::new(600.0, 600.0)),
+            ],
+            120,
+            2.2,
+        );
+        assert_eq!(appeared[1], settled, "no seed from the live neighbour");
+        assert_eq!(appeared[2], Point2::default(), "seeded from a stale arrow");
+        assert_eq!(appeared[3], Point2::default(), "seeded from nothing near");
+        assert!(appeared[0].x > settled.x, "the live arrow stopped");
+
+        // The seed is a start, not a copy: each converges on its own.
+        let later = at(
+            &mut state,
+            &[(3, near), (91, Pos2::new(43.0, 48.0))],
+            130,
+            2.3,
+        );
+        assert!(later[1].x > settled.x && later[1].x < 1.0);
+    }
+
+    /// Rewinding the steps is a reset: the averages are dropped, not carried
+    /// into the new run.
+    #[test]
+    fn a_reset_clears_the_low_pass() {
+        let mut state = Playground::default();
+        let rate = std::f64::consts::TAU * 0.5;
+        let value = Point2::new(1.0, 0.0);
+        for (step, time) in [(100, 2.0), (110, 2.1), (120, 2.2)] {
+            let mut samples = vec![(0, Pos2::ZERO, value, value)];
+            state.low_pass_vector_samples(&mut samples, step, time, rate, 80.0);
+        }
+        let mut after_reset = vec![(0, Pos2::ZERO, value, value)];
+        state.low_pass_vector_samples(&mut after_reset, 5, 0.1, rate, 80.0);
+        assert_eq!(after_reset[0].2, Point2::default());
+        assert_eq!(state.vector_overlay_filter_step, 5);
+    }
+
+    #[test]
+    fn low_pass_history_survives_a_handoff_and_is_rebased_across_a_remesh() {
+        let mut state = Playground::default();
+        let rate = std::f64::consts::TAU * 0.5;
+        let value = Point2::new(1.0, 0.0);
+        let owner = VectorOverlayFilterOwner {
+            mesh_revision: 17,
+            physics: PhysicsModel::Mechanical,
+        };
+        let filter = VectorFilter::LowPass;
+        state.retain_vector_overlay_filter_owner(filter, owner, &[], 100, 2.0, 80.0);
+        let origin = Pos2::new(40.0, 50.0);
+        let mut first = vec![(3, origin, value, value)];
+        state.low_pass_vector_samples(&mut first, 100, 2.0, rate, 80.0);
+        let mut second = vec![(3, origin, value, value)];
+        state.low_pass_vector_samples(&mut second, 110, 2.1, rate, 80.0);
+        let before = second[0].2;
+        assert!(before.x > 0.0);
+
+        // A same-mesh handoff keeps the history and carries on from it.
+        state.retain_vector_overlay_filter_owner(filter, owner, &[], 120, 2.2, 80.0);
+        let mut after_handoff = vec![(3, origin, value, value)];
+        state.low_pass_vector_samples(&mut after_handoff, 120, 2.2, rate, 80.0);
+        assert!(
+            after_handoff[0].2.x > before.x,
+            "handoff cold-started arrows"
+        );
+        let carried = state.vector_overlay_filter_state[&3];
+
+        // A remesh carries the average whole to the nearest new sample.
+        let new_samples = vec![(91, Pos2::new(43.0, 48.0), value, value)];
+        state.retain_vector_overlay_filter_owner(
+            filter,
+            VectorOverlayFilterOwner {
+                mesh_revision: 18,
+                ..owner
+            },
+            &new_samples,
+            120,
+            2.2,
+            80.0,
+        );
+        let mut accepted = new_samples;
+        state.low_pass_vector_samples(&mut accepted, 120, 2.2, rate, 80.0);
+        assert_eq!(accepted[0].2, carried.output, "remesh blinked the average");
+        assert_eq!(state.vector_overlay_filter_state[&91].inner, carried.inner);
+
+        // A physics change discards it.
+        state.retain_vector_overlay_filter_owner(
+            filter,
+            VectorOverlayFilterOwner {
+                mesh_revision: 18,
+                physics: PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                },
+            },
+            &[],
+            130,
+            2.3,
+            80.0,
+        );
+        assert!(state.vector_overlay_filter_state.is_empty());
+    }
+
+    /// Every arrow starts silent on the first frame, so a scale measured on
+    /// the averaged arrows would have nothing to measure; it is measured on
+    /// the raw ones, and a standing region then draws short rather than
+    /// having what the average leaves renormalised to full length.
+    #[test]
+    fn low_passed_flow_arrows_are_exposed_by_the_raw_level() {
+        let mut state = Playground::default();
+        state.editor.document.presentation.vector_overlay = VectorOverlay::RelativeEnergyFlow;
+        assert!(state.editor.document.presentation.vector_overlay_lowpass);
+        let context = egui::Context::default();
+        let painter = egui::Painter::new(context, egui::LayerId::background(), Rect::EVERYTHING);
+        let owner = VectorOverlayFilterOwner {
+            mesh_revision: 1,
+            physics: state.editor.document.model.draft.physics,
+        };
+        let samples = (0..20)
+            .map(|index| {
+                let value = Point2::new(1.0 + f64::from(index) * 0.1, 0.0);
+                (index, Pos2::new(index as f32 * 60.0, 0.0), value, value)
+            })
+            .collect::<Vec<_>>();
+        state.draw_vector_overlay(&painter, samples, owner, 10, 0.1);
+        assert_eq!(state.vector_overlay_filter, Some(VectorFilter::LowPass));
+        let reference = state
+            .vector_overlay_exposure
+            .reference()
+            .expect("a scale from the raw samples");
+        assert!((reference - 2.7).abs() < 1.0e-9, "{reference}");
     }
 
     #[test]

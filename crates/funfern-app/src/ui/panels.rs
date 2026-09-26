@@ -4,10 +4,16 @@
 use crate::material_overlay::{MaterialOverlay, MaterialProperty};
 use bevy::prelude::*;
 use bevy_egui::egui::{self};
-use funfern_app::document::VectorOverlay;
+use funfern_app::document::{VECTOR_LOWPASS_HZ_RANGE, VectorOverlay};
 use funfern_core::*;
 
 use super::*;
+
+/// The one rule of thumb the low-pass control needs.
+const LOW_PASS_HELP: &str = "Average the energy-flow arrows below this corner. A harmonic \
+     flow ripples at twice its source's frequency; a corner four times under that leaves a \
+     few percent of the ripple and settles in 5.3 / (2π·f) seconds, 1.7 s at 0.5 Hz. The \
+     canonical field, probes and energy remain unchanged.";
 
 impl Playground {
     /// Whether the active generation carries a restoring law, and so an
@@ -95,6 +101,22 @@ impl Playground {
                         "Subtract a slowly varying presentation baseline from the arrows. \
                          The canonical field, probes and energy remain unchanged.",
                     );
+            }
+            if p.vector_overlay == VectorOverlay::RelativeEnergyFlow {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut p.vector_overlay_lowpass, "Low-pass")
+                        .on_hover_text(LOW_PASS_HELP);
+                    ui.add_enabled(
+                        p.vector_overlay_lowpass,
+                        egui::DragValue::new(&mut p.vector_overlay_lowpass_hz)
+                            .range(VECTOR_LOWPASS_HZ_RANGE)
+                            .speed(0.01)
+                            .fixed_decimals(2)
+                            .suffix(" Hz")
+                            .update_while_editing(false),
+                    )
+                    .on_hover_text(LOW_PASS_HELP);
+                });
             }
             ui.add(
                 egui::Slider::new(&mut p.vector_overlay_density, 28.0..=120.0)

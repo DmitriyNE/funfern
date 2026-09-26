@@ -125,6 +125,28 @@ pub(super) const FIELD_EXPOSURE_GAIN: f32 = 0.5;
 /// samples and measured in simulated time. Ordinary 2.5--4 Hz waves therefore
 /// retain more than 99.9% of their amplitude.
 pub(super) const VECTOR_DC_REJECTION_RATE: f64 = 0.5;
+/// The energy-flow low-pass is this many identical first-order stages at the
+/// corner the view sets, advanced together by the exact response of the chain
+/// to a sample held over the simulated time since the previous readback, so
+/// neither readback cadence nor simulation speed moves the corner.
+///
+/// Measured on eight gallery scenes, the flow at every arrow-lattice point
+/// split into its one-period mean and the ripple about it (equal to the mean
+/// at a travelling point, 3--8× it where the wave stands, 35× at the worst
+/// point in front of the photonic crystal), fed at 60 Hz. The most ripple any
+/// arrow keeps, against the level the exposure is set from:
+///
+/// | stages, corner | ordinary scenes | drum / photonic crystal | 90 % of a step |
+/// | --- | --- | --- | --- |
+/// | 1, 0.5 Hz (the retired smoothing) | 19--70 % | 26 % / 81 % | 0.7 s |
+/// | 2, 0.5 Hz | ≤ 7 % | 5.8 % / 12 % | 1.2 s |
+/// | 2, 0.25 Hz | ≤ 3 % | 2.1 % / 4.7 % | 2.5 s |
+/// | 3, 0.5 Hz | ≤ 1.5 % | 2.3 % / 2.5 % | 1.7 s |
+///
+/// Three stages leave under 2.5 % anywhere, which is 0.6 px on the longest
+/// arrow at the default spacing, and reach 90 % of a changed flow in
+/// `5.3 / (2π f)` seconds. Medians are a tenth of these maxima.
+pub(super) const VECTOR_LOW_PASS_STAGES: usize = 3;
 /// A vector sampling revision is tiny and normally completes within a few
 /// display frames. If its readback disappears during rapid resource churn,
 /// retry instead of allowing the one-in-flight coalescer to deadlock.
@@ -395,15 +417,16 @@ mod tests {
         let mut state = Playground::default();
         state.field_exposure.update(0.71, 0.016);
         state.vector_overlay_exposure.update(0.71, 0.016);
-        state.vector_overlay_ac_owner = Some(VectorOverlayAcOwner {
+        state.vector_overlay_filter_owner = Some(VectorOverlayFilterOwner {
             mesh_revision: 3,
             physics: PhysicsModel::Mechanical,
         });
-        state.vector_overlay_ac_state.insert(
+        state.vector_overlay_filter_state.insert(
             4,
-            VectorAcState {
+            VectorFilterState {
                 input: Point2::new(1.0, 0.0),
                 output: Point2::new(0.2, 0.0),
+                inner: Default::default(),
                 step: 10,
                 time: 0.1,
                 origin: Pos2::new(20.0, 30.0),
@@ -412,14 +435,14 @@ mod tests {
         state.restart_exposures_after_handoff(false);
         assert_eq!(state.field_exposure.reference(), Some(0.71));
         assert_eq!(state.vector_overlay_exposure.reference(), Some(0.71));
-        assert_eq!(state.vector_overlay_ac_state.len(), 1);
+        assert_eq!(state.vector_overlay_filter_state.len(), 1);
 
         // A field replaced with zeros starts the scale again.
         state.restart_exposures_after_handoff(true);
         assert_eq!(state.field_exposure.reference(), None);
         assert_eq!(state.vector_overlay_exposure.reference(), None);
-        assert!(state.vector_overlay_ac_state.is_empty());
-        assert_eq!(state.vector_overlay_ac_owner, None);
+        assert!(state.vector_overlay_filter_state.is_empty());
+        assert_eq!(state.vector_overlay_filter_owner, None);
     }
 
     /// Asking for a new field leaves the scale alone. A reset zeroes the field

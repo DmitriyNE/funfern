@@ -269,13 +269,23 @@ names or with every expression evaluated at the material frame's origin. Each ro
 - **Vector view:** View can overlay the canonical complementary field or energy flow
   sampled directly on the GPU at display cadence. Arrow spacing and gain are
   screen-space presentation controls. Complementary-field arrows optionally subtract
-  a slow, explicitly presentation-only baseline; energy-flow arrows do not, because
-  their time average is meaningful. The canonical state, probes and energy always
-  retain the full field. The arrow filter follows stable physical mesh samples while
-  the view moves; a newly exposed sample starts silent until it has temporal history,
-  so an unknown DC baseline is not flashed as a wave. A resident grid-filter event
-  rebases that presentation filter instead of appearing as temporal field content.
-  Once the overlay falls below one percent of its run peak it fades rather than
+  a slow, explicitly presentation-only baseline. Energy-flow arrows are instead
+  averaged below a corner the panel sets in Hz, since their time average is the
+  transport: a harmonic flow ripples at twice its source's frequency, so the corner
+  wants to sit a few times under that (0.5 Hz by default, four times under the
+  slowest gallery source's ripple), and the average reaches nine tenths of a changed
+  flow in 5.3 / (2π·f) seconds, 1.7 s at the default. The corner is in simulated
+  time, so the simulation speed does not move it. The canonical state, probes and
+  energy always retain the full field. The arrow filters follow stable physical mesh
+  samples while the view moves. A newly exposed complementary-field sample starts
+  silent until it has temporal history, so an unknown DC baseline is not flashed as
+  a wave; a newly exposed flow arrow takes the average of the nearest arrow within
+  one and a half spacings, so a changed spacing or a pan keeps the picture, and
+  starts silent only without one. A resident grid-filter event rebases the
+  presentation high-pass instead of appearing as temporal field content. Averaged
+  flow arrows are scaled by the raw flow, so a region where the wave stands draws
+  short rather than having the little the average leaves there renormalised to full
+  length. Once the overlay falls below one percent of its run peak it fades rather than
   magnifying f32 residue. Each EM mode remains one scalar
   Maxwell polarization rather than a simultaneous six-component field solve.
 - **Field exposure:** the scalar field and the vector overlay each set their own

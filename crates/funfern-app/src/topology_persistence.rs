@@ -1351,6 +1351,10 @@ struct StoredPresentation {
     vector_overlay_smoothed: bool,
     #[serde(default)]
     vector_overlay_ac_coupled: Option<bool>,
+    #[serde(default)]
+    vector_overlay_lowpass: Option<bool>,
+    #[serde(default)]
+    vector_overlay_lowpass_hz: Option<f64>,
     #[serde(default = "default_vector_overlay_density")]
     vector_overlay_density: f32,
     #[serde(default = "default_vector_overlay_gain")]
@@ -2100,6 +2104,8 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
         },
         vector_overlay_smoothed: false,
         vector_overlay_ac_coupled: Some(settings.vector_overlay_ac_coupled),
+        vector_overlay_lowpass: Some(settings.vector_overlay_lowpass),
+        vector_overlay_lowpass_hz: Some(settings.vector_overlay_lowpass_hz),
         vector_overlay_density: settings.vector_overlay_density,
         vector_overlay_gain: settings.vector_overlay_gain,
         material_overlay: match settings.material_overlay {
@@ -2130,6 +2136,7 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
 }
 
 fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSettings, String> {
+    let defaults = PresentationSettings::default();
     let settings = PresentationSettings {
         grid: stored.grid,
         control_polygons: stored.control_polygons,
@@ -2174,6 +2181,12 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
         vector_overlay_ac_coupled: stored
             .vector_overlay_ac_coupled
             .unwrap_or(stored.vector_overlay_smoothed),
+        vector_overlay_lowpass: stored
+            .vector_overlay_lowpass
+            .unwrap_or(defaults.vector_overlay_lowpass),
+        vector_overlay_lowpass_hz: stored
+            .vector_overlay_lowpass_hz
+            .unwrap_or(defaults.vector_overlay_lowpass_hz),
         vector_overlay_density: stored.vector_overlay_density,
         vector_overlay_gain: stored.vector_overlay_gain,
         // A scene from before the move carries the target as its own flag. It
@@ -2666,6 +2679,8 @@ mod tests {
                 field_auto_exposure: !flag,
                 vector_overlay: vectors[index % vectors.len()],
                 vector_overlay_ac_coupled: flag,
+                vector_overlay_lowpass: !flag,
+                vector_overlay_lowpass_hz: if flag { 0.35 } else { 2.0 },
                 vector_overlay_density: 71.5,
                 vector_overlay_gain: 2.5,
                 material_overlay: overlay,
@@ -2738,6 +2753,8 @@ mod tests {
             "vector_overlay",
             "vector_overlay_smoothed",
             "vector_overlay_ac_coupled",
+            "vector_overlay_lowpass",
+            "vector_overlay_lowpass_hz",
             "vector_overlay_density",
             "vector_overlay_gain",
         ] {

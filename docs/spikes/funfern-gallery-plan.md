@@ -924,7 +924,9 @@ and vector-valued, and the scenes should show it.
 Done on 26 September, judged on a screenshot of every scene 12 s from its
 own launch. The pass also moved probes that overlapped
 (`no_gallery_probe_sits_on_another`), and turned up that auto exposure
-carried one scene's loudest level into the next.
+carried one scene's loudest level into the next. Since 27 September the
+flow arrows are low-passed at the default 0.5 Hz, so these scenes open
+showing the mean flow rather than its ripple; the log has the measurement.
 
 - **Power-flow arrows** where the power has somewhere to go, at gain 2 (at
   1 most arrows were a few pixels):

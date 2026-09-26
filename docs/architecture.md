@@ -396,7 +396,17 @@ nearest old sample's decayed AC output and rebase their raw input to the
 transferred field, avoiding a zero-frame blink without interpreting remap error
 as temporal signal. A physics-skin change discards the old identities and
 meaning. Fresh zero-state installation also clears it explicitly. Energy-flow
-arrows never use AC coupling because their temporal mean is meaningful. Quiet-tail
+arrows never use AC coupling because their temporal mean is meaningful; they are
+low-passed instead: three identical first-order stages at a corner the presentation
+stores in Hz, advanced together by the chain's exact response to the sample held
+over the simulated time since the previous readback, so neither readback cadence
+nor simulation speed moves the corner. The default 0.5 Hz was measured across
+eight gallery scenes: three stages leave at most 2.5 % of the raw flow level at
+any arrow and reach nine tenths of a changed flow in 1.7 s. Their exposure is
+measured from the raw samples, because measured from the averaged ones a region
+where the wave stands renormalises the ripple that leaks. A new flow arrow seeds
+from the nearest arrow updated at the previous readback within 1.5 spacings and
+starts silent without one; a same-physics remesh carries the average whole. Quiet-tail
 visibility is applied after each arrow saturates, so a sparse numerical outlier
 cannot defeat the overlay-wide fade; sub-pixel residual arrows are not drawn. The
 overlay's run peak provides the global quiet reference: below `10⁻²` of that
