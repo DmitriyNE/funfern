@@ -13979,3 +13979,40 @@ meshes on the CI runner (AMD EPYC, glibc).
   since the scene-change drop.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — No gallery probe sits on another
+
+- Asked for in the view-settings pass: point probes overlapped line probes
+  in a couple of scenes. Measured on every scene at the fitted view of a
+  2 × 2 domain (373 pixels a unit): seven had a point probe on a line or
+  boundary probe, and in one two line probes crossed. A point probe's
+  marker is 7 pixels across, and its label sits 10 pixels up and right.
+- **Moved:**
+  - Fiber amplifier: "Along the fiber" ends at 0.75, short of Output at 0.85.
+  - Photonic crystal: "Along the channel" ends at 0.6, short of the point
+    at 0.75.
+  - Zone plate: the axis line, which ran through the focus probe, is now
+    "Focal plane", half of it from 0.08 beside the focus to the wall. The
+    plate is symmetric about the axis, and this half shows the spot falling
+    away to the claim's 0.4 aside.
+  - Skin depth and plasma skin depth: "Behind the slab" steps from the
+    line at y = 0.3 onto the axis. The plane wave is the same across the
+    channel.
+  - Spatial soliton: "Along the beam" ends at 0.55, inside the slab, so it
+    no longer crosses the line behind it.
+  - Ring resonator and FTIR: the output points move 0.15 left, so their
+    labels no longer run over the right wall.
+- **Dropped:**
+  - Disordered crystal: the point on the axis, hidden under the cut line's
+    badge, with the labels on top of each other. The claim is read on the
+    cut.
+  - Fisheye: the image point, 0.03 inside the rim probe, with its label
+    across the rim. The rim probe's peak is the image.
+- No claim test reads a probe's position; each reads its own points. So no
+  claim moved.
+- Test: `no_gallery_probe_sits_on_another`. A point probe keeps more than
+  0.04 (15 pixels) from every line and boundary probe and from every other
+  point, and no two line probes cross. On the old positions it fails first
+  on the fiber amplifier: "Output is 0.000 from Along the fiber".
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -317,8 +317,8 @@ which the first exploration ran into.) The permittivity carries the
 "Travelling modulation" preset over the graded base: pump 5 Hz, depth 0.2,
 wavenumber `2β = 43.88`, phase `3π/4`, angle 0. A 2.5 Hz point source of 4 on
 the axis at x = −0.85, a probe at x = 0.85, and a line probe along the axis
-from x = −0.75, past the source's near field, to 0.9, whose energy density
-shows the signal growing along the fiber. Walls outgoing.
+from x = −0.75, past the source's near field, to 0.75, short of the probe,
+whose energy density shows the signal growing along the fiber. Walls outgoing.
 
 Explored. Unpumped, the fundamental mode runs at β = 21.94 (`n_eff` 1.397;
 a 1D mode solve of the same profile gives 1.391). Pumped at `2β` the gain is
@@ -398,8 +398,8 @@ plan's pitch 0.16 does not divide the height, and its radius 0.3 is not
 the textbook crystal: Joannopoulos's rods of `ε = 8.9` and radius 0.2 open
 a TM gap from 0.302 to 0.443 of the pitch over the wavelength.) Each rod
 is a regular octagon with the circle's area, its flats facing the axes. A
-line probe runs along the midline between two rows, and a point probe
-reads the transmitted wave 0.25 behind the crystal.
+line probe runs along the midline between two rows to 0.6, short of the
+point probe that reads the transmitted wave 0.25 behind the crystal.
 
 Explored. Meshed as spline circles the rods cost the scene 36.6k unknowns
 and a time step of 1.0e-3 at edge 0.08, its shortest edge 0.004. As
@@ -555,7 +555,8 @@ optics to run in an EM skin, and for plain `μ = 1` media, so the profile is
 runs from 2 at the centre to 1 at the rim, where it meets the vacuum. The
 region's frame follows it, so a dragged lens keeps its profile. A 3 Hz
 source 0.03 inside the rim on the left; a boundary probe on the rim itself,
-a point probe on the image. The view shows the wave speed. Walls outgoing.
+whose peak is the image. (A point probe on the image, 0.03 inside the rim,
+sat on the rim probe's line; the view pass dropped it.) The view shows the wave speed. Walls outgoing.
 
 Explored, with `|U|` on the circle 0.03 inside the rim. Away from the source
 the rim is brightest at the antipode, which is as bright as the rim beside
@@ -579,8 +580,9 @@ x = 0 closed over the even Fresnel zones for a focus at `F = 0.4`, zone
 edges `y_n = √(nλF + (nλ/2)²)`: 0.34, 0.51, 0.66, 0.81, 0.94, so the
 openings are |y| < 0.34, 0.51 < |y| < 0.66 and 0.81 < |y| < 0.94, and the
 last, even zone is closed out to the walls, to which those baffles attach.
-A point probe on the focus and a line probe along the axis behind the
-screen. Walls outgoing.
+A point probe on the focus and a line probe across half the focal plane,
+from 0.08 beside the focus out to the wall; the axis line it replaced ran
+through the focus probe. Walls outgoing.
 
 Explored. The plan's plate, `F = 0.6`, focuses at 1.48× the bare plane
 wave's amplitude at (0.6, 0), and its axis peaks at 1.76× beyond it, at
@@ -727,8 +729,9 @@ TM. The photonic crystal's channel, launcher and fifty octagonal rods, but
 at centres drawn at random with a fixed seed (`disordered_sites`,
 xorshift64*) over the same slab, kept 0.14 apart (nearer, the gap between
 two rods forces elements and a time step far below the rest) and clear of
-the walls. Lit at 2.5 Hz, where the ordered crystal passes 80%. A point
-probe behind the slab and a line probe across the channel.
+the walls. Lit at 2.5 Hz, where the ordered crystal passes 80%. A line
+probe across the channel behind the slab, on the claim's cut. (A point
+probe on the axis sat under the line's badge; the view pass dropped it.)
 
 The name changed: a slab one unit deep with fifty rods cannot tell Anderson
 localization from the scattering that leads to it, and the plan's claims,
@@ -759,7 +762,8 @@ the damped wave equation's, `u_tt + γ u_t = c²∇²u`: each half step scales
 the flux by `e^{−γh/2}`. So inside, `k = (ω/c)√(1 − iγ/ω)`: `Im k = 14.82`,
 a depth of 0.068, and `Re k = 23.98`, crests 0.26 apart, where the good
 conductor's `√(ωγ/2) = 18.85` would put the depth at 0.053. A line probe
-along the channel through the slab, a point probe behind it.
+along the channel through the slab, 0.3 off the axis, and a point probe
+behind it on the axis, clear of the line.
 
 Explored, from the phasor 0.02 to 0.18 inside the front face, before the
 back face's reflection counts: the slope of `ln|U|` is 14.83 at edge 0.08,
@@ -808,8 +812,8 @@ TM. A slab of the "Saturable medium" preset at its defaults (χ = 0.8,
 saturation 1) from x = −0.6 to 0.6, half-height 0.9 so it stops short of
 the outgoing walls. A 4 Hz Gaussian beam, `exp(−(y/w)²)` with w = 0.2, from
 a wall-to-wall launcher at x = −0.85, strength 1000; the weak beam is the
-same at 10. Walls second-order outgoing. Probes along the axis and across
-the beam just behind the slab, at x = 0.65 (a probe on the face itself
+same at 10. Walls second-order outgoing. Probes along the axis to 0.55,
+inside the slab, and across the beam just behind it, at x = 0.65 (a probe on the face itself
 would sit on a boundary with two traces).
 
 The plan's risk came true: without dispersion the third harmonic is

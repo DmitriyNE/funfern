@@ -1305,9 +1305,11 @@ fn spatial_soliton_with(amplitude: f64) -> TopologyDocument {
         name: "Along the beam".into(),
         color: [248, 196, 112],
         enabled: true,
+        // To just inside the slab's back face, short of the line across the
+        // beam behind it.
         target: TopologyProbeTarget::Segment {
             start: Point2::new(-0.8, 0.0),
-            end: Point2::new(0.9, 0.0),
+            end: Point2::new(0.55, 0.0),
             preset: ProbeSamplingPreset::High,
         },
     });
@@ -1898,8 +1900,8 @@ fn fiber_amplifier_with(depth: f64, wavenumber: f64, phase: f64) -> TopologyDocu
         target: TopologyProbeTarget::Point(Point2::new(0.85, 0.0)),
     });
     // From past the source's near field, which would set the plot's scale,
-    // to the far end: its energy density shows the signal growing along the
-    // fiber.
+    // to short of the output probe: its energy density shows the signal
+    // growing along the fiber.
     document.model.probes.push(TopologyProbeDefinition {
         id: ProbeId(2),
         name: "Along the fiber".into(),
@@ -1907,7 +1909,7 @@ fn fiber_amplifier_with(depth: f64, wavenumber: f64, phase: f64) -> TopologyDocu
         enabled: true,
         target: TopologyProbeTarget::Segment {
             start: Point2::new(-0.75, 0.0),
-            end: Point2::new(0.9, 0.0),
+            end: Point2::new(0.75, 0.0),
             preset: ProbeSamplingPreset::Medium,
         },
     });
@@ -2167,7 +2169,7 @@ fn photonic_crystal_with(frequency: f64, rods: bool) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Segment {
             start: Point2::new(-0.75, 0.0),
-            end: Point2::new(0.9, 0.0),
+            end: Point2::new(0.6, 0.0),
             preset: ProbeSamplingPreset::Medium,
         },
     });
@@ -2314,7 +2316,7 @@ fn ring_resonator_with(frequency: f64, ring: bool) -> TopologyDocument {
         name: "Past the ring".into(),
         color: [91, 220, 194],
         enabled: true,
-        target: TopologyProbeTarget::Point(Point2::new(0.8, -0.55)),
+        target: TopologyProbeTarget::Point(Point2::new(0.65, -0.55)),
     });
     if let Some(region) = region {
         document.model.probes.push(TopologyProbeDefinition {
@@ -2532,13 +2534,6 @@ fn fisheye_with(lens: bool) -> TopologyDocument {
             preset: ProbeSamplingPreset::Medium,
         }),
     });
-    document.model.probes.push(TopologyProbeDefinition {
-        id: ProbeId(2),
-        name: "Image".into(),
-        color: [91, 220, 194],
-        enabled: true,
-        target: TopologyProbeTarget::Point(Point2::new(FISHEYE_RADIUS - 0.03, 0.0)),
-    });
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
     document
 }
@@ -2619,14 +2614,17 @@ fn zone_plate_with(plate: bool) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(ZONE_FOCUS, 0.0)),
     });
+    // Half the focal plane, from beside the focus out to the wall, so it
+    // stays clear of the focus probe: the plate is symmetric about the axis,
+    // and this half shows the spot falling away to the claim's 0.4 aside.
     document.model.probes.push(TopologyProbeDefinition {
         id: ProbeId(2),
-        name: "Along the axis".into(),
+        name: "Focal plane".into(),
         color: [248, 196, 112],
         enabled: true,
         target: TopologyProbeTarget::Segment {
-            start: Point2::new(0.05, 0.0),
-            end: Point2::new(0.95, 0.0),
+            start: Point2::new(ZONE_FOCUS, 0.08),
+            end: Point2::new(ZONE_FOCUS, 0.9),
             preset: ProbeSamplingPreset::Medium,
         },
     });
@@ -2826,7 +2824,7 @@ fn tunnelling_with(gap: f64, glass: bool) -> TopologyDocument {
         ..source(Point2::new(-0.9, -0.5), TUNNEL_HZ, 10.0, 0.03)
     };
     for (id, name, color, point) in [
-        (1, "Fiber output", [91, 220, 194], Point2::new(0.85, -0.5)),
+        (1, "Fiber output", [91, 220, 194], Point2::new(0.7, -0.5)),
         (2, "In the block", [248, 196, 112], Point2::new(0.6, 0.0)),
     ] {
         document.model.probes.push(TopologyProbeDefinition {
@@ -3035,13 +3033,6 @@ fn rods_with(sites: &[Point2]) -> TopologyDocument {
     document.model.source.enabled = false;
     document.model.probes.push(TopologyProbeDefinition {
         id: ProbeId(1),
-        name: "Behind the slab".into(),
-        color: [91, 220, 194],
-        enabled: true,
-        target: TopologyProbeTarget::Point(Point2::new(0.75, 0.0)),
-    });
-    document.model.probes.push(TopologyProbeDefinition {
-        id: ProbeId(2),
         name: "Across the channel".into(),
         color: [248, 196, 112],
         enabled: true,
@@ -3142,7 +3133,9 @@ fn slab_channel(material: Material) -> TopologyDocument {
         name: "Behind the slab".into(),
         color: [91, 220, 194],
         enabled: true,
-        target: TopologyProbeTarget::Point(Point2::new(0.5, 0.3)),
+        // Off the line, on the axis: the plane wave is the same across the
+        // channel.
+        target: TopologyProbeTarget::Point(Point2::new(0.5, 0.0)),
     });
     document
 }
@@ -3309,6 +3302,101 @@ mod tests {
                     example.name,
                     probe.id
                 );
+            }
+        }
+    }
+
+    /// No gallery probe sits on another. A point probe keeps clear of every
+    /// line and boundary probe, and of every other point, by more than its
+    /// marker: 0.04 is 15 pixels in the fitted view of a 2 × 2 domain. No two
+    /// line probes cross. Each marker then stays one to click and to read.
+    #[test]
+    fn no_gallery_probe_sits_on_another() {
+        use crate::topology_viewport::{
+            SampledTopologyGeometry, ScreenPoint, TopologySpanTarget, ViewportTransform,
+        };
+        const CLEARANCE: f64 = 0.04;
+        let distance = |point: Point2, [a, b]: [Point2; 2]| {
+            let along = b - a;
+            let t = ((point - a).dot(along) / along.dot(along)).clamp(0.0, 1.0);
+            (point - a.lerp(b, t)).norm()
+        };
+        let crosses = |a: [Point2; 2], b: [Point2; 2]| {
+            let side = |point: Point2, [p, q]: [Point2; 2]| (q - p).cross(point - p);
+            side(b[0], a) * side(b[1], a) < 0.0 && side(a[0], b) * side(a[1], b) < 0.0
+        };
+        for example in catalog() {
+            let geometry = &example.document.model.draft.geometry;
+            let transform = ViewportTransform {
+                screen_center: ScreenPoint::new(0.0, 0.0),
+                world_center: geometry.domain.center(),
+                pixels_per_world: 400.0,
+            };
+            let sampled = SampledTopologyGeometry::new(geometry, transform, 0.5).unwrap();
+            let mut points = vec![];
+            let mut lines = vec![];
+            for probe in &example.document.model.probes {
+                let name = probe.name.as_str();
+                match &probe.target {
+                    TopologyProbeTarget::Point(point) => points.push((name, *point)),
+                    TopologyProbeTarget::Segment { start, end, .. } => {
+                        lines.push((name, vec![[*start, *end]]))
+                    }
+                    TopologyProbeTarget::Boundary(target) => {
+                        let path = target
+                            .spans
+                            .iter()
+                            .flat_map(|span| {
+                                sampled
+                                    .spans
+                                    .iter()
+                                    .filter(|sampled| {
+                                        sampled.target == TopologySpanTarget::Curve(*span)
+                                    })
+                                    .flat_map(|sampled| {
+                                        sampled.samples.iter().map(|sample| sample.point)
+                                    })
+                            })
+                            .collect::<Vec<_>>();
+                        assert!(path.len() > 1, "{}: {name} has no path", example.name);
+                        lines.push((
+                            name,
+                            path.windows(2).map(|pair| [pair[0], pair[1]]).collect(),
+                        ));
+                    }
+                    TopologyProbeTarget::AreaDisk { .. } | TopologyProbeTarget::AreaRegion(_) => {}
+                }
+            }
+            for (index, (name, point)) in points.iter().enumerate() {
+                for (other, at) in &points[index + 1..] {
+                    assert!(
+                        (*point - *at).norm() > CLEARANCE,
+                        "{}: {name} sits on {other}",
+                        example.name
+                    );
+                }
+                for (other, segments) in &lines {
+                    let gap = segments
+                        .iter()
+                        .map(|segment| distance(*point, *segment))
+                        .fold(f64::INFINITY, f64::min);
+                    assert!(
+                        gap > CLEARANCE,
+                        "{}: {name} is {gap:.3} from {other}",
+                        example.name
+                    );
+                }
+            }
+            for (index, (name, segments)) in lines.iter().enumerate() {
+                for (other, others) in &lines[index + 1..] {
+                    assert!(
+                        !segments
+                            .iter()
+                            .any(|a| others.iter().any(|b| crosses(*a, *b))),
+                        "{}: {name} crosses {other}",
+                        example.name
+                    );
+                }
             }
         }
     }
