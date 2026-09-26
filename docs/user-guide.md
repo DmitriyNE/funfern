@@ -409,7 +409,16 @@ names or with every expression evaluated at the material frame's origin. Each ro
   gallery: the scenes in seven sections (basics; interfaces and media; lenses
   and imaging; guides and crystals; resonators; time-varying media; nonlinear
   and self-organizing), each a thumbnail over its name, with what it shows on
-  hover. Picking one opens it, undoably, and closes the gallery. New, Load scene, an example, a
+  hover. Picking one opens it, undoably, and closes the gallery. While a
+  scene opened from the gallery is up, a card in the viewport's top-left corner
+  names it and says what it shows. ⏴ and ⏵ step to the previous and next
+  example in the gallery's order, round from the last to the first; ⏶ folds
+  the description away for the rest of the session; All examples… reopens the
+  gallery; and × closes the card until another example opens. Edits keep the
+  card, since the descriptions suggest them. New, a loaded file, a scene link,
+  Undo or Redo across a scene, and a relaunch that restores the autosave show
+  none. A first launch, with nothing to restore, opens a random example whose
+  card adds a line pointing at the rest. New, Load scene, an example, a
   scene link, and Undo or Redo across any of them replace the whole scene: the
   outgoing field stops and disappears at once, the new scene's geometry shows
   while its mesh is built, and its field starts from zero, as at startup. An

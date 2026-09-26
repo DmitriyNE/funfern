@@ -58,6 +58,7 @@ mod probe_view;
 mod probes;
 mod readouts;
 mod runtime;
+mod scene_card;
 mod selection;
 
 mod session;
@@ -701,6 +702,7 @@ impl Playground {
             self.probe_windows(root.ctx());
             self.diagnostics_window(root.ctx());
             self.formula_help_window(root.ctx());
+            self.scene_card(root.ctx(), viewport);
             self.examples_window(root.ctx());
         }
         self.keyboard_focus_previous = root.ctx().egui_wants_keyboard_input();

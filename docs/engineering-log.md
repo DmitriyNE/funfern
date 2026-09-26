@@ -14197,3 +14197,44 @@ meshes on the CI runner (AMD EPYC, glibc).
   now `picking_an_example_closes_the_gallery_and_marks_the_tile`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Scene card and first-launch hint
+
+- Last of the onboarding steps. While a scene opened from the gallery is up,
+  a card in the viewport's top-left corner (`ui/scene_card.rs`) shows:
+  - ⏴ n/36 ⏵, stepping through the catalogue in the gallery's order and
+    wrapping at the ends (`step_example`);
+  - the name, the section and the description;
+  - ⏶/⏷ to fold the description, which holds for the session;
+  - All examples…, which reopens the gallery;
+  - ×, which closes the card until another example opens.
+- It is `example_opened` that decides whether there is a card. Edits keep it,
+  since the descriptions ask for them ("drag the bend tighter"); New, a file,
+  a link, Undo or Redo across a scene, and a relaunch show none. Knowing which
+  example a restored scene came from would need a file-format change.
+- A first launch (`open_random_example`, nothing to restore) adds one gold
+  line to the card: "One of 36 examples: ⏴ ⏵ steps through them, and Examples
+  in the top bar shows them all." It goes on the first step, when the gallery
+  opens, or on ×. Nothing new is stored to make it one-time: after the first
+  run there is an autosave to restore instead.
+- The card has a fixed width, 340 or the viewport's less its insets. The name
+  has a line of its own, so a long one wraps rather than widening the card,
+  and the buttons stay where they are while stepping. It hides during
+  captures.
+- **Glyphs:** ◂ ▸ ▾ ▴ are not in egui's default fonts and would draw as
+  boxes, so the card uses ⏴ ⏵ ⏶ ⏷ (`the_cards_glyphs_are_in_the_fonts`). The
+  materials panel's existing "Switch ◂ / ▸" button uses the missing pair;
+  reported, not changed here.
+- Tests:
+  - `stepping_wraps_round_the_catalog`;
+  - `a_closed_card_stays_closed_until_another_example_opens`;
+  - `an_edit_keeps_the_card_and_a_replaced_scene_drops_it`;
+  - `a_first_launch_hints_at_the_gallery_until_the_viewer_moves_on`;
+  - `a_click_on_the_card_stays_off_the_viewport`: real pointer events through
+    an egui frame laid out as the app's, a viewport-filling painter under the
+    card. The viewport takes a click beside the card and none on it.
+- **Checked** from a scratch HOME with no autosave, as a real first launch, at
+  1512×945 and 700×640: the card with its hint, then stepped (hint gone),
+  folded, and under the gallery.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

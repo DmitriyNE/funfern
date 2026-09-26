@@ -27,6 +27,7 @@ use std::sync::{
 use super::events::EventEntry;
 use super::gesture::{DragGesture, DrawGesture, PendingMerge};
 use super::probe_view::{AreaTrace, CurveTrace, FarFieldTrace, ProbeTrace, ProbeViewState};
+use super::scene_card::SceneCard;
 use super::workers::{BackgroundAmrWorker, BackgroundPreparationWorker};
 use super::*;
 
@@ -83,9 +84,10 @@ pub struct Playground {
     pub(super) examples_open: bool,
     /// One thumbnail per catalog entry, built lazily and at most one per frame.
     pub(super) example_previews: Vec<Option<ExamplePreview>>,
-    /// The catalog entry the document came from, for the gallery's own marker.
-    /// Any other load clears it.
+    /// The catalog entry the document came from, for the gallery's own marker
+    /// and the scene card. Any other load clears it.
     pub(super) example_opened: Option<usize>,
+    pub(super) scene_card: SceneCard,
     pub(super) material_color_edit: Option<(MaterialId, [u8; 3])>,
     pub(super) new_separator_material: MaterialId,
     /// The slider produces a value per frame; the rebuild waits for release.
@@ -358,6 +360,7 @@ impl Default for Playground {
                 .map(|_| None)
                 .collect(),
             example_opened: Some(0),
+            scene_card: SceneCard::default(),
             material_color_edit: None,
             new_separator_material: DEFAULT_MATERIAL,
             mesh_edge_dragging: false,
