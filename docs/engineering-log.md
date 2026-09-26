@@ -14450,3 +14450,25 @@ meshes on the CI runner (AMD EPYC, glibc).
   signs against the copy's two edges decide it. Not done here: the mesher
   is shared by every scene and the change wants its own gate, with the 35
   octagons as the test.
+
+## 2026-09-27 — Stage 11 closed
+
+- Report: `docs/spikes/funfern-material-laws-stage11-report.md`, in the
+  Stage 10 report's shape. Twenty-five defects found and fixed during the
+  stage in its table, the physics ones first (the filter parting `b` from
+  `ηC r`, the handoff carrying `b` instead of `b − ηC r`, `r` in opened
+  ground, the short-wave lasing, the f32 van der Pol map, the device's
+  loss share), then what shipped by sub-stage, what stays refused or open,
+  and how it was verified.
+- **Device at the close:** `canonical_gpu_long_run` at 400 steps on all 36
+  gallery scenes from `f19cb43`'s code (unchanged since `7224f7c`), all
+  exit 0. Thirty-five within 3.5e-6 in `Q` and `b` (largest: the plasma
+  whispering gallery's Q 3.5e-6, the soliton's b 2.8e-6); the
+  self-sustained emitter Q 1.5e-5, b 3.0e-5, inside its 1e-4 bound for a
+  rate past 0.02 (2.7e-5 / 2.4e-5 when it landed). Fourteen scenes run on
+  the temporal path.
+- The material-laws plan's stage table marks 11 complete and its status
+  paragraph reads 27 September; the catalogue already had R1–R3 and D3 as
+  running.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
