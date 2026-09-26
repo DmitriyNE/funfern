@@ -110,7 +110,7 @@ itself and the pitch holds as written; its faces reflect as glass does,
 about 5% on the axis.
 
 Claims, as built (edge 0.08, on a cut across the whole domain height): at
-x = 0.75 the rod's beam keeps 0.78 of its power within the aperture, up from
+x = 0.75 the rod's beam keeps 0.77 of its power within the aperture, up from
 0.71 at x = 0.2, where the bare source keeps 0.39, down from 0.43. Not
 claimed: a flat phase at the exit face, where the near field still holds the
 reflected and wide-angle waves, and a half-amplitude width, which the
@@ -348,7 +348,7 @@ true of any deterministic run from rest and is dropped.
 Claims at edge 0.08, at the far end at 2.5 Hz over 2 s windows:
 
 - The travelling pump amplifies the signal more than 4× against the pump
-  off (4.85×), and steadily: at 14 s the gain is within 10% of 8 s (4.63×).
+  off (4.88×), and steadily: at 14 s the gain is within 10% of 8 s (4.65×).
 - Advanced by half a turn it squeezes the signal below half (0.13×).
 - Uniform in space, the same pump makes the fiber oscillate: its far end
   grows more than 3× from 8 s to 12 s (5.7×).

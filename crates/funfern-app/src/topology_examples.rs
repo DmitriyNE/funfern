@@ -760,7 +760,7 @@ fn source(position: Point2, frequency: f64, amplitude: f64, width: f64) -> Point
         position,
         width,
         region: BACKGROUND_REGION,
-        signal: TimeSignal::harmonic(0.0, amplitude, frequency, 0.0),
+        signal: TimeSignal::harmonic(0.0, amplitude, frequency, SWITCH_ON_PHASE),
     }
 }
 
@@ -1291,6 +1291,10 @@ fn kerr_slab_with(chi: f64, amplitude: f64) -> TopologyDocument {
     document
 }
 
+/// The pump phase the scene opens at, the top of its gain against phase;
+/// tied to the source's cosine start as the fiber's is.
+const PUMP_PHASE: f64 = 2.0 * SWITCH_ON_PHASE + std::f64::consts::FRAC_PI_4;
+
 fn pumped_slab_with(depth: f64, pump_hz: f64, phase: f64) -> TopologyDocument {
     let mut builder = Builder::new();
     builder.scene.physics = PhysicsModel::Electromagnetic {
@@ -1583,7 +1587,7 @@ fn kerr_slab() -> TopologyDocument {
 }
 
 fn pumped_slab() -> TopologyDocument {
-    pumped_slab_with(0.4, 5.0, std::f64::consts::FRAC_PI_4)
+    pumped_slab_with(0.4, 5.0, PUMP_PHASE)
 }
 
 fn time_crystal_slab() -> TopologyDocument {
@@ -1992,7 +1996,10 @@ const FIBER_DEPTH: f64 = 0.2;
 /// 1.391), so the pump runs with the signal.
 const FIBER_PUMP_WAVENUMBER: f64 = 43.88;
 /// The pump phase that amplifies the source's quadrature most.
-const FIBER_PUMP_PHASE: f64 = 0.75 * std::f64::consts::PI;
+/// The pump's phase that amplifies the signal most. A degenerate pump's
+/// gain goes with `pump_phase − 2 × signal phase`, so it is tied to the
+/// source's cosine start (`SWITCH_ON_PHASE`) and holds if that moves.
+const FIBER_PUMP_PHASE: f64 = 2.0 * SWITCH_ON_PHASE + 0.75 * std::f64::consts::PI;
 
 fn fiber_amplifier() -> TopologyDocument {
     fiber_amplifier_with(FIBER_DEPTH, FIBER_PUMP_WAVENUMBER, FIBER_PUMP_PHASE)
@@ -4162,10 +4169,11 @@ mod tests {
     /// against the source. That phase sensitivity is what marks degenerate
     /// parametric amplification rather than a slab that merely changed its
     /// average impedance. The two phases are the extremes of an eight-phase
-    /// scan, which sit at the same phases on a finer mesh (see the log).
+    /// scan, which sit at the same phases on a finer mesh (see the log);
+    /// they moved by half a turn when the source's start moved by a quarter.
     #[test]
     fn a_pump_at_twice_the_source_frequency_amplifies_by_phase() {
-        let (best, worst) = (pump_gain(5.0, 1.0), pump_gain(5.0, 5.0));
+        let (best, worst) = (pump_gain(5.0, 5.0), pump_gain(5.0, 1.0));
         assert!(best > 1.8, "amplified to {best:.3}");
         assert!(
             best / worst > 1.5,
@@ -5378,7 +5386,7 @@ mod tests {
     /// launches into the mode. (On that straight fiber the mode runs at
     /// `n_eff` 1.329 against a slab solve's 1.323, and 1.3238 at edge 0.04.)
     /// The gallery's radius 0.5 delivers more than 60% of it (72%); radius
-    /// 0.3 loses more than twice what radius 0.7 loses (45% against 12%).
+    /// 0.3 loses more than twice what radius 0.7 loses (46% against 13%).
     #[test]
     fn a_bent_fiber_leaks_more_the_sharper_its_bend() {
         let mut builder = glass_builder();

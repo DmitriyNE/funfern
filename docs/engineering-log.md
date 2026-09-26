@@ -14489,3 +14489,49 @@ meshes on the CI runner (AMD EPYC, glibc).
   Left as they are.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — Point sources switch on as a cosine too
+
+- The gallery's `source()` still started its point sources on a sine,
+  though the launcher, the point source's default and the panel's volume
+  source had moved to `SWITCH_ON_PHASE` on 26 September. Eighteen scenes
+  use it. It starts on the cosine now, so every gallery source starts the
+  same way.
+- **Two scenes depend on the source's phase:** a degenerate pump's gain
+  goes with `pump_phase − 2 × signal phase`, so a quarter-turn later start
+  moves the gain curve by half a turn. Measured on the parametric pump at
+  edge 0.15 in eighths of a turn: the gain now peaks at 5π/4 (2.295; it
+  was 2.292 at π/4) and bottoms at π/4 (1.222, where it had bottomed at
+  5π/4), and the detuned pump at 3.6 Hz reads 0.912–0.924 at every phase
+  where the sine start had given it a spurious 0.870–0.964 phase
+  dependence. The pump scene's phase is `PUMP_PHASE = 2·SWITCH_ON_PHASE +
+  π/4` and the fiber's `FIBER_PUMP_PHASE = 2·SWITCH_ON_PHASE + 3π/4`, so
+  both are tied to the source's start and hold if it moves; the pump test's
+  best and worst phases swap. At the old phases the fiber amplified 0.129×,
+  its squeezed value, and the pump 1.222.
+- **Every claim was measured again** with each test's assertion printed:
+  22 of the 40 tests read identically; the rest moved as below and all pass
+  as they were. Bent fiber: radius 0.7 loses 0.121 → 0.129 (0.5 delivers
+  0.717 → 0.718). Crystal bend 0.913 → 0.916. Dielectric gallery 8.02× →
+  8.04×. Fisheye 4.90× → 4.91×. Plasma gallery rim 0.1686/0.0370 →
+  0.1670/0.0366, decay 0.288 → 0.289, transparency at 5 Hz 1.205 → 1.244.
+  Ring 0.162/0.916 → 0.164/0.922. Emitter 2.999 → 3.002 Hz. Fiber gain
+  4.847 → 4.875 (later 4.632 → 4.647; the standing pump grows 0.1215 →
+  0.6897). Time crystal sidebands [0.247, 0.852, 0.163] → [0.202, 0.885,
+  0.202] against the sinusoidal pump's [0.153, 0.602, 0.048]. Travelling
+  modulation [2.249, 1.662, 7.713] → [2.515, 1.742, 8.315]. Kerr third
+  harmonic 0.269 → 0.312 of the fundamental, and the linear slab's 4.7e-3
+  → 9.7e-3. Double slit, GRIN (0.776 → 0.774), Brewster and the drum moved
+  in the third digit. The doc comments and the gallery plan carry the new
+  numbers where they state them.
+- `examples/eight-obstacles.json` is the Obstacle array scene as a file and
+  is regenerated, as its test asks.
+- **Device:** `canonical_gpu_long_run` on all 36 scenes at 400 and 1000
+  steps. At 400 every scene is within 3.5e-6 but the emitter (1.5e-5 /
+  3.0e-5, bound 1e-4), as before this change. At 1000 the largest are the
+  soliton (Q 2.1e-5), the fiber amplifier (1.3e-5 / 1.6e-5) and the
+  emitter (1.7e-5 / 1.2e-5), inside their bounds; symmetry breaking reads
+  Q 1.1e-5, b 7.2e-5 at 1000 as it did when it landed, relative to a `|b|`
+  that has fallen a hundredfold, and has no point source.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
