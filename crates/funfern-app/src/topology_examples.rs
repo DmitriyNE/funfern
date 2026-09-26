@@ -245,6 +245,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  is the scattering that leads to it.",
                 disordered_crystal(),
             ),
+            example(
+                "Skin depth",
+                "A plane wave at 3 Hz meets a slab whose electric loss is twice its angular \
+                 frequency: inside, the wave falls by e every 0.068 while its crests stand 0.26 \
+                 apart, exactly as k = (ω/c)√(1 − iγ/ω) says, not the good conductor's shortcut, \
+                 and about a hundredth of the field gets through.",
+                skin_depth(),
+            ),
         ]
     })
 }
@@ -2823,13 +2831,98 @@ fn rods_with(sites: &[Point2]) -> TopologyDocument {
     document
 }
 
+const SKIN_HZ: f64 = 3.0;
+/// The slab's faces.
+const SKIN_FRONT: f64 = -0.35;
+const SKIN_BACK: f64 = -0.05;
+
+/// The loss rate, `γ = 2ω`.
+fn skin_loss() -> f64 {
+    2.0 * std::f64::consts::TAU * SKIN_HZ
+}
+
+fn skin_depth() -> TopologyDocument {
+    skin_with(skin_loss())
+}
+
+/// A TM channel lit by a 3 Hz launcher at the left, with a slab of an
+/// otherwise vacuum medium carrying an electric loss `rate` from
+/// `x = −0.35` to `−0.05`. Inside, the plane wave runs as `e^{ikx}` with
+/// `k = (ω/c)√(1 − iγ/ω)`: at `γ = 2ω` it falls by `e` every 0.068 while its
+/// crests stand 0.26 apart, where the good conductor's `√(ωγ/2)`, the usual
+/// shortcut, would put the depth at 0.053. A line probe runs along the
+/// channel through the slab and a point probe sits behind it.
+fn skin_with(rate: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    builder.launcher(-0.85, SKIN_HZ, 40.0);
+    builder.scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Lossy medium".into(),
+        electric_loss: Some(LossChannel {
+            base_rate: ScalarField::constant(rate),
+            law: DampingLaw::constant(),
+        }),
+        color: [139, 92, 66],
+        ..Material::default_medium()
+    });
+    let (front, span) = builder.divider(SKIN_FRONT);
+    builder.divider(SKIN_BACK);
+    for (material, side) in [
+        (MaterialId(2), CurveTraceSide::Right),
+        (DEFAULT_MATERIAL, CurveTraceSide::Left),
+    ] {
+        let region = RegionId(builder.next_region);
+        builder.next_region += 1;
+        builder.scene.regions.push(Region {
+            id: region,
+            material,
+            frame: MaterialFrame::world(),
+        });
+        // Running upwards, a divider's right is towards +x.
+        builder.scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Curve {
+                curve: front,
+                span,
+                side,
+                parameter: 0.5,
+            },
+            region: Some(region),
+        });
+    }
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Through the slab".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Segment {
+            start: Point2::new(-0.8, 0.3),
+            end: Point2::new(0.9, 0.3),
+            preset: ProbeSamplingPreset::High,
+        },
+    });
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Behind the slab".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(0.5, 0.3)),
+    });
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 32);
+        assert_eq!(catalog().len(), 33);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -5032,6 +5125,66 @@ mod tests {
         assert!(
             plane_share < 0.25,
             "the plane wave is {plane_share:.3} of what passes"
+        );
+    }
+
+    /// The skin-depth claims, at edge 0.08, 8 s from rest at 3 Hz, from the
+    /// phasor along the slab's front, 0.02 to 0.18 in, before its back face's
+    /// reflection counts: the slope of `ln|U|` is `Im k` of
+    /// `k = (ω/c)√(1 − iγ/ω)` within 3% (14.83 against 14.82), and that of the
+    /// phase `Re k` within 3% (23.90 against 23.98); edges 0.05 and 0.04 agree
+    /// within 0.4%. The good conductor's `√(ωγ/2) = 18.85` is more than 15%
+    /// off the measured decay (21%).
+    #[test]
+    fn a_lossy_slab_damps_the_wave_at_its_exact_skin_depth() {
+        let scene = Harmonic::run(&skin_depth(), 0.08, 8.0, SKIN_HZ, 4.0);
+        let omega = std::f64::consts::TAU * SKIN_HZ;
+        let ratio = skin_loss() / omega;
+        let (magnitude, angle) = ((1.0 + ratio * ratio).sqrt().sqrt(), -ratio.atan() / 2.0);
+        let (real, imaginary) = (
+            omega * magnitude * angle.cos(),
+            -omega * magnitude * angle.sin(),
+        );
+        let mut samples = (0..=40)
+            .map(|index| {
+                let x = SKIN_FRONT + 0.02 + 0.16 * index as f64 / 40.0;
+                let (u, v) = scene.interpolated(Point2::new(x, 0.3));
+                (x, u.hypot(v).ln(), v.atan2(u))
+            })
+            .collect::<Vec<_>>();
+        // The phase, unwrapped.
+        for index in 1..samples.len() {
+            let mut step = samples[index].2 - samples[index - 1].2;
+            step -= (step / std::f64::consts::TAU).round() * std::f64::consts::TAU;
+            samples[index].2 = samples[index - 1].2 + step;
+        }
+        let slope = |value: fn(&(f64, f64, f64)) -> f64| {
+            let count = samples.len() as f64;
+            let mean_x = samples.iter().map(|sample| sample.0).sum::<f64>() / count;
+            let mean = samples.iter().map(value).sum::<f64>() / count;
+            samples
+                .iter()
+                .map(|sample| (sample.0 - mean_x) * (value(sample) - mean))
+                .sum::<f64>()
+                / samples
+                    .iter()
+                    .map(|sample| (sample.0 - mean_x).powi(2))
+                    .sum::<f64>()
+        };
+        let decay = -slope(|sample| sample.1);
+        let wavenumber = slope(|sample| sample.2).abs();
+        assert!(
+            (decay / imaginary - 1.0).abs() < 0.03,
+            "the field decays at {decay:.2} against {imaginary:.2}"
+        );
+        assert!(
+            (wavenumber / real - 1.0).abs() < 0.03,
+            "its phase runs at {wavenumber:.2} against {real:.2}"
+        );
+        let conductor = (omega * skin_loss() / 2.0).sqrt();
+        assert!(
+            (decay / conductor - 1.0).abs() > 0.15,
+            "the good conductor's {conductor:.2} is within 15% of {decay:.2}"
         );
     }
 }

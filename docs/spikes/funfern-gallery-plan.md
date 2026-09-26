@@ -752,13 +752,27 @@ Claims at edge 0.08, 12 s from rest, at 2.5 Hz:
 
 ### 25. Skin depth
 
-TM. A slab of thickness 0.3 with a constant electric loss of `γ = 2ω` at
-3 Hz. The wavenumber inside is `k = (ω/c)√(1 − iγ/ω)`, so the field decays
-with `Im k = 14.8`, a depth of 0.068, and the wavelength inside is 0.26. The
-scene is described by that exact formula rather than the conductor limit,
-which would need a depth too small to mesh.
+TM. A channel lit by a 3 Hz launcher at the left, and a slab 0.3 thick,
+from x = −0.35 to −0.05, of an otherwise vacuum medium with a constant
+electric loss of `γ = 2ω` (the primary row in TM). The solver's rate is
+the damped wave equation's, `u_tt + γ u_t = c²∇²u`: each half step scales
+the flux by `e^{−γh/2}`. So inside, `k = (ω/c)√(1 − iγ/ω)`: `Im k = 14.82`,
+a depth of 0.068, and `Re k = 23.98`, crests 0.26 apart, where the good
+conductor's `√(ωγ/2) = 18.85` would put the depth at 0.053. A line probe
+along the channel through the slab, a point probe behind it.
 
-Claim: the decay constant measured across the slab matches `Im k` within 15%.
+Explored, from the phasor 0.02 to 0.18 inside the front face, before the
+back face's reflection counts: the slope of `ln|U|` is 14.83 at edge 0.08,
+14.76 at 0.05, 14.81 at 0.04, and the phase's 23.90, 23.98, 24.00. The
+plan's 15% was far looser than the scene needs; about a hundredth of the
+field gets through.
+
+Claims at edge 0.08, 8 s from rest:
+
+- The decay constant is `Im k` within 3% (14.83 against 14.82).
+- The phase runs at `Re k` within 3% (23.90 against 23.98).
+- The good conductor's `√(ωγ/2)` is more than 15% off the measured decay
+  (21%).
 
 ## Batch E: nonlinear extras
 

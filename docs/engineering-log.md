@@ -13619,3 +13619,24 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and 1.4e-5.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: skin depth
+
+- **Scene** "Skin depth" (gallery item 25), the catalogue's 33rd: a TM
+  channel, a 3 Hz launcher and a slab 0.3 thick of vacuum with an electric
+  loss `γ = 2ω` (`skin_loss`), with a line probe through it and a point
+  probe behind. The builder's `strip` holds one strip only, so the slab's
+  faces are two dividers with their regions anchored on the front one.
+- **Loss rate:** the solver's is the damped wave equation's (`Q` scaled by
+  `e^{−γh/2}` a half step), so `k = (ω/c)√(1 − iγ/ω)` holds as the plan
+  wrote it: `Im k = 14.82`, `Re k = 23.98`.
+- **Measured** from the phasor 0.02 to 0.18 inside the front face: `Im k`
+  14.83 and `Re k` 23.90 at edge 0.08, 14.76 and 23.98 at 0.05, 14.81 and
+  24.00 at 0.04. The claims tighten the plan's 15% to 3%, and add that the
+  good conductor's `√(ωγ/2) = 18.85` is 21% off. Test:
+  `a_lossy_slab_damps_the_wave_at_its_exact_skin_depth`.
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 1.8e-6, b 1.4e-6; at
+  1000 steps Q 8.2e-6, b 2.0e-6; at 3000 steps (printed, not judged) 3.2e-5
+  and 6.1e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
