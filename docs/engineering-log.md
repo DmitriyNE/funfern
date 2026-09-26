@@ -14393,3 +14393,19 @@ meshes on the CI runner (AMD EPYC, glibc).
   bound.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The gallery plan is closed
+
+- Docs only. `docs/spikes/funfern-gallery-plan.md` said "proposed, awaiting
+  review. Nothing here is built yet". It now says it is done, with every
+  planned scene built, 8b and 25b with them, and the catalogue at 36 entries
+  from 12. The scene sections stay as the proposals they were built from,
+  and the scene's log entry has what was built and measured.
+- Its "Order" section had grown into a record of every pass after the
+  scenes. It is now "Order, as built", then "View settings" and "Sections"
+  as their own headings, with the GRIN collimator's revisit marked done.
+- The plasmonic guide is the one scene left, under a new "Still open":
+  it most likely needs a Drude law on the complementary row, and the user
+  left the analysis for later. "Blocked" is unchanged.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

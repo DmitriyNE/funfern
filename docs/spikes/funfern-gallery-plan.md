@@ -1,8 +1,14 @@
 # Gallery plan: Stage 11.5 and the scenes after it
 
-**Date:** 25 September 2026
+**Date:** 25 September 2026, closed 27 September 2026
 
-**Status:** proposed, awaiting review. Nothing here is built yet.
+**Status:** done. Every planned scene is built, 8b and 25b with them, each
+behind its measured claim and a device run, and the catalogue went from 12
+entries to 36. One scene is left, the plasmonic guide, which needs physics
+the solver does not have; it is under "Still open". The scene sections below
+are the proposals the scenes were built from, some with their measured
+claims added; each scene's entry in the engineering log has what was built
+and what it measured.
 
 ## Purpose
 
@@ -888,18 +894,26 @@ Claims at edge 0.08, 8 s from rest, the lines over the last 4 s:
   power within 5% (0.988), while the two powers make over 1.5 of it
   (1.71): the grating's work.
 
-## Order
+## Order, as built
 
-Batch A first, including the groundwork and the todo. Then B, C, D, E. Before
-their scene text is fixed, CPU exploration in the scratchpad settles: the
-fluxon emission (7), the pacemaker's entrainment (9, which failed), the clad disk's
-resonance (10), the fiber's β and stable depth (11), the crystal's gap (13),
-the ring's resonance (15), the dielectric disk's resonance (17) and the
-Doppler grating's depth (27). Every other scene gets its claim tolerance from
-its own first run.
+Built from 25 to 26 September in batch order, A to E, groundwork first.
+CPU exploration in the scratchpad came before the scene text where a number
+had to be found: the fluxon emission (7), the pacemaker's entrainment (9),
+the clad disk's resonance (10), the fiber's β and stable depth (11), the
+crystal's gap (13), the ring's resonance (15), the dielectric disk's
+resonance (17) and the Doppler grating's depth (27). Every other scene took
+its claim tolerance from its own first run. The pacemaker failed its
+exploration and shipped as the self-sustained emitter.
 
-Straight after batch E: a scene change stops the old field at once (the
-first item under "Maintenance" in `docs/plan.md`).
+Straight after batch E, on 26 September: a scene change stops the old field
+at once (`docs/plan.md`, "Maintenance").
+
+After the planned scenes, at the user's request: the GRIN collimator (scene
+3) ran in the Mechanical skin and moved to the E_z skin as glass, `μ = 1`,
+on 27 September, as the other optics scenes are. Its length is unchanged and
+its claims were measured again (see scene 3).
+
+## View settings
 
 After the last scene, at the user's request on 26 September: a pass over
 every gallery scene's view settings, so each opens showing what it is about
@@ -915,6 +929,8 @@ carried one scene's loudest level into the next.
 - **Power-flow arrows** where the power has somewhere to go, at gain 2 (at
   1 most arrows were a few pixels):
   - the material lens and the Luneburg lens, converging on the focus;
+  - the GRIN collimator's straight beam, since it moved to E_z (27
+    September);
   - the anisotropic crystal, walking off its wavefronts;
   - the phased array's steered beam;
   - the bent fiber's shed beam;
@@ -950,22 +966,7 @@ gallery probe opens on what its claim reads, one or two plots
   the mean energy density of the acoustic gallery's two disks.
 - **Far fields** (double slit, phased array): the polar patterns alone.
 
-Revisited after the planned scenes, at the user's request: the GRIN
-collimator (scene 3) ran in the Mechanical skin and moved to the E_z skin as
-glass, `μ = 1`, on 27 September. Its length is unchanged and its claims were
-measured again (see scene 3).
-
-Proposed by the user on 25 September, after the planned scenes: a plasmonic
-guide. To scope first: a surface plasmon on a flat interface needs a
-permittivity that turns negative acting on the in-plane electric field. In
-TM (`E_z`) the Klein-Gordon plasma's negative ε acts on the out-of-plane
-field, which has no surface mode; in TE the in-plane field is the
-complementary row, and Gate O's restoring laws act on the primary field
-only, which there makes a magnetic plasma. So the guide likely needs a Drude
-law on the complementary row first.
-
-Catalogue count after everything: 12 when the plan began, 36 with the
-planned scenes and 25b; the catalogue test's count moves with each commit.
+## Sections
 
 Grouped on 26 September, for onboarding: the gallery shows the catalogue in
 sections, and the catalogue runs through them in order, so stepping from one
@@ -989,6 +990,18 @@ example to the next walks the gallery as it is shown
 
 The starter obstacle became "Obstacle over a mirror" then, since it had long
 stopped being where the app starts.
+
+## Still open
+
+- **Plasmonic guide.** Proposed by the user on 25 September, after the
+  planned scenes. A surface plasmon on a flat interface needs a permittivity
+  that turns negative acting on the in-plane electric field. In E_z the
+  Klein-Gordon plasma's negative ε acts on the out-of-plane field, which has
+  no surface mode. In H_z the in-plane field is the complementary row, and
+  Gate O's restoring laws act on the primary field only, which there makes a
+  magnetic plasma. So the guide most likely needs a Drude law on the
+  complementary row first. The user agreed on 27 September and left the
+  analysis for later.
 
 ## Blocked
 
