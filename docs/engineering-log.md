@@ -13592,3 +13592,30 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   (printed, not judged) 2.0e-6 and 4.1e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: the disordered crystal
+
+- **Scene** "Disordered crystal" (gallery item 24, planned as Anderson
+  localization), the catalogue's 32nd: the photonic crystal's channel,
+  launcher and fifty octagonal rods at centres drawn with a fixed seed
+  (`disordered_sites`, xorshift64*, 0.14 apart, clear of the walls), lit at
+  2.5 Hz, where the ordered crystal passes 80%. Renamed with the user's
+  agreement: a slab this thin cannot show localization itself. Probes
+  "Behind the slab" and "Across the channel".
+- **Explored:** at 2.5 Hz the random rods pass 11.6% of the empty channel's
+  power and 0.6% as the plane wave (13.5% and 1.0% at edge 0.05; 12.3% and
+  1.7% at 24 s); at 1 Hz 82%; in the crystal's gap at 2 Hz 2.4% against the
+  crystal's 0.1%.
+- **Found, not fixed:** the depth series' first 0.6 of the random slab, 35
+  octagons, fails to mesh with "topology ear clipping stalled", the failure
+  the axis-aligned square rods hit in scene 13; the full fifty mesh. So the
+  stall is not about squares or alignment.
+- **Measured** at edge 0.08, 12 s: random 0.116, ordered 0.798, the plane
+  wave's share of what passes 0.052. Test:
+  `a_disordered_crystal_scatters_away_what_its_order_passes` (under a
+  quarter, under a quarter).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 1.4e-6, b 1.4e-6; at
+  1000 steps Q 4.4e-6, b 4.3e-6; at 3000 steps (printed, not judged) 1.1e-5
+  and 1.4e-5.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

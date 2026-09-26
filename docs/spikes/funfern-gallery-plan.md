@@ -721,16 +721,34 @@ Claims at edge 0.08, 45 s from rest:
 - `|U|` round the circle through the lobes has four maxima.
 - Driven 0.01 Hz either side, the lobes are weaker.
 
-### 24. Anderson localization
+### 24. Disordered crystal (was: Anderson localization)
 
-TM. The crystal's rods at the crystal's pass frequency, but placed at random
-with a fixed seed listed in the code, five rows deep, against the periodic
-crystal of 13.
+TM. The photonic crystal's channel, launcher and fifty octagonal rods, but
+at centres drawn at random with a fixed seed (`disordered_sites`,
+xorshift64*) over the same slab, kept 0.14 apart (nearer, the gap between
+two rods forces elements and a time step far below the rest) and clear of
+the walls. Lit at 2.5 Hz, where the ordered crystal passes 80%. A point
+probe behind the slab and a line probe across the channel.
 
-Claims: the disordered slab's transmission is under a quarter of the
-crystal's; the log-transmission falls roughly linearly with depth over three
-and five rows. Medium risk: the localization length may not be short on fifty
-rods; exploration decides.
+The name changed: a slab one unit deep with fifty rods cannot tell Anderson
+localization from the scattering that leads to it, and the plan's claims,
+transmission against the crystal's and the log-transmission against depth,
+measure extinction, which falls exponentially in any disordered medium.
+
+Explored, against the empty channel: at 2.5 Hz the ordered rods pass 80%,
+the random ones 11.6% of the power, and the plane wave, from the phasor
+averaged across the channel, 0.6% (13.5% and 1.0% at edge 0.05; 12.3% and
+1.7% at 24 s). At 1 Hz, long waves beside the rods, the random slab passes
+82%, 78% as the plane wave; in the crystal's gap at 2 Hz it passes 2.4%
+where the crystal passes 0.1%. The depth series failed to mesh: the first
+0.6 of the random slab, 35 rods, stalls the mesher ("topology ear clipping
+stalled"), as the axis-aligned square rods did in scene 13. Reported, not
+fixed.
+
+Claims at edge 0.08, 12 s from rest, at 2.5 Hz:
+
+- The random rods pass under a quarter of what the ordered ones do (15%).
+- Of what they pass, under a quarter is still the plane wave (5%).
 
 ### 25. Skin depth
 

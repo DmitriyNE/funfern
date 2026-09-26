@@ -236,6 +236,15 @@ pub fn catalog() -> &'static [TopologyExample] {
                  off and the lobes fall.",
                 drum(),
             ),
+            example(
+                "Disordered crystal",
+                "The photonic crystal's fifty rods scattered at random, a fixed seed, and lit at \
+                 2.5 Hz, where the ordered crystal lets 80% of the power through: scattered from \
+                 rod to rod, about an eighth gets through, nearly all of it thrown off the \
+                 straight path. A slab this thin cannot show Anderson localization itself; this \
+                 is the scattering that leads to it.",
+                disordered_crystal(),
+            ),
         ]
     })
 }
@@ -2726,13 +2735,101 @@ fn drum_with(frequency: f64) -> TopologyDocument {
     document
 }
 
+/// The seed of the disordered crystal's rods.
+const DISORDER_SEED: u64 = 0x5eed_2026_0926;
+/// How close two rods' centres may come: nearer, the gap between them
+/// forces elements, and a time step, far below the rest of the scene's.
+const DISORDER_SPACING: f64 = 0.14;
+
+/// Fifty rod centres drawn at random, with a fixed seed, over the photonic
+/// crystal's slab, `x` from −0.5 to 0.5, kept `DISORDER_SPACING` apart and
+/// clear of the channel's walls.
+fn disordered_sites() -> Vec<Point2> {
+    let mut state = DISORDER_SEED;
+    let mut next = move || {
+        // xorshift64*
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        (state.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut sites: Vec<Point2> = vec![];
+    while sites.len() < 50 {
+        let candidate = Point2::new(-0.45 + 0.9 * next(), -0.9 + 1.8 * next());
+        if sites
+            .iter()
+            .all(|site| (*site - candidate).norm() >= DISORDER_SPACING)
+        {
+            sites.push(candidate);
+        }
+    }
+    sites
+}
+
+/// The photonic crystal's pass frequency above its gap, where the ordered
+/// crystal lets 80% of the power through.
+const DISORDER_HZ: f64 = 2.5;
+
+fn disordered_crystal() -> TopologyDocument {
+    rods_with(&disordered_sites())
+}
+
+/// The photonic crystal's channel and launcher at 2.5 Hz with its ceramic
+/// rods at `sites`. Scattered from rod to rod, a wave through fifty rods at
+/// random mostly turns back, and what gets through has been thrown off the
+/// straight path. A point probe and a line probe across the channel read
+/// what gets through.
+fn rods_with(sites: &[Point2]) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    builder.launcher(-0.85, DISORDER_HZ, 40.0);
+    builder.scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Ceramic".into(),
+        mass_density: ScalarField::constant(CRYSTAL_ROD_PERMITTIVITY),
+        color: [66, 105, 151],
+        ..Material::default_medium()
+    });
+    for site in sites {
+        builder.subdomain(
+            octagonal_rod(*site, CRYSTAL_ROD_FRACTION * CRYSTAL_PITCH),
+            MaterialId(2),
+            MaterialFrame::world(),
+        );
+    }
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Behind the slab".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(Point2::new(0.75, 0.0)),
+    });
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "Across the channel".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Segment {
+            start: Point2::new(0.75, -0.95),
+            end: Point2::new(0.75, 0.95),
+            preset: ProbeSamplingPreset::Medium,
+        },
+    });
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 31);
+        assert_eq!(catalog().len(), 32);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -4886,5 +4983,55 @@ mod tests {
                 "{offset:+} Hz off the lobes are {off:.4} against {lobes:.4}"
             );
         }
+    }
+
+    /// The disordered-crystal claims, at edge 0.08, 12 s from rest at 2.5 Hz,
+    /// against the empty channel: the power through a cut across the channel
+    /// behind the slab, and the plane wave's share of it, from the phasor
+    /// averaged across the channel. The ordered crystal passes 80%; the same
+    /// rods at random pass under a quarter of that (0.116, 15% of it; 13.5%
+    /// at edge 0.05, 12.3% at 24 s), and of what they pass under a quarter is
+    /// still the plane wave (5%; 7% and 14%).
+    #[test]
+    fn a_disordered_crystal_scatters_away_what_its_order_passes() {
+        let through = |sites: &[Point2]| {
+            let scene = Harmonic::run(&rods_with(sites), 0.08, 12.0, DISORDER_HZ, 4.0);
+            let (re, im) = (0..80)
+                .map(|index| {
+                    scene.interpolated(Point2::new(0.75, -1.0 + 2.0 * (index as f64 + 0.5) / 80.0))
+                })
+                .fold((0.0, 0.0), |sum, (a, b)| (sum.0 + a, sum.1 + b));
+            let power = scene.power_through(
+                Point2::new(0.75, -0.995),
+                Point2::new(0.75, 0.995),
+                Point2::new(1.0, 0.0),
+                400,
+            );
+            (power, (re * re + im * im) / 6400.0)
+        };
+        let lattice = (0..50)
+            .map(|index| {
+                Point2::new(
+                    ((index / 10) as f64 - 2.0) * CRYSTAL_PITCH,
+                    -1.0 + ((index % 10) as f64 + 0.5) * CRYSTAL_PITCH,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (empty, empty_plane) = through(&[]);
+        let (ordered, _) = through(&lattice);
+        let (random, random_plane) = through(&disordered_sites());
+        assert!(
+            random < 0.25 * ordered,
+            "at random the rods pass {:.3} of the empty channel, in order {:.3}",
+            random / empty,
+            ordered / empty
+        );
+        // The plane wave carries power in proportion to its squared
+        // amplitude; the empty channel's is the plane wave's own.
+        let plane_share = (random_plane / empty_plane) / (random / empty);
+        assert!(
+            plane_share < 0.25,
+            "the plane wave is {plane_share:.3} of what passes"
+        );
     }
 }
