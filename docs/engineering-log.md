@@ -13795,3 +13795,35 @@ meshes on the CI runner (AMD EPYC, glibc).
   (printed, not judged) 5.4e-6 and 5.4e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Sources switch on as a cosine
+
+- Found in the Doppler mirror: a harmonic source switched on as a sine
+  leaves the field a mean velocity of `amplitude·cos(phase)/ω`. For the
+  gallery's plane-wave launcher in a reflecting channel that is a static
+  offset as large as the wave (0.191 beside a 0.19 carrier, the same at
+  every probe), because a constant satisfies the outgoing walls. The field
+  view of every channel scene oscillated about it, and a moving grating
+  turned it into lines at 2 and 4 Hz.
+- The new point source already started at a quarter turn, with the reason
+  beside it. That reason is now `SWITCH_ON_PHASE`'s doc comment in
+  `wave.rs`, used by the point source's default, by the materials panel's
+  default for a new volume source (at the user's request), and by the
+  gallery's `launcher`. Phases already in documents are theirs and
+  unchanged.
+- Every launcher scene's claims were measured again. Most moved only in the
+  third digit: disordered crystal 0.116 → 0.118 (plane 0.052 → 0.057),
+  Talbot 3.89/3.55/1.71 → 3.91/3.49/1.74, skin depth decay 14.83 → 14.81,
+  plasma mirror wall 0.290 → 0.289, rod crystal 0.0007/0.999/0.791 →
+  0.0008/0.996/0.792. Zone plate, plasma skin and Doppler were unchanged.
+  The soliton, rid of the switch-on transient, holds its width better: exit
+  ratio 0.49 → 0.47, strong widening 9% → 2%, weak 55% → 53%. The tests'
+  doc comments and the gallery plan's claim lists carry the new numbers;
+  exploration notes keep the sine-start values.
+- The Doppler claim test now also asserts the channel's static field is
+  under a thousandth of the carrier at both probes, in both runs.
+- **Device:** `canonical_gpu_long_run` at 400 and 1000 steps for all nine
+  launcher scenes, largest Q 2.1e-5 (the soliton at 1000), all inside the
+  Stage 0 bound.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

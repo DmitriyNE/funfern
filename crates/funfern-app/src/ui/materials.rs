@@ -292,7 +292,9 @@ impl Playground {
                 enabled: false,
                 profile: ScalarField::constant(1.0),
                 parameters: vec![],
-                signal: TimeSignal::harmonic(0.0, 12.0, 3.0, 0.0),
+                // Switched on as a cosine, as a new point source is; see
+                // `SWITCH_ON_PHASE`.
+                signal: TimeSignal::harmonic(0.0, 12.0, 3.0, SWITCH_ON_PHASE),
             });
             let mut source_changed = false;
             ui.horizontal(|ui| {

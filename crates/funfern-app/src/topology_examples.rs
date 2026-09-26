@@ -642,6 +642,9 @@ impl Builder {
 
     /// A plane-wave launcher: a thin strip at `x` across the whole height,
     /// radiating both ways, of the background material so it is transparent.
+    /// It switches on as a cosine: started on a sine, its plane wave carries
+    /// a static part as large as itself, which a channel keeps (see
+    /// `SWITCH_ON_PHASE`).
     fn launcher(&mut self, x: f64, frequency: f64, amplitude: f64) -> RegionId {
         let background = self.scene.regions[0].material;
         let region = self.strip(x - 0.03, x + 0.03, background);
@@ -650,7 +653,7 @@ impl Builder {
             enabled: true,
             profile: ScalarField::constant(1.0),
             parameters: vec![],
-            signal: TimeSignal::harmonic(0.0, amplitude, frequency, 0.0),
+            signal: TimeSignal::harmonic(0.0, amplitude, frequency, SWITCH_ON_PHASE),
         });
         region
     }
@@ -1340,13 +1343,6 @@ fn doppler_mirror_with(pump_hz: f64) -> TopologyDocument {
     };
     builder.scene.outer_boundaries = channel();
     builder.launcher(-0.85, DOPPLER_HZ, 40.0);
-    // Started on a sine, the launcher's plane wave carries a static part as
-    // large as the wave, which the channel keeps, and the grating turns it
-    // into lines at 2 and 4 Hz; started on a cosine it carries none.
-    *builder.scene.volume_sources[0]
-        .signal
-        .harmonic_parameters_mut()
-        .3 = std::f64::consts::FRAC_PI_2;
     // The background's floor anchor moves beyond the slab, which crosses
     // the centre where it sat.
     builder.scene.face_assignments[0].anchor = FaceAnchor::Outer {
@@ -3633,9 +3629,9 @@ mod tests {
 
     /// The spatial soliton's claims, against the same beam at a hundredth of
     /// the strength, which the slab does not see: at the far face the strong
-    /// beam is under 0.6 of the weak one's width (0.49); and across the
-    /// slab's second half it widens by under a fifth (9%), where the weak
-    /// beam widens by over 40% (55%), so it is held, not focused.
+    /// beam is under 0.6 of the weak one's width (0.47); and across the
+    /// slab's second half it widens by under a fifth (2%), where the weak
+    /// beam widens by over 40% (53%), so it is held, not focused.
     #[test]
     fn a_strong_beam_holds_its_width_where_a_weak_one_spreads() {
         let widths = |amplitude| {
@@ -3667,7 +3663,20 @@ mod tests {
                 &[DOPPLER_FRONT, DOPPLER_BEHIND],
             );
             let spectrum = |series: &Vec<f64>| {
-                [1.0, 2.0, 3.0, 4.0, 5.0].map(|n| amplitude_at(series, dt, n * DOPPLER_HZ, 4.0 * n))
+                let window = &series[series.len() - (4.0 / dt).round() as usize..];
+                let mean = window.iter().sum::<f64>() / window.len() as f64;
+                let lines = [1.0, 2.0, 3.0, 4.0, 5.0]
+                    .map(|n| amplitude_at(series, dt, n * DOPPLER_HZ, 4.0 * n));
+                // The launcher switches on as a cosine, so the channel holds
+                // no static field; on a sine it held one as large as the wave
+                // (0.191 against 0.19), which the grating made into 2 and 4 Hz
+                // lines.
+                std::assert!(
+                    mean.abs() < 1e-3 * lines[0],
+                    "a static field of {mean:.4} beside a carrier of {:.4}",
+                    lines[0]
+                );
+                lines
             };
             [spectrum(&series[0]), spectrum(&series[1])]
         };
@@ -4982,7 +4991,7 @@ mod tests {
     /// wave: the phasor averaged across the channel 0.25 behind the last
     /// column, where every other diffraction order has died, against the
     /// empty channel. In the gap, at 1.85 Hz, five columns pass under 1% of
-    /// the power (0.07%); below it, at 1 Hz, more than 90% (99.9%); above
+    /// the power (0.08%); below it, at 1 Hz, more than 90% (99.6%); above
     /// it, at 2.5 Hz, more than half (79%). At edge 0.05 the three are 0.08%,
     /// 99.5% and 79%.
     #[test]
@@ -5348,7 +5357,7 @@ mod tests {
     /// The Talbot claims, at edge 0.08, 8 s from rest at 4 Hz, with `|U|` at
     /// the slit centres (±0.2, ±0.6) and the bar centres (0, ±0.4). Halfway to
     /// the Talbot distance the bars are more than 2.5× the slits (3.9×); at
-    /// the Talbot distance the slits are more than 2.5× the bars (3.6×), and
+    /// the Talbot distance the slits are more than 2.5× the bars (3.5×), and
     /// that image is more than 1.5× as sharp as at the paraxial `2a²/λ`
     /// (1.7×). At edge 0.05: 4.0×, 3.5×, 1.7×.
     #[test]
@@ -5447,9 +5456,9 @@ mod tests {
     /// against the empty channel: the power through a cut across the channel
     /// behind the slab, and the plane wave's share of it, from the phasor
     /// averaged across the channel. The ordered crystal passes 80%; the same
-    /// rods at random pass under a quarter of that (0.116, 15% of it; 13.5%
+    /// rods at random pass under a quarter of that (0.118, 15% of it; 13.5%
     /// at edge 0.05, 12.3% at 24 s), and of what they pass under a quarter is
-    /// still the plane wave (5%; 7% and 14%).
+    /// still the plane wave (6%; 7% and 14%).
     #[test]
     fn a_disordered_crystal_scatters_away_what_its_order_passes() {
         let through = |sites: &[Point2]| {
@@ -5496,8 +5505,8 @@ mod tests {
     /// The skin-depth claims, at edge 0.08, 8 s from rest at 3 Hz, from the
     /// phasor along the slab's front, 0.02 to 0.18 in, before its back face's
     /// reflection counts: the slope of `ln|U|` is `Im k` of
-    /// `k = (ω/c)√(1 − iγ/ω)` within 3% (14.83 against 14.82), and that of the
-    /// phase `Re k` within 3% (23.90 against 23.98); edges 0.05 and 0.04 agree
+    /// `k = (ω/c)√(1 − iγ/ω)` within 3% (14.81 against 14.82), and that of the
+    /// phase `Re k` within 3% (23.88 against 23.98); edges 0.05 and 0.04 agree
     /// within 0.4%. The good conductor's `√(ωγ/2) = 18.85` is more than 15%
     /// off the measured decay (21%).
     #[test]

@@ -432,6 +432,20 @@ pub enum TimeSignal {
     },
 }
 
+/// The phase a new harmonic source starts at: a quarter turn, so it switches
+/// on as a cosine. Switching a sinusoid on at t = 0 leaves the field a mean
+/// velocity of `amplitude * cos(phase) / omega`, because that is what the
+/// forcing's running integral keeps. In an open domain it drains through the
+/// boundary. A region sealed by reflecting walls has nowhere to put it, so
+/// its level rises for as long as the run lasts; a channel between
+/// reflecting sides keeps it as a static offset, which for a plane-wave
+/// strip is as large as the wave itself, and anything that mixes
+/// frequencies (a moving grating, a nonlinear medium) turns that offset into
+/// lines of its own. A cosine start carries no such impulse and looks the
+/// same. Any other phase the user picks does carry one, and that is theirs
+/// to choose.
+pub const SWITCH_ON_PHASE: f64 = std::f64::consts::FRAC_PI_2;
+
 impl TimeSignal {
     pub const ZERO: Self = Self::Harmonic {
         offset: 0.0,
@@ -595,15 +609,7 @@ impl Default for PointSource {
             position: Point2::new(-0.45, 0.0),
             width: 0.06,
             region: BACKGROUND_REGION,
-            // A quarter turn, not zero. Switching a sinusoid on at t = 0 leaves
-            // the field a mean velocity of `amplitude * cos(phase) / omega`,
-            // because that is what the forcing's running integral keeps. In an
-            // open domain it drains through the boundary; a region sealed by
-            // reflecting walls has nowhere to put it, so its level rises without
-            // bound for as long as the run lasts. A cosine start carries no such
-            // impulse and looks the same. Any other phase the user picks does
-            // carry one, and that is theirs to choose.
-            signal: TimeSignal::harmonic(0.0, 18.0, 2.5, std::f64::consts::FRAC_PI_2),
+            signal: TimeSignal::harmonic(0.0, 18.0, 2.5, SWITCH_ON_PHASE),
         }
     }
 }

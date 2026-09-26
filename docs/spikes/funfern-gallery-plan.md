@@ -417,8 +417,8 @@ by under 1.5 points. The scene runs at 1.85 Hz, mid-gap.
 Claims at edge 0.08, from the phasor averaged across the channel 0.25
 behind the last column, against the empty channel:
 
-- In the gap, at 1.85 Hz, five columns pass under 1% of the power (0.07%).
-- Below it, at 1 Hz, more than 90% (99.9%).
+- In the gap, at 1.85 Hz, five columns pass under 1% of the power (0.08%).
+- Below it, at 1 Hz, more than 90% (99.6%).
 - Above it, at 2.5 Hz, more than half (79%).
 
 The Bragg-stack fallback was not needed.
@@ -691,7 +691,7 @@ Claims at edge 0.08, 8 s from rest:
 
 - Halfway to the Talbot distance the bars are more than 2.5× the slits
   (3.9×).
-- At the Talbot distance the slits are more than 2.5× the bars (3.6×), and
+- At the Talbot distance the slits are more than 2.5× the bars (3.5×), and
   more than 1.5× the contrast at the paraxial distance (1.7×).
 
 ### 23. Drum modes
@@ -748,7 +748,7 @@ fixed.
 Claims at edge 0.08, 12 s from rest, at 2.5 Hz:
 
 - The random rods pass under a quarter of what the ordered ones do (15%).
-- Of what they pass, under a quarter is still the plane wave (5%).
+- Of what they pass, under a quarter is still the plane wave (6%).
 
 ### 25. Skin depth
 
@@ -769,8 +769,8 @@ field gets through.
 
 Claims at edge 0.08, 8 s from rest:
 
-- The decay constant is `Im k` within 3% (14.83 against 14.82).
-- The phase runs at `Re k` within 3% (23.90 against 23.98).
+- The decay constant is `Im k` within 3% (14.81 against 14.82).
+- The phase runs at `Re k` within 3% (23.88 against 23.98).
 - The good conductor's `√(ωγ/2)` is more than 15% off the measured decay
   (21%).
 
@@ -834,9 +834,9 @@ steps), where the Kerr slab keeps 4.8e-5.
 Claims at edge 0.08, 3 s from rest, against the weak beam:
 
 - At the far face the strong beam is under 0.6 of the weak one's width
-  (0.49).
+  (0.47).
 - Across the slab's second half the strong beam widens by under a fifth
-  (9%) and the weak one by over 40% (55%).
+  (2%) and the weak one by over 40% (53%).
 
 ### 27. Doppler mirror
 
@@ -851,12 +851,15 @@ phase-matched. At 1 Hz the grating's period 0.25 and the 3 Hz wavelength
 beyond the slab, which crosses the centre. Probes: points in front of the
 slab (−0.7, 0.3) and behind it (0.9, 0.3).
 
-The launcher starts on a cosine. Started on a sine, as every other
-launcher is, its plane wave carries a static part as large as the wave
-(0.191 at every probe), which a channel keeps because a constant satisfies
-its outgoing walls, and the grating turned it into lines at 2 and 4 Hz
-(0.19 and 0.014 of the carrier). A cosine start leaves 4e-5 and removes
-both, with the odd lines unchanged.
+The launcher starts on a cosine, as every launcher now does. Started on a
+sine, as they all did before this scene, its plane wave carries a static
+part as large as the wave (0.191 at every probe), which a channel keeps
+because a constant satisfies its outgoing walls, and the grating turned it
+into lines at 2 and 4 Hz (0.19 and 0.014 of the carrier). A cosine start
+leaves 4e-5 and removes both, with the odd lines unchanged. The claims of
+the other launcher scenes above were measured again with the cosine start;
+the numbers in their claim lists are those, and their exploration notes
+keep the sine-start values.
 
 Explored at depths 0.1, 0.2 and 0.3: the 3 Hz line in front is 0.58, 1.00
 and 1.23 of the carrier; at rest 2e-4; with the grating running away 0.03.
