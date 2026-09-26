@@ -771,11 +771,7 @@ impl Playground {
                     .copied()
                     .or(state.map(|(_, target, _)| target >= 0.5));
                 ui.horizontal(|ui| {
-                    let label = if heading == Some(true) {
-                        "Switch ◂"
-                    } else {
-                        "Switch ▸"
-                    };
+                    let label = switch_label(heading);
                     if ui
                         .add_enabled(state.is_some(), egui::Button::new(label))
                         .on_hover_text(
@@ -1235,9 +1231,34 @@ fn nonlinear_strength_line(
     ))
 }
 
+/// The Switch button's label, pointing the way the ramp goes next. ⏴ and ⏵
+/// are in egui's default fonts; ◂ and ▸ were not, and drew as boxes.
+fn switch_label(heading: Option<bool>) -> &'static str {
+    if heading == Some(true) {
+        "Switch ⏴"
+    } else {
+        "Switch ⏵"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both Switch labels draw in the button font.
+    #[test]
+    fn the_switch_labels_are_in_the_fonts() {
+        let context = egui::Context::default();
+        let _ = context.run_ui(egui::RawInput::default(), |_| {});
+        let font = egui::TextStyle::Button.resolve(&context.global_style());
+        for heading in [Some(true), Some(false), None] {
+            let label = switch_label(heading);
+            assert!(
+                context.fonts_mut(|fonts| fonts.has_glyphs(&font, label)),
+                "{label}"
+            );
+        }
+    }
 
     /// Deleting a parameter removes it, in every build, and a parameter a
     /// formula uses is refused and kept.

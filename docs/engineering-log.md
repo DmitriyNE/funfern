@@ -14472,3 +14472,20 @@ meshes on the CI runner (AMD EPYC, glibc).
   running.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The Switch button's arrows are in the fonts
+
+- The materials panel's Switch button read "Switch ◂" or "Switch ▸", and
+  neither arrow is in egui's default fonts, so both drew as boxes; found
+  on 26 September with the scene card's glyphs and reported then. They
+  are ⏴ and ⏵ now, the glyphs the card and the top bar use, through
+  `switch_label`. Test: `the_switch_labels_are_in_the_fonts`.
+- **Found while checking, reported only:** every non-ASCII character in
+  the UI's string literals was tried against both font families. Also
+  missing in both: ḡ, ″, ●, →, ′, ṙ and the combining diaeresis of r̈; and
+  ⚠ in the proportional family (the monospace one has it). They sit in
+  the Laws help (`FORMULA_LAWS`, drawn in monospace), the REC label, the
+  step-ceiling line and the energy readout, as text rather than buttons.
+  Left as they are.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
