@@ -3470,6 +3470,142 @@ mod tests {
         }
     }
 
+    /// Diagnostic twin of `moving_a_welded_baffle_repairs_by_carving`: prints,
+    /// per move, whether it carved, a digest of the mesh, and its smallest
+    /// angle, so a platform where the test fails can be compared move by move.
+    #[test]
+    #[ignore]
+    fn diagnose_welded_baffle_carve() {
+        let digest = |mesh: &TriMesh| {
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            let mut mix = |value: u64| {
+                for byte in value.to_le_bytes() {
+                    hash ^= byte as u64;
+                    hash = hash.wrapping_mul(0x0100_0000_01b3);
+                }
+            };
+            for vertex in &mesh.vertices {
+                mix(vertex.point.x.to_bits());
+                mix(vertex.point.y.to_bits());
+            }
+            for triangle in &mesh.triangles {
+                for index in triangle.vertices {
+                    mix(index as u64);
+                }
+            }
+            hash
+        };
+        let smallest = |mesh: &TriMesh| {
+            mesh.triangles
+                .iter()
+                .flat_map(|triangle| {
+                    let p = triangle.vertices.map(|index| mesh.vertices[index].point);
+                    (0..3).map(move |corner| {
+                        let (a, b, c) = (p[corner], p[(corner + 1) % 3], p[(corner + 2) % 3]);
+                        let (u, v) = (b - a, c - a);
+                        (u.dot(v) / (u.norm() * v.norm()))
+                            .clamp(-1.0, 1.0)
+                            .acos()
+                            .to_degrees()
+                    })
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        eprintln!(
+            "libm: tan(10deg) {:016x} atan2(0.3,0.7) {:016x} acos(0.2) {:016x} hypot(0.3,0.4) {:016x} sin(1) {:016x}",
+            10f64.to_radians().tan().to_bits(),
+            0.3f64.atan2(0.7).to_bits(),
+            0.2f64.acos().to_bits(),
+            0.3f64.hypot(0.4).to_bits(),
+            1f64.sin().to_bits()
+        );
+        for count in [1, 2] {
+            let mut editor = TopologyEditor::default();
+            let mut curves = vec![];
+            for (index, (from, to, side)) in [
+                (0.9, 0.25, OuterSide::Top),
+                (-0.9, -0.25, OuterSide::Bottom),
+            ]
+            .into_iter()
+            .take(count)
+            .enumerate()
+            {
+                let curve = editor
+                    .create_open_curve(
+                        OpenCubicSpline::polyline(vec![
+                            Point2::new(0.0, from),
+                            Point2::new(0.0, to),
+                        ])
+                        .unwrap(),
+                        OpenCurvePurpose::BoundaryBaffle,
+                        None,
+                        None,
+                    )
+                    .unwrap()
+                    .curve;
+                settle(&mut editor);
+                editor
+                    .attach_endpoint(
+                        curve,
+                        0,
+                        TopologyAttachment::Boundary(FaceAnchor::Outer {
+                            side,
+                            fraction: 0.5,
+                        }),
+                    )
+                    .unwrap();
+                settle(&mut editor);
+                curves.push((index, curve));
+            }
+            let mut runtime = TopologyRuntime::default();
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            prepare(&mut runtime).unwrap();
+            let first = runtime.commit_ready(token).unwrap();
+            eprintln!(
+                "count {count} start: vertices {} triangles {} digest {:016x} smallest {:.4}",
+                first.mesh.vertices.len(),
+                first.mesh.triangles.len(),
+                digest(&first.mesh),
+                smallest(&first.mesh)
+            );
+            let (_, curve) = curves[0];
+            for step in 1..=6 {
+                editor
+                    .set_control(curve, 3, Point2::new(0.03 * step as f64, 0.25))
+                    .unwrap();
+                settle(&mut editor);
+                let token = runtime
+                    .request(
+                        editor.revision,
+                        &editor.document,
+                        editor.compiled_accepted.clone(),
+                        options(),
+                        false,
+                    )
+                    .unwrap();
+                prepare(&mut runtime).unwrap();
+                let moved = runtime.commit_ready(token).unwrap();
+                eprintln!(
+                    "count {count} move {step}: carved {} vertices {} triangles {} digest {:016x} smallest {:.4} fallback {:?}",
+                    moved.carve.is_some(),
+                    moved.mesh.vertices.len(),
+                    moved.mesh.triangles.len(),
+                    digest(&moved.mesh),
+                    smallest(&moved.mesh),
+                    moved.repair_fallback
+                );
+            }
+        }
+    }
+
     /// Adaptation checks every constrained edge against the plan it came from,
     /// so a chain the carve recovered has to carry the same lineage a rebuild
     /// would have given it: its interval endpoints hold their traces, and the
