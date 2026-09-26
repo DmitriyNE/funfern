@@ -14357,3 +14357,39 @@ meshes on the CI runner (AMD EPYC, glibc).
   🖼 Examples ☰ + on the left, ⏸ ⏮ … on the right.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The GRIN collimator becomes a glass rod (E_z skin)
+
+- The last optics scene in the Mechanical skin, as filed after the planned
+  scenes. It is now glass in the E_z skin, `ε = n²` and `μ = 1`, with the
+  same index `n = 1 + dn·max(0, 1 − (y/H)²)`, so the paraxial pitch (2.18)
+  and the rod's length (0.544) are unchanged. In E_z the field obeys the
+  Helmholtz equation in `n` itself, so the pitch holds as written; in H_z
+  the gradient of `1/ε` would add a term. The faces are no longer impedance
+  matched and reflect as glass does, about 5% on the axis. The scene also
+  shows the power-flow arrows, as the other lenses do, and says it is glass.
+- **Measured** at edge 0.08, the share of a cut's power across the whole
+  domain height lying within the aperture; edge 0.06 agrees within 0.016
+  everywhere:
+
+  | x | 0.0 | 0.2 | 0.45 | 0.6 | 0.75 | 0.9 |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | rod | 0.710 | 0.705 | 0.739 | 0.764 | 0.776 | 0.779 |
+  | bare source | 0.458 | 0.430 | 0.411 | 0.402 | 0.386 | 0.374 |
+
+  The Mechanical rod kept 0.83 at 0.75.
+- **The width claim went.** The test asserted the half-amplitude width held
+  within 25% from x = 0.2 to 0.75, and in E_z it measured 0.75 then 0.55.
+  The profile has a shoulder either side near half the peak, in both skins:
+  at x = 0.2 it sat at 0.50–0.55 in Mechanical (width 0.60, passing) and at
+  0.58 in E_z (0.75). At x = 0, 0.1, 0.2, 0.3, 0.45, 0.6, 0.75 and 0.9 the
+  width reads 0.65, 0.70, 0.75, 0.70, 0.45, 0.50, 0.55 and 0.65: it measures
+  where a shoulder falls, not spreading. The test now claims what the share shows: the rod's share at
+  0.75 is over 0.7 and no less than at 0.2, and the bare source's is under
+  0.5 and falls.
+  Test: `the_grin_collimator_sends_out_a_beam_that_does_not_spread`.
+- **Device:** `canonical_gpu_long_run`, 8,511 DOFs, dt 6.49e-3: Q 1.4e-6,
+  b 1.5e-6 at 400 steps; Q 3.3e-6, b 2.6e-6 at 1000, inside the Stage 0
+  bound.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

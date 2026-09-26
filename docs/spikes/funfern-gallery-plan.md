@@ -93,16 +93,23 @@ base leaves the other base as a collimated beam. The profile changes from
 `smoothstep` to parabolic, `n = 1 + dn·max(0, 1 − (y/H)²)`, because the
 smoothstep profile is flat to fourth order on the axis and has no paraxial
 pitch. With `H = 0.3` and `dn = 0.6` the paraxial pitch is
-`2πH·√((1 + dn)/(2dn)) = 2.18`, so the rod is 0.55 long: x from −0.55 to 0,
-y from −0.3 to 0.3, rectangular. The source sits inside the rod on the
-entrance base at (−0.54, 0), 4 Hz. Mass and stiffness stay reciprocal so the
-impedance is matched, as today.
+`2πH·√((1 + dn)/(2dn)) = 2.18`, so the rod is 0.544 long: x from −0.75 to
+−0.206, y from −0.3 to 0.3, rectangular. The source sits inside the rod on
+the entrance base at (−0.74, 0), 4 Hz.
 
-Claims: the phase of the field at 4 Hz along x = 0.05 is flat to λ/8 over
-the central 70% of the aperture; at x = 0.6 at least 70% of the RMS power
-across the domain height lies within the aperture, against under 35% for the
-bare source. Rays far from the axis have a shorter pitch, which is why the
-claim is on the central 70%.
+It was built in the Mechanical skin with reciprocal mass and stiffness, so
+the impedance was matched. On 27 September it became glass in the E_z skin,
+`ε = n²` and `μ = 1`, where the field obeys the Helmholtz equation in `n`
+itself and the pitch holds as written; its faces reflect as glass does,
+about 5% on the axis.
+
+Claims, as built (edge 0.08, on a cut across the whole domain height): at
+x = 0.75 the rod's beam keeps 0.78 of its power within the aperture, up from
+0.71 at x = 0.2, where the bare source keeps 0.39, down from 0.43. Not
+claimed: a flat phase at the exit face, where the near field still holds the
+reflected and wide-angle waves, and a half-amplitude width, which the
+profile's shoulders near half the peak move between 0.45 and 0.75 along the
+beam.
 
 ### 4. Luneburg lens, angled illumination
 
@@ -943,11 +950,10 @@ gallery probe opens on what its claim reads, one or two plots
   the mean energy density of the acoustic gallery's two disks.
 - **Far fields** (double slit, phased array): the polar patterns alone.
 
-Revisit after the planned scenes, at the user's request: the GRIN collimator
-(scene 3) runs in the Mechanical skin and should run in an EM one, as the
-other optics scenes do. In TM that means ε = μ = n for its impedance-matched
-profile, not the Mechanical `1/n` stiffness (see scene 11); its quarter-pitch
-length and claims are re-measured then.
+Revisited after the planned scenes, at the user's request: the GRIN
+collimator (scene 3) ran in the Mechanical skin and moved to the E_z skin as
+glass, `μ = 1`, on 27 September. Its length is unchanged and its claims were
+measured again (see scene 3).
 
 Proposed by the user on 25 September, after the planned scenes: a plasmonic
 guide. To scope first: a surface plasmon on a flat interface needs a
