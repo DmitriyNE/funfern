@@ -42,6 +42,9 @@ pub struct CarveReport {
     pub rebuilt_curves: usize,
     /// Cavity polygons that were triangulated.
     pub cavities: usize,
+    /// Refills refused for an element under the quality floor and carved
+    /// again with the cavity grown by a ring.
+    pub quality_retries: usize,
 }
 
 /// Everything about an atom the mesh's boundary can observe: its label and
@@ -419,7 +422,21 @@ pub struct TopologyCarveJob {
     slit_runs: Vec<(RegionId, Vec<PlannedFaceStep>)>,
     report: CarveReport,
     phase: CarvePhase,
+    /// The extra rings this attempt grows the cavity by.
+    margin: usize,
 }
+
+/// How many extra rings a carve may grow its cavity by, one per attempt: a
+/// refill refused for an element under the quality floor is carved again a
+/// ring wider, and past this the carve gives up and the full rebuild takes
+/// over. Beside the cavity's rim, whose edges are frozen, refinement cannot
+/// fix everything, and a refill lands above or below the floor on the last
+/// bits of the geometry; another cavity frees the rim edges that pinned it.
+/// Wider is not always better, so every margin is tried in turn: moving a
+/// welded baffle in 416 carves put fifteen first refills under the floor,
+/// and one to five extra rings carved every one of them, where jumping from
+/// none to two to five left four.
+const MAX_CARVE_MARGIN: usize = 6;
 
 impl TopologyCarveJob {
     /// Prepares a repair of `previous`, a mesh of `previous_plan`, for `plan`.
@@ -436,11 +453,31 @@ impl TopologyCarveJob {
         options: MeshingOptions,
         preserve_adaptation: bool,
     ) -> Self {
-        let old_keys = previous_plan
-            .boundaries
-            .iter()
-            .map(atom_key)
-            .collect::<BTreeSet<_>>();
+        Self::with_margin(
+            previous,
+            previous_plan.boundaries.clone(),
+            plan,
+            topology,
+            mesh_revision,
+            options,
+            preserve_adaptation,
+            0,
+        )
+    }
+
+    /// A carve whose cavity grows by `margin` rings beyond the first.
+    #[allow(clippy::too_many_arguments)]
+    fn with_margin(
+        previous: Arc<TriMesh>,
+        old_atoms: Vec<PlannedBoundaryEdge>,
+        plan: TopologyMeshPlan,
+        topology: Arc<TopologySnapshot>,
+        mesh_revision: u64,
+        options: MeshingOptions,
+        preserve_adaptation: bool,
+        margin: usize,
+    ) -> Self {
+        let old_keys = old_atoms.iter().map(atom_key).collect::<BTreeSet<_>>();
         let new_keys = plan
             .boundaries
             .iter()
@@ -450,8 +487,7 @@ impl TopologyCarveJob {
             .intersection(&new_keys)
             .copied()
             .collect::<BTreeSet<_>>();
-        let rebuilt_curves = previous_plan
-            .boundaries
+        let rebuilt_curves = old_atoms
             .iter()
             .chain(&plan.boundaries)
             .filter(|atom| !kept_keys.contains(&atom_key(atom)))
@@ -459,7 +495,7 @@ impl TopologyCarveJob {
             .collect();
         Self {
             previous,
-            old_atoms: previous_plan.boundaries.clone(),
+            old_atoms,
             plan,
             topology,
             mesh_revision,
@@ -486,6 +522,7 @@ impl TopologyCarveJob {
             slit_runs: vec![],
             report: CarveReport::default(),
             phase: CarvePhase::Index(0),
+            margin,
         }
     }
 
@@ -672,13 +709,30 @@ impl TopologyCarveJob {
                     .triangles
                     .len()
                     .saturating_sub(self.report.kept_triangles);
-                verify_repair_quality(
+                match verify_repair_quality(
                     &mesh,
                     self.report.kept_triangles,
                     self.previous_worst_angle,
                     self.options,
-                )?;
-                return Ok(Some(mesh));
+                ) {
+                    Ok(()) => return Ok(Some(mesh)),
+                    Err(MeshError::DegenerateRepair { .. }) if self.margin < MAX_CARVE_MARGIN => {
+                        let retries = self.report.quality_retries + 1;
+                        *self = Self::with_margin(
+                            self.previous.clone(),
+                            self.old_atoms.clone(),
+                            self.plan.clone(),
+                            self.topology.clone(),
+                            self.mesh_revision,
+                            self.options,
+                            self.preserve_adaptation,
+                            self.margin + 1,
+                        );
+                        self.report.quality_retries = retries;
+                        CarvePhase::Index(0)
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             CarvePhase::Done => CarvePhase::Done,
         };
@@ -824,18 +878,21 @@ impl TopologyCarveJob {
             }
             // One more ring gives the cavity room: elements beside the rim
             // cannot be flipped or split across it, so the rim should not
-            // hug the new boundary.
-            let mut touched = vec![false; mesh.vertices.len()];
-            for (index, triangle) in mesh.triangles.iter().enumerate() {
-                if deleted[index] {
-                    for vertex in triangle.vertices {
-                        touched[vertex] = true;
+            // hug the new boundary. A refill refused for an element under
+            // the quality floor comes back with more rings.
+            for _ in 0..=self.margin {
+                let mut touched = vec![false; mesh.vertices.len()];
+                for (index, triangle) in mesh.triangles.iter().enumerate() {
+                    if deleted[index] {
+                        for vertex in triangle.vertices {
+                            touched[vertex] = true;
+                        }
                     }
                 }
-            }
-            for (index, triangle) in mesh.triangles.iter().enumerate() {
-                if triangle.vertices.iter().any(|vertex| touched[*vertex]) {
-                    deleted[index] = true;
+                for (index, triangle) in mesh.triangles.iter().enumerate() {
+                    if triangle.vertices.iter().any(|vertex| touched[*vertex]) {
+                        deleted[index] = true;
+                    }
                 }
             }
 
@@ -1295,17 +1352,21 @@ impl TopologyCarveJob {
             // keeps the cavity interior on the left through pinch vertices.
             let next = |from: usize, at: usize| -> Result<usize, MeshError> {
                 let incoming = point(from) - point(at);
-                let base = incoming.y.atan2(incoming.x);
                 outgoing
                     .get(&at)
                     .into_iter()
                     .flatten()
                     .map(|to| {
                         let direction = point(*to) - point(at);
-                        let mut clockwise = (base - direction.y.atan2(direction.x))
-                            .rem_euclid(std::f64::consts::TAU);
+                        // The clockwise turn from `incoming` to `direction` as
+                        // a pseudo-angle over (0, 4], taken in `incoming`'s
+                        // frame so the platform's `atan2` cannot move it by a
+                        // last bit; no turn, or a turn back, comes last.
+                        let along = incoming.dot(direction);
+                        let across = incoming.cross(direction);
+                        let mut clockwise = (-crate::pseudo_angle(along, across)).rem_euclid(4.0);
                         if clockwise <= 1.0e-12 || *to == from {
-                            clockwise = std::f64::consts::TAU;
+                            clockwise = 4.0;
                         }
                         (clockwise, *to)
                     })

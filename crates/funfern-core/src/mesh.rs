@@ -162,22 +162,9 @@ impl TriMesh {
 
     pub fn triangle_quality(&self, index: usize) -> Option<MeshQuality> {
         let triangle = self.triangles.get(index)?;
-        let points = triangle.vertices.map(|vertex| self.vertices[vertex].point);
-        let sides = [
-            (points[1] - points[2]).norm(),
-            (points[2] - points[0]).norm(),
-            (points[0] - points[1]).norm(),
-        ];
-        Some(MeshQuality {
-            minimum_angle_degrees: [
-                angle_from_sides(sides[0], sides[1], sides[2]),
-                angle_from_sides(sides[1], sides[2], sides[0]),
-                angle_from_sides(sides[2], sides[0], sides[1]),
-            ]
-            .into_iter()
-            .fold(f64::INFINITY, f64::min),
-            maximum_edge_length: sides.into_iter().fold(0.0, f64::max),
-        })
+        Some(triangle_quality_of(
+            triangle.vertices.map(|vertex| self.vertices[vertex].point),
+        ))
     }
 
     pub fn poor_triangles(&self, minimum_angle_degrees: f64) -> Vec<usize> {
@@ -1088,21 +1075,7 @@ impl MeshBuilder {
     }
 
     fn triangle_quality(&self, triangle: MeshTriangle) -> MeshQuality {
-        let points = self.triangle_points(triangle);
-        let sides = [
-            (points[1] - points[2]).norm(),
-            (points[2] - points[0]).norm(),
-            (points[0] - points[1]).norm(),
-        ];
-        let angles = [
-            angle_from_sides(sides[0], sides[1], sides[2]),
-            angle_from_sides(sides[1], sides[2], sides[0]),
-            angle_from_sides(sides[2], sides[0], sides[1]),
-        ];
-        MeshQuality {
-            minimum_angle_degrees: angles.into_iter().fold(f64::INFINITY, f64::min),
-            maximum_edge_length: sides.into_iter().fold(0.0, f64::max),
-        }
+        triangle_quality_of(self.triangle_points(triangle))
     }
 
     fn quality(&self) -> MeshQuality {
@@ -1441,8 +1414,9 @@ impl MeshBuilder {
             .chain(self.internal_trace_vertices.iter().copied())
             .collect::<BTreeSet<_>>();
         let normal = Point2::new(-edge.y, edge.x) / length;
-        let desired_altitude = (length * self.options.minimum_angle_degrees.to_radians().tan())
-            .min(self.options.target_edge_length * 0.3);
+        let desired_altitude = (length
+            * crate::portable_tan(self.options.minimum_angle_degrees.to_radians()))
+        .min(self.options.target_edge_length * 0.3);
 
         for (_, vertex) in adjacent {
             if protected.contains(&vertex) || self.vertices[vertex].boundary.is_some() {
@@ -2115,11 +2089,34 @@ fn resample_internal_boundary(
     Ok(result)
 }
 
-fn angle_from_sides(opposite: f64, adjacent_a: f64, adjacent_b: f64) -> f64 {
+/// A triangle's smallest angle and longest side. The smallest angle is the
+/// one opposite the shortest side, so one angle is formed, by the law of
+/// cosines and the portable `acos`: refinement ranks triangles by it, and the
+/// platform's `acos`, a last bit apart between macOS and Linux, reordered
+/// that ranking and meshed the same geometry differently.
+fn triangle_quality_of(points: [Point2; 3]) -> MeshQuality {
+    let sides = [
+        (points[1] - points[2]).norm(),
+        (points[2] - points[0]).norm(),
+        (points[0] - points[1]).norm(),
+    ];
+    let shortest = (0..3)
+        .min_by(|a, b| sides[*a].total_cmp(&sides[*b]))
+        .expect("three sides");
+    let (opposite, adjacent_a, adjacent_b) = (
+        sides[shortest],
+        sides[(shortest + 1) % 3],
+        sides[(shortest + 2) % 3],
+    );
     let cosine = ((adjacent_a * adjacent_a + adjacent_b * adjacent_b - opposite * opposite)
         / (2.0 * adjacent_a * adjacent_b))
         .clamp(-1.0, 1.0);
-    cosine.acos().to_degrees()
+    let angle = crate::portable_acos(cosine).to_degrees();
+    MeshQuality {
+        // A triangle with every corner at one point has no angle to rank.
+        minimum_angle_degrees: if angle.is_nan() { f64::INFINITY } else { angle },
+        maximum_edge_length: sides.into_iter().fold(0.0, f64::max),
+    }
 }
 
 fn valid_options(options: MeshingOptions) -> bool {

@@ -1334,10 +1334,10 @@ impl GraphBuilder {
                 let origin = self.vertices[vertex].point;
                 let left_delta = self.vertices[left_target].point - origin;
                 let right_delta = self.vertices[right_target].point - origin;
-                left_delta
-                    .y
-                    .atan2(left_delta.x)
-                    .total_cmp(&right_delta.y.atan2(right_delta.x))
+                // In `atan2`'s order, by a key the platform's `atan2` cannot
+                // move by a last bit.
+                crate::pseudo_angle(left_delta.x, left_delta.y)
+                    .total_cmp(&crate::pseudo_angle(right_delta.x, right_delta.y))
             });
         }
 

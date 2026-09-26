@@ -15,8 +15,11 @@ impl Point2 {
     pub fn cross(self, b: Self) -> f64 {
         self.x * b.y - self.y * b.x
     }
+    /// `√(x² + y²)` from the four operations and `sqrt`, which IEEE 754
+    /// fixes exactly, where the platform's `hypot` is a last bit apart
+    /// between macOS and Linux; the mesher's lengths come from here.
     pub fn norm(self) -> f64 {
-        self.x.hypot(self.y)
+        (self.x * self.x + self.y * self.y).sqrt()
     }
     pub fn finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite()
@@ -757,8 +760,9 @@ impl PeriodicCubicSpline {
         Self::uniform(
             (0..8)
                 .map(|i| {
-                    let a = i as f64 * std::f64::consts::TAU / 8.0;
-                    center + Point2::new(a.cos(), a.sin()) * radius
+                    let (sin, cos) =
+                        crate::portable_sin_cos(i as f64 * std::f64::consts::TAU / 8.0);
+                    center + Point2::new(cos, sin) * radius
                 })
                 .collect(),
         )

@@ -746,6 +746,17 @@ bridge search if it is blocked. Each legalization unit checks at most one edge;
 one insertion changes at most four triangles. The synchronous `mesh_scene` drives
 the same state machine, so slice sizes do not change results.
 
+A document meshes to the same bits on every platform. Platform `libm` may round
+a transcendental function differently in the last bit (macOS and glibc on an
+FMA machine disagree on `acos(0.2)`), and the refinement queue orders its bad
+triangles by those bits, so one ulp reorders refinement and yields a different
+mesh. Every meshing decision is therefore IEEE-exact arithmetic: angles through
+`portable_acos` and `portable_tan` (the fdlibm algorithms written with `+ - * /`
+and `sqrt`), direction orderings through `pseudo_angle` (a monotone stand-in for
+`atan2` with one division), lengths as an explicit square root rather than
+`hypot`, and the built-in scenes' circles and arcs through `portable_sin_cos`.
+A pinned-digest test holds the result.
+
 The application checks a portable monotonic clock between units, targeting 2 ms
 of meshing per frame, with a ceiling of 100,000 units. This is a soft deadline:
 boundary assembly, point location, insertion checks, and domain classification
@@ -905,8 +916,11 @@ with it off the band returns to the target regardless of stale requests. A carve
 verifies its refill: an inserted element below half the mesher's minimum angle,
 or half the worst angle the repaired mesh already had, is a defect, and the carve
 fails with the count, the worst angle and its place rather than hand the solver
-a collapsed timestep; the runtime falls back to the full rebuild and the panel
-shows that message. The mesher's capacity caps bound what a repair adds, not what
+a collapsed timestep. A refill under the floor carves again one ring wider, up to
+six extra rings: the elements beside the frozen rim cannot be refined, and the
+floor sits close enough to what a narrow cavity reaches that the refill's order
+decides it. Only when the widest cavity still fails does the runtime fall back to
+the full rebuild, and the panel shows that message. The mesher's capacity caps bound what a repair adds, not what
 it inherits, since an adapted mesh may already exceed them. There is no motion
 cap and no patch cap; a
 carve that fails falls back to the full rebuild with the reason attached to the
