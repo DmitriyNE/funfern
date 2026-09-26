@@ -13518,3 +13518,33 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and 9.2e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: frustrated total internal reflection
+
+- **Scene** "Frustrated total internal reflection" (gallery item 21), the
+  catalogue's 29th: TM, the bent fiber's glass as a straight fiber along
+  `y = −0.5`, and a glass block from `x = −0.3` to the top and right walls
+  0.05 above it, its edge a wall-attached L (a free top face would turn the
+  leaked beam back). The fiber's mode is total internal reflection at 61.9°
+  with an evanescent tail `γ = 21.8`, the plan's `κ` at that angle; the
+  block frustrates it and the mode leaks out as a beam at that angle.
+  Probes: "Fiber output" and "In the block".
+- **Why not the plan's prisms:** a tilted beam here spreads over ±15°, and
+  at 45° much of it would cross below the critical angle. A point source
+  under a gap, read on an arc or as a plane-wave spectrum along a line,
+  came close at 45° (0.39 against 0.40) but moved with the mesh and the
+  line: the tunnelled field is weak beside the lateral wave, the line's
+  span and the walls.
+- **Measured** with the block's material vacuum in the control on the same
+  mesh: the fiber keeps 0.604, 0.953, 0.9965 at gaps 0.05, 0.1, 0.15 (edge
+  0.08); the leak's rate falls by 0.096 per 0.05 of gap against `e^{−2γ·0.05}
+  = 0.113` (0.105 at edge 0.05). Test:
+  `a_nearby_block_frustrates_a_fibers_total_internal_reflection` (under 70%,
+  within 30%, over 99%).
+- **Filed** in the gallery plan's "Order", at the user's request: a pass
+  over every gallery scene's view settings after the last scene.
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 1.0e-6, b 1.3e-6; at
+  1000 steps Q 3.7e-6, b 3.3e-6; at 3000 steps (printed, not judged) 2.0e-6
+  and 3.7e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

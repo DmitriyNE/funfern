@@ -211,6 +211,15 @@ pub fn catalog() -> &'static [TopologyExample] {
                  times as strongly.",
                 brewster(),
             ),
+            example(
+                "Frustrated total internal reflection",
+                "A glass fiber holds its light by total internal reflection, and outside the core \
+                 the field dies away within a few hundredths. Lower a glass block to 0.05 above it \
+                 and the reflection is frustrated: the light tunnels across the gap and leaves \
+                 into the block as a tilted beam, draining 40% of the fiber's power. Raise the \
+                 block to 0.15 and under a hundredth tunnels.",
+                tunnelling(),
+            ),
         ]
     })
 }
@@ -2448,13 +2457,140 @@ fn brewster_with(polarization: ElectromagneticPolarization, glass: bool) -> Topo
     document
 }
 
+const TUNNEL_HZ: f64 = 4.0;
+/// Where the glass block over the fiber begins.
+const TUNNEL_BLOCK: f64 = -0.3;
+/// The gallery's gap: 40% of the guided power tunnels into the block over
+/// its length, where 0.1 lets 5% through and 0.15 half a percent.
+const TUNNEL_GAP: f64 = 0.05;
+
+fn tunnelling() -> TopologyDocument {
+    tunnelling_with(TUNNEL_GAP, true)
+}
+
+/// The bent fiber's glass as a straight fiber along `y = −0.5` from wall to
+/// wall, lit by a 4 Hz source at its left end, and a glass block over it
+/// from `x = −0.3` to the top and right walls, `gap` above the fiber. The
+/// fiber's mode is light held by total internal reflection at 61.9° inside
+/// the core, its field outside falling as `e^{−γy}` with
+/// `γ = k₀√(n_eff² − 1) = 21.8`; where the block reaches into that tail the
+/// reflection is frustrated, and the mode leaks into the block as a beam at
+/// that same angle, draining at a rate that falls with the gap as `e^{−2γd}`.
+/// The block's edge is a wall-attached curve, so the beam leaves through the
+/// walls rather than being turned back by a free face. Without `glass` the
+/// block is vacuum, on the same mesh. Every wall is outgoing.
+fn tunnelling_with(gap: f64, glass: bool) -> TopologyDocument {
+    let mut builder = glass_builder();
+    builder.scene.materials.push(Material {
+        id: MaterialId(3),
+        name: "Block".into(),
+        mass_density: ScalarField::constant(if glass { CORE_PERMITTIVITY } else { 1.0 }),
+        color: [66, 105, 151],
+        ..Material::default_medium()
+    });
+    let domain = builder.scene.geometry.domain;
+    builder.level(-0.55);
+    let (top, top_span) = builder.level(-0.45);
+    let fiber = RegionId(builder.next_region);
+    builder.next_region += 1;
+    builder.scene.regions.push(Region {
+        id: fiber,
+        material: MaterialId(2),
+        frame: MaterialFrame::world(),
+    });
+    // Running towards +x, the upper level's right is the fiber below it.
+    builder.scene.face_assignments.push(AuthoredFaceAssignment {
+        anchor: FaceAnchor::Curve {
+            curve: top,
+            span: top_span,
+            side: CurveTraceSide::Right,
+            parameter: 0.5,
+        },
+        region: Some(fiber),
+    });
+    let above = RegionId(builder.next_region);
+    builder.next_region += 1;
+    builder.scene.regions.push(Region {
+        id: above,
+        material: DEFAULT_MATERIAL,
+        frame: MaterialFrame::world(),
+    });
+    builder.scene.face_assignments.push(AuthoredFaceAssignment {
+        anchor: FaceAnchor::Outer {
+            side: OuterSide::Top,
+            fraction: 0.9,
+        },
+        region: Some(above),
+    });
+    let face = -0.45 + gap;
+    let start = builder.outer_vertex(
+        OuterSide::Top,
+        (domain.max_x - TUNNEL_BLOCK) / domain.width(),
+    );
+    let end = builder.outer_vertex(OuterSide::Right, (face - domain.min_y) / domain.height());
+    let span = CurveSpanId(builder.next_span);
+    let edge = builder.open_curve(
+        OpenCubicSpline::polyline(vec![
+            Point2::new(TUNNEL_BLOCK, domain.max_y),
+            Point2::new(TUNNEL_BLOCK, face),
+            Point2::new(domain.max_x, face),
+        ])
+        .unwrap(),
+        &[SpanBehavior::Transmitting; 2],
+    );
+    let authored = builder
+        .scene
+        .geometry
+        .curves
+        .iter_mut()
+        .find(|candidate| candidate.id == edge)
+        .unwrap();
+    authored.nodes[0].vertex = Some(start);
+    authored.nodes[2].vertex = Some(end);
+    let block = RegionId(builder.next_region);
+    builder.next_region += 1;
+    builder.scene.regions.push(Region {
+        id: block,
+        material: MaterialId(3),
+        frame: MaterialFrame::world(),
+    });
+    // Running down its left edge, the block is on the curve's left.
+    builder.scene.face_assignments.push(AuthoredFaceAssignment {
+        anchor: FaceAnchor::Curve {
+            curve: edge,
+            span,
+            side: CurveTraceSide::Left,
+            parameter: 0.5 * (domain.max_y - face),
+        },
+        region: Some(block),
+    });
+    let mut document = builder.document();
+    document.model.source = PointSource {
+        region: fiber,
+        ..source(Point2::new(-0.9, -0.5), TUNNEL_HZ, 10.0, 0.03)
+    };
+    for (id, name, color, point) in [
+        (1, "Fiber output", [91, 220, 194], Point2::new(0.85, -0.5)),
+        (2, "In the block", [248, 196, 112], Point2::new(0.6, 0.0)),
+    ] {
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(id),
+            name: name.into(),
+            color,
+            enabled: true,
+            target: TopologyProbeTarget::Point(point),
+        });
+    }
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 28);
+        assert_eq!(catalog().len(), 29);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -4477,5 +4613,38 @@ mod tests {
             te(72.0),
             te(brewster)
         );
+    }
+
+    /// The frustrated-TIR claims, at edge 0.08, 8 s from rest at 4 Hz, with the
+    /// power in the fiber's mode from x = 0.6 to 0.9, under the block's far
+    /// end, against the same run with the block vacuum on the same mesh.
+    /// Over the gallery's gap of 0.05 the fiber keeps under 70% (60%). The
+    /// leak's rate, `−ln` of what it keeps, falls from a gap of 0.05 to 0.1 by
+    /// `e^{−2γ·0.05} = 0.113`, `γ = 21.8`, within 30% (0.096; 0.105 at edge
+    /// 0.05). Over 0.15 the fiber keeps more than 99% (99.65%).
+    #[test]
+    fn a_nearby_block_frustrates_a_fibers_total_internal_reflection() {
+        let kept = |gap: f64| {
+            let glass = Harmonic::run(&tunnelling_with(gap, true), 0.08, 8.0, TUNNEL_HZ, 4.0);
+            let vacuum = Harmonic::run(&tunnelling_with(gap, false), 0.08, 8.0, TUNNEL_HZ, 4.0);
+            (0..=6)
+                .map(|index| {
+                    let point = Point2::new(0.6 + 0.05 * index as f64, -0.5);
+                    let across = Point2::new(0.0, 1.0);
+                    guided_power(&glass, point, across) / guided_power(&vacuum, point, across)
+                })
+                .sum::<f64>()
+                / 7.0
+        };
+        let (close, farther, far) = (kept(TUNNEL_GAP), kept(0.1), kept(0.15));
+        assert!(close < 0.7, "over 0.05 the fiber keeps {close:.3}");
+        let gamma = std::f64::consts::TAU * TUNNEL_HZ * (1.3234_f64.powi(2) - 1.0).sqrt();
+        let expected = (-2.0 * gamma * 0.05).exp();
+        let measured = farther.ln() / close.ln();
+        assert!(
+            (measured / expected - 1.0).abs() < 0.3,
+            "the leak fell by {measured:.3}, e^(-2γ·0.05) = {expected:.3}"
+        );
+        assert!(far > 0.99, "over 0.15 the fiber keeps {far:.4}");
     }
 }

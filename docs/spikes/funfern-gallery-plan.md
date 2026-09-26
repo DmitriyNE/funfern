@@ -634,14 +634,41 @@ Claims at edge 0.08, 8 s from rest, on the arc:
 
 ### 21. Frustrated total internal reflection
 
-Mechanical. Two right prisms of `n = 1.5` with parallel hypotenuses separated
-by a gap `d`. A tilted source strip inside the first prism sends a beam at 45°
-onto the hypotenuse, past the critical angle of 41.8°; the field in the gap is
-evanescent with `κ = k₀√(n² sin²θ − 1) = 8.9`, decay length 0.11. Walls
-outgoing. The gallery ships `d = 0.1`.
+TM, not the plan's Mechanical: optics goes in an EM skin. The bent fiber's
+glass as a straight fiber along `y = −0.5` from wall to wall, lit by a
+4 Hz source at its left end, and a glass block over it from `x = −0.3` to
+the top and right walls, 0.05 above the fiber. The fiber's mode is light
+held by total internal reflection at 61.9° inside the core, its field
+outside falling as `e^{−γy}` with `γ = k₀√(n_eff² − 1) = 21.8`, the plan's
+`κ` at that angle. The block frustrates the reflection, and the mode leaks
+into it as a beam at that same angle. The block's edge is a wall-attached
+L, so the beam leaves through the walls; with a free top face it would be
+turned back by total internal reflection there. Probes on the fiber's
+output and in the block. Walls outgoing.
 
-Claim: the transmitted RMS for `d = 0.1` over `d = 0.2` is `e^{−κ·0.1} = 0.41`
-within 30%.
+Explored. The plan's prisms need a beam at one angle, and the scenes
+before this one showed a tilted beam here spreads over ±15°: at 45°, 3.2°
+past the critical angle, much of it would cross the gap below it. A point
+source in one of two glass half-planes, read on an arc or as a plane-wave
+spectrum along a line above the gap, came close near 45° (0.39 against
+the formula's 0.40) but moved with the mesh and the line: past the
+critical angle the tunnelled field is weak beside the lateral wave, the
+line's finite span and the walls. The guided mode is one angle by
+construction. With the block's material vacuum in the control, on the
+same mesh, the power the fiber keeps falls smoothly along the block: 0.604,
+0.953 and 0.9965 of the control at gaps of 0.05, 0.1 and 0.15. The leak's
+rate, `−ln` of that, falls by 0.096 and 0.072 per 0.05 of gap against
+`e^{−2γ·0.05} = 0.113`, and by 0.105 and 0.099 at edge 0.05: the coarse mesh
+under-resolves the gap's evanescent field. The gallery ships a gap of 0.05,
+where the beam into the block is plain; at 0.1 only 5% tunnels.
+
+Claims at edge 0.08, 8 s from rest, with the fiber's guided power from
+x = 0.6 to 0.9 against the vacuum block:
+
+- Over a gap of 0.05 the fiber keeps under 70% (60%).
+- The leak's rate falls from 0.05 to 0.1 by `e^{−2γ·0.05}` within 30%
+  (0.096 against 0.113).
+- Over 0.15 it keeps more than 99% (99.65%).
 
 ### 22. Talbot carpet
 
@@ -721,6 +748,12 @@ its own first run.
 
 Straight after batch E: a scene change stops the old field at once (the
 first item under "Maintenance" in `docs/plan.md`).
+
+After the last scene, at the user's request on 26 September: a pass over
+every gallery scene's view settings, so each opens showing what it is about
+(field or energy, the vector overlays, the material overlay, exposure, the
+readouts a probe opens with where that becomes storable). The toy is FEM
+and vector-valued, and the scenes should show it.
 
 Revisit after the planned scenes, at the user's request: the GRIN collimator
 (scene 3) runs in the Mechanical skin and should run in an EM one, as the
