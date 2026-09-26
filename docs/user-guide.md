@@ -22,7 +22,11 @@ running; this file covers using it.
   on its own, estimating or adapting the mesh, the same sheen runs much fainter
   over the ordinary colour. The lower-right status control shows
   FPS, solver steps per second, DOFs, mesh size, and solver dt; clicking it opens
-  the full frame, topology, mesh, handoff, and solver diagnostics. Under the frame
+  the full frame, topology, mesh, handoff, and solver diagnostics. On a
+  narrower screen that summary shortens first, to FPS, steps per second and
+  DOFs and then FPS alone; then the last message is cut and left out, and last
+  the status itself is cut, its full text on hover. A recording's indicator
+  and Stop are never cut. Under the frame
   graph, above the sections that change height, is a Log of what those sections
   said before they were overwritten - status lines, preparation and adaptation
   errors, and the reason a repair became a rebuild - which can be cleared or

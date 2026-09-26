@@ -11,6 +11,70 @@ use funfern_core::*;
 
 use super::*;
 
+/// The narrowest a message is shown at, cut; below this it is left out.
+const MESSAGE_KEEP: f32 = 60.0;
+
+/// How the status strip spends its width, measured from what it has to say.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct StatusPlan {
+    /// Which of the summary's forms, fullest first.
+    pub(super) summary: usize,
+    /// The width the status may take; it is cut to this.
+    pub(super) status: f32,
+    /// The width the message may take, or `None` to leave it out.
+    pub(super) message: Option<f32>,
+}
+
+impl StatusPlan {
+    /// `width` is the strip's; `status`, `capture` and `message` are what the
+    /// left end would take uncut, `summaries` the right end's forms, fullest
+    /// first, and every item is `spacing` apart. As the strip narrows the
+    /// summary shortens first, while that keeps the left end whole; then the
+    /// message is cut, then left out, and last the status is cut. A recording
+    /// in progress is never cut.
+    pub(super) fn new(
+        width: f32,
+        spacing: f32,
+        status: f32,
+        capture: f32,
+        message: Option<f32>,
+        summaries: &[f32],
+    ) -> Self {
+        let capture = if capture > 0.0 {
+            capture + spacing
+        } else {
+            0.0
+        };
+        let whole = status + capture + message.map_or(0.0, |message| message + spacing);
+        let summary = summaries
+            .iter()
+            .position(|summary| summary + spacing + whole <= width)
+            .unwrap_or(summaries.len() - 1);
+        let room = (width - summaries[summary] - spacing - capture).max(0.0);
+        let status = status.min(room);
+        let message = message
+            .map(|message| message.min(room - status - spacing))
+            .filter(|&message| message >= MESSAGE_KEEP);
+        Self {
+            summary,
+            status,
+            message,
+        }
+    }
+}
+
+/// What a vertical separator takes in a row, egui's default.
+const SEPARATOR_WIDTH: f32 = 6.0;
+
+/// Where the status strip's two ends landed, for the tests that hold them
+/// apart.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct StatusFit {
+    pub(super) bar: egui::Rect,
+    pub(super) left: egui::Rect,
+    pub(super) right: egui::Rect,
+}
+
 impl Playground {
     pub(super) fn diagnostics_warning(&self) -> bool {
         self.runtime.last_error().is_some() || self.amr_error.is_some() || self.unseen_error
@@ -756,67 +820,109 @@ impl Playground {
         }
     }
 
-    pub(super) fn status_bar(&mut self, root: &mut egui::Ui) {
+    /// The summary at the strip's right end, fullest first; a narrow strip
+    /// takes a shorter one.
+    fn summary_lines(&self) -> [String; 3] {
+        let active = self.runtime.active();
+        let rates = format!(
+            "{:.0} fps · {:.0} steps/s",
+            1000.0 / self.frame_ms.max(0.01),
+            self.steps_per_second
+        );
+        [
+            self.summary_line(),
+            format!(
+                "{rates} · {} dofs",
+                active.map_or(0, |v| v.operator.degrees_of_freedom())
+            ),
+            format!("{:.0} fps", 1000.0 / self.frame_ms.max(0.01)),
+        ]
+    }
+
+    /// What the strip says about a recording or snapshot in progress, and
+    /// whether it offers Stop.
+    fn capture_status(&self) -> (Vec<(Color32, String)>, bool) {
+        match self.recording_state {
+            RecordingState::SelectingDestination => (
+                vec![(GOLD, "Choosing recording destination…".into())],
+                false,
+            ),
+            RecordingState::Requested | RecordingState::Preparing | RecordingState::Starting => {
+                (vec![(GOLD, "Preparing recording…".into())], false)
+            }
+            RecordingState::Recording => {
+                let elapsed = self
+                    .recording_started
+                    .map(recording::elapsed_label)
+                    .unwrap_or_else(|| "00:00".into());
+                let mut labels = vec![(RED, format!("● REC {elapsed}"))];
+                if self.recording_dropped_frames > 0 {
+                    labels.push((GOLD, format!("{} dropped", self.recording_dropped_frames)));
+                }
+                (labels, true)
+            }
+            RecordingState::Finalizing => (vec![(GOLD, "Finalizing recording…".into())], false),
+            _ if self.snapshot_state != SnapshotState::Idle => {
+                (vec![(GOLD, "Capturing snapshot…".into())], false)
+            }
+            _ => (vec![], false),
+        }
+    }
+
+    /// The strip along the bottom: what is being rebuilt and the last message
+    /// at its left end, the performance summary at its right. The right end
+    /// is laid out first and the left end takes what is left, cut rather than
+    /// running under it; `StatusPlan` picks the summary's form and whether
+    /// the message still has room.
+    pub(super) fn status_bar(&mut self, root: &mut egui::Ui) -> StatusFit {
+        let mut fit = StatusFit {
+            bar: egui::Rect::NOTHING,
+            left: egui::Rect::NOTHING,
+            right: egui::Rect::NOTHING,
+        };
         egui::Panel::bottom("status")
             .exact_size(29.0)
             .show(root, |ui| {
                 ui.horizontal(|ui| {
                     let (status, activity) = self.status();
-                    if activity == Activity::Idle {
-                        ui.label(status);
-                    } else {
-                        let base = match activity {
-                            Activity::Requested => GOLD,
-                            _ => ui.visuals().text_color(),
-                        };
-                        let font = egui::TextStyle::Body.resolve(ui.style());
-                        let time = ui.input(|input| input.time);
-                        ui.label(sheen_text(&status, base, activity, font, time));
-                        // The band moves only while frames are drawn; a paused
-                        // simulation draws none, and 30 a second is plenty for
-                        // a band this soft.
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(33));
-                    }
-                    if self.recording_state == RecordingState::SelectingDestination {
-                        ui.colored_label(GOLD, "Choosing recording destination…");
-                    } else if matches!(
-                        self.recording_state,
-                        RecordingState::Requested
-                            | RecordingState::Preparing
-                            | RecordingState::Starting
-                    ) {
-                        ui.colored_label(GOLD, "Preparing recording…");
-                    } else if self.recording_state == RecordingState::Recording {
-                        let elapsed = self
-                            .recording_started
-                            .map(recording::elapsed_label)
-                            .unwrap_or_else(|| "00:00".into());
-                        ui.colored_label(RED, format!("● REC {elapsed}"));
-                        if self.recording_dropped_frames > 0 {
-                            ui.colored_label(
-                                GOLD,
-                                format!("{} dropped", self.recording_dropped_frames),
-                            );
-                        }
-                        if ui.small_button("Stop").clicked() {
-                            self.stop_video_recording();
-                        }
-                    } else if self.recording_state == RecordingState::Finalizing {
-                        ui.colored_label(GOLD, "Finalizing recording…");
-                    } else if self.snapshot_state != SnapshotState::Idle {
-                        ui.colored_label(GOLD, "Capturing snapshot…");
-                    }
-                    if !self.message.is_empty() {
-                        ui.separator();
-                        ui.label(&self.message);
-                    }
+                    let (capture, stop) = self.capture_status();
+                    let summaries = self.summary_lines();
                     let warning = self.diagnostics_warning();
-                    let summary = self.summary_line();
+                    let spacing = ui.spacing().item_spacing.x;
+                    let padding = 2.0 * ui.spacing().button_padding.x;
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    let text = |label: &str| {
+                        ui.ctx().fonts_mut(|fonts| {
+                            fonts
+                                .layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE)
+                                .size()
+                                .x
+                        })
+                    };
+                    let flag = if warning { text("⚠") + spacing } else { 0.0 };
+                    let summary_widths = summaries
+                        .each_ref()
+                        .map(|summary| text(summary) + padding + flag);
+                    let capture_width = capture
+                        .iter()
+                        .map(|(_, label)| text(label) + spacing)
+                        .sum::<f32>()
+                        + if stop { text("Stop") + padding + spacing } else { 0.0 };
+                    let message = (!self.message.is_empty())
+                        .then(|| text(&self.message) + SEPARATOR_WIDTH + spacing);
+                    let plan = StatusPlan::new(
+                        ui.available_width(),
+                        spacing,
+                        text(&status),
+                        (capture_width - spacing).max(0.0),
+                        message,
+                        &summary_widths,
+                    );
+                    fit.bar = ui.max_rect();
                     let toggled = ui
                         .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let clicked = ui
-                                .add(egui::Button::new(summary).frame(false))
+                                .add(egui::Button::new(&summaries[plan.summary]).frame(false))
                                 .on_hover_text("Open performance diagnostics")
                                 .clicked();
                             if warning {
@@ -824,6 +930,44 @@ impl Playground {
                                     "Preparation or adaptation reported an error; the diagnostics log keeps it",
                                 );
                             }
+                            fit.right = ui.min_rect();
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                let room = egui::vec2(
+                                    (plan.status + 1.0).min(ui.available_width()),
+                                    ui.available_height(),
+                                );
+                                ui.allocate_ui(room, |ui| {
+                                    let label = if activity == Activity::Idle {
+                                        egui::WidgetText::from(status.as_str())
+                                    } else {
+                                        let base = match activity {
+                                            Activity::Requested => GOLD,
+                                            _ => ui.visuals().text_color(),
+                                        };
+                                        let font = egui::TextStyle::Body.resolve(ui.style());
+                                        let time = ui.input(|input| input.time);
+                                        // The band moves only while frames are drawn; a
+                                        // paused simulation draws none, and 30 a second
+                                        // is plenty for a band this soft.
+                                        ui.ctx().request_repaint_after(
+                                            std::time::Duration::from_millis(33),
+                                        );
+                                        sheen_text(&status, base, activity, font, time).into()
+                                    };
+                                    ui.add(egui::Label::new(label).truncate());
+                                });
+                                for (color, label) in &capture {
+                                    ui.colored_label(*color, label);
+                                }
+                                if stop && ui.small_button("Stop").clicked() {
+                                    self.stop_video_recording();
+                                }
+                                if plan.message.is_some() {
+                                    ui.separator();
+                                    ui.add(egui::Label::new(&self.message).truncate());
+                                }
+                                fit.left = ui.min_rect();
+                            });
                             clicked
                         })
                         .inner;
@@ -832,6 +976,7 @@ impl Playground {
                     }
                 });
             });
+        fit
     }
 }
 
@@ -1285,6 +1430,76 @@ mod tests {
         assert!(state.editor.document.model.source.enabled);
         assert_eq!(state.example_opened, None, "a new scene is not an example");
         assert!(state.editor.undo(), "New is one undoable action");
+    }
+
+    #[test]
+    fn the_summary_shortens_before_the_left_end_is_cut() {
+        let forms = [400.0, 250.0, 60.0];
+        let plan = |width| StatusPlan::new(width, 8.0, 300.0, 0.0, Some(200.0), &forms);
+        let whole = |summary| StatusPlan {
+            summary,
+            status: 300.0,
+            message: Some(200.0),
+        };
+        assert_eq!(plan(1200.0), whole(0));
+        assert_eq!(plan(800.0), whole(1));
+        assert_eq!(plan(600.0), whole(2));
+        // Then the message is cut, then left out, and last the status is cut.
+        assert_eq!(plan(500.0).message, Some(124.0));
+        assert_eq!(plan(420.0).message, None);
+        assert_eq!(plan(420.0).status, 300.0);
+        assert_eq!(plan(300.0).status, 232.0);
+    }
+
+    #[test]
+    fn a_recording_in_progress_is_never_cut() {
+        let plan = StatusPlan::new(300.0, 8.0, 300.0, 100.0, Some(80.0), &[60.0]);
+        assert_eq!(plan.status, 300.0 - 68.0 - 108.0);
+        assert_eq!(plan.message, None);
+    }
+
+    /// The strip laid out alone on a screen `width` wide, in the app's look.
+    fn strip_at(state: &mut Playground, context: &egui::Context, width: f32) -> StatusFit {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 800.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let mut fit = None;
+        let _ = context.run_ui(input, |ui| fit = Some(state.status_bar(ui)));
+        fit.unwrap()
+    }
+
+    /// A long status, a message and a recording, from a phone held upright
+    /// to a wide desktop: the two ends never meet and nothing leaves the
+    /// strip.
+    #[test]
+    fn the_status_strip_fits_from_a_phone_to_a_desktop() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        for recording in [false, true] {
+            let mut state = Playground::default();
+            state.editor.acceptance = TopologyAcceptance::Pending;
+            state.message = "Scene contains a readout for no probe of its own".into();
+            state.unseen_error = true;
+            if recording {
+                state.recording_state = RecordingState::Recording;
+                state.recording_dropped_frames = 3;
+            }
+            for width in (320..=1600).rev().step_by(4) {
+                let fit = strip_at(&mut state, &context, width as f32);
+                assert!(
+                    fit.left.right() <= fit.right.left() + 0.5,
+                    "the ends meet at {width} (recording {recording}): {:?} against {:?}",
+                    fit.left,
+                    fit.right
+                );
+                assert!(fit.left.left() >= fit.bar.left() - 0.5, "{width}");
+                assert!(fit.right.right() <= fit.bar.right() + 0.5, "{width}");
+            }
+        }
     }
 
     /// A full gallery row holds the largest section, a width one short of a

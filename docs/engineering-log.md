@@ -14297,3 +14297,32 @@ meshes on the CI runner (AMD EPYC, glibc).
   app. Layout depends only on the CSS width, so the phone checks run at DPR 1.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — A status strip that fits its width
+
+- The strip laid its left end out first (status, recording, message) and its
+  right end (the performance summary) after, right to left, so below about
+  900 px the two ran over each other, and on a phone it was unreadable.
+- The right end now goes first and the left end takes what is left, its
+  labels cut rather than run under it, so the ends cannot meet whatever the
+  texts measure. `StatusPlan` decides the rest from measured widths:
+  - the summary has three forms (full; fps, steps/s and DOFs; fps alone) and
+    takes the fullest that keeps the left end whole, else the shortest;
+  - then the message is cut, and left out below 60 px (`MESSAGE_KEEP`);
+  - last the status is cut; egui shows a cut label's full text on hover;
+  - a recording's indicator and Stop are never cut.
+- The recording and snapshot texts moved into `capture_status`, so the
+  strip measures and draws the same list.
+- Tests:
+  - `the_summary_shortens_before_the_left_end_is_cut`, the order above on
+    fixed widths;
+  - `a_recording_in_progress_is_never_cut`;
+  - `the_status_strip_fits_from_a_phone_to_a_desktop` lays the real strip
+    out with a long animated status, an error marker and a long message, with
+    and without a recording, at every fourth width from 1600 to 320. The ends
+    never meet. With the message left uncut it fails at 568.
+- **Checked in the browser build** at 360, 412, 768 and 1280 px: "Simulation
+  ready │ Simulation topology committ… │ 60 fps" at 360, the short summary
+  and a cut message at 412, the middle form at 768, the full one at 1280.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
