@@ -228,6 +228,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  behind the bars.",
                 talbot(),
             ),
+            example(
+                "Drum modes",
+                "A clamped round membrane driven at 1.36 Hz, j₂₁/(2πa), its (2,1) mode: it \
+                 stands in four lobes, rising and falling in turn, with two still diameters \
+                 between them that keep under a tenth of the lobes' motion. Drive it 0.01 Hz \
+                 off and the lobes fall.",
+                drum(),
+            ),
         ]
     })
 }
@@ -2653,13 +2661,78 @@ fn talbot_with(grating: bool) -> TopologyDocument {
     document
 }
 
+const DRUM_RADIUS: f64 = 0.6;
+/// The first zero of `J₂`.
+const BESSEL_J21: f64 = 5.135_622;
+/// A tenth of the plan's 0.3: with that the neighbouring modes, the source
+/// excites too, kept 14% of the lobes' field on the nodal diameters.
+const DRUM_LOSS: f64 = 0.1;
+
+/// The clamped drum's `(2,1)` mode, `j₂₁/(2πa) = 1.362 Hz`.
+fn drum_frequency() -> f64 {
+    BESSEL_J21 / (std::f64::consts::TAU * DRUM_RADIUS)
+}
+
+fn drum() -> TopologyDocument {
+    drum_with(drum_frequency())
+}
+
+/// A Mechanical drum: the inside of a circle of radius 0.6 clamped at its
+/// rim, everything outside cut away, with a velocity loss of 0.1 per second
+/// so a steady state exists, driven by a point source on one lobe of its
+/// `(2,1)` mode. At that mode's frequency the membrane stands in four lobes
+/// with two still nodal diameters between them. A point probe sits on
+/// another lobe and one on a nodal diameter.
+fn drum_with(frequency: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.materials[0].name = "Membrane".into();
+    builder.scene.materials[0].magnetic_loss = Some(LossChannel {
+        base_rate: ScalarField::constant(DRUM_LOSS),
+        law: DampingLaw::constant(),
+    });
+    let clamped = SpanBehavior::Separated {
+        left: FaceBoundaryCondition::Dirichlet {
+            signal: TimeSignal::harmonic(0.0, 0.0, 1.0, 0.0),
+        },
+        right: FaceBoundaryCondition::Reflecting,
+        coupling: InternalBoundaryCoupling::Independent,
+    };
+    builder.closed(circle(Point2::default(), DRUM_RADIUS), clamped, None);
+    // The membrane is the background region inside the rim; outside is cut
+    // away.
+    builder.scene.face_assignments[0].region = None;
+    let last = builder.scene.face_assignments.len() - 1;
+    builder.scene.face_assignments[last].region = Some(BACKGROUND_REGION);
+    let mut document = builder.document();
+    document.model.source = source(Point2::new(0.3, 0.0), frequency, 10.0, 0.03);
+    let diagonal = std::f64::consts::FRAC_PI_4;
+    for (id, name, color, point) in [
+        (1, "Lobe", [91, 220, 194], Point2::new(0.0, 0.36)),
+        (
+            2,
+            "Nodal diameter",
+            [248, 196, 112],
+            Point2::new(diagonal.cos(), diagonal.sin()) * 0.36,
+        ),
+    ] {
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(id),
+            name: name.into(),
+            color,
+            enabled: true,
+            target: TopologyProbeTarget::Point(point),
+        });
+    }
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 30);
+        assert_eq!(catalog().len(), 31);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -4753,5 +4826,65 @@ mod tests {
             full > 1.5 * paraxial,
             "the image is {full:.2}× at the Talbot distance, {paraxial:.2}× at the paraxial one"
         );
+    }
+
+    /// The drum claims, at edge 0.08, 45 s from rest, the lobes 95% of their
+    /// 60 s size. Driven at `j₂₁/(2πa)` the RMS along the two nodal diameters,
+    /// r from 0.05 to 0.55, is under a tenth of the RMS along the four lobes'
+    /// radii (5.4%; the same at edge 0.05), and `|U|` round the circle through
+    /// the lobes has four maxima. Driven 0.01 Hz either side the lobes are
+    /// weaker (0.086 and 0.114 against 0.128): the mesh's resonance is within
+    /// 0.1% of the Bessel zero.
+    #[test]
+    fn a_clamped_drum_stands_in_its_two_one_mode() {
+        let lobes_and_nodes = |frequency: f64| {
+            let scene = Harmonic::run(&drum_with(frequency), 0.08, 45.0, frequency, 4.0);
+            let power = |r: f64, degrees: f64| {
+                let angle = degrees.to_radians();
+                let (a, b) = scene.interpolated(Point2::new(angle.cos(), angle.sin()) * r);
+                a * a + b * b
+            };
+            let rms = |angles: [f64; 4]| {
+                let radii = (0..=10).map(|index| 0.05 + 0.05 * index as f64);
+                let values = radii
+                    .flat_map(|r| angles.map(|degrees| power(r, degrees)))
+                    .collect::<Vec<_>>();
+                (values.iter().sum::<f64>() / values.len() as f64).sqrt()
+            };
+            let ring = (0..72)
+                .map(|index| power(0.36, 5.0 * index as f64).sqrt())
+                .collect::<Vec<_>>();
+            (
+                rms([0.0, 90.0, 180.0, 270.0]),
+                rms([45.0, 135.0, 225.0, 315.0]),
+                ring,
+            )
+        };
+        let frequency = drum_frequency();
+        let (lobes, nodes, ring) = lobes_and_nodes(frequency);
+        assert!(
+            nodes < 0.1 * lobes,
+            "the nodal diameters keep {:.3}",
+            nodes / lobes
+        );
+        let peak = ring.iter().cloned().fold(0.0, f64::max);
+        let maxima = (0..ring.len())
+            .filter(|&index| {
+                let (before, here, after) = (
+                    ring[(index + ring.len() - 1) % ring.len()],
+                    ring[index],
+                    ring[(index + 1) % ring.len()],
+                );
+                here > before && here >= after && here > 0.5 * peak
+            })
+            .count();
+        assert_eq!(maxima, 4);
+        for offset in [-0.01, 0.01] {
+            let (off, _, _) = lobes_and_nodes(frequency + offset);
+            assert!(
+                off < lobes,
+                "{offset:+} Hz off the lobes are {off:.4} against {lobes:.4}"
+            );
+        }
     }
 }

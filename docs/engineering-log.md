@@ -13569,3 +13569,26 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and 3.3e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: drum modes
+
+- **Scene** "Drum modes" (gallery item 23), the catalogue's 31st:
+  Mechanical, a membrane of radius 0.6 clamped at its rim (the circle's
+  inner face `Dirichlet` at zero, the outside cut away), with a velocity
+  loss of 0.1/s (`magnetic_loss`, the primary row in this skin), driven by
+  a point source on a lobe at exactly `j₂₁/(2πa) = 1.362 Hz`. The plan's
+  "reflecting circle" would have been a free rim, whose `(2,1)` mode is at
+  `j'₂₁`. Probes on a lobe and on a nodal diameter.
+- **Explored:** the resonance is within 0.1% of the Bessel zero (lobes
+  0.086, 0.128, 0.114 at 1.35, 1.36, 1.37 Hz). With the plan's loss of 0.3
+  the other modes the point source excites keep 14% on the nodal diameters;
+  their background stays near 0.007 while the lobes grow, 5.4% at a loss of
+  0.1. Edge 0.05 gives the same.
+- **Measured** at edge 0.08, 45 s: nodal diameters 5.4% of the lobes, four
+  maxima round the lobes' circle, the lobes weaker 0.01 Hz either side.
+  Test: `a_clamped_drum_stands_in_its_two_one_mode`.
+- **Device:** `canonical_gpu_long_run` (2.6k unknowns) at 400 steps Q
+  6.4e-7, b 1.3e-6; at 1000 steps Q 1.2e-6, b 1.4e-6; at 3000 steps
+  (printed, not judged) 2.0e-6 and 4.1e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

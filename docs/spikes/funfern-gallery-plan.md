@@ -696,13 +696,30 @@ Claims at edge 0.08, 8 s from rest:
 
 ### 23. Drum modes
 
-Mechanical. A closed reflecting circle of radius 0.6 with the background
-material inside and a constant loss of 0.3/s so a steady state exists,
-driven off-centre by a point source at the (2,1) mode, `f = j₂₁/(2πa) =
-1.36 Hz`; the neighbours sit at 1.02 and 1.46 Hz. Trapped modes on purpose.
+Mechanical. A membrane of radius 0.6, the inside of a circle whose inner
+face is clamped, `u = 0` (a Dirichlet condition), with everything outside
+cut away: the plan's "reflecting circle" is a free rim in this skin, whose
+`(2,1)` mode sits at `j'₂₁`, not the `j₂₁/(2πa) = 1.362 Hz` it names. A
+velocity loss of 0.1 per second on the membrane so a steady state exists,
+and a point source on one lobe, at (0.3, 0), driven at exactly
+`j₂₁/(2πa)`. Point probes on another lobe and on a nodal diameter.
+Trapped modes on purpose.
 
-Claim: the RMS along the two nodal diameters is under 10% of the RMS in the
-four lobes.
+Explored. The mesh's resonance is within 0.1% of the Bessel zero: the lobes
+are 0.086, 0.128, 0.114 at 1.35, 1.36, 1.37 Hz. With the plan's loss of
+0.3 the resonance is 0.05 Hz wide, and the modes the point source excites
+too, the `(0,2)` 0.1 Hz above among them, keep 14% of the lobes' RMS on the
+nodal diameters; the nodes themselves sit exactly at 45°, 135°, 225°, 315°.
+That background stays near 0.007 while the lobes grow with the resonance's
+sharpness: 7.7% at a loss of 0.15, 5.4% at 0.1, 5.0% at 60 s. At 0.1 the
+lobes are 95% of their final size by 45 s; edge 0.05 gives the same.
+
+Claims at edge 0.08, 45 s from rest:
+
+- The RMS along the two nodal diameters is under 10% of the RMS along the
+  four lobes' radii (5.4%).
+- `|U|` round the circle through the lobes has four maxima.
+- Driven 0.01 Hz either side, the lobes are weaker.
 
 ### 24. Anderson localization
 
