@@ -13548,3 +13548,24 @@ First scenes of the gallery plan (`docs/spikes/funfern-gallery-plan.md`).
   and 3.7e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery: the Talbot carpet
+
+- **Scene** "Talbot carpet" (gallery item 22), the catalogue's 30th: a
+  Mechanical channel, a 4 Hz launcher and five reflecting bars at x = −0.5,
+  period 0.4, half open, slits centred at `y = 0.2 + 0.4k` so the channel's
+  reflecting walls sit on slit centres and it holds the infinite grating.
+  Line probes at the half and full Talbot distances.
+- **Talbot distance:** only the orders 0 and ±1 propagate (`λ/a = 0.625`),
+  so the image returns at `λ/(1 − √(1 − (λ/a)²)) = 1.14`, not the plan's
+  paraxial 1.28 (`talbot_distance`); the axial contrast peaks at
+  `z/z_T = 0.97`.
+- **Measured** at edge 0.08, 8 s: bars 3.9× the slits halfway, slits 3.6×
+  the bars at `z_T`, 1.7× at the paraxial distance; at edge 0.05 4.0×, 3.5×,
+  1.7×. Test: `a_grating_reimages_itself_at_the_talbot_distance` (over
+  2.5×, over 2.5×, over 1.5× the paraxial contrast).
+- **Device:** `canonical_gpu_long_run` at 400 steps Q 8.9e-7, b 1.2e-6; at
+  1000 steps Q 1.9e-6, b 2.8e-6; at 3000 steps (printed, not judged) 1.9e-6
+  and 3.3e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -220,6 +220,14 @@ pub fn catalog() -> &'static [TopologyExample] {
                  block to 0.15 and under a hundredth tunnels.",
                 tunnelling(),
             ),
+            example(
+                "Talbot carpet",
+                "A plane wave through a grating of period 0.4 at 4 Hz: behind it the grating's \
+                 image comes back at the Talbot distance, 1.14 rather than the paraxial 1.28, \
+                 bright behind the slits, and halfway there shifted by half a period, bright \
+                 behind the bars.",
+                talbot(),
+            ),
         ]
     })
 }
@@ -2584,13 +2592,74 @@ fn tunnelling_with(gap: f64, glass: bool) -> TopologyDocument {
     document
 }
 
+const TALBOT_HZ: f64 = 4.0;
+const TALBOT_PERIOD: f64 = 0.4;
+const TALBOT_SCREEN: f64 = -0.5;
+
+/// The Talbot distance of a grating of `TALBOT_PERIOD` at `TALBOT_HZ`, not
+/// paraxial: `λ/(1 − √(1 − (λ/a)²))`.
+fn talbot_distance() -> f64 {
+    let ratio = 1.0 / TALBOT_HZ / TALBOT_PERIOD;
+    (1.0 / TALBOT_HZ) / (1.0 - (1.0 - ratio * ratio).sqrt())
+}
+
+fn talbot() -> TopologyDocument {
+    talbot_with(true)
+}
+
+/// A Mechanical channel lit by a 4 Hz launcher at the left, with a grating
+/// of reflecting bars at `x = −0.5`: period 0.4, half open, its slits
+/// centred at `y = 0.2 + 0.4k`, so the reflecting walls sit on slit centres
+/// and the channel holds the infinite grating. Behind it the grating's image
+/// comes back at the Talbot distance and, halfway there, shifted by half a
+/// period. Only the orders 0 and ±1 propagate, `λ/a = 0.625`, so that
+/// distance is 1.14, not the paraxial `2a²/λ = 1.28`. Line probes run across
+/// the channel on both images. Without `grating` the channel is open.
+fn talbot_with(grating: bool) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.outer_boundaries = channel();
+    builder.launcher(-0.85, TALBOT_HZ, 40.0);
+    if grating {
+        for bar in -2..=2 {
+            let centre = TALBOT_PERIOD * bar as f64;
+            builder.baffle(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(TALBOT_SCREEN, centre - 0.25 * TALBOT_PERIOD),
+                    Point2::new(TALBOT_SCREEN, centre + 0.25 * TALBOT_PERIOD),
+                ])
+                .unwrap(),
+            );
+        }
+    }
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    for (id, name, color, distance) in [
+        (1, "Half the Talbot distance", [248, 196, 112], 0.5),
+        (2, "Talbot distance", [91, 220, 194], 1.0),
+    ] {
+        let x = TALBOT_SCREEN + distance * talbot_distance();
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(id),
+            name: name.into(),
+            color,
+            enabled: true,
+            target: TopologyProbeTarget::Segment {
+                start: Point2::new(x, -0.95),
+                end: Point2::new(x, 0.95),
+                preset: ProbeSamplingPreset::Medium,
+            },
+        });
+    }
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 29);
+        assert_eq!(catalog().len(), 30);
         assert_eq!(catalog()[0].name, "Starter obstacle");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -4646,5 +4715,43 @@ mod tests {
             "the leak fell by {measured:.3}, e^(-2γ·0.05) = {expected:.3}"
         );
         assert!(far > 0.99, "over 0.15 the fiber keeps {far:.4}");
+    }
+
+    /// The Talbot claims, at edge 0.08, 8 s from rest at 4 Hz, with `|U|` at
+    /// the slit centres (±0.2, ±0.6) and the bar centres (0, ±0.4). Halfway to
+    /// the Talbot distance the bars are more than 2.5× the slits (3.9×); at
+    /// the Talbot distance the slits are more than 2.5× the bars (3.6×), and
+    /// that image is more than 1.5× as sharp as at the paraxial `2a²/λ`
+    /// (1.7×). At edge 0.05: 4.0×, 3.5×, 1.7×.
+    #[test]
+    fn a_grating_reimages_itself_at_the_talbot_distance() {
+        let scene = Harmonic::run(&talbot_with(true), 0.08, 8.0, TALBOT_HZ, 4.0);
+        let at = |x: f64, y: f64| {
+            let (a, b) = scene.interpolated(Point2::new(x, y));
+            a.hypot(b)
+        };
+        let contrast = |distance: f64| {
+            let x = TALBOT_SCREEN + distance;
+            let slits = [0.2, -0.2, 0.6, -0.6]
+                .iter()
+                .map(|y| at(x, *y))
+                .sum::<f64>()
+                / 4.0;
+            let bars = [0.0, 0.4, -0.4].iter().map(|y| at(x, *y)).sum::<f64>() / 3.0;
+            slits / bars
+        };
+        let talbot = talbot_distance();
+        let half = 1.0 / contrast(0.5 * talbot);
+        assert!(half > 2.5, "halfway the bars are {half:.2}× the slits");
+        let full = contrast(talbot);
+        assert!(
+            full > 2.5,
+            "at the Talbot distance the slits are {full:.2}× the bars"
+        );
+        let paraxial = contrast(2.0 * TALBOT_PERIOD * TALBOT_PERIOD * TALBOT_HZ);
+        assert!(
+            full > 1.5 * paraxial,
+            "the image is {full:.2}× at the Talbot distance, {paraxial:.2}× at the paraxial one"
+        );
     }
 }

@@ -672,13 +672,27 @@ x = 0.6 to 0.9 against the vacuum block:
 
 ### 22. Talbot carpet
 
-Mechanical. A launcher at the left, 4 Hz. A grating of baffles at x = −0.5,
-period 0.4, 50% open, four periods. The Talbot distance `2a²/λ = 1.28` puts
-the self-image at x = 0.78 and the half-period-shifted image at x = 0.14.
+Mechanical. A channel lit by a launcher at the left, 4 Hz. A grating of
+reflecting bars at x = −0.5, period 0.4, half open, with its slits centred
+at `y = 0.2 + 0.4k`: the reflecting walls sit on slit centres, where the
+grating is mirror-symmetric, so the channel holds the infinite grating
+rather than the plan's four periods with their edges. Line probes across
+the channel at the half and full Talbot distances.
 
-Claim: the RMS profile at x = 0.14 peaks at the bar positions and at x = 0.78
-at the slit positions. Four periods is few; the tolerance comes from the
-first run.
+Explored. Only the orders 0 and ±1 propagate, `λ/a = 0.625`, so the image
+comes back at `λ/(1 − √(1 − (λ/a)²)) = 1.14`, not the plan's paraxial
+`2a²/λ = 1.28`: the slits-over-bars contrast along the axis peaks at
+`z/z_T = 0.97`. At half that distance, x = 0.07, the profile peaks on the
+bars (0.054 against 0.008 at the slits); at `z_T`, x = 0.64, on the slits.
+Averaged over the slit and bar centres: 3.9× and 3.6× at edge 0.08, 4.0×
+and 3.5× at 0.05; at the paraxial distance, 1.7×.
+
+Claims at edge 0.08, 8 s from rest:
+
+- Halfway to the Talbot distance the bars are more than 2.5× the slits
+  (3.9×).
+- At the Talbot distance the slits are more than 2.5× the bars (3.6×), and
+  more than 1.5× the contrast at the paraxial distance (1.7×).
 
 ### 23. Drum modes
 
