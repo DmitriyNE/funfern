@@ -78,8 +78,8 @@ pub struct Playground {
     /// Whether the formula reference is showing. It is a window rather than a
     /// menu so it stays readable while a formula is being typed.
     pub(super) formula_help_open: bool,
-    /// Whether the example gallery is showing. It stays open across a pick, so
-    /// the catalog can be clicked through.
+    /// Whether the example gallery is showing. A pick closes it; the scene
+    /// card steps through the catalog from there.
     pub(super) examples_open: bool,
     /// One thumbnail per catalog entry, built lazily and at most one per frame.
     pub(super) example_previews: Vec<Option<ExamplePreview>>,

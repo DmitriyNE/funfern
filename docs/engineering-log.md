@@ -14166,3 +14166,34 @@ meshes on the CI runner (AMD EPYC, glibc).
   catalogue's fourth entry now finds the GRIN collimator by name.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-26 — Gallery in sections, and an Examples button in the top bar
+
+- An **Examples** toggle sits right after File in the top bar, lit while the
+  gallery is up; File → Examples… stays. Before, the gallery was only in the
+  File menu, where a first-time user never looked.
+- The gallery shows the catalogue by section, one row each where the screen
+  has room: tiles of 108 px, a thumbnail over the name, the whole tile one
+  button, the scene's description on hover, and the open scene outlined in
+  gold. Six columns at most (the largest section), fewer on a narrow screen
+  (`gallery_columns`, `gallery_width`); the grid sets the window's size.
+- **A pick now closes the gallery** (`pick_example`); it used to stay up so
+  the catalogue could be clicked through, but it hid the scene. Stepping on
+  from the open scene is the scene card's job (the next entry).
+- Two egui sizing traps, found on screenshots and commented where they bite:
+  - An auto-sized window offers its content the size it had the frame
+    before, so a scroll area allowed to shrink never grew past its first
+    frame: the gallery opened one section tall. The scroll area now has a
+    minimum height as well as a maximum.
+  - A window's first, invisible sizing frame lays the whole catalogue out
+    unscrolled, and on a short screen the constraint to the screen then
+    pushed it over the top bar, where it stayed. It is constrained to the
+    band between the top bar and the status strip.
+- **Checked** from a scratch HOME at 1512×945 and 700×640: six and five
+  columns, every section in one row, the window between the bars. Hover is
+  not covered by a screenshot.
+- Tests: `a_gallery_row_holds_a_whole_section` (no section is longer than a
+  row, and the column count at a row's width); the gallery-stays-open test is
+  now `picking_an_example_closes_the_gallery_and_marks_the_tile`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

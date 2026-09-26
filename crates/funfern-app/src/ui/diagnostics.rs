@@ -135,9 +135,10 @@ impl Playground {
         }
     }
 
-    /// The example gallery. It is a window rather than a menu so the thumbnails
-    /// and descriptions have room, and it stays open across a pick so several
-    /// scenes can be tried one after another.
+    /// The example gallery: the catalog in its sections, a tile per scene with
+    /// its thumbnail and name, and what the scene shows on hover. A pick opens
+    /// the scene and closes the gallery, so the scene is not left behind it;
+    /// the scene card steps on from there and comes back here.
     pub(super) fn examples_window(&mut self, ctx: &egui::Context) {
         if !self.examples_open {
             return;
@@ -145,8 +146,8 @@ impl Playground {
         let catalog = funfern_app::topology_examples::catalog();
         // At most one preview is built per frame. The largest example takes
         // about twenty milliseconds to compile, so building all of them at once
-        // would drop a frame outright; this way a row shows its name and
-        // description immediately and its thumbnail a few frames later.
+        // would drop a frame outright; this way a tile shows its name
+        // immediately and its thumbnail a few frames later.
         if let Some(index) = self.example_previews.iter().position(Option::is_none) {
             self.example_previews[index] = Some(build_example_preview(&catalog[index]));
         }
@@ -154,53 +155,71 @@ impl Playground {
         let opened = self.example_opened;
         let mut open = true;
         let mut selected = None;
+        // A section a row, or as many tiles as a narrow screen has room for,
+        // and as tall as the screen allows below the top bar; the grid sets
+        // the window's size.
+        // It is kept between the top bar and the status strip: its first,
+        // invisible sizing frame lays the whole catalog out unscrolled, and
+        // held only to the screen that would push it over the top bar.
+        let screen = ctx.content_rect();
+        let between_bars =
+            egui::Rect::from_x_y_ranges(screen.x_range(), self.viewport_rect.y_range());
+        let columns = gallery_columns(screen.width() - 48.0).min(GALLERY_COLUMNS);
+        let height = (between_bars.height() - 100.0).clamp(200.0, 620.0);
         egui::Window::new("Examples")
             .id(egui::Id::new("examples"))
             .open(&mut open)
             .collapsible(false)
-            .resizable(true)
-            .default_width(560.0)
+            .resizable(false)
+            .constrain_to(between_bars)
+            .default_pos(between_bars.left_top() + egui::vec2(16.0, 8.0))
             .show(ctx, |ui| {
-                ui.label("Choose a ready-to-run scene. Picking one leaves this open.");
-                ui.add_space(6.0);
+                ui.label("Pick a scene to open it. Hover one for what it shows.");
+                // The minimum as well as the maximum: an auto-sized window
+                // offers its content the size it had the frame before, so a
+                // scroll area left to shrink never grows past its first frame.
                 egui::ScrollArea::vertical()
-                    .max_height(540.0)
+                    .min_scrolled_height(height)
+                    .max_height(height)
                     .show(ui, |ui| {
-                        for (index, example) in catalog.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                let thumbnail = paint_example_thumbnail(
-                                    ui,
-                                    example,
-                                    previews[index].as_ref(),
-                                    egui::vec2(144.0, 144.0),
-                                );
-                                ui.vertical(|ui| {
-                                    ui.heading(example.name);
-                                    ui.set_max_width(320.0);
-                                    ui.label(example.description);
-                                    ui.add_space(8.0);
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Open").clicked() || thumbnail.clicked() {
+                        ui.set_width(gallery_width(columns));
+                        ui.spacing_mut().item_spacing.x = EXAMPLE_TILE_GAP;
+                        for group in ExampleGroup::ALL {
+                            ui.add_space(8.0);
+                            ui.strong(group.label());
+                            ui.add_space(2.0);
+                            let members = (0..catalog.len())
+                                .filter(|&index| catalog[index].group == group)
+                                .collect::<Vec<_>>();
+                            for row in members.chunks(columns) {
+                                ui.horizontal_top(|ui| {
+                                    for &index in row {
+                                        let tile = example_tile(
+                                            ui,
+                                            &catalog[index],
+                                            previews[index].as_ref(),
+                                            opened == Some(index),
+                                        );
+                                        if tile.clicked() {
                                             selected = Some(index);
                                         }
-                                        if opened == Some(index) {
-                                            ui.weak("Opened");
-                                        }
-                                    });
+                                    }
                                 });
-                            });
-                            if index + 1 < catalog.len() {
-                                ui.add_space(8.0);
-                                ui.separator();
-                                ui.add_space(8.0);
                             }
                         }
                     });
             });
         self.examples_open = open;
         if let Some(index) = selected {
-            self.open_example(index);
+            self.pick_example(index);
         }
+    }
+
+    /// A pick in the gallery: the scene opens and the gallery gets out of
+    /// its way.
+    pub(super) fn pick_example(&mut self, index: usize) {
+        self.examples_open = false;
+        self.open_example(index);
     }
 
     pub(super) fn open_example(&mut self, index: usize) {
@@ -1262,9 +1281,29 @@ mod tests {
         assert!(state.editor.undo(), "New is one undoable action");
     }
 
-    /// The gallery survives a pick, and the pick is what changes the document.
+    /// A full gallery row holds the largest section, a width one short of a
+    /// tile drops one, and a screen narrowed to nothing still shows one.
     #[test]
-    fn opening_an_example_leaves_the_gallery_open_and_marks_the_row() {
+    fn a_gallery_row_holds_a_whole_section() {
+        let catalog = funfern_app::topology_examples::catalog();
+        for group in ExampleGroup::ALL {
+            let members = catalog.iter().filter(|e| e.group == group).count();
+            assert!(
+                members <= GALLERY_COLUMNS,
+                "{} needs two rows",
+                group.label()
+            );
+        }
+        let full = gallery_width(GALLERY_COLUMNS);
+        assert_eq!(gallery_columns(full), GALLERY_COLUMNS);
+        assert_eq!(gallery_columns(full - 1.0), GALLERY_COLUMNS - 1);
+        assert_eq!(gallery_columns(0.0), 1);
+    }
+
+    /// A pick closes the gallery, so the scene is not left behind it, and
+    /// the pick is what changes the document.
+    #[test]
+    fn picking_an_example_closes_the_gallery_and_marks_the_tile() {
         let mut state = Playground {
             examples_open: true,
             ..Playground::default()
@@ -1273,8 +1312,8 @@ mod tests {
             .iter()
             .position(|example| example.name == "Double slit")
             .unwrap();
-        state.open_example(index);
-        assert!(state.examples_open, "the gallery closed on a pick");
+        state.pick_example(index);
+        assert!(!state.examples_open, "the gallery stayed over the scene");
         assert_eq!(state.example_opened, Some(index));
         assert_eq!(
             state.editor.document.model,

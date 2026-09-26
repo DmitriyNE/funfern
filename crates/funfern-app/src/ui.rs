@@ -20,6 +20,7 @@ use bevy_egui::{
     egui::{self, Color32, Pos2, Rect, Sense, Stroke},
 };
 use funfern_app::document::{ProbeId, ProbeSamplingPreset};
+use funfern_app::topology_examples::ExampleGroup;
 use funfern_app::topology_persistence::{self as persistence};
 use funfern_app::topology_runtime::{PreparedTopology, TopologyPreparationTiming, TopologyToken};
 use funfern_app::topology_viewport::{
@@ -1585,16 +1586,86 @@ fn face_spans(cycles: &[Vec<Point2>], y: f64) -> Vec<(f64, f64)> {
         .collect()
 }
 
-fn paint_example_thumbnail(
+/// A gallery tile's width, which is also its thumbnail's side.
+const EXAMPLE_TILE: f32 = 108.0;
+const EXAMPLE_TILE_GAP: f32 = 10.0;
+/// The most tiles a gallery row holds: the largest section, so each section
+/// sits in one row where the screen has room.
+const GALLERY_COLUMNS: usize = 6;
+
+/// Room a scroll bar may take beside the tiles.
+const EXAMPLE_SCROLL_BAR: f32 = 16.0;
+
+/// How many tiles fit across `width`, never fewer than one.
+fn gallery_columns(width: f32) -> usize {
+    (((width - EXAMPLE_SCROLL_BAR + EXAMPLE_TILE_GAP) / (EXAMPLE_TILE + EXAMPLE_TILE_GAP)).floor()
+        as usize)
+        .max(1)
+}
+
+/// The width `columns` tiles take, with room for the scroll bar.
+fn gallery_width(columns: usize) -> f32 {
+    columns as f32 * (EXAMPLE_TILE + EXAMPLE_TILE_GAP) - EXAMPLE_TILE_GAP + EXAMPLE_SCROLL_BAR
+}
+
+/// One scene in the gallery: its thumbnail over its name, the whole tile one
+/// button, and what the scene shows on hover. The open scene's tile is
+/// outlined in gold.
+fn example_tile(
     ui: &mut egui::Ui,
     example: &funfern_app::topology_examples::TopologyExample,
     preview: Option<&ExamplePreview>,
-    size: egui::Vec2,
+    opened: bool,
 ) -> egui::Response {
+    let name = ui.painter().layout(
+        example.name.to_owned(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        ui.visuals().text_color(),
+        EXAMPLE_TILE,
+    );
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(EXAMPLE_TILE, EXAMPLE_TILE + 4.0 + name.size().y),
+        Sense::click(),
+    );
+    let thumbnail = Rect::from_min_size(rect.min, egui::vec2(EXAMPLE_TILE, EXAMPLE_TILE));
+    let painter = ui.painter();
+    paint_example_thumbnail(painter, thumbnail, example, preview);
+    if opened || response.hovered() {
+        let (width, color) = if opened { (2.0, GOLD) } else { (1.5, SELECT) };
+        painter.rect_stroke(
+            thumbnail,
+            5.0,
+            Stroke::new(width, color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let color = if opened {
+        GOLD
+    } else {
+        ui.visuals().text_color()
+    };
+    painter.galley(
+        Pos2::new(rect.left(), thumbnail.bottom() + 4.0),
+        name,
+        color,
+    );
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_ui(|ui| {
+            ui.set_max_width(320.0);
+            ui.label(example.description);
+        })
+}
+
+fn paint_example_thumbnail(
+    painter: &egui::Painter,
+    rect: Rect,
+    example: &funfern_app::topology_examples::TopologyExample,
+    preview: Option<&ExamplePreview>,
+) {
     let scene = &example.document.model.accepted;
     let domain = scene.geometry.domain;
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let painter = ui.painter_at(rect);
+    let painter = painter.with_clip_rect(rect);
     painter.rect_filled(rect, 5.0, Color32::from_rgb(24, 32, 39));
     let inner = rect.shrink(7.0);
     let project = |point: Point2| {
@@ -1676,7 +1747,6 @@ fn paint_example_thumbnail(
         Stroke::new(1.0, Color32::from_rgb(88, 104, 116)),
         egui::StrokeKind::Inside,
     );
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Chooses one topology direction for the next adaptation transaction.

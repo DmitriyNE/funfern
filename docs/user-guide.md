@@ -405,9 +405,11 @@ names or with every expression evaluated at the material frame's origin. Each ro
   opens. Save scene downloads JSON in the browser or opens a native save
   dialog. Load scene uses file upload/native selection and validates before
   replacement. Successful loading clears history; malformed files leave the
-  current document intact. Examples opens a thumbnail gallery with a
-  description beside each scene; opening one is undoable and leaves the gallery
-  up, so the catalog can be clicked through. New, Load scene, an example, a
+  current document intact. Examples, in the top bar and under File, opens the
+  gallery: the scenes in seven sections (basics; interfaces and media; lenses
+  and imaging; guides and crystals; resonators; time-varying media; nonlinear
+  and self-organizing), each a thumbnail over its name, with what it shows on
+  hover. Picking one opens it, undoably, and closes the gallery. New, Load scene, an example, a
   scene link, and Undo or Redo across any of them replace the whole scene: the
   outgoing field stops and disappears at once, the new scene's geometry shows
   while its mesh is built, and its field starts from zero, as at startup. An

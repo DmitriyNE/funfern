@@ -83,6 +83,13 @@ impl Playground {
                         ui.close();
                     }
                 });
+                if ui
+                    .selectable_label(self.examples_open, "Examples")
+                    .on_hover_text("Ready-to-run scenes")
+                    .clicked()
+                {
+                    self.examples_open = !self.examples_open;
+                }
                 if ui.button("Fit view").clicked() {
                     self.fit = true;
                 }
