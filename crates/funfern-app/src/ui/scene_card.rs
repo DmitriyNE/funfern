@@ -12,9 +12,6 @@ use super::*;
 pub(super) struct SceneCard {
     pub(super) expanded: bool,
     pub(super) dismissed: bool,
-    /// The line a first launch adds, pointing at the rest of the gallery. It
-    /// goes once the viewer has stepped, opened the gallery or closed the card.
-    pub(super) hint: bool,
 }
 
 impl Default for SceneCard {
@@ -22,7 +19,6 @@ impl Default for SceneCard {
         Self {
             expanded: true,
             dismissed: false,
-            hint: false,
         }
     }
 }
@@ -51,9 +47,6 @@ impl Playground {
     /// Draws the card over the viewport's top-left corner and acts on it.
     /// Returns where it was drawn.
     pub(super) fn scene_card(&mut self, ctx: &egui::Context, viewport: Rect) -> Option<Rect> {
-        if self.examples_open {
-            self.scene_card.hint = false;
-        }
         let index = self.scene_card_example()?;
         let catalog = catalog();
         let example = &catalog[index];
@@ -63,7 +56,6 @@ impl Playground {
         let mut close = false;
         let mut gallery = false;
         let expanded = self.scene_card.expanded;
-        let hint = self.scene_card.hint;
         let card = egui::Area::new(egui::Id::new("scene_card"))
             .fixed_pos(viewport.left_top() + egui::vec2(CARD_INSET, CARD_INSET))
             .constrain_to(viewport)
@@ -102,17 +94,6 @@ impl Playground {
                     if expanded {
                         ui.small(example.group.label());
                         ui.label(example.description);
-                        if hint {
-                            ui.add_space(2.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "One of {} examples: ⏴ ⏵ steps through them, and \
-                                     Examples in the top bar shows them all.",
-                                    catalog.len()
-                                ))
-                                .color(GOLD),
-                            );
-                        }
                         ui.add_space(2.0);
                         if ui.button("All examples…").clicked() {
                             gallery = true;
@@ -125,11 +106,9 @@ impl Playground {
         }
         if close {
             self.scene_card.dismissed = true;
-            self.scene_card.hint = false;
         }
         if gallery {
             self.examples_open = true;
-            self.scene_card.hint = false;
         }
         if step != 0 {
             self.step_example(step);
@@ -197,22 +176,13 @@ mod tests {
         assert_eq!(state.scene_card_example(), None, "undo is not an example");
     }
 
+    /// A first launch opens a random example with its card, like any other.
     #[test]
-    fn a_first_launch_hints_at_the_gallery_until_the_viewer_moves_on() {
+    fn a_first_launch_opens_an_example_with_its_card() {
         let mut state = Playground::default();
         state.open_random_example();
-        assert!(state.scene_card.hint && state.scene_card.expanded);
+        assert!(state.scene_card.expanded);
         assert!(state.scene_card_example().is_some());
-        state.step_example(1);
-        assert!(!state.scene_card.hint, "stepping kept the hint");
-
-        state.open_random_example();
-        let context = egui::Context::default();
-        state.examples_open = true;
-        let _ = context.run_ui(egui::RawInput::default(), |ui| {
-            state.scene_card(ui.ctx(), viewport());
-        });
-        assert!(!state.scene_card.hint, "the gallery kept the hint");
     }
 
     /// One frame laid out as the app lays it out, a viewport-filling painter

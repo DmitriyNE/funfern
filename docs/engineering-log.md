@@ -14599,3 +14599,14 @@ meshes on the CI runner (AMD EPYC, glibc).
   presentation round trip and earlier-build defaults carry the two keys.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The first-launch hint line is gone
+
+- The scene card's first-launch line ("One of 36 examples: ⏴ ⏵ steps
+  through them, and Examples in the top bar shows them all") is removed at
+  the user's request: the card's buttons say as much themselves. The
+  `hint` flag, its clearing on stepping, closing and opening the gallery,
+  and its test go with it; a first launch opens a random example with an
+  ordinary card.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

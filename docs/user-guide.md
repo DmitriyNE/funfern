@@ -440,8 +440,8 @@ names or with every expression evaluated at the material frame's origin. Each ro
   gallery; and × closes the card until another example opens. Edits keep the
   card, since the descriptions suggest them. New, a loaded file, a scene link,
   Undo or Redo across a scene, and a relaunch that restores the autosave show
-  none. A first launch, with nothing to restore, opens a random example whose
-  card adds a line pointing at the rest. New, Load scene, an example, a
+  none. A first launch, with nothing to restore, opens a random example with
+  its card. New, Load scene, an example, a
   scene link, and Undo or Redo across any of them replace the whole scene: the
   outgoing field stops and disappears at once, the new scene's geometry shows
   while its mesh is built, and its field starts from zero, as at startup. An

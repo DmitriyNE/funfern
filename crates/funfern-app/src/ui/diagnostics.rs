@@ -292,7 +292,6 @@ impl Playground {
             Ok(()) => {
                 self.example_opened = Some(index);
                 self.scene_card.dismissed = false;
-                self.scene_card.hint = false;
                 self.notify(format!("Opened {}", catalog[index].name));
             }
             Err(error) => self.notify(error),
@@ -312,8 +311,7 @@ impl Playground {
     }
 
     /// Opens a catalog entry at random, for a launch with nothing to restore,
-    /// which is a first launch but for an autosave gone missing. Its card
-    /// opens with a line saying there are more.
+    /// which is a first launch but for an autosave gone missing.
     pub(super) fn open_random_example(&mut self) {
         let catalog = funfern_app::topology_examples::catalog();
         let index = random_example_index(random_fraction(), catalog.len());
@@ -322,7 +320,6 @@ impl Playground {
         } else {
             self.example_opened = Some(index);
             self.scene_card.dismissed = false;
-            self.scene_card.hint = true;
         }
     }
 
