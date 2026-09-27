@@ -203,6 +203,29 @@ impl Playground {
             }
             return;
         }
+        // A long touch is a tap with Shift held: what is under it goes into the
+        // selection or comes back out, the multi-select a touchscreen has.
+        // egui makes it neither a click nor a drag, and drags nothing for the
+        // rest of that touch, so nothing else acts on it.
+        if response.long_touched()
+            && let Some(grab) = press
+        {
+            if let Some(hit) = self.hit_probe(grab, r) {
+                self.selected_probe = Some(hit.id());
+                self.selection = TopologySelection::None;
+            } else if let Some(hit) =
+                self.topology_hit(ScreenPoint::new(grab.x as f64, grab.y as f64), r)
+            {
+                self.selected_probe = None;
+                self.selection.apply_hit(
+                    &self.editor.document.model.draft.geometry,
+                    hit,
+                    true,
+                    false,
+                );
+            }
+            return;
+        }
         if response.drag_started_by(egui::PointerButton::Primary) {
             if let (Some(pos), Some(grab)) = (pointer, press) {
                 if let Some(hit) = self.hit_material_frame_gizmo(grab, r)

@@ -15387,3 +15387,21 @@ nothing stepping, and nothing in the console.
   taken out. The undo test now presses the buttons too.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — A long press is a touchscreen's Shift-click
+
+- **Defect** (reported). Adding a span to the selection or taking one out was
+  Shift-click and Ctrl/Cmd-click, so a touchscreen could only replace the
+  selection, one span or one box at a time.
+- **Fix.** A long press on a span toggles it in the selection as Shift-click
+  does; on a handle it selects the handle, and on a probe the probe, as a tap
+  would. egui recognises a finger held still past its 0.8 s click limit as a
+  long touch, reports it as neither a click nor a drag, and drags nothing for
+  the rest of that touch, so a finger slid on afterwards moves nothing. A
+  mouse is never a long touch, so Shift keeps the desktop's toggle.
+- **Test.** `a_long_touch_toggles_a_span_in_the_selection` drives the viewport
+  with touch events: two long presses select two spans, a third takes the
+  first back out, a finger slid 40 px after one moves no geometry and opens no
+  history entry, and a short tap still replaces the selection.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

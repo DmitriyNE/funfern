@@ -39,7 +39,8 @@ running; this file covers using it.
   into Panels. The essential editing and playback controls stay on one row.
 - **Select:** clicking a control or junction selects one handle. Clicking a curve
   selects its stable span; Shift-click toggles spans, and Ctrl/Cmd-click selects the
-  complete curve. Marquee direction follows CAD convention: left-to-right fully
+  complete curve. On a touchscreen a long press is the Shift-click: it puts the
+  span under the finger into the selection or takes it back out. Marquee direction follows CAD convention: left-to-right fully
   encloses spans, while right-to-left crosses them. Shift at release adds the hits.
   The outer rectangle participates in the same span selection model.
 - **Delete and transform:** Delete or Backspace removes the selection: every

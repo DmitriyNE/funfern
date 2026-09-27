@@ -299,6 +299,111 @@ mod tests {
     use super::*;
     use funfern_app::topology_viewport::{TopologyHandle, TopologyHit};
 
+    /// One finger on `point` from `time` for `held` seconds, slid by `slide`
+    /// pixels and lifted, with the viewport shown every tenth of a second.
+    /// Answers the time after it.
+    fn touch(
+        state: &mut Playground,
+        context: &egui::Context,
+        time: f64,
+        held: f64,
+        point: Point2,
+        slide: egui::Vec2,
+    ) -> f64 {
+        let at = state.screen(point, viewport());
+        let finger = |phase, pos| egui::Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(0),
+            phase,
+            pos,
+            force: None,
+        };
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let none = egui::Modifiers::NONE;
+        let events = vec![
+            finger(egui::TouchPhase::Start, at),
+            egui::Event::PointerMoved(at),
+            button(true),
+        ];
+        viewport_frame(state, context, time, none, events);
+        let steps = (held / 0.1).round() as usize;
+        for step in 1..=steps {
+            viewport_frame(state, context, time + 0.1 * step as f64, none, vec![]);
+            assert!(state.drag.is_none(), "a held finger started a drag");
+            assert!(!state.editor.editing(), "a held finger started an edit");
+        }
+        let end = at + slide;
+        for step in 1..=4 {
+            let pos = at + slide * (step as f32 / 4.0);
+            let moved = vec![
+                finger(egui::TouchPhase::Move, pos),
+                egui::Event::PointerMoved(pos),
+            ];
+            viewport_frame(
+                state,
+                context,
+                time + held + 0.02 * step as f64,
+                none,
+                moved,
+            );
+        }
+        let lift = vec![finger(egui::TouchPhase::End, end), button(false)];
+        viewport_frame(state, context, time + held + 0.1, none, lift);
+        viewport_frame(state, context, time + held + 0.15, none, vec![]);
+        time + held + 1.0
+    }
+
+    /// A long touch puts the span under it into the selection or takes it
+    /// back out, as Shift-click does - a touchscreen's multi-select - and a
+    /// finger slid on after it moves nothing. A short tap still replaces.
+    #[test]
+    fn a_long_touch_toggles_a_span_in_the_selection() {
+        let mut state = with_baffles(&[[Point2::new(-0.5, -0.5), Point2::new(-0.5, 0.5)]]);
+        let context = viewport_context(&mut state);
+        let upper = |state: &Playground, curve: usize| {
+            TopologySpanTarget::Curve(
+                state.editor.document.model.draft.geometry.curves[curve].spans[1].id,
+            )
+        };
+        let (right, left) = (upper(&state, 0), upper(&state, 1));
+        let selected = |state: &Playground| state.selection.spans().cloned().unwrap_or_default();
+        let history = state.editor.history_len();
+        let geometry = state.editor.document.model.draft.geometry.clone();
+        let still = egui::Vec2::ZERO;
+
+        let slid = egui::vec2(40.0, 0.0);
+        let mut time = touch(&mut state, &context, 1.0, 1.0, Point2::new(0.0, 0.25), slid);
+        assert_eq!(selected(&state), BTreeSet::from([right]));
+        let point = Point2::new(-0.5, 0.25);
+        time = touch(&mut state, &context, time, 1.0, point, still);
+        assert_eq!(selected(&state), BTreeSet::from([right, left]));
+        time = touch(
+            &mut state,
+            &context,
+            time,
+            1.0,
+            Point2::new(0.0, 0.25),
+            still,
+        );
+        assert_eq!(selected(&state), BTreeSet::from([left]));
+        touch(
+            &mut state,
+            &context,
+            time,
+            0.1,
+            Point2::new(0.0, 0.25),
+            still,
+        );
+        assert_eq!(selected(&state), BTreeSet::from([right]), "a tap replaces");
+        assert_eq!(state.editor.history_len(), history);
+        assert_eq!(state.editor.document.model.draft.geometry, geometry);
+    }
+
     #[test]
     fn marquee_operation_and_direction_are_live_conventions() {
         assert_eq!(

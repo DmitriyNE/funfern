@@ -74,6 +74,30 @@ pub(super) fn viewport_click(
     time + 0.04
 }
 
+/// A scene with one baffle standing across the middle and `extra` besides,
+/// framed so a world point can be clicked where it is drawn.
+pub(super) fn with_baffles(extra: &[[Point2; 2]]) -> Playground {
+    let mut state = Playground {
+        editor: TopologyEditor::default(),
+        scale: 250.0,
+        center: Point2::new(0.0, 0.0),
+        ..Playground::default()
+    };
+    for [start, end] in [[Point2::new(0.0, -0.5), Point2::new(0.0, 0.5)]]
+        .iter()
+        .chain(extra)
+    {
+        state
+            .editor
+            .create_boundary_baffle(
+                OpenCubicSpline::polyline(vec![*start, start.lerp(*end, 0.5), *end]).unwrap(),
+            )
+            .unwrap();
+        settle(&mut state.editor);
+    }
+    state
+}
+
 pub(super) fn settle(editor: &mut TopologyEditor) {
     for _ in 0..100_000 {
         editor.validate_frame(64);

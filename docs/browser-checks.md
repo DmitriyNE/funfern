@@ -50,7 +50,9 @@ plain `trunk` builds the cooperative static-host variant.
   Select filtered, Invert, and Clear. Press and release Shift or Alt while a marquee
   is already moving and confirm that its operation and result update immediately.
   Exercise persistent Area select with Replace, Add, and Subtract. Selecting one
-  span must ring only that span's own four controls, not the whole curve.
+  span must ring only that span's own four controls, not the whole curve. On a
+  touchscreen, a long press toggles a span in and out of the selection without
+  moving it, however the finger slides afterwards.
 - [ ] Press Delete and Backspace with a control, a probe, one complete feature, and
   several complete features selected, including while the pointer is over a panel.
   A multi-feature deletion is one undo entry; partial span and outer-edge selections
