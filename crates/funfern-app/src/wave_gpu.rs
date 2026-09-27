@@ -258,7 +258,10 @@ pub struct RecorderContext {
 /// a comparison against a real number is one no compiler is free to fold away,
 /// which `w != w` is: under the fast-math the Metal backend compiles with, a
 /// NaN test silently becomes `false` and every unwritten frame reads as data.
-const FAR_FIELD_UNRECORDED: f32 = -1.0e30;
+/// A billion seconds before the clock starts is below any time it records;
+/// the shaders' own copy must stay under 2^63, which Safari cannot read in the
+/// full digits naga writes an f32 constant in.
+const FAR_FIELD_UNRECORDED: f32 = -1.0e9;
 
 /// The ring is a time series, not a step series: a frame is one bucket of the
 /// wave clock, so a mesh swap that moves the time step neither shifts the write
@@ -6416,7 +6419,7 @@ mod tests {
         assert!(!shader.contains("!= newer.w"));
         assert!(!shader.contains("!= older.w"));
         assert!(!shader.contains("recorded == recorded"));
-        assert!(shader.contains("const UNRECORDED: f32 = -1.0e30;"));
+        assert!(shader.contains("const UNRECORDED: f32 = -1.0e9;"));
         assert!(shader.contains("if newer.w < 0.0 || older.w < 0.0 {"));
     }
 

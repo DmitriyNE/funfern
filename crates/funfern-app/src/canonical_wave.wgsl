@@ -37,9 +37,12 @@ const TEMPORAL_LOSS_VAN_DER_POL: u32 = 16u;
 const RESTORING_KLEIN_GORDON: u32 = 1u;
 const RESTORING_SINE_GORDON: u32 = 2u;
 const RESTORING_PHI4: u32 = 3u;
-// Leave serialization headroom below f32::MAX: Naga's decimal WGSL writer
-// rounds the exact maximum upward, which Chrome correctly rejects.
-const MAX_FINITE: f32 = 3.0e+38;
+// The exponent bits of an f32 that is infinite or NaN. Finiteness is read
+// from them rather than against a float bound: naga writes an f32 constant
+// out in full digits, which Safari cannot read past 2^63 and Chrome rejects at
+// f32::MAX, and a float comparison is one fast math may assume never meets a
+// NaN.
+const NON_FINITE_EXPONENT: u32 = 0x7f800000u;
 
 struct Control {
     counts_a: vec4<u32>,
@@ -129,12 +132,22 @@ fn reject(reason: u32) {
 }
 
 fn finite_scalar(value: f32) -> bool {
-    return value >= -MAX_FINITE && value <= MAX_FINITE;
+    return (bitcast<u32>(value) & NON_FINITE_EXPONENT) != NON_FINITE_EXPONENT;
+}
+
+fn finite_vec2(value: vec2<f32>) -> bool {
+    return all((bitcast<vec2<u32>>(value) & vec2<u32>(NON_FINITE_EXPONENT))
+        != vec2<u32>(NON_FINITE_EXPONENT));
+}
+
+fn finite_vec3(value: vec3<f32>) -> bool {
+    return all((bitcast<vec3<u32>>(value) & vec3<u32>(NON_FINITE_EXPONENT))
+        != vec3<u32>(NON_FINITE_EXPONENT));
 }
 
 fn finite_vector(value: vec4<f32>) -> bool {
-    return all(value >= vec4<f32>(-MAX_FINITE))
-        && all(value <= vec4<f32>(MAX_FINITE));
+    return all((bitcast<vec4<u32>>(value) & vec4<u32>(NON_FINITE_EXPONENT))
+        != vec4<u32>(NON_FINITE_EXPONENT));
 }
 
 fn primary_offset() -> u32 { return 0u; }
@@ -1549,8 +1562,7 @@ fn filter_temporal_samples(@builtin(global_invocation_id) id: vec3<u32>) {
     scratch[control.counts_a.x + sample].values =
         vec4<f32>(primary_flux, filter_sample_energies(sample, next));
     set_candidate_b(sample, next);
-    if !all(next >= vec2<f32>(-MAX_FINITE))
-        || !all(next <= vec2<f32>(MAX_FINITE)) {
+    if !finite_vec2(next) {
         reject(STATUS_NON_FINITE);
     }
 }
@@ -1613,8 +1625,7 @@ fn filter_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let next = accepted_b(sample_index) - scale * control.evolution.y * correction;
         set_candidate_b(sample_index, next);
-        if !all(next >= vec2<f32>(-MAX_FINITE))
-            || !all(next <= vec2<f32>(MAX_FINITE)) {
+        if !finite_vec2(next) {
             reject(STATUS_NON_FINITE);
         }
     }
@@ -1653,8 +1664,7 @@ fn event_validate(@builtin(local_invocation_id) id: vec3<u32>) {
     }
     let total = reduce_boundary_vector(local, energies);
     if !participating || local != 0u { return; }
-    if !all(total >= vec2<f32>(-MAX_FINITE))
-        || !all(total <= vec2<f32>(MAX_FINITE)) {
+    if !finite_vec2(total) {
         reject(STATUS_NON_FINITE);
         return;
     }
@@ -1823,8 +1833,7 @@ fn handoff_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
     if i < control.counts_a.x + control.counts_a.y {
         let sample = i - control.counts_a.x;
         let value = candidate_b(sample);
-        if !all(value >= vec2<f32>(-MAX_FINITE))
-            || !all(value <= vec2<f32>(MAX_FINITE)) {
+        if !finite_vec2(value) {
             reject(STATUS_NON_FINITE);
         }
         if temporal_enabled() && field_kind(samples[sample].nodes_b.w) != 0u {
@@ -2562,8 +2571,7 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
                 boundary_float(mode_word(mode, 11u), 1u),
                 boundary_float(mode_word(mode, 11u), 2u));
             midpoint_memory = dot(loss_coefficient, 0.5 * (old_z + new_z));
-            if !all(new_z >= vec3<f32>(-MAX_FINITE))
-                || !all(new_z <= vec3<f32>(MAX_FINITE)) {
+            if !finite_vec3(new_z) {
                 reject(STATUS_NON_FINITE);
             }
             if second {
@@ -2795,8 +2803,7 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
                 scratch[complementary_offset() + i].values.w = stress.y;
             }
         }
-        if !all(next >= vec2<f32>(-MAX_FINITE))
-            || !all(next <= vec2<f32>(MAX_FINITE)) {
+        if !finite_vec2(next) {
             reject(STATUS_NON_FINITE);
         }
         inject_at(complementary_offset() + i);
@@ -2854,8 +2861,7 @@ fn finish_loss_validate(@builtin(global_invocation_id) id: vec3<u32>) {
         scratch[i].values.x += stage_complementary_energy(sample_index, before, stage_time)
             - stage_complementary_energy(sample_index, next, stage_time);
         set_candidate_b(sample_index, next);
-        if !all(next >= vec2<f32>(-MAX_FINITE))
-            || !all(next <= vec2<f32>(MAX_FINITE)) {
+        if !finite_vec2(next) {
             reject(STATUS_NON_FINITE);
         }
     } else if !finite_scalar(state[i].values.y) {

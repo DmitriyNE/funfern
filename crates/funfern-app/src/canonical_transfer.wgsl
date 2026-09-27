@@ -9,9 +9,12 @@ const STATUS_LAYOUT: u32 = 1u;
 const STATUS_TIMESTEP: u32 = 2u;
 const STATUS_NON_FINITE: u32 = 4u;
 const HANDOFF_RECEIPT_MAGIC: u32 = 0x48414e44u;
-// Leave serialization headroom below f32::MAX: Naga's decimal WGSL writer
-// rounds the exact maximum upward, which Chrome correctly rejects.
-const MAX_FINITE: f32 = 3.0e+38;
+// The exponent bits of an f32 that is infinite or NaN. Finiteness is read
+// from them rather than against a float bound: naga writes an f32 constant
+// out in full digits, which Safari cannot read past 2^63 and Chrome rejects at
+// f32::MAX, and a float comparison is one fast math may assume never meets a
+// NaN.
+const NON_FINITE_EXPONENT: u32 = 0x7f800000u;
 
 struct Control {
     counts_a: vec4<u32>,
@@ -88,7 +91,12 @@ fn stopped() -> bool {
         || atomicLoad(&new_status.latch) != 0u;
 }
 fn finite_scalar(value: f32) -> bool {
-    return value >= -MAX_FINITE && value <= MAX_FINITE;
+    return (bitcast<u32>(value) & NON_FINITE_EXPONENT) != NON_FINITE_EXPONENT;
+}
+
+fn finite_vec2(value: vec2<f32>) -> bool {
+    return all((bitcast<vec2<u32>>(value) & vec2<u32>(NON_FINITE_EXPONENT))
+        != vec2<u32>(NON_FINITE_EXPONENT));
 }
 fn transfer_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(transfer[word].data[lane]);
@@ -197,8 +205,7 @@ fn transfer_vector(@builtin(global_invocation_id) id: vec3<u32>) {
     if vector_identity() {
         let value = old_b(target_index);
         set_candidate_b(target_index, value);
-        if !all(value >= vec2<f32>(-MAX_FINITE))
-            || !all(value <= vec2<f32>(MAX_FINITE)) {
+        if !finite_vec2(value) {
             reject(STATUS_NON_FINITE);
         }
         return;
@@ -220,7 +227,7 @@ fn transfer_vector(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     set_candidate_b(target_index, value);
-    if !all(value >= vec2<f32>(-MAX_FINITE)) || !all(value <= vec2<f32>(MAX_FINITE)) {
+    if !finite_vec2(value) {
         reject(STATUS_NON_FINITE);
     }
 }

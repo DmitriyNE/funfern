@@ -44,6 +44,17 @@ browser rejects: twice now a shader has passed every native check and failed
 the whole browser build, most recently a `workgroupBarrier` under a branch on a
 flag read from read-write storage.
 
+A browser is not given the WGSL as written. Bevy composes every shader into a
+naga module, and wgpu writes it back out as WGSL for the browser. That writer
+prints each `f32` constant in full digits, and Safari cannot read a digit-only
+float literal past 2^63: `3.0e38` goes out as 39 digits and Safari rejects the
+whole shader, which Chrome, and so the browser test, reads without complaint. The
+workspace test `every_shader_reaches_a_browser_in_a_form_safari_reads` writes each
+shader through naga's writer and fails on such a literal. Safari itself is checked
+by hand, since no CI browser runs its WebGPU: with remote automation enabled in
+Safari's developer settings, `safaridriver` can drive it against a local
+`browser-tests/server.py --isolated` serving the built bundle.
+
 GitHub Actions runs formatting, Clippy, the workspace tests, and native and WASM
 release builds for pull requests and pushes to `main`. The Playwright smoke test is
 a local hardware-backed check because GitHub-hosted runners do not expose a usable

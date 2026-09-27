@@ -12,7 +12,17 @@
 // either side lacking `r` it leaves that untouched.
 const VECTOR_WORDS: u32 = 4u;
 const STATUS_NON_FINITE: u32 = 4u;
-const MAX_FINITE: f32 = 3.0e+38;
+// The exponent bits of an f32 that is infinite or NaN. Finiteness is read
+// from them rather than against a float bound: naga writes an f32 constant
+// out in full digits, which Safari cannot read past 2^63 and Chrome rejects at
+// f32::MAX, and a float comparison is one fast math may assume never meets a
+// NaN.
+const NON_FINITE_EXPONENT: u32 = 0x7f800000u;
+
+fn finite_vec2(value: vec2<f32>) -> bool {
+    return all((bitcast<vec2<u32>>(value) & vec2<u32>(NON_FINITE_EXPONENT))
+        != vec2<u32>(NON_FINITE_EXPONENT));
+}
 
 struct Control {
     counts_a: vec4<u32>,
@@ -195,7 +205,7 @@ fn transfer_invariant(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let value = flux + (target_potential(target_index) - carried);
     set_candidate_b(target_index, value);
-    if !all(value >= vec2<f32>(-MAX_FINITE)) || !all(value <= vec2<f32>(MAX_FINITE)) {
+    if !finite_vec2(value) {
         reject(STATUS_NON_FINITE);
     }
 }

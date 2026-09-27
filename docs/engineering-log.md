@@ -14791,3 +14791,60 @@ The user saw the gallery's scroll bar in the middle of the window on a phone.
   of 596.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — Safari reads the shaders a browser is given
+
+The user saw the simulation stand still in Safari on macOS: the scene drawn,
+nothing stepping, and nothing in the console.
+
+- **Reproduced** in Safari 26.3.1 through `safaridriver`, on the live site and
+  on a local build: 0 steps/s, the status strip at "Adapting mesh: ready for
+  GPU upload". A script on a scratch copy of the page recorded each shader's
+  compilation messages and each compute pipeline's validation: 7 of 23 modules
+  rejected, "Expected one of '(', a literal, or an identifier", at
+  `const MAX_FINITE: f32 = 300000000000000000000000000000000000000f;` and
+  `const UNRECORDED: f32 = -1000000000000000000000000000000f;`, and 60 of 79
+  compute pipelines with them, every canonical wave, transfer and far-field
+  one. The stepper waits on all of its pipelines, so it skipped every frame.
+- **Cause.** A browser is not given the source. Bevy composes each shader
+  into a naga module and wgpu's WebGPU backend writes it back out with naga's
+  WGSL writer, which prints an `f32` as `{value}f`, in full digits. WebKit
+  lexes a digit-only float literal as a 64-bit integer: `9223372036854775807f`
+  compiles and `9223372036854775808f` does not, while `3e38f` and
+  `300…0.0f` do. The grammar allows all of them and Chrome reads them, so the
+  browser shader test, which compiles the source in Chrome, could not see it.
+- **Confirmed** by rewriting only those literals in the page, to exponent
+  form: all 79 pipelines compiled and the simulation ran at 378 steps/s. The
+  one other device error, "GPUCommandEncoder.finish: encoder state is
+  'Locked'", came from the failed pipelines and went with them.
+- **Fix.** The five shaders that bounded a value by `MAX_FINITE = 3e38` read
+  finiteness from the exponent bits instead (`NON_FINITE_EXPONENT`,
+  `finite_scalar`, `finite_vec2`, `finite_vec3`, `finite_vector`), 27 checks:
+  infinity and NaN still fail, the bound moves from 3e38 to `f32::MAX`, and no
+  float comparison is left for fast math to fold. The far-field sentinel goes
+  from −1e30 to −1e9, in both shaders and in `FAR_FIELD_UNRECORDED`; a
+  recorded time is never negative.
+- **Guard:** `every_shader_reaches_a_browser_in_a_form_safari_reads` writes
+  each shader through naga's WGSL writer, as wgpu does (the naga
+  dev-dependency gains `wgsl-out`), and fails on a literal Safari cannot read.
+  Before the fix it named the same seven shaders, and also naga's fold of
+  `UNRECORDED * 0.5` into 5e29.
+  `the_literal_scan_finds_what_safari_rejects_and_nothing_else` checks the
+  scan. `docs/checks.md` says what a browser compiles and how Safari is checked
+  by hand.
+- **Device:** `canonical_gpu_long_run` at 400 steps on all 36 gallery scenes,
+  with the old shaders and with the new: the same Q and b on every scene to
+  the printed digits, all within 3.8e-6 but the self-sustained emitter
+  (1.418e-5 / 1.889e-5, inside its 1e-4).
+- **Safari after:** the rebuilt bundle, with the next entry's shim, in
+  Safari: no shader, pipeline or uncaptured error, and the first-launch
+  scene, the double slit with its far field, at 410 steps/s through its mesh
+  adaptations.
+- Also found: Safari's `GPUDevice` has no `onuncapturederror` attribute, so
+  no GPU error reached wgpu or Bevy there (next entry). Drafts of bug reports
+  for WebKit (the literal, the attribute) and naga (the writer) went to the
+  user to file.
+- **iOS** stops earlier, on the splash, before a first frame, which the
+  shaders do not reach; not reproduced yet.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

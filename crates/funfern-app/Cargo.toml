@@ -44,5 +44,6 @@ web-sys = { version = "0.3", features = ["Blob", "Document", "Element", "History
 [dev-dependencies]
 # Pinned to the version wgpu links, so the parse a test does is the parse the
 # app's own device does. Nothing in the workspace read the shaders before this:
-# every edit was checked by hand against a throwaway crate.
-naga = { version = "=29.0.4", features = ["wgsl-in"] }
+# every edit was checked by hand against a throwaway crate. `wgsl-out` is the
+# rewrite wgpu hands a browser in place of the source.
+naga = { version = "=29.0.4", features = ["wgsl-in", "wgsl-out"] }

@@ -24,7 +24,8 @@ struct FarFieldStencil {
 }
 struct FarFieldControl { sampling: vec4<f32>, projection: vec4<f32> }
 struct ProbeSample { values: vec4<f32> }
-const UNRECORDED: f32 = -1.0e30;
+// An unwritten frame, as in far_field.wgsl.
+const UNRECORDED: f32 = -1.0e9;
 
 @group(0) @binding(0) var<storage, read> control: Control;
 @group(0) @binding(1) var<storage, read> state: array<StateWord>;

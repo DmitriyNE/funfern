@@ -33,8 +33,11 @@ struct FarFieldControl {
 
 // What an unwritten frame holds. A recorded time is never negative, so this is
 // a comparison against a real number rather than a NaN test, which the fast
-// math these shaders compile under is free to fold away.
-const UNRECORDED: f32 = -1.0e30;
+// math these shaders compile under is free to fold away. A billion seconds
+// before the clock starts is below any time it records, and short enough for a
+// browser: naga writes an f32 constant out in full digits, which Safari cannot
+// read past 2^63.
+const UNRECORDED: f32 = -1.0e9;
 
 struct ProbeSample {
     values: vec4<f32>,
