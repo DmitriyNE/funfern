@@ -775,8 +775,10 @@ averaged across the channel, 0.6% (13.5% and 1.0% at edge 0.05; 12.3% and
 82%, 78% as the plane wave; in the crystal's gap at 2 Hz it passes 2.4%
 where the crystal passes 0.1%. The depth series failed to mesh: the first
 0.6 of the random slab, 35 rods, stalls the mesher ("topology ear clipping
-stalled"), as the axis-aligned square rods did in scene 13. Reported, not
-fixed.
+stalled"), as the axis-aligned square rods did in scene 13. Fixed on
+2026-09-27: a second bridge to a rod vertex was spliced at the wrong copy of
+it; the slab cut every 0.05 from either side now meshes at edges 0.16, 0.08
+and 0.05. The depth series itself has not been run.
 
 Claims at edge 0.08, 12 s from rest, at 2.5 Hz:
 

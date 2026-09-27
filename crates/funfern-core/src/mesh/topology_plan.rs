@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     BoundaryEdge, BoundaryLabel, BoundaryPoint, BridgeSearch, EarSearch, EarStage, MeshBuilder,
     MeshError, MeshQuality, MeshTriangle, MeshingStats, OpenConstraintKind, PolygonLocation,
-    SegmentRelation, TriMesh, TriangulationDomain, boundary_adjacency, edge_key, point_in_triangle,
-    segment_relation, valid_options,
+    SegmentRelation, TriMesh, TriangulationDomain, boundary_adjacency, bridge_copy, edge_key,
+    point_in_triangle, segment_relation, valid_options,
 };
 use crate::{
     CompiledBoundaryStep, CompiledEdge, CompiledEdgeSource, CurveId, CurveSpanId, FaceId, Point2,
@@ -348,6 +348,8 @@ impl TopologyMeshingJob {
                 .best
                 .ok_or(MeshError::Topology("no visible bridge to topology cycle"))?;
             let hole = search.holes[search.hole].clone();
+            let outer_index =
+                bridge_copy(b, &search.polygon, outer_index, b.point(hole[hole_index]));
             let mut splice = Vec::with_capacity(hole.len() + 2);
             for offset in 0..hole.len() {
                 splice.push(hole[(hole_index + offset) % hole.len()]);
@@ -4331,6 +4333,51 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{edge}: {error}"));
             assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9, "{edge}");
             assert_eq!(orphan_vertices(&mesh), 0, "{edge}");
+        }
+    }
+
+    /// A bridge leaves a corner only into the polygon: between a convex
+    /// corner's edges, anywhere but between a reflex corner's, to the
+    /// interior's side of a straight run, and anywhere but along the slit at
+    /// a slit's tip. A bridge along either edge is in no wedge.
+    #[test]
+    fn a_wedge_holds_the_directions_that_leave_into_the_polygon() {
+        let point = Point2::new;
+        let [east, north, west, south] = [
+            point(1.0, 0.0),
+            point(0.0, 1.0),
+            point(-1.0, 0.0),
+            point(0.0, -1.0),
+        ];
+        let [northeast, southwest] = [point(1.0, 1.0), point(-1.0, -1.0)];
+        let holds = |previous, next, target| {
+            crate::mesh::wedge_holds(previous, Point2::default(), next, target)
+        };
+        // In from the north, out to the east: the quarter between.
+        assert!(holds(north, east, northeast));
+        for target in [southwest, west, south, east, north, point(2.0, 0.0)] {
+            assert!(!holds(north, east, target), "{target:?}");
+        }
+        // In from the east, out to the north: three quarters.
+        for target in [southwest, west, south] {
+            assert!(holds(east, north, target), "{target:?}");
+        }
+        for target in [northeast, north, east, point(0.0, 2.0)] {
+            assert!(!holds(east, north, target), "{target:?}");
+        }
+        // Straight on eastwards: the half to the north.
+        assert!(holds(west, east, north));
+        assert!(holds(west, east, northeast));
+        for target in [south, southwest, east, west] {
+            assert!(!holds(west, east, target), "{target:?}");
+        }
+        // Out along a slit to the east and back.
+        for target in [north, south, west, southwest, northeast] {
+            assert!(holds(east, east, target), "{target:?}");
+            assert!(holds(point(2.0, 0.0), east, target), "{target:?}");
+        }
+        for target in [east, point(0.5, 0.0), point(2.0, 0.0)] {
+            assert!(!holds(east, east, target), "{target:?}");
         }
     }
 }

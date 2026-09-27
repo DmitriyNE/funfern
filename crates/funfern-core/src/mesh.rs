@@ -522,6 +522,51 @@ fn point_in_triangle(point: Point2, triangle: [Point2; 3]) -> PolygonLocation {
     }
 }
 
+/// Whether a segment from `vertex` towards `target` leaves into the polygon
+/// at a corner walked `previous → vertex → next` counterclockwise, the
+/// interior on the left: the wedge from the next edge counterclockwise round
+/// to the previous one, both edges excluded. Exact signs only.
+fn wedge_holds(previous: Point2, vertex: Point2, next: Point2, target: Point2) -> bool {
+    let beyond_next = orient2d(vertex, next, target) == PredicateSign::Positive;
+    let before_previous = orient2d(vertex, previous, target) == PredicateSign::Negative;
+    match orient2d(previous, vertex, next) {
+        PredicateSign::Positive => beyond_next && before_previous,
+        PredicateSign::Negative => beyond_next || before_previous,
+        // Along one line the differences' signs are exact, and so are the
+        // signs of these dot products.
+        PredicateSign::Zero if (previous - vertex).dot(next - vertex) < 0.0 => beyond_next,
+        // A slit's tip: the polygon is all round it but along the slit.
+        PredicateSign::Zero => {
+            orient2d(vertex, next, target) != PredicateSign::Zero
+                || (target - vertex).dot(next - vertex) < 0.0
+        }
+    }
+}
+
+/// Where in `polygon` a bridge from the vertex at `found` to `target` is
+/// spliced. A vertex that already carries a bridge is in the polygon once for
+/// each wedge the bridges split it into, all at one point, so visibility
+/// cannot tell the copies apart; spliced at a copy whose wedge the bridge
+/// does not run into, the polygon crosses itself there and no ear passes.
+/// `found` stays when its wedge holds the bridge, and when no copy's does, as
+/// for a bridge along one of the vertex's edges.
+fn bridge_copy(builder: &MeshBuilder, polygon: &[usize], found: usize, target: Point2) -> usize {
+    let count = polygon.len();
+    let vertex = polygon[found];
+    (0..count)
+        .map(|offset| (found + offset) % count)
+        .filter(|&index| polygon[index] == vertex)
+        .find(|&index| {
+            wedge_holds(
+                builder.point(polygon[(index + count - 1) % count]),
+                builder.point(vertex),
+                builder.point(polygon[(index + 1) % count]),
+                target,
+            )
+        })
+        .unwrap_or(found)
+}
+
 trait ArrayMapWithIndex<T, const N: usize> {
     fn map_with_index<U>(self, map: impl FnMut(usize, T) -> U) -> [U; N];
 }
@@ -2652,6 +2697,8 @@ impl MeshingJob {
                         let (_, outer_index, hole_index) = search
                             .best
                             .ok_or(MeshError::Topology("no visible bridge to obstacle"))?;
+                        let outer_index =
+                            bridge_copy(b, &search.polygon, outer_index, b.point(hole[hole_index]));
                         let mut splice = Vec::with_capacity(hole.len() + 2);
                         for offset in 0..hole.len() {
                             splice.push(hole[(hole_index + offset) % hole.len()]);

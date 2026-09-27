@@ -6046,6 +6046,23 @@ mod tests {
         );
     }
 
+    /// The first 0.6 of the disordered slab, its 35 rods west of `x = 0.1`,
+    /// meshes at edges 0.16, 0.08 and 0.05. Bridging the channel's face to its holes gives
+    /// one rod vertex two bridges there, and the second must leave through
+    /// the copy of the vertex whose wedge it runs into; spliced at the other
+    /// copy, the polygon crossed itself and ear clipping stalled.
+    #[test]
+    fn the_disordered_slab_meshes_where_a_rod_takes_two_bridges() {
+        let west = disordered_sites()
+            .into_iter()
+            .filter(|site| site.x < 0.1)
+            .collect::<Vec<_>>();
+        assert_eq!(west.len(), 35);
+        for edge in [0.16, 0.08, 0.05] {
+            prepare(&rods_with(&west), edge);
+        }
+    }
+
     /// The skin-depth claims, at edge 0.08, 8 s from rest at 3 Hz, from the
     /// phasor along the slab's front, 0.02 to 0.18 in, before its back face's
     /// reflection counts: the slope of `ln|U|` is `Im k` of

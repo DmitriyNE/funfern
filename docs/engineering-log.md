@@ -14725,3 +14725,42 @@ tangent's slowing.
   note say what the forced wavelength includes.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — A second bridge leaves a bridged vertex through its own wedge
+
+The ear-clipping stall diagnosed earlier today ("a vertex bridged twice"):
+the second bridge to a vertex that already carries one was spliced at that
+vertex's first copy in the polygon, whatever wedge it ran into.
+
+- **The fix.** `wedge_holds` (in `mesh.rs`) says whether a direction leaving
+  a corner walked `previous → vertex → next` runs into the polygon, from the
+  two `orient2d` signs against the corner's edges: between them at a convex
+  corner, outside the convex pair at a reflex one, the interior's side of a
+  straight run, and all round a slit's tip but along the slit. `bridge_copy`
+  picks, from the copy the search found onwards, the first copy of the vertex
+  whose wedge holds the bridge, and keeps the found one when none does (a
+  bridge along one of the vertex's edges, which visibility passes as it did).
+  Both splices use it: `TopologyMeshingJob::step_bridge` and the legacy
+  `MeshingJob`'s bridge, which had the same splice.
+- The log's sketch refused a pair no copy's wedge holds; that happens only
+  for a bridge along an edge, and refusing it would have turned such a bridge
+  into "no visible bridge" where it meshes today.
+- A vertex in the polygon once is untouched, since visibility already keeps a
+  bridge inside its wedge, so a mesh changes only where the polygon used to
+  cross itself. Cost: one pass over the polygon per hole, beside the seeding
+  pass over polygon × hole.
+- **Measured** with a temporary probe (removed): the disordered sites cut at
+  `x` from −0.45 to 0.5 every 0.05, west and east of the cut, at edges 0.16,
+  0.08 and 0.05, 120 documents: 26 stalled before, none after, and the 94
+  that meshed before give bit-identical meshes (vertex coordinates and
+  triangles hashed). Every gallery scene at the same three edges is
+  bit-identical. The stalls were mostly east cuts, 22 to 36 rods, and west
+  cuts at 0.1 and 0.15, at every edge; two more east cuts, 10 and 11 rods,
+  at 0.08 only.
+- Tests: `the_disordered_slab_meshes_where_a_rod_takes_two_bridges` (the 35
+  rods west of `x = 0.1` at the three edges; it stalled at each before the
+  fix) and `a_wedge_holds_the_directions_that_leave_into_the_polygon`.
+- The architecture's meshing paragraph says it; the gallery plan's item 24
+  note says the slab meshes, and that its depth series has not been run.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

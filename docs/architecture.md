@@ -699,12 +699,13 @@ Mesh construction samples the accepted axis-aligned outer rectangle and every ac
 builds one polygonal domain per retained region. A material interface reuses one
 vertex trace for its exterior and interior domains; a wall duplicates the trace
 so the two sides have independent DOFs. A visibility bridge turns each domain and
-its direct child holes into one weakly-simple polygon; exact-sign ear clipping
-creates the initial constrained triangulation. Boundary segments are authoritative
-constraints. Queued edge legalization flips only unconstrained convex diagonals,
-using the robust incircle predicate, to produce a locally constrained-Delaunay
-mesh. Triangle centroids are checked against the sampled domain before a result
-is published.
+its direct child holes into one weakly-simple polygon; a bridge to a vertex that
+already carries one leaves through the copy whose wedge it runs into. Exact-sign
+ear clipping creates the initial constrained triangulation. Boundary segments
+are authoritative constraints. Queued edge legalization flips only unconstrained
+convex diagonals, using the robust incircle predicate, to produce a locally
+constrained-Delaunay mesh. Triangle centroids are checked against the sampled
+domain before a result is published.
 
 Open baffles are inserted after the closed-region mesh reaches its requested bulk
 resolution. Each sampled open curve is recovered as a constrained edge chain by
