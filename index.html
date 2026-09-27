@@ -63,6 +63,34 @@
         .catch(giveUp);
     })();
   </script>
+  <!--
+    Safari's GPUDevice has no onuncapturederror attribute, only the event. wgpu
+    hears a GPU error through the attribute, so there no error reached Bevy: it
+    logged none and its error policy never ran, and a shader Safari rejected
+    left the simulation silently still. Where the attribute is missing this
+    gives it its specified meaning, the handler of the uncapturederror event.
+  -->
+  <script>
+    (function () {
+      if (!window.GPUDevice || 'onuncapturederror' in GPUDevice.prototype) return;
+      var handlers = new WeakMap();
+      Object.defineProperty(GPUDevice.prototype, 'onuncapturederror', {
+        configurable: true,
+        enumerable: true,
+        get: function () { return handlers.get(this) || null; },
+        set: function (handler) {
+          var device = this;
+          if (!handlers.has(device)) {
+            device.addEventListener('uncapturederror', function (event) {
+              var current = handlers.get(device);
+              if (typeof current === 'function') current.call(device, event);
+            });
+          }
+          handlers.set(device, typeof handler === 'function' ? handler : null);
+        },
+      });
+    })();
+  </script>
   <link data-trunk rel="copy-file" href="coi-serviceworker.js">
   <link data-trunk rel="copy-file" href="assets/logo.svg">
   <link data-trunk rel="rust" href="crates/funfern-app/Cargo.toml" data-bin="funfern-app">

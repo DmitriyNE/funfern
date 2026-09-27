@@ -14848,3 +14848,28 @@ nothing stepping, and nothing in the console.
   shaders do not reach; not reproduced yet.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — GPU errors reach Bevy in Safari
+
+- In Safari 26.3.1, `'onuncapturederror' in GPUDevice.prototype` is false: an
+  assigned handler is never called, and a listener on the `uncapturederror`
+  event is (an isolated page: attribute 0, listener 1). wgpu's WebGPU backend
+  assigns the attribute (`arg0.onuncapturederror = arg1` in the glue), so no
+  GPU error reached Bevy in Safari. It logged no "Caught rendering error", and
+  its policy, to stop rendering and exit on any GPU error as it does in
+  Chrome, never ran: the rejected shaders of the previous entry left the
+  simulation silently still.
+- **Fix.** `index.html` defines the attribute on `GPUDevice.prototype` where
+  it is missing, with its specified meaning, the handler of the
+  `uncapturederror` event: one listener per device calls the current handler,
+  and `null` clears it. Where the attribute exists, as in Chrome, it does
+  nothing.
+- **Checked in Safari:** on an isolated page the handler fires, the getter
+  returns it, and once cleared it is not called; on the bundle built before
+  the shader fix, Bevy logs "Caught rendering error: createComputePipeline
+  failed" and "Quitting the application due to Validation RenderError", as
+  Chrome would.
+- Safari now stops on a GPU error as Chrome does, rather than running on
+  with nothing said.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
