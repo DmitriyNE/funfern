@@ -14986,3 +14986,45 @@ nothing stepping, and nothing in the console.
   workers `unavailable`, the gallery running at 60 fps with adaptation).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — A driven estimate reads its own generation's rate
+
+- **What changed.** The adaptive estimate's scalar snapshot carries a primary
+  rate `u̇`, which weights the energy norm and sets the envelope a field law is
+  read at. On a driven generation the app took it from the fixed operator's
+  `canonical_primary_rate`, which reads the authored mass and force and knows
+  no loss law or restoring force, while the calibration example fed the
+  endpoint difference of the instantaneous fields. So the estimate the
+  application ran was not quite the one that had been calibrated. Both now call
+  `canonical_temporal_primary_rate`: the balance form of the rate at the
+  snapshot's endpoint, with every term the step integrates, and `u̇` from
+  `Q = P(u, t)` as `(Q̇ − ∂ₜP)/∂ᵤP`, so a breathing mass is not read as motion
+  of the field. It is the balance form for the fixed path's reason: a device
+  snapshot is f32 and the difference of adjacent endpoints is mostly rounding.
+- **Measured before the change** (a probe beside the calibration sweep, same
+  fixtures): the app's rate moved the efficiency index by at most 4 percent
+  (mass Kerr 1.379 against 1.435 geometric mean; mass pumped 1.433 against
+  1.480; Klein-Gordon and sine-Gordon within 0.2 percent) and left every spread
+  unchanged. Small, but it is also the rate a first-order wall's residual will
+  read, where it enters directly.
+- **After:** the calibration sweep with production's rate reproduces the
+  2026-09-22 table within 0.01 on every row (mass pumped 1.612, 1.367, 1.458;
+  the static row 1.536, 1.261, 1.358). The ratio of geometric means, static
+  over the seven driven rows, is 1.0021, so the constant recomputes to 1.884
+  and `DRIVEN_INDICATOR_CALIBRATION = 1.88` stands.
+- **Tested:** the rate against the centred difference of the trajectory
+  through the same state, halving the step, on a pumped mass behind a
+  first-order wall, a pumped stiffness behind a second-order wall, a lossy pump
+  with a prescribed wall, Kerr behind both walls, a pumped Kerr, a gap,
+  Klein-Gordon, and van der Pol. Each closes at order two (ratios 3.99 to 4.04)
+  except one.
+- **Found, not fixed: the short-wave viscosity is first order in the step.**
+  Van der Pol with a gradient converges at order one (ratios 2.92, 2.71, 2.46,
+  2.26 over four halvings); a uniform state, which the viscosity does not touch,
+  is second order again (4.1, 4.0, 4.0). The step applies the viscosity on the
+  drift's midpoint field, which does not contain the viscosity's own increment,
+  so within its own subflow the step is forward Euler; the device does the same.
+  The term is a mesh-scale damping that vanishes as the mesh refines, so this is
+  listed under the plan's "Worth checking sometime" rather than changed.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

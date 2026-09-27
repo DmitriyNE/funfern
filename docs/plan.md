@@ -1042,6 +1042,14 @@ is next touched.
   rebuilds `b` about the new `r` carries that rounding amplified through the
   gradient: 5.4e-5 in `canonical_gpu_oscillator_handoff`'s opened mode
   against 3e-5, with the check there relaxed to 1e-4 for rebuilt handoffs.
+- A self-oscillating medium's short-wave viscosity is first order in the step,
+  on CPU and device alike: it is applied on the drift's midpoint field, which
+  does not contain the viscosity's own increment, so within that subflow the
+  step is forward Euler. Measured through `canonical_temporal_primary_rate`, a
+  van der Pol state with a gradient closes on its trajectory at order one while
+  a uniform one closes at order two. The term damps mesh-scale patterns and
+  vanishes as the mesh refines; splitting it half before the drift and half
+  after would make it symmetric.
 
 ## Working practice
 

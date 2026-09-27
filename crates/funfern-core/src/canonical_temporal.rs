@@ -1259,6 +1259,151 @@ fn midpoint_flux_of(current: &[f64], previous: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// The primary field's rate `u̇` at the snapshot's current endpoint: the
+/// time-driven counterpart of [`crate::canonical_primary_rate`], which reads
+/// the authored mass and force.
+///
+/// It is the balance form rather than an endpoint difference, for the reason
+/// the fixed one is: a device snapshot is f32, and the difference of two
+/// adjacent endpoints is mostly rounding. The flux rate `Q̇` is every term the
+/// step integrates, read at the instant - sources, the force with the gap
+/// springs and the restoring force, the absorbing wall's `d u`, the loss the
+/// decay maps integrate, and a self-oscillating medium's short-wave viscosity.
+/// The field then follows from `Q = P(u, t)` as `u̇ = (Q̇ − ∂ₜP)/∂ᵤP`: on a
+/// linear row `(Q̇ − Ṁu)/M`, so a breathing mass is not read as motion of the
+/// field. A second-order wall's trace nodes take the wall's own generator,
+/// and a prescribed node its signal's derivative, as on the fixed path.
+pub fn canonical_temporal_primary_rate(
+    operator: &CanonicalTemporalWaveOperator,
+    forcing: &CanonicalForcing,
+    snapshot: &CanonicalIndicatorSnapshot,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<Vec<f64>, WaveError> {
+    let base = operator.base();
+    let node_count = base.degrees_of_freedom();
+    let gap_count = base.thin_gap_samples().len();
+    let outgoing_count = base
+        .outgoing_boundary()
+        .map_or(0, |boundary| boundary.auxiliary_count());
+    let integrated_count = if operator.has_restoring() {
+        node_count
+    } else {
+        0
+    };
+    if snapshot.primary_flux.len() != node_count
+        || snapshot.complementary_flux.len() != base.complementary_degrees_of_freedom()
+        || snapshot.auxiliary.len() != gap_count + outgoing_count
+        || snapshot.integrated_field.len() != integrated_count
+        || forcing.prescribed().len() != node_count
+        || !snapshot.time.is_finite()
+    {
+        return Err(WaveError::InvalidState);
+    }
+    let time = snapshot.time;
+    let flux = &snapshot.primary_flux;
+    // A pinned node's field is its signal, which is what the step's own
+    // field-reading terms see there.
+    let mut field = operator.primary_field_at(flux, time, runtime)?;
+    for (value, signal) in field.iter_mut().zip(forcing.prescribed()) {
+        if let Some(signal) = signal {
+            *value = signal.value(time);
+        }
+    }
+    let mut force = operator.force_at(&snapshot.complementary_flux, time, runtime)?;
+    add_gap_force(operator, &snapshot.auxiliary[..gap_count], &mut force)?;
+    add_restoring_force(operator, &snapshot.integrated_field, &mut force)?;
+    let source = forcing.integrated_rate(time)?;
+    // The decay maps integrate `Q̇ = −λ Q` exactly, with `λ` the channel's
+    // rate or, on a self-oscillating node, `β + k Q²`.
+    let loss = if operator.has_active_loss {
+        let (beta, alpha, mass) = operator.active_loss_coefficients(time, runtime)?;
+        flux.iter()
+            .enumerate()
+            .map(|(node, flux)| {
+                (beta[node] + alpha[node] / (mass[node] * mass[node]) * flux * flux) * flux
+            })
+            .collect::<Vec<_>>()
+    } else if operator.has_loss {
+        let rates = operator.loss_rates_at(time, runtime)?;
+        flux.iter()
+            .zip(&rates.primary)
+            .map(|(flux, rate)| rate * flux)
+            .collect()
+    } else {
+        vec![0.0; node_count]
+    };
+    let damping = base.first_order_boundary_damping();
+    let mut flux_rate = (0..node_count)
+        .map(|node| source[node] - force[node] - damping[node] * field[node] - loss[node])
+        .collect::<Vec<_>>();
+    // The step skips pinned and trace nodes here; both are replaced below.
+    if let Some(short_wave) = operator.short_wave_force(&field, time, runtime)? {
+        for (rate, value) in flux_rate.iter_mut().zip(short_wave) {
+            *rate -= value;
+        }
+    }
+    if let Some(boundary) = base.outgoing_boundary() {
+        let memory = &snapshot.auxiliary[gap_count..];
+        // As the kick does: a trace with a nonlinear node is driven by its
+        // field at unit mass, a linear one by its flux at the mass in force.
+        let nonlinear_trace = operator.has_field_laws() && {
+            let (terms, _) = operator.primary_terms_at(time, runtime)?;
+            boundary.trace_nodes().iter().any(|node| {
+                !ConstitutiveSite::new(&terms[operator.primary_range(*node as usize)]).is_linear()
+            })
+        };
+        let derivative = if nonlinear_trace {
+            let trace = boundary
+                .trace_nodes()
+                .iter()
+                .map(|node| field[*node as usize])
+                .collect::<Vec<_>>();
+            boundary.diagnostic_derivative_with(base, &vec![1.0; node_count], &trace, memory)?
+        } else {
+            let mass = operator.primary_mass_at(time, runtime)?;
+            let trace = boundary
+                .trace_nodes()
+                .iter()
+                .map(|node| flux[*node as usize])
+                .collect::<Vec<_>>();
+            boundary.diagnostic_derivative_with(base, &mass, &trace, memory)?
+        };
+        for (position, node) in boundary.trace_nodes().iter().enumerate() {
+            let node = *node as usize;
+            flux_rate[node] = source[node] - force[node] - loss[node] + derivative[position];
+        }
+    }
+    let mut rate = if operator.has_field_laws() {
+        let (terms, term_rates) = operator.primary_terms_at(time, runtime)?;
+        (0..node_count)
+            .map(|node| {
+                let range = operator.primary_range(node);
+                let magnitude = field[node].abs();
+                let explicit = terms[range.clone()]
+                    .iter()
+                    .zip(&term_rates[range.clone()])
+                    .map(|(term, rate)| rate * term.law.multiplier(magnitude))
+                    .sum::<f64>()
+                    * field[node];
+                (flux_rate[node] - explicit)
+                    / ConstitutiveSite::new(&terms[range]).tangent(magnitude)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let (mass, mass_rate) = operator.primary_mass_and_rate_at(time, runtime)?;
+        (0..node_count)
+            .map(|node| (flux_rate[node] - mass_rate[node] * field[node]) / mass[node])
+            .collect()
+    };
+    for (value, signal) in rate.iter_mut().zip(forcing.prescribed()) {
+        if let Some(signal) = signal {
+            *value = signal.derivative(time);
+        }
+    }
+    validate_finite(&rate)?;
+    Ok(rate)
+}
+
 /// What a driven medium demands of the mesh, beyond what the sources ask.
 ///
 /// A modulated coefficient is not just a moving number. It mixes with the
@@ -11166,5 +11311,247 @@ mod tests {
             relative_gap(expected, without) > 0.1,
             "the store must matter"
         );
+    }
+
+    /// A state on any generation: a displacement carrier, a compatible
+    /// complementary flux and, beside a restoring law, an integrated field.
+    /// A uniform one has no gradient anywhere.
+    fn rate_test_state(
+        operator: &CanonicalTemporalWaveOperator,
+        time_step: f64,
+        uniform: bool,
+    ) -> CanonicalTemporalWaveState {
+        let base = operator.base();
+        let carrier = |point: &Point2| {
+            if uniform {
+                1.0
+            } else {
+                (1.4 * point.x - 0.9 * point.y).sin() + 0.4
+            }
+        };
+        let primary = base
+            .primary_mass()
+            .iter()
+            .zip(base.node_points())
+            .map(|(mass, point)| 0.1 * mass * carrier(point))
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| {
+                if uniform {
+                    0.03
+                } else {
+                    0.06 * (0.8 * point.x + 1.2 * point.y).cos()
+                }
+            })
+            .collect::<Vec<_>>();
+        let complementary = base.compatible_flux(&potential).unwrap();
+        let state =
+            CanonicalTemporalWaveState::new(operator, time_step, primary, complementary).unwrap();
+        if operator.has_restoring() {
+            state.with_integrated_field(operator, potential).unwrap()
+        } else {
+            state
+        }
+    }
+
+    /// The physical field of a state, a pinned node reading its signal.
+    fn pinned_field(
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+        state: &CanonicalTemporalWaveState,
+    ) -> Vec<f64> {
+        let mut field = operator
+            .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+            .unwrap();
+        for (value, signal) in field.iter_mut().zip(forcing.prescribed()) {
+            if let Some(signal) = signal {
+                *value = signal.value(state.time());
+            }
+        }
+        field
+    }
+
+    /// The rate at the state `steps` steps of `time_step` in, against the
+    /// centred difference of the trajectory through it, relative to the
+    /// largest rate.
+    fn rate_against_trajectory(
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+        time_step: f64,
+        steps: usize,
+        uniform: bool,
+    ) -> f64 {
+        let mut state = rate_test_state(operator, time_step, uniform);
+        for _ in 1..steps {
+            state.step_with_forcing(operator, forcing).unwrap();
+        }
+        let before = pinned_field(operator, forcing, &state);
+        state.step_with_forcing(operator, forcing).unwrap();
+        let auxiliary = state
+            .thin_gap_jump()
+            .iter()
+            .chain(state.outgoing_pole_currents())
+            .copied()
+            .collect::<Vec<_>>();
+        let snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: operator.base().generation().mesh_revision,
+            primary_flux: state.primary_flux().to_vec(),
+            previous_primary_flux: state.primary_flux().to_vec(),
+            complementary_flux: state.complementary_flux().to_vec(),
+            previous_complementary_flux: state.complementary_flux().to_vec(),
+            previous_auxiliary: auxiliary.clone(),
+            auxiliary,
+            integrated_field: state.integrated_field().to_vec(),
+            previous_integrated_field: state.integrated_field().to_vec(),
+            time: state.time(),
+            time_step,
+        };
+        let rate =
+            canonical_temporal_primary_rate(operator, forcing, &snapshot, state.runtime()).unwrap();
+        state.step_with_forcing(operator, forcing).unwrap();
+        let after = pinned_field(operator, forcing, &state);
+        let scale = rate
+            .iter()
+            .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+        assert!(scale > 0.0);
+        rate.iter()
+            .zip(after.iter().zip(&before))
+            .map(|(rate, (after, before))| (rate - (after - before) / (2.0 * time_step)).abs())
+            .fold(0.0_f64, f64::max)
+            / scale
+    }
+
+    /// The balance-form rate is the derivative of the trajectory the step
+    /// takes, to second order, on every composition the step runs: halving
+    /// the step divides the gap to the centred difference by four.
+    ///
+    /// Except one term, whose limit is the step's and not the rate's. The
+    /// short-wave viscosity is applied on the drift's midpoint field, which
+    /// does not contain the viscosity's own increment, so within its own
+    /// subflow the step is forward Euler and a self-oscillating medium with a
+    /// gradient converges at first order. Measured, the gap halves with each
+    /// halving past the first; a uniform state, which the viscosity does not
+    /// touch, is second order again, so the Bernoulli rate and the restoring
+    /// force are exact.
+    #[test]
+    fn the_temporal_rate_is_the_trajectorys_own_derivative() {
+        let mut pumped = Scene::default();
+        pumped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
+        let mut stiffness_pumped = Scene::default();
+        stiffness_pumped.materials[0].stiffness_law.drive = pump(0.25, 0.7, -0.3);
+        let mut lossy_pumped = pumped.clone();
+        lossy_pumped.materials[0].damping = ScalarField::constant(0.45);
+        let mut kerr_medium = Scene::default();
+        kerr_medium.materials[0].mass_law.field = kerr(0.8);
+        kerr_medium.materials[0].stiffness_law.field = kerr(20.0);
+        let mut kerr_pumped = kerr_medium.clone();
+        kerr_pumped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
+        let (_, mut gapped, _) = filter_compositions().remove(3);
+        gapped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
+        // Label, generation, prescribed wall, uniform state, least ratio.
+        let cases = [
+            (
+                "pumped mass, first-order wall",
+                walled(OuterBoundaryCondition::FirstOrderOutgoing, &pumped),
+                false,
+                false,
+                3.5,
+            ),
+            (
+                "pumped stiffness, second-order wall",
+                walled(
+                    OuterBoundaryCondition::SecondOrderOutgoing,
+                    &stiffness_pumped,
+                ),
+                false,
+                false,
+                3.5,
+            ),
+            (
+                "pumped mass, loss, prescribed wall",
+                walled(OuterBoundaryCondition::Reflecting, &lossy_pumped),
+                true,
+                false,
+                3.5,
+            ),
+            (
+                "Kerr, first-order wall",
+                walled(OuterBoundaryCondition::FirstOrderOutgoing, &kerr_medium),
+                false,
+                false,
+                3.5,
+            ),
+            (
+                "Kerr, second-order wall",
+                walled(OuterBoundaryCondition::SecondOrderOutgoing, &kerr_medium),
+                false,
+                false,
+                3.5,
+            ),
+            (
+                "pumped Kerr",
+                walled(OuterBoundaryCondition::Reflecting, &kerr_pumped),
+                false,
+                false,
+                3.5,
+            ),
+            (
+                "pumped mass, thin gap",
+                walled(OuterBoundaryCondition::Reflecting, &gapped),
+                false,
+                false,
+                3.5,
+            ),
+            (
+                "Klein-Gordon",
+                restoring_operator(klein_gordon(3.0), 0.3),
+                false,
+                false,
+                3.5,
+            ),
+            (
+                "van der Pol, uniform",
+                van_der_pol_operator(4.0, 0.05, 3.0),
+                false,
+                true,
+                3.5,
+            ),
+            (
+                "van der Pol, with a gradient",
+                van_der_pol_operator(4.0, 0.05, 3.0),
+                false,
+                false,
+                1.8,
+            ),
+        ];
+        for (label, operator, prescribed, uniform, least_ratio) in cases {
+            let forcing = if prescribed {
+                let signals = operator
+                    .base()
+                    .node_points()
+                    .iter()
+                    .map(|point| {
+                        (point.x < -0.999).then_some(TimeSignal::Harmonic {
+                            offset: 0.02,
+                            amplitude: 0.05,
+                            frequency_hz: 0.8,
+                            phase_radians: 0.4,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                CanonicalForcing::from_prescribed(operator.base(), signals).unwrap()
+            } else {
+                CanonicalForcing::none(operator.base())
+            };
+            let time_step = 0.25 * operator.maximum_time_step();
+            let coarse = rate_against_trajectory(&operator, &forcing, time_step, 2, uniform);
+            let fine = rate_against_trajectory(&operator, &forcing, 0.5 * time_step, 4, uniform);
+            assert!(
+                fine < 0.025 && coarse / fine > least_ratio,
+                "{label}: the rate missed the trajectory by {coarse:.3e}, then {fine:.3e}"
+            );
+        }
     }
 }

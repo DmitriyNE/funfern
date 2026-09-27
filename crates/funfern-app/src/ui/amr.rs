@@ -483,11 +483,23 @@ impl Playground {
             .iter()
             .map(|value| f64::from(*value))
             .collect::<Vec<_>>();
-        let velocity = match canonical_primary_rate(
-            &active.canonical_operator,
-            &active.canonical_forcing,
-            &canonical_snapshot,
-        ) {
+        // A driven generation's rate is its own: the fixed operator's reads
+        // the authored mass and force, and knows no loss law or restoring
+        // force, which is not the field the solver stepped.
+        let velocity = match &temporal {
+            Some((operator, runtime)) => canonical_temporal_primary_rate(
+                operator,
+                &active.canonical_forcing,
+                &canonical_snapshot,
+                runtime,
+            ),
+            None => canonical_primary_rate(
+                &active.canonical_operator,
+                &active.canonical_forcing,
+                &canonical_snapshot,
+            ),
+        };
+        let velocity = match velocity {
             Ok(velocity) => velocity,
             Err(error) => {
                 self.amr_status = "canonical estimate failed".into();

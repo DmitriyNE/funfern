@@ -553,19 +553,25 @@ fn estimate(
     };
     // Production zeroes acceleration on purpose, because the canonical
     // estimator excludes the scalar strong cell residual, but it does supply
-    // a real rate: the energy denominator uses it. In a driven medium each
-    // endpoint divides by the mass in force at its own time.
+    // a real rate: the energy denominator uses it. It is the rate production
+    // computes, the fixed operator's on the static path and the driven
+    // generation's own otherwise, so the index measured here is the one the
+    // application's estimate has.
     let current = operator
         .primary_field_at(state.primary_flux(), state.time(), state.runtime())
         .ok()?;
-    let earlier = operator
-        .primary_field_at(previous, state.time() - state.time_step(), state.runtime())
-        .ok()?;
-    let velocity = current
-        .iter()
-        .zip(&earlier)
-        .map(|(now, before)| (now - before) / state.time_step())
-        .collect::<Vec<_>>();
+    let forcing = funfern_core::CanonicalForcing::none(operator.base());
+    let velocity = if static_path {
+        funfern_core::canonical_primary_rate(operator.base(), &forcing, &snapshot).ok()?
+    } else {
+        funfern_core::canonical_temporal_primary_rate(
+            operator,
+            &forcing,
+            &snapshot,
+            state.runtime(),
+        )
+        .ok()?
+    };
     let scalar_snapshot = QuadraticSolutionSnapshot {
         mesh_revision: mesh.mesh_revision,
         displacement: current,
