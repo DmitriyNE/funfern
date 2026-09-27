@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::{
     CanonicalAreaContribution, CanonicalAreaSample, CanonicalForcing, CanonicalIndicatorSnapshot,
-    CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil,
+    CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil, CanonicalWallFlux,
     CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, ConstitutiveInverseError,
     ConstitutiveSite, ConstitutiveTerm, DampingLaw, DampingLawValues, ElectromagneticPolarization,
     FieldLawValues, LossChannel, Material, MaterialCoordinates, MaterialError, MaterialId,
@@ -680,9 +680,11 @@ impl CanonicalTemporalAreaContribution {
 ///
 /// Thin gaps and open boundaries are covered: their defects are the fixed
 /// path's own, with the mass and force in force at the instant standing in for
-/// the authored ones. Loss, a damped boundary and prescribed boundary data are
-/// refused rather than reported with those terms missing, because each puts a
-/// term in the evolution the defect would otherwise charge to the mesh.
+/// the authored ones. So is boundary data: a Neumann load is a flux sourced
+/// alike at both kicks, and a pinned node takes no part in the defects that
+/// measure the kick. Loss and a damped boundary are refused rather than
+/// reported with those terms missing, because each puts a term in the
+/// evolution the defect would otherwise charge to the mesh.
 ///
 /// Gate O: an oscillator medium's store includes `Σ m₀ V(r)`, split over the
 /// elements each contribution belongs to, and the outgoing trace's force
@@ -701,8 +703,7 @@ pub fn canonical_temporal_indicator_supplement(
 ) -> Result<CanonicalIndicatorSupplement, WaveError> {
     if !operator.indicator_supplement_supported() {
         return Err(WaveError::Unsupported(
-            "no adaptive estimate for a driven medium carrying loss, a damped \
-             boundary or prescribed boundary data",
+            "no adaptive estimate for a driven medium carrying loss or a damped boundary",
         ));
     }
     let base = operator.base();
@@ -900,84 +901,96 @@ pub fn canonical_temporal_indicator_supplement(
                 .push(element);
         }
     }
+    const FACE_GAUSS: [(f64, f64); 3] = [
+        (0.112_701_665_379_258_3, 5.0 / 18.0),
+        (0.5, 8.0 / 18.0),
+        (0.887_298_334_620_741_7, 5.0 / 18.0),
+    ];
+    // One element's physical complementary field at a point `fraction` of the
+    // way along its face from `start_vertex`, and the scale that normalizes a
+    // flux there.
+    let face_point = |element: usize,
+                      start_vertex: usize,
+                      end_vertex: usize,
+                      fraction: f64|
+     -> Result<(Point2, f64), WaveError> {
+        let triangle = mesh.triangles[element];
+        // The point sits on one of this element's own edges, so its
+        // barycentric coordinates are exact rather than solved for.
+        let local_start = triangle
+            .vertices
+            .iter()
+            .position(|vertex| *vertex == start_vertex)
+            .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
+        let local_end = triangle
+            .vertices
+            .iter()
+            .position(|vertex| *vertex == end_vertex)
+            .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
+        let mut barycentric = [0.0; 3];
+        barycentric[local_start] = 1.0 - fraction;
+        barycentric[local_end] = fraction;
+        let interpolation = complementary_interpolation_weights(sample_points, barycentric)?;
+        let start = element * 6;
+        let mut flux = Point2::default();
+        let mut map = SymmetricTensor2::default();
+        for (sample, weight) in interpolation.into_iter().enumerate() {
+            let inverse = inverses[start + sample];
+            flux = flux + physical_at(start + sample) * weight;
+            map = SymmetricTensor2::new(
+                map.xx + inverse.xx * weight,
+                map.xy + inverse.xy * weight,
+                map.yy + inverse.yy * weight,
+            );
+        }
+        // The interpolated map normalizes the jump exactly as the
+        // scalar term's pointwise stiffness does. An extrapolating
+        // weight can leave it indefinite, which the six-sample mean
+        // cannot, and the two differ by `O(h)` in a smooth medium.
+        let scale = map.determinant().sqrt();
+        if scale.is_finite() && scale > 0.0 {
+            return Ok((flux, scale));
+        }
+        let mean = (start..start + 6).fold(SymmetricTensor2::default(), |sum, index| {
+            SymmetricTensor2::new(
+                sum.xx + inverses[index].xx / 6.0,
+                sum.xy + inverses[index].xy / 6.0,
+                sum.yy + inverses[index].yy / 6.0,
+            )
+        });
+        let mean = mean.determinant().sqrt();
+        if mean.is_finite() && mean > 0.0 {
+            Ok((flux, mean))
+        } else {
+            Err(WaveError::Unsupported(
+                "an element's mean constitutive inverse is not positive",
+            ))
+        }
+    };
+    let face_length = |start_vertex: usize, end_vertex: usize| {
+        let ends = [
+            mesh.vertices[start_vertex].point,
+            mesh.vertices[end_vertex].point,
+        ];
+        let length = (ends[1] - ends[0]).norm();
+        if length.is_finite() && length > 0.0 {
+            Ok((ends, length))
+        } else {
+            Err(WaveError::InvalidMesh("invalid temporal indicator face"))
+        }
+    };
     for ((start_vertex, end_vertex), sides) in &faces {
         let [left, right] = sides[..] else {
             continue;
         };
-        let ends = [
-            mesh.vertices[*start_vertex].point,
-            mesh.vertices[*end_vertex].point,
-        ];
-        let length = (ends[1] - ends[0]).norm();
-        if !length.is_finite() || length <= 0.0 {
-            return Err(WaveError::InvalidMesh("invalid temporal indicator face"));
-        }
+        let (ends, length) = face_length(*start_vertex, *end_vertex)?;
         let mut integrals = [0.0; 2];
-        for (fraction, weight) in [
-            (0.112_701_665_379_258_3, 5.0 / 18.0),
-            (0.5, 8.0 / 18.0),
-            (0.887_298_334_620_741_7, 5.0 / 18.0),
-        ] {
+        for (fraction, weight) in FACE_GAUSS {
             let mut difference = Point2::default();
             let mut scales = [0.0; 2];
             for (side, element) in [left, right].into_iter().enumerate() {
-                let triangle = mesh.triangles[element];
-                let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
-                // The point sits on one of this element's own edges, so its
-                // barycentric coordinates are exact rather than solved for.
-                let local_start = triangle
-                    .vertices
-                    .iter()
-                    .position(|vertex| vertex == start_vertex)
-                    .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
-                let local_end = triangle
-                    .vertices
-                    .iter()
-                    .position(|vertex| vertex == end_vertex)
-                    .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
-                let mut barycentric = [0.0; 3];
-                barycentric[local_start] = 1.0 - fraction;
-                barycentric[local_end] = fraction;
-                let interpolation =
-                    complementary_interpolation_weights(sample_points, barycentric)?;
-                let start = element * 6;
-                let mut flux = Point2::default();
-                let mut map = SymmetricTensor2::default();
-                for (sample, weight) in interpolation.into_iter().enumerate() {
-                    let inverse = inverses[start + sample];
-                    flux = flux + physical_at(start + sample) * weight;
-                    map = SymmetricTensor2::new(
-                        map.xx + inverse.xx * weight,
-                        map.xy + inverse.xy * weight,
-                        map.yy + inverse.yy * weight,
-                    );
-                }
-                // The interpolated map normalizes the jump exactly as the
-                // scalar term's pointwise stiffness does. An extrapolating
-                // weight can leave it indefinite, which the six-sample mean
-                // cannot, and the two differ by `O(h)` in a smooth medium.
-                let scale = map.determinant().sqrt();
-                scales[side] = if scale.is_finite() && scale > 0.0 {
-                    scale
-                } else {
-                    let mean =
-                        (start..start + 6).fold(SymmetricTensor2::default(), |sum, index| {
-                            SymmetricTensor2::new(
-                                sum.xx + inverses[index].xx / 6.0,
-                                sum.xy + inverses[index].xy / 6.0,
-                                sum.yy + inverses[index].yy / 6.0,
-                            )
-                        });
-                    let mean = mean.determinant().sqrt();
-                    if mean.is_finite() && mean > 0.0 {
-                        mean
-                    } else {
-                        return Err(WaveError::Unsupported(
-                            "an element's mean constitutive inverse is not positive",
-                        ));
-                    }
-                };
-                let _ = points;
+                let (flux, scale) = face_point(element, *start_vertex, *end_vertex, fraction)?;
+                scales[side] = scale;
                 difference = difference + flux * if side == 0 { 1.0 } else { -1.0 };
             }
             let tangent = (ends[1] - ends[0]) / length;
@@ -991,6 +1004,45 @@ pub fn canonical_temporal_indicator_supplement(
         }
     }
     let complementary_jump_contribution = element_complementary_jump.iter().sum();
+
+    // The same flux on a face with one side only - an outer wall, a hole's
+    // rim, one side of a baffle - as the outward normal flux `σ·n` a wall
+    // condition constrains. The direct state holds `v = η R σ`, with `R` the
+    // quarter turn the curls carry and `σ = A∇r` the flux integrated in
+    // time, so `σ = η Rᵀ v`. What each wall imposes on it is the scalar
+    // job's to say, since it holds the conditions.
+    let mut wall_flux = BTreeMap::new();
+    for ((start_vertex, end_vertex), sides) in &faces {
+        let [element] = sides[..] else {
+            continue;
+        };
+        let (ends, length) = face_length(*start_vertex, *end_vertex)?;
+        let opposite = mesh.triangles[element]
+            .vertices
+            .into_iter()
+            .find(|vertex| vertex != start_vertex && vertex != end_vertex)
+            .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
+        let tangent = (ends[1] - ends[0]) / length;
+        let mut normal = Point2::new(tangent.y, -tangent.x);
+        if normal.dot(mesh.vertices[opposite].point - ends[0]) > 0.0 {
+            normal = normal * -1.0;
+        }
+        let mut normal_flux = [0.0; 3];
+        let mut scale = [0.0; 3];
+        for (slot, (fraction, _)) in FACE_GAUSS.into_iter().enumerate() {
+            let (flux, point_scale) = face_point(element, *start_vertex, *end_vertex, fraction)?;
+            normal_flux[slot] = base.orientation() * (flux.y * normal.x - flux.x * normal.y);
+            scale[slot] = point_scale;
+        }
+        wall_flux.insert(
+            (*start_vertex, *end_vertex),
+            CanonicalWallFlux {
+                element,
+                normal_flux,
+                scale,
+            },
+        );
+    }
 
     // Primary energy uses the mass in force now, so a modulated element is
     // not credited with the storage its authored coefficient would have.
@@ -1248,6 +1300,7 @@ pub fn canonical_temporal_indicator_supplement(
         complementary_jump_contribution,
         thin_gap_contribution,
         outgoing_contribution,
+        wall_flux: Some(wall_flux),
     })
 }
 
@@ -2146,15 +2199,17 @@ impl CanonicalTemporalWaveOperator {
             !open && ungapped && undamped_boundary && !has_loss && undriven_boundary;
         // What the error estimate's defect terms cover. Open boundaries and
         // thin gaps are in, because their defects are the fixed path's own with
-        // the instantaneous mass and force in place of the authored ones. Loss,
-        // a damped boundary and prescribed boundary data are not: each puts a
-        // term in the evolution that the defect would otherwise charge to the
-        // mesh, and none has been derived here.
+        // the instantaneous mass and force in place of the authored ones.
+        // Boundary data is in: a Neumann load is a flux the kick sources the
+        // same way at both of its stages, and a pinned node is left out of
+        // every defect that measures the kick, as on the fixed path. Loss and a
+        // damped boundary are not yet: each puts a term in the evolution that
+        // the defect would otherwise charge to the mesh.
         // A field-dependent medium's estimator reads its nonlinear observables
         // and weighs every defect by the tangent maps at the snapshot.
         // An oscillator medium's restoring store and trace force are in the
         // estimate (Gate O); van der Pol is a loss channel, refused with loss.
-        let indicator_supplement_supported = undamped_boundary && !has_loss && undriven_boundary;
+        let indicator_supplement_supported = undamped_boundary && !has_loss;
         let short_wave = if has_active_loss {
             short_wave_viscosity(&base, quadratic, &primary, maximum_time_step)?
         } else {
@@ -11552,6 +11607,112 @@ mod tests {
                 fine < 0.025 && coarse / fine > least_ratio,
                 "{label}: the rate missed the trajectory by {coarse:.3e}, then {fine:.3e}"
             );
+        }
+    }
+
+    /// The wall flux is the outward `σ·n` of the flux the direct state holds,
+    /// in every skin: a linear integrated field on a uniform medium reads its
+    /// flux's normal component on each of the box's four walls.
+    #[test]
+    fn the_wall_flux_is_the_outward_normal_flux() {
+        for physics in [
+            PhysicsModel::Mechanical,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            },
+        ] {
+            let mut scene = Scene {
+                physics,
+                ..Scene::default()
+            };
+            scene.materials[0].mass_law.drive = pump(0.2, 0.9, 0.0);
+            let mut base_scene = scene.clone();
+            strip_temporal_laws(&mut base_scene.materials);
+            let mesh = mesh_scene(
+                &base_scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.4,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap();
+            let quadratic = QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &base_scene,
+                OuterBoundaryCondition::Reflecting,
+            )
+            .unwrap();
+            let operator =
+                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            let base = operator.base();
+            let potential = base
+                .node_points()
+                .iter()
+                .map(|point| 0.3 * point.x + 0.1 * point.y)
+                .collect::<Vec<_>>();
+            let complementary = base.compatible_flux(&potential).unwrap();
+            let primary = vec![0.0; base.degrees_of_freedom()];
+            let snapshot = CanonicalIndicatorSnapshot {
+                mesh_revision: mesh.mesh_revision,
+                primary_flux: primary.clone(),
+                previous_primary_flux: primary,
+                complementary_flux: complementary.clone(),
+                previous_complementary_flux: complementary,
+                auxiliary: vec![],
+                previous_auxiliary: vec![],
+                integrated_field: vec![],
+                previous_integrated_field: vec![],
+                time: 0.0,
+                time_step: 0.01,
+            };
+            let supplement = canonical_temporal_indicator_supplement(
+                &mesh,
+                &operator,
+                &CanonicalForcing::none(base),
+                &snapshot,
+                &operator.initial_runtime(),
+                0.0,
+            )
+            .unwrap();
+            // The skin's own stiffness as it stands at the snapshot - in TE
+            // the permittivity pump drives this row - back through the
+            // quarter turn its complementary map carries: `J = R A Rᵀ`.
+            let map = operator
+                .complementary_tangents_at(
+                    &snapshot.complementary_flux,
+                    0.0,
+                    &operator.initial_runtime(),
+                )
+                .unwrap()[0];
+            let flux = Point2::new(map.yy * 0.3 - map.xy * 0.1, -map.xy * 0.3 + map.xx * 0.1);
+            let walls = supplement.wall_flux.unwrap();
+            assert!(!walls.is_empty());
+            for ((start, end), face) in walls {
+                let middle = mesh.vertices[start]
+                    .point
+                    .lerp(mesh.vertices[end].point, 0.5);
+                let expected = if (middle.x - 1.0).abs() < 1.0e-9 {
+                    flux.x
+                } else if (middle.x + 1.0).abs() < 1.0e-9 {
+                    -flux.x
+                } else if (middle.y - 1.0).abs() < 1.0e-9 {
+                    flux.y
+                } else if (middle.y + 1.0).abs() < 1.0e-9 {
+                    -flux.y
+                } else {
+                    panic!("{physics:?}: a wall face off the box at {middle:?}");
+                };
+                for value in face.normal_flux {
+                    assert!(
+                        (value - expected).abs() < 1.0e-12,
+                        "{physics:?}: {value} against {expected} at {middle:?}"
+                    );
+                }
+            }
         }
     }
 }

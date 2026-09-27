@@ -15028,3 +15028,59 @@ nothing stepping, and nothing in the console.
   listed under the plan's "Worth checking sometime" rather than changed.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The driven wall residual reads the solver's own flux
+
+- **Found.** The calibration sweep had never measured the wall residual: its
+  estimator job was handed the scene's default walls, second-order outgoing,
+  which the canonical estimate skips, while the solver in the same run used
+  reflecting walls. Production hands the job the walls the solver runs. Given
+  those, the driven estimate broke wherever the wall term reads `∇(Q/M)` badly:
+  a travelling mass modulation at `k=3` read an index of 9.2, 11.9, 21.6, both
+  rows travelling 9.9 to 21.5, Klein-Gordon 20.5 to 33.3, sine-Gordon 20.1 to
+  32.0, and a Neumann side under a pump 3.7 to 5.4 - each climbing with
+  refinement. The wall residual dominated those rows and stalled (travelling
+  mass: 1.6e-4, 7.6e-5, 6.9e-5, while the other terms fell 10 to 20 times). It
+  is the same defect that moved the interior jump onto the solver's flux on
+  2026-09-22: under a patterned mass the nodal quotient `Q/M` carries a
+  lumping pattern, and an oscillator's field carries its nodal force. The
+  static path was unaffected (1.58, 1.29, 1.38 against 1.54, 1.26, 1.36).
+  Driven gallery scenes with reflecting walls - Doppler mirror, Plasma skin
+  depth, Plasma mirror - have been estimated with that term.
+- **Fix.** Under substitution the wall residual reads the solver's own flux.
+  The temporal supplement reports, on every face with one side only (outer
+  walls, hole rims, baffle sides), the outward `σ·n` of the time-integrated
+  flux the direct state holds, `σ = η Rᵀ v`, at the face's three Gauss points
+  with the interior jump's scale; the job measures it against what the kick
+  imposes: nothing on a reflecting wall, the integrated load `∫₀ᵗ g` on a
+  Neumann one, and `−Z₀ u` on an absorbing one, whose kick term is `−d u` at
+  the impedance the step freezes. So an absorbing wall needs no rate at all.
+  The boundary sources' anchor is now a named constant,
+  `BOUNDARY_SOURCE_ANCHOR_TIME`, which the application compiles against and the
+  estimator reads the integral from. The fixed path keeps its scalar wall
+  residual.
+- **Boundary data is admitted.** A Neumann load is a flux the kick sources the
+  same way at both stages, and a pinned node takes no part in the defects that
+  measure the kick, so neither puts an uncharged term in the estimate; the
+  refusal for prescribed boundary data is lifted. Loss and damped boundaries
+  are still refused.
+- **Measured** (the full sweep, walls included; indices at h = 0.20, 0.14,
+  0.10): travelling mass `k=3` 1.45, 1.27, 1.29; both travelling 1.38, 1.24,
+  1.28; Klein-Gordon 1.58, 1.40, 1.46; sine-Gordon 1.59, 1.40, 1.43; prescribed
+  side, pumped 1.72, 1.67, 1.46 (spread 1.18); Neumann side, pumped 1.54,
+  1.34, 1.36 (1.15). Every driven row reads 1.01 to 1.73 with spreads 1.06 to
+  1.19, except the pumped interface at 1.38, as before. The ratio of geometric
+  means is 1.0053, so the constant recomputes to 1.890 and 1.88 stands.
+- **Calibration sweep:** rows carry their own walls and boundary forcing, the
+  estimator is handed those walls, a prescribed side starts from its own data
+  at the mass in force then (the authored mass started a pump off its
+  boundary and the true error stalled at 2 percent), and an argument filters
+  the rows.
+- **Tested:** the wall flux is the outward normal flux of a linear integrated
+  field in all three skins, to 1e-12, including TE, where a permittivity pump
+  drives this row.
+- **Found, not investigated:** the static estimator reads Neumann data
+  pessimistically, 3.28, 3.53, 3.87, climbing, against 2.07, 1.88, 1.90 on a
+  prescribed side and 1.58, 1.29, 1.38 on reflecting walls.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

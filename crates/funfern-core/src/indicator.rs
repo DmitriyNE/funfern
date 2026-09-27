@@ -3,12 +3,13 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::canonical_consumer::complementary_interpolation_weights;
 use crate::wave::TimedDirectionalWaveCoefficients;
 use crate::{
-    BoundaryLabel, BoundarySide, CanonicalForcing, CanonicalMaterialRuntimeState,
-    CanonicalWaveOperator, DirectionalWaveCoefficients, FaceBoundaryCondition,
-    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField,
-    OuterBoundaryCondition, OwnedTopologyWaveModel, PlannedBoundarySource, Point2,
-    QuadraticWaveOperator, RegionId, Scene, SpanBehavior, TopologyMeshPlan, TopologyWaveModel,
-    TriMesh, WaveError, enriched_quadratic_basis, enriched_quadratic_basis_gradients,
+    BOUNDARY_SOURCE_ANCHOR_TIME, BoundaryLabel, BoundarySide, CanonicalForcing,
+    CanonicalMaterialRuntimeState, CanonicalRateDrive, CanonicalWaveOperator,
+    DirectionalWaveCoefficients, FaceBoundaryCondition, InternalBoundaryCoupling,
+    InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField, OuterBoundaryCondition,
+    OwnedTopologyWaveModel, PlannedBoundarySource, Point2, QuadraticWaveOperator, RegionId, Scene,
+    SpanBehavior, TopologyMeshPlan, TopologyWaveModel, TriMesh, WaveError,
+    enriched_quadratic_basis, enriched_quadratic_basis_gradients,
     enriched_quadratic_basis_hessians,
 };
 
@@ -66,6 +67,26 @@ pub struct CanonicalIndicatorSupplement {
     pub complementary_jump_contribution: f64,
     pub thin_gap_contribution: f64,
     pub outgoing_contribution: f64,
+    /// The solver's own outward normal flux on every face with one side only,
+    /// keyed by its vertices in increasing order, when this supplement
+    /// carries it. `None` is what the fixed path returns, and it keeps the
+    /// scalar wall residual; with it the wall residual reads this flux, as
+    /// the interior jump reads the solver's own across a face.
+    pub wall_flux: Option<BTreeMap<(usize, usize), CanonicalWallFlux>>,
+}
+
+/// The solver's normal flux on one side of a mesh face that has an element on
+/// that side only. Values sit at the face's three Gauss points, ordered from
+/// its lower-indexed vertex.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalWallFlux {
+    pub element: usize,
+    /// `σ·n`, outward: the flux integrated in time, as the direct state holds
+    /// it, which is what a wall's condition constrains in the kick.
+    pub normal_flux: [f64; 3],
+    /// The constitutive scale a residual there divides by, as the interior
+    /// flux jump does.
+    pub scale: [f64; 3],
 }
 
 /// Reconstructs the instantaneous scalar-field rate from the accepted direct
@@ -450,6 +471,7 @@ pub fn canonical_indicator_supplement(
         complementary_jump_contribution: 0.0,
         thin_gap_contribution,
         outgoing_contribution,
+        wall_flux: None,
     })
 }
 
@@ -862,6 +884,8 @@ struct BoundaryRecord {
     triangle: usize,
     region: RegionId,
     nodes: [usize; 3],
+    /// The face's mesh vertices, in the order of `nodes`.
+    vertices: [usize; 2],
     condition: FaceBoundaryCondition,
     pair: Option<(BoundaryPairKey, usize, f64)>,
 }
@@ -1271,10 +1295,13 @@ impl SolutionIndicatorJob {
             unreachable!()
         };
         let raw_nodes = self.boundary_edge_nodes(triangle, edge.vertices)?;
-        let nodes = if edge.parameters[0] < edge.parameters[1] {
-            raw_nodes
+        let (nodes, vertices) = if edge.parameters[0] < edge.parameters[1] {
+            (raw_nodes, edge.vertices)
         } else {
-            [raw_nodes[2], raw_nodes[1], raw_nodes[0]]
+            (
+                [raw_nodes[2], raw_nodes[1], raw_nodes[0]],
+                [edge.vertices[1], edge.vertices[0]],
+            )
         };
         let (condition, pair) = match edge.label {
             BoundaryLabel::Outer(side) => {
@@ -1396,6 +1423,7 @@ impl SolutionIndicatorJob {
             triangle,
             region,
             nodes,
+            vertices,
             condition,
             pair,
         });
@@ -1456,10 +1484,13 @@ impl SolutionIndicatorJob {
             return Err(SolutionIndicatorError::InvalidMesh);
         }
         let raw_nodes = self.boundary_edge_nodes(triangle, edge.vertices)?;
-        let nodes = if edge.parameters[0] < edge.parameters[1] {
-            raw_nodes
+        let (nodes, vertices) = if edge.parameters[0] < edge.parameters[1] {
+            (raw_nodes, edge.vertices)
         } else {
-            [raw_nodes[2], raw_nodes[1], raw_nodes[0]]
+            (
+                [raw_nodes[2], raw_nodes[1], raw_nodes[0]],
+                [edge.vertices[1], edge.vertices[0]],
+            )
         };
         let (condition, pair) = match source {
             PlannedBoundarySource::Outer(side) => {
@@ -1530,6 +1561,7 @@ impl SolutionIndicatorJob {
             triangle,
             region,
             nodes,
+            vertices,
             condition,
             pair,
         });
@@ -2022,10 +2054,32 @@ impl SolutionIndicatorJob {
             self.material_at(record.region, edge_points[0].lerp(edge_points[1], 0.5))?;
         let auxiliary_scale = middle_material.stiffness.determinant()
             / (2.0 * middle_material.normal_impedance(normal));
+        // Where the gradient terms read the solver's own flux, so does the
+        // wall: `∇(Q/M)` carries a mass's lumping pattern and an oscillator's
+        // nodal force, neither of which converges at a wall.
+        let wall = match self
+            .canonical
+            .as_ref()
+            .and_then(|canonical| canonical.wall_flux.as_ref())
+        {
+            Some(walls) if self.substitutes_canonical_gradients() => {
+                let face = walls
+                    .get(&edge_key(record.vertices))
+                    .ok_or(SolutionIndicatorError::InvalidMesh)?;
+                if face.element != record.triangle {
+                    return Err(SolutionIndicatorError::InvalidMesh);
+                }
+                // Stored from the lower-indexed vertex; the Gauss points
+                // are symmetric, so the other direction reads them reversed.
+                Some((*face, record.vertices[0] < record.vertices[1]))
+            }
+            _ => None,
+        };
         let mut integral = 0.0;
-        for (fraction, weight) in line_quadrature() {
+        for (slot, (fraction, weight)) in line_quadrature().into_iter().enumerate() {
             let point = edge_points[0].lerp(edge_points[1], fraction);
-            let material = self.material_at(record.region, point)?;
+            let timed = self.timed_material_at(record.region, point)?;
+            let material = timed.instantaneous;
             let barycentric =
                 barycentric(point, geometry.points).ok_or(SolutionIndicatorError::InvalidMesh)?;
             let gradients = enriched_quadratic_basis_gradients(barycentric, geometry.gradients);
@@ -2043,13 +2097,39 @@ impl SolutionIndicatorJob {
                     .max((displacement - signal.value(self.snapshot.time)).abs());
                 continue;
             }
+            if let Some((face, forward)) = wall {
+                let slot = if forward { slot } else { 2 - slot };
+                // What the kick imposes on the time-integrated flux: nothing
+                // on a reflecting wall, the integrated load on a Neumann one,
+                // and `−Z u` on an absorbing one, whose kick term is `−d u`
+                // at the impedance the step freezes.
+                let imposed = match record.condition {
+                    FaceBoundaryCondition::Reflecting => 0.0,
+                    FaceBoundaryCondition::Neumann { signal } => {
+                        CanonicalRateDrive::legacy(signal, BOUNDARY_SOURCE_ANCHOR_TIME)
+                            .and_then(|drive| drive.value(self.snapshot.time))
+                            .map_err(|_| SolutionIndicatorError::InvalidMesh)?
+                    }
+                    FaceBoundaryCondition::Impedance { ratio } => {
+                        -ratio * timed.authored.normal_impedance(normal) * displacement
+                    }
+                    _ => return Err(SolutionIndicatorError::InvalidMesh),
+                };
+                let residual = face.normal_flux[slot] - imposed;
+                integral += weight * length * residual * residual / face.scale[slot];
+                continue;
+            }
             let mut residual = match record.condition {
                 FaceBoundaryCondition::Reflecting => flux,
                 FaceBoundaryCondition::Neumann { signal } => {
                     flux - signal.value(self.snapshot.time)
                 }
                 FaceBoundaryCondition::Impedance { ratio } => {
-                    let impedance = ratio * material.normal_impedance(normal);
+                    // The impedance the wall applies, which a driven step
+                    // freezes at the authored medium (`forced_kick`). The
+                    // instantaneous one would charge that documented
+                    // approximation to the mesh on every cycle of a drive.
+                    let impedance = ratio * timed.authored.normal_impedance(normal);
                     flux + impedance * velocity
                 }
                 FaceBoundaryCondition::SecondOrderOutgoing => {

@@ -1638,8 +1638,9 @@ fn compile_canonical_forcing(
     authored_volume: &[VolumeSource],
     point: PointSource,
 ) -> Result<CanonicalForcing, String> {
-    let mut forcing = CanonicalForcing::from_legacy_boundaries(canonical, quadratic, 0.0)
-        .map_err(|error| error.to_string())?;
+    let mut forcing =
+        CanonicalForcing::from_legacy_boundaries(canonical, quadratic, BOUNDARY_SOURCE_ANCHOR_TIME)
+            .map_err(|error| error.to_string())?;
     let mut membership = vec![false; canonical.degrees_of_freedom()];
     for (triangle, nodes) in mesh.triangles.iter().zip(canonical.element_nodes()) {
         if triangle.region == point.region {

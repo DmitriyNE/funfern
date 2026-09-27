@@ -25,6 +25,12 @@ const MASS_WEIGHTS: [f64; LOCAL_NODES] = [
     9.0 / 20.0,
 ];
 
+/// The time boundary data's integrated sources are anchored at: the
+/// application compiles them against absolute time, so a Neumann side imposes
+/// `σ·n = ∫₀ᵗ g` on the flux the direct state holds, whatever generation it
+/// was compiled in. The estimator reads that same integral at a wall.
+pub const BOUNDARY_SOURCE_ANCHOR_TIME: f64 = 0.0;
+
 /// Time law for an integrated source in the direct first-order system.
 ///
 /// `Direct` is already authored in primary-field-rate units. The legacy form

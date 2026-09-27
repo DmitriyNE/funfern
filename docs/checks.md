@@ -120,11 +120,15 @@ estimator is charging for. The index should be bounded and roughly constant;
 where it climbs with refinement the estimate cannot be read as a percentage.
 The first row is the production static estimator on an inert medium, and it is
 there because the driven estimate's calibration constant is the ratio of the two
-geometric means; two indices only compare if one study produced both. With that
-constant applied, every row reads 1.21 to 1.62 against the static row's 1.26 to
-1.54, so the same accuracy target means the same true error on either path. This
-sweep is where `DRIVEN_INDICATOR_CALIBRATION` comes from: if the driven rows stop
-agreeing with the static one, the constant is stale.
+geometric means; two indices only compare if one study produced both. The rows
+after the oscillator media carry boundary data - a prescribed side and a Neumann
+side, each beside its static control - and every row's estimate is handed the
+walls its solver ran, as production's is, so the wall residual is measured too.
+With the constant applied, every driven row reads 1.01 to 1.73 against the static
+row's 1.29 to 1.58, so the same accuracy target means the same true error on
+either path. This sweep is where `DRIVEN_INDICATOR_CALIBRATION` comes from: if
+the driven rows stop agreeing with the static one, the constant is stale. An
+argument runs only the rows whose label contains it.
 
 `wave_boundary_reflection` sends finite Gaussian P2e packets at the outer box and
 compares first- and second-order residual-energy reflection at two angles and two

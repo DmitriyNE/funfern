@@ -21,12 +21,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use funfern_core::{
-    BACKGROUND_REGION, CanonicalIndicatorSnapshot, CanonicalTemporalPointStencil,
+    BACKGROUND_REGION, CanonicalForcing, CanonicalIndicatorSnapshot, CanonicalTemporalPointStencil,
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, FieldLaw, LoopRole,
-    Material, MaterialFrame, MaterialId, MeshingOptions, OuterBoundaryCondition, Point2,
-    QuadraticPointStencil, QuadraticSolutionSnapshot, QuadraticWaveOperator, Region, RegionId,
-    RestoringLaw, ScalarField, Scene, SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive,
-    TriMesh, canonical_temporal_indicator_supplement, mesh_scene,
+    Material, MaterialFrame, MaterialId, MeshingOptions, OuterBoundaryCondition,
+    OuterBoundaryConditions, OuterSide, Point2, QuadraticPointStencil, QuadraticSolutionSnapshot,
+    QuadraticWaveOperator, Region, RegionId, RestoringLaw, ScalarField, Scene,
+    SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive, TimeSignal, TriMesh,
+    canonical_temporal_indicator_supplement, mesh_scene,
 };
 
 /// Coarse to fine; the last is the reference.
@@ -67,7 +68,7 @@ fn main() {
     // The first row is the production static estimator on an inert medium,
     // measured here rather than inherited, because the driven target is set
     // against it. Two indices only compare if one study produced both.
-    for (label, scene, static_path) in [
+    let rows = [
         ("static path, inert", inert_scene(), true),
         ("inert", inert_scene(), false),
         ("mass pumped", driven(true, None), false),
@@ -114,15 +115,24 @@ fn main() {
             }),
             false,
         ),
-    ] {
+    ]
+    .into_iter()
+    .map(|(label, scene, static_path)| (label, scene, static_path, reflecting()))
+    .chain(boundary_rows());
+    // An argument runs only the rows whose label contains it.
+    let only = std::env::args().nth(1).unwrap_or_default();
+    for (label, scene, static_path, walls) in rows {
+        if !label.contains(only.as_str()) {
+            continue;
+        }
         // The finest mesh sets the timestep every mesh in the sweep uses.
         let reference_edge = *EDGES.last().expect("one reference edge");
-        let (_, _, reference_operator) = build(&scene, reference_edge);
+        let (_, _, reference_operator) = build(&scene, reference_edge, walls);
         let time_step = 0.4 * reference_operator.maximum_time_step();
         let lattice = lattice_points();
         let solved = EDGES
             .iter()
-            .map(|edge| solve(&scene, *edge, time_step, &lattice, static_path))
+            .map(|edge| solve(&scene, *edge, time_step, &lattice, static_path, walls))
             .collect::<Vec<_>>();
         let reference = solved.last().expect("a reference solution");
         println!("{label}: shared time step {time_step:.4e} from h={reference_edge}");
@@ -184,6 +194,50 @@ fn main() {
          the driven rows stop agreeing with the static one, it is the constant that\n\
          is stale, not the estimator that is broken."
     );
+}
+
+fn reflecting() -> OuterBoundaryConditions {
+    OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting)
+}
+
+/// Rows whose boundaries carry data, each beside its static-path control.
+///
+/// A prescribed side starts from the standing wave `cos(π(x+1))`, which meets
+/// the reflecting sides and the left side's `cos(ωt)` data at the start, with
+/// `ω` the unit medium's `π`: a box mode varies along that side and a uniform
+/// signal would fight it. A Neumann side starts from the box mode, whose normal
+/// derivative is zero, against data that starts at zero.
+fn boundary_rows() -> Vec<(&'static str, Scene, bool, OuterBoundaryConditions)> {
+    let mut prescribed = reflecting();
+    prescribed.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Dirichlet {
+        signal: TimeSignal::harmonic(0.0, 0.08, 0.5, std::f64::consts::FRAC_PI_2),
+    };
+    let mut neumann = reflecting();
+    neumann.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Neumann {
+        signal: TimeSignal::harmonic(0.0, 0.1, 0.7, 0.0),
+    };
+    vec![
+        (
+            "static path, prescribed side",
+            inert_scene(),
+            true,
+            prescribed,
+        ),
+        ("prescribed side, inert", inert_scene(), false, prescribed),
+        (
+            "prescribed side, mass pumped",
+            driven(true, None),
+            false,
+            prescribed,
+        ),
+        ("static path, Neumann side", inert_scene(), true, neumann),
+        (
+            "Neumann side, mass pumped",
+            driven(true, None),
+            false,
+            neumann,
+        ),
+    ]
 }
 
 fn kerr(chi2: f64) -> FieldLaw {
@@ -323,6 +377,7 @@ fn both_scene() -> Scene {
 fn build(
     scene: &Scene,
     edge: f64,
+    walls: OuterBoundaryConditions,
 ) -> (
     Arc<TriMesh>,
     Arc<QuadraticWaveOperator>,
@@ -346,7 +401,7 @@ fn build(
         .expect("calibration mesh"),
     );
     let quadratic = Arc::new(
-        QuadraticWaveOperator::assemble_scene(&mesh, &fixed, OuterBoundaryCondition::Reflecting)
+        QuadraticWaveOperator::assemble_scene_with_boundaries(&mesh, &fixed, walls)
             .expect("calibration scalar operator"),
     );
     let temporal = CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1)
@@ -362,7 +417,10 @@ fn build(
 /// An oscillator medium is released from rest in `u` instead, with the mode in
 /// the integrated field `r` and its compatible companion `b = ηC r`, so the
 /// restoring law is loaded from the first step.
-fn initial(operator: &CanonicalTemporalWaveOperator) -> (Vec<f64>, Vec<Point2>, Vec<f64>) {
+fn initial(
+    operator: &CanonicalTemporalWaveOperator,
+    walls: OuterBoundaryConditions,
+) -> (Vec<f64>, Vec<Point2>, Vec<f64>) {
     const MODE_X: f64 = 2.0;
     const MODE_Y: f64 = 1.0;
     let base = operator.base();
@@ -385,11 +443,27 @@ fn initial(operator: &CanonicalTemporalWaveOperator) -> (Vec<f64>, Vec<Point2>, 
             integrated,
         );
     }
-    let primary = base
-        .primary_mass()
+    let prescribed = matches!(
+        walls.get(OuterSide::Left),
+        OuterBoundaryCondition::Dirichlet { .. }
+    );
+    // Against a prescribed side the start has to be the field the side
+    // holds, so its flux is taken at the mass in force then; the authored
+    // mass would start a pumped medium off its own boundary data.
+    let mass = if prescribed {
+        operator
+            .primary_mass_at(0.0, &operator.initial_runtime())
+            .expect("initial mass")
+    } else {
+        base.primary_mass().to_vec()
+    };
+    let primary = mass
         .iter()
         .zip(base.node_points())
         .map(|(mass, point)| {
+            if prescribed {
+                return mass * 0.08 * (2.0 * half * (point.x + 1.0)).cos();
+            }
             mass * 0.08
                 * (MODE_X * half * (point.x + 1.0)).cos()
                 * (MODE_Y * half * (point.y + 1.0)).cos()
@@ -419,16 +493,19 @@ fn solve(
     time_step: f64,
     lattice: &[Point2],
     static_path: bool,
+    walls: OuterBoundaryConditions,
 ) -> Solved {
     let started = Instant::now();
-    let (mesh, quadratic, operator) = build(scene, edge);
+    let (mesh, quadratic, operator) = build(scene, edge, walls);
+    let forcing = CanonicalForcing::from_legacy_boundaries(operator.base(), &quadratic, 0.0)
+        .expect("calibration forcing");
     let mut fixed = scene.clone();
     for material in &mut fixed.materials {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
         material.restoring = RestoringLaw::None;
     }
-    let (primary, complementary, integrated) = initial(&operator);
+    let (primary, complementary, integrated) = initial(&operator, walls);
     let mut state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("calibration state");
     if !integrated.is_empty() {
@@ -444,7 +521,9 @@ fn solve(
         previous = state.primary_flux().to_vec();
         previous_complementary = state.complementary_flux().to_vec();
         previous_integrated = state.integrated_field().to_vec();
-        state.step(&operator).expect("calibration step");
+        state
+            .step_with_forcing(&operator, &forcing)
+            .expect("calibration step");
     }
 
     // Sample the solution where every mesh can be compared.
@@ -485,6 +564,8 @@ fn solve(
         &previous_complementary,
         &previous_integrated,
         static_path,
+        &forcing,
+        walls,
     );
     let breakdown = estimator.clone();
     Solved {
@@ -512,6 +593,8 @@ fn estimate(
     previous_complementary: &[Point2],
     previous_integrated: &[f64],
     static_path: bool,
+    forcing: &CanonicalForcing,
+    walls: OuterBoundaryConditions,
 ) -> Option<funfern_core::SolutionIndicatorReport> {
     let count = operator.base().degrees_of_freedom();
     let demand = operator.resolution_demand(0.0);
@@ -533,23 +616,23 @@ fn estimate(
     // the material samples stay authored. On an inert medium that is exactly
     // what the application runs today.
     let supplement = if static_path {
-        funfern_core::canonical_indicator_supplement(
-            mesh,
-            operator.base(),
-            &funfern_core::CanonicalForcing::none(operator.base()),
-            &snapshot,
-        )
-        .ok()?
+        funfern_core::canonical_indicator_supplement(mesh, operator.base(), forcing, &snapshot)
     } else {
         canonical_temporal_indicator_supplement(
             mesh,
             operator,
-            &funfern_core::CanonicalForcing::none(operator.base()),
+            forcing,
             &snapshot,
             state.runtime(),
             0.0,
         )
-        .ok()?
+    };
+    let supplement = match supplement {
+        Ok(supplement) => supplement,
+        Err(error) => {
+            eprintln!("supplement refused: {error}");
+            return None;
+        }
     };
     // Production zeroes acceleration on purpose, because the canonical
     // estimator excludes the scalar strong cell residual, but it does supply
@@ -560,17 +643,11 @@ fn estimate(
     let current = operator
         .primary_field_at(state.primary_flux(), state.time(), state.runtime())
         .ok()?;
-    let forcing = funfern_core::CanonicalForcing::none(operator.base());
     let velocity = if static_path {
-        funfern_core::canonical_primary_rate(operator.base(), &forcing, &snapshot).ok()?
+        funfern_core::canonical_primary_rate(operator.base(), forcing, &snapshot).ok()?
     } else {
-        funfern_core::canonical_temporal_primary_rate(
-            operator,
-            &forcing,
-            &snapshot,
-            state.runtime(),
-        )
-        .ok()?
+        funfern_core::canonical_temporal_primary_rate(operator, forcing, &snapshot, state.runtime())
+            .ok()?
     };
     let scalar_snapshot = QuadraticSolutionSnapshot {
         mesh_revision: mesh.mesh_revision,
@@ -590,6 +667,10 @@ fn estimate(
     // not carry it either; the supplement holds its store and force.
     let nonlinear = operator.has_field_laws();
     let mut sized = authored.clone();
+    // The walls the solver ran, which is what production's model carries;
+    // the scene's own default is second-order outgoing, which the canonical
+    // estimate skips, and would leave every wall's residual out.
+    sized.outer_boundaries = walls;
     for material in &mut sized.materials {
         material.restoring = RestoringLaw::None;
     }
