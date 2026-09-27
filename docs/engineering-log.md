@@ -15450,3 +15450,21 @@ nothing stepping, and nothing in the console.
   three and four controls, closed spline at four, rectangle and polygon.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — The README catches up with the media and the gallery
+
+- **Highlights.** The solver bullet now says the step is symplectic and
+  time-reversible, nonlinear media included, so its error is phase rather
+  than artificial damping or growth. The media bullet no longer
+  repeats that it runs on the GPU. A new bullet names the gallery.
+- **Description.** The tagline names linear, time-varying and nonlinear media,
+  and the second tagline is gone. The canonical state is described as it is,
+  an integrated nodal flux and an independent complementary flux; the old text
+  still called it a scalar potential, which the direct-state core replaced. The
+  gallery paragraph lists its 36 scenes' seven sections, and the materials
+  paragraph links the law catalogue. The documentation list gains the user
+  guide and the catalogue.
+- **Acknowledgements.** Paul Falstad's Ripple Tank Simulation, funfern's
+  initial inspiration, is credited.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

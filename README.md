@@ -3,11 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>An interactive 2D finite-element playground for mechanical and electromagnetic waves.</strong>
-</p>
-
-<p align="center">
-  Draw geometry, assign materials and boundaries, launch waves, and reshape the scene while the simulation keeps running.
+  <strong>An interactive 2D finite-element playground for mechanical and electromagnetic waves in linear, time-varying and nonlinear media.</strong>
 </p>
 
 <p align="center">
@@ -34,27 +30,30 @@
 
 * **Incremental meshing and mesh repair** for boundary motion and topology changes, replacing only the affected part of the constrained mesh.
 
-* **Time-domain field solver over one canonical formulation** covering scalar/mechanical waves and both scalar electromagnetic polarizations, TM and TE.
+* **Time-domain field solver over one canonical formulation** covering scalar/mechanical waves and both scalar electromagnetic polarizations, TM and TE, advanced by a time-reversible symplectic step that preserves the phase-space structure of the lossless dynamics, nonlinear media included: numerical error shows up as a small phase error rather than artificial damping or growth.
 
 * **Rich boundary-condition model**: reflecting and prescribed boundaries, first- and higher-order absorbing boundaries, impedance conditions, internal two-sided boundaries and conservative thin-gap coupling.
 
 * **Spatially varying and anisotropic constitutive laws** with formula-defined material properties in local coordinate frames.
 
-* **Time-driven and nonlinear media**: switchable media and time interfaces, parametric pumps, time crystals, travelling modulations, and Kerr and saturable response, composing with the boundary conditions, sources, loss and thin gaps, and running on the GPU.
+* **Time-driven and nonlinear media**: switchable media and time interfaces, parametric pumps, time crystals, travelling modulations, and Kerr and saturable response, composing with the boundary conditions, sources, loss and thin gaps.
 
 * **Error-estimate-driven adaptive mesh refinement and coarsening** under wavelength, grading and mesh-size constraints, preserving the running solution.
 
 * **Extensive solution diagnostics**: scalar and vector field overlays, point, line, boundary and area probes, energy and flux measurements, and time-domain far-field estimation.
+
+* **Extensive gallery of physically motivated demos**, from interference and photonic crystals to time crystals and solitons.
 
 * **Browser-native and GPU accelerated** using WebGPU, with the same application also available as a native build.
 
 ## What is funfern?
 
 funfern is an interactive 2D finite-element wave-simulation **toy** and geometry
-editor for scalar mechanical waves and TE/TM electromagnetic fields. It combines
-a NURBS-based 2D boundary representation, meshing and adaptive discretization,
-GPU-accelerated time-domain simulation, extensive diagnostics, and live
-solution-preserving remeshing in a single browser-native application.
+editor for scalar mechanical waves and TE/TM electromagnetic fields in linear,
+time-varying and nonlinear media. It combines a NURBS-based 2D boundary
+representation, meshing and adaptive discretization, GPU-accelerated
+time-domain simulation, extensive diagnostics, and live solution-preserving
+remeshing in a single browser-native application.
 
 The geometry model is effectively a 2D B-rep: curves define boundaries, but
 regions, sidedness, junctions and adjacency are explicit parts of the model
@@ -63,11 +62,14 @@ Material interfaces, holes, transmitting separators and two-sided baffles
 therefore participate in the same editable topology, and curves can be split,
 merged and reshaped while preserving their topological role.
 
-The time-domain solver uses a shared canonical state consisting of a scalar
-potential and an integrated nodal quantity. Mechanical, electromagnetic TM and
-electromagnetic TE modes expose different constitutive parameters and physical
-observables over this common formulation rather than being three unrelated
-solvers. The interactive solver runs on the GPU in single precision, with a
+The time-domain solver uses a shared canonical state consisting of an
+integrated nodal flux and an independently evolved complementary flux.
+Mechanical, electromagnetic TM and electromagnetic TE modes expose different
+constitutive parameters and physical observables over this common formulation
+rather than being three unrelated solvers. Material laws act on the same
+state: a time drive, a field response or a restoring force changes a
+coefficient or adds a force, and one step advances every medium. The
+interactive solver runs on the GPU in single precision, with a
 double-precision CPU implementation maintained as a numerical reference.
 
 Editing does not require a stop, rebuild and restart cycle. Geometry and
@@ -82,15 +84,17 @@ wavelength, grading and element-size constraints.
 
 Scenes support undo/redo, autosave, versioned JSON files and shareable links.
 Geometry, snapshots and viewport recordings can be exported. The built-in
-example gallery ships obstacle arrays, GRIN rods, Luneburg profiles and driven
-and nonlinear media, ready to
-run with their drivers, probes and view presets; `examples/` currently holds the
-obstacle scene as a standalone file as well.
+example gallery holds 36 scenes in seven sections: basics, interfaces and
+media, lenses and imaging, guides and crystals, resonators, time-varying media,
+and nonlinear and self-organizing media. Each is ready to run with its sources,
+probes and view presets; `examples/` holds the obstacle array as a standalone
+file as well.
 
 Materials take their laws from a preset selector or, in the Advanced view,
-slot by slot; the gallery's Kerr slab, parametric pump, time crystal and
-travelling modulation scenes each show one, and each is backed by a test that
-measures what it claims.
+slot by slot. The [material law catalogue](docs/material-law-catalogue.md)
+lists every law, what it does to a wave and whether it runs. Beyond the basic
+scattering scenes, every gallery scene is backed by a test that measures the
+effect it shows.
 
 ## Implementation
 
@@ -106,9 +110,10 @@ application framework. The crate has no external dependencies, including
 numerical libraries.
 
 The current discretization is seven-node enriched quadratic, mass-lumped
-triangles, advanced by a symplectic-style explicit integrator, on both the f64
-CPU reference and an f32 WebGPU gather kernel. An isogeometric discretization is
-planned, so the element family is not a fixed property of the project.
+triangles, advanced by an explicit symplectic kick–drift–kick step, on both the
+f64 CPU reference and an f32 WebGPU gather kernel. An isogeometric
+discretization is planned, so the element family is not a fixed property of the
+project.
 
 ## Build and run
 
@@ -360,11 +365,19 @@ WebGL fallback are disabled.
 
 Useful documentation:
 
+* [User guide](docs/user-guide.md) — how to draw, edit, simulate and measure.
 * [Architecture](docs/architecture.md) — representations and numerical machinery.
+* [Material law catalogue](docs/material-law-catalogue.md) — every material law and whether it runs.
 * [Checks](docs/checks.md) — specialized verification runs and what they assert.
 * [Development plan](docs/plan.md) — milestones and planned work.
 * [Engineering log](docs/engineering-log.md) — verification results and implementation history.
 * [Browser checks](docs/browser-checks.md) — browser verification procedures.
+
+## Acknowledgements
+
+The initial inspiration for funfern was Paul Falstad's
+[Ripple Tank Simulation](https://www.falstad.com/ripple/), an interactive toy
+for 2D interference, diffraction, refraction and resonance.
 
 ## License
 
