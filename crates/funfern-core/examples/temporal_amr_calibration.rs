@@ -22,12 +22,12 @@ use std::time::Instant;
 
 use funfern_core::{
     BACKGROUND_REGION, CanonicalForcing, CanonicalIndicatorSnapshot, CanonicalTemporalPointStencil,
-    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, FieldLaw, LoopRole,
-    Material, MaterialFrame, MaterialId, MeshingOptions, OuterBoundaryCondition,
-    OuterBoundaryConditions, OuterSide, Point2, QuadraticPointStencil, QuadraticSolutionSnapshot,
-    QuadraticWaveOperator, Region, RegionId, RestoringLaw, ScalarField, Scene,
-    SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive, TimeSignal, TriMesh,
-    canonical_temporal_indicator_supplement, mesh_scene,
+    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, DampingLaw,
+    FieldLaw, LoopRole, LossChannel, Material, MaterialFrame, MaterialId, MeshingOptions,
+    OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, Point2, QuadraticPointStencil,
+    QuadraticSolutionSnapshot, QuadraticWaveOperator, RateLaw, Region, RegionId, RestoringLaw,
+    ScalarField, Scene, SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive, TimeSignal,
+    TriMesh, canonical_temporal_indicator_supplement, mesh_scene,
 };
 
 /// Coarse to fine; the last is the reference.
@@ -118,7 +118,12 @@ fn main() {
     ]
     .into_iter()
     .map(|(label, scene, static_path)| (label, scene, static_path, reflecting()))
-    .chain(boundary_rows());
+    .chain(boundary_rows())
+    .chain(
+        loss_rows()
+            .into_iter()
+            .map(|(label, scene, static_path)| (label, scene, static_path, reflecting())),
+    );
     // An argument runs only the rows whose label contains it.
     let only = std::env::args().nth(1).unwrap_or_default();
     for (label, scene, static_path, walls) in rows {
@@ -302,6 +307,88 @@ fn boundary_rows() -> Vec<(&'static str, Scene, bool, OuterBoundaryConditions)> 
             driven(true, Some(3.0)),
             false,
             absorbing_end,
+        ),
+    ]
+}
+
+/// Rows carrying loss, in the reflecting box: a constant primary loss, a
+/// constant complementary one - which contracts `b` itself between the step's
+/// endpoints - loss beside a restoring law, and a self-oscillating medium like
+/// the self-sustained emitter's, van der Pol gain beside Klein-Gordon with a
+/// complementary loss.
+fn loss_rows() -> Vec<(&'static str, Scene, bool)> {
+    let constant_loss = |rate: f64| LossChannel {
+        base_rate: ScalarField::constant(rate),
+        law: DampingLaw {
+            rate: RateLaw::Constant,
+            drive: TimeDrive::None,
+        },
+    };
+    // The mechanical skin's complementary row carries the electric channel.
+    let primary_loss = |mut scene: Scene| {
+        scene.materials[0].damping = ScalarField::constant(0.45);
+        scene
+    };
+    let complementary_loss = |mut scene: Scene| {
+        scene.materials[0].electric_loss = Some(constant_loss(5.0));
+        scene
+    };
+    let mut emitter = complementary_loss(restoring(RestoringLaw::KleinGordon {
+        omega0: ScalarField::constant(3.0),
+    }));
+    emitter.materials[0].magnetic_loss = Some(LossChannel {
+        base_rate: ScalarField::constant(4.0),
+        law: DampingLaw {
+            rate: RateLaw::VanDerPol {
+                threshold: ScalarField::constant(5.0),
+                amplitude_bound: ScalarField::constant(50.0),
+            },
+            drive: TimeDrive::None,
+        },
+    });
+    vec![
+        (
+            "static path, primary loss",
+            primary_loss(inert_scene()),
+            true,
+        ),
+        ("primary loss, inert", primary_loss(inert_scene()), false),
+        (
+            "primary loss, mass pumped",
+            primary_loss(driven(true, None)),
+            false,
+        ),
+        (
+            "static path, complementary loss",
+            complementary_loss(inert_scene()),
+            true,
+        ),
+        (
+            "complementary loss, inert",
+            complementary_loss(inert_scene()),
+            false,
+        ),
+        (
+            "complementary loss, mass pumped",
+            complementary_loss(driven(true, None)),
+            false,
+        ),
+        (
+            "complementary loss, mass travelling k=3",
+            complementary_loss(driven(true, Some(3.0))),
+            false,
+        ),
+        (
+            "Klein-Gordon, primary loss",
+            primary_loss(restoring(RestoringLaw::KleinGordon {
+                omega0: ScalarField::constant(3.0),
+            })),
+            false,
+        ),
+        (
+            "van der Pol beside Klein-Gordon, complementary loss",
+            emitter,
+            false,
         ),
     ]
 }
@@ -584,11 +671,15 @@ fn solve(
     let (mesh, quadratic, operator) = build(scene, edge, walls);
     let forcing = CanonicalForcing::from_legacy_boundaries(operator.base(), &quadratic, 0.0)
         .expect("calibration forcing");
+    // The lattice sampler reads geometry and coefficients only, and refuses
+    // any law it cannot execute, so its copy carries no loss channel either.
     let mut fixed = scene.clone();
     for material in &mut fixed.materials {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
         material.restoring = RestoringLaw::None;
+        material.electric_loss = None;
+        material.magnetic_loss = None;
     }
     let (primary, complementary, integrated) = initial(&operator, walls);
     let mut state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)

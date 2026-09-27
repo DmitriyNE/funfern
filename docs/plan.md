@@ -1050,6 +1050,13 @@ is next touched.
   a uniform one closes at order two. The term damps mesh-scale patterns and
   vanishes as the mesh refines; splitting it half before the drift and half
   after would make it symmetric.
+- The fixed estimator's outgoing-trace defect does not take out the primary
+  loss the step applies at trace nodes, a defect of order `γh` in the trace
+  flux. Measured on a static box behind second-order walls with a primary loss
+  of 1/s and 3/s, the term reads about 1000 times its lossless value and stops
+  converging, but stays 10 to 11 orders below the estimate, which is the same
+  to four digits either way. The driven estimate's trace defect has the same
+  omission.
 
 ## Working practice
 

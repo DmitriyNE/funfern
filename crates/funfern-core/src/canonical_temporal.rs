@@ -703,11 +703,6 @@ pub fn canonical_temporal_indicator_supplement(
     runtime: &CanonicalMaterialRuntimeState,
     resolved_frequency_hz: f64,
 ) -> Result<CanonicalIndicatorSupplement, WaveError> {
-    if !operator.indicator_supplement_supported() {
-        return Err(WaveError::Unsupported(
-            "no adaptive estimate for a driven medium carrying loss",
-        ));
-    }
     let base = operator.base();
     let node_count = base.degrees_of_freedom();
     let sample_count = base.complementary_degrees_of_freedom();
@@ -1095,8 +1090,24 @@ pub fn canonical_temporal_indicator_supplement(
     }
 
     // The drift the residual measures against is the one the solver takes:
-    // the midpoint primary field, with no loss because the conservative bulk
-    // carries none.
+    // the midpoint primary field, between the two exact half maps a lossy
+    // medium's step contracts `b` by, each at the rate in force at the middle
+    // of its own half interval (`decay`):
+    // `b₊ = e^{−γ₂h/2} (e^{−γ₁h/2} b₋ + h η C u)`. On a fixed rate that is
+    // the fixed path's own expected flux. The primary side's maps and a
+    // self-oscillating medium's viscosity change `u` between the endpoints
+    // only at second order, which is the proxy's own, and are left in.
+    let complementary_decay = if operator.has_loss {
+        let first = operator
+            .loss_rates_at(previous_time + 0.25 * snapshot.time_step, runtime)?
+            .complementary;
+        let second = operator
+            .loss_rates_at(previous_time + 0.75 * snapshot.time_step, runtime)?
+            .complementary;
+        Some((first, second))
+    } else {
+        None
+    };
     for (sample_index, sample) in base.constitutive_samples().iter().enumerate() {
         let element = sample.element as usize;
         let current = snapshot.complementary_flux[sample_index];
@@ -1113,7 +1124,15 @@ pub fn canonical_temporal_indicator_supplement(
             curl =
                 curl + sample.curls()[local] * (midpoint_field[nodes[local] as usize] - reference);
         }
-        let expected = previous + curl * (base.orientation() * snapshot.time_step);
+        let drifted = curl * (base.orientation() * snapshot.time_step);
+        let expected = match &complementary_decay {
+            Some((first, second)) => {
+                let half = 0.5 * snapshot.time_step;
+                (previous * (-half * first[sample_index]).exp() + drifted)
+                    * (-half * second[sample_index]).exp()
+            }
+            None => previous + drifted,
+        };
         let defect = current - expected;
         element_cell_residual[element] +=
             0.5 * sample.integration_weight * defect.dot(inverses[sample_index].apply(defect));
@@ -1953,7 +1972,6 @@ pub struct CanonicalTemporalWaveOperator {
     node_contributions: Vec<u32>,
     has_loss: bool,
     conservative_bulk_supported: bool,
-    indicator_supplement_supported: bool,
     forced_composition_supported: bool,
     maximum_time_step: f64,
     primary_floor: f64,
@@ -2199,21 +2217,6 @@ impl CanonicalTemporalWaveOperator {
         let forced_composition_supported = passive_composition;
         let conservative_bulk_supported =
             !open && ungapped && undamped_boundary && !has_loss && undriven_boundary;
-        // What the error estimate's defect terms cover. Open boundaries and
-        // thin gaps are in, because their defects are the fixed path's own with
-        // the instantaneous mass and force in place of the authored ones.
-        // Boundary data is in: a Neumann load is a flux the kick sources the
-        // same way at both of its stages, and a pinned node is left out of
-        // every defect that measures the kick, as on the fixed path. So is an
-        // absorbing wall: its `−d u` sits in both kicks alike, and the wall
-        // residual measures it at the impedance the step freezes. Loss is not
-        // yet: it contracts `b` between the endpoints, which the drift defect
-        // would otherwise charge to the mesh.
-        // A field-dependent medium's estimator reads its nonlinear observables
-        // and weighs every defect by the tangent maps at the snapshot.
-        // An oscillator medium's restoring store and trace force are in the
-        // estimate (Gate O); van der Pol is a loss channel, refused with loss.
-        let indicator_supplement_supported = !has_loss;
         let short_wave = if has_active_loss {
             short_wave_viscosity(&base, quadratic, &primary, maximum_time_step)?
         } else {
@@ -2236,7 +2239,6 @@ impl CanonicalTemporalWaveOperator {
             node_contributions,
             has_loss,
             conservative_bulk_supported,
-            indicator_supplement_supported,
             forced_composition_supported,
             maximum_time_step,
             primary_floor,
@@ -2480,12 +2482,6 @@ impl CanonicalTemporalWaveOperator {
     /// lossy, forced, prescribed-boundary, or auxiliary subsystem.
     pub fn conservative_bulk_supported(&self) -> bool {
         self.conservative_bulk_supported
-    }
-
-    /// Whether [`canonical_temporal_indicator_supplement`] covers this
-    /// generation's defect terms.
-    pub fn indicator_supplement_supported(&self) -> bool {
-        self.indicator_supplement_supported
     }
 
     /// Whether the stepper can compose prescribed data, volume sources and
@@ -8709,7 +8705,6 @@ mod tests {
         scene.materials[0].stiffness_law.field = saturable_law(0.0, 1.0);
         let (mesh, linear, snapshot) = nonlinear_snapshot(&linear_scene);
         let (_, nonlinear, _) = nonlinear_snapshot(&scene);
-        assert!(nonlinear.indicator_supplement_supported());
         let forcing = CanonicalForcing::none(linear.base());
         let estimate = |operator: &CanonicalTemporalWaveOperator| {
             canonical_temporal_indicator_supplement(
@@ -11233,7 +11228,6 @@ mod tests {
     fn the_oscillator_estimate_splits_the_store_and_charges_the_trace_its_own_force() {
         let (mesh, operator, state, snapshot) =
             oscillator_snapshot(OuterBoundaryCondition::Reflecting);
-        assert!(operator.indicator_supplement_supported());
         let forcing = CanonicalForcing::none(operator.base());
         let runtime = operator.initial_runtime();
         let estimate = canonical_temporal_indicator_supplement(
@@ -11285,10 +11279,102 @@ mod tests {
         );
     }
 
-    /// Van der Pol is a loss channel, and the estimate still refuses loss.
+    /// Loss is in the estimate, and the drift defect is not charged for it.
+    /// A complementary loss contracts `b` by `e^{−γh}` over a step, a defect
+    /// of order `γh` against the drift's own third-order one; taking the
+    /// step's two half maps out leaves the lossless defect. The emitter's
+    /// medium: van der Pol gain on the primary row beside Klein-Gordon, from
+    /// the same smooth state.
     #[test]
-    fn the_estimate_still_refuses_van_der_pol() {
-        assert!(!van_der_pol_operator(1.0, 0.5, 3.0).indicator_supplement_supported());
+    fn the_drift_defect_takes_the_loss_out() {
+        let drift = |complementary_rate: f64| {
+            let mut scene = Scene::default();
+            scene.materials[0].restoring = klein_gordon(3.0);
+            scene.materials[0].magnetic_loss = Some(crate::LossChannel {
+                base_rate: ScalarField::constant(4.0),
+                law: DampingLaw {
+                    rate: crate::RateLaw::VanDerPol {
+                        threshold: ScalarField::constant(0.05),
+                        amplitude_bound: ScalarField::constant(10.0),
+                    },
+                    drive: TimeDrive::None,
+                },
+            });
+            if complementary_rate > 0.0 {
+                scene.materials[0].electric_loss = Some(crate::LossChannel {
+                    base_rate: ScalarField::constant(complementary_rate),
+                    law: DampingLaw {
+                        rate: crate::RateLaw::Constant,
+                        drive: TimeDrive::None,
+                    },
+                });
+            }
+            let mut base_scene = scene.clone();
+            strip_temporal_laws(&mut base_scene.materials);
+            let mesh = mesh_scene(
+                &base_scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.3,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap();
+            let quadratic = QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &base_scene,
+                OuterBoundaryCondition::Reflecting,
+            )
+            .unwrap();
+            let operator =
+                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            let time_step = 0.25 * operator.maximum_time_step();
+            let mut state = rate_test_state(&operator, time_step, false);
+            let previous = state.clone();
+            state.step(&operator).unwrap();
+            let snapshot = CanonicalIndicatorSnapshot {
+                mesh_revision: mesh.mesh_revision,
+                primary_flux: state.primary_flux().to_vec(),
+                previous_primary_flux: previous.primary_flux().to_vec(),
+                complementary_flux: state.complementary_flux().to_vec(),
+                previous_complementary_flux: previous.complementary_flux().to_vec(),
+                auxiliary: vec![],
+                previous_auxiliary: vec![],
+                integrated_field: state.integrated_field().to_vec(),
+                previous_integrated_field: previous.integrated_field().to_vec(),
+                time: state.time(),
+                time_step,
+            };
+            let supplement = canonical_temporal_indicator_supplement(
+                &mesh,
+                &operator,
+                &CanonicalForcing::none(operator.base()),
+                &snapshot,
+                state.runtime(),
+                0.0,
+            )
+            .unwrap();
+            let (stored, _) = operator
+                .complementary_energy_and_rate(
+                    state.complementary_flux(),
+                    state.time(),
+                    state.runtime(),
+                )
+                .unwrap();
+            (supplement.drift_contribution, stored, time_step)
+        };
+        let rate = 5.0;
+        let (lossless, _, _) = drift(0.0);
+        let (lossy, stored, time_step) = drift(rate);
+        // What the defect would read with the contraction left in. Measured,
+        // the lossy defect is 0.93 of the lossless one and 1.3e-3 of this:
+        // at this gain the drift's own second-order proxy error is large.
+        let charged = (rate * time_step).powi(2) * stored;
+        assert!(
+            lossy < 1.0e-2 * charged && lossy < 2.0 * lossless,
+            "the lossy drift defect {lossy:.3e} against the lossless {lossless:.3e} and \
+             the contraction's {charged:.3e}"
+        );
     }
 
     /// Gate O: over every face an oscillator state's area readout is the

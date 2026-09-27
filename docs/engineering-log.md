@@ -15123,3 +15123,42 @@ nothing stepping, and nothing in the console.
   content of different frequency. Not changed here.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The driven estimate admits loss
+
+- **What changed.** Loss was the last composition the driven estimate refused,
+  and the refusal is gone: every generation the step runs is now estimated.
+  Symmetry breaking, Pinned domain wall (φ⁴ with a primary loss) and
+  Self-sustained emitter (van der Pol gain, a magnetic loss of 25/s and the
+  short-wave viscosity) were refused for it.
+- **The one term loss needs.** A complementary loss contracts `b` by an exact
+  half map on each side of the drift, which is first order in the drift
+  defect, `(γh)²` of the stored energy: about 1e-3 of it for the emitter,
+  against recovery and jump terms near 1e-5. The expected flux is now the
+  step's own, `e^{−γ₂h/2}(e^{−γ₁h/2} b₋ + h η C u)`, each rate read at the
+  middle of its half interval as `decay` reads it; on a fixed rate that is
+  the fixed path's formula. The primary maps, van der Pol's Bernoulli map and
+  the short-wave viscosity change `u` between the endpoints only at second
+  order, inside a drift term that reads 1e-17 to 1e-10 of the estimate on
+  every calibration row, so they are left in.
+- **The size rule's evaluator** no longer refuses loss channels. It applies
+  the two constitutive rows only; the one scalar term that reads `damping`,
+  the strong cell residual, is off wherever a supplement is attached.
+- **Measured before the correction:** complementary loss read 1.50, 1.42,
+  1.96 on an inert medium and 1.64, 1.52, 2.02 under a pump, climbing; on the
+  emitter's medium the drift term stayed at 2.2e-4 on all three meshes while
+  the others fell twentyfold. **After:** inert 1.46, 1.23, 1.31; pumped 1.60,
+  1.35, 1.44; travelling mass 1.34, 1.23, 1.24; the emitter's medium 0.88,
+  0.83, 0.85 (spread 1.06), its drift term 5e-10. Primary loss needed nothing:
+  1.49, 1.26, 1.34 inert, 1.56, 1.31, 1.40 pumped, Klein-Gordon beside it
+  1.59, 1.39, 1.46.
+- **Tested:** on the emitter's medium one lossy step's drift defect is 0.93 of
+  the lossless one and 1.3e-3 of what the contraction would charge.
+- **Still open:** the emitter's medium reads a lower level, as the steeper
+  pulses of the previous entry do, which is that entry's frequency finding and
+  not a new one. The static estimator reads a complementary loss 3.1 to 3.7,
+  another row where it is pessimistic.
+- **Calibration sweep:** its lattice sampler's scene copy drops loss channels,
+  which sampling does not read and a van der Pol one it refuses.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

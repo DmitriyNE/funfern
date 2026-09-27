@@ -107,20 +107,19 @@ pub(crate) fn evaluate_timed_directional_material_library_at(
         .iter()
         .find(|material| material.id == region.material)
         .ok_or(MaterialError::InvalidValue)?;
-    // Only the two constitutive rows are applied here, so a medium whose law
-    // reaches anywhere else is refused rather than half-evaluated. That is the
-    // same line the temporal supplement draws: it covers the conservative bulk
-    // and refuses an operator carrying loss.
+    // Only the two constitutive rows are applied here. A loss channel changes
+    // neither: the canonical supplement's drift defect takes the contraction
+    // it puts on `b` out, and the one scalar term that reads `damping`, the
+    // strong cell residual, is excluded wherever a supplement is attached,
+    // which is the only place these instantaneous samples are used. The
+    // authored `damping` is carried through unread.
     //
-    // A restoring law (Gate O) changes no coefficient: it is an additive
-    // force on the integrated field, whose store and force the canonical
-    // supplement carries. The size rule reads the wave speed here, and a
-    // Klein-Gordon wave at a given frequency is longer than the plain
+    // A restoring law (Gate O) changes no coefficient either: it is an
+    // additive force on the integrated field, whose store and force the
+    // canonical supplement carries. The size rule reads the wave speed here,
+    // and a Klein-Gordon wave at a given frequency is longer than the plain
     // medium's, `k = √(ω² − ω₀²)/c`, so reading the coefficients without it
     // can only over-resolve.
-    if material.electric_loss.is_some() || material.magnetic_loss.is_some() {
-        return Err(MaterialError::UnsupportedMaterialLaw);
-    }
     let properties = material.evaluate_base(region.frame, point)?;
     let authored = physics.directional_wave_coefficients(properties, region.frame);
     if !authored.valid() {

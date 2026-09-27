@@ -123,7 +123,10 @@ there because the driven estimate's calibration constant is the ratio of the two
 geometric means; two indices only compare if one study produced both. The rows
 after the oscillator media carry boundary data - a prescribed side, a Neumann
 side, absorbing walls, and a channel with one absorbing end that a pulse
-reaches during the run, each beside its static control - and every row's
+reaches during the run, each beside its static control - and then loss:
+constant primary and complementary loss, loss beside Klein-Gordon, and the
+self-sustained emitter's medium, van der Pol gain with a complementary loss.
+Every row's
 estimate is handed the walls its solver ran, as production's is, so the wall
 residual is measured too.
 With the constant applied, every driven row reads 1.01 to 1.73 against the static
