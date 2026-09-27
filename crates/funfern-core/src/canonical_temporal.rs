@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::{
     CanonicalAreaContribution, CanonicalAreaSample, CanonicalForcing, CanonicalIndicatorSnapshot,
-    CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil, CanonicalWallFlux,
+    CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil,
     CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, ConstitutiveInverseError,
     ConstitutiveSite, ConstitutiveTerm, DampingLaw, DampingLawValues, ElectromagneticPolarization,
     FieldLawValues, LossChannel, Material, MaterialCoordinates, MaterialError, MaterialId,
@@ -868,178 +868,17 @@ pub fn canonical_temporal_indicator_supplement(
     }
     let complementary_recovery_contribution = element_complementary_recovery.iter().sum();
 
-    // Candidate replacement for the scalar interior flux jump, measured here
-    // but summed into nothing: whether it converges is the question that
-    // decides whether the estimator should switch to it.
-    //
-    // The direct state keeps its complementary variable in a frame rotated by
-    // a quarter turn - the reference map is `rotate_tensor(stiffness)` - and
-    // `b` evolves from the curl of the primary field. So `(S b) . n` across a
-    // face is a tangential derivative of a single-valued edge trace and is
-    // identical from both sides by construction: measured, that jump is `1e-32`
-    // against a scalar jump of `1e-5`, which is structural zero, not a small
-    // error. The informative component is the tangential one, which is the
-    // scalar `[[A grad(u) . n]]` carried through that rotation.
-    //
-    // What makes it a candidate at all is where it comes from. The scalar term
-    // differentiates the nodal primary quotient `Q/M`, and a spatially
-    // patterned mass makes that quotient carry a patterned lumping error. This
-    // one reads a variable the solver stores independently per element and
-    // inverts at that element's own six samples, so no nodal mass enters it.
-    let mut element_complementary_jump = vec![0.0; element_count];
-    let mut faces = BTreeMap::<(usize, usize), Vec<usize>>::new();
-    for (element, triangle) in mesh.triangles.iter().enumerate() {
-        for local in 0..3 {
-            let start = triangle.vertices[local];
-            let end = triangle.vertices[(local + 1) % 3];
-            faces
-                .entry((start.min(end), start.max(end)))
-                .or_default()
-                .push(element);
-        }
-    }
-    const FACE_GAUSS: [(f64, f64); 3] = [
-        (0.112_701_665_379_258_3, 5.0 / 18.0),
-        (0.5, 8.0 / 18.0),
-        (0.887_298_334_620_741_7, 5.0 / 18.0),
-    ];
-    // One element's physical complementary field at a point `fraction` of the
-    // way along its face from `start_vertex`, and the scale that normalizes a
-    // flux there.
-    let face_point = |element: usize,
-                      start_vertex: usize,
-                      end_vertex: usize,
-                      fraction: f64|
-     -> Result<(Point2, f64), WaveError> {
-        let triangle = mesh.triangles[element];
-        // The point sits on one of this element's own edges, so its
-        // barycentric coordinates are exact rather than solved for.
-        let local_start = triangle
-            .vertices
-            .iter()
-            .position(|vertex| *vertex == start_vertex)
-            .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
-        let local_end = triangle
-            .vertices
-            .iter()
-            .position(|vertex| *vertex == end_vertex)
-            .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
-        let mut barycentric = [0.0; 3];
-        barycentric[local_start] = 1.0 - fraction;
-        barycentric[local_end] = fraction;
-        let interpolation = complementary_interpolation_weights(sample_points, barycentric)?;
-        let start = element * 6;
-        let mut flux = Point2::default();
-        let mut map = SymmetricTensor2::default();
-        for (sample, weight) in interpolation.into_iter().enumerate() {
-            let inverse = inverses[start + sample];
-            flux = flux + physical_at(start + sample) * weight;
-            map = SymmetricTensor2::new(
-                map.xx + inverse.xx * weight,
-                map.xy + inverse.xy * weight,
-                map.yy + inverse.yy * weight,
-            );
-        }
-        // The interpolated map normalizes the jump exactly as the
-        // scalar term's pointwise stiffness does. An extrapolating
-        // weight can leave it indefinite, which the six-sample mean
-        // cannot, and the two differ by `O(h)` in a smooth medium.
-        let scale = map.determinant().sqrt();
-        if scale.is_finite() && scale > 0.0 {
-            return Ok((flux, scale));
-        }
-        let mean = (start..start + 6).fold(SymmetricTensor2::default(), |sum, index| {
-            SymmetricTensor2::new(
-                sum.xx + inverses[index].xx / 6.0,
-                sum.xy + inverses[index].xy / 6.0,
-                sum.yy + inverses[index].yy / 6.0,
-            )
-        });
-        let mean = mean.determinant().sqrt();
-        if mean.is_finite() && mean > 0.0 {
-            Ok((flux, mean))
-        } else {
-            Err(WaveError::Unsupported(
-                "an element's mean constitutive inverse is not positive",
-            ))
-        }
-    };
-    let face_length = |start_vertex: usize, end_vertex: usize| {
-        let ends = [
-            mesh.vertices[start_vertex].point,
-            mesh.vertices[end_vertex].point,
-        ];
-        let length = (ends[1] - ends[0]).norm();
-        if length.is_finite() && length > 0.0 {
-            Ok((ends, length))
-        } else {
-            Err(WaveError::InvalidMesh("invalid temporal indicator face"))
-        }
-    };
-    for ((start_vertex, end_vertex), sides) in &faces {
-        let [left, right] = sides[..] else {
-            continue;
-        };
-        let (ends, length) = face_length(*start_vertex, *end_vertex)?;
-        let mut integrals = [0.0; 2];
-        for (fraction, weight) in FACE_GAUSS {
-            let mut difference = Point2::default();
-            let mut scales = [0.0; 2];
-            for (side, element) in [left, right].into_iter().enumerate() {
-                let (flux, scale) = face_point(element, *start_vertex, *end_vertex, fraction)?;
-                scales[side] = scale;
-                difference = difference + flux * if side == 0 { 1.0 } else { -1.0 };
-            }
-            let tangent = (ends[1] - ends[0]) / length;
-            let jump = difference.dot(tangent);
-            for (integral, scale) in integrals.iter_mut().zip(scales) {
-                *integral += weight * length * jump * jump / scale;
-            }
-        }
-        for (element, integral) in [left, right].into_iter().zip(integrals) {
-            element_complementary_jump[element] += 0.5 * length * integral;
-        }
-    }
-    let complementary_jump_contribution = element_complementary_jump.iter().sum();
-
-    // The same flux on a face with one side only - an outer wall, a hole's
-    // rim, one side of a baffle - as the outward normal flux `σ·n` a wall
-    // condition constrains. The direct state holds `v = η R σ`, with `R` the
-    // quarter turn the curls carry and `σ = A∇r` the flux integrated in
-    // time, so `σ = η Rᵀ v`. What each wall imposes on it is the scalar
-    // job's to say, since it holds the conditions.
-    let mut wall_flux = BTreeMap::new();
-    for ((start_vertex, end_vertex), sides) in &faces {
-        let [element] = sides[..] else {
-            continue;
-        };
-        let (ends, length) = face_length(*start_vertex, *end_vertex)?;
-        let opposite = mesh.triangles[element]
-            .vertices
-            .into_iter()
-            .find(|vertex| vertex != start_vertex && vertex != end_vertex)
-            .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
-        let tangent = (ends[1] - ends[0]) / length;
-        let mut normal = Point2::new(tangent.y, -tangent.x);
-        if normal.dot(mesh.vertices[opposite].point - ends[0]) > 0.0 {
-            normal = normal * -1.0;
-        }
-        let mut normal_flux = [0.0; 3];
-        let mut scale = [0.0; 3];
-        for (slot, (fraction, _)) in FACE_GAUSS.into_iter().enumerate() {
-            let (flux, point_scale) = face_point(element, *start_vertex, *end_vertex, fraction)?;
-            normal_flux[slot] = base.orientation() * (flux.y * normal.x - flux.x * normal.y);
-            scale[slot] = point_scale;
-        }
-        wall_flux.insert(
-            (*start_vertex, *end_vertex),
-            CanonicalWallFlux {
-                element,
-                normal_flux,
-                scale,
-            },
-        );
-    }
+    // The face terms, from the solver's own flux at the instant.
+    let faces = crate::indicator::canonical_face_terms(
+        mesh,
+        base.orientation(),
+        sample_points,
+        &physical_at,
+        &|index| inverses[index],
+    )?;
+    let element_complementary_jump = faces.element_jump;
+    let complementary_jump_contribution = faces.jump_contribution;
+    let wall_flux = faces.wall_flux;
 
     // Primary energy uses the mass in force now, so a modulated element is
     // not credited with the storage its authored coefficient would have.
@@ -1312,7 +1151,7 @@ pub fn canonical_temporal_indicator_supplement(
     Ok(CanonicalIndicatorSupplement {
         mesh_revision: mesh.mesh_revision,
         element_complementary_recovery,
-        element_complementary_jump: Some(element_complementary_jump),
+        element_complementary_jump,
         element_cell_residual,
         element_boundary_residual,
         element_energy,
@@ -1321,7 +1160,7 @@ pub fn canonical_temporal_indicator_supplement(
         complementary_jump_contribution,
         thin_gap_contribution,
         outgoing_contribution,
-        wall_flux: Some(wall_flux),
+        wall_flux,
     })
 }
 
@@ -5803,7 +5642,6 @@ mod tests {
             0.0,
         )
         .unwrap();
-        assert!(supplement.element_complementary_jump.is_some());
         assert!(supplement.complementary_jump_contribution > 0.0);
 
         let count = quadratic.degrees_of_freedom();
@@ -5880,23 +5718,19 @@ mod tests {
             supplement.element_energy.iter().sum::<f64>()
         ));
 
-        // Same supplement, no runtime: the scalar terms keep the estimate and
-        // the flux jump is not folded in on top of them.
-        let scalar = report(supplement.clone(), false);
-        assert!((scalar.global_indicator / raw(&scalar) - 1.0).abs() < 1.0e-9);
-        assert!(scalar.interior_jump_contribution > substituted.interior_jump_contribution);
-        assert!(scalar.recovery_contribution > substituted.recovery_contribution);
-
-        // A runtime with a supplement that carries no flux jump must not
-        // substitute, or the estimate would silently lose its gradient terms.
-        let mut without = supplement.clone();
-        without.element_complementary_jump = None;
-        let unsubstituted = report(without, true);
-        assert!(unsubstituted.interior_jump_contribution > substituted.interior_jump_contribution);
-        assert!(unsubstituted.displacement_recovery_contribution > 0.0);
-        assert!(
-            unsubstituted.recovery_contribution > supplement.complementary_recovery_contribution
-        );
+        // Same supplement, no runtime: the solver-flux terms are the estimate
+        // on a fixed generation as on a driven one, so it substitutes and
+        // carries the one calibration either way.
+        let fixed = report(supplement.clone(), false);
+        assert!((fixed.global_indicator / raw(&fixed) - 0.372).abs() < 1.0e-9);
+        assert!(close(
+            fixed.interior_jump_contribution,
+            fixed.complementary_jump_contribution
+        ));
+        assert!(close(
+            fixed.total_energy,
+            supplement.element_energy.iter().sum::<f64>()
+        ));
     }
 
     /// An inert medium must not notice the runtime at all, or the temporal
@@ -11785,7 +11619,7 @@ mod tests {
                 )
                 .unwrap()[0];
             let flux = Point2::new(map.yy * 0.3 - map.xy * 0.1, -map.xy * 0.3 + map.xx * 0.1);
-            let walls = supplement.wall_flux.unwrap();
+            let walls = supplement.wall_flux;
             assert!(!walls.is_empty());
             for ((start, end), face) in walls {
                 let middle = mesh.vertices[start]

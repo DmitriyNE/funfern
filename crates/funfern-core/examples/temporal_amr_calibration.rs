@@ -1,11 +1,11 @@
-//! Does the estimator's relative-error number mean anything in a driven
-//! medium?
+//! Does the estimator's relative-error number mean the same thing whatever
+//! the medium, the boundaries and the field's frequency?
 //!
-//! The static path's `6%` target was calibrated by watching a production run
-//! settle, not against a known answer, and the material-law review forbids
-//! quoting that number for time-driven media without validating it again.
-//! This is that validation: the efficiency index, estimator over true error,
-//! across a refinement sequence.
+//! The `6%` target was calibrated by watching a production run settle, not
+//! against a known answer, and the material-law review forbids quoting that
+//! number for time-driven media without validating it again. This is that
+//! validation: the efficiency index, estimator over true error, across a
+//! refinement sequence, and the constant that sets its level.
 //!
 //! True error needs a reference, and the study has to be clean enough that
 //! the reference converges. The domain is a bare rectangle and the initial
@@ -65,9 +65,9 @@ fn main() {
     // cannot say which one the estimator is charging for, and the first
     // version of this study changed both.
     //
-    // The first row is the production static estimator on an inert medium,
-    // measured here rather than inherited, because the driven target is set
-    // against it. Two indices only compare if one study produced both.
+    // The "static path" rows run the fixed generation's supplement, the others
+    // the time-driven one. One estimator reads both, so on an inert medium the
+    // two must read the same index; that pair is the check that they agree.
     let rows = [
         ("static path, inert", inert_scene(), true),
         ("inert", inert_scene(), false),
@@ -206,11 +206,10 @@ fn main() {
         "An estimator worth reading as a percentage has an efficiency index bounded\n\
          and roughly constant under refinement. A drifting index means the number\n\
          moves with the mesh.\n\n\
-         The driven rows carry the calibration that makes one accuracy target mean\n\
-         one true accuracy on both paths, so they are directly comparable with the\n\
-         static row above them. This sweep is where that constant comes from: if\n\
-         the driven rows stop agreeing with the static one, it is the constant that\n\
-         is stale, not the estimator that is broken."
+         The constant is set so the smooth box mode reads the index the 6% target\n\
+         was calibrated at, about 1.4. Every other row, the self-similar ones\n\
+         included, should read near it: a row that does not is a medium, boundary\n\
+         or frequency the estimate weighs differently."
     );
 }
 

@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use crate::SymmetricTensor2;
 use crate::canonical_consumer::complementary_interpolation_weights;
 use crate::wave::TimedDirectionalWaveCoefficients;
 use crate::{
@@ -47,18 +48,17 @@ pub struct CanonicalIndicatorSnapshot {
     pub time_step: f64,
 }
 
-/// Direct-state defect terms added to the scalar-equivalent spatial estimate.
-/// Interface jumps remain in the scalar estimator; these arrays own the
-/// complementary drift, thin-gap history and nonlocal outgoing-state defects.
+/// Direct-state defect terms that make up the spatial estimate. With one
+/// attached, the estimate reads the solver's own state in the units of its
+/// store: the complementary recovery, the flux jump across faces, the wall
+/// flux, the drift, thin-gap history and nonlocal outgoing-state defects, and
+/// the store itself. The scalar terms are still measured and reported.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalIndicatorSupplement {
     pub mesh_revision: u64,
     pub element_complementary_recovery: Vec<f64>,
-    /// The face jump of the solver's own flux, when this supplement carries
-    /// one. `None` says it does not, which is what the fixed path returns, and
-    /// is what keeps a runtime paired with a fixed supplement from silently
-    /// replacing the scalar jump with nothing.
-    pub element_complementary_jump: Option<Vec<f64>>,
+    /// The face jump of the solver's own flux, per element.
+    pub element_complementary_jump: Vec<f64>,
     pub element_cell_residual: Vec<f64>,
     pub element_boundary_residual: Vec<f64>,
     pub element_energy: Vec<f64>,
@@ -68,11 +68,9 @@ pub struct CanonicalIndicatorSupplement {
     pub thin_gap_contribution: f64,
     pub outgoing_contribution: f64,
     /// The solver's own outward normal flux on every face with one side only,
-    /// keyed by its vertices in increasing order, when this supplement
-    /// carries it. `None` is what the fixed path returns, and it keeps the
-    /// scalar wall residual; with it the wall residual reads this flux, as
-    /// the interior jump reads the solver's own across a face.
-    pub wall_flux: Option<BTreeMap<(usize, usize), CanonicalWallFlux>>,
+    /// keyed by its vertices in increasing order. The wall residual reads it,
+    /// as the interior jump reads the solver's own flux across a face.
+    pub wall_flux: BTreeMap<(usize, usize), CanonicalWallFlux>,
 }
 
 /// The solver's normal flux on one side of a mesh face that has an element on
@@ -87,6 +85,204 @@ pub struct CanonicalWallFlux {
     /// The constitutive scale a residual there divides by, as the interior
     /// flux jump does.
     pub scale: [f64; 3],
+}
+
+/// The face terms every canonical supplement carries, read from the solver's
+/// own complementary field: the jump of its normal flux across each interior
+/// face, and the outward normal flux on each face with one side only.
+pub(crate) struct CanonicalFaceTerms {
+    pub element_jump: Vec<f64>,
+    pub jump_contribution: f64,
+    pub wall_flux: BTreeMap<(usize, usize), CanonicalWallFlux>,
+}
+
+/// `physical_at` is the physical complementary field at a sample and `map_at`
+/// the map that produced it from the flux, in force at the snapshot: the
+/// authored one on a fixed generation, the instantaneous or tangent one on a
+/// driven or field-dependent one.
+pub(crate) fn canonical_face_terms(
+    mesh: &TriMesh,
+    orientation: f64,
+    sample_points: [[f64; 3]; 6],
+    physical_at: &dyn Fn(usize) -> Point2,
+    map_at: &dyn Fn(usize) -> SymmetricTensor2,
+) -> Result<CanonicalFaceTerms, WaveError> {
+    // The direct state keeps its complementary variable in a frame rotated by
+    // a quarter turn - the reference map is `rotate_tensor(stiffness)` - and
+    // `b` evolves from the curl of the primary field. So `(S b) . n` across a
+    // face is a tangential derivative of a single-valued edge trace and is
+    // identical from both sides by construction: measured, that jump is `1e-32`
+    // against a scalar jump of `1e-5`, which is structural zero, not a small
+    // error. The informative component is the tangential one, which is the
+    // scalar `[[A grad(u) . n]]` carried through that rotation.
+    //
+    // What makes it a candidate at all is where it comes from. The scalar term
+    // differentiates the nodal primary quotient `Q/M`, and a spatially
+    // patterned mass makes that quotient carry a patterned lumping error. This
+    // one reads a variable the solver stores independently per element and
+    // inverts at that element's own six samples, so no nodal mass enters it.
+    let element_count = mesh.triangles.len();
+    let mut element_complementary_jump = vec![0.0; element_count];
+    let mut faces = BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (element, triangle) in mesh.triangles.iter().enumerate() {
+        for local in 0..3 {
+            let start = triangle.vertices[local];
+            let end = triangle.vertices[(local + 1) % 3];
+            faces
+                .entry((start.min(end), start.max(end)))
+                .or_default()
+                .push(element);
+        }
+    }
+    const FACE_GAUSS: [(f64, f64); 3] = [
+        (0.112_701_665_379_258_3, 5.0 / 18.0),
+        (0.5, 8.0 / 18.0),
+        (0.887_298_334_620_741_7, 5.0 / 18.0),
+    ];
+    // One element's physical complementary field at a point `fraction` of the
+    // way along its face from `start_vertex`, and the scale that normalizes a
+    // flux there.
+    let face_point = |element: usize,
+                      start_vertex: usize,
+                      end_vertex: usize,
+                      fraction: f64|
+     -> Result<(Point2, f64), WaveError> {
+        let triangle = mesh.triangles[element];
+        // The point sits on one of this element's own edges, so its
+        // barycentric coordinates are exact rather than solved for.
+        let local_start = triangle
+            .vertices
+            .iter()
+            .position(|vertex| *vertex == start_vertex)
+            .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
+        let local_end = triangle
+            .vertices
+            .iter()
+            .position(|vertex| *vertex == end_vertex)
+            .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
+        let mut barycentric = [0.0; 3];
+        barycentric[local_start] = 1.0 - fraction;
+        barycentric[local_end] = fraction;
+        let interpolation = complementary_interpolation_weights(sample_points, barycentric)?;
+        let start = element * 6;
+        let mut flux = Point2::default();
+        let mut map = SymmetricTensor2::default();
+        for (sample, weight) in interpolation.into_iter().enumerate() {
+            let inverse = map_at(start + sample);
+            flux = flux + physical_at(start + sample) * weight;
+            map = SymmetricTensor2::new(
+                map.xx + inverse.xx * weight,
+                map.xy + inverse.xy * weight,
+                map.yy + inverse.yy * weight,
+            );
+        }
+        // The interpolated map normalizes the jump exactly as the
+        // scalar term's pointwise stiffness does. An extrapolating
+        // weight can leave it indefinite, which the six-sample mean
+        // cannot, and the two differ by `O(h)` in a smooth medium.
+        let scale = map.determinant().sqrt();
+        if scale.is_finite() && scale > 0.0 {
+            return Ok((flux, scale));
+        }
+        let mean = (start..start + 6).fold(SymmetricTensor2::default(), |sum, index| {
+            let map = map_at(index);
+            SymmetricTensor2::new(
+                sum.xx + map.xx / 6.0,
+                sum.xy + map.xy / 6.0,
+                sum.yy + map.yy / 6.0,
+            )
+        });
+        let mean = mean.determinant().sqrt();
+        if mean.is_finite() && mean > 0.0 {
+            Ok((flux, mean))
+        } else {
+            Err(WaveError::Unsupported(
+                "an element's mean constitutive inverse is not positive",
+            ))
+        }
+    };
+    let face_length = |start_vertex: usize, end_vertex: usize| {
+        let ends = [
+            mesh.vertices[start_vertex].point,
+            mesh.vertices[end_vertex].point,
+        ];
+        let length = (ends[1] - ends[0]).norm();
+        if length.is_finite() && length > 0.0 {
+            Ok((ends, length))
+        } else {
+            Err(WaveError::InvalidMesh("invalid canonical indicator face"))
+        }
+    };
+    for ((start_vertex, end_vertex), sides) in &faces {
+        let [left, right] = sides[..] else {
+            continue;
+        };
+        let (ends, length) = face_length(*start_vertex, *end_vertex)?;
+        let mut integrals = [0.0; 2];
+        for (fraction, weight) in FACE_GAUSS {
+            let mut difference = Point2::default();
+            let mut scales = [0.0; 2];
+            for (side, element) in [left, right].into_iter().enumerate() {
+                let (flux, scale) = face_point(element, *start_vertex, *end_vertex, fraction)?;
+                scales[side] = scale;
+                difference = difference + flux * if side == 0 { 1.0 } else { -1.0 };
+            }
+            let tangent = (ends[1] - ends[0]) / length;
+            let jump = difference.dot(tangent);
+            for (integral, scale) in integrals.iter_mut().zip(scales) {
+                *integral += weight * length * jump * jump / scale;
+            }
+        }
+        for (element, integral) in [left, right].into_iter().zip(integrals) {
+            element_complementary_jump[element] += 0.5 * length * integral;
+        }
+    }
+    let complementary_jump_contribution = element_complementary_jump.iter().sum();
+
+    // The same flux on a face with one side only - an outer wall, a hole's
+    // rim, one side of a baffle - as the outward normal flux `σ·n` a wall
+    // condition constrains. The direct state holds `v = η R σ`, with `R` the
+    // quarter turn the curls carry and `σ = A∇r` the flux integrated in
+    // time, so `σ = η Rᵀ v`. What each wall imposes on it is the scalar
+    // job's to say, since it holds the conditions.
+    let mut wall_flux = BTreeMap::new();
+    for ((start_vertex, end_vertex), sides) in &faces {
+        let [element] = sides[..] else {
+            continue;
+        };
+        let (ends, length) = face_length(*start_vertex, *end_vertex)?;
+        let opposite = mesh.triangles[element]
+            .vertices
+            .into_iter()
+            .find(|vertex| vertex != start_vertex && vertex != end_vertex)
+            .ok_or(WaveError::InvalidMesh("a face is not on its own element"))?;
+        let tangent = (ends[1] - ends[0]) / length;
+        let mut normal = Point2::new(tangent.y, -tangent.x);
+        if normal.dot(mesh.vertices[opposite].point - ends[0]) > 0.0 {
+            normal = normal * -1.0;
+        }
+        let mut normal_flux = [0.0; 3];
+        let mut scale = [0.0; 3];
+        for (slot, (fraction, _)) in FACE_GAUSS.into_iter().enumerate() {
+            let (flux, point_scale) = face_point(element, *start_vertex, *end_vertex, fraction)?;
+            normal_flux[slot] = orientation * (flux.y * normal.x - flux.x * normal.y);
+            scale[slot] = point_scale;
+        }
+        wall_flux.insert(
+            (*start_vertex, *end_vertex),
+            CanonicalWallFlux {
+                element,
+                normal_flux,
+                scale,
+            },
+        );
+    }
+
+    Ok(CanonicalFaceTerms {
+        element_jump: element_complementary_jump,
+        jump_contribution: complementary_jump_contribution,
+        wall_flux,
+    })
 }
 
 /// Reconstructs the instantaneous scalar-field rate from the accepted direct
@@ -211,26 +407,13 @@ pub fn canonical_indicator_supplement(
     let mut element_boundary_residual = vec![0.0; element_count];
     let mut element_energy = vec![0.0; element_count];
 
-    // The scalar estimator's phase-paired term used grad(u_dot), but obtaining
-    // u_dot from an f32 direct state requires either a tiny endpoint difference
-    // or a cancellation-heavy nodal force. Recover the complementary physical
-    // field Jb instead: for a harmonic component grad(u_dot) = -omega^2 b, so
-    // omega^2 ||Jb-recovered(Jb)||_{J^-1} is the same energy-scaled channel
-    // without inventing a derivative that the canonical state does not store.
-    let frequency_hz = forcing
-        .sources()
-        .iter()
-        .filter(|source| source.weights().iter().any(|weight| *weight != 0.0))
-        .map(|source| source.drive().frequency_ceiling_hz())
-        .chain(
-            forcing
-                .prescribed()
-                .iter()
-                .flatten()
-                .map(|signal| signal.frequency_ceiling_hz()),
-        )
-        .fold(0.0, f64::max);
-    let omega = (std::f64::consts::TAU * frequency_hz).max(1.0);
+    // Recover the complementary physical field Jb, whose defect
+    // ||Jb-recovered(Jb)||_{J^-1} is in the units of the store, as every term
+    // here is. The scalar path's phase-paired term used grad(u_dot) instead,
+    // which from an f32 direct state needs a tiny endpoint difference or a
+    // cancellation-heavy nodal force, and which sits one time derivative above
+    // the store: this term used to carry `omega^2` for that, from the forcing's
+    // frequency, and read a field of any other frequency off by its ratio.
     let mut recovered_complementary = BTreeMap::<(usize, RegionId), (Point2, f64)>::new();
     let first_samples = operator
         .constitutive_samples()
@@ -301,10 +484,18 @@ pub fn canonical_indicator_supplement(
                 .inverse()
                 .ok_or(WaveError::InvalidState)?;
             element_complementary_recovery[element] +=
-                omega * omega * sample.integration_weight * defect.dot(reference.apply(defect));
+                sample.integration_weight * defect.dot(reference.apply(defect));
         }
     }
     let complementary_recovery_contribution = element_complementary_recovery.iter().sum();
+
+    let physical = |index: usize| {
+        operator.constitutive_samples()[index]
+            .complementary_inverse
+            .apply(snapshot.complementary_flux[index])
+    };
+    let map = |index: usize| operator.constitutive_samples()[index].complementary_inverse;
+    let faces = canonical_face_terms(mesh, operator.orientation(), sample_points, &physical, &map)?;
 
     for contribution in operator.primary_contributions() {
         let node = contribution.node as usize;
@@ -462,16 +653,16 @@ pub fn canonical_indicator_supplement(
     Ok(CanonicalIndicatorSupplement {
         mesh_revision: mesh.mesh_revision,
         element_complementary_recovery,
-        element_complementary_jump: None,
+        element_complementary_jump: faces.element_jump,
         element_cell_residual,
         element_boundary_residual,
         element_energy,
         drift_contribution,
         complementary_recovery_contribution,
-        complementary_jump_contribution: 0.0,
+        complementary_jump_contribution: faces.jump_contribution,
         thin_gap_contribution,
         outgoing_contribution,
-        wall_flux: None,
+        wall_flux: faces.wall_flux,
     })
 }
 
@@ -815,26 +1006,29 @@ impl MeshSizeField for AdaptiveSizeField {
     }
 }
 
-/// What the driven estimate is multiplied by so that one accuracy target means
-/// one true accuracy on both paths.
+/// What the estimate is multiplied by so that an accuracy target names a true
+/// accuracy.
 ///
-/// The estimate changes shape under a material runtime: the gradient terms
-/// move onto the solver's own flux, the scalar displacement recovery leaves
-/// the total, and the energy it is relative to is the solver's own store.
-/// That is what lets it survive a spatially patterned medium and read the same
-/// index whatever the field's frequency. Measured by the
-/// `temporal_amr_calibration` example, the production static estimator's
-/// efficiency index has a geometric mean of 1.41 over a refinement sequence on
-/// a smooth reflecting-box problem, while the substituted estimate has 3.79
-/// over seven media crossing driven row, spatial pattern and modulation
-/// wavenumber. This is their ratio.
+/// The estimate reads the solver's own state in the units of its store, on a
+/// fixed generation and a driven one alike, so one factor serves both. It is
+/// set where the scalar estimator it replaced was calibrated: a production run
+/// settling at the 6 percent target delivered about 4.4 percent true error, an
+/// efficiency index of about 1.4, which is what that estimator read on the
+/// `temporal_amr_calibration` example's smooth reflecting-box mode (1.41, the
+/// geometric mean over a refinement sequence). The solver-flux estimate reads
+/// 3.79 there, and this is their ratio.
 ///
-/// It is a calibration and not a correction. Neither index is one, and the
-/// claim being made is only that the same target delivers the same true error
-/// whichever estimate produced it. Scaled, the driven index runs 1.30 to 1.56
-/// across those seven media, and 1.28 to 1.61 on the box mode at twice and
-/// three times the wavenumber, where it used to fall as the frequency rose.
-const DRIVEN_INDICATOR_CALIBRATION: f64 = 0.372;
+/// It is a calibration and not a correction: the index is not one, and the
+/// claim is only that one target delivers one true error whatever the medium
+/// and whatever the field's frequency. Scaled, the index runs 1.26 to 1.67
+/// across the example's rows - media driven, patterned, nonlinear and
+/// oscillating, prescribed and Neumann sides, absorbing walls, loss, and the
+/// box mode at two and three times the wavenumber - with the pumped interface
+/// down to 0.97 on its finest mesh and a self-oscillating medium at 0.86 to
+/// 0.90. The scalar estimator read 1.3 to 1.6 on smooth content and up to 19
+/// on a material interface, because it measured `∇u`, one time derivative
+/// above the store, which weighs whatever part of the error is fastest.
+const INDICATOR_CALIBRATION: f64 = 0.372;
 
 #[derive(Clone, Copy, Default)]
 struct Recovery {
@@ -1232,17 +1426,14 @@ impl SolutionIndicatorJob {
         if self.canonical.as_ref().is_some_and(|supplement| {
             supplement.mesh_revision != self.mesh.mesh_revision
                 || supplement.element_complementary_recovery.len() != self.mesh.triangles.len()
-                || supplement
-                    .element_complementary_jump
-                    .as_ref()
-                    .is_some_and(|jump| jump.len() != self.mesh.triangles.len())
+                || supplement.element_complementary_jump.len() != self.mesh.triangles.len()
                 || supplement.element_cell_residual.len() != self.mesh.triangles.len()
                 || supplement.element_boundary_residual.len() != self.mesh.triangles.len()
                 || supplement.element_energy.len() != self.mesh.triangles.len()
                 || supplement
                     .element_complementary_recovery
                     .iter()
-                    .chain(supplement.element_complementary_jump.iter().flatten())
+                    .chain(&supplement.element_complementary_jump)
                     .chain(&supplement.element_cell_residual)
                     .chain(&supplement.element_boundary_residual)
                     .chain(&supplement.element_energy)
@@ -1738,31 +1929,28 @@ impl SolutionIndicatorJob {
     }
 
     /// Whether the gradient-based error terms read the solver's own flux
-    /// instead of a gradient of the reconstructed scalar field.
-    ///
-    /// Only under a runtime, and only when the supplement actually carries the
-    /// flux jump. The scalar terms differentiate the nodal primary quotient
+    /// instead of a gradient of the reconstructed scalar field: whenever a
+    /// canonical supplement is attached, on a fixed generation as on a driven
+    /// one. The scalar terms differentiate the nodal primary quotient
     /// `Q/M`, and a spatially patterned mass makes that quotient carry a
     /// lumping error patterned at the modulation wavenumber - invisible in the
     /// field's own norm, and dominant in anything that differentiates it
     /// across a face. Measured on a travelling mass modulation, the scalar
     /// interior jump converges at `h^1.2` and the scalar displacement recovery
     /// at `h^1.5`, while the flux terms converge at `h^4` on the same runs.
+    /// And they measure `∇u`, one time derivative above the store, which on
+    /// any medium weighs the fastest part of the error most: a material
+    /// interface read an index of 9 to 19, climbing with refinement.
     fn substitutes_canonical_gradients(&self) -> bool {
-        self.runtime.is_some()
-            && self
-                .canonical
-                .as_ref()
-                .is_some_and(|canonical| canonical.element_complementary_jump.is_some())
+        self.canonical.is_some()
     }
 
-    /// The factor from raw residual to a number an accuracy target can name.
-    /// One on the static path, which is what the target was calibrated
-    /// against, and [`DRIVEN_INDICATOR_CALIBRATION`] once the gradient terms
-    /// have moved onto the flux.
+    /// The factor from raw residual to a number an accuracy target can name:
+    /// [`INDICATOR_CALIBRATION`] on the solver's own terms, and one on the
+    /// scalar terms alone, which an estimate without a supplement still is.
     fn indicator_calibration(&self) -> f64 {
         if self.substitutes_canonical_gradients() {
-            DRIVEN_INDICATOR_CALIBRATION
+            INDICATOR_CALIBRATION
         } else {
             1.0
         }
@@ -1944,8 +2132,8 @@ impl SolutionIndicatorJob {
             // Only where the scalar jump stepped aside for it. A supplement
             // can carry the term without the estimator having substituted,
             // and adding both would count one defect twice.
-            if substitutes && let Some(jump) = &canonical.element_complementary_jump {
-                estimate.interior_jump += jump[index];
+            if substitutes {
+                estimate.interior_jump += canonical.element_complementary_jump[index];
             }
             estimate.cell_residual += canonical.element_cell_residual[index];
             estimate.boundary_residual += canonical.element_boundary_residual[index];
@@ -2072,7 +2260,7 @@ impl SolutionIndicatorJob {
         let wall = match self
             .canonical
             .as_ref()
-            .and_then(|canonical| canonical.wall_flux.as_ref())
+            .map(|canonical| &canonical.wall_flux)
         {
             Some(walls) if self.substitutes_canonical_gradients() => {
                 let face = walls

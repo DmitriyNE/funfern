@@ -15217,3 +15217,35 @@ nothing stepping, and nothing in the console.
   be the supplement's store exactly.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — One estimator for every generation
+
+- **Defect.** The static estimator read the displayed field's gradient, `∇u`,
+  in its numerator and its energy alike. That cancels on one smooth mode,
+  where it was calibrated, and overweights whatever part of the error is
+  fastest everywhere else, because `∇u` sits one time derivative above the
+  solver's store. Measured on the calibration sweep: a material interface read
+  9.3, 14.2, 19.0, climbing with refinement; absorbing walls 3.3 to 3.6; a
+  steep pulse at an absorbing end 5.6 to 5.7; a Neumann side 3.3 to 3.9; a
+  complementary loss 3.1 to 3.7; the smooth box 1.29 to 1.58.
+- **Fix.** The fixed generation takes the driven one's estimator: its
+  supplement now carries the flux jump across faces and the wall flux, from
+  one shared `canonical_face_terms` with the authored maps where the driven
+  one passes the instantaneous or tangent ones; its complementary recovery
+  drops the `ω²` from the forcing's frequency that carried it into the
+  gradient's units; and the job reads the solver's own terms, relative to the
+  solver's store, whenever a supplement is attached. The scalar terms are
+  still measured and reported. One constant, `INDICATOR_CALIBRATION = 0.372`,
+  sets the level so the smooth box reads 1.41, the index the 6 percent target
+  was calibrated at; it is the former driven constant, whose definition gave
+  the same number.
+- **Measured** (the full sweep): every fixed row reads its inert driven twin's
+  index to three digits - interface 1.47, 1.41, 1.35; Neumann 1.52, 1.31, 1.36;
+  absorbing walls 1.51, 1.58, 1.38; absorbing end 1.47, 1.44, 1.48;
+  complementary loss 1.49, 1.26, 1.34 - and every row reads 1.26 to 1.67,
+  except the pumped interface (1.34, 1.14, 0.97) and the self-oscillating
+  medium (0.86 to 0.90). The smooth box's geometric mean is 1.408.
+- **Tested:** the guard test now requires a supplement to substitute and
+  carry the one calibration with or without a runtime, relative to the store.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

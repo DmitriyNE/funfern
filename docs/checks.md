@@ -119,26 +119,23 @@ travelling pattern, one row at two wavenumbers, and both rows at once - because
 a sweep that changes the row and the pattern together cannot say which one the
 estimator is charging for. The index should be bounded and roughly constant;
 where it climbs with refinement the estimate cannot be read as a percentage.
-The first row is the production static estimator on an inert medium, and it is
-there because the driven estimate's calibration constant is the ratio of the two
-geometric means; two indices only compare if one study produced both. The rows
-after the oscillator media carry boundary data - a prescribed side, a Neumann
-side, absorbing walls, and a channel with one absorbing end that a pulse
-reaches during the run, each beside its static control - and then loss:
-constant primary and complementary loss, loss beside Klein-Gordon, and the
-self-sustained emitter's medium, van der Pol gain with a complementary loss.
-Every row's
-estimate is handed the walls its solver ran, as production's is, so the wall
-residual is measured too. The last rows are self-similar: the box mode at two
-and three times the wavenumber, on meshes and over a run that many times
-smaller, which leaves the true relative error where it was, so an index that
-moves with them is weighting by frequency. With the constant applied, the
-driven rows read 1.26 to 1.66 - the pumped interface down to 0.97 at its finest
-mesh and the self-oscillating medium 0.86 to 0.90 - against the static box's
-1.27 to 1.63 at every scale, so the same accuracy target means the same true
-error on either path. This sweep is where `DRIVEN_INDICATOR_CALIBRATION` comes from: if
-the driven rows stop agreeing with the static one, the constant is stale. An
-argument runs only the rows whose label contains it.
+The rows after the oscillator media carry boundary data - a prescribed side, a
+Neumann side, absorbing walls, and a channel with one absorbing end that a
+pulse reaches during the run - and then loss: constant primary and
+complementary loss, loss beside Klein-Gordon, and the self-sustained emitter's
+medium, van der Pol gain with a complementary loss. Every row's estimate is
+handed the walls its solver ran, as production's is, so the wall residual is
+measured too. The last rows are self-similar: the box mode at two and three
+times the wavenumber, on meshes and over a run that many times smaller, which
+leaves the true relative error where it was, so an index that moves with them
+is weighting by frequency. One estimator reads every generation, fixed and
+driven; the "static path" rows run the fixed generation's supplement, and on
+an inert medium they read the time-driven one's index to three digits.
+`INDICATOR_CALIBRATION` is set so the smooth box reads 1.41, the index the 6
+percent target was calibrated at; every row then reads 1.26 to 1.67, except the
+pumped interface, down to 0.97 at its finest mesh, and the self-oscillating
+medium at 0.86 to 0.90. An argument runs only the rows whose label contains
+it.
 
 `wave_boundary_reflection` sends finite Gaussian P2e packets at the outer box and
 compares first- and second-order residual-energy reflection at two angles and two
