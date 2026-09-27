@@ -15468,3 +15468,51 @@ nothing stepping, and nothing in the console.
   initial inspiration, is credited.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — A drive's sidebands are left to the estimate
+
+- **Defect** (found on the live site). Time crystal refined until the
+  browser build's wasm memory reached its 1 GiB cap, where a GPU pack
+  allocation failed and its worker trapped (`RuntimeError: unreachable`, at
+  915 MiB). The app never learns of it: the status stays at "Adapting mesh:
+  ready for GPU upload", and the pool slot packing needs is gone, so a scene
+  opened next never starts. Every refinement was forced by the size rule's
+  drive-sideband floor, all limit candidates at a 0.0063 wavelength target,
+  while the estimate read 1.3% against 12%.
+- **Measured** (CPU reference, field amplitude against the carrier at four
+  points over the last 4 s of 8, edges 0.06, 0.04, 0.03 and 0.022). The
+  floor assumed each sideband order carries `depth/2` of the one below, and
+  a smoothed square `1 + 2·sharpness` harmonics. At depth 0.3 a cosine pump
+  measures +1 0.53–0.73, +2 0.17–0.22, +3 0.035–0.067 and +4 0.006–0.017,
+  against 0.15, 0.023 and 0.003 assumed and a reach of +3. Time crystal
+  carries 1.1–1.3% out to +11…+13, converged between the two finest meshes,
+  and under 0.6% from +14, against the +24 assumed. How strong the sidebands
+  grow follows the wave's transit through the medium, which a floor read
+  from the material cannot see, so it missed in both directions. Even the
+  measured +13 wants elements of 0.011, under the 0.02 minimum edge.
+- **Change.** The size rule no longer forces a drive's sidebands; the
+  estimate, which reads them from the solver's own flux, decides.
+  `CanonicalTemporalResolution` keeps only the pattern a travelling drive
+  writes into the coefficients, which no field estimate can see, and the
+  estimator option `resolved_frequency_hz` is gone: the size rule resolves
+  the forcing frequency and the Kerr harmonics, whose floor is unchanged.
+- **Measured in the app** (native, M1 Max, DOFs 115 s after opening, before
+  and after): Parametric pump 137k → 19k (estimate 2.0%), Time crystal
+  131k → 16k (3.2%), Travelling modulation 108k → 39k (5.9%), Doppler mirror
+  55k → 34k (1.4%), Parametric fiber amplifier 54k → 54k. The fiber reads
+  about 22% either way and, now refining on error, reaches 91k in 300 s with
+  its estimate flat at 20–24%: the up-conversion ladder fills each finer
+  mesh, the residue filed under the plan's "Later experiments".
+- **Found, not fixed.** The browser build caps wasm memory at 1 GiB
+  (`scripts/trunk`, since 8700f36, with no recorded reason), and a trap in a
+  pool worker hangs the app as above. The native heap at 137k DOFs holds 956
+  MiB at rest: the temporal operator's per-site law tables 240 MiB (a full
+  law record, about 400 bytes, at each of 591k sites), CPU copies of the GPU
+  buffers 238 MiB (`ShaderBuffer::default()` keeps its main-world data), the
+  canonical and legacy quadratic assemblies 141 MiB, transfer maps kept after
+  their handoff 58 MiB and the estimator's state 55 MiB. A handoff roughly
+  doubles it for a moment, 1.4–1.5 GiB sampled at 75–100k DOFs.
+- **Tests.** `only_a_travelling_drive_demands_a_mesh_of_its_own` replaces
+  the sideband test.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

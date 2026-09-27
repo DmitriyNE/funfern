@@ -817,7 +817,7 @@ fn estimate(
     walls: OuterBoundaryConditions,
 ) -> Option<funfern_core::SolutionIndicatorReport> {
     let count = operator.base().degrees_of_freedom();
-    let demand = operator.resolution_demand(0.0);
+    let demand = operator.resolution_demand();
     let snapshot = CanonicalIndicatorSnapshot {
         mesh_revision: mesh.mesh_revision,
         primary_flux: state.primary_flux().to_vec(),
@@ -909,10 +909,8 @@ fn estimate(
             minimum_edge_length: 0.005,
             maximum_edge_length: 0.3,
             elements_per_wavelength: ELEMENTS_PER_WAVELENGTH,
-            // No sources here, so the field's own scale is zero; the drive's
-            // reach belongs to the size rule alone.
+            // No sources here, so the field's own scale is zero.
             forcing_frequency_hz: 0.0,
-            resolved_frequency_hz: demand.frequency_hz,
             coefficient_wavelength: demand.coefficient_wavelength,
             ..Default::default()
         },

@@ -1125,7 +1125,9 @@ phases and Switch states live in a bank carried with the state snapshot.
   divides its wavelength floor by the primary row's tangent at the field
   envelope. It also resolves, element by element, the odd harmonics of the
   carrier that the coefficient's swing `(c(A) − c(0)) / (c(A) + c(0))` makes,
-  a pump at twice the carrier counted by the drives' 1% sideband floor.
+  counted down to 1% of the carrier. Of a drive, the size rule resolves only
+  the spatial pattern a travelling one writes into the coefficients; the
+  sidebands a drive mixes into the field are left to the estimate.
 
 The per-stage reports in `docs/spikes/funfern-material-laws-stage{7,8,9,10}-report.md`
 hold the measurements.

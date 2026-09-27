@@ -1868,23 +1868,16 @@ fn resident_filter_boundary(enabled: bool, completed_steps: u64) -> bool {
     enabled && completed_steps > 0 && completed_steps.is_multiple_of(GRID_SCALE_FILTER_CADENCE)
 }
 
-/// What the mesh must resolve: the sources, and whatever the medium's own
-/// drives add on top of them.
+/// What the medium's own drives demand of the mesh beyond the sources.
 ///
-/// A driven medium mixes with the wave, so a size rule keyed on the source
-/// frequency alone under-resolves it, and a travelling drive patterns the
-/// coefficients in space whether or not a wave is present. The scene is
-/// authored, so this holds for materials whose drives are not yet executable:
-/// it is the mesh rule, not the solver path.
-fn scene_resolution_demand(
-    scene: &TopologyScene,
-    source: PointSource,
-) -> CanonicalTemporalResolution {
-    let sources = highest_forcing_frequency(scene, source);
-    CanonicalTemporalResolution::of_materials(&scene.materials, sources).unwrap_or(
+/// A travelling drive patterns the coefficients in space whether or not a
+/// wave is present; the sidebands any drive mixes into the field are left to
+/// the error estimate. The scene is authored, so this holds for materials
+/// whose drives are not yet executable: it is the mesh rule, not the solver
+/// path.
+fn scene_resolution_demand(scene: &TopologyScene) -> CanonicalTemporalResolution {
+    CanonicalTemporalResolution::of_materials(&scene.materials).unwrap_or(
         CanonicalTemporalResolution {
-            frequency_hz: sources,
-            sideband_order: 0,
             coefficient_wavelength: f64::INFINITY,
         },
     )

@@ -4239,7 +4239,6 @@ mod tests {
                 relative_tolerance: defaults.accuracy_percent / 100.0,
                 elements_per_wavelength: defaults.elements_per_wavelength,
                 forcing_frequency_hz: frequency,
-                resolved_frequency_hz: frequency,
                 ..Default::default()
             },
         )

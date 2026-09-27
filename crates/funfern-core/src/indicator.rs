@@ -688,21 +688,16 @@ pub struct SolutionIndicatorOptions {
     pub elements_per_wavelength: f64,
     /// Frequency at which the field itself oscillates, used as the spectral
     /// scale that converts the complementary recovery channel into a
-    /// displacement-equivalent one and weights the energy denominator.
+    /// displacement-equivalent one and weights the energy denominator, and
+    /// as the frequency the size rule's wavelength floor resolves.
     ///
     /// This is the driving frequency, not what a modulated medium generates.
     /// Raising it for a driven medium inflates the recovery term by its
     /// square while the field oscillates no faster, which measurably wrecked
     /// the estimator's calibration: the efficiency index went from about 1.4
-    /// and flat to between 4 and 9 and climbing. The size rule's frequency is
-    /// `resolved_frequency_hz`, separately.
+    /// and flat to between 4 and 9 and climbing. The sidebands a drive mixes
+    /// in are left to the error estimate, which reads them where they exist.
     pub forcing_frequency_hz: f64,
-    /// Highest temporal frequency the mesh must resolve. In a driven medium
-    /// this exceeds the source frequency, because mixing puts energy at
-    /// `f_source +/- n f_drive`;
-    /// [`CanonicalTemporalWaveOperator::resolution_demand`] computes it. Zero
-    /// falls back to `forcing_frequency_hz`.
-    pub resolved_frequency_hz: f64,
     /// Shortest spatial period the operator's own coefficients carry, from a
     /// travelling modulation. Infinity where none does.
     ///
@@ -732,7 +727,6 @@ impl Default for SolutionIndicatorOptions {
             relative_tolerance: 0.06,
             elements_per_wavelength: 5.0,
             forcing_frequency_hz: 0.0,
-            resolved_frequency_hz: 0.0,
             coefficient_wavelength: f64::INFINITY,
             grading_ratio: 1.5,
             minimum_scale: 0.6,
@@ -1235,8 +1229,9 @@ impl SolutionIndicatorJob {
     ///
     /// The wavelength limit deliberately keeps the authored wave speed. A
     /// limit that breathed with the drive would retarget the same element
-    /// every cycle; a drive's reach belongs to `resolved_frequency_hz` and
-    /// `coefficient_wavelength`, which the caller supplies for it.
+    /// every cycle. What a drive writes into the operator in space belongs to
+    /// `coefficient_wavelength`, which the caller supplies for it; the
+    /// sidebands it mixes into the field are measured, not predicted.
     pub fn with_instantaneous_materials(mut self, runtime: CanonicalMaterialRuntimeState) -> Self {
         self.runtime = Some(runtime);
         self
@@ -1338,8 +1333,6 @@ impl SolutionIndicatorJob {
             || options.elements_per_wavelength <= 0.0
             || !options.forcing_frequency_hz.is_finite()
             || options.forcing_frequency_hz < 0.0
-            || !options.resolved_frequency_hz.is_finite()
-            || options.resolved_frequency_hz < 0.0
             || options.coefficient_wavelength.is_nan()
             || options.coefficient_wavelength <= 0.0
             || !options.grading_ratio.is_finite()
@@ -1817,13 +1810,8 @@ impl SolutionIndicatorJob {
         // medium a harmonic that has left it is linear and makes no more.
         let harmonics = crate::CanonicalTemporalResolution::field_law_harmonics(response.depth);
         self.report.field_law_harmonics = self.report.field_law_harmonics.max(harmonics);
-        let carrier = if self.options.forcing_frequency_hz > 0.0 {
-            self.options.forcing_frequency_hz
-        } else {
-            self.options.resolved_frequency_hz
-        };
         let harmonic_frequency_hz = if harmonics > 0 {
-            f64::from(1 + 2 * harmonics) * carrier
+            f64::from(1 + 2 * harmonics) * self.options.forcing_frequency_hz
         } else {
             0.0
         };
@@ -1858,12 +1846,7 @@ impl SolutionIndicatorJob {
                 (model.physics, &model.materials[..], &model.regions[..])
             }
         };
-        let frequency = if self.options.resolved_frequency_hz > 0.0 {
-            self.options.resolved_frequency_hz
-        } else {
-            self.options.forcing_frequency_hz
-        };
-        let omega = std::f64::consts::TAU * frequency;
+        let omega = std::f64::consts::TAU * self.options.forcing_frequency_hz;
         let amplitude = self.operator.element_nodes()[index]
             .iter()
             .map(|node| {
@@ -2380,12 +2363,10 @@ impl SolutionIndicatorJob {
         // applies wherever the material carries that wave, so which of the two
         // rules set this element's size is worth keeping - only one of them
         // answers to an accuracy target.
-        let resolved_frequency_hz = if self.options.resolved_frequency_hz > 0.0 {
-            self.options.resolved_frequency_hz
-        } else {
-            self.options.forcing_frequency_hz
-        }
-        .max(material.harmonic_frequency_hz);
+        let resolved_frequency_hz = self
+            .options
+            .forcing_frequency_hz
+            .max(material.harmonic_frequency_hz);
         let wavelength_target = (resolved_frequency_hz > 0.0).then(|| {
             material.minimum_wave_speed
                 / (resolved_frequency_hz * self.options.elements_per_wavelength)

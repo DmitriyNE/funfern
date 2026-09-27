@@ -539,7 +539,7 @@ fn estimate(
         time,
         time_step,
     };
-    let demand = operator.resolution_demand(0.0);
+    let demand = operator.resolution_demand();
     let mut job = SolutionIndicatorJob::new(
         mesh.clone(),
         quadratic.clone(),
@@ -548,7 +548,6 @@ fn estimate(
         SolutionIndicatorOptions {
             minimum_edge_length: MINIMUM_EDGE,
             maximum_edge_length: MAXIMUM_EDGE,
-            resolved_frequency_hz: demand.frequency_hz,
             coefficient_wavelength: demand.coefficient_wavelength,
             ..SolutionIndicatorOptions::default()
         },

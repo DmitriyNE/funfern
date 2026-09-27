@@ -545,9 +545,11 @@ names or with every expression evaluated at the material frame's origin. Each ro
   Carrying a forced wavelength and staying under the largest element allowed are
   floors rather than judgements about error, so they refine regardless. The
   forced wavelength is the shortest the field is expected to carry: the
-  sources', a driven medium's sidebands, and, where a Kerr or saturable
-  medium's field is strong, the odd harmonics it makes there, which relax as
-  the field fades. Advanced
+  sources', the pattern a travelling drive writes into its medium, and, where
+  a Kerr or saturable medium's field is strong, the odd harmonics it makes
+  there, which relax as the field fades. The sidebands a driven medium mixes
+  into the wave are left to the estimate, which sees them where they are.
+  Advanced
   settings holds elements per wavelength, at six - twelve nodes, quadratically -
   and the smallest and largest element, and the panel says when a forced
   wavelength wants elements under the smallest allowed, which holds the mesh at

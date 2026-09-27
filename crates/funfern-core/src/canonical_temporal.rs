@@ -1317,20 +1317,18 @@ pub fn canonical_temporal_primary_rate(
     Ok(rate)
 }
 
-/// What a driven medium demands of the mesh, beyond what the sources ask.
+/// What a driven medium demands of the mesh on its own, whatever the field.
 ///
-/// A modulated coefficient is not just a moving number. It mixes with the
-/// wave to make sidebands the mesh has to resolve, and a travelling
-/// modulation writes a spatial pattern into the operator itself that the mesh
-/// has to resolve whether or not a wave is present.
+/// A travelling modulation writes a spatial pattern into the operator
+/// itself, which the mesh has to resolve whether or not a wave is present: a
+/// mesh too coarse for it assembles the wrong operator, and no estimate of
+/// the field would say so. The sidebands a drive mixes into the field are not
+/// part of this demand. They are field content, which the error estimate
+/// reads from the solver's own flux; a floor predicted from the drive alone
+/// missed them in both directions, because how strong they grow depends on
+/// how long the wave spends in the medium, not on the material.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CanonicalTemporalResolution {
-    /// Highest temporal frequency the field is expected to carry, given a
-    /// source at `source_frequency_hz`. Zero when nothing is driven.
-    pub frequency_hz: f64,
-    /// Sideband order the frequency above accounts for. One means only the
-    /// first pair; zero means the drive contributes no resolvable sideband.
-    pub sideband_order: u32,
     /// Shortest spatial period any travelling modulation writes into the
     /// coefficients, or infinity where none does. This is a property of the
     /// operator, so it binds even on a quiet field.
@@ -1338,58 +1336,13 @@ pub struct CanonicalTemporalResolution {
 }
 
 impl CanonicalTemporalResolution {
-    /// Sideband amplitude below which a pair is not worth resolving. A
-    /// first-order pair carries about `depth/2` of the carrier, and each
-    /// further order multiplies by roughly the same factor, so this bounds
-    /// the order rather than fixing it.
-    const SIDEBAND_FLOOR: f64 = 1.0e-2;
-    /// Sidebands counted at most, whatever the depth. Depth is bounded below
-    /// one by the positivity requirement on the multiplier, so this is a
-    /// guard against a pathological authored value rather than a physical
-    /// limit.
-    const MAX_SIDEBAND_ORDER: u32 = 8;
-
-    /// Harmonics a drive's own waveform carries, which multiply its frequency
-    /// before any mixing. A cosine pump has one; a smoothed square has odd
-    /// harmonics whose amplitude falls with the sharpness that produced them.
-    fn harmonic_order(drive: TimeDriveValues) -> u32 {
-        match drive {
-            TimeDriveValues::None => 0,
-            TimeDriveValues::ParametricPump { .. }
-            | TimeDriveValues::TravellingModulation { .. } => 1,
-            TimeDriveValues::TimeCrystal { sharpness, .. } => {
-                // tanh(s cos t)/tanh(s) approaches a square wave as `s`
-                // grows, and its odd harmonics decay on a scale set by `s`.
-                // Counting `1 + 2s` of them keeps the retained content above
-                // the same floor the sidebands use without pretending a
-                // sharp square is band-limited.
-                let order = (1.0 + 2.0 * sharpness.abs()).ceil();
-                if order.is_finite() {
-                    (order as u32).clamp(1, Self::MAX_SIDEBAND_ORDER)
-                } else {
-                    Self::MAX_SIDEBAND_ORDER
-                }
-            }
-        }
-    }
-
-    fn sideband_order(depth: f64) -> u32 {
-        let depth = depth.abs();
-        if depth <= 0.0 {
-            return 0;
-        }
-        // Each further order costs roughly another factor of `depth/2`.
-        let ratio = (0.5 * depth).min(0.99);
-        if ratio <= 0.0 {
-            return 0;
-        }
-        let order = (Self::SIDEBAND_FLOOR.ln() / ratio.ln()).ceil();
-        if order.is_finite() {
-            (order.max(1.0) as u32).min(Self::MAX_SIDEBAND_ORDER)
-        } else {
-            Self::MAX_SIDEBAND_ORDER
-        }
-    }
+    /// Share of the carrier below which a harmonic a field law makes is not
+    /// worth resolving.
+    const HARMONIC_FLOOR: f64 = 1.0e-2;
+    /// Harmonics counted at most, whatever the depth. The depth of a field
+    /// law's swing is below one, so this is a guard against a pathological
+    /// law rather than a physical limit.
+    const MAX_HARMONICS: u32 = 8;
 
     /// The odd harmonics a field law makes of a wave whose coefficient swings
     /// through `depth` about its mean over a cycle,
@@ -1397,72 +1350,35 @@ impl CanonicalTemporalResolution {
     ///
     /// An even law moves the coefficient at twice the wave's frequency, so
     /// the medium pumps the wave with a depth of its own making: each odd
-    /// harmonic carries about `depth/2` of the one below, as a drive's
-    /// sidebands do, and `n` of them reach `(1 + 2n)` times the wave's
-    /// frequency. They are counted while that share stays at or above the
-    /// 1% floor the sidebands use, so a weak field counts none and the mesh
-    /// may coarsen again where the field fades. A drive's order counts at least
-    /// one pair and one past the floor, since its depth is authored rather
-    /// than made by the field.
+    /// harmonic carries about `depth/2` of the one below, and `n` of them
+    /// reach `(1 + 2n)` times the wave's frequency. They are counted while
+    /// that share stays at or above the 1% floor, so a weak field counts none
+    /// and the mesh may coarsen again where the field fades.
     pub fn field_law_harmonics(depth: f64) -> u32 {
         let ratio = 0.5 * depth.abs();
-        if !(Self::SIDEBAND_FLOOR..1.0).contains(&ratio) {
+        if !(Self::HARMONIC_FLOOR..1.0).contains(&ratio) {
             return 0;
         }
-        let count = (Self::SIDEBAND_FLOOR.ln() / ratio.ln()).floor();
+        let count = (Self::HARMONIC_FLOOR.ln() / ratio.ln()).floor();
         if count.is_finite() {
-            (count as u32).min(Self::MAX_SIDEBAND_ORDER)
+            (count as u32).min(Self::MAX_HARMONICS)
         } else {
-            Self::MAX_SIDEBAND_ORDER
+            Self::MAX_HARMONICS
         }
     }
 
-    fn drive_depth(drive: TimeDriveValues) -> f64 {
-        match drive {
-            TimeDriveValues::None => 0.0,
-            TimeDriveValues::ParametricPump { depth, .. }
-            | TimeDriveValues::TimeCrystal { depth, .. }
-            | TimeDriveValues::TravellingModulation { depth, .. } => depth,
-        }
-    }
-
-    fn drive_frequency_hz(drive: TimeDriveValues) -> f64 {
-        match drive {
-            TimeDriveValues::None => 0.0,
-            TimeDriveValues::ParametricPump { frequency_hz, .. }
-            | TimeDriveValues::TimeCrystal { frequency_hz, .. }
-            | TimeDriveValues::TravellingModulation { frequency_hz, .. } => frequency_hz.abs(),
-        }
-    }
-}
-
-impl CanonicalTemporalResolution {
-    /// Accumulates the demand of a set of evaluated drives over the sources
-    /// already accounted for by `source_frequency_hz`.
-    pub fn of_drives(
-        drives: impl IntoIterator<Item = TimeDriveValues>,
-        source_frequency_hz: f64,
-    ) -> Self {
-        let source_frequency_hz = source_frequency_hz.max(0.0);
+    /// Accumulates the demand of a set of evaluated drives.
+    pub fn of_drives(drives: impl IntoIterator<Item = TimeDriveValues>) -> Self {
         let mut demand = Self {
-            frequency_hz: source_frequency_hz,
-            sideband_order: 0,
             coefficient_wavelength: f64::INFINITY,
         };
         for drive in drives {
-            let harmonics = Self::harmonic_order(drive);
-            let order = Self::sideband_order(Self::drive_depth(drive));
-            if harmonics == 0 || order == 0 {
-                continue;
-            }
-            let reach = f64::from(order * harmonics) * Self::drive_frequency_hz(drive);
-            if reach.is_finite() {
-                demand.frequency_hz = demand.frequency_hz.max(source_frequency_hz + reach);
-                demand.sideband_order = demand.sideband_order.max(order);
-            }
-            if let TimeDriveValues::TravellingModulation { wavenumber, .. } = drive {
+            if let TimeDriveValues::TravellingModulation {
+                depth, wavenumber, ..
+            } = drive
+            {
                 let wavenumber = wavenumber.abs();
-                if wavenumber > 0.0 {
+                if depth != 0.0 && wavenumber > 0.0 {
                     demand.coefficient_wavelength = demand
                         .coefficient_wavelength
                         .min(std::f64::consts::TAU / wavenumber);
@@ -1476,7 +1392,6 @@ impl CanonicalTemporalResolution {
     /// temporal operator exists.
     pub fn of_materials<'a>(
         materials: impl IntoIterator<Item = &'a Material>,
-        source_frequency_hz: f64,
     ) -> Result<Self, MaterialError> {
         let mut drives = Vec::new();
         for material in materials {
@@ -1490,21 +1405,16 @@ impl CanonicalTemporalResolution {
                 drives.push(channel.law.drive.evaluate(parameters)?);
             }
         }
-        Ok(Self::of_drives(drives, source_frequency_hz))
+        Ok(Self::of_drives(drives))
     }
 }
 
 impl CanonicalTemporalWaveOperator {
-    /// What this operator's drives demand of the mesh, given the sources
-    /// already accounted for by `source_frequency_hz`.
-    ///
-    /// The mesh-size rule cannot keep using the source frequency alone once a
-    /// medium is driven. Mixing puts energy at `f_source +/- n f_drive`, and a
-    /// travelling drive additionally patterns the coefficients in space, which
-    /// constrains the mesh even where the field is quiet.
-    pub fn resolution_demand(&self, source_frequency_hz: f64) -> CanonicalTemporalResolution {
+    /// What this operator's drives demand of the mesh whatever the field: the
+    /// spatial pattern a travelling drive writes into the coefficients.
+    pub fn resolution_demand(&self) -> CanonicalTemporalResolution {
         if !self.has_temporal_laws {
-            return CanonicalTemporalResolution::of_drives([], source_frequency_hz);
+            return CanonicalTemporalResolution::of_drives([]);
         }
         CanonicalTemporalResolution::of_drives(
             self.primary
@@ -1521,7 +1431,6 @@ impl CanonicalTemporalWaveOperator {
                         .iter()
                         .map(|sample| sample.loss.law.drive),
                 ),
-            source_frequency_hz,
         )
     }
 }
@@ -5502,7 +5411,7 @@ mod tests {
                 time_step: 1.0e-3,
             };
             let options = SolutionIndicatorOptions {
-                resolved_frequency_hz: 2.0,
+                forcing_frequency_hz: 2.0,
                 ..SolutionIndicatorOptions::default()
             };
             let report = |scene: &Scene, runtime: Option<&CanonicalMaterialRuntimeState>| {
@@ -5780,7 +5689,7 @@ mod tests {
             time_step: 1.0e-3,
         };
         let options = SolutionIndicatorOptions {
-            resolved_frequency_hz: 2.0,
+            forcing_frequency_hz: 2.0,
             ..SolutionIndicatorOptions::default()
         };
         let report = |runtime: Option<&CanonicalMaterialRuntimeState>| {
@@ -7071,7 +6980,7 @@ mod tests {
         let operator =
             CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
 
-        let demand = operator.resolution_demand(0.0);
+        let demand = operator.resolution_demand();
         let elements_per_wavelength = 5.0;
         let pattern_limit = demand.coefficient_wavelength / elements_per_wavelength;
         assert!(
@@ -7099,7 +7008,6 @@ mod tests {
                 minimum_edge_length: 0.005,
                 maximum_edge_length: 0.25,
                 elements_per_wavelength,
-                forcing_frequency_hz: demand.frequency_hz,
                 coefficient_wavelength: demand.coefficient_wavelength,
                 ..Default::default()
             },
@@ -7132,77 +7040,53 @@ mod tests {
         }
     }
 
-    /// A source frequency alone cannot size a mesh in a driven medium. The
-    /// medium mixes, putting energy at `f_source +/- n f_drive`, and a
-    /// travelling drive writes a spatial pattern into the coefficients that
-    /// the mesh must resolve even where the field is quiet.
+    /// A drive's sidebands are field content, which the error estimate reads
+    /// from the solver's own flux. The one thing a drive demands of the mesh
+    /// whatever the field is the spatial pattern a travelling drive writes
+    /// into the coefficients.
     #[test]
-    fn resolution_demand_accounts_for_sidebands_and_the_coefficient_pattern() {
-        // An inert medium asks for nothing beyond the source.
-        let inert = compile(&Scene::initial()).unwrap();
-        let quiet = inert.resolution_demand(2.0);
-        assert_eq!(quiet.frequency_hz, 2.0);
-        assert_eq!(quiet.sideband_order, 0);
-        assert!(quiet.coefficient_wavelength.is_infinite());
+    fn only_a_travelling_drive_demands_a_mesh_of_its_own() {
+        let pattern = |scene: &Scene| {
+            compile(scene)
+                .unwrap()
+                .resolution_demand()
+                .coefficient_wavelength
+        };
+        assert!(pattern(&Scene::initial()).is_infinite());
 
-        // A shallow pump reaches one sideband pair; a deep one reaches more.
-        let pumped = |depth: f64| {
+        // Neither a deep pump nor a sharp smoothed square writes a pattern.
+        let mut pumped = Scene::initial();
+        pumped.materials[0].mass_law.drive = pump(0.9, 0.5, 0.0);
+        assert!(pattern(&pumped).is_infinite());
+        let mut crystal = Scene::initial();
+        crystal.materials[0].mass_law.drive = TimeDrive::TimeCrystal {
+            depth: ScalarField::constant(0.3),
+            frequency_hz: ScalarField::constant(1.0),
+            phase_radians: ScalarField::constant(0.0),
+            sharpness: ScalarField::constant(6.0),
+        };
+        assert!(pattern(&crystal).is_infinite());
+
+        // A travelling drive patterns the operator in space, which binds the
+        // mesh on its own, independently of any source; at zero depth it
+        // writes nothing.
+        let travelling = |depth: f64| {
             let mut scene = Scene::initial();
-            scene.materials[0].mass_law.drive = pump(depth, 0.5, 0.0);
-            compile(&scene).unwrap().resolution_demand(2.0)
+            scene.materials[0].stiffness_law.drive = TimeDrive::TravellingModulation {
+                depth: ScalarField::constant(depth),
+                frequency_hz: ScalarField::constant(0.4),
+                phase_radians: ScalarField::constant(0.0),
+                wavenumber: ScalarField::constant(8.0),
+                angle_radians: ScalarField::constant(0.3),
+            };
+            pattern(&scene)
         };
-        let shallow = pumped(0.02);
-        let deep = pumped(0.9);
-        assert_eq!(shallow.sideband_order, 1);
+        let wavelength = travelling(0.2);
         assert!(
-            deep.sideband_order > shallow.sideband_order,
-            "a deeper drive carries further, got {} against {}",
-            deep.sideband_order,
-            shallow.sideband_order
+            (wavelength - std::f64::consts::TAU / 8.0).abs() < 1.0e-12,
+            "got {wavelength}"
         );
-        assert!((shallow.frequency_hz - 2.5).abs() < 1.0e-12);
-        assert!(deep.frequency_hz > shallow.frequency_hz);
-
-        // A smoothed square carries its own odd harmonics before mixing, so
-        // it reaches further than a cosine of the same depth and frequency.
-        let mut crystal_scene = Scene::initial();
-        crystal_scene.materials[0].mass_law.drive = TimeDrive::TimeCrystal {
-            depth: ScalarField::constant(0.02),
-            frequency_hz: ScalarField::constant(0.5),
-            phase_radians: ScalarField::constant(0.0),
-            sharpness: ScalarField::constant(3.0),
-        };
-        let crystal = compile(&crystal_scene).unwrap().resolution_demand(2.0);
-        assert!(
-            crystal.frequency_hz > shallow.frequency_hz,
-            "a sharpened square reaches past a cosine: {} against {}",
-            crystal.frequency_hz,
-            shallow.frequency_hz
-        );
-
-        // A travelling drive patterns the operator in space. That binds the
-        // mesh on its own, independently of any source.
-        let mut travelling_scene = Scene::initial();
-        travelling_scene.materials[0].stiffness_law.drive = TimeDrive::TravellingModulation {
-            depth: ScalarField::constant(0.2),
-            frequency_hz: ScalarField::constant(0.4),
-            phase_radians: ScalarField::constant(0.0),
-            wavenumber: ScalarField::constant(8.0),
-            angle_radians: ScalarField::constant(0.3),
-        };
-        let travelling = compile(&travelling_scene).unwrap();
-        let demand = travelling.resolution_demand(0.0);
-        assert!(
-            (demand.coefficient_wavelength - std::f64::consts::TAU / 8.0).abs() < 1.0e-12,
-            "got {}",
-            demand.coefficient_wavelength
-        );
-        assert!(
-            demand.frequency_hz > 0.0,
-            "a driven medium is not quiet just because no source is on"
-        );
-        // A non-travelling drive writes no spatial pattern.
-        assert!(pumped(0.2).coefficient_wavelength.is_infinite());
+        assert!(travelling(0.0).is_infinite());
     }
 
     /// The pump power must be the actual time derivative of the energy at
@@ -7533,7 +7417,7 @@ mod tests {
             crate::SolutionIndicatorOptions {
                 minimum_edge_length: 1.0e-4,
                 maximum_edge_length: 10.0,
-                resolved_frequency_hz: frequency,
+                forcing_frequency_hz: frequency,
                 ..Default::default()
             },
         )
