@@ -965,7 +965,9 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   now slightly dispersive, by a Klein-Gordon cutoff, which ends the ladder
   and holds the gain across meshes (`docs/spikes/funfern-gallery-plan.md`,
   item 11). The Kerr slab's speckle was resolution: at edge 0.04 its
-  harmonics are clean. The travelling modulation's ladder is bounded, each
+  harmonics are clean, and the size rule now resolves the odd harmonics a
+  field law makes where its field is strong. The travelling modulation's
+  ladder is bounded, each
   rung about half the last. The grid filter could not touch any of it, and
   a loss that rises with frequency cost the resolved signal too much. That
   loss is filed under "Later experiments".

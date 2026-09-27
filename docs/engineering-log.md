@@ -14674,3 +14674,54 @@ over the medium's elements, at edges 0.08, 0.04 and 0.02.
   Q 2.1e-6, b 2.6e-6 at 400 steps; Q 8.1e-6, b 7.7e-6 at 1000.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The size rule resolves the harmonics a field law makes
+
+The mixing measurements (previous entry) found the Kerr slab's speckle to be
+resolution: at edge 0.08 its 12.5 Hz content was 0.37 of the signal, at 0.04
+it was 0.04. The size rule counted a drive's sidebands but nothing a field law
+makes, so adaptation sized a Kerr medium for its source alone, bar the
+tangent's slowing.
+
+- **The rule.** Where the estimator already reads each element's field
+  envelope `A` for the tangent, it also reads the coefficient's swing
+  `d = (c(A) − c(0)) / (c(A) + c(0))`, with `c = ḡ`, or `1/ḡ` on an
+  inverted law. An even law moves the coefficient at twice the wave's
+  frequency, so the medium pumps the wave with a depth of its own making, and
+  the drives' reckoning applies: each odd harmonic carries about `d/2` of the
+  one below. `CanonicalTemporalResolution::field_law_harmonics` counts those
+  at or above the drives' 1% floor, and the element's wavelength floor is
+  taken at `(1 + 2n)` times the source frequency when that is above the
+  scene's. Unlike a drive's order it counts none for a weak field and none
+  past the floor, since the depth is the field's, and it is local: a harmonic
+  that has left the medium is linear and makes no more. The envelope keeps
+  the scene's frequency, so the rule reads the same at every phase.
+- `wave::primary_field_tangent_at` becomes `primary_field_response_at`,
+  returning the tangent and the depth; the report gains
+  `field_law_harmonics`, the most any element asked for.
+- **Cost**, from the estimate on a CPU snapshot at edge 0.05 with the app's
+  adaptation defaults, as the elements the targets ask for, summed over the
+  mesh:
+
+  | scene | before | after | at the 0.02 floor |
+  | --- | --- | --- | --- |
+  | Kerr slab, 4 s | 25,957 | 28,705 | 331 → 1,442 |
+  | Spatial soliton, 3 s | 26,084 | 32,452 | 410 → 2,927 |
+  | Kerr slab lit at a tenth | 4,901 | 4,901 | 5 → 5 |
+
+  The error target already refined most of the strong field, and the smallest
+  element sat at the floor before, so the time step does not change. The Kerr
+  slab's tangent reached 11.5 near the source, where the swing asks for three
+  harmonics; the soliton's saturable swing asks for two.
+- Tests: `the_size_rule_resolves_the_harmonics_a_kerr_field_makes` (a
+  uniform envelope-one field at χ = 0.02, 0.2 and 0.8 asks for none, the
+  third and the fifth, and the floor scales by `(1 + 2n)√tangent`),
+  `a_field_law_counts_the_harmonics_its_depth_keeps_above_the_floor`, and
+  `the_kerr_slab_asks_the_mesh_for_the_harmonics_it_makes` (the gallery scene
+  asks for at least one, the same slab lit at a tenth for none).
+  `the_size_rule_resolves_the_wavelength_a_strong_kerr_field_makes` now
+  expects the fifth harmonic at χ = 0.8.
+- The user guide's adaptation paragraph and the architecture's consumers
+  note say what the forced wavelength includes.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

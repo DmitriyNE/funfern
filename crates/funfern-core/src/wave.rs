@@ -164,22 +164,40 @@ pub(crate) fn evaluate_timed_directional_material_library_at(
         .ok_or(MaterialError::InvalidValue)
 }
 
-/// The tangent `ḡ + Aḡ′` of the primary row's field law at amplitude `A`, at
-/// one point: how much slower a small wave riding on a field of that amplitude
-/// runs, squared. A linear row reads one.
+/// What the primary row's field law does to a wave of envelope `A`, at one
+/// point. A linear row reads [`Self::LINEAR`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PrimaryFieldResponse {
+    /// `ḡ + Aḡ′`: how much slower a small wave riding on a field of that
+    /// amplitude runs, squared.
+    pub tangent: f64,
+    /// `(c(A) − c(0)) / (c(A) + c(0))` for the coefficient `c` the law makes,
+    /// `ḡ`, or `1/ḡ` when it is inverted: how far the coefficient swings
+    /// about its mean over a cycle of the wave.
+    pub depth: f64,
+}
+
+impl PrimaryFieldResponse {
+    pub(crate) const LINEAR: Self = Self {
+        tangent: 1.0,
+        depth: 0.0,
+    };
+}
+
+/// The primary row's field response at amplitude `A`, at one point.
 ///
 /// Only the primary row: its argument is the nodal field the estimator holds.
 /// The complementary row's argument is the complementary field, which the
 /// estimator does not read through its inverse, so it stays at its
 /// small-signal limit.
-pub(crate) fn primary_field_tangent_at(
+pub(crate) fn primary_field_response_at(
     physics: PhysicsModel,
     materials: &[Material],
     regions: &[Region],
     region: RegionId,
     point: Point2,
     amplitude: f64,
-) -> Result<f64, MaterialError> {
+) -> Result<PrimaryFieldResponse, MaterialError> {
     let region = regions
         .iter()
         .find(|candidate| candidate.id == region)
@@ -190,12 +208,23 @@ pub(crate) fn primary_field_tangent_at(
         .ok_or(MaterialError::InvalidValue)?;
     let (_, law) = crate::canonical_temporal::coefficient_for(physics, material, true);
     if law.field == crate::FieldLaw::Linear {
-        return Ok(1.0);
+        return Ok(PrimaryFieldResponse::LINEAR);
     }
     let law = law.evaluate_at(region.frame.coordinates(point), &material.parameters)?;
-    let tangent = law.field.tangent(amplitude.abs(), law.inverted);
-    if tangent.is_finite() && tangent > 0.0 {
-        Ok(tangent)
+    let amplitude = amplitude.abs();
+    let tangent = law.field.tangent(amplitude, law.inverted);
+    let coefficient = |u: f64| {
+        let multiplier = law.field.multiplier(u);
+        if law.inverted {
+            1.0 / multiplier
+        } else {
+            multiplier
+        }
+    };
+    let (quiet, strong) = (coefficient(0.0), coefficient(amplitude));
+    let depth = (strong - quiet).abs() / (strong + quiet);
+    if tangent.is_finite() && tangent > 0.0 && depth.is_finite() && quiet > 0.0 && strong > 0.0 {
+        Ok(PrimaryFieldResponse { tangent, depth })
     } else {
         Err(MaterialError::InvalidValue)
     }

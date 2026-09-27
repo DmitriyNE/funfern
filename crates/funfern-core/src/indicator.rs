@@ -585,6 +585,10 @@ pub struct SolutionIndicatorReport {
     /// The largest field tangent `ḡ + Aḡ′` any element's size rule was
     /// divided by, one where no field law reached it.
     pub largest_field_tangent: f64,
+    /// The most odd harmonics a field law's own swing asked any element's
+    /// size rule to resolve: one for the third, two for the fifth, zero
+    /// where none did.
+    pub field_law_harmonics: u32,
 }
 
 impl Default for SolutionIndicatorReport {
@@ -618,6 +622,7 @@ impl Default for SolutionIndicatorReport {
             dormant: false,
             smallest_wavelength_target: f64::INFINITY,
             largest_field_tangent: 1.0,
+            field_law_harmonics: 0,
         }
     }
 }
@@ -834,6 +839,9 @@ struct ElementMaterialSamples {
     quadrature: [DirectionalWaveCoefficients; 6],
     stiffness_divergence: Point2,
     minimum_wave_speed: f64,
+    /// The highest odd harmonic of the carrier the element's field law makes
+    /// at the field's envelope, zero where it makes none worth resolving.
+    harmonic_frequency_hz: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1582,27 +1590,47 @@ impl SolutionIndicatorJob {
         // value, which crosses zero twice a cycle and would retarget the same
         // element every period. A tangent below one - a defocusing law, whose
         // waves run faster - never coarsens the mesh.
-        let tangent = self.field_tangent(index, triangle.region, &geometry.points)?;
+        let response = self.field_response(index, triangle.region, &geometry.points)?;
+        let tangent = response.tangent;
         self.report.largest_field_tangent = self.report.largest_field_tangent.max(tangent);
         let minimum_wave_speed = minimum_wave_speed / tangent.sqrt();
+        // The same law makes odd harmonics of the carrier where the field is
+        // strong, and they are resolved where they are made. Outside the
+        // medium a harmonic that has left it is linear and makes no more.
+        let harmonics = crate::CanonicalTemporalResolution::field_law_harmonics(response.depth);
+        self.report.field_law_harmonics = self.report.field_law_harmonics.max(harmonics);
+        let carrier = if self.options.forcing_frequency_hz > 0.0 {
+            self.options.forcing_frequency_hz
+        } else {
+            self.options.resolved_frequency_hz
+        };
+        let harmonic_frequency_hz = if harmonics > 0 {
+            f64::from(1 + 2 * harmonics) * carrier
+        } else {
+            0.0
+        };
         self.material_samples[index] = Some(ElementMaterialSamples {
             vertex_stiffness,
             quadrature: samples,
             stiffness_divergence,
             minimum_wave_speed,
+            harmonic_frequency_hz,
         });
         self.phase = IndicatorPhase::SampleMaterials(index + 1);
         Ok(())
     }
 
-    fn field_tangent(
+    /// The primary field law's largest tangent and depth over the element's
+    /// vertices at its field's envelope; linear before instantaneous
+    /// materials are attached.
+    fn field_response(
         &self,
         index: usize,
         region: RegionId,
         points: &[Point2; 3],
-    ) -> Result<f64, SolutionIndicatorError> {
+    ) -> Result<crate::wave::PrimaryFieldResponse, SolutionIndicatorError> {
         if self.runtime.is_none() {
-            return Ok(1.0);
+            return Ok(crate::wave::PrimaryFieldResponse::LINEAR);
         }
         let (physics, materials, regions) = match &self.input {
             IndicatorInput::Scene(scene) => {
@@ -1631,9 +1659,9 @@ impl SolutionIndicatorJob {
                 }
             })
             .fold(0.0_f64, f64::max);
-        let mut tangent = 1.0_f64;
+        let mut response = crate::wave::PrimaryFieldResponse::LINEAR;
         for point in points {
-            let value = crate::wave::primary_field_tangent_at(
+            let value = crate::wave::primary_field_response_at(
                 physics, materials, regions, region, *point, amplitude,
             )
             .map_err(|error| SolutionIndicatorError::MaterialEvaluation {
@@ -1641,9 +1669,10 @@ impl SolutionIndicatorJob {
                 point: *point,
                 reason: error.to_string(),
             })?;
-            tangent = tangent.max(value);
+            response.tangent = response.tangent.max(value.tangent);
+            response.depth = response.depth.max(value.depth);
         }
-        Ok(tangent)
+        Ok(response)
     }
 
     fn boundary_edge_nodes(
@@ -2081,7 +2110,8 @@ impl SolutionIndicatorJob {
             self.options.resolved_frequency_hz
         } else {
             self.options.forcing_frequency_hz
-        };
+        }
+        .max(material.harmonic_frequency_hz);
         let wavelength_target = (resolved_frequency_hz > 0.0).then(|| {
             material.minimum_wave_speed
                 / (resolved_frequency_hz * self.options.elements_per_wavelength)

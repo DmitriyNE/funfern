@@ -4177,6 +4177,96 @@ mod tests {
         assert!(strongest > 0.2, "the slab moved only {strongest:.3}");
     }
 
+    /// The size rule's report on `document` after `seconds` from rest at
+    /// `edge`, estimated the way the app estimates it: the field, its rate
+    /// and its acceleration from the last three steps, with the instantaneous
+    /// materials attached and the app's adaptation defaults.
+    fn size_rule_report(
+        document: &TopologyDocument,
+        edge: f64,
+        seconds: f64,
+        frequency: f64,
+    ) -> SolutionIndicatorReport {
+        let prepared = prepare(document, edge);
+        let operator = prepared
+            .canonical_temporal_operator
+            .clone()
+            .expect("a field law prepares a temporal operator");
+        let forcing = prepared.canonical_forcing.clone();
+        let dt = prepared.recommended_time_step();
+        let mut state = CanonicalTemporalWaveState::zero(&operator, dt)
+            .unwrap()
+            .pinned(&operator, &forcing)
+            .unwrap();
+        let mut fields = std::collections::VecDeque::new();
+        for _ in 0..(seconds / dt).ceil() as usize {
+            state.step_with_forcing(&operator, &forcing).unwrap();
+            fields.push_back(
+                operator
+                    .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                    .unwrap(),
+            );
+            if fields.len() > 3 {
+                fields.pop_front();
+            }
+        }
+        let (before, now, after) = (&fields[0], &fields[1], &fields[2]);
+        let count = now.len();
+        let snapshot = QuadraticSolutionSnapshot {
+            mesh_revision: prepared.mesh.mesh_revision,
+            displacement: now.clone(),
+            velocity: (0..count)
+                .map(|node| (after[node] - before[node]) / (2.0 * dt))
+                .collect(),
+            acceleration: (0..count)
+                .map(|node| (after[node] - 2.0 * now[node] + before[node]) / (dt * dt))
+                .collect(),
+            volume_acceleration: vec![0.0; count],
+            auxiliary: vec![0.0; count],
+            time: state.time() - dt,
+            time_step: dt,
+        };
+        let defaults = crate::document::AdaptationSettings::default();
+        let mut job = SolutionIndicatorJob::new_topology(
+            prepared.mesh.clone(),
+            prepared.operator.clone(),
+            &prepared.bundle.plan,
+            prepared.bundle.model(),
+            snapshot,
+            SolutionIndicatorOptions {
+                minimum_edge_length: defaults.minimum_edge,
+                maximum_edge_length: defaults.maximum_edge,
+                relative_tolerance: defaults.accuracy_percent / 100.0,
+                elements_per_wavelength: defaults.elements_per_wavelength,
+                forcing_frequency_hz: frequency,
+                resolved_frequency_hz: frequency,
+                ..Default::default()
+            },
+        )
+        .with_instantaneous_materials(state.runtime().clone());
+        loop {
+            if let Some(result) = job.advance(1 << 16) {
+                break result.unwrap().report;
+            }
+        }
+    }
+
+    /// The Kerr gallery scene's field is strong enough in the slab to make
+    /// odd harmonics of the source, and the size rule asks for them there;
+    /// the same slab lit ten times more weakly makes none worth resolving.
+    #[test]
+    fn the_kerr_slab_asks_the_mesh_for_the_harmonics_it_makes() {
+        let strong = size_rule_report(&kerr_slab(), 0.15, 3.0, 2.5);
+        assert!(
+            strong.field_law_harmonics >= 1,
+            "tangent {:.3}, harmonics {}",
+            strong.largest_field_tangent,
+            strong.field_law_harmonics
+        );
+        let weak = size_rule_report(&kerr_slab_with(40.0, 6.0), 0.15, 3.0, 2.5);
+        assert_eq!(weak.field_law_harmonics, 0);
+    }
+
     /// Amplitude at the source frequency behind the pumped slab, against the
     /// unpumped slab's, at a pump phase of `eighths` × π/4.
     fn pump_gain(pump_hz: f64, eighths: f64) -> f64 {

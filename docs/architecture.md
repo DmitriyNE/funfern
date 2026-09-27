@@ -1122,7 +1122,9 @@ phases and Switch states live in a bank carried with the state snapshot.
   through the same inverses. The area readout splits each node's stored
   energy over its materials as `Σ m_c (ḡ_c U² − G_c)`, and the size rule
   divides its wavelength floor by the primary row's tangent at the field
-  envelope.
+  envelope. It also resolves, element by element, the odd harmonics of the
+  carrier that the coefficient's swing `(c(A) − c(0)) / (c(A) + c(0))` makes,
+  a pump at twice the carrier counted by the drives' 1% sideband floor.
 
 The per-stage reports in `docs/spikes/funfern-material-laws-stage{7,8,9,10}-report.md`
 hold the measurements.

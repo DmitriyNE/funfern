@@ -1333,6 +1333,32 @@ impl CanonicalTemporalResolution {
         }
     }
 
+    /// The odd harmonics a field law makes of a wave whose coefficient swings
+    /// through `depth` about its mean over a cycle,
+    /// `(c(A) − c(0)) / (c(A) + c(0))` at the wave's envelope `A`.
+    ///
+    /// An even law moves the coefficient at twice the wave's frequency, so
+    /// the medium pumps the wave with a depth of its own making: each odd
+    /// harmonic carries about `depth/2` of the one below, as a drive's
+    /// sidebands do, and `n` of them reach `(1 + 2n)` times the wave's
+    /// frequency. They are counted while that share stays at or above the
+    /// 1% floor the sidebands use, so a weak field counts none and the mesh
+    /// may coarsen again where the field fades. A drive's order counts at least
+    /// one pair and one past the floor, since its depth is authored rather
+    /// than made by the field.
+    pub fn field_law_harmonics(depth: f64) -> u32 {
+        let ratio = 0.5 * depth.abs();
+        if !(Self::SIDEBAND_FLOOR..1.0).contains(&ratio) {
+            return 0;
+        }
+        let count = (Self::SIDEBAND_FLOOR.ln() / ratio.ln()).floor();
+        if count.is_finite() {
+            (count as u32).min(Self::MAX_SIDEBAND_ORDER)
+        } else {
+            Self::MAX_SIDEBAND_ORDER
+        }
+    }
+
     fn drive_depth(drive: TimeDriveValues) -> f64 {
         match drive {
             TimeDriveValues::None => 0.0,
@@ -7417,88 +7443,129 @@ mod tests {
             .sum()
     }
 
+    /// The size rule's smallest wavelength target, largest field tangent and
+    /// most field-law harmonics on a uniform Kerr medium of `chi` carrying a
+    /// 2 Hz harmonic field of envelope one, sampled at `phase`.
+    fn kerr_size_rule(chi: f64, phase: f64) -> (f64, f64, u32) {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = kerr(chi);
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = std::sync::Arc::new(
+            mesh_scene(
+                &base_scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.25,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap(),
+        );
+        let quadratic = std::sync::Arc::new(
+            QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &base_scene,
+                OuterBoundaryCondition::Reflecting,
+            )
+            .unwrap(),
+        );
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let frequency = 2.0;
+        let omega = std::f64::consts::TAU * frequency;
+        let count = quadratic.degrees_of_freedom();
+        let snapshot = crate::QuadraticSolutionSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            displacement: vec![phase.cos(); count],
+            velocity: vec![-omega * phase.sin(); count],
+            acceleration: vec![0.0; count],
+            volume_acceleration: vec![0.0; count],
+            auxiliary: vec![0.0; count],
+            time: 0.0,
+            time_step: 0.4 * operator.maximum_time_step(),
+        };
+        let mut job = crate::SolutionIndicatorJob::new(
+            mesh.clone(),
+            quadratic.clone(),
+            scene,
+            snapshot,
+            crate::SolutionIndicatorOptions {
+                minimum_edge_length: 1.0e-4,
+                maximum_edge_length: 10.0,
+                resolved_frequency_hz: frequency,
+                ..Default::default()
+            },
+        )
+        .with_instantaneous_materials(operator.initial_runtime());
+        let report = loop {
+            if let Some(result) = job.advance(4_096) {
+                break result.unwrap().report;
+            }
+        };
+        (
+            report.smallest_wavelength_target,
+            report.largest_field_tangent,
+            report.field_law_harmonics,
+        )
+    }
+
     /// The size rule on a self-focusing medium divides its wavelength floor by
     /// `√(ḡ + Aḡ′)` at the field's envelope `A`, `1 + 3χA²` for Kerr, and reads
     /// the same at every phase of a cycle, so it does not retarget elements
-    /// twice a period.
+    /// twice a period. At χ = 0.8 the swing also makes the fifth harmonic,
+    /// which the floor resolves as well.
     #[test]
     fn the_size_rule_resolves_the_wavelength_a_strong_kerr_field_makes() {
-        let target = |chi: f64, phase: f64| {
-            let mut scene = Scene::initial();
-            scene.materials[0].mass_law.field = kerr(chi);
-            let mut base_scene = scene.clone();
-            strip_temporal_laws(&mut base_scene.materials);
-            let mesh = std::sync::Arc::new(
-                mesh_scene(
-                    &base_scene,
-                    1,
-                    MeshingOptions {
-                        target_edge_length: 0.25,
-                        ..MeshingOptions::default()
-                    },
-                )
-                .unwrap(),
-            );
-            let quadratic = std::sync::Arc::new(
-                QuadraticWaveOperator::assemble_scene(
-                    &mesh,
-                    &base_scene,
-                    OuterBoundaryCondition::Reflecting,
-                )
-                .unwrap(),
-            );
-            let operator =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
-            let frequency = 2.0;
-            let omega = std::f64::consts::TAU * frequency;
-            let count = quadratic.degrees_of_freedom();
-            // A uniform harmonic field of envelope one.
-            let snapshot = crate::QuadraticSolutionSnapshot {
-                mesh_revision: mesh.mesh_revision,
-                displacement: vec![phase.cos(); count],
-                velocity: vec![-omega * phase.sin(); count],
-                acceleration: vec![0.0; count],
-                volume_acceleration: vec![0.0; count],
-                auxiliary: vec![0.0; count],
-                time: 0.0,
-                time_step: 0.4 * operator.maximum_time_step(),
-            };
-            let mut job = crate::SolutionIndicatorJob::new(
-                mesh.clone(),
-                quadratic.clone(),
-                scene,
-                snapshot,
-                crate::SolutionIndicatorOptions {
-                    minimum_edge_length: 1.0e-4,
-                    maximum_edge_length: 10.0,
-                    resolved_frequency_hz: frequency,
-                    ..Default::default()
-                },
-            )
-            .with_instantaneous_materials(operator.initial_runtime());
-            let report = loop {
-                if let Some(result) = job.advance(4_096) {
-                    break result.unwrap().report;
-                }
-            };
-            (
-                report.smallest_wavelength_target,
-                report.largest_field_tangent,
-            )
-        };
-        let (linear, unit) = target(0.0, 0.3);
-        assert_eq!(unit, 1.0);
-        let (kerr_target, tangent) = target(0.8, 0.3);
+        let (linear, unit, none) = kerr_size_rule(0.0, 0.3);
+        assert_eq!((unit, none), (1.0, 0));
+        let (kerr_target, tangent, harmonics) = kerr_size_rule(0.8, 0.3);
         assert!(
             (tangent - (1.0 + 3.0 * 0.8)).abs() < 1.0e-12,
             "tangent {tangent}"
         );
+        assert_eq!(harmonics, 2);
         assert!(
-            (kerr_target * tangent.sqrt() - linear).abs() < 1.0e-9 * linear,
+            (5.0 * kerr_target * tangent.sqrt() - linear).abs() < 1.0e-9 * linear,
             "{kerr_target} against {linear}"
         );
-        let (other_phase, _) = target(0.8, 1.9);
+        let (other_phase, _, _) = kerr_size_rule(0.8, 1.9);
         assert!((other_phase - kerr_target).abs() < 1.0e-9 * kerr_target);
+    }
+
+    /// A Kerr coefficient swings through `χA²/(2 + χA²)` over a cycle, a pump
+    /// of the wave's own making at twice its frequency, and the size rule
+    /// resolves each odd harmonic whose share, half that depth per step,
+    /// stays at or above 1%. At envelope one: χ = 0.02 makes none, 0.2 the
+    /// third, 0.8 the fifth.
+    #[test]
+    fn the_size_rule_resolves_the_harmonics_a_kerr_field_makes() {
+        let (linear, _, _) = kerr_size_rule(0.0, 0.3);
+        for (chi, expected) in [(0.02, 0), (0.2, 1), (0.8, 2)] {
+            let (target, tangent, harmonics) = kerr_size_rule(chi, 0.3);
+            assert_eq!(harmonics, expected, "χ = {chi}");
+            let factor = f64::from(1 + 2 * expected) * tangent.sqrt();
+            assert!(
+                (factor * target - linear).abs() < 1.0e-9 * linear,
+                "χ = {chi}: {target} against {linear}"
+            );
+        }
+    }
+
+    /// The count is the drive rule's `depth/2` per step, gated at the same
+    /// 1% floor: none below it, and one more each time `(depth/2)ⁿ` stays
+    /// above it for another `n`.
+    #[test]
+    fn a_field_law_counts_the_harmonics_its_depth_keeps_above_the_floor() {
+        let count = CanonicalTemporalResolution::field_law_harmonics;
+        assert_eq!(count(0.0), 0);
+        assert_eq!(count(0.019), 0);
+        assert_eq!(count(0.02), 1);
+        assert_eq!(count(0.199), 1);
+        assert_eq!(count(0.2), 2);
+        assert_eq!(count(0.45), 3);
+        assert_eq!(count(1.0), 6);
+        assert_eq!(count(f64::NAN), 0);
     }
 
     fn relative_gap(left: f64, right: f64) -> f64 {

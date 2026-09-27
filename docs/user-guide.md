@@ -525,7 +525,11 @@ names or with every expression evaluated at the material frame's origin. Each ro
   that is comfortably inside the target is the trade one number for the whole
   field makes.
   Carrying a forced wavelength and staying under the largest element allowed are
-  floors rather than judgements about error, so they refine regardless; Advanced
+  floors rather than judgements about error, so they refine regardless. The
+  forced wavelength is the shortest the field is expected to carry: the
+  sources', a driven medium's sidebands, and, where a Kerr or saturable
+  medium's field is strong, the odd harmonics it makes there, which relax as
+  the field fades. Advanced
   settings holds elements per wavelength, at six - twelve nodes, quadratically -
   and the smallest and largest element, and the panel says when a forced
   wavelength wants elements under the smallest allowed, which holds the mesh at
