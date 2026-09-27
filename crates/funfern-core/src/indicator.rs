@@ -753,14 +753,14 @@ pub struct SolutionIndicatorReport {
     pub minimum_target: f64,
     pub maximum_target: f64,
     pub refine_candidates: usize,
-    /// Of `refine_candidates`, the ones the error estimate itself asks for.
-    /// These are the ones an accuracy target has authority over.
+    /// Of `refine_candidates`, the ones the error estimate asks for, its own
+    /// or graded in from a neighbour's. These are the ones an accuracy target
+    /// has authority over.
     pub error_refine_candidates: usize,
     /// Of `refine_candidates`, the ones an unconditional constraint asks for:
     /// too coarse to carry the forced wavelength or larger than the largest
     /// element allowed. The constraint owns an element when it and the error
-    /// estimate both bind; no accuracy target answers for these. This bucket
-    /// also retains targets introduced only by mesh grading.
+    /// estimate both bind; no accuracy target answers for these.
     pub limit_refine_candidates: usize,
     pub coarsen_candidates: usize,
     pub recovery_contribution: f64,
@@ -1116,11 +1116,6 @@ pub struct SolutionIndicatorJob {
     estimates: Vec<ElementEstimate>,
     indicators: Vec<f64>,
     targets: Vec<f64>,
-    /// Whether the error estimate on its own wants each element finer than it
-    /// is. Anything else that shrinks a target - the forced wavelength, the
-    /// largest element allowed - is a limit rather than a judgement about
-    /// error, and only this tells the two apart.
-    error_bound: Vec<bool>,
     /// Whether an unconditional wavelength or maximum-edge limit wants the
     /// element finer. This is kept independently because both the estimator
     /// and a limit can bind at once; the limit must win that classification or
@@ -1204,7 +1199,6 @@ impl SolutionIndicatorJob {
             estimates: vec![ElementEstimate::default(); count],
             indicators: vec![0.0; count],
             targets: vec![0.0; count],
-            error_bound: vec![false; count],
             limit_bound: vec![false; count],
             total_energy: 0.0,
             total_area: 0.0,
@@ -2420,7 +2414,6 @@ impl SolutionIndicatorJob {
                 self.options.minimum_edge_length,
                 self.options.maximum_edge_length,
             );
-        self.error_bound[index] = estimate.edge > 1.05 * error_target;
         self.limit_bound[index] = estimate.edge > 1.05 * limit_target;
         let target = error_target.min(limit_target);
         self.indicators[index] = indicator;
@@ -2512,10 +2505,15 @@ impl SolutionIndicatorJob {
             ];
             if lengths.iter().copied().fold(0.0, f64::max) > 1.05 * target {
                 self.report.refine_candidates += 1;
-                if self.error_bound[index] && !self.limit_bound[index] {
-                    self.report.error_refine_candidates += 1;
-                } else {
+                // Only an element past its own resolution floor is a limit
+                // candidate, which refines whatever the estimate reads. One
+                // that grading pulled below its edge belongs to the error
+                // refinement it grades out from, and answers to the global
+                // accuracy gate with it.
+                if self.limit_bound[index] {
                     self.report.limit_refine_candidates += 1;
+                } else {
+                    self.report.error_refine_candidates += 1;
                 }
             }
             if lengths
@@ -3802,6 +3800,45 @@ mod tests {
         assert_eq!(result.report.refine_candidates, 2);
         assert_eq!(result.report.limit_refine_candidates, 2);
         assert_eq!(result.report.error_refine_candidates, 0);
+    }
+
+    /// Grading shrinks a neighbour's target without that neighbour's own error
+    /// or wavelength asking. Such an element belongs to the error refinement
+    /// it grades out from, and answers to the global accuracy gate with it;
+    /// counted as a limit candidate, it let a local patch refine a field the
+    /// estimate was satisfied with. With no wavelength floor and a generous
+    /// largest element nothing is limit-bound, so every candidate - the graded
+    /// ones included - is an error candidate.
+    #[test]
+    fn a_graded_neighbour_is_an_error_candidate() {
+        let (mesh, operator, scene) = meshed_setup(Scene::default(), 1);
+        // A steep bump off centre: its error binds a few elements, and grading
+        // pulls their neighbours in.
+        let state = snapshot(&mesh, &operator, |point| {
+            (-((point.x - 0.6).powi(2) + (point.y - 0.6).powi(2)) / 0.01).exp()
+        });
+        let result = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions {
+                    minimum_edge_length: 0.005,
+                    maximum_edge_length: 2.0,
+                    relative_tolerance: 1.0e-3,
+                    ..Default::default()
+                },
+            ),
+            100,
+        )
+        .unwrap();
+        assert!(result.report.refine_candidates > 0);
+        assert_eq!(result.report.limit_refine_candidates, 0);
+        assert_eq!(
+            result.report.error_refine_candidates,
+            result.report.refine_candidates
+        );
     }
 
     /// A wavelength remains an unconditional resolution floor when the error

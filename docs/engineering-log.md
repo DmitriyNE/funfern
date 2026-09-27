@@ -15280,3 +15280,29 @@ nothing stepping, and nothing in the console.
   3.50e-2 with loss and absorbing walls.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — Grading no longer refines past the accuracy gate
+
+- **Defect** (found in the previous entry). The application refines when four
+  or more elements are past a resolution floor, whatever the estimate reads,
+  or when four or more are past their error target and the global estimate
+  exceeds the accuracy target. After grading, an element whose target a
+  neighbour pulled below its edge counted with the floors unless its own
+  error bound it, so a local error patch turned its neighbours into floor
+  candidates and refined a field the estimate was satisfied with. Josephson
+  line read 0.015 against its 0.12 target and refined on 27 such candidates.
+  The report documented the grading bucket since Stage 6 (2d111c1), which only
+  described what the classification already did.
+- **Fix.** An element counts as a limit candidate only when it is past its
+  own wavelength or largest-element limit; one grading pulled in counts with
+  the error refinement it grades out from. When a refinement does run, it
+  still refines to the graded targets, so grading holds wherever the mesh
+  changes.
+- **Measured** (the gallery probe, each scene at its own settings after
+  1.5 s): Josephson line now coarsens (no limit candidates, 1053 error ones
+  held back by the gate), and every other scene takes the decision it took
+  before - the linear and driven scenes that refine do so on their own
+  resolution floors. `a_graded_neighbour_is_an_error_candidate` reads 8 of
+  136 candidates as limit ones without the fix, none with it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
