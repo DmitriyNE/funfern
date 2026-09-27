@@ -67,10 +67,22 @@ impl Playground {
         }
         gesture.points.push(point);
         gesture.attachments.push(attachment);
+        // An open curve attaches only at its ends, so an attachment after the
+        // first point is where it ends. Kept as an inner point it was drawn
+        // through as if it were free, and the curve crossed what it touched.
+        let ends_here = attachment.is_some() && gesture.points.len() > 1;
         let finish = gesture.tool == DrawTool::Rectangle && gesture.points.len() == 2;
         self.draw = Some(gesture);
         if finish {
             self.finish_draw();
+        } else if ends_here {
+            self.finish_draw();
+            // Refused: the attachment comes back off, so the curve can still be
+            // taken elsewhere, and the reason stays in the status.
+            if let Some(gesture) = &mut self.draw {
+                gesture.points.pop();
+                gesture.attachments.pop();
+            }
         }
     }
     pub(super) fn finish_draw(&mut self) {
@@ -110,6 +122,20 @@ impl Playground {
                 OpenCubicSpline::polyline(gesture.points.clone())
                     .map_err(|e| e.to_string())
                     .and_then(|s| self.create_open(s, &gesture))
+            }
+            // Three points are one arc through the two ends, drawn toward the
+            // middle one as the spline draws toward every inner control: the
+            // quadratic they define, raised exactly to the cubic a curve is.
+            DrawTool::OpenSpline if gesture.points.len() == 3 => {
+                let [start, middle, end] = [0, 1, 2].map(|index| gesture.points[index]);
+                OpenCubicSpline::uniform(vec![
+                    start,
+                    start.lerp(middle, 2.0 / 3.0),
+                    end.lerp(middle, 2.0 / 3.0),
+                    end,
+                ])
+                .map_err(|e| e.to_string())
+                .and_then(|s| self.create_open(s, &gesture))
             }
             DrawTool::OpenSpline if gesture.points.len() >= 4 => {
                 OpenCubicSpline::uniform(gesture.points.clone())
@@ -663,6 +689,150 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A scene with one baffle standing across the middle and `extra` besides,
+    /// framed so a world point can be clicked where it is drawn.
+    fn with_baffles(extra: &[[Point2; 2]]) -> Playground {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            scale: 250.0,
+            center: Point2::new(0.0, 0.0),
+            ..Playground::default()
+        };
+        for [start, end] in [[Point2::new(0.0, -0.5), Point2::new(0.0, 0.5)]]
+            .iter()
+            .chain(extra)
+        {
+            state
+                .editor
+                .create_boundary_baffle(
+                    OpenCubicSpline::polyline(vec![*start, start.lerp(*end, 0.5), *end]).unwrap(),
+                )
+                .unwrap();
+            settle(&mut state.editor);
+        }
+        state
+    }
+
+    fn click_at(state: &mut Playground, point: Point2) {
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let screen = state.screen(point, viewport);
+        state.draw_click(
+            point,
+            ScreenPoint::new(screen.x as f64, screen.y as f64),
+            viewport,
+            false,
+        );
+    }
+
+    fn last_curve(state: &Playground) -> &TopologyCurve {
+        state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .last()
+            .unwrap()
+    }
+
+    /// An open curve attaches only at its ends, so clicking an attachment after
+    /// the first point ends it there. The attachment used to be kept as an
+    /// inner point: the polyline through it was refused for touching the
+    /// baffle with no junction, and the spline was drawn past it unattached.
+    #[test]
+    fn an_attachment_ends_the_curve_drawn_to_it() {
+        for tool in [DrawTool::Polyline, DrawTool::OpenSpline] {
+            let mut state = with_baffles(&[]);
+            state.begin_draw(tool);
+            for point in [
+                Point2::new(-0.6, 0.3),
+                Point2::new(-0.3, 0.25),
+                Point2::new(0.0, 0.1),
+            ] {
+                click_at(&mut state, point);
+            }
+            assert!(state.draw.is_none(), "{tool:?}: {}", state.message);
+            let nodes = &last_curve(&state).nodes;
+            assert!(nodes[0].vertex.is_none(), "{tool:?} starts free");
+            assert!(
+                nodes.last().unwrap().vertex.is_some(),
+                "{tool:?} ends attached"
+            );
+
+            // Starting on one leaves the curve open; the next ends it.
+            settle(&mut state.editor);
+            state.begin_draw(tool);
+            click_at(&mut state, Point2::new(0.0, -0.2));
+            assert_eq!(state.draw.as_ref().map(|draw| draw.points.len()), Some(1));
+            click_at(&mut state, Point2::new(-1.0, -0.3));
+            assert!(state.draw.is_none(), "{tool:?}: {}", state.message);
+            let nodes = &last_curve(&state).nodes;
+            assert!(nodes.iter().all(|node| node.vertex.is_some()), "{tool:?}");
+            settle(&mut state.editor);
+            assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
+        }
+    }
+
+    /// An ending that is refused takes the attachment back off: the drawing
+    /// stays open with the reason, and the attachment never becomes an inner
+    /// point of whatever is drawn next.
+    #[test]
+    fn a_refused_ending_takes_the_attachment_back_off() {
+        let mut state = with_baffles(&[[Point2::new(-0.3, -0.5), Point2::new(-0.3, 0.5)]]);
+        let curves = state.editor.document.model.draft.geometry.curves.len();
+        state.begin_draw(DrawTool::Polyline);
+        click_at(&mut state, Point2::new(-0.6, 0.0));
+        // Straight across the other baffle to this one.
+        click_at(&mut state, Point2::new(0.0, 0.1));
+        let draw = state.draw.as_ref().expect("the drawing stays open");
+        assert_eq!(draw.points, vec![Point2::new(-0.6, 0.0)]);
+        assert_eq!(draw.attachments, vec![None]);
+        assert!(state.message.contains("cross"), "{}", state.message);
+        assert_eq!(
+            state.editor.document.model.draft.geometry.curves.len(),
+            curves
+        );
+
+        click_at(&mut state, Point2::new(-0.6, 0.7));
+        state.finish_draw();
+        assert!(state.draw.is_none(), "{}", state.message);
+        assert!(
+            last_curve(&state)
+                .nodes
+                .iter()
+                .all(|node| node.vertex.is_none())
+        );
+    }
+
+    /// Three points make a spline too: the arc through the two ends that the
+    /// middle one draws toward. It used to take two points or four and more.
+    #[test]
+    fn three_points_make_a_spline_arc() {
+        let mut state = with_baffles(&[]);
+        state.begin_draw(DrawTool::OpenSpline);
+        let [start, middle, end] = [
+            Point2::new(-0.6, 0.6),
+            Point2::new(-0.3, 0.9),
+            Point2::new(0.0, 0.6),
+        ];
+        for point in [start, middle, end] {
+            click_at(&mut state, point);
+        }
+        state.finish_draw();
+        assert!(state.draw.is_none(), "{}", state.message);
+        let CurveSpline::Open(spline) = &last_curve(&state).spline else {
+            panic!("an open curve");
+        };
+        let close = |a: Point2, b: Point2| (a - b).norm() < 1.0e-12;
+        assert!(close(spline.evaluate(0.0), start));
+        assert!(close(spline.evaluate(spline.period()), end));
+        assert!(close(
+            spline.evaluate(0.5 * spline.period()),
+            (start + middle * 2.0 + end) * 0.25
+        ));
     }
 
     /// Picking a tool starts the gesture and leaves the palette up, so one

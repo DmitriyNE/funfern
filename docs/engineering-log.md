@@ -15332,3 +15332,27 @@ nothing stepping, and nothing in the console.
   `a_resize_past_an_attachment_is_refused_and_one_that_is_taken_undoes`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — An attachment ends the open curve drawn to it
+
+- **Defect** (reported). An open curve attaches only at its two ends, but a
+  click on an attachment in the middle of a drawing was kept as an ordinary
+  point, and the drawing went on. Clicking free, free, onto a baffle and on
+  past it, the polyline was refused ("span 2 and span 4 touch with no junction
+  between them"), and the spline, whose inner points are controls it does not
+  pass through, was drawn past the baffle unattached or refused for crossing
+  it. Three spline points were also refused outright ("Add enough points"), so
+  a spline ended on an attachment at its third click could not finish at all.
+- **Fix.** A click on an attachment after the first point finishes the curve
+  there; starting on one is unchanged. An ending that is refused takes the
+  point back off and leaves the drawing open with the reason, so an attachment
+  can never become an inner point. Three spline points make the quadratic arc
+  through the two ends drawn toward the middle one, raised exactly to the one
+  cubic segment a curve is made of, as the spline draws toward every inner
+  control.
+- **Tests.** `an_attachment_ends_the_curve_drawn_to_it` (both tools, ending on
+  a baffle and running from a baffle to the outer boundary),
+  `a_refused_ending_takes_the_attachment_back_off` and
+  `three_points_make_a_spline_arc`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

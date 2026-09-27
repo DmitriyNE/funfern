@@ -24,14 +24,16 @@ plain `trunk` builds the cooperative static-host variant.
   Separator or Baffle purpose. Exercise two-corner Rectangle, vertex-based Polygon
   with Enter and first-vertex closure, and the four-control Spline preview. Finish
   an open Spline at exactly two controls and verify an exact straight baffle;
-  verify that three controls cannot finish and four or more retain the freeform
-  spline behavior. Check Finish, Enter, Backspace, Escape, previews, one-entry
+  verify that three controls make one arc through the ends and four or more retain
+  the freeform spline behavior. Check Finish, Enter, Backspace, Escape, previews, one-entry
   history, invalid drafts, and the 128-control limit. The viewport overlay
   identifies vertices versus control points.
 - [ ] While drawing an open curve, confirm that eligible outer edges, curve
   interiors, junctions, loose ends, and vertex-less corners all highlight, and that
-  starting or finishing on a loose end welds the new curve into that one. A
-  separator must start and finish on the same active face.
+  starting or finishing on a loose end welds the new curve into that one. A click
+  on an attachment after the first point finishes the curve there; one whose
+  ending is refused comes back off and leaves the drawing open. A separator must
+  start and finish on the same active face.
 - [ ] Drag a handle outside the square. The invalid draft persists after release,
   is red, and shows a specific reason and the accepted reference. Drag it back
   to recover. Escape during a drag restores both scenes. Undo restores the prior

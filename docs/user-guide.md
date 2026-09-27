@@ -142,7 +142,10 @@ running; this file covers using it.
   enclosed later, by attaching an end, inherits the material of the region it is
   cut out of. Gold highlights and a 14-pixel screen-space query show the exact
   available attachments on the outer domain, inner curves, and junctions, either
-  side of each being a target.
+  side of each being a target. An open curve attaches only at its ends, so it may
+  start on an attachment, and clicking one after the first point finishes the
+  curve there. An ending that is refused takes the point back off, with the reason
+  in the status, and the curve can be taken on elsewhere.
 - **Circle:** click to place eight controls on a radius `0.15` circle, then
   automatically return to selection. The spline lies inside its control polygon.
 - **Rectangle:** two opposite-corner clicks create an axis-aligned rectangular
@@ -152,8 +155,8 @@ running; this file covers using it.
   a polygon. Polygon is available for loops and Polyline for baffles.
 - **Spline:** this is the control-point tool. A baffle can be finished with exactly
   two clicked controls to create an exact straight line with equidistant internal
-  controls; three controls are incomplete, and four or more form the usual freeform
-  spline. Four controls enable the live curve preview. Enter finishes an open
+  controls; three make one arc through the two ends drawn toward the middle one,
+  and four or more form the usual freeform spline. Four controls enable the live curve preview. Enter finishes an open
   baffle; Enter or clicking the first handle closes a loop. Its control polygon
   distinguishes it from the vertex-based tools. Backspace removes the latest staged
   point and Escape cancels construction.
