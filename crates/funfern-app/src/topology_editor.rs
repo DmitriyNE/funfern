@@ -463,12 +463,17 @@ impl TopologyEditor {
         Ok(())
     }
 
+    /// Resizes the outer rectangle with what is attached to it, as
+    /// `resize_outer_domain` carries it. A resize that leaves an attachment
+    /// nowhere to go changes nothing.
     pub fn set_domain_during_edit(&mut self, domain: DomainRect) -> Result<(), String> {
         if !domain.valid() {
             return Err("Domain extents are invalid".into());
         }
         if self.document.model.draft.geometry.domain != domain {
-            self.document.model.draft.geometry.domain = domain;
+            let mut draft = self.document.model.draft.clone();
+            resize_outer_domain(&mut draft, domain)?;
+            self.document.model.draft = draft;
             self.changed();
         }
         Ok(())
@@ -3843,13 +3848,75 @@ fn outer_attachment_point(
 }
 
 fn outer_fraction(domain: DomainRect, side: OuterSide, point: Point2) -> f64 {
+    fraction_along(domain, side, point).clamp(0.0, 1.0)
+}
+
+/// Where `point` projects onto `side`, as a fraction of it that is not held to
+/// the side: below zero or past one is off its ends.
+fn fraction_along(domain: DomainRect, side: OuterSide, point: Point2) -> f64 {
     match side {
         OuterSide::Bottom => (point.x - domain.min_x) / domain.width(),
         OuterSide::Right => (point.y - domain.min_y) / domain.height(),
         OuterSide::Top => (domain.max_x - point.x) / domain.width(),
         OuterSide::Left => (domain.max_y - point.y) / domain.height(),
     }
-    .clamp(0.0, 1.0)
+}
+
+/// Moves the outer rectangle of `scene` to `domain` and takes what is attached
+/// to it along. A vertex on a side keeps its place along that side, so the
+/// side it is on carries it and a neighbour's growing or shrinking does not
+/// slide it. The curves ending there follow their vertices, and a face
+/// anchored on a side keeps its place between the corners and vertices
+/// either side of it, so it still names the same face. A side carried past a
+/// vertex on its neighbour would leave that vertex off the rectangle, and is
+/// refused.
+fn resize_outer_domain(scene: &mut TopologyScene, domain: DomainRect) -> Result<(), String> {
+    const END: f64 = 1.0e-12;
+    let previous = scene.geometry.domain;
+    // Each side's breakpoints, where they were and where they go.
+    let mut breakpoints = OuterSide::ALL.map(|_| vec![(0.0, 0.0), (1.0, 1.0)]);
+    for vertex in &mut scene.geometry.vertices {
+        let TopologyVertexLocation::Outer { side, fraction } = &mut vertex.location else {
+            continue;
+        };
+        let point = outer_attachment_point(previous, *side, *fraction)?;
+        let moved = fraction_along(domain, *side, point);
+        if !(END..=1.0 - END).contains(&moved) {
+            return Err(format!(
+                "An attachment on the {} side is in the way",
+                side.label().to_lowercase()
+            ));
+        }
+        breakpoints[side.index()].push((*fraction, moved));
+        *fraction = moved;
+    }
+    for points in &mut breakpoints {
+        points.sort_by(|left, right| left.0.total_cmp(&right.0));
+    }
+    for assignment in &mut scene.face_assignments {
+        let FaceAnchor::Outer { side, fraction } = &mut assignment.anchor else {
+            continue;
+        };
+        let points = &breakpoints[side.index()];
+        let Some(pair) = points
+            .windows(2)
+            .find(|pair| (pair[0].0..=pair[1].0).contains(fraction))
+        else {
+            continue;
+        };
+        let [(start, start_moved), (end, end_moved)] = [pair[0], pair[1]];
+        let within = if end - start > END {
+            (*fraction - start) / (end - start)
+        } else {
+            0.0
+        };
+        *fraction = start_moved + within * (end_moved - start_moved);
+    }
+    scene.geometry.domain = domain;
+    scene
+        .geometry
+        .synchronize_vertices()
+        .map_err(|issue| issue.to_string())
 }
 
 fn curve_period(spline: &CurveSpline) -> f64 {
@@ -7492,7 +7559,203 @@ mod tests {
         assert!(editor.document.model.draft.geometry.curves.is_empty());
     }
 
-    /// Detaching an outer-attached endpoint must take its vertex with it.    /// Detaching an outer-attached endpoint must take its vertex with it. An
+    /// A separator across the default domain from the middle of the bottom to
+    /// the middle of the top, cutting a new material off on the right, and a
+    /// baffle hanging off the middle of the right side. Answers the two curves
+    /// and the new material.
+    fn attached_to_three_sides() -> (TopologyEditor, [CurveId; 2], MaterialId) {
+        let mut editor = TopologyEditor::default();
+        let material = editor.add_material().unwrap();
+        settle(&mut editor);
+        let outer = |side, fraction| {
+            Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                side,
+                fraction,
+            }))
+        };
+        let mut curves = vec![];
+        for (points, purpose, start, end) in [
+            (
+                [(0.0, -1.0), (0.0, 0.0), (0.0, 1.0)],
+                OpenCurvePurpose::SubdomainSeparator { material },
+                outer(OuterSide::Bottom, 0.5),
+                outer(OuterSide::Top, 0.5),
+            ),
+            (
+                [(1.0, 0.0), (0.8, 0.1), (0.6, 0.0)],
+                OpenCurvePurpose::BoundaryBaffle,
+                outer(OuterSide::Right, 0.5),
+                None,
+            ),
+        ] {
+            let spline = OpenCubicSpline::polyline(
+                points.into_iter().map(|(x, y)| Point2::new(x, y)).collect(),
+            )
+            .unwrap();
+            curves.push(
+                editor
+                    .create_open_curve(spline, purpose, start, end)
+                    .unwrap()
+                    .curve,
+            );
+            settle(&mut editor);
+        }
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        (editor, curves.try_into().unwrap(), material)
+    }
+
+    fn curve_ends(editor: &TopologyEditor, curve: CurveId) -> [Point2; 2] {
+        let curve = editor.document.model.draft.geometry.curve(curve).unwrap();
+        [0, curve.nodes.len() - 1].map(|node| curve.spline.node_point(node).unwrap())
+    }
+
+    fn material_at(editor: &TopologyEditor, point: Point2) -> Option<MaterialId> {
+        let compiled = editor.compiled_draft.as_ref()?;
+        let face = compiled.topology.face_at(point)?;
+        let region = compiled
+            .assignments
+            .iter()
+            .find(|assignment| assignment.face == face)?
+            .region?;
+        Some(editor.document.model.draft.region(region)?.material)
+    }
+
+    /// The outer rectangle takes what is attached to it along. Its vertices
+    /// used to stay put as fractions of their sides while the curves ending
+    /// on them did not move, so every resize of an attached scene was refused
+    /// with a vertex mismatch, and a grown side slid the vertices on its
+    /// neighbours along with it.
+    #[test]
+    fn a_domain_resize_carries_what_is_attached_to_it() {
+        let close = |a: Point2, b: Point2| (a - b).norm() < 1.0e-12;
+        let resized = |edit: fn(DomainRect) -> DomainRect| {
+            let (mut editor, curves, material) = attached_to_three_sides();
+            let domain = edit(editor.document.model.draft.geometry.domain);
+            editor.set_domain(domain).unwrap();
+            settle(&mut editor);
+            assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+            assert_eq!(editor.document.model.accepted.geometry.domain, domain);
+            (editor, curves, material)
+        };
+
+        // The top goes up and the separator's top end with it; the right
+        // side's vertex stays where it is along that side.
+        let (editor, [separator, side], _) = resized(|domain| DomainRect {
+            max_y: 1.3,
+            ..domain
+        });
+        assert!(close(
+            curve_ends(&editor, separator)[1],
+            Point2::new(0.0, 1.3)
+        ));
+        assert!(close(
+            curve_ends(&editor, separator)[0],
+            Point2::new(0.0, -1.0)
+        ));
+        assert!(close(curve_ends(&editor, side)[0], Point2::new(1.0, 0.0)));
+
+        // The right side goes out and carries its own vertex; the vertices on
+        // the top and bottom stay at x = 0.
+        let (editor, [separator, side], _) = resized(|domain| DomainRect {
+            max_x: 1.5,
+            ..domain
+        });
+        assert!(close(
+            curve_ends(&editor, separator)[0],
+            Point2::new(0.0, -1.0)
+        ));
+        assert!(close(
+            curve_ends(&editor, separator)[1],
+            Point2::new(0.0, 1.0)
+        ));
+        assert!(close(curve_ends(&editor, side)[0], Point2::new(1.5, 0.0)));
+
+        // The left side comes in close to the separator. The background's
+        // anchor on the bottom keeps its place between the corner and the
+        // separator's vertex; as a plain fraction it would have landed past
+        // the vertex, in the new material's face.
+        let (editor, [separator, ..], material) = resized(|domain| DomainRect {
+            min_x: -0.2,
+            ..domain
+        });
+        assert!(close(
+            curve_ends(&editor, separator)[0],
+            Point2::new(0.0, -1.0)
+        ));
+        assert_eq!(
+            material_at(&editor, Point2::new(-0.1, 0.5)),
+            Some(DEFAULT_MATERIAL)
+        );
+        assert_eq!(material_at(&editor, Point2::new(0.5, -0.5)), Some(material));
+
+        // A drag is many small resizes in one edit, and lands where one does.
+        let (one, ..) = resized(|domain| DomainRect {
+            max_x: 1.5,
+            ..domain
+        });
+        let (mut dragged, ..) = attached_to_three_sides();
+        let start = dragged.document.model.draft.geometry.domain;
+        dragged.begin();
+        for step in 1..=50 {
+            dragged
+                .set_domain_during_edit(DomainRect {
+                    max_x: 1.0 + 0.5 * step as f64 / 50.0,
+                    ..start
+                })
+                .unwrap();
+        }
+        dragged.commit();
+        settle(&mut dragged);
+        assert_eq!(dragged.acceptance, TopologyAcceptance::Valid);
+        for (a, b) in one
+            .document
+            .model
+            .draft
+            .geometry
+            .vertices
+            .iter()
+            .zip(&dragged.document.model.draft.geometry.vertices)
+        {
+            let domain = one.document.model.draft.geometry.domain;
+            assert!(close(a.point(domain).unwrap(), b.point(domain).unwrap()));
+        }
+        assert_eq!(dragged.history_len().0, one.history_len().0, "one entry");
+    }
+
+    /// A side cannot be carried past a vertex on its neighbour, which would
+    /// leave the vertex off the rectangle: the resize is refused and nothing
+    /// moves. A resize that is taken is one undo step, curves and all.
+    #[test]
+    fn a_resize_past_an_attachment_is_refused_and_one_that_is_taken_undoes() {
+        let (mut editor, [separator, ..], _) = attached_to_three_sides();
+        let before = editor.document.model.clone();
+        let domain = before.draft.geometry.domain;
+        let error = editor
+            .set_domain(DomainRect {
+                max_x: -0.1,
+                ..domain
+            })
+            .unwrap_err();
+        assert!(error.contains("bottom") || error.contains("top"), "{error}");
+        assert_eq!(editor.document.model, before);
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+
+        editor
+            .set_domain(DomainRect {
+                max_y: 1.4,
+                ..domain
+            })
+            .unwrap();
+        settle(&mut editor);
+        assert!(editor.undo());
+        settle(&mut editor);
+        assert_eq!(editor.document.model.draft.geometry.domain, domain);
+        assert_eq!(curve_ends(&editor, separator)[1], Point2::new(0.0, 1.0));
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+    }
+
+    /// Detaching an outer-attached endpoint must take its vertex with it. An
     /// unreferenced outer vertex still subdivides its domain side and still
     /// draws a junction handle, so it reads as a ghost the user cannot remove.
     #[test]

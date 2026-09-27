@@ -15306,3 +15306,29 @@ nothing stepping, and nothing in the console.
   136 candidates as limit ones without the fix, none with it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — Resizing the domain carries what is attached to it
+
+- **Defect** (reported). Dragging a side of the outer rectangle with a curve
+  attached to it was refused. An outer vertex is stored as a fraction of its
+  side, so it moved with the rectangle, but the curve ending on it did not, and
+  every compile failed with a vertex mismatch: with a separator attached from
+  the middle of the bottom to the middle of the top, raising the top by 0.3
+  left its end at y = 1.0 under a vertex at 1.3. Widening the right side slid
+  both vertices from x = 0 to 0.25, since they kept their fractions of the
+  longer top and bottom. `synchronize_vertices` was documented as the call to
+  make after a resize, and the resize never made it.
+- **Fix.** The resize keeps each outer vertex at its place along its own side,
+  so the side it is on carries it and a neighbour's growth leaves it alone, and
+  then moves every attached curve end onto its vertex. A face anchored on a
+  side keeps its place between the corners and vertices either side of it:
+  kept as a plain fraction, the background's anchor crossed the separator's
+  vertex when the left side came in to x = -0.2, and the scene compiled as a
+  duplicate face. A resize that would carry a side past an attachment on its
+  neighbour is refused and moves nothing. The drag and the Edit panel's
+  extents share the path.
+- **Tests.** `a_domain_resize_carries_what_is_attached_to_it` (top, right and
+  left moves, and fifty drag frames landing where one resize does) and
+  `a_resize_past_an_attachment_is_refused_and_one_that_is_taken_undoes`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

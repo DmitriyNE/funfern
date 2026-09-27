@@ -81,7 +81,10 @@ plain `trunk` builds the cooperative static-host variant.
   region to match the toggle.
 - [ ] Resize the outer rectangle by dragging a side and a corner grip, with Shift
   snapping to the grid. Each drag is one undo entry. Confirm the resize cursors
-  appear on hover, before the drag starts, along with the gizmo cursors.
+  appear on hover, before the drag starts, along with the gizmo cursors. With a
+  curve attached across the domain, the dragged side carries its attached ends,
+  the ends on its neighbours stay put, and a side stops short of an attachment
+  on its neighbour.
 - [ ] Undo/redo each action through buttons and Ctrl/Cmd shortcuts. One drag or
   completed coordinate edit is one action. Undo/redo restores invalid drafts.
 - [ ] Type coordinates. Delete, Space, and Ctrl/Cmd+Z while typing are captured
