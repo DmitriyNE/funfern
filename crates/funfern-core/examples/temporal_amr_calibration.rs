@@ -123,21 +123,34 @@ fn main() {
         loss_rows()
             .into_iter()
             .map(|(label, scene, static_path)| (label, scene, static_path, reflecting())),
-    );
+    )
+    .map(|(label, scene, static_path, walls)| (label, scene, static_path, walls, 1.0))
+    .chain(self_similar_rows());
     // An argument runs only the rows whose label contains it.
     let only = std::env::args().nth(1).unwrap_or_default();
-    for (label, scene, static_path, walls) in rows {
+    for (label, scene, static_path, walls, scale) in rows {
         if !label.contains(only.as_str()) {
             continue;
         }
         // The finest mesh sets the timestep every mesh in the sweep uses.
-        let reference_edge = *EDGES.last().expect("one reference edge");
+        let edges = EDGES.map(|edge| edge / scale);
+        let reference_edge = *edges.last().expect("one reference edge");
         let (_, _, reference_operator) = build(&scene, reference_edge, walls);
         let time_step = 0.4 * reference_operator.maximum_time_step();
         let lattice = lattice_points();
-        let solved = EDGES
+        let solved = edges
             .iter()
-            .map(|edge| solve(&scene, *edge, time_step, &lattice, static_path, walls))
+            .map(|edge| {
+                solve(
+                    &scene,
+                    *edge,
+                    time_step,
+                    &lattice,
+                    static_path,
+                    walls,
+                    scale,
+                )
+            })
             .collect::<Vec<_>>();
         let reference = solved.last().expect("a reference solution");
         println!("{label}: shared time step {time_step:.4e} from h={reference_edge}");
@@ -199,6 +212,31 @@ fn main() {
          the driven rows stop agreeing with the static one, it is the constant that\n\
          is stale, not the estimator that is broken."
     );
+}
+
+/// The box mode at `s` times the wavenumber, on meshes and over a run `s`
+/// times shorter: `s²` tiles of the first problem, so the true relative error
+/// is the same and an estimate that reads the error in its own units reads the
+/// same index. One whose index moves with `s` is weighting by frequency.
+fn self_similar_rows() -> Vec<(&'static str, Scene, bool, OuterBoundaryConditions, f64)> {
+    vec![
+        (
+            "static path, inert, s=2",
+            inert_scene(),
+            true,
+            reflecting(),
+            2.0,
+        ),
+        ("inert, s=2", inert_scene(), false, reflecting(), 2.0),
+        (
+            "static path, inert, s=3",
+            inert_scene(),
+            true,
+            reflecting(),
+            3.0,
+        ),
+        ("inert, s=3", inert_scene(), false, reflecting(), 3.0),
+    ]
 }
 
 fn reflecting() -> OuterBoundaryConditions {
@@ -548,6 +586,11 @@ fn build(
             1,
             MeshingOptions {
                 target_edge_length: edge,
+                // The self-similar rows' finest meshes are nine times the
+                // largest of the others.
+                max_vertices: 1_000_000,
+                max_triangles: 2_000_000,
+                max_refinement_steps: 1_000_000,
                 ..MeshingOptions::default()
             },
         )
@@ -573,9 +616,10 @@ fn build(
 fn initial(
     operator: &CanonicalTemporalWaveOperator,
     walls: OuterBoundaryConditions,
+    scale: f64,
 ) -> (Vec<f64>, Vec<Point2>, Vec<f64>) {
-    const MODE_X: f64 = 2.0;
-    const MODE_Y: f64 = 1.0;
+    let mode_x = 2.0 * scale;
+    let mode_y = 1.0 * scale;
     let base = operator.base();
     let half = std::f64::consts::PI / 2.0;
     if operator.has_restoring() {
@@ -583,8 +627,8 @@ fn initial(
             .node_points()
             .iter()
             .map(|point| {
-                1.5 * (MODE_X * half * (point.x + 1.0)).cos()
-                    * (MODE_Y * half * (point.y + 1.0)).cos()
+                1.5 * (mode_x * half * (point.x + 1.0)).cos()
+                    * (mode_y * half * (point.y + 1.0)).cos()
             })
             .collect::<Vec<_>>();
         let complementary = base
@@ -637,8 +681,8 @@ fn initial(
                 return mass * 0.08 * bump.powi(4);
             }
             mass * 0.08
-                * (MODE_X * half * (point.x + 1.0)).cos()
-                * (MODE_Y * half * (point.y + 1.0)).cos()
+                * (mode_x * half * (point.x + 1.0)).cos()
+                * (mode_y * half * (point.y + 1.0)).cos()
         })
         .collect::<Vec<_>>();
     // From rest: zero complementary flux is the compatible companion of a
@@ -666,6 +710,7 @@ fn solve(
     lattice: &[Point2],
     static_path: bool,
     walls: OuterBoundaryConditions,
+    scale: f64,
 ) -> Solved {
     let started = Instant::now();
     let (mesh, quadratic, operator) = build(scene, edge, walls);
@@ -681,7 +726,7 @@ fn solve(
         material.electric_loss = None;
         material.magnetic_loss = None;
     }
-    let (primary, complementary, integrated) = initial(&operator, walls);
+    let (primary, complementary, integrated) = initial(&operator, walls, scale);
     let mut state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("calibration state");
     if !integrated.is_empty() {
@@ -689,7 +734,7 @@ fn solve(
             .with_integrated_field(&operator, integrated)
             .expect("calibration integrated field");
     }
-    let steps = (TARGET_TIME / time_step).round().max(1.0) as u64;
+    let steps = (TARGET_TIME / scale / time_step).round().max(1.0) as u64;
     let mut previous = state.primary_flux().to_vec();
     let mut previous_complementary = state.complementary_flux().to_vec();
     let mut previous_integrated = state.integrated_field().to_vec();

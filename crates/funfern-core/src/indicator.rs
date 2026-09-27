@@ -819,21 +819,22 @@ impl MeshSizeField for AdaptiveSizeField {
 /// one true accuracy on both paths.
 ///
 /// The estimate changes shape under a material runtime: the gradient terms
-/// move onto the solver's own flux and the scalar displacement recovery leaves
-/// the total. That is what lets it survive a spatially patterned medium, and
-/// it also makes it read low. Measured by the `temporal_amr_calibration`
-/// example on a smooth reflecting-box problem, the production static
-/// estimator's efficiency index has a geometric mean of 1.38 over a refinement
-/// sequence, while the substituted estimate has 0.73 over seven media crossing
-/// driven row, spatial pattern and modulation wavenumber. This is their ratio.
+/// move onto the solver's own flux, the scalar displacement recovery leaves
+/// the total, and the energy it is relative to is the solver's own store.
+/// That is what lets it survive a spatially patterned medium and read the same
+/// index whatever the field's frequency. Measured by the
+/// `temporal_amr_calibration` example, the production static estimator's
+/// efficiency index has a geometric mean of 1.41 over a refinement sequence on
+/// a smooth reflecting-box problem, while the substituted estimate has 3.79
+/// over seven media crossing driven row, spatial pattern and modulation
+/// wavenumber. This is their ratio.
 ///
 /// It is a calibration and not a correction. Neither index is one, and the
 /// claim being made is only that the same target delivers the same true error
-/// whichever estimate produced it. Scaled, the driven index runs 1.21 to 1.62
-/// across those seven media, against 1.26 to 1.54 for the static estimator
-/// across three meshes on one medium, so the substituted estimate is no more
-/// scattered than the one it has to agree with.
-const DRIVEN_INDICATOR_CALIBRATION: f64 = 1.88;
+/// whichever estimate produced it. Scaled, the driven index runs 1.30 to 1.56
+/// across those seven media, and 1.28 to 1.61 on the box mode at twice and
+/// three times the wavenumber, where it used to fall as the frequency rose.
+const DRIVEN_INDICATOR_CALIBRATION: f64 = 0.372;
 
 #[derive(Clone, Copy, Default)]
 struct Recovery {
@@ -1875,6 +1876,8 @@ impl SolutionIndicatorJob {
             edge: geometry.maximum_edge,
             ..Default::default()
         };
+        let substitutes = self.substitutes_canonical_gradients();
+        let mut scalar_energy = 0.0;
         for ((barycentric, weight), coefficients) in
             quadrature().into_iter().zip(material.quadrature)
         {
@@ -1919,14 +1922,23 @@ impl SolutionIndicatorJob {
                     weight * geometry.area * geometry.maximum_edge.powi(2) * residual.powi(2)
                         / stiffness_scale;
             }
-            estimate.energy += weight
+            scalar_energy += weight
                 * geometry.area
                 * (coefficients.stiffness.quadratic_form(grad_u)
                     + coefficients.mass_density * (omega * omega * u * u + v * v));
         }
-        self.total_energy += estimate.energy;
+        // An estimate is relative to an energy in its residual's own units.
+        // The scalar terms differentiate the displayed field, so they measure
+        // against `A∇u·∇u`; the solver-flux terms measure the flux integrated
+        // in time, whose store is the solver's own. That scalar energy is one
+        // time derivative higher - `ω²` times the store for a component of
+        // frequency `ω` - so dividing the flux terms by it read an estimate
+        // that fell as the field's frequency rose.
+        if !substitutes {
+            estimate.energy += scalar_energy;
+            self.total_energy += scalar_energy;
+        }
         self.total_area += estimate.area;
-        let substitutes = self.substitutes_canonical_gradients();
         if let Some(canonical) = &self.canonical {
             estimate.recovery += canonical.element_complementary_recovery[index];
             // Only where the scalar jump stepped aside for it. A supplement

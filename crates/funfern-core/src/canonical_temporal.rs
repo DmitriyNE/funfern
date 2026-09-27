@@ -5870,9 +5870,15 @@ mod tests {
         };
         let calibration = substituted.global_indicator / raw(&substituted);
         assert!(
-            (calibration - 1.88).abs() < 1.0e-9,
+            (calibration - 0.372).abs() < 1.0e-9,
             "the driven estimate must carry its calibration, got {calibration}"
         );
+        // And it is relative to the solver's own store, in its residual's
+        // units, rather than to the scalar `A∇u·∇u` one time derivative above.
+        assert!(close(
+            substituted.total_energy,
+            supplement.element_energy.iter().sum::<f64>()
+        ));
 
         // Same supplement, no runtime: the scalar terms keep the estimate and
         // the flux jump is not folded in on top of them.

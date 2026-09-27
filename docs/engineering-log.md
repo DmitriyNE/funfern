@@ -15184,3 +15184,36 @@ nothing stepping, and nothing in the console.
   emitter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The driven estimate is relative to the solver's own store
+
+- **Defect.** The driven estimate's residual terms all read the solver's own
+  flux, the flux integrated in time, but its energy normalization was 96 to
+  100 percent the scalar `A∇u·∇u`, which is one time derivative higher: `ω²`
+  times the store for a component of frequency `ω`. So the index fell as the
+  field's frequency rose, and the constant 1.88 was right at the one frequency
+  it was fitted at. Shown by a self-similar sweep, the box mode at `s` times
+  the wavenumber on meshes and over a run `s` times smaller - `s²` tiles of
+  the same problem, with the same true relative error: the driven index read
+  1.40, 0.69, 0.50 at `s` = 1, 2, 3, the static 1.41, 1.35, 1.48.
+- **Fix.** Where the job reads the solver's flux, each element's energy and
+  the total are the solver's store alone; the scalar energy counts only
+  beside the scalar terms. The constant is recomputed from the sweep by its
+  own definition, the static box's geometric mean over the seven driven
+  media's: 1.41 / 3.79, so `DRIVEN_INDICATOR_CALIBRATION = 0.372`.
+- **Measured** (the full sweep, now with the self-similar rows kept): the
+  driven box reads 1.45, 1.34, 1.28 at `s` = 2 and 1.61, 1.42, 1.42 at `s` = 3,
+  against the static 1.47, 1.33, 1.27 and 1.63, 1.43, 1.39. Across every driven
+  row the index is 1.26 to 1.66, except the pumped interface (1.34, 1.14, 0.97,
+  its spread of 1.38 unchanged) and the self-oscillating medium (0.86 to
+  0.90, which a gain that amplifies the error in time can explain); the
+  steep pulse on the absorbing end now reads 1.40 to 1.49 where it read 0.83,
+  and every spread is unchanged.
+- **Also consistent now:** the application's dormancy threshold compares the
+  estimate's energy with a peak fed from both the estimate and the solver's
+  energy readout; those were in different units, about 25 to 1, and are now
+  the same.
+- **Tested:** the guard test also requires a substituted estimate's energy to
+  be the supplement's store exactly.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

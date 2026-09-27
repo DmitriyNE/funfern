@@ -129,10 +129,14 @@ constant primary and complementary loss, loss beside Klein-Gordon, and the
 self-sustained emitter's medium, van der Pol gain with a complementary loss.
 Every row's
 estimate is handed the walls its solver ran, as production's is, so the wall
-residual is measured too.
-With the constant applied, every driven row reads 1.01 to 1.73 against the static
-row's 1.29 to 1.58, so the same accuracy target means the same true error on
-either path. This sweep is where `DRIVEN_INDICATOR_CALIBRATION` comes from: if
+residual is measured too. The last rows are self-similar: the box mode at two
+and three times the wavenumber, on meshes and over a run that many times
+smaller, which leaves the true relative error where it was, so an index that
+moves with them is weighting by frequency. With the constant applied, the
+driven rows read 1.26 to 1.66 - the pumped interface down to 0.97 at its finest
+mesh and the self-oscillating medium 0.86 to 0.90 - against the static box's
+1.27 to 1.63 at every scale, so the same accuracy target means the same true
+error on either path. This sweep is where `DRIVEN_INDICATOR_CALIBRATION` comes from: if
 the driven rows stop agreeing with the static one, the constant is stale. An
 argument runs only the rows whose label contains it.
 
