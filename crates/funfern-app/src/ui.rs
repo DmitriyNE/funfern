@@ -299,6 +299,33 @@ enum DrawTool {
     OpenSpline,
 }
 
+impl DrawTool {
+    /// Whether `points` placed are enough to finish this tool's curve: what
+    /// Finish and Enter both ask. A circle is made by its one click and a
+    /// rectangle by its second, before either is asked.
+    fn finishes_with(self, points: usize) -> bool {
+        match self {
+            Self::Circle => false,
+            Self::Rectangle => points == 2,
+            Self::Polygon => points >= 3,
+            Self::ClosedSpline => points >= 4,
+            Self::Polyline | Self::OpenSpline => points >= 2,
+        }
+    }
+
+    /// What the tool is waiting for, said in the Draw palette while it draws.
+    fn prompt(self) -> &'static str {
+        match self {
+            Self::Circle => "Place the circle's centre",
+            Self::Rectangle => "Place two opposite corners",
+            Self::Polygon => "Place the corners; the first again closes the loop",
+            Self::ClosedSpline => "Place the controls; the first again closes the loop",
+            Self::Polyline => "Place the vertices; an attachment ends the line",
+            Self::OpenSpline => "Place the controls; an attachment ends the curve",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ProbePlacement {
     Point,

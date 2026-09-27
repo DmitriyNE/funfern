@@ -40,17 +40,28 @@ impl Playground {
         Ok(())
     }
 
-    /// The Undo button. Stepping back over a New, an opened example or a
-    /// load swaps the whole scene, and is treated as one.
+    /// The Undo button and shortcut. Stepping back over a New, an opened
+    /// example or a load swaps the whole scene, and is treated as one. A
+    /// gesture still under way is only cancelled, as Escape cancels it: its
+    /// edit is not in the history yet, and stepping the history beneath it
+    /// would strand it.
     pub(super) fn undo(&mut self) {
+        if self.interaction_in_progress() {
+            self.cancel_interaction();
+            return;
+        }
         let replaces = self.editor.undo_replaces_scene();
         if self.editor.undo() {
             self.history_moved(replaces);
         }
     }
 
-    /// The Redo button, the same way round.
+    /// The Redo button and shortcut, the same way round.
     pub(super) fn redo(&mut self) {
+        if self.interaction_in_progress() {
+            self.cancel_interaction();
+            return;
+        }
         let replaces = self.editor.redo_replaces_scene();
         if self.editor.redo() {
             self.history_moved(replaces);
@@ -58,9 +69,7 @@ impl Playground {
     }
 
     /// Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z, the two buttons' own steps. A focused
-    /// text field keeps them for its own text. A gesture still under way is
-    /// only cancelled, as Escape cancels it: its edit is not in the history
-    /// yet, and stepping the history beneath it would strand it.
+    /// text field keeps them for its own text.
     pub(super) fn history_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
             return;
@@ -70,11 +79,7 @@ impl Playground {
             let redo = input.consume_shortcut(&REDO_SHORTCUT);
             (redo, input.consume_shortcut(&UNDO_SHORTCUT))
         });
-        if self.interaction_in_progress() {
-            if undo || redo {
-                self.cancel_interaction();
-            }
-        } else if undo {
+        if undo {
             self.undo();
         } else if redo {
             self.redo();
@@ -466,7 +471,9 @@ mod tests {
         assert_eq!(state.editor.history_len(), (1, 0));
     }
 
-    /// Mid-gesture, the shortcut does what Escape does and nothing more.
+    /// Mid-gesture, the shortcut does what Escape does and nothing more, and
+    /// so do the toolbar's buttons: they used to step the history under a
+    /// drawing and leave it open.
     #[test]
     fn the_undo_shortcut_cancels_a_gesture_rather_than_stepping_under_it() {
         let mut state = one_edit_in();
@@ -475,6 +482,12 @@ mod tests {
         press_z(&mut state, &context, egui::Modifiers::COMMAND, None);
         assert!(state.draw.is_none(), "the draw survived");
         assert_eq!(state.editor.history_len(), (1, 0));
+        for button in [Playground::undo, Playground::redo] {
+            state.begin_draw(DrawTool::Polygon);
+            button(&mut state);
+            assert!(state.draw.is_none(), "the draw survived the button");
+            assert_eq!(state.editor.history_len(), (1, 0));
+        }
 
         let edited = state.editor.document.model.clone();
         state.editor.begin();

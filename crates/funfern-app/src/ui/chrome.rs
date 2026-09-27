@@ -201,16 +201,40 @@ impl Playground {
         });
         // The palette stays up across draws - one primitive after another is the
         // usual way it is used - so it closes only from its own button or the
-        // toolbar toggle, and it floats where it was last dragged.
+        // toolbar toggle, and it floats where it was last dragged. While a
+        // drawing is under way it carries that drawing's controls, which a
+        // keyboard also has but a touchscreen has nowhere else.
         if self.draw_open && !self.capturing() {
             let ctx = root.ctx().clone();
             let mut open = true;
+            let active = self.draw.as_ref().map(|draw| draw.tool);
             egui::Window::new("Draw")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .default_pos([300.0, 42.0])
                 .show(&ctx, |ui| {
+                    if let Some(draw) = &self.draw {
+                        let (tool, points) = (draw.tool, draw.points.len());
+                        ui.label(egui::RichText::new(tool.prompt()).strong());
+                        ui.horizontal(|ui| {
+                            let finish = egui::Button::new("Finish").shortcut_text("Enter");
+                            if ui.add_enabled(tool.finishes_with(points), finish).clicked() {
+                                self.finish_draw();
+                            }
+                            let undo = egui::Button::new("Undo point").shortcut_text("⌫");
+                            if ui.add_enabled(points > 0, undo).clicked() {
+                                self.undo_draw_point();
+                            }
+                            if ui
+                                .add(egui::Button::new("Cancel").shortcut_text("Esc"))
+                                .clicked()
+                            {
+                                self.draw = None;
+                            }
+                        });
+                        ui.separator();
+                    }
                     ui.label("Closed curve");
                     ui.horizontal(|ui| {
                         ui.radio_value(
@@ -250,7 +274,8 @@ impl Playground {
                             (DrawTool::Polygon, "Polygon"),
                             (DrawTool::ClosedSpline, "Spline"),
                         ] {
-                            if ui.button(label).clicked() {
+                            let button = egui::Button::new(label).selected(active == Some(tool));
+                            if ui.add(button).clicked() {
                                 self.begin_draw(tool);
                             }
                         }
@@ -266,15 +291,22 @@ impl Playground {
                         ui.radio_value(&mut self.open_purpose, OpenPurpose::Baffle, "BC baffle");
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("Polyline").clicked() {
-                            self.begin_draw(DrawTool::Polyline);
-                        }
-                        if ui.button("Spline").clicked() {
-                            self.begin_draw(DrawTool::OpenSpline);
+                        for (tool, label) in [
+                            (DrawTool::Polyline, "Polyline"),
+                            (DrawTool::OpenSpline, "Spline"),
+                        ] {
+                            let button = egui::Button::new(label).selected(active == Some(tool));
+                            if ui.add(button).clicked() {
+                                self.begin_draw(tool);
+                            }
                         }
                     });
+                    ui.separator();
+                    self.snap_checkbox(ui);
                 });
-            self.draw_open = open;
+            if !open {
+                self.set_draw_open(false);
+            }
         }
         fit
     }
@@ -360,7 +392,7 @@ impl Playground {
                     button
                 };
                 if button.clicked() {
-                    self.draw_open = !self.draw_open;
+                    self.set_draw_open(!self.draw_open);
                 }
             }
             ToolbarItem::RunPause => {

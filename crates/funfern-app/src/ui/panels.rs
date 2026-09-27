@@ -48,8 +48,9 @@ impl Playground {
                 .map(|snapshot| snapshot.invalid_count(property)),
             _ => None,
         };
+        ui.checkbox(&mut self.editor.document.presentation.grid, "Grid");
+        self.snap_checkbox(ui);
         let p = &mut self.editor.document.presentation;
-        ui.checkbox(&mut p.grid, "Grid");
         ui.checkbox(&mut p.control_polygons, "Control polygons");
         ui.checkbox(&mut p.handles, "Handles");
         ui.checkbox(&mut p.boundary_conditions, "Boundary conditions");

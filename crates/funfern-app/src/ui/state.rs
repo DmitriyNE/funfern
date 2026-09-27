@@ -40,9 +40,16 @@ pub struct Playground {
     pub(super) selection: TopologySelection,
     pub(super) inspector: Option<InspectorPanel>,
     pub(super) draw_open: bool,
+    /// Whether placing and dragging land on the grid as Shift makes them,
+    /// Shift then inverting it: the way to snap without a keyboard.
+    pub(super) snap_to_grid: bool,
     pub(super) closed_purpose: ClosedPurpose,
     pub(super) open_purpose: OpenPurpose,
     pub(super) draw: Option<DrawGesture>,
+    /// The latest viewport click finished a drawing, so the second click of
+    /// a double click on it belongs to the drawing rather than to whatever
+    /// the drawing was made onto.
+    pub(super) click_finished_draw: bool,
     pub(super) drag: Option<DragGesture>,
     pub(super) touch_navigation: bool,
     pub(super) touch_active: bool,
@@ -326,9 +333,11 @@ impl Default for Playground {
             selection: TopologySelection::None,
             inspector: Some(InspectorPanel::Edit),
             draw_open: false,
+            snap_to_grid: false,
             closed_purpose: ClosedPurpose::Subdomain,
             open_purpose: OpenPurpose::Baffle,
             draw: None,
+            click_finished_draw: false,
             drag: None,
             touch_navigation: false,
             touch_active: false,

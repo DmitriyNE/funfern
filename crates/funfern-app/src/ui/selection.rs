@@ -115,6 +115,19 @@ impl Playground {
             }
         }
     }
+    /// Whether what is placed or dragged now lands on the grid: the Snap
+    /// setting, inverted while Shift is held.
+    pub(super) fn snapping(&self, shift: bool) -> bool {
+        self.snap_to_grid != shift
+    }
+    /// The Snap setting, shown in View and in the Draw palette.
+    pub(super) fn snap_checkbox(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.snap_to_grid, "Snap to grid")
+            .on_hover_text(
+                "Place and drag on the grid, rotate in 15° steps and scale in tenths, as \
+             holding Shift does. Shift inverts it.",
+            );
+    }
     pub(super) fn snap_point(point: Point2, step: f64) -> Point2 {
         Point2::new(
             (point.x / step).round() * step,

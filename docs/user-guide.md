@@ -130,9 +130,14 @@ running; this file covers using it.
   same EM material law.
 - **Geometry role:** Draw contains closed and open curve tools. Its palette is a
   floating window that can be dragged anywhere and stays up across draws, so one
-  primitive follows another; it closes from its own button or the toolbar toggle.
-  Holding Shift places each point on the same grid dragging snaps to, except
-  where the point attaches to existing geometry, which outranks it. That grid is
+  primitive follows another; it closes from its own button or the toolbar toggle,
+  and closing it gives up a drawing under way. While a tool draws, the palette
+  marks it, says what it is waiting for, and offers Finish, Undo point and
+  Cancel, which Enter, Backspace and Escape also do, so a touchscreen can draw
+  without a keyboard. Holding Shift places each point on the same grid dragging
+  snaps to, except where the point attaches to existing geometry, which outranks
+  it. Snap to grid, in View and in the palette, snaps every point, drag, rotation
+  and scale as Shift does, and Shift then places off the grid. That grid is
   the one drawn in the viewport: it steps in 1/2/5 per decade from the zoom and
   divides each step into four or five, and Shift lands on those divisions, so
   what is drawn is what can be reached. Zooming in makes it finer.
@@ -151,15 +156,17 @@ running; this file covers using it.
 - **Rectangle:** two opposite-corner clicks create an axis-aligned rectangular
   loop from exact straight cubic spans and then return to selection.
 - **Polygon and Polyline:** clicks place interpolation vertices joined by exact C0
-  straight spans. Enter finishes either tool; clicking the first vertex also closes
-  a polygon. Polygon is available for loops and Polyline for baffles.
+  straight spans. Finish or Enter finishes either tool; clicking the first vertex
+  also closes a polygon. Polygon is available for loops and Polyline for baffles.
 - **Spline:** this is the control-point tool. A baffle can be finished with exactly
   two clicked controls to create an exact straight line with equidistant internal
   controls; three make one arc through the two ends drawn toward the middle one,
-  and four or more form the usual freeform spline. Four controls enable the live curve preview. Enter finishes an open
-  baffle; Enter or clicking the first handle closes a loop. Its control polygon
-  distinguishes it from the vertex-based tools. Backspace removes the latest staged
-  point and Escape cancels construction.
+  and four or more form the usual freeform spline. Four controls enable the live
+  curve preview. Finish or Enter finishes an open baffle; either, or clicking the
+  first handle, closes a loop. Its control polygon distinguishes it from the
+  vertex-based tools. Undo point or Backspace removes the latest staged point and
+  Cancel or Escape cancels construction. A double click while drawing places
+  points; it does not reach the curves beneath.
 - **Spline editing:** **Straighten spans** makes every selected logical span an
   exact line between its own endpoints, inserting exact C0 isolation where needed,
   so a multi-span selection becomes a polyline through the existing breakpoints.
@@ -425,7 +432,8 @@ names or with every expression evaluated at the material frame's origin. Each ro
   document; Undo can restore earlier accepted snapshots.
 - **History:** Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes outside text editing.
   Pressed during a drag, a draw or a placement, either only cancels it, as
-  Escape does. The Undo and Redo buttons show the shortcuts on hover.
+  Escape does, and so do the Undo and Redo buttons. The buttons show the
+  shortcuts on hover.
   Each drag, coordinate edit, insertion, removal, creation, or deletion is one
   action. History keeps up to 100 actions, including invalid drafts.
 - **Files:** New starts an empty scene: one background material, every wall

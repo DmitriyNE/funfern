@@ -90,7 +90,10 @@ impl Playground {
             return;
         };
         let result: Result<CurveId, String> = match gesture.tool {
-            DrawTool::Rectangle if gesture.points.len() == 2 => {
+            _ if !gesture.tool.finishes_with(gesture.points.len()) => {
+                Err("Add enough points to finish this curve".into())
+            }
+            DrawTool::Rectangle => {
                 let a = gesture.points[0];
                 let b = gesture.points[1];
                 let points = vec![
@@ -103,21 +106,15 @@ impl Playground {
                     .map_err(|e| e.to_string())
                     .and_then(|s| self.create_closed(s))
             }
-            DrawTool::Polygon if gesture.points.len() >= 3 => {
-                PeriodicCubicSpline::polygon(gesture.points.clone())
-                    .map_err(|e| e.to_string())
-                    .and_then(|s| self.create_closed(s))
-            }
-            DrawTool::ClosedSpline if gesture.points.len() >= 4 => {
-                PeriodicCubicSpline::uniform(gesture.points.clone())
-                    .map_err(|e| e.to_string())
-                    .and_then(|s| self.create_closed(s))
-            }
-            DrawTool::Polyline if gesture.points.len() >= 2 => {
-                OpenCubicSpline::polyline(gesture.points.clone())
-                    .map_err(|e| e.to_string())
-                    .and_then(|s| self.create_open(s, &gesture))
-            }
+            DrawTool::Polygon => PeriodicCubicSpline::polygon(gesture.points.clone())
+                .map_err(|e| e.to_string())
+                .and_then(|s| self.create_closed(s)),
+            DrawTool::ClosedSpline => PeriodicCubicSpline::uniform(gesture.points.clone())
+                .map_err(|e| e.to_string())
+                .and_then(|s| self.create_closed(s)),
+            DrawTool::Polyline => OpenCubicSpline::polyline(gesture.points.clone())
+                .map_err(|e| e.to_string())
+                .and_then(|s| self.create_open(s, &gesture)),
             DrawTool::OpenSpline if gesture.points.len() == 2 => {
                 OpenCubicSpline::polyline(gesture.points.clone())
                     .map_err(|e| e.to_string())
@@ -137,12 +134,10 @@ impl Playground {
                 .map_err(|e| e.to_string())
                 .and_then(|s| self.create_open(s, &gesture))
             }
-            DrawTool::OpenSpline if gesture.points.len() >= 4 => {
-                OpenCubicSpline::uniform(gesture.points.clone())
-                    .map_err(|e| e.to_string())
-                    .and_then(|s| self.create_open(s, &gesture))
-            }
-            _ => Err("Add enough points to finish this curve".into()),
+            DrawTool::OpenSpline => OpenCubicSpline::uniform(gesture.points.clone())
+                .map_err(|e| e.to_string())
+                .and_then(|s| self.create_open(s, &gesture)),
+            DrawTool::Circle => Err("A circle is placed with one click".into()),
         };
         match result {
             Ok(curve) => {
@@ -155,6 +150,23 @@ impl Playground {
                 self.draw = Some(gesture);
             }
         }
+    }
+    /// Takes the latest point back out of the drawing: Backspace, or Undo
+    /// point in the Draw palette.
+    pub(super) fn undo_draw_point(&mut self) {
+        if let Some(draw) = &mut self.draw {
+            draw.points.pop();
+            draw.attachments.pop();
+        }
+    }
+    /// Opens or closes the Draw palette. It holds the drawing's own controls,
+    /// so closing it gives the drawing up rather than leave one going that
+    /// only a keyboard could finish or cancel.
+    pub(super) fn set_draw_open(&mut self, open: bool) {
+        if !open {
+            self.draw = None;
+        }
+        self.draw_open = open;
     }
     pub(super) fn create_closed(&mut self, spline: PeriodicCubicSpline) -> Result<CurveId, String> {
         let purpose = match self.closed_purpose {
@@ -833,6 +845,131 @@ mod tests {
             spline.evaluate(0.5 * spline.period()),
             (start + middle * 2.0 + end) * 0.25
         ));
+    }
+
+    /// What Finish offers is what finishing takes: the button is enabled by
+    /// the rule `finish_draw` refuses by, for every tool and count.
+    #[test]
+    fn finishing_takes_what_the_finish_button_offers() {
+        for tool in [
+            DrawTool::Circle,
+            DrawTool::Rectangle,
+            DrawTool::Polygon,
+            DrawTool::ClosedSpline,
+            DrawTool::Polyline,
+            DrawTool::OpenSpline,
+        ] {
+            for count in 0..=5 {
+                let mut state = Playground {
+                    editor: TopologyEditor::default(),
+                    ..Playground::default()
+                };
+                let points = (0..count)
+                    .map(|index| {
+                        let angle = std::f64::consts::TAU * index as f64 / 5.0;
+                        Point2::new(0.4 + 0.3 * angle.cos(), 0.4 + 0.3 * angle.sin())
+                    })
+                    .collect::<Vec<_>>();
+                state.draw = Some(DrawGesture {
+                    tool,
+                    attachments: vec![None; count],
+                    points,
+                });
+                state.finish_draw();
+                assert_eq!(
+                    state.draw.is_none(),
+                    tool.finishes_with(count),
+                    "{tool:?} with {count}: {}",
+                    state.message
+                );
+            }
+        }
+    }
+
+    /// The palette carries the drawing's controls, so closing it gives the
+    /// drawing up: it used to leave one going that only a keyboard could
+    /// finish or cancel, and the next tap added a point to it.
+    #[test]
+    fn closing_the_draw_palette_gives_the_drawing_up() {
+        let mut state = Playground {
+            draw_open: true,
+            ..Playground::default()
+        };
+        state.begin_draw(DrawTool::Polyline);
+        state.set_draw_open(false);
+        assert!(state.draw.is_none());
+        assert!(!state.draw_open);
+        state.set_draw_open(true);
+        assert!(state.draw.is_none(), "opening it again starts nothing");
+    }
+
+    /// A drawing owns the viewport. A double click beside a curve while
+    /// drawing a loop places the drawing's points and leaves the curve
+    /// alone, and a double click whose first click ends an open curve on a
+    /// baffle does not go on to insert a control into it.
+    #[test]
+    fn a_double_click_while_drawing_stays_with_the_drawing() {
+        let controls =
+            |state: &Playground| match &state.editor.document.model.draft.geometry.curves[0].spline
+            {
+                CurveSpline::Open(spline) => spline.controls().len(),
+                CurveSpline::Closed(spline) => spline.controls().len(),
+            };
+        let mut state = with_baffles(&[]);
+        let context = viewport_context(&mut state);
+        let before = controls(&state);
+        let on_baffle = state.screen(Point2::new(0.0, 0.1), viewport());
+        state.begin_draw(DrawTool::Polygon);
+        let mut time = 1.0;
+        for _ in 0..2 {
+            time = viewport_click(&mut state, &context, time, egui::Modifiers::NONE, on_baffle);
+        }
+        assert_eq!(controls(&state), before, "{}", state.message);
+        assert_eq!(state.draw.as_ref().map(|draw| draw.points.len()), Some(2));
+
+        let mut state = with_baffles(&[]);
+        let context = viewport_context(&mut state);
+        state.begin_draw(DrawTool::Polyline);
+        let start = state.screen(Point2::new(-0.6, 0.3), viewport());
+        let mut time = viewport_click(&mut state, &context, 1.0, egui::Modifiers::NONE, start);
+        time += 1.0;
+        for _ in 0..2 {
+            time = viewport_click(&mut state, &context, time, egui::Modifiers::NONE, on_baffle);
+        }
+        assert!(state.draw.is_none());
+        assert_eq!(state.message, "Curve added");
+        assert!(
+            matches!(state.selection, TopologySelection::Spans(_)),
+            "the new curve stays selected: {:?}",
+            state.selection
+        );
+    }
+
+    /// The Snap setting lands a click on the grid as Shift does, and Shift
+    /// inverts it, so a touchscreen can snap and a keyboard can still place a
+    /// point off the grid.
+    #[test]
+    fn shift_inverts_the_snap_setting() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            scale: 400.0,
+            snap_to_grid: true,
+            ..Playground::default()
+        };
+        let context = viewport_context(&mut state);
+        state.begin_draw(DrawTool::Polygon);
+        let at = egui::pos2(437.3, 211.9);
+        let time = viewport_click(&mut state, &context, 1.0, egui::Modifiers::NONE, at);
+        viewport_click(&mut state, &context, time + 1.0, egui::Modifiers::SHIFT, at);
+        let points = &state.draw.as_ref().unwrap().points;
+        let on_grid = |point: Point2| {
+            [point.x, point.y]
+                .iter()
+                .all(|value| ((value / 0.05) - (value / 0.05).round()).abs() < 1.0e-9)
+        };
+        assert!(on_grid(points[0]), "{:?}", points[0]);
+        assert!(!on_grid(points[1]), "{:?}", points[1]);
+        assert_eq!(points[1], state.world(at, viewport()));
     }
 
     /// Picking a tool starts the gesture and leaves the palette up, so one

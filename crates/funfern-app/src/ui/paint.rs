@@ -1301,7 +1301,7 @@ impl Playground {
                     .draw_attachment_hit(ScreenPoint::new(pointer.x as f64, pointer.y as f64), r)
                     .map(|hit| self.screen(hit.point, r))
                     .unwrap_or_else(|| {
-                        if painter.ctx().input(|input| input.modifiers.shift) {
+                        if self.snapping(painter.ctx().input(|input| input.modifiers.shift)) {
                             self.screen(
                                 Self::snap_point(self.world(pointer, r), self.snap_step()),
                                 r,
@@ -1319,7 +1319,7 @@ impl Playground {
         if let Some(pointer) = painter.ctx().pointer_hover_pos() {
             let current = self.world(pointer, r);
             // Where the click will land, not where the cursor is.
-            let snap = painter.ctx().input(|input| input.modifiers.shift);
+            let snap = self.snapping(painter.ctx().input(|input| input.modifiers.shift));
             match self.probe_mode {
                 Some(ProbePlacement::Segment { start: Some(start) }) => {
                     let end = if snap {

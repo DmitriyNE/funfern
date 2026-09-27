@@ -111,7 +111,17 @@ impl Playground {
             }
             return;
         }
+        // A drawing owns the viewport, so its clicks never reach the curves
+        // underneath: a double click there used to insert a control into one,
+        // and so did one whose first click finished the drawing.
+        if self.click_finished_draw && response.clicked() {
+            self.click_finished_draw = false;
+            if response.double_clicked() {
+                return;
+            }
+        }
         if response.double_clicked()
+            && self.draw.is_none()
             && let Some(pos) = pointer
         {
             // The same lookup a single click uses, so a double click honours the
@@ -164,15 +174,13 @@ impl Playground {
                         self.world(pos, r),
                         ScreenPoint::new(pos.x as f64, pos.y as f64),
                         r,
-                        ui.input(|input| input.modifiers.shift),
+                        self.snapping(ui.input(|input| input.modifiers.shift)),
                     );
+                    self.click_finished_draw = self.draw.is_none();
                 }
             }
             if !typing && ui.input(|i| i.key_pressed(egui::Key::Backspace)) {
-                if let Some(draw) = &mut self.draw {
-                    draw.points.pop();
-                    draw.attachments.pop();
-                }
+                self.undo_draw_point();
             }
             if !typing && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.finish_draw();
@@ -190,7 +198,7 @@ impl Playground {
             if let Some(pos) = pointer {
                 self.probe_placement_click(
                     self.world(pos, r),
-                    ui.input(|input| input.modifiers.shift),
+                    self.snapping(ui.input(|input| input.modifiers.shift)),
                 );
             }
             return;
@@ -366,7 +374,7 @@ impl Playground {
         if response.dragged_by(egui::PointerButton::Primary) {
             if let (Some(pos), Some(drag)) = (pointer, self.drag.clone()) {
                 let point = self.world(pos, r);
-                let shift = ui.input(|input| input.modifiers.shift);
+                let snap = self.snapping(ui.input(|input| input.modifiers.shift));
                 let invalidates_geometry = !matches!(
                     &drag,
                     DragGesture::Marquee { .. } | DragGesture::Pivot { .. }
@@ -374,7 +382,7 @@ impl Playground {
                 let step = self.snap_step();
                 let result = match drag {
                     DragGesture::Endpoint { curve, node, .. } => {
-                        let point = if shift {
+                        let point = if snap {
                             Self::snap_point(point, step)
                         } else {
                             point
@@ -393,12 +401,16 @@ impl Playground {
                             .and_then(|update| {
                                 self.editor.apply_transform_updates_during_edit(&[update])
                             });
-                        let snap = self.weld_hit_for(pos, r, Some((curve, node)));
-                        self.drag = Some(DragGesture::Endpoint { curve, node, snap });
+                        let weld = self.weld_hit_for(pos, r, Some((curve, node)));
+                        self.drag = Some(DragGesture::Endpoint {
+                            curve,
+                            node,
+                            snap: weld,
+                        });
                         moved
                     }
                     DragGesture::Domain { drag } => {
-                        let point = if shift {
+                        let point = if snap {
                             Self::snap_point(point, step)
                         } else {
                             point
@@ -412,7 +424,7 @@ impl Playground {
                             .set_domain_during_edit(Self::resize_domain(start, drag, point))
                     }
                     DragGesture::Handle { handle } => {
-                        let point = if shift {
+                        let point = if snap {
                             Self::snap_point(point, step)
                         } else {
                             point
@@ -431,7 +443,7 @@ impl Playground {
                         geometry,
                     } => {
                         let selected = self.selection.spans().cloned().unwrap_or_default();
-                        let target = if shift {
+                        let target = if snap {
                             Self::snap_point(pivot + point - start, step)
                         } else {
                             pivot + point - start
@@ -465,7 +477,7 @@ impl Playground {
                         let selected = self.selection.spans().cloned().unwrap_or_default();
                         let relative = point - pivot;
                         let mut angle = relative.y.atan2(relative.x) - start_angle;
-                        if shift {
+                        if snap {
                             let step = 15.0_f64.to_radians();
                             angle = (angle / step).round() * step;
                         }
@@ -496,7 +508,7 @@ impl Playground {
                             - GIZMO_PADDING as f64 / self.scale)
                             .max(0.0);
                         let mut factor = (distance / start_distance).max(0.01);
-                        if shift {
+                        if snap {
                             factor = ((factor * 10.0).round() / 10.0).max(0.1);
                         }
                         plan_axis_scale(
@@ -522,7 +534,7 @@ impl Playground {
                     }
                     DragGesture::Pivot { offset, .. } => {
                         let selected = self.selection.spans().cloned().unwrap_or_default();
-                        let target = if shift {
+                        let target = if snap {
                             Self::snap_point(point + offset, step)
                         } else {
                             point + offset
@@ -563,7 +575,7 @@ impl Playground {
                         let mut frame = start;
                         match hit {
                             MaterialFrameGizmoHit::Origin => {
-                                frame.origin = if shift {
+                                frame.origin = if snap {
                                     Self::snap_point(point, step)
                                 } else {
                                     point
@@ -573,7 +585,7 @@ impl Playground {
                                 let relative = point - start.origin;
                                 let mut angle =
                                     start.angle_radians + relative.y.atan2(relative.x) - grab;
-                                if shift {
+                                if snap {
                                     let step = 15.0_f64.to_radians();
                                     angle = (angle / step).round() * step;
                                 }
@@ -606,7 +618,7 @@ impl Playground {
                         // Snap what the drag moves, not the pointer: the grab
                         // offset would otherwise leave the probe off the grid by
                         // however far inside itself it was picked up.
-                        self.drag_probe(hit, original, point - grab, shift);
+                        self.drag_probe(hit, original, point - grab, snap);
                         Ok(())
                     }
                 };

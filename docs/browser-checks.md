@@ -24,10 +24,13 @@ plain `trunk` builds the cooperative static-host variant.
   Separator or Baffle purpose. Exercise two-corner Rectangle, vertex-based Polygon
   with Enter and first-vertex closure, and the four-control Spline preview. Finish
   an open Spline at exactly two controls and verify an exact straight baffle;
-  verify that three controls make one arc through the ends and four or more retain
-  the freeform spline behavior. Check Finish, Enter, Backspace, Escape, previews, one-entry
-  history, invalid drafts, and the 128-control limit. The viewport overlay
-  identifies vertices versus control points.
+  verify that three controls make one arc through the ends and four or more
+  retain the freeform spline behavior. Check Finish, Enter, Backspace, Escape,
+  previews, one-entry history, invalid drafts, and the 128-control limit. The
+  viewport overlay identifies vertices versus control points. On a touchscreen,
+  draw every tool with the palette's Finish, Undo point and Cancel alone, and
+  confirm that closing the palette gives the drawing up and that Snap to grid
+  snaps a tap.
 - [ ] While drawing an open curve, confirm that eligible outer edges, curve
   interiors, junctions, loose ends, and vertex-less corners all highlight, and that
   starting or finishing on a loose end welds the new curve into that one. A click

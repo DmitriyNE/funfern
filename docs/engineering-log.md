@@ -15356,3 +15356,34 @@ nothing stepping, and nothing in the console.
   `three_points_make_a_spline_arc`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The Draw palette carries the drawing's own controls
+
+- **Defect** (reported). Finishing an open curve, taking a point back and
+  cancelling a drawing were Enter, Backspace and Escape and nothing else, so a
+  touchscreen could start a drawing and never end it: on the live site, taps
+  placed points, a double tap on the last one did not finish, and closing the
+  Draw palette left the drawing going, so the next tap added a point. Grid
+  snapping was Shift alone, for points, drags, the 15° rotation steps and the
+  tenths of scale. Two neighbours: the toolbar's Undo stepped the history
+  under a drawing and left it open, where Cmd+Z cancels it, and a double click
+  while drawing reached the curves beneath - beside a curve while drawing a
+  loop it inserted a control, and so did a double click whose first click
+  ended an open curve on a baffle, a rectangle's corner or a circle, since the
+  second click arrived with the drawing gone.
+- **Fix.** While a tool draws, the palette marks it, says what it waits for and
+  offers Finish, Undo point and Cancel; Finish is enabled by the rule finishing
+  refuses by, now one function for both. Closing the palette gives the drawing
+  up. Snap to grid, in View and in the palette, is a session setting that does
+  what Shift does everywhere Shift snaps, and Shift inverts it. Undo and Redo
+  cancel a gesture under way from the buttons as from the shortcuts. A double
+  click while drawing stays with the drawing, and so does the second click of
+  one whose first click finished it.
+- **Tests.** `finishing_takes_what_the_finish_button_offers` (every tool, zero
+  to five points), `closing_the_draw_palette_gives_the_drawing_up`,
+  `a_double_click_while_drawing_stays_with_the_drawing` and
+  `shift_inverts_the_snap_setting`, the last two driving the viewport through
+  egui input; each of the two double-click guards fails that test alone when
+  taken out. The undo test now presses the buttons too.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
