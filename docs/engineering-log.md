@@ -14903,3 +14903,27 @@ nothing stepping, and nothing in the console.
   follow once they have run on `main`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The browser build's cache keeps its std
+
+- **Measured on `main`.** Cold run (36315285364) 10m41 end to end against 27
+  minutes before: "Check and test" 10m26 (Clippy 63 s, test build 344 s,
+  tests 183 s), "Browser bundle" 9m29 (build 541 s). Saved caches: native
+  995 MiB, browser 472 MiB. Warm run (36315900671): "Check and test" 9m03
+  (restore 15 s, Clippy 28 s, test build 161 s, compiling only
+  `funfern-core` and `funfern-app`; the tests took 312 s, runner variance),
+  but "Browser bundle" 9m12 (build 527 s).
+- **Cause.** The warm browser build recompiled 235 of its 276 crates,
+  starting with `core` and `alloc`. `-Zbuild-std` compiles std from the
+  toolchain's `rust-src` as path crates, which cargo checks by modification
+  time, and the job reinstalls the nightly each run, so those sources are
+  always newer than the cached std; everything above std follows. Registry
+  crates are not checked by time, which is why the native cache works.
+- **Fix.** After the install, the job dates every file in `rust-src` to
+  2000-01-01. The cache key names the exact nightly, so under one key those
+  sources never change, only their times did. Caching the toolchain instead
+  would have added several hundred MB per entry. The existing browser cache
+  still matches, so the next run on `main` is the warm measurement.
+- **Checked:** actionlint 1.7.12 passes.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

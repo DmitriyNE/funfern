@@ -115,6 +115,15 @@ jobs:
             --target wasm32-unknown-unknown \
             --no-self-update
 
+      # -Zbuild-std compiles std from these sources as path crates, which cargo
+      # checks by modification time. A fresh install dates them now, so the
+      # cached std would rebuild, and with it every crate above it. The cache
+      # key names the exact toolchain, so their contents never change under it.
+      - name: Pin the std sources' timestamps
+        run: |
+          find "$(rustc +"$WEB_RUST_VERSION" --print sysroot)/lib/rustlib/src/rust" \
+            -exec touch -h -d '2000-01-01T00:00:00Z' {} +
+
       - name: Install Trunk
         working-directory: /tmp
         env:
