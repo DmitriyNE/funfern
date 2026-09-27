@@ -1288,11 +1288,53 @@ impl Playground {
                 .iter()
                 .map(|p| self.screen(*p, r))
                 .collect::<Vec<_>>();
-            for p in &points {
-                painter.circle_filled(*p, 4.0, GOLD);
-            }
+            let faint = GOLD.gamma_multiply(0.55);
             if points.len() > 1 {
-                painter.add(egui::Shape::line(points.clone(), Stroke::new(1.5, GOLD)));
+                painter.add(egui::Shape::line(points.clone(), Stroke::new(1.0, GOLD)));
+            }
+            if draw.tool.closes_on_first() && points.len() > 2 {
+                painter.line_segment(
+                    [points[points.len() - 1], points[0]],
+                    Stroke::new(1.0, faint),
+                );
+            }
+            // The curve Finish would make now, from the points placed so far:
+            // with no pointer on a touchscreen, it is still what a tap commits.
+            if let Ok(curve) = draw.curve() {
+                let options = SamplingOptions {
+                    tolerance: 0.6 / self.scale,
+                    ..SamplingOptions::default()
+                };
+                let (samples, closed) = match &curve {
+                    CurveSpline::Closed(spline) => (sample(spline, options), true),
+                    CurveSpline::Open(spline) => (sample_open(spline, options), false),
+                };
+                if let Ok(samples) = samples {
+                    let line = samples
+                        .iter()
+                        .map(|sample| self.screen(sample.point, r))
+                        .collect::<Vec<_>>();
+                    let stroke = Stroke::new(2.0, GOLD);
+                    painter.add(if closed {
+                        egui::Shape::closed_line(line, stroke)
+                    } else {
+                        egui::Shape::line(line, stroke)
+                    });
+                }
+            }
+            for (index, p) in points.iter().enumerate() {
+                let first = index == 0 && draw.tool.closes_on_first();
+                if draw.tool.places_vertices() {
+                    let size = if first { 9.0 } else { 7.0 };
+                    painter.rect_filled(
+                        Rect::from_center_size(*p, egui::vec2(size, size)),
+                        1.0,
+                        GOLD,
+                    );
+                } else {
+                    let radius = if first { 7.0 } else { 4.0 };
+                    painter.circle_stroke(*p, radius, Stroke::new(1.5, GOLD));
+                }
             }
             if let (Some(last), Some(pointer)) = (points.last(), painter.ctx().pointer_hover_pos())
             {
@@ -1310,10 +1352,17 @@ impl Playground {
                             pointer
                         }
                     });
-                painter.line_segment(
-                    [*last, target],
-                    Stroke::new(1.2, Color32::from_rgba_unmultiplied(248, 196, 112, 180)),
-                );
+                let rubber = Stroke::new(1.2, Color32::from_rgba_unmultiplied(248, 196, 112, 180));
+                if draw.tool == DrawTool::Rectangle {
+                    painter.rect_stroke(
+                        Rect::from_two_pos(*last, target),
+                        0.0,
+                        rubber,
+                        egui::StrokeKind::Inside,
+                    );
+                } else {
+                    painter.line_segment([*last, target], rubber);
+                }
             }
         }
         if let Some(pointer) = painter.ctx().pointer_hover_pos() {

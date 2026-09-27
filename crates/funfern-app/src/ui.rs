@@ -313,6 +313,18 @@ impl DrawTool {
         }
     }
 
+    /// Whether the points placed are vertices the curve passes through, drawn
+    /// as squares, rather than controls it is drawn toward, drawn as rings.
+    fn places_vertices(self) -> bool {
+        matches!(self, Self::Rectangle | Self::Polygon | Self::Polyline)
+    }
+
+    /// Whether tapping the first point again closes the loop, so that point
+    /// is drawn larger.
+    fn closes_on_first(self) -> bool {
+        matches!(self, Self::Polygon | Self::ClosedSpline)
+    }
+
     /// What the tool is waiting for, said in the Draw palette while it draws.
     fn prompt(self) -> &'static str {
         match self {

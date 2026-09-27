@@ -22,7 +22,8 @@ plain `trunk` builds the cooperative static-host variant.
 - [ ] Draw offers Closed curve with Circle, Rectangle, Polygon, and Spline under a
   Subdomain or Hole purpose, and Open curve with Polyline and Spline under a
   Separator or Baffle purpose. Exercise two-corner Rectangle, vertex-based Polygon
-  with Enter and first-vertex closure, and the four-control Spline preview. Finish
+  with Enter and first-vertex closure, the Rectangle rubber band, and the live
+  Spline preview from two controls for a baffle and four for a loop. Finish
   an open Spline at exactly two controls and verify an exact straight baffle;
   verify that three controls make one arc through the ends and four or more
   retain the freeform spline behavior. Check Finish, Enter, Backspace, Escape,

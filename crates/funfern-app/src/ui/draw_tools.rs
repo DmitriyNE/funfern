@@ -14,6 +14,56 @@ use std::collections::BTreeSet;
 
 use super::*;
 
+impl DrawGesture {
+    /// The curve the points placed so far make: what Finish commits and what
+    /// the overlay previews, built once so that what is drawn is what is
+    /// committed.
+    pub(super) fn curve(&self) -> Result<CurveSpline, String> {
+        let points = &self.points;
+        if !self.tool.finishes_with(points.len()) {
+            return Err("Add enough points to finish this curve".into());
+        }
+        match self.tool {
+            DrawTool::Rectangle => {
+                let [a, b] = [points[0], points[1]];
+                PeriodicCubicSpline::polygon(vec![
+                    Point2::new(a.x, a.y),
+                    Point2::new(b.x, a.y),
+                    Point2::new(b.x, b.y),
+                    Point2::new(a.x, b.y),
+                ])
+                .map(CurveSpline::Closed)
+            }
+            DrawTool::Polygon => {
+                PeriodicCubicSpline::polygon(points.clone()).map(CurveSpline::Closed)
+            }
+            DrawTool::ClosedSpline => {
+                PeriodicCubicSpline::uniform(points.clone()).map(CurveSpline::Closed)
+            }
+            DrawTool::Polyline => OpenCubicSpline::polyline(points.clone()).map(CurveSpline::Open),
+            DrawTool::OpenSpline if points.len() == 2 => {
+                OpenCubicSpline::polyline(points.clone()).map(CurveSpline::Open)
+            }
+            // Three points are one arc through the two ends, drawn toward the
+            // middle one as the spline draws toward every inner control: the
+            // quadratic they define, raised exactly to the cubic a curve is.
+            DrawTool::OpenSpline if points.len() == 3 => {
+                let [start, middle, end] = [points[0], points[1], points[2]];
+                OpenCubicSpline::uniform(vec![
+                    start,
+                    start.lerp(middle, 2.0 / 3.0),
+                    end.lerp(middle, 2.0 / 3.0),
+                    end,
+                ])
+                .map(CurveSpline::Open)
+            }
+            DrawTool::OpenSpline => OpenCubicSpline::uniform(points.clone()).map(CurveSpline::Open),
+            DrawTool::Circle => return Err("A circle is placed with one click".into()),
+        }
+        .map_err(|error| error.to_string())
+    }
+}
+
 impl Playground {
     pub(super) fn draw_click(
         &mut self,
@@ -89,56 +139,10 @@ impl Playground {
         let Some(gesture) = self.draw.take() else {
             return;
         };
-        let result: Result<CurveId, String> = match gesture.tool {
-            _ if !gesture.tool.finishes_with(gesture.points.len()) => {
-                Err("Add enough points to finish this curve".into())
-            }
-            DrawTool::Rectangle => {
-                let a = gesture.points[0];
-                let b = gesture.points[1];
-                let points = vec![
-                    Point2::new(a.x, a.y),
-                    Point2::new(b.x, a.y),
-                    Point2::new(b.x, b.y),
-                    Point2::new(a.x, b.y),
-                ];
-                PeriodicCubicSpline::polygon(points)
-                    .map_err(|e| e.to_string())
-                    .and_then(|s| self.create_closed(s))
-            }
-            DrawTool::Polygon => PeriodicCubicSpline::polygon(gesture.points.clone())
-                .map_err(|e| e.to_string())
-                .and_then(|s| self.create_closed(s)),
-            DrawTool::ClosedSpline => PeriodicCubicSpline::uniform(gesture.points.clone())
-                .map_err(|e| e.to_string())
-                .and_then(|s| self.create_closed(s)),
-            DrawTool::Polyline => OpenCubicSpline::polyline(gesture.points.clone())
-                .map_err(|e| e.to_string())
-                .and_then(|s| self.create_open(s, &gesture)),
-            DrawTool::OpenSpline if gesture.points.len() == 2 => {
-                OpenCubicSpline::polyline(gesture.points.clone())
-                    .map_err(|e| e.to_string())
-                    .and_then(|s| self.create_open(s, &gesture))
-            }
-            // Three points are one arc through the two ends, drawn toward the
-            // middle one as the spline draws toward every inner control: the
-            // quadratic they define, raised exactly to the cubic a curve is.
-            DrawTool::OpenSpline if gesture.points.len() == 3 => {
-                let [start, middle, end] = [0, 1, 2].map(|index| gesture.points[index]);
-                OpenCubicSpline::uniform(vec![
-                    start,
-                    start.lerp(middle, 2.0 / 3.0),
-                    end.lerp(middle, 2.0 / 3.0),
-                    end,
-                ])
-                .map_err(|e| e.to_string())
-                .and_then(|s| self.create_open(s, &gesture))
-            }
-            DrawTool::OpenSpline => OpenCubicSpline::uniform(gesture.points.clone())
-                .map_err(|e| e.to_string())
-                .and_then(|s| self.create_open(s, &gesture)),
-            DrawTool::Circle => Err("A circle is placed with one click".into()),
-        };
+        let result = gesture.curve().and_then(|spline| match spline {
+            CurveSpline::Closed(spline) => self.create_closed(spline),
+            CurveSpline::Open(spline) => self.create_open(spline, &gesture),
+        });
         match result {
             Ok(curve) => {
                 self.select_curve(curve);
@@ -823,10 +827,12 @@ mod tests {
         ));
     }
 
-    /// What Finish offers is what finishing takes: the button is enabled by
-    /// the rule `finish_draw` refuses by, for every tool and count.
+    /// What Finish offers is what finishing takes, and what the overlay
+    /// previews is what it commits: the button is enabled by the rule
+    /// `finish_draw` refuses by, a preview exists exactly then, and the curve
+    /// committed is the one previewed, for every tool and count.
     #[test]
-    fn finishing_takes_what_the_finish_button_offers() {
+    fn finishing_takes_what_the_finish_button_offers_and_commits_the_preview() {
         for tool in [
             DrawTool::Circle,
             DrawTool::Rectangle,
@@ -846,11 +852,18 @@ mod tests {
                         Point2::new(0.4 + 0.3 * angle.cos(), 0.4 + 0.3 * angle.sin())
                     })
                     .collect::<Vec<_>>();
-                state.draw = Some(DrawGesture {
+                let gesture = DrawGesture {
                     tool,
                     attachments: vec![None; count],
                     points,
-                });
+                };
+                let preview = gesture.curve();
+                assert_eq!(
+                    preview.is_ok(),
+                    tool.finishes_with(count),
+                    "{tool:?} {count}"
+                );
+                state.draw = Some(gesture);
                 state.finish_draw();
                 assert_eq!(
                     state.draw.is_none(),
@@ -858,6 +871,9 @@ mod tests {
                     "{tool:?} with {count}: {}",
                     state.message
                 );
+                if let Ok(preview) = preview {
+                    assert_eq!(last_curve(&state).spline, preview, "{tool:?} {count}");
+                }
             }
         }
     }

@@ -15425,3 +15425,28 @@ nothing stepping, and nothing in the console.
   top and bottom keeping their x and its bottom end following the bottom.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — The drawing overlay previews the curve Finish would make
+
+- **Defect** (found against the user guide). The guide promised a live curve
+  preview once a spline had four controls, and the browser checklist said the
+  overlay tells vertices from control points. Neither survived the switch to
+  the unified topology (eddad77): the old overlay drew the sampled spline, a
+  rubber-band rectangle, a faint closing segment and squares for vertices
+  against rings for controls, and the new one drew gold dots joined by a
+  line, so a spline's shape was a surprise until it was committed.
+- **Fix.** The curve the placed points make is built by one function, which
+  Finish commits and the overlay draws, sampled to the screen, as soon as
+  Finish is enabled: from two controls for an open spline (a line), three (the
+  arc) and four, four for a loop, and three vertices for a polygon. It uses
+  the points placed, not the pointer, so a touchscreen sees what a tap on
+  Finish commits. Vertices are squares and controls rings, the first larger
+  where clicking it closes the loop; a loop's control polygon closes faintly,
+  and a rectangle shows its rubber band after the first corner.
+- **Tests.** `finishing_takes_what_the_finish_button_offers_and_commits_the_preview`
+  now checks, for every tool and zero to five points, that a preview exists
+  exactly when Finish is enabled and that the committed curve is the one
+  previewed. Checked on a local web build with the mouse: open spline at
+  three and four controls, closed spline at four, rectangle and polygon.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
