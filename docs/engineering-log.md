@@ -14764,3 +14764,30 @@ vertex's first copy in the polygon, whatever wedge it ran into.
   note says the slab meshes, and that its depth series has not been run.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The examples window is as narrow as its grid
+
+The user saw the gallery's scroll bar in the middle of the window on a phone.
+
+- **Reproduced** headlessly, by laying the gallery out at a screen's width
+  and reading where its scroll bar is painted: at 360 and 390 the window
+  was 340 wide (content to x = 333) and the bar at x = 249; at 600 and 1400
+  the bar was at the window's content edge.
+- **Cause.** A window that is not resizable starts at egui's default width,
+  340, and only ever grows to its content. Below about 408 the gallery has
+  two columns, 242 wide, so the window kept its default width, and the
+  scroll area, which shrinks to its tiles, drew its bar at the tiles' right
+  edge. For the same reason a window a wider screen had widened never
+  narrowed again, as after turning a phone upright.
+- **Fix.** The window's width is capped each frame at the grid's width plus
+  the window frame's margins, with that frame passed to the window, so the
+  grid sets the window's size, as the code already intended. At 360 the
+  window is 256 wide and the bar at its content edge, x = 249; wider screens
+  are unchanged. The intro line wraps on a phone.
+- Test: `the_gallery_window_is_as_wide_as_its_grid`, screens from 1600 down
+  to 320 and back up every 8, on one context: the window is the grid's width
+  plus the margins at each and stays on the screen. Without the cap it fails
+  at the first narrowing, 760, where the window stays 714 wide around a grid
+  of 596.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

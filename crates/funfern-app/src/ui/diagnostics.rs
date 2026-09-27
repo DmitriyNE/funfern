@@ -230,11 +230,18 @@ impl Playground {
             egui::Rect::from_x_y_ranges(screen.x_range(), self.viewport_rect.y_range());
         let columns = gallery_columns(screen.width() - 48.0).min(GALLERY_COLUMNS);
         let height = (between_bars.height() - 100.0).clamp(200.0, 620.0);
+        // A window that is not resizable only ever grows, from egui's default
+        // width up: narrower than that, or than a wider screen left it, a grid
+        // would sit in blank space with its scroll bar beside the tiles, in
+        // the middle of the window.
+        let frame = egui::Frame::window(&ctx.global_style());
         egui::Window::new("Examples")
             .id(egui::Id::new("examples"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
+            .frame(frame)
+            .max_width(gallery_width(columns) + frame.total_margin().sum().x)
             .constrain_to(between_bars)
             .default_pos(between_bars.left_top() + egui::vec2(16.0, 8.0))
             .show(ctx, |ui| {
@@ -1516,6 +1523,50 @@ mod tests {
         assert_eq!(gallery_columns(full), GALLERY_COLUMNS);
         assert_eq!(gallery_columns(full - 1.0), GALLERY_COLUMNS - 1);
         assert_eq!(gallery_columns(0.0), 1);
+    }
+
+    /// The gallery's window is as wide as its grid, so the grid's scroll
+    /// bar is at the window's edge, on a phone held upright as on a desktop,
+    /// and after the screen narrows as well as widens.
+    #[test]
+    fn the_gallery_window_is_as_wide_as_its_grid() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let mut state = Playground {
+            examples_open: true,
+            ..Playground::default()
+        };
+        let margin = egui::Frame::window(&context.global_style())
+            .total_margin()
+            .sum()
+            .x;
+        let narrowing = (320..=1600).rev().step_by(8).collect::<Vec<_>>();
+        for &width in narrowing.iter().chain(narrowing.iter().rev()) {
+            let width = width as f32;
+            state.viewport_rect =
+                egui::Rect::from_min_max(egui::pos2(0.0, 40.0), egui::pos2(width, 820.0));
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 844.0),
+                    )),
+                    ..egui::RawInput::default()
+                };
+                let _ = context.run_ui(input, |ui| state.examples_window(ui.ctx()));
+            }
+            let window = context
+                .memory(|memory| memory.area_rect(egui::Id::new("examples")))
+                .unwrap();
+            let columns = gallery_columns(width - 48.0).min(GALLERY_COLUMNS);
+            assert!(
+                (window.width() - margin - gallery_width(columns)).abs() < 0.5,
+                "at {width} the window is {:.1} wide around a grid of {:.1}",
+                window.width() - margin,
+                gallery_width(columns)
+            );
+            assert!(window.right() <= width + 0.5, "{width}: {window:?}");
+        }
     }
 
     /// A pick closes the gallery, so the scene is not left behind it, and
