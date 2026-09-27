@@ -55,6 +55,17 @@ by hand, since no CI browser runs its WebGPU: with remote automation enabled in
 Safari's developer settings, `safaridriver` can drive it against a local
 `browser-tests/server.py --isolated` serving the built bundle.
 
+iOS Safari 26.2 has a defect no desktop browser shows: its main thread does not
+see a worker's growth of shared wasm memory in `memory.fill` and `memory.copy`,
+so the threaded bundle's first bulk copy into memory its workers grew traps inside
+the allocator, and the page freezes on its splash. `index.html` checks for exactly
+this on a two-page memory before the app starts its background pool, and where
+the check fails the app runs without the pool, its preparation and adaptation on
+the main thread. An iPhone is driven like desktop Safari, with
+`platformName: iOS` and Remote Automation on in its Safari settings; it reaches
+a local bundle only over HTTPS, through a tunnel such as
+`cloudflared tunnel --url`.
+
 GitHub Actions runs two jobs in parallel for pull requests and pushes to `main`:
 one checks formatting and Clippy, runs the workspace tests and makes the native
 release build, and the other makes the threaded WASM release bundle. Each caches
@@ -64,7 +75,9 @@ restores only an exact match, so a cache is one clean build and never grows; a
 changed lockfile or toolchain costs one cold run. Caches are saved from `main`
 only, after the build and before the tests run. The Playwright smoke test is
 a local hardware-backed check because GitHub-hosted runners do not expose a usable
-WebGPU adapter. It rejects browser rendering failures, checks that the canvas
+WebGPU adapter. It rejects browser rendering failures, requires the page's
+shared-memory check to pass so that the check cannot switch off a working pool,
+checks that the canvas
 continues to change, and verifies that its backing render target follows a viewport
 resize. A successful `main` run publishes the browser bundle to
 <https://dmitriyne.github.io/funfern/>. The Pages source is configured as

@@ -88,16 +88,44 @@ fn main() {
         // off-UI-thread placement it has natively; the two receiver loops do
         // not return to Rayon between jobs and therefore cannot lend it a slot.
         const BACKGROUND_WORKERS: usize = 3;
-        let worker_ready = wasm_bindgen_futures::JsFuture::from(
-            wasm_bindgen_rayon::init_thread_pool(BACKGROUND_WORKERS),
-        )
-        .await
-        .is_ok();
+        let worker_ready = if shared_memory_growth_visible().await {
+            wasm_bindgen_futures::JsFuture::from(wasm_bindgen_rayon::init_thread_pool(
+                BACKGROUND_WORKERS,
+            ))
+            .await
+            .is_ok()
+        } else {
+            web_sys::console::warn_1(
+                &"funfern: this browser's main thread does not see a worker's growth of shared \
+                  memory, so the background pool stays off and its work runs on the main thread"
+                    .into(),
+            );
+            false
+        };
         ui::set_browser_background_pool_ready(worker_ready);
         set_browser_preparation_worker_status(if worker_ready { "ready" } else { "unavailable" });
         set_browser_amr_worker_status(if worker_ready { "ready" } else { "unavailable" });
         run_app();
     });
+}
+
+/// The page's check of whether this browser's main thread sees a worker grow a
+/// shared memory (see `index.html`). Where it does not, the pool's workers
+/// growing the memory as they start make the main thread's next bulk copy trap
+/// inside the allocator. A page without the check starts the pool as before.
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+async fn shared_memory_growth_visible() -> bool {
+    let Some(window) = web_sys::window() else {
+        return true;
+    };
+    let check = js_sys::Reflect::get(&window, &"funfernSharedMemoryGrowthVisible".into())
+        .unwrap_or(wasm_bindgen::JsValue::UNDEFINED);
+    if check.is_undefined() {
+        return true;
+    }
+    wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&check))
+        .await
+        .is_ok_and(|visible| visible.as_bool() == Some(true))
 }
 
 #[cfg(all(target_arch = "wasm32", not(feature = "browser-threads")))]

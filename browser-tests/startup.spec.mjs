@@ -19,6 +19,11 @@ test("WebGPU app starts, advances, and resizes its render target", async ({ page
 
   await page.goto("/");
   expect(await page.evaluate(() => crossOriginIsolated)).toBe(expectPreparationWorker);
+  // The page's shared-memory growth check decides whether the pool starts; it
+  // must pass wherever the pool works, or the check alone would switch it off.
+  expect(await page.evaluate(() => window.funfernSharedMemoryGrowthVisible)).toBe(
+    expectPreparationWorker,
+  );
   if (expectPreparationWorker) {
     await expect
       .poll(() =>

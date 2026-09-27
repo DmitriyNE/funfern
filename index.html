@@ -91,6 +91,70 @@
       });
     })();
   </script>
+  <!--
+    Whether the main thread sees a worker's growth of a shared memory. iOS
+    Safari 26.2 does not for memory.fill and memory.copy: from WebKit bug 298743
+    (September 2025) each thread checks them against its own cached size, which
+    only that thread's growth refreshes, until the multi-memory work of bug
+    277743 (March 2026) went back to the memory's size. The background pool's
+    workers grow the memory as they start, and the main thread's next memcpy
+    into the new pages then traps inside the allocator, which is holding its
+    lock, so every later allocation spins and the page freezes on its splash.
+    This runs that sequence on a two-page memory; the app starts its pool only
+    where the check passes, and otherwise runs its work on the main thread.
+  -->
+  <script>
+    window.funfernSharedMemoryGrowthVisible = (function () {
+      if (!window.crossOriginIsolated || !window.Worker || typeof WebAssembly !== 'object') {
+        return Promise.resolve(false);
+      }
+      var worker, url, fill, module, memory;
+      try {
+        // (import "env" "memory" (memory 1 2 shared))
+        // (func (export "grow") (param i32) (result i32) local.get 0 memory.grow)
+        // (func (export "fill") (param i32 i32 i32) local.get 0 local.get 1 local.get 2 memory.fill)
+        module = new WebAssembly.Module(new Uint8Array([
+          0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+          0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x00, 0x02, 0x10, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x06, 0x6d, 0x65,
+          0x6d, 0x6f, 0x72, 0x79, 0x02, 0x03, 0x01, 0x02, 0x03, 0x03, 0x02, 0x00, 0x01, 0x07, 0x0f, 0x02,
+          0x04, 0x67, 0x72, 0x6f, 0x77, 0x00, 0x00, 0x04, 0x66, 0x69, 0x6c, 0x6c, 0x00, 0x01, 0x0a, 0x14,
+          0x02, 0x06, 0x00, 0x20, 0x00, 0x40, 0x00, 0x0b, 0x0b, 0x00, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02,
+          0xfc, 0x0b, 0x00, 0x0b,
+        ]));
+        memory = new WebAssembly.Memory({ initial: 1, maximum: 2, shared: true });
+        fill = new WebAssembly.Instance(module, { env: { memory: memory } }).exports.fill;
+        url = URL.createObjectURL(new Blob([
+          'onmessage = function (e) {' +
+          '  new WebAssembly.Instance(e.data.module, { env: { memory: e.data.memory } }).exports.grow(1);' +
+          '  postMessage(0);' +
+          '};',
+        ], { type: 'text/javascript' }));
+        worker = new Worker(url);
+      } catch (e) {
+        return Promise.resolve(false);
+      }
+      return new Promise(function (resolve) {
+        var settle = function (visible) {
+          clearTimeout(timer);
+          worker.terminate();
+          URL.revokeObjectURL(url);
+          resolve(visible);
+        };
+        // A worker that never answers could not run the pool either.
+        var timer = setTimeout(function () { settle(false); }, 5000);
+        worker.onerror = function () { settle(false); };
+        worker.onmessage = function () {
+          try {
+            fill(65536, 0, 65536);
+            settle(true);
+          } catch (e) {
+            settle(false);
+          }
+        };
+        worker.postMessage({ module: module, memory: memory });
+      });
+    })();
+  </script>
   <link data-trunk rel="copy-file" href="coi-serviceworker.js">
   <link data-trunk rel="copy-file" href="assets/logo.svg">
   <link data-trunk rel="rust" href="crates/funfern-app/Cargo.toml" data-bin="funfern-app">

@@ -14927,3 +14927,62 @@ nothing stepping, and nothing in the console.
 - **Checked:** actionlint 1.7.12 passes.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — iOS Safari starts without the background pool
+
+- **Symptom.** On an iPhone 13 with iOS 26.2 the live site stayed on its
+  splash for good, with the spinner turning. Driven through `safaridriver`
+  (`platformName: iOS`), the page loaded, was cross-origin isolated and had
+  WebGPU, started its three pool workers, and then its main thread never
+  answered again. Web Inspector could not pause it, and the splash's own
+  30-second failure timer never fired. It was not WebGPU (no WebGPU call had
+  been made), the download, or Bevy (it had not opened its window).
+- **Where.** A tracer injected ahead of the app's scripts showed the last call
+  into JavaScript, and log lines in wasm-bindgen-rayon's worker helper showed
+  `builder.build()` throwing `RuntimeError: Out of bounds memory access`. A
+  build with function names put the trap in rayon's `Registry::new` under
+  `Once::call_once` in `wbg_rayon_poolbuilder_build`, and markers written to a
+  static and read back from the shared memory put it between the deques and
+  the `Arc` of the registry: allocations and copies only. It happened with one
+  worker too, and in a 136 KB program that does nothing but
+  `init_thread_pool(1)`, so none of it is our code. The same `Registry::new`
+  with no workers behind it passed on the phone.
+- **Cause.** A few bytes of hand-written wasm pin it down. After a worker grows
+  a shared memory, the main thread's `memory.fill` and `memory.copy` over the
+  new pages trap, while `i32.load`, `i32.store` and atomics there work. The
+  main thread's `memory.size` still reports the old size; only a real growth by
+  that thread itself refreshes it (`memory.grow 0`, reading `memory.buffer`, and
+  a new instance do not). macOS Safari 26.3.1 passes all of it. In WebKit, bug
+  298743 (September 2025) moved bulk memory operations to a per-instance cached
+  size, which a grow on another thread leaves alone; the multi-memory work of
+  bug 277743 (March 2026) went back to the memory's own size. In the app each
+  worker's stack allocation grows the memory, `Registry::new`'s memcpy on the
+  main thread traps inside the allocator, the allocator's spin lock stays held,
+  and every later allocation spins: that is the freeze.
+- **Also measured, not the cause:** a wasm `memory.atomic.wait32` on the main
+  thread traps on both platforms, with the same "Out of bounds" message; waits
+  and wakes between the threads work in both directions, as do loads of memory
+  another thread grew, even inside a long-running call.
+- **Fix.** `index.html` runs that sequence on a two-page memory while the
+  bundle downloads (a worker grows it, the main thread fills the new page) and
+  resolves `funfernSharedMemoryGrowthVisible`. The app awaits it before
+  `init_thread_pool` and, where it fails, warns once in the console and starts
+  without the pool, through the fallbacks a failed pool start already had: the
+  phone ran the gallery that way at 60 fps before this change, with the pool
+  refused by hand. No other browser changes, and iOS gets the pool back by
+  itself once its WebKit passes the check. The Playwright startup test now
+  requires the check to pass in Chrome.
+- **Not done.** Threads on iOS as well would need the whole heap allocated up
+  front and an allocator over that fixed region, so that no thread grows the
+  memory once workers exist. No WebKit report is filed: trunk has the fix, and
+  a current iOS would show whether a release carries it.
+- **CI, measured on `main`** (run 36319206048, after the std timestamps fix):
+  the browser job recompiled only `funfern-core` and `funfern-app`, 6m21 (build
+  358 s against 527 s warm before the fix); the native job 6m27 (Clippy 20 s,
+  test build 117 s); about 6.5 minutes a run, against 27 before the caches.
+- **Checked:** Chrome, in the Playwright startup test (the check passes, the
+  pool reaches `active`); macOS Safari 26.3.1 through a tunnel (pool active, no
+  warning); the iPhone 13 on iOS 26.2 through the tunnel (the warning, both
+  workers `unavailable`, the gallery running at 60 fps with adaptation).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
