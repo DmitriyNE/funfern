@@ -17,7 +17,11 @@
 //!
 //! The fixture drives a travelling modulation on the mass row, which is the
 //! medium that used to take the efficiency index from 1.4 to 17.4 before the
-//! estimate moved onto the flux.
+//! estimate moved onto the flux. `TEMPORAL_AMR_LOSSY_WALLS=1` adds a
+//! complementary loss and absorbing walls, the two compositions whose terms
+//! the estimate reads from the direct state itself: the drift defect with the
+//! step's contraction of `b` taken out, and the wall residual from the
+//! solver's own flux against the impedance the step freezes.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,11 +37,12 @@ use funfern_core::{
     CanonicalForcing, CanonicalIndicatorSnapshot, CanonicalMaterialRuntimeState,
     CanonicalOutgoingHistoryTransferMap, CanonicalPrimaryTransferMap,
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferMap, CoefficientLaw, MeshAdaptationJob, MeshAdaptationOptions,
-    MeshAdaptationState, MeshSizeField, MeshingOptions, OuterBoundaryCondition, Point2,
-    QuadraticSolutionSnapshot, QuadraticTransferMap, QuadraticWaveOperator, ScalarField, Scene,
-    SolutionIndicatorJob, SolutionIndicatorOptions, SolutionIndicatorResult, TimeDrive, TriMesh,
-    canonical_temporal_indicator_supplement, mesh_scene,
+    CanonicalVectorTransferMap, CoefficientLaw, DampingLaw, LossChannel, MeshAdaptationJob,
+    MeshAdaptationOptions, MeshAdaptationState, MeshSizeField, MeshingOptions,
+    OuterBoundaryCondition, OuterBoundaryConditions, Point2, QuadraticSolutionSnapshot,
+    QuadraticTransferMap, QuadraticWaveOperator, RateLaw, ScalarField, Scene, SolutionIndicatorJob,
+    SolutionIndicatorOptions, SolutionIndicatorResult, TimeDrive, TriMesh,
+    canonical_temporal_indicator_supplement, canonical_temporal_primary_rate, mesh_scene,
 };
 
 const TOTAL_STEPS: u64 = 48;
@@ -125,7 +130,25 @@ struct Expected {
 }
 
 fn main() -> AppExit {
+    let lossy_walls = std::env::var("TEMPORAL_AMR_LOSSY_WALLS").is_ok_and(|value| value == "1");
+    let wall = if lossy_walls {
+        OuterBoundaryCondition::FirstOrderOutgoing
+    } else {
+        OuterBoundaryCondition::Reflecting
+    };
     let mut scene = Scene::initial();
+    if lossy_walls {
+        // The mechanical skin's complementary row carries the electric channel.
+        scene.materials[0].electric_loss = Some(LossChannel {
+            base_rate: ScalarField::constant(5.0),
+            law: DampingLaw {
+                rate: RateLaw::Constant,
+                drive: TimeDrive::None,
+            },
+        });
+    }
+    // The estimator is handed the walls the solver runs, as production's is.
+    scene.outer_boundaries = OuterBoundaryConditions::uniform(wall);
     scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
         depth: ScalarField::constant(0.22),
         frequency_hz: ScalarField::constant(0.9),
@@ -154,12 +177,8 @@ fn main() -> AppExit {
         .expect("temporal AMR mesh"),
     );
     let quadratic = Arc::new(
-        QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &fixed_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .expect("temporal AMR scalar operator"),
+        QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, wall)
+            .expect("temporal AMR scalar operator"),
     );
     let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1)
         .expect("temporal AMR operator");
@@ -250,12 +269,8 @@ fn main() -> AppExit {
         "the estimate has to actually move the mesh, or the transfer proves nothing"
     );
     let target_quadratic = Arc::new(
-        QuadraticWaveOperator::assemble_scene(
-            &target_mesh,
-            &fixed_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .expect("target scalar operator"),
+        QuadraticWaveOperator::assemble_scene(&target_mesh, &fixed_scene, wall)
+            .expect("target scalar operator"),
     );
     let target_operator =
         CanonicalTemporalWaveOperator::compile_scene(&target_mesh, &target_quadratic, &scene, 1)
@@ -505,14 +520,14 @@ fn estimate(
     let current = operator
         .primary_field_at(primary_flux, time, runtime)
         .ok()?;
-    let earlier = operator
-        .primary_field_at(previous_primary_flux, time - time_step, runtime)
-        .ok()?;
-    let velocity = current
-        .iter()
-        .zip(&earlier)
-        .map(|(now, before)| (now - before) / time_step)
-        .collect::<Vec<_>>();
+    // Production's rate, the balance form at the snapshot's endpoint.
+    let velocity = canonical_temporal_primary_rate(
+        operator,
+        &CanonicalForcing::none(operator.base()),
+        &snapshot,
+        runtime,
+    )
+    .ok()?;
     let count = quadratic.degrees_of_freedom();
     let scalar_snapshot = QuadraticSolutionSnapshot {
         mesh_revision: mesh.mesh_revision,

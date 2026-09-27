@@ -4251,6 +4251,126 @@ mod tests {
         }
     }
 
+    /// Every gallery scene whose medium carries a law is estimated the way the
+    /// application's adaptation worker estimates it: production's rate, the
+    /// temporal supplement, the scene's own walls and the instantaneous
+    /// materials. Eight of them - behind absorbing walls, with a prescribed
+    /// side, or with loss - used to be refused.
+    #[test]
+    fn every_driven_gallery_scene_is_estimated() {
+        let mut estimated = Vec::new();
+        for example in catalog() {
+            let prepared = prepare(&example.document, 0.16);
+            let Some(operator) = prepared.canonical_temporal_operator.clone() else {
+                continue;
+            };
+            let forcing = prepared.canonical_forcing.clone();
+            let dt = prepared.recommended_time_step();
+            let mut state = CanonicalTemporalWaveState::zero(&operator, dt)
+                .unwrap()
+                .pinned(&operator, &forcing)
+                .unwrap();
+            let auxiliary_of = |state: &CanonicalTemporalWaveState| {
+                state
+                    .thin_gap_jump()
+                    .iter()
+                    .chain(state.outgoing_pole_currents())
+                    .copied()
+                    .collect::<Vec<_>>()
+            };
+            let mut previous = state.clone();
+            for _ in 0..40 {
+                previous = state.clone();
+                state.step_with_forcing(&operator, &forcing).unwrap();
+            }
+            let snapshot = funfern_core::CanonicalIndicatorSnapshot {
+                mesh_revision: prepared.mesh.mesh_revision,
+                primary_flux: state.primary_flux().to_vec(),
+                previous_primary_flux: previous.primary_flux().to_vec(),
+                complementary_flux: state.complementary_flux().to_vec(),
+                previous_complementary_flux: previous.complementary_flux().to_vec(),
+                auxiliary: auxiliary_of(&state),
+                previous_auxiliary: auxiliary_of(&previous),
+                integrated_field: state.integrated_field().to_vec(),
+                previous_integrated_field: previous.integrated_field().to_vec(),
+                time: state.time(),
+                time_step: dt,
+            };
+            let supplement = funfern_core::canonical_temporal_indicator_supplement(
+                &prepared.mesh,
+                &operator,
+                &forcing,
+                &snapshot,
+                state.runtime(),
+                0.0,
+            )
+            .unwrap_or_else(|error| panic!("{}: supplement: {error}", example.name));
+            let velocity = funfern_core::canonical_temporal_primary_rate(
+                &operator,
+                &forcing,
+                &snapshot,
+                state.runtime(),
+            )
+            .unwrap_or_else(|error| panic!("{}: rate: {error}", example.name));
+            let displacement = operator
+                .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                .unwrap();
+            let count = displacement.len();
+            let defaults = crate::document::AdaptationSettings::default();
+            let mut job = SolutionIndicatorJob::new_topology(
+                prepared.mesh.clone(),
+                prepared.operator.clone(),
+                &prepared.bundle.plan,
+                prepared.bundle.model(),
+                QuadraticSolutionSnapshot {
+                    mesh_revision: prepared.mesh.mesh_revision,
+                    displacement,
+                    velocity,
+                    acceleration: vec![0.0; count],
+                    auxiliary: vec![0.0; count],
+                    volume_acceleration: vec![0.0; count],
+                    time: state.time(),
+                    time_step: dt,
+                },
+                SolutionIndicatorOptions {
+                    minimum_edge_length: defaults.minimum_edge,
+                    maximum_edge_length: defaults.maximum_edge,
+                    relative_tolerance: defaults.accuracy_percent / 100.0,
+                    elements_per_wavelength: defaults.elements_per_wavelength,
+                    ..Default::default()
+                },
+            )
+            .with_canonical_supplement(supplement)
+            .with_instantaneous_materials(state.runtime().clone());
+            let report = loop {
+                if let Some(result) = job.advance(1 << 16) {
+                    break result
+                        .unwrap_or_else(|error| panic!("{}: estimate: {error}", example.name))
+                        .report;
+                }
+            };
+            assert!(
+                report.global_indicator.is_finite(),
+                "{}: the estimate is {}",
+                example.name,
+                report.global_indicator
+            );
+            estimated.push(example.name);
+        }
+        for name in [
+            "Parametric pump",
+            "Time crystal",
+            "Travelling modulation",
+            "Kerr slab",
+            "Josephson line",
+            "Symmetry breaking",
+            "Pinned domain wall",
+            "Self-sustained emitter",
+        ] {
+            assert!(estimated.contains(&name), "{name} was not estimated");
+        }
+    }
+
     /// The Kerr gallery scene's field is strong enough in the slab to make
     /// odd harmonics of the source, and the size rule asks for them there;
     /// the same slab lit ten times more weakly makes none worth resolving.

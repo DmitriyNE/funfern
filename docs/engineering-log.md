@@ -15162,3 +15162,25 @@ nothing stepping, and nothing in the console.
   which sampling does not read and a van der Pol one it refuses.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — Driven estimates on the device, and on the gallery
+
+- **Device** (`canonical_gpu_temporal_amr`, M1 Max, Metal). The gate was
+  missing what the calibration sweep was: its estimate was handed the scene's
+  default walls and an endpoint-difference rate. It now gets the walls the
+  solver runs and production's rate, and `TEMPORAL_AMR_LOSSY_WALLS=1` adds a
+  complementary loss of 5/s and absorbing walls. Both pass the gate's bounds
+  before and after a refinement transfer: reflecting, the global indicator
+  within 4.7e-8 of the f64 oracle and the wall residual within 3.4e-7, the
+  estimate falling 8.59e-2 to 4.46e-2; lossy and absorbing, 5.0e-8 and 6.2e-7,
+  falling 6.77e-2 to 3.02e-2.
+- **Gallery.** `every_driven_gallery_scene_is_estimated` prepares every scene
+  whose medium carries a law as the application does, steps it on the CPU
+  reference and estimates it along the adaptation worker's path: production's
+  rate, the temporal supplement, the scene's walls and the instantaneous
+  materials. All fourteen are estimated, among them the eight that were
+  refused: Parametric pump, Time crystal, Travelling modulation, Kerr slab,
+  Josephson line, Symmetry breaking, Pinned domain wall and Self-sustained
+  emitter.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -15,6 +15,7 @@ cargo run -p funfern-core --release --example canonical_temporal_timing
 cargo run -p funfern-app --release --locked --example canonical_gpu_filter_boundary
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_work
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_amr
+TEMPORAL_AMR_LOSSY_WALLS=1 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_amr
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_forced
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --fixed
@@ -193,7 +194,9 @@ transfer as before one. In between it measures the transfer on its own, host
 and device applying the same maps to the same input, and requires that the
 device is performing the *conserving* primary transfer: the free one misses by
 `2e-4`, the conserving one lands at `6e-8`, and the complementary transfer is
-exact.
+exact. The estimate is handed the walls the solver runs and production's rate.
+`TEMPORAL_AMR_LOSSY_WALLS=1` adds a complementary loss and absorbing walls, the
+two compositions whose terms the estimate reads from the direct state itself.
 The field view tessellates every quadratic parent triangle into six display
 triangles around its shared edge-midpoint and element bubble nodes.
 
