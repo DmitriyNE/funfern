@@ -207,6 +207,13 @@ fn reflecting() -> OuterBoundaryConditions {
 /// `ω` the unit medium's `π`: a box mode varies along that side and a uniform
 /// signal would fight it. A Neumann side starts from the box mode, whose normal
 /// derivative is zero, against data that starts at zero.
+///
+/// First-order walls impose `σ·n = −Z u` on the flux the direct state holds at
+/// every instant, and a box mode released from rest has no flux and a field on
+/// the walls, so those rows start from a `sin⁴` bump that meets the walls with
+/// no field, slope or curvature. Its wave barely reaches them in the run, so a
+/// channel with one absorbing end starts the bump 0.4 from that wall instead,
+/// and half of it arrives there.
 fn boundary_rows() -> Vec<(&'static str, Scene, bool, OuterBoundaryConditions)> {
     let mut prescribed = reflecting();
     prescribed.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Dirichlet {
@@ -216,6 +223,9 @@ fn boundary_rows() -> Vec<(&'static str, Scene, bool, OuterBoundaryConditions)> 
     neumann.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Neumann {
         signal: TimeSignal::harmonic(0.0, 0.1, 0.7, 0.0),
     };
+    let absorbing = OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
+    let mut absorbing_end = reflecting();
+    absorbing_end.sides[OuterSide::Right.index()] = OuterBoundaryCondition::FirstOrderOutgoing;
     vec![
         (
             "static path, prescribed side",
@@ -236,6 +246,62 @@ fn boundary_rows() -> Vec<(&'static str, Scene, bool, OuterBoundaryConditions)> 
             driven(true, None),
             false,
             neumann,
+        ),
+        (
+            "static path, first-order walls",
+            inert_scene(),
+            true,
+            absorbing,
+        ),
+        ("first-order walls, inert", inert_scene(), false, absorbing),
+        (
+            "first-order walls, mass pumped",
+            driven(true, None),
+            false,
+            absorbing,
+        ),
+        (
+            "first-order walls, mass travelling k=3",
+            driven(true, Some(3.0)),
+            false,
+            absorbing,
+        ),
+        (
+            "first-order walls, stiffness pumped",
+            driven(false, None),
+            false,
+            absorbing,
+        ),
+        (
+            "first-order walls, mass Kerr",
+            nonlinear(Some(kerr(30.0)), None),
+            false,
+            absorbing,
+        ),
+        (
+            "static path, absorbing end",
+            inert_scene(),
+            true,
+            absorbing_end,
+        ),
+        ("absorbing end, inert", inert_scene(), false, absorbing_end),
+        (
+            "absorbing end, mass pumped",
+            driven(true, None),
+            false,
+            absorbing_end,
+        ),
+        (
+            "absorbing end, stiffness pumped",
+            driven(false, None),
+            false,
+            absorbing_end,
+        ),
+        (
+            "absorbing end, mass travelling k=3",
+            driven(true, Some(3.0)),
+            false,
+            absorbing_end,
         ),
     ]
 }
@@ -447,6 +513,11 @@ fn initial(
         walls.get(OuterSide::Left),
         OuterBoundaryCondition::Dirichlet { .. }
     );
+    let absorbing =
+        |side: &OuterBoundaryCondition| matches!(side, OuterBoundaryCondition::FirstOrderOutgoing);
+    let absorbing_end = walls.sides.iter().filter(|side| absorbing(side)).count() == 1
+        && absorbing(&walls.get(OuterSide::Right));
+    let absorbing = walls.sides.iter().any(absorbing);
     // Against a prescribed side the start has to be the field the side
     // holds, so its flux is taken at the mass in force then; the authored
     // mass would start a pumped medium off its own boundary data.
@@ -463,6 +534,20 @@ fn initial(
         .map(|(mass, point)| {
             if prescribed {
                 return mass * 0.08 * (2.0 * half * (point.x + 1.0)).cos();
+            }
+            if absorbing_end {
+                // `sin⁴` over [0.2, 1] in x, zero to its left, which meets
+                // both the absorbing end and the reflecting sides smoothly.
+                let across = if point.x > 0.2 {
+                    (std::f64::consts::PI * (point.x - 0.2) / 0.8).sin().powi(4)
+                } else {
+                    0.0
+                };
+                return mass * 0.08 * across * (half * (point.y + 1.0)).sin().powi(4);
+            }
+            if absorbing {
+                let bump = (half * (point.x + 1.0)).sin() * (half * (point.y + 1.0)).sin();
+                return mass * 0.08 * bump.powi(4);
             }
             mass * 0.08
                 * (MODE_X * half * (point.x + 1.0)).cos()

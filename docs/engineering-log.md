@@ -15084,3 +15084,42 @@ nothing stepping, and nothing in the console.
   prescribed side and 1.58, 1.29, 1.38 on reflecting walls.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The driven estimate admits absorbing walls
+
+- **What changed.** A driven generation behind first-order walls is estimated
+  instead of refused. The wall's `−d u` sits in both kicks alike, so no step
+  defect charges it; the wall residual, read from the solver's own flux since
+  the previous entry, measures `σ·n + Z₀ u` at the impedance the step freezes.
+  Parametric pump, Time crystal, Travelling modulation and Kerr slab were
+  refused only for their absorbing walls. Loss is now the one refusal left.
+- **Why the frozen impedance.** The step assembles its wall damping from the
+  authored medium and keeps it while a drive moves the medium, a documented
+  approximation. The residual has to measure the equation the step solves, or
+  it charges that approximation to the mesh. Measured on a channel with one
+  absorbing end that a pulse reaches during the run: with the frozen impedance
+  the index reads 0.81 to 0.86 with spreads 1.02 to 1.04 across inert, both
+  pumps and a travelling mass; with the instantaneous one it climbs, mass
+  pumped 0.90, 1.00, 1.18 and travelling 0.80, 0.91, 1.05, because its wall
+  term stalls (2.2e-6, 5.7e-7, 2.8e-7 against 8.5e-7, 7.6e-8, 1.5e-8).
+- **Measured, walls everywhere** (a `sin⁴` bump, which meets an absorbing wall
+  with no field, slope or curvature; a box mode released from rest has no
+  flux and a field there): inert 1.56, 1.63, 1.42; mass pumped 1.60, 1.69,
+  1.48; travelling mass 1.62, 1.76, 1.51; stiffness pumped 1.56, 1.66, 1.45;
+  mass Kerr 1.62, 1.75, 1.50; spreads 1.14 to 1.17.
+- **Found, not fixed: the two estimators agree only where they were
+  calibrated.** Both indices stay constant under refinement on every row, so
+  each estimate converges with the error, but their level moves with the
+  problem in opposite directions. On inert media: 1.38 each on the smooth box
+  mode, where the constant was fitted; with absorbing walls around a centred
+  bump the static estimator reads 3.3 to 3.6 and the driven one 1.4 to 1.6;
+  on the absorbing end, a steeper pulse, 5.6 to 5.7 against 0.82 to 0.84; a
+  Neumann side 3.3 to 3.9 against 1.3 to 1.5 under a pump. The interior jump
+  dominates the difference: on the absorbing end the scalar jump is 9.5e-4 and
+  the solver-flux jump 4.3e-6, a ratio of 220, against about 4 on the box. The
+  solver-flux terms measure the flux integrated in time, which reads a
+  component of frequency `ω` at about `1/ω²` of the scalar gradient terms, so
+  one constant cannot make one accuracy target one true accuracy across
+  content of different frequency. Not changed here.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

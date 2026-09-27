@@ -682,9 +682,11 @@ impl CanonicalTemporalAreaContribution {
 /// path's own, with the mass and force in force at the instant standing in for
 /// the authored ones. So is boundary data: a Neumann load is a flux sourced
 /// alike at both kicks, and a pinned node takes no part in the defects that
-/// measure the kick. Loss and a damped boundary are refused rather than
-/// reported with those terms missing, because each puts a term in the
-/// evolution the defect would otherwise charge to the mesh.
+/// measure the kick. So is an absorbing wall, whose residual the scalar job
+/// measures from the wall flux reported here, at the impedance the step
+/// freezes. Loss is refused rather than reported with its term missing,
+/// because it contracts `b` between the endpoints and the drift defect would
+/// charge that to the mesh.
 ///
 /// Gate O: an oscillator medium's store includes `Σ m₀ V(r)`, split over the
 /// elements each contribution belongs to, and the outgoing trace's force
@@ -703,7 +705,7 @@ pub fn canonical_temporal_indicator_supplement(
 ) -> Result<CanonicalIndicatorSupplement, WaveError> {
     if !operator.indicator_supplement_supported() {
         return Err(WaveError::Unsupported(
-            "no adaptive estimate for a driven medium carrying loss or a damped boundary",
+            "no adaptive estimate for a driven medium carrying loss",
         ));
     }
     let base = operator.base();
@@ -2202,14 +2204,16 @@ impl CanonicalTemporalWaveOperator {
         // the instantaneous mass and force in place of the authored ones.
         // Boundary data is in: a Neumann load is a flux the kick sources the
         // same way at both of its stages, and a pinned node is left out of
-        // every defect that measures the kick, as on the fixed path. Loss and a
-        // damped boundary are not yet: each puts a term in the evolution that
-        // the defect would otherwise charge to the mesh.
+        // every defect that measures the kick, as on the fixed path. So is an
+        // absorbing wall: its `−d u` sits in both kicks alike, and the wall
+        // residual measures it at the impedance the step freezes. Loss is not
+        // yet: it contracts `b` between the endpoints, which the drift defect
+        // would otherwise charge to the mesh.
         // A field-dependent medium's estimator reads its nonlinear observables
         // and weighs every defect by the tangent maps at the snapshot.
         // An oscillator medium's restoring store and trace force are in the
         // estimate (Gate O); van der Pol is a loss channel, refused with loss.
-        let indicator_supplement_supported = undamped_boundary && !has_loss;
+        let indicator_supplement_supported = !has_loss;
         let short_wave = if has_active_loss {
             short_wave_viscosity(&base, quadratic, &primary, maximum_time_step)?
         } else {
