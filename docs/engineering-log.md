@@ -14873,3 +14873,33 @@ nothing stepping, and nothing in the console.
   with nothing said.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — CI keeps its compiled dependencies and runs in two jobs
+
+- A run took 27 minutes, and only the crate downloads were cached: Clippy
+  1m45, the release test build 9m14 and the test run about 5 minutes, the
+  threaded browser build 7m54 and wasm-bindgen with wasm-opt a minute, which
+  on `main` ran twice, once more for the Pages base path.
+- **Two jobs.** "Check and test" (formatting, Clippy, the release tests, the
+  native release build) and "Browser bundle" (the threaded bundle, and on
+  `main` the Pages artifact) run in parallel, and the deploy waits for both.
+  The bundle is built once, with the Pages base path on `main` and for the
+  site root elsewhere; the browser job needs no Linux packages.
+- **Caches.** Each job restores the registry and `target/` (the browser job
+  also Trunk's downloaded tools) under a key naming the toolchain and a hash
+  of `Cargo.lock` (for the bundle also the Trunk version, `scripts/trunk` and
+  `Trunk.toml`), and only on an exact match. With no fallback to an older
+  key, a saved cache is one clean build and does not grow across lockfile
+  changes, and a restored `target/` is no larger than a cold build's; the
+  cost is one cold run per lockfile or toolchain change. Superseded entries
+  are not read again and expire. Caches are saved from `main` only, on a
+  miss, after the build and before the tests, so a failing test still leaves
+  one. `CARGO_INCREMENTAL=0` keeps Clippy's incremental data out of them.
+- **Not Swatinem/rust-cache:** before saving it deletes every artifact not
+  named after a package in `cargo metadata`, which takes the `std`, `core`
+  and `alloc` the threaded build rebuilds with `-Zbuild-std`; the rebuilt
+  `std` then makes the whole wasm dependency tree stale on every run.
+- **Checked:** actionlint 1.7.12 passes. Timings of a cold and a warm run
+  follow once they have run on `main`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

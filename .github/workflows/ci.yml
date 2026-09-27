@@ -11,17 +11,25 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # A fresh checkout has nothing to reuse incrementally, and the data would
+  # only enlarge the build caches.
+  CARGO_INCREMENTAL: 0
   RUST_VERSION: 1.96.1
   WEB_RUST_VERSION: nightly-2026-05-28
   TRUNK_VERSION: 0.22.0-beta.5
 
+# Each job caches its compiled dependencies under a key naming everything that
+# decides them, and restores only an exact match: a saved cache is one clean
+# build and never grows, and a changed lockfile or toolchain costs one cold run.
+# Caches are saved from main alone, after the build and before the tests, so a
+# failing test does not leave the next run without them.
+
 jobs:
-  ci:
-    name: Check and build
+  native:
+    name: Check and test
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      pages: read
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -47,6 +55,58 @@ jobs:
             --no-self-update
           rustup default "$RUST_VERSION"
 
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@v6
+        with:
+          # The same paths as the save step below.
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build tests
+        # Release, as the local checks run them: the gallery's scene tests
+        # simulate seconds of a wave, which in a debug build took the step
+        # from 9 to over 45 minutes, and the optimized arithmetic is what
+        # ships.
+        run: cargo test --workspace --release --locked --no-run
+
+      - name: Build native release
+        run: cargo build --release -p funfern-app --locked
+
+      - name: Save build cache
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Run tests
+        run: cargo test --workspace --release --locked
+
+  web:
+    name: Browser bundle
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
       - name: Install threaded browser toolchain
         run: |
           rustup toolchain install "$WEB_RUST_VERSION" \
@@ -54,17 +114,6 @@ jobs:
             --component rust-src \
             --target wasm32-unknown-unknown \
             --no-self-update
-
-      - name: Cache Cargo downloads
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: cargo-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ env.WEB_RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ env.RUST_VERSION }}-
 
       - name: Install Trunk
         working-directory: /tmp
@@ -83,36 +132,45 @@ jobs:
           sudo install trunk /usr/local/bin/trunk
           trunk --version
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Run tests
-        # Release, as the local checks run them: the gallery's scene tests
-        # simulate seconds of a wave, which in a debug build took the step
-        # from 9 to over 45 minutes, and the optimized arithmetic is what
-        # ships.
-        run: cargo test --workspace --release --locked
-
-      - name: Build native release
-        run: cargo build --release -p funfern-app --locked
-
-      - name: Build browser release
-        run: scripts/trunk build --release --locked
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@v6
+        with:
+          # The same paths as the save step below. Trunk keeps the
+          # wasm-bindgen and wasm-opt it downloads in ~/.cache/trunk.
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.cache/trunk/
+            target/
+          key: web-${{ runner.os }}-${{ env.WEB_RUST_VERSION }}-${{ env.TRUNK_VERSION }}-${{ hashFiles('Cargo.lock', 'scripts/trunk', 'Trunk.toml') }}
 
       - name: Configure GitHub Pages
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         id: pages
         uses: actions/configure-pages@v6
 
-      - name: Build browser release for Pages
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      - name: Build browser release
         # Pages cannot send the cross-origin isolation headers the shared-memory
         # bundle needs, so the page installs coi-serviceworker to add them and
-        # the threaded bundle is what gets published.
-        run: scripts/trunk build --release --locked --public-url "${{ steps.pages.outputs.base_path }}/"
+        # the threaded bundle is what gets published. Off main no Pages base
+        # path is set, and the bundle is built for the site root.
+        env:
+          PUBLIC_URL: ${{ steps.pages.outputs.base_path }}/
+        run: scripts/trunk build --release --locked --public-url "$PUBLIC_URL"
+
+      - name: Save build cache
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.cache/trunk/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -123,7 +181,7 @@ jobs:
   deploy:
     name: Deploy GitHub Pages
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    needs: ci
+    needs: [native, web]
     runs-on: ubuntu-24.04
     permissions:
       pages: write

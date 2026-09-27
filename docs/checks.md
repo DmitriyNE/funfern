@@ -55,8 +55,14 @@ by hand, since no CI browser runs its WebGPU: with remote automation enabled in
 Safari's developer settings, `safaridriver` can drive it against a local
 `browser-tests/server.py --isolated` serving the built bundle.
 
-GitHub Actions runs formatting, Clippy, the workspace tests, and native and WASM
-release builds for pull requests and pushes to `main`. The Playwright smoke test is
+GitHub Actions runs two jobs in parallel for pull requests and pushes to `main`:
+one checks formatting and Clippy, runs the workspace tests and makes the native
+release build, and the other makes the threaded WASM release bundle. Each caches
+its compiled dependencies under a key naming the toolchain and the exact lockfile
+(for the bundle also the Trunk version, `scripts/trunk` and `Trunk.toml`), and
+restores only an exact match, so a cache is one clean build and never grows; a
+changed lockfile or toolchain costs one cold run. Caches are saved from `main`
+only, after the build and before the tests run. The Playwright smoke test is
 a local hardware-backed check because GitHub-hosted runners do not expose a usable
 WebGPU adapter. It rejects browser rendering failures, checks that the canvas
 continues to change, and verifies that its backing render target follows a viewport
