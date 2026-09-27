@@ -15249,3 +15249,34 @@ nothing stepping, and nothing in the console.
   carry the one calibration with or without a runtime, relative to the store.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — What one estimator changes on the gallery
+
+- **Gallery** (every scene prepared as the application does, stepped 1.5 s on
+  the CPU reference, estimated at its own settings - a 12 percent target -
+  before and after this change). Linear scenes read about half their old
+  estimate, 0.5 to 0.65 of it, their point sources' fronts being what the
+  old estimator overweighted; the interface-heavy crystals less still
+  (Photonic crystal 0.087 to 0.019, Crystal bend 0.096 to 0.045). Driven
+  scenes read 2 to 9 times their old estimate, which fell with their
+  frequency; Parametric fiber amplifier (0.26) and Spatial soliton (0.33) now
+  exceed their target. The element count the targets imply barely moves on
+  most scenes, whose meshes the wavelength floor or the minimum edge sets;
+  it falls 22 to 25 percent on Photonic crystal (3254 to 2525) and Crystal
+  bend (2971 to 2221) and 7 percent on Disordered crystal, and rises fourfold
+  on Josephson line (499 to 1972), whose old estimate divided by a scalar
+  energy six times its store.
+- **Found, not fixed: grading lets local refinement past the accuracy gate.**
+  After grading, an element whose target a neighbour pulled below its edge
+  counts as a limit candidate unless its own error bound it, and limit
+  candidates refine whatever the global estimate reads. So an error-bound
+  patch makes its neighbours limit candidates: Josephson line reads 0.015
+  against its 0.12 target and still refines, on 27 such candidates beside
+  1026 error ones. Counting only elements past their own wavelength limit as
+  limit candidates would keep the gate.
+- **Device** (`canonical_gpu_temporal_amr`, M1 Max, Metal): both variants
+  pass unchanged bounds before and after the refinement transfer; the
+  estimate falls 1.15e-1 to 7.52e-2 on reflecting walls and 7.20e-2 to
+  3.50e-2 with loss and absorbing walls.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
