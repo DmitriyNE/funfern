@@ -936,6 +936,20 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   faces, and time drives. It is persisted, so it takes a serde default or a
   file version.
 
+- [ ] An authored viscous loss channel: the Gate O short-wave viscosity
+  (`docs/spikes/funfern-gate-o.md`, "The short-wave limit") as a named,
+  persisted loss channel on any material, off by default, its rate `α/h`
+  scaled to each element's own ceiling. It damps a mode by the square of
+  its share of that ceiling, so it trims mesh-scale residue and spares
+  resolved waves, and it would let a scene band-limit its own gain.
+  Measured on 2026-09-27 (`docs/engineering-log.md`): on the unpumped fiber
+  at edge 0.04, where the signal has about seven nodes per wavelength, it
+  takes 20% of the far-end signal at α = 0.25 and 4% at α = 0.05. On the
+  dispersive fiber α = 0.05 halves the leftover 17.5 Hz rung, and on the
+  Kerr slab α = 0.25 halves its 17.5 Hz residue for 1.5% of the signal.
+  The device already applies the stress for van der Pol. The work is the
+  authoring, persistence, its own loss lane, the law summary and a preset.
+
 ## Maintenance
 
 - [x] A self-oscillating gain lased on the mesh's shortest waves, at a
@@ -943,19 +957,18 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   on the self-oscillating elements (`docs/spikes/funfern-gate-o.md`, "The
   short-wave limit").
 
-- [ ] Mixing-based amplifiers need a high-frequency loss. The user saw the
-  parametric fiber amplifier fill with mesh-sized excitations, though it
-  amplifies as measured. The likely cause, not yet measured: the pump
-  travels at the guided mode's phase velocity, and in a fiber this nearly
-  dispersionless it phase-matches the whole sum-frequency ladder (2.5, 7.5,
-  12.5, 17.5 Hz and on), which the pump climbs to the mesh scale. The
-  travelling-modulation scene's up-conversion is the same physics. What stops
-  it in a real guide is dispersion or loss that rises with frequency. Options
-  to weigh: extend the short-wave viscosity (`docs/spikes/funfern-gate-o.md`,
-  "The short-wave limit") to coefficients under a time drive, where the
-  pump is the gain; or an authorable viscous loss channel whose rate grows
-  with the gradient, which would also let a scene band-limit its own gain.
-  Measure the spectrum up the ladder first, on the CPU and in the app.
+- [x] Mixing scenes filled with mesh-sized excitations: the parametric fiber
+  amplifier, the Kerr slab and the travelling modulation. Measured on
+  2026-09-27 up the sum-frequency ladder at edges 0.08, 0.04 and 0.02. The
+  dispersionless fiber was ill-posed. Its pump phase-matched the whole
+  ladder, and the rungs grew and the gain fell with each refinement. It is
+  now slightly dispersive, by a Klein-Gordon cutoff, which ends the ladder
+  and holds the gain across meshes (`docs/spikes/funfern-gallery-plan.md`,
+  item 11). The Kerr slab's speckle was resolution: at edge 0.04 its
+  harmonics are clean. The travelling modulation's ladder is bounded, each
+  rung about half the last. The grid filter could not touch any of it, and
+  a loss that rises with frequency cost the resolved signal too much. That
+  loss is filed under "Later experiments".
 
 - [x] A scene change stops the old field at once. Fixed on 2026-09-26.
   New, a load, an example, a link, and Undo or Redo across any of them go

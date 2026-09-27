@@ -328,7 +328,9 @@ impedance stays one. (The GRIN rod's `1/n` stiffness is right in its
 Mechanical skin; copied into TM it made `εμ = 1` and the fiber invisible,
 which the first exploration ran into.) The permittivity carries the
 "Travelling modulation" preset over the graded base: pump 5 Hz, depth 0.2,
-wavenumber `2β = 43.88`, phase `3π/4`, angle 0. A 2.5 Hz point source of 4 on
+wavenumber 36.2, phase `5π/8`, angle 0. The fiber also carries the
+Klein-Gordon preset with a 1.25 Hz cutoff, which makes it slightly
+dispersive. A 2.5 Hz point source of 4 on
 the axis at x = −0.85, a probe at x = 0.85, and a line probe along the axis
 from x = −0.75, past the source's near field, to 0.75, short of the probe,
 whose energy density shows the signal growing along the fiber. Walls outgoing.
@@ -345,13 +347,27 @@ end grew 5×, 21×, 77× and 411× of the unpumped level at 6, 9, 12 and 16 s.
 That is the scene's contrast now. The plan's "signal off stays quiet" is
 true of any deterministic run from rest and is dropped.
 
+Dispersion, added on 2026-09-27. The dispersionless fiber filled with
+mesh-scale excitations. A pump running at the mode's phase velocity also
+phase-matches the signal's sum frequencies with itself (7.5, 12.5, 17.5 Hz
+and on) and climbs them to the mesh's scale; only the mesh's own dispersion
+stopped it. At edge 0.04 the three rungs held 0.9 of the signal, and the
+gain fell with each refinement: 4.6×, 3.4× and 2.7× at edges 0.08, 0.04 and
+0.02. The grid filter and a gradient viscosity were measured against it and
+set aside (`docs/engineering-log.md`, 2026-09-27). The 1.25 Hz cutoff
+lowers the mode's index at 2.5 Hz from 1.38 to 1.18 and much less at
+7.5 Hz, so the first rung runs out of step within 0.2 of fiber instead of
+0.44. The gain peaks at wavenumber 36.2, 3% under the dispersive mode's
+`2β = 37.17`, because the pump shifts the signal's own propagation constant
+a little; it is flat to 2% over ±0.4 of that.
+
 Claims at edge 0.08, at the far end at 2.5 Hz over 2 s windows:
 
-- The travelling pump amplifies the signal more than 4× against the pump
-  off (4.88×), and steadily: at 14 s the gain is within 10% of 8 s (4.65×).
-- Advanced by half a turn it squeezes the signal below half (0.13×).
+- The travelling pump amplifies the signal more than 7× against the pump
+  off (8.58×), and steadily: at 14 s the gain is within 10% of 8 s (8.71×).
+- Advanced by half a turn it squeezes the signal below half (0.12×).
 - Uniform in space, the same pump makes the fiber oscillate: its far end
-  grows more than 3× from 8 s to 12 s (5.7×).
+  grows more than 3× from 8 s to 12 s (6.0×).
 
 ### 12. Bent fiber
 

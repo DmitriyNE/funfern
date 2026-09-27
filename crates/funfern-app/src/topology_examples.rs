@@ -305,9 +305,11 @@ pub fn catalog() -> &'static [TopologyExample] {
                 ExampleGroup::TimeVaryingMedia,
                 "Parametric fiber amplifier",
                 "A graded-index fiber whose permittivity is pumped at twice the signal's \
-                 frequency by a wave running with it amplifies the signal about fivefold by the \
+                 frequency by a wave running with it amplifies the signal about eightfold by the \
                  far end; shift the pump's phase by half a turn and the same signal is squeezed. \
-                 Stop the pump's wave (wavenumber 0) and the fiber oscillates on its own.",
+                 Stop the pump's wave (wavenumber 0) and the fiber oscillates on its own. The \
+                 fiber is slightly dispersive, as real ones are, which keeps the pump from also \
+                 driving the signal's higher harmonics.",
                 fiber_amplifier(),
             ),
             example(
@@ -1991,15 +1993,28 @@ const FIBER_H: f64 = 0.15;
 const FIBER_DN: f64 = 0.6;
 const FIBER_SIGNAL_HZ: f64 = 2.5;
 const FIBER_DEPTH: f64 = 0.2;
-/// Twice the fundamental mode's propagation constant at 2.5 Hz, measured on
-/// the unpumped fiber (β = 21.94, `n_eff` 1.397; a 1D mode solve gives
-/// 1.391), so the pump runs with the signal.
-const FIBER_PUMP_WAVENUMBER: f64 = 43.88;
-/// The pump phase that amplifies the source's quadrature most.
+/// The fiber's Klein-Gordon cutoff, which makes it slightly dispersive.
+///
+/// Without it the guided mode is nearly dispersionless, and a pump running
+/// at its phase velocity also phase-matches the signal's sum frequencies
+/// with itself, 7.5, 12.5, 17.5 Hz and on, which it climbs to the mesh's
+/// scale: at edge 0.04 the three rungs held 0.9 of the signal, and the gain
+/// fell with every refinement (4.6, 3.4 and 2.7 at edges 0.08, 0.04 and
+/// 0.02). This cutoff lowers the mode's index at 2.5 Hz from 1.38 to 1.18
+/// and much less at 7.5 Hz, so the first rung runs out of step within 0.2
+/// of fiber instead of 0.44, the rungs stay under a third of the signal,
+/// and the gain holds across meshes.
+const FIBER_CUTOFF_HZ: f64 = 1.25;
+/// Where the gain peaks, about 3% under twice the unpumped mode's
+/// propagation constant (β = 18.58 at 2.5 Hz, `n_eff` 1.183, measured from
+/// the phase along the axis at edges 0.08, 0.04 and 0.02): the pump shifts
+/// the signal's own propagation constant a little, and it runs with that.
+/// The gain is flat to 2% over ±0.4 of it.
+const FIBER_PUMP_WAVENUMBER: f64 = 36.2;
 /// The pump's phase that amplifies the signal most. A degenerate pump's
 /// gain goes with `pump_phase − 2 × signal phase`, so it is tied to the
 /// source's cosine start (`SWITCH_ON_PHASE`) and holds if that moves.
-const FIBER_PUMP_PHASE: f64 = 2.0 * SWITCH_ON_PHASE + 0.75 * std::f64::consts::PI;
+const FIBER_PUMP_PHASE: f64 = 2.0 * SWITCH_ON_PHASE + 0.625 * std::f64::consts::PI;
 
 fn fiber_amplifier() -> TopologyDocument {
     fiber_amplifier_with(FIBER_DEPTH, FIBER_PUMP_WAVENUMBER, FIBER_PUMP_PHASE)
@@ -2016,7 +2031,9 @@ fn fiber_amplifier() -> TopologyDocument {
 /// squeezes the other, steadily, as the signal passes. A pump uniform in
 /// space conserves the wavenumber instead of the frequency and couples the
 /// forward wave to a backward one; over this length that closes a loop
-/// above threshold and the fiber oscillates on its own.
+/// above threshold and the fiber oscillates on its own. The fiber carries
+/// the Klein-Gordon preset at [`FIBER_CUTOFF_HZ`], so the same pump does not
+/// also climb the signal's sum frequencies.
 fn fiber_amplifier_with(depth: f64, wavenumber: f64, phase: f64) -> TopologyDocument {
     let mut builder = Builder::new();
     builder.scene.physics = PhysicsModel::Electromagnetic {
@@ -2063,6 +2080,18 @@ fn fiber_amplifier_with(depth: f64, wavenumber: f64, phase: f64) -> TopologyDocu
             .expect("the preset names its parameter")
             .value = value;
     }
+    let klein_gordon = restoring_presets()
+        .iter()
+        .find(|preset| preset.id == "R1")
+        .expect("the Klein-Gordon preset");
+    let mut fiber = apply_restoring_preset(klein_gordon, &fiber)
+        .expect("a restoring preset applies beside a drive");
+    fiber
+        .parameters
+        .iter_mut()
+        .find(|parameter| parameter.name == "omega0")
+        .expect("the preset names its cutoff")
+        .value = std::f64::consts::TAU * FIBER_CUTOFF_HZ;
     builder.scene.materials.push(fiber);
     let region = builder.band(-FIBER_H, FIBER_H, MaterialId(2));
     let mut document = builder.document();
@@ -5285,7 +5314,7 @@ mod tests {
     }
     /// The parametric fiber claims, at edge 0.08, read at the far end at
     /// 2.5 Hz over 2 s windows. The pump running with the signal amplifies it
-    /// more than 4× against the pump off, and steadily: 6 s later the gain
+    /// more than 7× against the pump off, and steadily: 6 s later the gain
     /// is the same within 10%. Advanced by half a turn, the same pump
     /// squeezes it below half. The same pump uniform in space makes the fiber
     /// an oscillator: its far-end field grows more than 3× from 8 s to 12 s.
@@ -5321,7 +5350,7 @@ mod tests {
             &[8.0, 12.0],
         );
         let (gain, later) = (pumped[0] / off, pumped[1] / off);
-        assert!(gain > 4.0, "the pump amplifies {gain:.3}×");
+        assert!(gain > 7.0, "the pump amplifies {gain:.3}×");
         assert!(
             (later / gain - 1.0).abs() < 0.1,
             "the gain moved from {gain:.3} to {later:.3}"

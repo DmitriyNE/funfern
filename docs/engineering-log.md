@@ -14610,3 +14610,67 @@ meshes on the CI runner (AMD EPYC, glibc).
   ordinary card.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-27 — The parametric fiber is slightly dispersive
+
+The user saw the parametric fiber amplifier, the Kerr slab and the
+travelling modulation fill with mesh-sized excitations. A temporary probe
+(removed) ran each on the CPU as the app steps it, filter included, and read
+the sum-frequency ladder at mid-medium against the signal, the output, and an
+effective nodes per wavelength inside the medium, `2π/√(Σ(max−min)²/Σ⟨u²⟩)`
+over the medium's elements, at edges 0.08, 0.04 and 0.02.
+
+- **The dispersionless fiber was ill-posed.** Its pump runs at the mode's
+  phase velocity, a luminal grating, and it also phase-matches the signal's
+  sum frequencies with itself. Refining made it worse, so only the mesh's own
+  dispersion stopped the climb:
+
+  | edge | gain | 7.5 / 12.5 / 17.5 Hz of the signal | nodes per λ (unpumped) |
+  | --- | --- | --- | --- |
+  | 0.08 | 4.6× | 2.3 / 0.39 / 0.06 | |
+  | 0.04 | 3.4× | 0.94 / 0.76 / 0.93 | 4.6 (15.7) |
+  | 0.02 | 2.7× | 1.64 / 1.53 / 1.11 | 5.7 (30.7) |
+
+  Adaptation takes the fiber to its 0.02 floor, since the drive's sidebands
+  ask for 12.5 Hz, so the last row is what the app showed.
+- **The grid filter cannot touch it.** Its normalisation is the global
+  ceiling, which the source's refined patch sets near 90 Hz against the
+  bulk's own near 10 Hz, so a bulk mesh-scale mode loses about 1% per event.
+  At 0.04 even full strength every step left the rungs at 0.98 / 0.75 / 0.73.
+- **A loss that rises with frequency costs the signal too much.** Gate O's
+  short-wave viscosity on the fiber's elements, `τ = α/(h G)`, trims the top
+  rungs (0.83 / 0.47 / 0.23 at α = 0.25, edge 0.04), but the signal sits at
+  three to seven nodes per wavelength: with the pump off it takes 35%, 20%,
+  8% and 4% of the far-end signal at α = 0.5, 0.25, 0.1 and 0.05. Filed under
+  "Later experiments" in `docs/plan.md` as an authored loss channel.
+- **Dispersion ends the ladder.** Measured from the phase along the axis at
+  edge 0.04, the plain fiber's β is 21.73, 72.32 and 94.00 at 2.5, 7.5 and
+  12.5 Hz. With the pump at `2β` its first rung already runs out of step
+  within `π/Δk` = 0.44 of fiber, and the coupling fills it anyway. The
+  catalogue's Klein-Gordon preset at 1.25 Hz gives 18.58, 71.27 and 77.18,
+  and 0.20; β at 2.5 Hz reads 18.58 at edges 0.08, 0.04 and 0.02 alike. At
+  the final pump, edge 0.04: 0.29 / 0.035 / 0.23, and 8.8 nodes per
+  wavelength inside against 4.6. A 0.8 Hz cutoff did little
+  (0.95 / 0.50 / 0.32).
+- **The pump** peaks at wavenumber 36.2, 2.6% under the dispersive mode's
+  `2β = 37.17`, at both edges and flat to 2% over ±0.4; the pump shifts the
+  signal's own β a little. The best phase moved from `3π/4` to `5π/8`. Gain
+  against the dispersive fiber unpumped, from 8 s: 8.58× at edge 0.08 and
+  8.50× at 0.04; at 14 s 8.71× and 8.67×. Squeezed half a turn
+  later 0.12× and 0.24×; a standing pump still oscillates, 6.0× from 8 s to
+  12 s.
+- **The other two scenes need no mechanism.** The Kerr slab's speckle is
+  resolution: its 12.5 Hz content is 0.37 of the signal at edge 0.08 and
+  0.04 at 0.04, while the third harmonic holds at 0.15–0.17. The travelling
+  modulation's ladder is bounded, each rung about half the last, and at edge
+  0.04 the field inside is clean (14.5 nodes per λ against 21.2 unmodulated).
+- **Scene:** the fiber takes the Klein-Gordon preset at `FIBER_CUTOFF_HZ`,
+  wavenumber 36.2 and phase `2·SWITCH_ON_PHASE + 5π/8`. The card says it
+  amplifies about eightfold and is slightly dispersive, as real fibers are.
+  `a_pump_running_with_the_signal_amplifies_it_where_a_standing_one_oscillates`
+  asks for more than 7×. The gallery plan's item 11 carries the numbers, and
+  the plan's maintenance item is checked off.
+- **Device:** `canonical_gpu_long_run` on the fiber, 8,715 DOFs, dt 5.82e-3:
+  Q 2.1e-6, b 2.6e-6 at 400 steps; Q 8.1e-6, b 7.7e-6 at 1000.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
