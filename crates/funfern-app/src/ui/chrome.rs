@@ -203,7 +203,8 @@ impl Playground {
         // usual way it is used - so it closes only from its own button or the
         // toolbar toggle, and it floats where it was last dragged. While a
         // drawing is under way it carries that drawing's controls, which a
-        // keyboard also has but a touchscreen has nowhere else.
+        // keyboard also has but a touchscreen has nowhere else. They go below
+        // the tools, so the button a finger has just pressed does not move.
         if self.draw_open && !self.capturing() {
             let ctx = root.ctx().clone();
             let mut open = true;
@@ -214,27 +215,6 @@ impl Playground {
                 .resizable(false)
                 .default_pos([300.0, 42.0])
                 .show(&ctx, |ui| {
-                    if let Some(draw) = &self.draw {
-                        let (tool, points) = (draw.tool, draw.points.len());
-                        ui.label(egui::RichText::new(tool.prompt()).strong());
-                        ui.horizontal(|ui| {
-                            let finish = egui::Button::new("Finish").shortcut_text("Enter");
-                            if ui.add_enabled(tool.finishes_with(points), finish).clicked() {
-                                self.finish_draw();
-                            }
-                            let undo = egui::Button::new("Undo point").shortcut_text("⌫");
-                            if ui.add_enabled(points > 0, undo).clicked() {
-                                self.undo_draw_point();
-                            }
-                            if ui
-                                .add(egui::Button::new("Cancel").shortcut_text("Esc"))
-                                .clicked()
-                            {
-                                self.draw = None;
-                            }
-                        });
-                        ui.separator();
-                    }
                     ui.label("Closed curve");
                     ui.horizontal(|ui| {
                         ui.radio_value(
@@ -301,6 +281,27 @@ impl Playground {
                             }
                         }
                     });
+                    if let Some(draw) = &self.draw {
+                        let (tool, points) = (draw.tool, draw.points.len());
+                        ui.separator();
+                        ui.label(egui::RichText::new(tool.prompt()).strong());
+                        ui.horizontal(|ui| {
+                            let finish = egui::Button::new("Finish").shortcut_text("Enter");
+                            if ui.add_enabled(tool.finishes_with(points), finish).clicked() {
+                                self.finish_draw();
+                            }
+                            let undo = egui::Button::new("Undo point").shortcut_text("Backspace");
+                            if ui.add_enabled(points > 0, undo).clicked() {
+                                self.undo_draw_point();
+                            }
+                            if ui
+                                .add(egui::Button::new("Cancel").shortcut_text("Esc"))
+                                .clicked()
+                            {
+                                self.draw = None;
+                            }
+                        });
+                    }
                     ui.separator();
                     self.snap_checkbox(ui);
                 });

@@ -15405,3 +15405,23 @@ nothing stepping, and nothing in the console.
   history entry, and a short tap still replaces the selection.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — The Draw palette's tools stay put while a drawing runs
+
+- **Defect** (found driving a local web build with touch emulation, after the
+  palette gained the drawing's controls). The controls went at the top of the
+  palette, so starting a drawing pushed every tool button down by one block:
+  the Polyline button a finger had just pressed moved from y = 254 to 316, and
+  the next tap on the palette landed on whatever had moved under it. Undo
+  point's hint, ⌫, is not in the interface font and drew as an empty box.
+- **Fix.** The drawing's controls go below the tools, above Snap to grid, so
+  the palette grows downward and nothing above them moves; the hint reads
+  Backspace.
+- **Checked** on the local build in Chrome with touch emulation: Finish,
+  Undo point and Cancel by tap; a baffle drawn from the bottom side to the top
+  by tapping its two attachments, and one ended on the left side by tapping
+  it; long presses adding a span, taking one back out and taking the last one
+  out; and touch drags of the right and bottom sides, the baffle's ends on the
+  top and bottom keeping their x and its bottom end following the bottom.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
