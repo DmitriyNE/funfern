@@ -3915,11 +3915,11 @@ impl CanonicalOutgoingBoundaryJob {
                     )));
                 };
                 let decay = (7.0 * eigenvalue / 4.0).sqrt();
-                let trace = (0..self.trace_nodes.len())
-                    .map(|trace_node| {
-                        self.eigenvectors[trace_node * self.trace_nodes.len() + mode]
-                            * self.damping[trace_node].sqrt()
-                    })
+                let count = self.trace_nodes.len();
+                let trace = self.eigenvectors[mode * count..(mode + 1) * count]
+                    .iter()
+                    .zip(&self.damping)
+                    .map(|(component, damping)| component * damping.sqrt())
                     .collect();
                 let auxiliary_offset = if decay > 2.0e-12 * self.largest.sqrt() {
                     let offset = self.auxiliary_count;
@@ -4093,23 +4093,104 @@ fn apply_outgoing_generator(
     Ok(derivative)
 }
 
-/// Dependency-free, cooperative Jacobi diagonalization for the symmetric trace
-/// oracle. One work unit applies at most one plane rotation, whose cost is
-/// linear in the trace size. Eigenvectors are returned as columns and
-/// eigenpairs are sorted ascending.
+/// Inner iterations one work unit of [`SymmetricEigenJob`] may spend. A unit
+/// is a block of columns or rotations sized to this, or one step whose own
+/// cost is linear in the trace, so a unit's time does not grow with the
+/// square of the trace the way a whole Householder step or QL iteration does.
+/// The assembly runs 32 units at a time: at 1,042 trace nodes such a step
+/// took 0.12 ms typically and 0.36 ms at the 99th percentile, well inside the
+/// 4 ms a browser frame lends preparation.
+const EIGEN_UNIT_WORK: usize = 1 << 13;
+
+/// Implicit QL iterations one eigenvalue may take before the solve is refused.
+/// EISPACK's bound; the trace operators here take under two on average.
+const EIGEN_MAXIMUM_ITERATIONS: usize = 30;
+
+/// Dependency-free, cooperative eigensolver for the symmetric trace oracle:
+/// Householder tridiagonalization, then implicit QL, as EISPACK's `tred2` and
+/// `tql2` in the form JAMA gives them. It replaced a cyclic Jacobi solve that
+/// took 25 s at 1,042 trace nodes; this one takes about 1.2 s there, with
+/// eigen residuals near 1e-14 of the matrix where the Jacobi's tolerance left
+/// 4e-11. Its arithmetic is `sqrt` and the four operations, so the trace basis
+/// does not depend on a platform's transcendental functions.
+///
+/// `vectors` is column-major, `vectors[column * count + row]`: it starts as
+/// the matrix, holds the accumulated transformations, and ends as one
+/// eigenvector per contiguous column. Eigenpairs come out ascending.
 struct SymmetricEigenJob {
-    matrix: Vec<f64>,
     vectors: Vec<f64>,
+    /// `d`: the Householder vector and scales while reducing, then the
+    /// diagonal, then the eigenvalues.
+    diagonal: Vec<f64>,
+    /// `e`: the reduction's scratch, then the subdiagonal.
+    off_diagonal: Vec<f64>,
     count: usize,
-    tolerance: f64,
-    sweep: usize,
-    p: usize,
-    q: usize,
-    largest: f64,
-    done: bool,
+    phase: EigenPhase,
+    /// The current Householder step's `h`, or accumulation step's divisor.
+    step_scale: f64,
+    /// QL's accumulated shift `f` and its running negligibility scale `tst1`.
+    shift: f64,
+    negligible: f64,
+    iterations: usize,
+    /// One QL iteration's plane rotations `(c, s)`, from row `m - 1` down to
+    /// `l`, kept so their application to the vectors can be split into units.
+    rotations: Vec<(f64, f64)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EigenPhase {
+    ReduceSetup {
+        step: usize,
+    },
+    ReduceMultiply {
+        step: usize,
+        column: usize,
+    },
+    ReduceScale {
+        step: usize,
+    },
+    ReduceUpdate {
+        step: usize,
+        column: usize,
+    },
+    AccumulateSetup {
+        step: usize,
+    },
+    AccumulateColumns {
+        step: usize,
+        column: usize,
+    },
+    AccumulateFinish,
+    Deflate {
+        eigenvalue: usize,
+    },
+    Sweep {
+        eigenvalue: usize,
+        end: usize,
+    },
+    Rotate {
+        eigenvalue: usize,
+        end: usize,
+        next: usize,
+    },
+    Sort {
+        position: usize,
+    },
+    Done,
 }
 
 type SymmetricEigenResult = (Vec<f64>, Vec<f64>);
+
+/// `sqrt(a^2 + b^2)` without overflow, from `sqrt` alone.
+fn portable_hypot(a: f64, b: f64) -> f64 {
+    let (a, b) = (a.abs(), b.abs());
+    let (large, small) = if a > b { (a, b) } else { (b, a) };
+    if large == 0.0 {
+        return 0.0;
+    }
+    let ratio = small / large;
+    large * (1.0 + ratio * ratio).sqrt()
+}
 
 impl SymmetricEigenJob {
     fn new(matrix: Vec<f64>, count: usize) -> Result<Self, WaveError> {
@@ -4118,109 +4199,389 @@ impl SymmetricEigenJob {
                 "the outgoing trace matrix is invalid",
             ));
         }
-        let scale = matrix.iter().map(|value| value.abs()).sum::<f64>().max(1.0);
-        let mut vectors = vec![0.0; count * count];
-        for index in 0..count {
-            vectors[index * count + index] = 1.0;
-        }
+        let diagonal = (0..count)
+            .map(|column| matrix[column * count + count - 1])
+            .collect();
+        let phase = match count {
+            0 => EigenPhase::Sort { position: 0 },
+            1 => EigenPhase::AccumulateFinish,
+            _ => EigenPhase::ReduceSetup { step: count - 1 },
+        };
         Ok(Self {
-            matrix,
-            vectors,
+            vectors: matrix,
+            diagonal,
+            off_diagonal: vec![0.0; count],
             count,
-            tolerance: 4.0e-14 * scale,
-            sweep: 0,
-            p: 0,
-            q: 1,
-            largest: 0.0,
-            done: false,
+            phase,
+            step_scale: 0.0,
+            shift: 0.0,
+            negligible: 0.0,
+            iterations: 0,
+            rotations: Vec::with_capacity(count),
         })
     }
 
     fn advance(&mut self, budget: usize) -> Option<Result<SymmetricEigenResult, WaveError>> {
-        const MAXIMUM_SWEEPS: usize = 80;
         for _ in 0..budget {
-            if self.done {
-                return None;
+            match self.phase {
+                EigenPhase::Done => return None,
+                EigenPhase::Sort { position } if position + 1 >= self.count => {
+                    self.phase = EigenPhase::Done;
+                    return Some(self.finish());
+                }
+                _ => {}
             }
-            if self.count < 2 || self.p + 1 >= self.count {
-                if self.largest <= self.tolerance {
-                    self.done = true;
-                    return Some(Ok(self.sorted()));
-                }
-                self.sweep += 1;
-                if self.sweep == MAXIMUM_SWEEPS {
-                    self.done = true;
-                    return Some(Err(WaveError::InvalidMesh(
-                        "the outgoing trace eigensolve did not converge",
-                    )));
-                }
-                self.p = 0;
-                self.q = 1;
-                self.largest = 0.0;
-                continue;
-            }
-
-            let p = self.p;
-            let q = self.q;
-            let apq = self.matrix[p * self.count + q];
-            self.largest = self.largest.max(apq.abs());
-            if apq.abs() > self.tolerance {
-                let app = self.matrix[p * self.count + p];
-                let aqq = self.matrix[q * self.count + q];
-                let angle = 0.5 * (2.0 * apq).atan2(aqq - app);
-                let (sine, cosine) = angle.sin_cos();
-                for row in 0..self.count {
-                    if row == p || row == q {
-                        continue;
-                    }
-                    let arp = self.matrix[row * self.count + p];
-                    let arq = self.matrix[row * self.count + q];
-                    let next_p = cosine * arp - sine * arq;
-                    let next_q = sine * arp + cosine * arq;
-                    self.matrix[row * self.count + p] = next_p;
-                    self.matrix[p * self.count + row] = next_p;
-                    self.matrix[row * self.count + q] = next_q;
-                    self.matrix[q * self.count + row] = next_q;
-                }
-                self.matrix[p * self.count + p] =
-                    cosine * cosine * app - 2.0 * sine * cosine * apq + sine * sine * aqq;
-                self.matrix[q * self.count + q] =
-                    sine * sine * app + 2.0 * sine * cosine * apq + cosine * cosine * aqq;
-                self.matrix[p * self.count + q] = 0.0;
-                self.matrix[q * self.count + p] = 0.0;
-                for row in 0..self.count {
-                    let vrp = self.vectors[row * self.count + p];
-                    let vrq = self.vectors[row * self.count + q];
-                    self.vectors[row * self.count + p] = cosine * vrp - sine * vrq;
-                    self.vectors[row * self.count + q] = sine * vrp + cosine * vrq;
-                }
-            }
-            self.q += 1;
-            if self.q == self.count {
-                self.p += 1;
-                self.q = self.p + 1;
+            if let Err(error) = self.unit() {
+                self.phase = EigenPhase::Done;
+                return Some(Err(error));
             }
         }
         None
     }
 
-    fn sorted(&mut self) -> (Vec<f64>, Vec<f64>) {
-        let mut order = (0..self.count).collect::<Vec<_>>();
-        order.sort_by(|left, right| {
-            self.matrix[*left * self.count + *left]
-                .total_cmp(&self.matrix[*right * self.count + *right])
-        });
-        let values = order
+    fn finish(&mut self) -> Result<SymmetricEigenResult, WaveError> {
+        let values = std::mem::take(&mut self.diagonal);
+        let vectors = std::mem::take(&mut self.vectors);
+        if values
             .iter()
-            .map(|index| self.matrix[*index * self.count + *index])
-            .collect::<Vec<_>>();
-        let mut sorted = vec![0.0; self.count * self.count];
-        for (new_column, old_column) in order.into_iter().enumerate() {
-            for row in 0..self.count {
-                sorted[row * self.count + new_column] = self.vectors[row * self.count + old_column];
-            }
+            .chain(&vectors)
+            .any(|value| !value.is_finite())
+        {
+            return Err(WaveError::InvalidMesh(
+                "the outgoing trace eigensolve did not converge",
+            ));
         }
-        (values, sorted)
+        Ok((values, vectors))
+    }
+
+    /// `V[row][column]`.
+    fn at(&self, row: usize, column: usize) -> f64 {
+        self.vectors[column * self.count + row]
+    }
+
+    fn set(&mut self, row: usize, column: usize, value: f64) {
+        self.vectors[column * self.count + row] = value;
+    }
+
+    /// One bounded unit of whichever phase is current.
+    fn unit(&mut self) -> Result<(), WaveError> {
+        let n = self.count;
+        match self.phase {
+            // Householder step `i` reduces row `i` onto the subdiagonal. `d`
+            // holds that row, which the step turns into its reflector.
+            EigenPhase::ReduceSetup { step: i } => {
+                let scale = self.diagonal[..i]
+                    .iter()
+                    .map(|value| value.abs())
+                    .sum::<f64>();
+                if scale == 0.0 {
+                    self.off_diagonal[i] = self.diagonal[i - 1];
+                    for j in 0..i {
+                        self.diagonal[j] = self.at(i - 1, j);
+                        self.set(i, j, 0.0);
+                        self.set(j, i, 0.0);
+                    }
+                    self.diagonal[i] = 0.0;
+                    self.phase = self.after_reduction(i);
+                    return Ok(());
+                }
+                let mut h = 0.0;
+                for value in &mut self.diagonal[..i] {
+                    *value /= scale;
+                    h += *value * *value;
+                }
+                let f = self.diagonal[i - 1];
+                let g = if f > 0.0 { -h.sqrt() } else { h.sqrt() };
+                self.off_diagonal[i] = scale * g;
+                h -= f * g;
+                self.diagonal[i - 1] = f - g;
+                self.off_diagonal[..i].fill(0.0);
+                self.step_scale = h;
+                self.phase = EigenPhase::ReduceMultiply { step: i, column: 0 };
+            }
+            // `e = A u`, from the lower triangle only.
+            EigenPhase::ReduceMultiply { step: i, column } => {
+                let mut j = column;
+                let mut work = 0;
+                while j < i && work < EIGEN_UNIT_WORK {
+                    let f = self.diagonal[j];
+                    self.set(j, i, f);
+                    let column = &self.vectors[j * n + j..j * n + i];
+                    let mut g = self.off_diagonal[j] + column[0] * f;
+                    for ((entry, d), e) in column[1..]
+                        .iter()
+                        .zip(&self.diagonal[j + 1..i])
+                        .zip(&mut self.off_diagonal[j + 1..i])
+                    {
+                        g += entry * d;
+                        *e += entry * f;
+                    }
+                    self.off_diagonal[j] = g;
+                    work += i - j;
+                    j += 1;
+                }
+                self.phase = if j == i {
+                    EigenPhase::ReduceScale { step: i }
+                } else {
+                    EigenPhase::ReduceMultiply { step: i, column: j }
+                };
+            }
+            EigenPhase::ReduceScale { step: i } => {
+                let h = self.step_scale;
+                let mut f = 0.0;
+                for j in 0..i {
+                    self.off_diagonal[j] /= h;
+                    f += self.off_diagonal[j] * self.diagonal[j];
+                }
+                let hh = f / (h + h);
+                for j in 0..i {
+                    self.off_diagonal[j] -= hh * self.diagonal[j];
+                }
+                self.phase = EigenPhase::ReduceUpdate { step: i, column: 0 };
+            }
+            // The rank-two update `A - u q^T - q u^T` of the leading block.
+            EigenPhase::ReduceUpdate { step: i, column } => {
+                let mut j = column;
+                let mut work = 0;
+                while j < i && work < EIGEN_UNIT_WORK {
+                    let f = self.diagonal[j];
+                    let g = self.off_diagonal[j];
+                    for ((entry, e), d) in self.vectors[j * n + j..j * n + i]
+                        .iter_mut()
+                        .zip(&self.off_diagonal[j..i])
+                        .zip(&self.diagonal[j..i])
+                    {
+                        *entry -= f * e + g * d;
+                    }
+                    self.diagonal[j] = self.at(i - 1, j);
+                    self.set(i, j, 0.0);
+                    work += i - j + 1;
+                    j += 1;
+                }
+                if j == i {
+                    self.diagonal[i] = self.step_scale;
+                    self.phase = self.after_reduction(i);
+                } else {
+                    self.phase = EigenPhase::ReduceUpdate { step: i, column: j };
+                }
+            }
+            // Accumulation step `i` applies reflector `i + 1` to the
+            // transformations gathered so far.
+            EigenPhase::AccumulateSetup { step: i } => {
+                self.set(n - 1, i, self.at(i, i));
+                self.set(i, i, 1.0);
+                let h = self.diagonal[i + 1];
+                if h != 0.0 {
+                    for k in 0..=i {
+                        self.diagonal[k] = self.at(k, i + 1) / h;
+                    }
+                    self.phase = EigenPhase::AccumulateColumns { step: i, column: 0 };
+                } else {
+                    self.phase = self.after_accumulation(i);
+                }
+            }
+            EigenPhase::AccumulateColumns { step: i, column } => {
+                let (columns, reflector) = self.vectors.split_at_mut((i + 1) * n);
+                let reflector = &reflector[..=i];
+                let scaled = &self.diagonal[..=i];
+                let mut j = column;
+                let mut work = 0;
+                while j <= i && work < EIGEN_UNIT_WORK {
+                    let column = &mut columns[j * n..j * n + i + 1];
+                    let g = reflector
+                        .iter()
+                        .zip(column.iter())
+                        .map(|(a, b)| a * b)
+                        .sum::<f64>();
+                    for (entry, d) in column.iter_mut().zip(scaled) {
+                        *entry -= g * d;
+                    }
+                    work += 2 * (i + 1);
+                    j += 1;
+                }
+                self.phase = if j > i {
+                    self.after_accumulation(i)
+                } else {
+                    EigenPhase::AccumulateColumns { step: i, column: j }
+                };
+            }
+            EigenPhase::AccumulateFinish => {
+                for j in 0..n {
+                    self.diagonal[j] = self.at(n - 1, j);
+                    self.set(n - 1, j, 0.0);
+                }
+                self.set(n - 1, n - 1, 1.0);
+                // The subdiagonal moves up one place for QL.
+                self.off_diagonal.copy_within(1.., 0);
+                self.off_diagonal[n - 1] = 0.0;
+                self.phase = EigenPhase::Deflate { eigenvalue: 0 };
+            }
+            // Eigenvalue `l` is settled once the subdiagonal next to it is
+            // negligible; `m` bounds the unreduced block it sits in.
+            EigenPhase::Deflate { eigenvalue: l } => {
+                if l == n {
+                    self.phase = EigenPhase::Sort { position: 0 };
+                    return Ok(());
+                }
+                self.negligible = self
+                    .negligible
+                    .max(self.diagonal[l].abs() + self.off_diagonal[l].abs());
+                let threshold = f64::EPSILON * self.negligible;
+                let m = (l..n)
+                    .find(|&m| self.off_diagonal[m].abs() <= threshold)
+                    .unwrap_or(n - 1);
+                if m == l {
+                    self.settle(l);
+                } else {
+                    self.iterations = 0;
+                    self.phase = EigenPhase::Sweep {
+                        eigenvalue: l,
+                        end: m,
+                    };
+                }
+            }
+            // One implicit QL iteration on the scalars, recording its
+            // rotations for the vectors.
+            EigenPhase::Sweep {
+                eigenvalue: l,
+                end: m,
+            } => {
+                self.iterations += 1;
+                if self.iterations > EIGEN_MAXIMUM_ITERATIONS {
+                    return Err(WaveError::InvalidMesh(
+                        "the outgoing trace eigensolve did not converge",
+                    ));
+                }
+                let d = &mut self.diagonal;
+                let e = &mut self.off_diagonal;
+                let mut g = d[l];
+                let mut p = (d[l + 1] - g) / (2.0 * e[l]);
+                let mut r = portable_hypot(p, 1.0);
+                if p < 0.0 {
+                    r = -r;
+                }
+                d[l] = e[l] / (p + r);
+                d[l + 1] = e[l] * (p + r);
+                let dl1 = d[l + 1];
+                let mut h = g - d[l];
+                for value in &mut d[l + 2..] {
+                    *value -= h;
+                }
+                self.shift += h;
+                p = d[m];
+                let mut c = 1.0;
+                let mut c2 = c;
+                let mut c3 = c;
+                let el1 = e[l + 1];
+                let mut s = 0.0;
+                let mut s2 = 0.0;
+                self.rotations.clear();
+                for i in (l..m).rev() {
+                    c3 = c2;
+                    c2 = c;
+                    s2 = s;
+                    g = c * e[i];
+                    h = c * p;
+                    r = portable_hypot(p, e[i]);
+                    e[i + 1] = s * r;
+                    s = e[i] / r;
+                    c = p / r;
+                    p = c * d[i] - s * g;
+                    d[i + 1] = h + s * (c * g + s * d[i]);
+                    self.rotations.push((c, s));
+                }
+                p = -s * s2 * c3 * el1 * e[l] / dl1;
+                e[l] = s * p;
+                d[l] = c * p;
+                self.phase = EigenPhase::Rotate {
+                    eigenvalue: l,
+                    end: m,
+                    next: 0,
+                };
+            }
+            // The iteration's rotations on the vectors, a run of them at a
+            // time: each mixes two whole columns, and every row still meets
+            // them in their order.
+            EigenPhase::Rotate {
+                eigenvalue: l,
+                end: m,
+                next,
+            } => {
+                let stop = (next + (EIGEN_UNIT_WORK / n).max(1)).min(self.rotations.len());
+                for (index, &(c, s)) in self.rotations[next..stop].iter().enumerate() {
+                    let i = m - 1 - (next + index);
+                    let (left, right) = self.vectors.split_at_mut((i + 1) * n);
+                    for (current, following) in left[i * n..].iter_mut().zip(&mut right[..n]) {
+                        let h = *following;
+                        *following = s * *current + c * h;
+                        *current = c * *current - s * h;
+                    }
+                }
+                if stop < self.rotations.len() {
+                    self.phase = EigenPhase::Rotate {
+                        eigenvalue: l,
+                        end: m,
+                        next: stop,
+                    };
+                } else if self.off_diagonal[l].abs() > f64::EPSILON * self.negligible {
+                    self.phase = EigenPhase::Sweep {
+                        eigenvalue: l,
+                        end: m,
+                    };
+                } else {
+                    self.settle(l);
+                }
+            }
+            // Selection sort, ascending, moving whole columns with their
+            // eigenvalues. Ties keep their first position.
+            EigenPhase::Sort { position } => {
+                let mut l = position;
+                let mut work = 0;
+                while l + 1 < n && work < EIGEN_UNIT_WORK {
+                    let mut smallest = l;
+                    for k in l + 1..n {
+                        if self.diagonal[k] < self.diagonal[smallest] {
+                            smallest = k;
+                        }
+                    }
+                    if smallest != l {
+                        self.diagonal.swap(l, smallest);
+                        let (left, right) = self.vectors.split_at_mut(smallest * n);
+                        left[l * n..(l + 1) * n].swap_with_slice(&mut right[..n]);
+                    }
+                    work += 2 * n - l;
+                    l += 1;
+                }
+                self.phase = EigenPhase::Sort { position: l };
+            }
+            EigenPhase::Done => {}
+        }
+        Ok(())
+    }
+
+    fn after_reduction(&self, step: usize) -> EigenPhase {
+        if step > 1 {
+            EigenPhase::ReduceSetup { step: step - 1 }
+        } else {
+            EigenPhase::AccumulateSetup { step: 0 }
+        }
+    }
+
+    fn after_accumulation(&mut self, step: usize) -> EigenPhase {
+        let reflector = (step + 1) * self.count;
+        self.vectors[reflector..=reflector + step].fill(0.0);
+        if step + 2 < self.count {
+            EigenPhase::AccumulateSetup { step: step + 1 }
+        } else {
+            EigenPhase::AccumulateFinish
+        }
+    }
+
+    /// Eigenvalue `l` is final: restore the shifts QL took from it.
+    fn settle(&mut self, l: usize) {
+        self.diagonal[l] += self.shift;
+        self.off_diagonal[l] = 0.0;
+        self.phase = EigenPhase::Deflate { eigenvalue: l + 1 };
     }
 }
 
@@ -4858,28 +5219,147 @@ mod tests {
         assert_eq!(actual.generation().constitutive_revision, 43);
     }
 
-    #[test]
-    fn outgoing_trace_eigensolve_yields_between_rotation_blocks() {
-        let count = 32;
-        let mut matrix = vec![0.0; count * count];
-        for row in 0..count {
-            matrix[row * count + row] = 2.0;
-            if row + 1 < count {
-                matrix[row * count + row + 1] = -1.0;
-                matrix[(row + 1) * count + row] = -1.0;
+    /// Runs the cooperative eigensolve to completion, one unit at a time, and
+    /// returns its result with the number of units it took.
+    fn eigensolve(matrix: &[f64], count: usize) -> (Vec<f64>, Vec<f64>, usize) {
+        let mut job = SymmetricEigenJob::new(matrix.to_vec(), count).unwrap();
+        let mut units = 1;
+        loop {
+            if let Some(result) = job.advance(1) {
+                let (values, vectors) = result.unwrap();
+                return (values, vectors, units);
+            }
+            units += 1;
+        }
+    }
+
+    /// The largest eigen-residual `|A v - lambda v|` over the matrix's largest
+    /// row sum, and the largest departure of the vectors from orthonormality.
+    fn eigen_errors(matrix: &[f64], count: usize, values: &[f64], vectors: &[f64]) -> [f64; 2] {
+        let norm = (0..count)
+            .map(|row| {
+                (0..count)
+                    .map(|column| matrix[row * count + column].abs())
+                    .sum::<f64>()
+            })
+            .fold(0.0, f64::max)
+            .max(f64::MIN_POSITIVE);
+        let column = |mode: usize| &vectors[mode * count..(mode + 1) * count];
+        let mut residual = 0.0_f64;
+        for (mode, value) in values.iter().enumerate() {
+            for row in 0..count {
+                let product = (0..count)
+                    .map(|entry| matrix[row * count + entry] * column(mode)[entry])
+                    .sum::<f64>();
+                residual = residual.max((product - value * column(mode)[row]).abs());
             }
         }
-        let mut job = SymmetricEigenJob::new(matrix, count).unwrap();
-        assert!(job.advance(1).is_none());
-        let (values, vectors) = loop {
-            if let Some(result) = job.advance(32) {
-                break result.unwrap();
+        let mut orthogonality = 0.0_f64;
+        for left in 0..count {
+            for right in left..count {
+                let dot = column(left)
+                    .iter()
+                    .zip(column(right))
+                    .map(|(a, b)| a * b)
+                    .sum::<f64>();
+                let expected = if left == right { 1.0 } else { 0.0 };
+                orthogonality = orthogonality.max((dot - expected).abs());
             }
-        };
-        assert_eq!(values.len(), count);
-        assert_eq!(vectors.len(), count * count);
+        }
+        [residual / norm, orthogonality]
+    }
+
+    /// A closed trace is a ring: its tangential operator has one zero mode and
+    /// every other eigenvalue twice, `2 - 2 cos(2 pi k / n)` for a uniform one.
+    /// The solve finds them to roundoff, with orthonormal vectors, and yields
+    /// many times on the way instead of spending one long unit.
+    #[test]
+    fn the_trace_eigensolve_finds_a_rings_spectrum_in_bounded_units() {
+        let count = 160;
+        let mut matrix = vec![0.0; count * count];
+        for row in 0..count {
+            let next = (row + 1) % count;
+            matrix[row * count + row] = 2.0;
+            matrix[row * count + next] = -1.0;
+            matrix[next * count + row] = -1.0;
+        }
+        let (values, vectors, units) = eigensolve(&matrix, count);
+        let mut expected = (0..count)
+            .map(|k| 2.0 - 2.0 * (std::f64::consts::TAU * k as f64 / count as f64).cos())
+            .collect::<Vec<_>>();
+        expected.sort_by(f64::total_cmp);
+        for (value, expected) in values.iter().zip(&expected) {
+            assert!(
+                (value - expected).abs() < 1.0e-13,
+                "{value} against {expected}"
+            );
+        }
         assert!(values.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(values[0] > 0.0);
+        let [residual, orthogonality] = eigen_errors(&matrix, count, &values, &vectors);
+        assert!(residual < 1.0e-14, "{residual:e}");
+        assert!(orthogonality < 1.0e-13, "{orthogonality:e}");
+        // One unit per Householder and accumulation step at the least.
+        assert!(units > 2 * count, "{units}");
+    }
+
+    /// A trace in pieces, with a node coupled to nothing, is block diagonal:
+    /// the reduction meets rows that are already reduced. A general
+    /// symmetric matrix, a diagonal one out of order, and one and two nodes
+    /// take the same path.
+    #[test]
+    fn the_trace_eigensolve_takes_disconnected_general_and_small_matrices() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut random = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1_u64 << 53) as f64 - 0.5
+        };
+        let mut cases = Vec::new();
+        let count = 40;
+        let mut pieces = vec![0.0; count * count];
+        for row in 0..count - 1 {
+            pieces[row * count + row] = 1.0 + row as f64 * 0.1;
+            if row + 1 < count - 1 && row != 16 {
+                pieces[row * count + row + 1] = -0.7;
+                pieces[(row + 1) * count + row] = -0.7;
+            }
+        }
+        pieces[count * count - 1] = 3.0;
+        cases.push((pieces, count));
+        let count = 57;
+        let mut general = vec![0.0; count * count];
+        for row in 0..count {
+            for column in 0..=row {
+                let value = random();
+                general[row * count + column] = value;
+                general[column * count + row] = value;
+            }
+        }
+        cases.push((general, count));
+        let count = 6;
+        let mut diagonal = vec![0.0; count * count];
+        for (row, value) in [3.0, -1.0, 0.0, 2.5, -1.0, 7.0].into_iter().enumerate() {
+            diagonal[row * count + row] = value;
+        }
+        cases.push((diagonal, count));
+        cases.push((vec![4.0], 1));
+        cases.push((vec![2.0, -1.0, -1.0, 2.0], 2));
+        for (matrix, count) in cases {
+            let (values, vectors, _) = eigensolve(&matrix, count);
+            assert_eq!(values.len(), count);
+            assert!(
+                values.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{values:?}"
+            );
+            let trace = (0..count).map(|row| matrix[row * count + row]).sum::<f64>();
+            assert!((values.iter().sum::<f64>() - trace).abs() < 1.0e-12 * count as f64);
+            let [residual, orthogonality] = eigen_errors(&matrix, count, &values, &vectors);
+            assert!(residual < 1.0e-14, "{count}: {residual:e}");
+            assert!(orthogonality < 1.0e-13, "{count}: {orthogonality:e}");
+        }
+        let (values, _, _) = eigensolve(&[2.0, -1.0, -1.0, 2.0], 2);
+        assert!((values[0] - 1.0).abs() < 1.0e-15 && (values[1] - 3.0).abs() < 1.0e-15);
     }
 
     #[test]

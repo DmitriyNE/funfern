@@ -16231,3 +16231,75 @@ open, with the large-mesh warning as the suggested remedy.
   passes in the Linux x86_64 container.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — The outgoing trace's eigensystem by Householder and QL
+
+The previous entry found preparation, not the device, to be what a long
+outgoing trace costs: the trace's dense cyclic Jacobi eigensolve.
+
+- **Measured** on the trace matrix itself, dumped from the empty 2 × 2
+  domain with second-order walls at edges 0.03 and 0.02 (698 and 1,042
+  trace nodes, 3 to 5 nonzeros a row), in a standalone copy of the Jacobi
+  beside Householder tridiagonalization and implicit QL:
+
+  | Trace | Jacobi | Householder + QL |
+  |---|---|---|
+  | 698 | 7.2 s, 14 sweeps | 0.51 s |
+  | 1,042 | 25.1 s, 15 sweeps | 1.55 s |
+
+  The eigenvalues agree to 1.4e-11 of the largest. The eigen residual
+  `|Av − λv|/|A|` is 3.9e-11 for the Jacobi, whose tolerance is 4e-14 of
+  the sum of every entry, and 1.7e-14 for QL. Orthogonality is 3.5e-14 and
+  9.9e-14. Both find one zero mode: four outgoing walls meet at the
+  corners, so the trace is one cycle and splitting it into components, the
+  latency plan's P4 idea, has nothing to split.
+- **Change.** `SymmetricEigenJob` is EISPACK's `tred2` and `tql2` as JAMA
+  writes them, stored column-major so each eigenvector is a contiguous
+  column, which is how `CanonicalOutgoingBoundaryJob` now reads its modes.
+  It stays cooperative: a unit is a block of columns in the reduction and
+  the accumulation, one QL iteration's scalars, or a run of that
+  iteration's rotations over whole columns, each at most `EIGEN_UNIT_WORK`
+  (8,192) inner iterations or one linear step. A QL iteration past 30 for
+  one eigenvalue, EISPACK's bound, or a non-finite result, refuses the
+  solve as the Jacobi's 80 sweeps did. The arithmetic is `sqrt` and a
+  portable `hypot`: the Jacobi's `atan2` and `sin_cos` rounded differently
+  across platforms, which put their last bits into every outgoing mode.
+- **In place** at 1,042 trace nodes the job takes 1.2 s, eigen residual
+  1.7e-14. The assembly runs it 32 units at a time: such a step took 0.12 ms
+  typically, 0.36 ms at the 99th percentile and 0.58 ms at the 99.9th,
+  against 0.016, 0.21 and 0.33 ms for the Jacobi's 32 rotations, measured
+  on the same matrix under the same load.
+- **Preparation** with second-order walls, before in one call and after in
+  the 4 ms slices the app runs it in:
+
+  | Edge | Trace | Before, assembly / all | After, assembly / all |
+  |---|---|---|---|
+  | 0.03 | 698 | 6.4 / 6.9 s | 0.40 / 0.98 s |
+  | 0.025 | 828 | 12.9 / 13.8 s | 0.65 / 1.56 s |
+  | 0.022 | 898 | 20.0 / 21.5 s | 0.83 / 2.29 s |
+  | 0.02 | 1,042 | 30.7 / 33.2 s | 1.27 / 3.38 s |
+  | 0.017 | 1,196 | not run | 2.27 / 6.23 s |
+
+  The after column ran with the machine at a load of 80 to 150 from other
+  work, so it is if anything slow; the slice maxima it read, 11 to 37 ms,
+  came from meshing and the scalar assembly as much as from this phase,
+  which is that load.
+- **Tests.** `the_trace_eigensolve_finds_a_rings_spectrum_in_bounded_units`:
+  a uniform ring of 160, `2 − 2cos(2πk/n)` with its one zero mode and every
+  other value twice, to 1e-13, and more units than Householder steps.
+  `the_trace_eigensolve_takes_disconnected_general_and_small_matrices`: a
+  trace in two pieces with a node coupled to nothing, which takes the
+  reduction's already-reduced branch; a random symmetric matrix; a diagonal
+  one out of order; one and two nodes. Residuals under 1e-14 and
+  orthogonality under 1e-13 in each. They replace
+  `outgoing_trace_eigensolve_yields_between_rotation_blocks`. Every
+  `funfern-core` test also passes in the Linux x86_64 container.
+- **Device.** All 106 runs of the canonical GPU gates, the two long runs
+  past 1,024 trace nodes and `canonical_gpu_timing` exit 0. The 84 without a
+  second-order wall read what they read before to the last digit; the 22
+  with one moved by at most 3%, at 2e-7 to 2e-6, as a new basis for the same
+  boundary does.
+- **Docs.** `docs/plan.md` Maintenance, the Stage 11 report's compile row,
+  and the P4 row of the latency plan.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

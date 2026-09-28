@@ -1000,19 +1000,16 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   scene switches found `clear` leaving the old step backlog outstanding,
   which held the next upload forever; it now owes no steps.
 
-- Outgoing walls make a fine mesh slow to prepare. The outgoing trace's
-  eigensystem is a dense cyclic Jacobi (`SymmetricEigenJob` in
-  `canonical_wave.rs`), about cubic in the trace. On the empty 2 × 2 domain
-  with second-order walls, preparation's assembly phase took about 6.4 s at
-  698 trace nodes (edge 0.03), 12.9 s at 828, 20 s at 898 and 30.7 s at 1,042
-  (edge 0.02), where reflecting walls take 0.25 s. The device is not the
-  cost: at about 1,200 trace nodes it steps 23% (fixed) to 48% (driven)
-  slower than with reflecting walls. Candidates are a tridiagonalizing
-  symmetric eigensolver, or the banded trace components of the latency
-  plan's P4 (`docs/spikes/funfern-material-laws-plan.md`). Hold either to
-  `SymmetricEigenJob` on eigen-residual, orthogonality and reflection before
-  cutting over. This is probably also the 25.7 s "constitutive compile" of
-  2026-09-26, which is not checked.
+- [x] Outgoing walls made a fine mesh slow to prepare. Fixed on 2026-09-28.
+  The outgoing trace's eigensystem was a dense cyclic Jacobi, and on the
+  empty 2 × 2 domain with second-order walls it took 30.7 s of a 33 s
+  preparation at 1,042 trace nodes (edge 0.02), where reflecting walls take
+  0.25 s. `SymmetricEigenJob` is now Householder tridiagonalization and
+  implicit QL, EISPACK's `tred2` and `tql2`, in units of at most 8,192 inner
+  iterations. That preparation takes 3.4 s, the eigensolve 1.2 s of it, with
+  eigen residuals of 1.7e-14 of the matrix where the Jacobi left 3.9e-11.
+  Whether this was the 25.7 s "constitutive compile" of 2026-09-26 is not
+  checked.
 
 - Test a larger wasm memory cap on iOS Safari before shipping one. The
   threaded web build caps its shared memory at 1 GiB (`--max-memory` in
