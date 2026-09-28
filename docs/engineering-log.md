@@ -15769,3 +15769,31 @@ cap did the same, so it was not the cap.
   the cap stays at 1 GiB until then.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — An opened scene keeps none of the old one's materials open
+
+- **Defect** (reported). After a material was picked in one scene and a
+  scene with several materials was opened, a click on a subdomain stopped
+  selecting its material until one was picked by hand. The Materials panel
+  keeps a working copy of the open material, and only an undo or redo across
+  a scene dropped it; opening an example, loading a file or New kept it, and
+  the selection with it. Scenes number their materials from the same small
+  ids, so the copy passed for unapplied edits to the new material of its id,
+  which holds the selection where it is. The panel also showed the old
+  material under the new one's id (Anisotropic crystal then Brewster angle
+  showed "Rotated crystal" where the scene has "Glass"), with Apply live to
+  write it over the new one. Of the 552 ordered pairs of the 24 examples
+  with two or more materials, 536 stuck; the other 16 share an identical
+  material 2.
+- **Fix.** Every scene replacement, through the one path they share, drops
+  the material editor's state with the rest of the outgoing selection: the
+  working copy, half-typed formulas and parameter names, a colour being
+  picked, and the selected material, subdomain and face, back to the default
+  material and the background.
+- **Test.** `an_opened_scene_keeps_none_of_the_old_ones_materials_open`
+  opens a material in one example, opens another whose material of that id
+  differs, and checks that the panel shows the new scene's own material,
+  nothing reads as pending, and a click on a subdomain selects its material.
+  It fails without the fix.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -107,6 +107,19 @@ impl Playground {
         self.selected_probe = None;
         self.draw = None;
         self.pending_merge = None;
+        // The incoming scene numbers its materials and subdomains from the
+        // same small ids, so none of the outgoing ones carries over: a copy
+        // left open in the Materials panel would pass for unapplied edits to
+        // the material sharing its id, show it as the old one, and hold a
+        // click on a subdomain back from selecting its material.
+        self.material_selection = DEFAULT_MATERIAL;
+        self.region_selection = BACKGROUND_REGION;
+        self.face_selection = 0;
+        self.material_edit = None;
+        self.material_formula_edits.clear();
+        self.material_formula_errors.clear();
+        self.parameter_name_edits.clear();
+        self.material_color_edit = None;
         self.requested_revision = None;
         self.fresh_requested = fresh;
         self.drop_requested = true;

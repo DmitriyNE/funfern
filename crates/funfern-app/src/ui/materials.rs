@@ -1607,6 +1607,68 @@ mod tests {
         assert_eq!(state.material_selection, DEFAULT_MATERIAL);
     }
 
+    /// A scene that comes in keeps none of the outgoing one's materials open.
+    /// Both number them from the same small ids, so a material left open in
+    /// the panel passed for unapplied edits to the new material of its id:
+    /// the panel showed the old one, Apply would have written it over the
+    /// new one, and a click on a subdomain did not select its material until
+    /// one was picked by hand.
+    #[test]
+    fn an_opened_scene_keeps_none_of_the_old_ones_materials_open() {
+        let catalog = funfern_app::topology_examples::catalog();
+        let materials = |index: usize| &catalog[index].document.model.draft.materials;
+        // Two scenes with a material of the same id that differs between them.
+        let (first, second, picked) = (0..catalog.len())
+            .flat_map(|first| (0..catalog.len()).map(move |second| (first, second)))
+            .filter(|(first, second)| first != second)
+            .find_map(|(first, second)| {
+                materials(first)
+                    .iter()
+                    .filter(|material| material.id != DEFAULT_MATERIAL)
+                    .find(|material| {
+                        materials(second)
+                            .iter()
+                            .any(|other| other.id == material.id && other != *material)
+                    })
+                    .map(|material| (first, second, material.id))
+            })
+            .expect("two scenes whose materials share an id");
+        let context = egui::Context::default();
+        let render = |state: &mut Playground| {
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                state.materials_panel(ui);
+            });
+        };
+
+        let mut state = Playground::default();
+        state.open_example(first);
+        state.material_selection = picked;
+        render(&mut state);
+        assert_eq!(
+            state.material_edit.as_ref().map(|edit| edit.id),
+            Some(picked)
+        );
+
+        state.open_example(second);
+        render(&mut state);
+        let draft = &state.editor.document.model.draft;
+        assert_eq!(state.material_selection, DEFAULT_MATERIAL);
+        assert_eq!(
+            state.material_edit.as_ref(),
+            draft.material(DEFAULT_MATERIAL),
+            "the panel shows the new scene's own material"
+        );
+        assert!(!state.material_edits_pending());
+        let region = draft
+            .regions
+            .iter()
+            .find(|region| region.material != DEFAULT_MATERIAL)
+            .expect("a subdomain of another material");
+        let (region, material) = (region.id, region.material);
+        state.select_region(region);
+        assert_eq!(state.material_selection, material);
+    }
+
     /// The pump helper offers each enabled source that has a frequency, and
     /// only those.
     #[test]
