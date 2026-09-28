@@ -1118,7 +1118,10 @@ phases and Switch states live in a bank carried with the state snapshot.
   generation first freezes each site's map at the event instant (`m⁻¹(t)` or
   the tangent inverse at nodes, secant and radial tangent at samples). On a
   field-dependent generation a candidate that would add energy is skipped,
-  not faulted.
+  not faulted. Each node's reach `1/Λ̃` is compiled with the generation
+  (`grid_filter_reach`) over everything its maps can do, and packed in the
+  node record; a wave is damped by its share of its own rows' ceiling, not
+  the stiffest row's anywhere on the mesh.
 - **Consumers:** probes, the area readout and the AMR estimator read fields
   through the same inverses. The area readout splits each node's stored
   energy over its materials as `Σ m_c (ḡ_c U² − G_c)`, and the size rule

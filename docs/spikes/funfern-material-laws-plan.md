@@ -621,21 +621,25 @@ Avoid global reductions every step solely for bookkeeping. Accumulate applied in
 
 ### 7.3 Selected linear and time-driven grid filter; nonlinear gate F
 
-For fixed linear maps `Q=Mu`, `v=Jb`, let `K=CᵀWJC` and let `Λ` bound the largest eigenvalue of `M⁻¹/²KM⁻¹/²`. Use the paired polynomial reference
+For fixed linear maps `Q=Mu`, `v=Jb`, let `K=CᵀWJC` and `H=M⁻¹/²KM⁻¹/²`. Each node carries a reach `sᵢ=1/Λ̃ᵢ`: `Rᵢ≥Σⱼ|Hᵢⱼ|` is assembled sample by sample without cancellation, and `Λ̃ᵢ` is the largest `R` on the node's elements, so `Λ̃ᵢ≥Rⱼ` for every `j` that `H` couples to `i`. With `S=diag(s)`, use the paired polynomial reference
 
 ```text
-Q ← Q - α K M⁻¹ K M⁻¹ Q / Λ²
-b ← b - α C M⁻¹ K M⁻¹ CᵀWJ b / Λ².
+Q ← Q - α K S² M⁻¹ K M⁻¹ Q
+b ← b - α C S M⁻¹ K M⁻¹ S CᵀWJ b.
 ```
 
-Both right-hand sides use the pre-filter state; `0≤α≤1`. Skip zero-operator components rather than divide by zero. Compatible `b=ηCψ` remains compatible; constant primary fields and free component totals are preserved to arithmetic accuracy. With the appropriate linear energy norms, a mode of eigenvalue λ is attenuated by `1-α(λ/Λ)²`. The [core spike filter fixture](funfern-material-laws-spike-report.md) tests the unit-complementary-map case: α=0.8 attenuates the top mode by 80%, and a mode at 8.52% of maximum frequency by 0.00422%.
+Both right-hand sides use the pre-filter state; `0≤α≤2`. By the Schur test `‖SH‖≤1` and `‖S¹/²HS¹/²‖≤1`, so in the linear energy norms each half is a contraction for every admitted `α`. Compatible `b=ηCψ` remains compatible; constant primary fields and free component totals are preserved to arithmetic accuracy. A mode resolved in rows of reach `s` is attenuated by about `1-α(sλ)²`, so a wave is damped by its share of its own rows' ceiling. With a uniform reach `s=1/Λ`, `Λ` a global bound on the largest eigenvalue, this is exactly the global polynomial `1-α(λ/Λ)²` the first implementation used; that one spent the whole filter on the stiffest rows anywhere on the mesh and barely reached a coarse or slow region (engineering log, 2026-09-28). The [core spike filter fixture](funfern-material-laws-spike-report.md) tested the global form in the unit-complementary-map case: α=0.8 attenuates the top mode by 80%, and a mode at 8.52% of maximum frequency by 0.00422%.
 
 For an admitted time-driven linear generation, freeze every material map at the
 same accepted event time `t`: `M_t=M(t)`, `J_t=J(t)` and
 `K_t=CᵀWJ_tC`. Apply the same two polynomials with every occurrence of
-`M⁻¹`, `J` and `K` replaced by `M_t⁻¹`, `J_t` and `K_t`. Use the
-trajectory-wide bound `Λ=4/dt_max²`, where `dt_max` is the admitted temporal
-operator timestep bound, rather than a phase-local estimate. This is the exact
+`M⁻¹`, `J` and `K` replaced by `M_t⁻¹`, `J_t` and `K_t`. Use a
+trajectory-wide reach rather than a phase-local estimate: each sample enters
+`R` at the largest map its coefficient reaches over the drive, switch and
+field, and each node at the least mass it reaches, as the timestep bound uses
+the same minima globally. A field law's tangent also turns a gradient, so its
+sample adds the spread of its own tangents through Cauchy-Schwarz; at zero
+response that is zero. A restoring law adds its node's curvature. This is the exact
 frozen-time operator, not a reference-operator approximation. It preserves an
 instantaneously constant primary field, compatible complementary flux,
 component totals and `ker(CᵀWJ_t)` to arithmetic accuracy. Candidate energy is

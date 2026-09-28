@@ -1055,16 +1055,30 @@ fn candidate_constitutive_force(node: u32) -> f32 {
     return result;
 }
 
-fn stiffness_of_scratch(node: u32, lane: u32) -> f32 {
+// `K (Sᵖ M⁻¹ x)` of one scratch lane, `p` the power of each node's reach the
+// filter weighs that pass with: `K S² M⁻¹ K M⁻¹ Q` on `Q`, `S M⁻¹ K M⁻¹ S` on
+// the force.
+fn stiffness_of_scratch(node: u32, lane: u32, reach_power: u32) -> f32 {
     let range = nodes[node].stiffness.xy;
-    let row_field = scratch[node].values[lane] * nodes[node].mass_loss.y;
+    let row_field = scratch[node].values[lane] * filter_static_weight(node, reach_power);
     var result = 0.0;
     for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
         let column = tables[entry].data.x;
-        let column_field = scratch[column].values[lane] * nodes[column].mass_loss.y;
+        let column_field = scratch[column].values[lane] * filter_static_weight(column, reach_power);
         result += table_float(entry, 2u) * (column_field - row_field);
     }
     return result;
+}
+
+// The grid filter's reach `1/Λ̃` at a node, which stands where the global
+// bound's `1/Λ` did; `CanonicalWaveOperator::grid_filter_reach`.
+fn filter_node_reach(node: u32) -> f32 {
+    return nodes[node].damping_support.z;
+}
+
+fn filter_static_weight(node: u32, reach_power: u32) -> f32 {
+    let reach = filter_node_reach(node);
+    return nodes[node].mass_loss.y * select(reach, reach * reach, reach_power == 2u);
 }
 
 fn b_energy(sample_index: u32, value: vec2<f32>) -> f32 {
@@ -1085,25 +1099,24 @@ fn instantaneous_b_energy(sample_index: u32, value: vec2<f32>) -> f32 {
 }
 
 // The filter's inner map at a node, cached by its site pass: `m⁻¹(t)`, or
-// on a field-dependent node the tangent inverse `A = 1/P′(U)`.
-fn filter_node_weight(node: u32) -> f32 {
-    return scratch[node_field_offset() + node].values.z;
+// on a field-dependent node the tangent inverse `A = 1/P′(U)`, weighed by
+// `reach_power` powers of the node's reach. Zero takes the lane as it is.
+fn filter_node_weight(node: u32, reach_power: u32) -> f32 {
+    if reach_power == 0u { return 1.0; }
+    let reach = filter_node_reach(node);
+    return scratch[node_field_offset() + node].values.z
+        * select(reach, reach * reach, reach_power == 2u);
 }
 
-fn filter_compatible_flux(sample_index: u32, lane: u32, divide_mass: bool) -> vec2<f32> {
+fn filter_compatible_flux(sample_index: u32, lane: u32, reach_power: u32) -> vec2<f32> {
     let sample = samples[sample_index];
     let reference_node = sample_node(sample, 0u);
-    var reference = scratch[reference_node].values[lane];
-    if divide_mass {
-        reference *= filter_node_weight(reference_node);
-    }
+    let reference = scratch[reference_node].values[lane]
+        * filter_node_weight(reference_node, reach_power);
     var result = vec2<f32>(0.0);
     for (var local = 1u; local < 7u; local += 1u) {
         let node = sample_node(sample, local);
-        var field = scratch[node].values[lane];
-        if divide_mass {
-            field *= filter_node_weight(node);
-        }
+        let field = scratch[node].values[lane] * filter_node_weight(node, reach_power);
         result += sample_curl(sample, local) * (field - reference);
     }
     return control.evolution.y * result;
@@ -1529,15 +1542,15 @@ fn filter_second(@builtin(global_invocation_id) id: vec3<u32>) {
     if stopped() { return; }
     if temporal_enabled() {
         if i >= control.counts_a.y { return; }
-        let first = filter_tangent(i, filter_compatible_flux(i, 0u, false));
-        let second = filter_tangent(i, filter_compatible_flux(i, 1u, true));
+        let first = filter_tangent(i, filter_compatible_flux(i, 0u, 0u));
+        let second = filter_tangent(i, filter_compatible_flux(i, 1u, 1u));
         scratch[control.counts_a.x + i].values = vec4<f32>(first, second);
         return;
     }
     if i >= control.counts_a.x { return; }
     let node = i;
-    scratch[node].values.z = stiffness_of_scratch(node, 0u);
-    scratch[node].values.w = stiffness_of_scratch(node, 1u);
+    scratch[node].values.z = stiffness_of_scratch(node, 0u, 2u);
+    scratch[node].values.w = stiffness_of_scratch(node, 1u, 1u);
 }
 
 @compute @workgroup_size(128)
@@ -1552,10 +1565,9 @@ fn filter_temporal_gather(@builtin(global_invocation_id) id: vec3<u32>) {
 fn filter_temporal_samples(@builtin(global_invocation_id) id: vec3<u32>) {
     let sample = id.x;
     if stopped() || !temporal_enabled() || sample >= control.counts_a.y { return; }
-    let primary_flux = filter_tangent(sample, filter_compatible_flux(sample, 2u, true));
-    let correction = filter_compatible_flux(sample, 3u, true);
-    let next = accepted_b(sample) - bitcast<f32>(control.event.w)
-        * control.evolution.x * correction;
+    let primary_flux = filter_tangent(sample, filter_compatible_flux(sample, 2u, 2u));
+    let correction = filter_compatible_flux(sample, 3u, 1u);
+    let next = accepted_b(sample) - bitcast<f32>(control.event.w) * correction;
     // The commit test's two energies of this sample, formed here in parallel
     // so the single-workgroup validation only sums them. The pair lanes are
     // free again: the finalize reads only the primary flux beside them.
@@ -1571,7 +1583,7 @@ fn filter_temporal_samples(@builtin(global_invocation_id) id: vec3<u32>) {
 fn filter_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if stopped() { return; }
-    let scale = bitcast<f32>(control.event.w) * control.evolution.x;
+    let scale = bitcast<f32>(control.event.w);
     if temporal_enabled() {
         if i >= control.counts_a.x { return; }
         // A pin holds its data at this endpoint; there is nothing to filter
@@ -1581,12 +1593,12 @@ fn filter_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
         set_candidate_q(i, next);
         var energies = filter_node_energies(i, next);
         // Gate O: `r` takes the correction `b` takes through `ηC`,
-        // `δψ = −s A K A (F + R)`, read from the gathered lane before the
+        // `δψ = −α S A K A S (F + R)`, read from the gathered lane before the
         // energies overwrite it; its store joins the commit test.
         if restoring() {
             let index = integrated_index(i);
             let old_r = accepted_auxiliary(index);
-            let next_r = old_r - scale * filter_node_weight(i) * scratch[i].values.w;
+            let next_r = old_r - scale * filter_node_weight(i, 1u) * scratch[i].values.w;
             set_candidate_auxiliary(index, next_r);
             energies += vec2<f32>(
                 restoring_potential_at(i, old_r), restoring_potential_at(i, next_r));
@@ -1605,7 +1617,7 @@ fn filter_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
         var next = accepted_q(i) - scale * scratch[i].values.z;
         if nodes[i].boundary.z != 0u { next = accepted_q(i); }
         set_candidate_q(i, next);
-        let next_force = accepted_force(i) - scale * stiffness_of_scratch(i, 3u);
+        let next_force = accepted_force(i) - scale * stiffness_of_scratch(i, 3u, 1u);
         set_candidate_force(i, next_force);
         if !finite_scalar(next) || !finite_scalar(next_force) {
             reject(STATUS_NON_FINITE);
@@ -1616,11 +1628,11 @@ fn filter_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
         let sample_index = i - complementary_offset();
         let sample = samples[sample_index];
         let reference = scratch[sample.nodes_a.x].values.w
-            * nodes[sample.nodes_a.x].mass_loss.y;
+            * filter_static_weight(sample.nodes_a.x, 1u);
         var correction = vec2<f32>(0.0);
         for (var local = 1u; local < 7u; local += 1u) {
             let node = sample_node(sample, local);
-            let field = scratch[node].values.w * nodes[node].mass_loss.y;
+            let field = scratch[node].values.w * filter_static_weight(node, 1u);
             correction += sample_curl(sample, local) * (field - reference);
         }
         let next = accepted_b(sample_index) - scale * control.evolution.y * correction;
@@ -1697,6 +1709,12 @@ fn event_accept_tables(@builtin(global_invocation_id) id: vec3<u32>) {
                 target_word = header.z + i - primary_words;
             }
             tables[target_word].data = boundary[2u + i].data;
+        }
+        // The target's filter reach, after its runtime words: it bounds the
+        // patched trajectory, not the one the generation compiled.
+        if i < control.counts_a.x {
+            nodes[i].damping_support.z = bitcast<f32>(
+                boundary[2u + coefficient_words + boundary[1u].data.x + i].data.x);
         }
         return;
     }

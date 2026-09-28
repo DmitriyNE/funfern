@@ -39,8 +39,9 @@ use funfern_core::{
     CanonicalTemporalLossSample, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
     CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWaveOperator,
     CanonicalWaveState, CoefficientLawValues, FieldLawValues, GRID_SCALE_FILTER_CADENCE,
-    LinearPrimaryContribution, MaterialId, MaterialSwitchRuntime, Point2, QuadraticWaveOperator,
-    RateLawValues, RestoringLawValues, TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
+    GRID_SCALE_FILTER_LIMIT, LinearPrimaryContribution, MaterialId, MaterialSwitchRuntime, Point2,
+    QuadraticWaveOperator, RateLawValues, RestoringLawValues, TimeDriveRuntime, TimeDriveValues,
+    TimeSignal, WaveError,
 };
 
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
@@ -243,7 +244,7 @@ pub(crate) struct GpuCanonicalControl {
     pub candidate_accounting_a: Vec4,
     /// Candidate counterparts of `accepted_accounting_b`.
     pub candidate_accounting_b: Vec4,
-    /// Filter scale, orientation, half step and quarter step.
+    /// Reserved, orientation, half step and quarter step.
     pub evolution: Vec4,
     /// Gate O: accepted active gain (x); the other lanes are reserved.
     pub accepted_accounting_c: Vec4,
@@ -276,7 +277,8 @@ pub(crate) struct GpuCanonicalNode {
     pub boundary: UVec4,
     /// Prescribed harmonic offset, amplitude, angular frequency and epoch phase.
     pub prescribed: Vec4,
-    /// First-order damping and geometric support; remaining lanes are reserved.
+    /// First-order damping, geometric support and the grid filter's reach
+    /// `1/Λ̃`; the last lane is reserved.
     pub damping_support: Vec4,
     /// Absolute packed-table start/count for the static compatible stiffness.
     pub stiffness: UVec4,
@@ -537,9 +539,9 @@ impl CanonicalGpuLiveEvent {
     }
 
     pub fn grid_filter(strength: f64, serial: u32) -> Result<Self, CanonicalGpuBuildError> {
-        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+        if !strength.is_finite() || !(0.0..=GRID_SCALE_FILTER_LIMIT).contains(&strength) {
             return Err(CanonicalGpuBuildError::InvalidLayout(
-                "grid-filter strength must be in [0, 1]",
+                "grid-filter strength is outside the range its bound admits",
             ));
         }
         Self::scalar_payload(
@@ -768,7 +770,7 @@ impl CanonicalGpuLiveEvent {
             || current.sample_count != target.sample_count
             || current.time_step != target.time_step
             || current.temporal_runtime_materials != target.temporal_runtime_materials
-            || current.nodes != target.nodes
+            || !same_nodes_but_reach(&current.nodes, &target.nodes)
             || current.samples != target.samples
             || current_manifest.header_offset != target_manifest.header_offset
             || current.tables[..current_manifest.header_offset]
@@ -857,6 +859,11 @@ impl CanonicalGpuLiveEvent {
                 + 2;
             upload.push(target.tables[word]);
         }
+        // The target's filter reach, which bounds its own trajectory rather
+        // than the one it replaces, lands with its records.
+        upload.extend(target.nodes.iter().map(|node| GpuCanonicalTableWord {
+            data: UVec4::new(node.damping_support.z.to_bits(), 0, 0, 0),
+        }));
         Ok(Self {
             kind: EVENT_TEMPORAL_LAW_PATCH,
             serial,
@@ -1430,10 +1437,11 @@ impl CanonicalGpuPlan {
         ));
         self.control.boundary_offsets.w &= !4;
         self.control.clock_f32.w = finite_f32(operator.maximum_time_step(), "time step bound")?;
-        self.control.evolution.x = finite_f32(
-            1.0 / (4.0 / operator.maximum_time_step().powi(2)).powi(2),
-            "temporal filter scale",
-        )?;
+        // The filter's reach over the whole trajectory replaces the fixed
+        // one, which holds only at the authored maps.
+        for (node, reach) in self.nodes.iter_mut().zip(operator.grid_filter_reach()) {
+            node.damping_support.z = finite_f32(*reach, "grid-filter reach")?;
+        }
         self.manifest.bytes.tables = self.tables.len() * size_of::<GpuCanonicalTableWord>();
         self.manifest.temporal = Some(CanonicalGpuTemporalManifest {
             header_offset,
@@ -1730,7 +1738,7 @@ impl CanonicalGpuPlan {
                 damping_support: Vec4::new(
                     damping,
                     finite_f32(operator.geometric_support()[node], "geometric support")?,
-                    0.0,
+                    finite_f32(operator.grid_filter_reach()[node], "grid-filter reach")?,
                     0.0,
                 ),
                 stiffness: UVec4::new(stiffness_ranges[node].0, stiffness_ranges[node].1, 0, 0),
@@ -1850,15 +1858,7 @@ impl CanonicalGpuPlan {
             accepted_accounting_b: Vec4::ZERO,
             candidate_accounting_a: Vec4::ZERO,
             candidate_accounting_b: Vec4::ZERO,
-            evolution: Vec4::new(
-                finite_f32(
-                    1.0 / (4.0 / operator.maximum_time_step().powi(2)).powi(2),
-                    "filter scale",
-                )?,
-                operator.orientation() as f32,
-                0.5 * dt,
-                0.25 * dt,
-            ),
+            evolution: Vec4::new(0.0, operator.orientation() as f32, 0.5 * dt, 0.25 * dt),
             accepted_accounting_c: Vec4::ZERO,
             candidate_accounting_c: Vec4::ZERO,
         };
@@ -1967,9 +1967,9 @@ impl CanonicalGpuPlan {
         strength: f64,
         serial: u32,
     ) -> Result<(), CanonicalGpuBuildError> {
-        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+        if !strength.is_finite() || !(0.0..=GRID_SCALE_FILTER_LIMIT).contains(&strength) {
             return Err(CanonicalGpuBuildError::InvalidLayout(
-                "grid-filter strength must be in [0, 1]",
+                "grid-filter strength is outside the range its bound admits",
             ));
         }
         if !self.grid_filter_admitted {
@@ -3558,6 +3558,18 @@ fn pack_scalars(
     Ok(())
 }
 
+/// Whether two generations' node records match in everything a live law patch
+/// must keep, which is all of it but the filter's reach: that follows the law,
+/// and the patch carries the target's.
+fn same_nodes_but_reach(current: &[GpuCanonicalNode], target: &[GpuCanonicalNode]) -> bool {
+    current.len() == target.len()
+        && current.iter().zip(target).all(|(current, target)| {
+            let mut target = *target;
+            target.damping_support.z = current.damping_support.z;
+            *current == target
+        })
+}
+
 fn finite_f32(value: f64, name: &'static str) -> Result<f32, CanonicalGpuBuildError> {
     let converted = value as f32;
     if value.is_finite() && converted.is_finite() {
@@ -4297,6 +4309,7 @@ impl CanonicalGpuRequest {
                         == 2 + TEMPORAL_COEFFICIENT_WORDS
                             * (temporal.primary_record_count + temporal.complementary_record_count)
                             + temporal.runtime_record_count
+                            + handles.node_count as usize
                         && event.upload[0].data.z as usize == temporal.primary_record_count
                         && event.upload[0].data.w as usize == temporal.complementary_record_count
                         && event.upload[1].data.x as usize == temporal.runtime_record_count
@@ -8269,7 +8282,7 @@ mod tests {
         assert_eq!(pulse.serial, 7);
         assert_eq!(pulse.kind, EVENT_MAINTENANCE);
         assert_eq!(pulse.upload.len(), operator_nodes + 1);
-        assert!(CanonicalGpuLiveEvent::grid_filter(1.1, 8).is_err());
+        assert!(CanonicalGpuLiveEvent::grid_filter(2.1, 8).is_err());
         assert!(CanonicalGpuLiveEvent::maintenance(&[], 0).is_err());
     }
 
@@ -8304,6 +8317,9 @@ mod tests {
         target.tables[primary + 1].data.w = 1.7_f32.to_bits();
         let runtime = header.w as usize;
         target.tables[runtime + 2].data.x = 1.7_f32.to_bits();
+        // A new law has a new trajectory, and its filter reach with it; that
+        // is carried, not refused.
+        target.nodes[0].damping_support.z *= 0.5;
 
         let event = CanonicalGpuLiveEvent::temporal_law_patch(&current, &target, 13).unwrap();
         assert_eq!(event.kind, EVENT_TEMPORAL_LAW_PATCH);
@@ -8321,12 +8337,14 @@ mod tests {
             event.upload[1].data.x as usize,
             manifest.runtime_record_count
         );
-        assert_eq!(
-            event.upload.len(),
-            2 + TEMPORAL_COEFFICIENT_WORDS
+        let reach_offset = 2
+            + TEMPORAL_COEFFICIENT_WORDS
                 * (manifest.primary_record_count + manifest.complementary_record_count)
-                + manifest.runtime_record_count
-        );
+            + manifest.runtime_record_count;
+        assert_eq!(event.upload.len(), reach_offset + target.node_count);
+        for (word, node) in event.upload[reach_offset..].iter().zip(&target.nodes) {
+            assert_eq!(word.data.x, node.damping_support.z.to_bits());
+        }
 
         let mut changed_kind = target.clone();
         changed_kind.tables[primary].data.z = TEMPORAL_DRIVE_PUMP;

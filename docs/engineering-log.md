@@ -16039,3 +16039,68 @@ its first stage, which measures and changes nothing.
   is global. Next: a bound per node, then the strength.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — The grid filter reaches each node by its own rows
+
+The global bound spent the whole filter on the stiffest rows anywhere on the
+mesh (previous entry). Each node now carries its own.
+
+- **The filter** (core). A node's reach `sᵢ = 1/Λ̃ᵢ` stands where `1/Λ` did:
+  `Q ← Q − α K S² M⁻¹ K M⁻¹ Q` and `b ← b − α C S M⁻¹ K M⁻¹ S CᵀWJ b`.
+  `grid_filter_reach` bounds row `i` of `H = M^{-1/2} K M^{-1/2}` by adding
+  each sample's `w |gᵢ·J gⱼ|` without cancellation, and `Λ̃ᵢ` is the largest
+  such row on the node's elements. By the Schur test both halves are then
+  contractions for any strength up to two, and the strength checks now admit
+  `GRID_SCALE_FILTER_LIMIT`, where they stopped at one. Every correction
+  still begins with `K` or `CᵀWJ` and ends in `K` or `C`, so constants,
+  component totals, compatibility and the stationary flux come through as
+  before. With a uniform reach of `1/Λ` it is the old filter to 1e-12.
+- **Time-driven and field-dependent media.** The reach is compiled over the
+  whole trajectory: each sample at the largest map its coefficient reaches
+  over the drive, the switch and the field, each node at the least mass, and
+  a restoring law's curvature on its node's row, as the step bound uses the
+  same minima globally. A field law's tangent also turns a gradient, so its
+  sample adds the spread of its own tangents through Cauchy-Schwarz; at zero
+  response that is zero and the sample is the linear one. An inert
+  generation takes the fixed operator's reach as it is.
+- **How loose.** Over the gallery at its own edge, the sample-wise row is
+  1.22 times the assembled matrix's at the median and 1.85 at worst.
+  Cauchy-Schwarz everywhere would have been 1.7 and up to 6, which is why
+  only a turning map takes it. Measured by power iteration through the
+  filter on a slow disk beside a hole the mesh grades to, the top of each
+  half sits at 0.42 of its bound at rest and at 0.13-0.37 over a pump's
+  cycle, where the trajectory-wide global bound held it to 0.02-0.06.
+- **Device.** The reach rides in the node record's reserved lane and is
+  multiplied into the existing passes: no new dispatch, nothing per step.
+  The control's filter scale is retired. A live law patch now carries the
+  target generation's reach and writes it on commit. Before, the device kept
+  the source generation's global bound through a patch while the reference
+  took the target's, and that is the b error `canonical_gpu_temporal` has
+  read all along: 4.17e-5 against its 6e-5, now 2.38e-6.
+- **At the same strength.** The resident filter still commits at one. One
+  application on a plane wave at 3 and 12 nodes per wavelength, as the
+  e-folding rate per second: Obstacle over a mirror 1.1e-1 and 7.9e-4 (from
+  6.5e-3 and 4.6e-5), Phased array 1.7e-1 and 1.2e-3 (1.4e-3, 8.8e-6),
+  Material lens 9.1e-2 and 6.1e-4 (7.4e-3, 5.0e-5), Ring resonator 8.1e-2
+  and 5.3e-4 (1.1e-2, 7.0e-5), Dielectric whispering gallery 7.8e-2 and
+  4.8e-4 (1.2e-2, 7.6e-5). The spread across scenes closed from 8x to 2x at
+  the element scale. Picking the strength is the next step.
+- **Tests.** New: `each_half_of_the_filter_stays_within_its_reach`, and
+  `a_uniform_reach_is_the_global_filter`. `the_grid_filter_keeps_an_oscillator_equilibrium_and_b_equal_to_eta_c_r`
+  held the kink's shift to an absolute 1e-8; the local filter moves it
+  1.56e-8, and 1.54e-8 at twice the strength, against the 2.2e-6 the
+  discrete kink drifts by itself over the run. It is now held to 1% of that
+  drift, which a filter wearing the equilibrium down would not keep.
+  `the_tangent_filter_departs_from_the_linear_one_at_the_square_of_the_amplitude`
+  holds both generations to one reach, since a Kerr stiffness law's covers
+  every amplitude it admits. The tangent filter's invariants hold at the
+  strength limit, and the law-patch packing test carries a changed reach.
+- **Regression.** Every canonical GPU gate and its modes, 106 runs, exit 0
+  inside their bounds; `canonical_gpu_filter_boundary` u 4.4e-8 and rate
+  4.9e-7, the nonlinear filter runs 5.6e-7 to 8.9e-7, the oscillator ones
+  under 7.8e-7.
+- **Docs.** Plan section 7.3 states the local polynomial, its bound and its
+  trajectory-wide reach; the architecture's grid-filter line says where the
+  reach comes from.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

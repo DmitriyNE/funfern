@@ -780,6 +780,7 @@ pub struct CanonicalWaveOperator {
     component_labels: Vec<u32>,
     component_count: usize,
     maximum_time_step: f64,
+    grid_filter_reach: Vec<f64>,
 }
 
 impl CanonicalWaveOperator {
@@ -897,6 +898,20 @@ impl CanonicalWaveOperator {
         0.9 * self.maximum_time_step
     }
 
+    /// The grid filter's reach `1/Λ̃` at each node, from
+    /// [`grid_filter_reach`].
+    pub fn grid_filter_reach(&self) -> &[f64] {
+        &self.grid_filter_reach
+    }
+
+    /// The same operator with its filter reach replaced, so a test can hold
+    /// the filter to one bound everywhere.
+    #[cfg(test)]
+    fn with_grid_filter_reach(mut self, reach: Vec<f64>) -> Self {
+        self.grid_filter_reach = reach;
+        self
+    }
+
     pub fn component_labels(&self) -> &[u32] {
         &self.component_labels
     }
@@ -921,6 +936,7 @@ impl CanonicalWaveOperator {
                 .as_ref()
                 .map_or(0, |boundary| boundary.dense_transform_bytes())
             + self.component_labels.len() * std::mem::size_of::<u32>()
+            + self.grid_filter_reach.len() * std::mem::size_of::<f64>()
     }
 
     /// Converts the integrated primary flux to the synchronized scalar field.
@@ -1889,27 +1905,31 @@ impl CanonicalWaveState {
     /// Paired fixed-linear grid filter from specification section 7.3. Both
     /// updates are formed from the same pre-filter state; stationary flux in
     /// `ker(C^T W J)` is intentionally untouched.
+    ///
+    /// Each node's reach `s = 1/Λ̃` sits where the global bound's `1/Λ` did:
+    /// `Q ← Q − α K S² M⁻¹ K M⁻¹ Q` and `b ← b − α C S M⁻¹ K M⁻¹ S CᵀWJ b`.
+    /// A wave is then damped by its share of its own rows' ceiling rather than
+    /// the stiffest row's anywhere on the mesh, which on an adapted or
+    /// contrasted mesh is what reaches the coarse and the slow parts at all.
+    /// Every correction still begins with `K` or `CᵀWJ` and ends in `K` or
+    /// `C`, so constants, component totals, compatibility and the stationary
+    /// flux come through as before.
     pub fn apply_grid_filter(
         &mut self,
         operator: &CanonicalWaveOperator,
         forcing: &CanonicalForcing,
         strength: f64,
     ) -> Result<CanonicalStepAccounting, WaveError> {
-        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+        if !strength.is_finite() || !(0.0..=crate::GRID_SCALE_FILTER_LIMIT).contains(&strength) {
             return Err(WaveError::Unsupported(
-                "the grid filter strength is not a fraction between zero and one",
+                "the grid filter strength is outside the range its bound admits",
             ));
         }
         if strength == 0.0 {
             return Ok(CanonicalStepAccounting::default());
         }
         let before = self.energy(operator)?;
-        let eigenvalue_bound = 4.0 / operator.maximum_time_step().powi(2);
-        if !eigenvalue_bound.is_finite() || eigenvalue_bound <= 0.0 {
-            return Err(WaveError::Unsupported(
-                "the operator carries no finite positive eigenvalue bound for the grid filter",
-            ));
-        }
+        let reach = operator.grid_filter_reach();
 
         let old_primary = self.primary_flux.clone();
         let old_complementary = self.complementary_flux.clone();
@@ -1918,7 +1938,8 @@ impl CanonicalWaveState {
         let first_over_mass = first
             .iter()
             .zip(operator.primary_mass())
-            .map(|(value, mass)| value / mass)
+            .zip(reach)
+            .map(|((value, mass), reach)| value * reach * reach / mass)
             .collect::<Vec<_>>();
         let second = operator.compatible_stiffness(&first_over_mass)?;
 
@@ -1926,16 +1947,18 @@ impl CanonicalWaveState {
         let gathered_over_mass = gathered
             .iter()
             .zip(operator.primary_mass())
-            .map(|(value, mass)| value / mass)
+            .zip(reach)
+            .map(|((value, mass), reach)| value * reach / mass)
             .collect::<Vec<_>>();
         let stiffness_gathered = operator.compatible_stiffness(&gathered_over_mass)?;
         let twice_over_mass = stiffness_gathered
             .iter()
             .zip(operator.primary_mass())
-            .map(|(value, mass)| value / mass)
+            .zip(reach)
+            .map(|((value, mass), reach)| value * reach / mass)
             .collect::<Vec<_>>();
         let complementary_correction = operator.compatible_flux(&twice_over_mass)?;
-        let scale = strength / eigenvalue_bound.powi(2);
+        let scale = strength;
 
         for node in 0..self.primary_flux.len() {
             if forcing.prescribed[node].is_none() {
@@ -3413,6 +3436,16 @@ impl CanonicalAssemblyJob {
             .zip(&self.primary_mass)
             .map(|(weighted, mass)| weighted / mass)
             .collect();
+        let grid_filter_reach = grid_filter_reach(
+            self.quadratic.element_nodes(),
+            &self.samples,
+            |_| FilterSampleBound {
+                largest: 1.0,
+                turning: 0.0,
+            },
+            &self.primary_mass,
+            &[],
+        )?;
         let operator = CanonicalWaveOperator {
             generation: self.generation,
             physics: self.model.physics,
@@ -3437,6 +3470,7 @@ impl CanonicalAssemblyJob {
             component_labels,
             component_count,
             maximum_time_step: self.quadratic.maximum_time_step(),
+            grid_filter_reach,
         };
         Ok(operator)
     }
@@ -3452,6 +3486,108 @@ fn orientation(physics: PhysicsModel) -> f64 {
             polarization: ElectromagneticPolarization::Te,
         } => -1.0,
     }
+}
+
+/// The most one constitutive sample's map can reach against its reference
+/// tensor `J`. A linear or driven map is `a J` with `a ≤ largest`. A field
+/// law's tangent is `J (a P⊥ + b P∥)` about the flux's direction, with both
+/// `a, b ≤ largest` and `|b − a| ≤ turning`: it turns a gradient as well as
+/// scaling it, by at most `turning`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FilterSampleBound {
+    pub largest: f64,
+    pub turning: f64,
+}
+
+/// The grid filter's reach at each node, `sᵢ = 1/Λ̃ᵢ`.
+///
+/// `Rᵢ` bounds row `i` of `H = M^{-1/2} K M^{-1/2}`, `Σⱼ |Hᵢⱼ| ≤ Rᵢ`: each
+/// sample's `w |gᵢ·J gⱼ|` is added without cancellation, at the most the
+/// sample's map reaches and over the least mass each node reaches, so it
+/// holds at every instant of a trajectory and for every tangent a field law
+/// takes. A restoring law adds its node's curvature to the row. `Λ̃ᵢ` is the
+/// largest `R` on the node's elements, which makes `Λ̃ᵢ ≥ Rⱼ` for every `j`
+/// that `H` couples to `i`, and by the Schur test both `‖S H‖` and
+/// `‖S^{1/2} H S^{1/2}‖` are at most one with `S = diag(s)`. Each half of
+/// the filter is then a contraction for any strength up to two, wherever
+/// the mesh is fine or coarse and the medium fast or slow.
+pub(crate) fn grid_filter_reach(
+    element_nodes: &[[u32; LOCAL_NODES]],
+    samples: &[LinearConstitutiveSample],
+    sample_bound: impl Fn(usize) -> FilterSampleBound,
+    minimum_mass: &[f64],
+    curvature: &[f64],
+) -> Result<Vec<f64>, WaveError> {
+    if samples.len() != element_nodes.len() * QUADRATURE_SAMPLES
+        || (!curvature.is_empty() && curvature.len() != minimum_mass.len())
+    {
+        return Err(WaveError::InvalidState);
+    }
+    let mut rows = curvature.to_vec();
+    rows.resize(minimum_mass.len(), 0.0);
+    for (index, sample) in samples.iter().enumerate() {
+        let nodes = element_nodes[index / QUADRATURE_SAMPLES].map(|node| node as usize);
+        // The curls act on differences from local node 0, which therefore
+        // takes minus their sum.
+        let mut gradients = *sample.curls();
+        gradients[0] = gradients[1..]
+            .iter()
+            .fold(Point2::default(), |sum, curl| sum - *curl);
+        let root_mass = nodes.map(|node| minimum_mass[node].sqrt());
+        let bound = sample_bound(index);
+        let tensor = sample.complementary_inverse;
+        // `|gᵢ·J gⱼ|`, and its Cauchy-Schwarz ceiling `‖J‖ |gᵢ| |gⱼ|`, which
+        // is what a map that turns can reach.
+        let exact = |row: usize| {
+            (0..LOCAL_NODES)
+                .map(|column| {
+                    gradients[row].dot(tensor.apply(gradients[column])).abs()
+                        / (root_mass[row] * root_mass[column])
+                })
+                .sum::<f64>()
+        };
+        let norm = tensor.eigenvalues()[1];
+        let reach: [f64; LOCAL_NODES] =
+            std::array::from_fn(|local| gradients[local].norm() / root_mass[local]);
+        let total = reach.iter().sum::<f64>();
+        let isotropic = tensor.xy == 0.0 && tensor.xx == tensor.yy;
+        for row in 0..LOCAL_NODES {
+            let ceiling = norm * reach[row] * total;
+            let value = if bound.turning == 0.0 {
+                bound.largest * exact(row)
+            } else if isotropic {
+                (bound.largest * exact(row) + bound.turning * ceiling).min(bound.largest * ceiling)
+            } else {
+                bound.largest * ceiling
+            };
+            rows[nodes[row]] += sample.integration_weight * value;
+        }
+    }
+    let element_largest = element_nodes
+        .iter()
+        .map(|nodes| {
+            nodes
+                .iter()
+                .map(|node| rows[*node as usize])
+                .fold(0.0_f64, f64::max)
+        })
+        .collect::<Vec<_>>();
+    let mut largest = vec![0.0_f64; rows.len()];
+    for (nodes, value) in element_nodes.iter().zip(element_largest) {
+        for node in nodes {
+            largest[*node as usize] = largest[*node as usize].max(value);
+        }
+    }
+    let reach = largest.into_iter().map(f64::recip).collect::<Vec<_>>();
+    if reach
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(WaveError::InvalidMesh(
+            "a node carries no finite positive grid-filter bound",
+        ));
+    }
+    Ok(reach)
 }
 
 /// Evaluates the fixed linear constitutive rows while admitting the Stage 3
@@ -5140,6 +5276,62 @@ mod tests {
                 .zip(stationary)
                 .all(|(actual, expected)| (*actual - expected).norm() < 2.0e-11)
         );
+    }
+
+    /// With every node's reach at the global bound's `1/Λ`, the filter is the
+    /// global paired polynomial it replaced: `α (K M⁻¹)² Q / Λ²` off `Q` and
+    /// `α C M⁻¹ K M⁻¹ CᵀWJ b / Λ²` off `b`.
+    #[test]
+    fn a_uniform_reach_is_the_global_filter() {
+        let (_, operator) = compile(&configured_scene(PhysicsModel::Mechanical));
+        let bound = 4.0 / operator.maximum_time_step().powi(2);
+        let count = operator.degrees_of_freedom();
+        let operator = operator.with_grid_filter_reach(vec![1.0 / bound; count]);
+        let dt = 0.1 * operator.maximum_time_step();
+        let primary = test_potential(&operator);
+        let complementary = (0..operator.complementary_degrees_of_freedom())
+            .map(|index| Point2::new((index as f64 + 0.3).sin(), (0.7 * index as f64).cos()))
+            .collect::<Vec<_>>();
+        let mut state =
+            CanonicalWaveState::new(&operator, dt, primary.clone(), complementary.clone()).unwrap();
+        let strength = 0.8;
+        state
+            .apply_grid_filter(&operator, &CanonicalForcing::none(&operator), strength)
+            .unwrap();
+
+        let over_mass = |values: Vec<f64>| {
+            values
+                .iter()
+                .zip(operator.primary_mass())
+                .map(|(value, mass)| value / mass)
+                .collect::<Vec<_>>()
+        };
+        let scale = strength / (bound * bound);
+        let field = over_mass(primary.clone());
+        let primary_image = operator
+            .compatible_stiffness(&over_mass(operator.compatible_stiffness(&field).unwrap()))
+            .unwrap();
+        let complementary_image = operator
+            .compatible_flux(&over_mass(
+                operator
+                    .compatible_stiffness(&over_mass(operator.force(&complementary).unwrap()))
+                    .unwrap(),
+            ))
+            .unwrap();
+        let primary_scale = primary.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+        for ((actual, before), image) in
+            state.primary_flux().iter().zip(&primary).zip(primary_image)
+        {
+            assert!((actual - (before - scale * image)).abs() <= 1e-12 * primary_scale);
+        }
+        for ((actual, before), image) in state
+            .complementary_flux()
+            .iter()
+            .zip(&complementary)
+            .zip(complementary_image)
+        {
+            assert!((*actual - (*before - image * scale)).norm() <= 1e-12);
+        }
     }
 
     #[test]

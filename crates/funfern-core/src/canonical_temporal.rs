@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::canonical_wave::{FilterSampleBound, grid_filter_reach};
 use crate::{
     CanonicalAreaContribution, CanonicalAreaSample, CanonicalForcing, CanonicalIndicatorSnapshot,
     CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil,
@@ -1881,6 +1882,9 @@ pub struct CanonicalTemporalWaveOperator {
     short_wave: Vec<f64>,
     /// The samples whose `τ` is not zero, so the step visits only those.
     short_wave_samples: Vec<u32>,
+    /// The grid filter's reach at each node over the whole trajectory; see
+    /// [`trajectory_grid_filter_reach`].
+    grid_filter_reach: Vec<f64>,
 }
 
 /// How far a self-oscillating element's viscosity reaches: `τ·G = κ·γ₀`,
@@ -2112,6 +2116,11 @@ impl CanonicalTemporalWaveOperator {
         } else {
             Vec::new()
         };
+        let grid_filter_reach = if has_temporal_laws || has_field_laws || has_restoring {
+            trajectory_grid_filter_reach(&base, &primary, &complementary)?
+        } else {
+            base.grid_filter_reach().to_vec()
+        };
         let short_wave_samples = short_wave
             .iter()
             .enumerate()
@@ -2137,6 +2146,7 @@ impl CanonicalTemporalWaveOperator {
             restoring_curvature,
             short_wave,
             short_wave_samples,
+            grid_filter_reach,
         })
     }
 
@@ -2388,6 +2398,20 @@ impl CanonicalTemporalWaveOperator {
     /// trajectory. Resolving a temporal carrier is a separate admission gate.
     pub fn maximum_time_step(&self) -> f64 {
         self.maximum_time_step
+    }
+
+    /// The grid filter's reach `1/Λ̃` at each node, holding at every instant
+    /// of the trajectory; see [`trajectory_grid_filter_reach`].
+    pub fn grid_filter_reach(&self) -> &[f64] {
+        &self.grid_filter_reach
+    }
+
+    /// The same generation with its filter reach replaced, so a test can hold
+    /// two generations' filters to one bound and compare their maps alone.
+    #[cfg(test)]
+    fn with_grid_filter_reach(mut self, reach: Vec<f64>) -> Self {
+        self.grid_filter_reach = reach;
+        self
     }
 
     /// The step a caller should actually take, carrying the fixed path's
@@ -3524,11 +3548,12 @@ impl CanonicalTemporalWaveState {
     /// Gate O: on an oscillator medium the complementary correction is a
     /// correction to the integrated field, `δb = ηC δψ`, and `r` takes the
     /// same `δψ`, so the step's invariant `b = ηC r` survives the filter. It
-    /// filters the total force on `ψ`, `δψ = −s A K A (F + R)`, whose
-    /// first-order energy change `−s (F + R)ᵀ A K A (F + R)` is not positive,
-    /// and which is zero at an equilibrium: a static kink, a wall or a well
-    /// balances `F(b) + R(r) = 0` with `F` itself nonzero, and a filter on `F`
-    /// alone would wear it away event by event.
+    /// filters the total force on `ψ`, `δψ = −α S A K A S (F + R)` with `S`
+    /// each node's reach, whose first-order energy change
+    /// `−α (F + R)ᵀ S A K A S (F + R)` is not positive, and which is zero at
+    /// an equilibrium: a static kink, a wall or a well balances
+    /// `F(b) + R(r) = 0` with `F` itself nonzero, and a filter on `F` alone
+    /// would wear it away event by event.
     pub fn apply_grid_filter_with_forcing(
         &mut self,
         operator: &CanonicalTemporalWaveOperator,
@@ -3541,9 +3566,9 @@ impl CanonicalTemporalWaveState {
                 actual: forcing.prescribed().len(),
             });
         }
-        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+        if !strength.is_finite() || !(0.0..=crate::GRID_SCALE_FILTER_LIMIT).contains(&strength) {
             return Err(WaveError::Unsupported(
-                "the time-driven grid filter strength is not a fraction between zero and one",
+                "the time-driven grid filter strength is outside the range its bound admits",
             ));
         }
         if strength == 0.0 {
@@ -3556,8 +3581,7 @@ impl CanonicalTemporalWaveState {
             self.frozen_grid_filter_corrections(operator)?
         };
 
-        let eigenvalue_bound = 4.0 / operator.maximum_time_step().powi(2);
-        let scale = strength / eigenvalue_bound.powi(2);
+        let scale = strength;
         let mut next_primary = self.primary_flux.clone();
         let mut next_complementary = self.complementary_flux.clone();
         for ((value, correction), pinned) in next_primary
@@ -3602,17 +3626,27 @@ impl CanonicalTemporalWaveState {
 
     /// The time-driven linear polynomial's two corrections, every map frozen
     /// at the event instant: the one to `Q`, and the one to the integrated
-    /// field, which `b` takes through `ηC`.
+    /// field, which `b` takes through `ηC`. Each node's reach `s` stands where
+    /// the fixed path's does: `K S² M⁻¹ K M⁻¹ Q`, and `S M⁻¹ K M⁻¹ S` on the
+    /// total force.
     fn frozen_grid_filter_corrections(
         &self,
         operator: &CanonicalTemporalWaveOperator,
     ) -> Result<(Vec<f64>, Vec<f64>), WaveError> {
         let mass = operator.primary_mass_at(self.time, &self.runtime)?;
-        let inverse_mass = |values: Vec<f64>| {
+        let reach = operator.grid_filter_reach();
+        let inverse_mass = |values: Vec<f64>, squared: bool| {
             values
                 .into_iter()
                 .zip(&mass)
-                .map(|(value, mass)| value / mass)
+                .zip(reach)
+                .map(|((value, mass), reach)| {
+                    if squared {
+                        value * reach * reach / mass
+                    } else {
+                        value * reach / mass
+                    }
+                })
                 .collect::<Vec<_>>()
         };
         let stiffness = |field: &[f64]| -> Result<Vec<f64>, WaveError> {
@@ -3625,10 +3659,10 @@ impl CanonicalTemporalWaveState {
             .zip(&mass)
             .map(|(flux, mass)| flux / mass)
             .collect::<Vec<_>>();
-        let primary_correction = stiffness(&inverse_mass(stiffness(&primary_field)?))?;
+        let primary_correction = stiffness(&inverse_mass(stiffness(&primary_field)?, true))?;
         let mut gathered = operator.force_at(&self.complementary_flux, self.time, &self.runtime)?;
         add_restoring_force(operator, &self.integrated_field, &mut gathered)?;
-        let integrated_correction = inverse_mass(stiffness(&inverse_mass(gathered))?);
+        let integrated_correction = inverse_mass(stiffness(&inverse_mass(gathered, false))?, false);
         Ok((primary_correction, integrated_correction))
     }
 
@@ -3738,11 +3772,19 @@ impl CanonicalTemporalWaveState {
         let tangent = operator.primary_tangent_inverse_at(&field, time, runtime)?;
         let sample_tangents =
             operator.complementary_tangents_at(&self.complementary_flux, time, runtime)?;
-        let weighted = |values: Vec<f64>| {
+        let reach = operator.grid_filter_reach();
+        let weighted = |values: Vec<f64>, squared: bool| {
             values
                 .into_iter()
                 .zip(&tangent)
-                .map(|(value, tangent)| value * tangent)
+                .zip(reach)
+                .map(|((value, tangent), reach)| {
+                    if squared {
+                        value * reach * reach * tangent
+                    } else {
+                        value * reach * tangent
+                    }
+                })
                 .collect::<Vec<_>>()
         };
         let stiffness = |field: &[f64]| -> Result<Vec<f64>, WaveError> {
@@ -3754,10 +3796,10 @@ impl CanonicalTemporalWaveState {
                 .collect::<Vec<_>>();
             operator.gather_force(&fields)
         };
-        let primary_correction = stiffness(&weighted(stiffness(&field)?))?;
+        let primary_correction = stiffness(&weighted(stiffness(&field)?, true))?;
         let mut gathered = operator.force_at(&self.complementary_flux, time, runtime)?;
         add_restoring_force(operator, &self.integrated_field, &mut gathered)?;
-        let integrated_correction = weighted(stiffness(&weighted(gathered))?);
+        let integrated_correction = weighted(stiffness(&weighted(gathered, false))?, false);
         Ok((primary_correction, integrated_correction))
     }
 
@@ -4131,6 +4173,69 @@ fn add_restoring_force(
         *total += value;
     }
     validate_finite(force)
+}
+
+/// The grid filter's reach at each node over everything this generation's
+/// maps can do, so one bound serves every event instant.
+///
+/// A sample enters at the largest map its coefficient reaches over the drive,
+/// the switch and the field: `1/ĥ_min` of its reference, `ĥ` the tangent in
+/// units of the base coefficient. A field law's tangent also turns with the
+/// flux, by the spread of the field's own tangents at the drive's largest
+/// map, `(1/t_min)(1/f_min − 1/f_max)`; at zero response that is zero and the
+/// sample is the linear one. A node enters at the least mass its
+/// contributions reach, and a restoring law adds `Σ m₀ V″_max / m_min` to its
+/// row, as the step bound adds the curvature to the ceiling. The step bound
+/// itself uses the same minima, globally.
+fn trajectory_grid_filter_reach(
+    base: &CanonicalWaveOperator,
+    primary: &TemporalSites<TemporalPrimarySample>,
+    complementary: &TemporalSites<TemporalComplementarySample>,
+) -> Result<Vec<f64>, WaveError> {
+    let lowest = |law: CoefficientLawValues| {
+        law.tangent_range()
+            .map(|range| range.0)
+            .filter(|low| low.is_finite() && *low > 0.0)
+            .unwrap_or(1.0)
+    };
+    let mut minimum_mass = vec![0.0; base.degrees_of_freedom()];
+    let mut restoring = vec![0.0; base.degrees_of_freedom()];
+    for (contribution, sample) in base.primary_contributions().iter().zip(primary.iter()) {
+        let reference = contribution.geometric_weight * contribution.reference_coefficient;
+        let node = contribution.node as usize;
+        minimum_mass[node] += reference * lowest(sample.coefficient.law);
+        restoring[node] += reference * sample.restoring.curvature_bound();
+    }
+    let curvature = restoring
+        .iter()
+        .zip(&minimum_mass)
+        .map(|(restoring, mass)| restoring / mass)
+        .collect::<Vec<_>>();
+    let bounds = complementary
+        .iter()
+        .map(|sample| {
+            let law = sample.coefficient.law;
+            let low = lowest(law);
+            let turning = match law.field.tangent_range(law.inverted) {
+                Some((field_low, field_high)) if law.field != FieldLawValues::Linear => {
+                    // `low = f_min t_min`, so `1/t_min = f_min / low`.
+                    (1.0 - field_low / field_high) / low
+                }
+                _ => 0.0,
+            };
+            FilterSampleBound {
+                largest: 1.0 / low,
+                turning,
+            }
+        })
+        .collect::<Vec<_>>();
+    grid_filter_reach(
+        base.element_nodes(),
+        base.constitutive_samples(),
+        |sample| bounds[sample],
+        &minimum_mass,
+        &curvature,
+    )
 }
 
 /// Gate O: a self-oscillating law's short-wave limit.
@@ -8801,7 +8906,8 @@ mod tests {
         let norm = |values: &[Point2]| values.iter().map(|v| v.norm().powi(2)).sum::<f64>().sqrt();
         assert!(norm(&stationary) <= 1e-10 * norm(state.complementary_flux()));
 
-        // Interleaved with steps at full strength, every filter removes.
+        // Interleaved with steps at the strength the bound admits, every
+        // filter removes.
         let mut state = CanonicalTemporalWaveState::new(
             &operator,
             0.4 * operator.maximum_time_step(),
@@ -8811,14 +8917,143 @@ mod tests {
         .unwrap();
         for _ in 0..20 {
             state.step(&operator).unwrap();
-            assert!(state.apply_grid_filter(&operator, 1.0).unwrap() >= 0.0);
+            let removed = state
+                .apply_grid_filter(&operator, crate::GRID_SCALE_FILTER_LIMIT)
+                .unwrap();
+            assert!(removed >= 0.0);
+        }
+    }
+
+    /// A scene the filter's bound is hard on: a slow disk, whose rows sit far
+    /// under the medium's around it, beside a hole the mesh grades down to.
+    fn contrasted_scene() -> Scene {
+        let mut scene = Scene::initial();
+        let mut slow = scene.materials[0].clone();
+        slow.id = MaterialId(2);
+        slow.name = "Slow".into();
+        slow.stiffness = ScalarField::constant(0.05);
+        scene.materials.push(slow);
+        scene.regions.push(Region {
+            id: RegionId(2),
+            material: MaterialId(2),
+            frame: MaterialFrame::world(),
+        });
+        scene.obstacles.push(Obstacle::with_role(
+            ObstacleId(2),
+            PeriodicCubicSpline::rounded(Point2::new(0.5, 0.4), 0.3),
+            LoopRole::MaterialInterface {
+                exterior: BACKGROUND_REGION,
+                interior: RegionId(2),
+            },
+        ));
+        scene
+    }
+
+    /// The largest eigenvalue of one half of the filter's operator at `time`,
+    /// by power iteration through the filter itself: a state holding only
+    /// that half, filtered at strength one, loses `P x`. The energy is the
+    /// norm `P` is symmetric in, so `⟨x, P x⟩` comes by polarization.
+    fn filter_half_eigenvalue(
+        operator: &CanonicalTemporalWaveOperator,
+        time: f64,
+        primary_half: bool,
+    ) -> f64 {
+        let base = operator.base();
+        let dt = 0.4 * operator.maximum_time_step();
+        let state_of = |x: &[f64]| {
+            let (primary, complementary) = if primary_half {
+                (
+                    x.to_vec(),
+                    vec![Point2::default(); base.complementary_degrees_of_freedom()],
+                )
+            } else {
+                (
+                    vec![0.0; base.degrees_of_freedom()],
+                    x.chunks(2)
+                        .map(|pair| Point2::new(pair[0], pair[1]))
+                        .collect(),
+                )
+            };
+            CanonicalTemporalWaveState::new_at(operator, dt, primary, complementary, time).unwrap()
+        };
+        let flatten = |state: &CanonicalTemporalWaveState| {
+            if primary_half {
+                state.primary_flux().to_vec()
+            } else {
+                state
+                    .complementary_flux()
+                    .iter()
+                    .flat_map(|value| [value.x, value.y])
+                    .collect()
+            }
+        };
+        let length = if primary_half {
+            base.degrees_of_freedom()
+        } else {
+            2 * base.complementary_degrees_of_freedom()
+        };
+        let mut x = (0..length)
+            .map(|index| (index as f64 * 2.371).sin() + 0.3 * (index as f64 * 0.137).cos())
+            .collect::<Vec<_>>();
+        let mut eigenvalue = 0.0;
+        for _ in 0..400 {
+            let energy = state_of(&x).energy(operator).unwrap();
+            let mut filtered = state_of(&x);
+            let removed = filtered.apply_grid_filter(operator, 1.0).unwrap();
+            let image = x
+                .iter()
+                .zip(flatten(&filtered))
+                .map(|(before, after)| before - after)
+                .collect::<Vec<_>>();
+            let image_energy = state_of(&image).energy(operator).unwrap();
+            eigenvalue = (removed + image_energy) / (2.0 * energy);
+            let norm = image_energy.sqrt();
+            x = image.into_iter().map(|value| value / norm).collect();
+        }
+        eigenvalue
+    }
+
+    /// The Schur bound behind `grid_filter_reach`, measured. On a slow disk
+    /// beside a hole the mesh grades to, at rest and pumped, the largest
+    /// eigenvalue of each half of the filter is at most one at every instant,
+    /// so a strength of two still takes energy and never adds it. At rest it
+    /// is 0.42, the stiffest rows' own share of their ceiling, which the
+    /// global bound gave as well; pumped it is 0.13-0.37 over the cycle,
+    /// where the global bound, spent on the trajectory's worst phase
+    /// everywhere at once, held it to 0.02-0.06.
+    #[test]
+    fn each_half_of_the_filter_stays_within_its_reach() {
+        let resting = compile(&contrasted_scene()).unwrap();
+        let mut scene = contrasted_scene();
+        scene.materials[1].stiffness_law.drive = pump(0.6, 1.3, 0.0);
+        scene.materials[0].mass_law.drive = pump(0.3, 0.7, 0.5);
+        let pumped = compile(&scene).unwrap();
+        assert!(pumped.has_temporal_laws());
+        for (label, operator, times) in [
+            ("resting", &resting, vec![0.0]),
+            ("pumped", &pumped, vec![0.0, 0.21, 0.47, 0.9]),
+        ] {
+            for time in times {
+                for primary_half in [true, false] {
+                    let eigenvalue = filter_half_eigenvalue(operator, time, primary_half);
+                    assert!(
+                        (0.05..=1.0).contains(&eigenvalue),
+                        "{label} at {time}, primary half {primary_half}: {eigenvalue}"
+                    );
+                }
+            }
         }
     }
 
     #[test]
     fn the_tangent_filter_departs_from_the_linear_one_at_the_square_of_the_amplitude() {
         let nonlinear = compile(&kerr_scene()).unwrap();
-        let linear = compile(&Scene::initial()).unwrap();
+        // Held to the nonlinear generation's bound, which covers every
+        // amplitude its stiffness law admits and so is not the linear one's:
+        // what departs is then the tangent maps alone.
+        let linear = compile(&Scene::initial())
+            .unwrap()
+            .with_grid_filter_reach(nonlinear.grid_filter_reach().to_vec());
         let departure = |amplitude: f64| {
             let (primary, complementary) = strong_fluxes(&linear, amplitude);
             let (expected, _) = filtered(&linear, &primary, &complementary, 1.0);
@@ -11091,8 +11326,18 @@ mod tests {
                 .fold(0.0, f64::max);
             assert!(apart < 5e-3, "{label}: the filtered run is {apart:e} away");
             if label == "kink" {
+                // The discrete kink is not quite a discrete equilibrium: left
+                // alone it drifts, 2.2e-6 over this second. What the filter
+                // takes is what it sheds doing so, and that is spent by a
+                // strength of one: at two it moves the kink by the same
+                // 1.5e-8, under 1% of the drift. A filter that wore the
+                // equilibrium down would grow with the strength instead.
+                let drift = kink_centre(operator, &free) - kink_centre(operator, &start);
                 let shift = kink_centre(operator, &filtered) - kink_centre(operator, &free);
-                assert!(shift.abs() < 1e-8, "the filter moved the kink by {shift:e}");
+                assert!(
+                    shift.abs() < 0.01 * drift.abs(),
+                    "the filter moved the kink by {shift:e} against its own drift {drift:e}"
+                );
             }
         }
     }
