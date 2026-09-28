@@ -9932,9 +9932,19 @@ mod tests {
     /// and the composed step runs backwards onto the state it started from:
     /// both of the wall's kicks are implicit midpoint rules, each the other's
     /// inverse under a reversed step, and a pin depends on the clock alone.
-    /// The wall's trace solve is iterative, so the same wall without pins sets
-    /// how closely it returns: 1.7e-12 in `Q` and 7e-10 in `b`, against 3.4e-12
-    /// and 1.1e-9 pinned.
+    ///
+    /// Neither trip returns to roundoff. The wall damps what the forward steps
+    /// send it, so the reversed ones amplify whatever rounding the forward
+    /// ones left, by a gain the same wall without pins measures: 1.7e-12 in
+    /// `Q` and 7e-10 in `b`, on states of 6e-3 and 2.5e-2. A pin rounds `M(t)
+    /// g(t)` afresh at every stage, on the wall itself, so its trip is that
+    /// gain on more rounding, and how much more depends on bits no one
+    /// chooses. Moving the signal's or the pump's phase by a unit in the last
+    /// place puts the pinned trip at 0.7 to 15 times the free one. macOS on
+    /// Apple silicon reads 2.0 in `Q`, and Linux on x86_64, whose `sin` rounds
+    /// differently, 9.3. A pin read 1e-8 of a step off its instant on the way
+    /// back only reads 440 to 650 times, and half a step off 1e10, so the bound
+    /// of 32 sits between the two.
     #[test]
     fn a_pinned_trace_holds_its_signal_and_reverses() {
         let mut scene = Scene::default();
@@ -10010,7 +10020,7 @@ mod tests {
         let free_trip = round_trip(&CanonicalForcing::none(base), &|_| {});
         for (pinned, free) in pinned_trip.iter().zip(free_trip) {
             assert!(
-                *pinned <= 4.0 * free.max(1e-13),
+                *pinned <= 32.0 * free.max(1e-13),
                 "{pinned_trip:?} against {free_trip:?}"
             );
         }

@@ -16200,3 +16200,34 @@ open, with the large-mesh warning as the suggested remedy.
 - **Docs.** The Stage 11 report's two rows; `docs/plan.md` Maintenance.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — A pinned trace's round trip is held to its own roundoff
+
+- **Reported:** CI has failed since dabb33d, on Linux x86_64 only, in
+  `a_pinned_trace_holds_its_signal_and_reverses`. The pinned round trip read
+  `[1.8e-11, 6.5e-9, 5.7e-10]` in `Q`, `b` and the pole currents, against
+  `[1.9e-12, 8.0e-10, 5.2e-11]` without pins, beyond the test's four times.
+  The test came in with a9e40dd, and CI stops at the first failing binary,
+  so `funfern-core`'s geometry and mesh tests had not run there since.
+- **Reproduced** bit for bit in a Linux x86_64 container under Rust 1.96.1,
+  with the same mesh, trace, pinned node and step as macOS on Apple silicon,
+  where the pinned trip reads 2.0 times the free one. Only the last bits of
+  the pump's and the signal's `sin` differ.
+- **Cause: the margin was one sample of roundoff.** Neither trip returns to
+  roundoff. The outgoing wall damps on the way forward, so the reversed
+  steps amplify what rounding the forward ones left: 1.7e-12 in `Q` on a
+  state of 6e-3. A pin rounds `M(t) g(t)` afresh at each stage on the wall
+  itself, and how much that adds depends on bits no one chooses. Across 200
+  one-unit-in-the-last-place steps of the signal's phase the pinned trip
+  reads 0.7 to 9.9 times the free one in `Q` (median 5.4), 0.7 to 9.0 in `b`
+  and 1.0 to 12.9 in the currents; moving the pump's phase the same way
+  reached 14.9. Linux's 9.3, 8.2 and 11 sit in that spread.
+- **What a defect reads.** A pin read off its instant on the way back only,
+  by 1e-8 of a step, reads 440 to 650 times the free trip; by half a step,
+  about 1e10.
+- **Fix.** The bound is 32 times the free trip, above the spread and below
+  the smallest defect by more than ten, with the measurements in the test's
+  comment. The test passes on both platforms, and every `funfern-core` test
+  passes in the Linux x86_64 container.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
