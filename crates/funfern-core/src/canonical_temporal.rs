@@ -1864,7 +1864,6 @@ pub struct CanonicalTemporalWaveOperator {
     node_contributions: Vec<u32>,
     has_loss: bool,
     conservative_bulk_supported: bool,
-    forced_composition_supported: bool,
     maximum_time_step: f64,
     primary_floor: f64,
     complementary_floor: f64,
@@ -2086,18 +2085,10 @@ impl CanonicalTemporalWaveOperator {
         // Thin gaps are admitted: a gap is a local spring with its own
         // displacement, which the specification calls a cheap exact local
         // split, and it carries its own stored energy into the balance.
-        // Every boundary capability composes now. What is left in the bulk
-        // claim is the absence of each, not the inability to run any. The one
-        // combination still refused is prescribed data sitting on an outgoing
-        // trace, which is its own composition and has had no tests.
+        // Every boundary capability composes now, prescribed data on an
+        // outgoing trace included. What is left in the bulk claim is the
+        // absence of each, not the inability to run any.
         let open = base.outgoing_boundary().is_some();
-        let prescribed_on_trace = base.outgoing_boundary().is_some_and(|boundary| {
-            boundary
-                .trace_nodes()
-                .iter()
-                .any(|node| quadratic.dirichlet_signals()[*node as usize].is_some())
-        });
-        let passive_composition = !prescribed_on_trace;
         let ungapped = base.thin_gap_samples().is_empty();
         let undamped_boundary = base
             .first_order_boundary_damping()
@@ -2114,7 +2105,6 @@ impl CanonicalTemporalWaveOperator {
                 .iter()
                 .flatten()
                 .all(|load| load.normalized_weight == 0.0);
-        let forced_composition_supported = passive_composition;
         let conservative_bulk_supported =
             !open && ungapped && undamped_boundary && !has_loss && undriven_boundary;
         let short_wave = if has_active_loss {
@@ -2139,7 +2129,6 @@ impl CanonicalTemporalWaveOperator {
             node_contributions,
             has_loss,
             conservative_bulk_supported,
-            forced_composition_supported,
             maximum_time_step,
             primary_floor,
             complementary_floor,
@@ -2393,16 +2382,6 @@ impl CanonicalTemporalWaveOperator {
     /// lossy, forced, prescribed-boundary, or auxiliary subsystem.
     pub fn conservative_bulk_supported(&self) -> bool {
         self.conservative_bulk_supported
-    }
-
-    /// Whether the stepper can compose prescribed data, volume sources and
-    /// loss with this generation. Weaker than
-    /// [`Self::conservative_bulk_supported`], which additionally requires that
-    /// nothing drives the boundary and that nothing dissipates, because an
-    /// accounted exchange lane is stepped without being part of the freely
-    /// evolving system.
-    pub fn forced_composition_supported(&self) -> bool {
-        self.forced_composition_supported
     }
 
     /// Conservative spatial CFL bound over the entire authored coefficient
@@ -3294,16 +3273,6 @@ impl CanonicalTemporalWaveState {
         complementary_flux: Vec<Point2>,
         time: f64,
     ) -> Result<Self, WaveError> {
-        // A state exists wherever the stepper can compose, which is now wider
-        // than the free bulk: loss, prescribed data, sources, an absorbing
-        // wall and thin gaps are accounted lanes or local states of their own.
-        // What the bulk claim still refuses - a second-order open boundary -
-        // has no state here either.
-        if !operator.forced_composition_supported() {
-            return Err(WaveError::Unsupported(
-                "the time-driven operator cannot compose a forced step for this scene",
-            ));
-        }
         if !time_step.is_finite() || time_step <= 0.0 {
             return Err(WaveError::Unsupported(
                 "the time-driven state was given a time step that is not positive and finite",
@@ -3566,11 +3535,6 @@ impl CanonicalTemporalWaveState {
         forcing: &CanonicalForcing,
         strength: f64,
     ) -> Result<f64, WaveError> {
-        if !operator.forced_composition_supported() {
-            return Err(WaveError::Unsupported(
-                "the time-driven grid filter needs a composition this scene does not have",
-            ));
-        }
         if forcing.prescribed().len() != operator.base().degrees_of_freedom() {
             return Err(WaveError::SizeMismatch {
                 expected: operator.base().degrees_of_freedom(),
@@ -3889,9 +3853,7 @@ impl CanonicalTemporalWaveState {
         forcing: &CanonicalForcing,
         duration: f64,
     ) -> Result<CanonicalTemporalStepAccounting, WaveError> {
-        if !operator.forced_composition_supported()
-            || forcing.prescribed().len() != operator.base().degrees_of_freedom()
-        {
+        if forcing.prescribed().len() != operator.base().degrees_of_freedom() {
             return Err(WaveError::Unsupported(
                 "the time-driven operator cannot compose the forcing it was handed",
             ));
@@ -4393,9 +4355,8 @@ fn bernoulli_map(flux: f64, beta: f64, k: f64, duration: f64) -> f64 {
     flux.signum() * next.max(0.0).sqrt()
 }
 
-/// One half kick with the source and any prescribed pin folded into it, as the
-/// fixed path's `force_coupled_kick` does with boundary damping and open
-/// boundaries excluded - both are refused by `forced_composition_supported`.
+/// One half kick with the sources, the pins and both walls folded into it, as
+/// the fixed path's `force_coupled_kick` does.
 ///
 /// The mass is the one in force at `target_time`, which is the instant the
 /// prescribed signal is sampled at, so a pinned node's `Q` and the `M` it is
@@ -4449,8 +4410,15 @@ fn forced_kick(
             })
         });
         let (work, escaped, exchange) = if let Some(terms) = nonlinear_trace {
-            // Admission refuses prescribed data on a trace, so the nonlinear
-            // kick has no pinned row to hold.
+            if boundary
+                .trace_nodes()
+                .iter()
+                .any(|node| forcing.prescribed()[*node as usize].is_some())
+            {
+                return Err(WaveError::Unsupported(
+                    "prescribed data on a nonlinear outgoing trace is not composed yet",
+                ));
+            }
             let trace = TemporalTrace {
                 operator,
                 terms,
@@ -4484,6 +4452,7 @@ fn forced_kick(
                 duration,
                 forcing,
                 target_time,
+                crate::canonical_wave::TracePinField::Staged,
             )?
         };
         source_work += work;
@@ -6011,11 +5980,22 @@ mod tests {
     /// samples a prescribed signal half a step in on the first kick, and the
     /// temporal path samples it at the stage. With a constant signal the two
     /// coincide exactly, which is what this pins down; a varying signal differs
-    /// at second order, which is the accuracy both paths already claim.
+    /// at second order, which is the accuracy both paths already claim. Beside
+    /// a second-order wall the prescribed side is on the wall's trace, where
+    /// the two paths hold a pin at different fields and the same constant.
     #[test]
     fn an_inert_generation_steps_forcing_exactly_as_the_fixed_path_does() {
+        for condition in [
+            OuterBoundaryCondition::Reflecting,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        ] {
+            inert_forcing_matches_the_fixed_path(condition);
+        }
+    }
+
+    fn inert_forcing_matches_the_fixed_path(condition: OuterBoundaryCondition) {
         let scene = Scene::default();
-        let operator = compile(&scene).unwrap();
+        let operator = walled(condition, &scene);
         let base = operator.base();
         let count = base.degrees_of_freedom();
 
@@ -6080,25 +6060,32 @@ mod tests {
             let temporal_accounting = temporal.step_with_forcing(&operator, &forcing).unwrap();
             let fixed_accounting = fixed.step_with_forcing(base, &forcing).unwrap();
             assert!(
-                (temporal_accounting.source_work - fixed_accounting.source_work).abs() < 1.0e-12
+                (temporal_accounting.source_work - fixed_accounting.source_work).abs() < 1.0e-12,
+                "{condition:?}"
             );
             assert!(
                 (temporal_accounting.prescribed_exchange - fixed_accounting.prescribed_exchange)
                     .abs()
-                    < 1.0e-12
+                    < 1.0e-12,
+                "{condition:?}"
+            );
+            assert!(
+                (temporal_accounting.boundary_loss - fixed_accounting.boundary_loss).abs()
+                    < 1.0e-12,
+                "{condition:?}"
             );
             // An inert medium does no temporal work, whatever else it does.
             assert!(temporal_accounting.temporal_work.abs() < 1.0e-12);
         }
         for (temporal, fixed) in temporal.primary_flux().iter().zip(fixed.primary_flux()) {
-            assert!((temporal - fixed).abs() < 1.0e-12);
+            assert!((temporal - fixed).abs() < 1.0e-12, "{condition:?}");
         }
         for (temporal, fixed) in temporal
             .complementary_flux()
             .iter()
             .zip(fixed.complementary_flux())
         {
-            assert!((*temporal - *fixed).norm() < 1.0e-12);
+            assert!((*temporal - *fixed).norm() < 1.0e-12, "{condition:?}");
         }
     }
 
@@ -6129,10 +6116,6 @@ mod tests {
             },
         });
         let operator = compile(&scene).unwrap();
-        assert!(
-            operator.forced_composition_supported(),
-            "a dissipating generation must still be steppable"
-        );
         assert!(
             !operator.conservative_bulk_supported(),
             "but it is not a conservative bulk"
@@ -6289,10 +6272,6 @@ mod tests {
             .unwrap();
             let operator =
                 CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
-            assert!(
-                operator.forced_composition_supported(),
-                "an absorbing wall must be steppable"
-            );
             let base = operator.base();
             let forcing = CanonicalForcing::none(base);
             let time_step = 0.4 * operator.maximum_time_step();
@@ -6551,7 +6530,6 @@ mod tests {
             CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let base = operator.base();
         assert!(base.outgoing_boundary().is_some());
-        assert!(operator.forced_composition_supported());
         assert!(!operator.conservative_bulk_supported());
         let forcing = CanonicalForcing::none(base);
         let time_step = 0.4 * operator.maximum_time_step();
@@ -6749,7 +6727,6 @@ mod tests {
             !base.thin_gap_samples().is_empty(),
             "the fixture needs a thin gap"
         );
-        assert!(operator.forced_composition_supported());
         assert!(!operator.conservative_bulk_supported());
         let forcing = CanonicalForcing::none(base);
 
@@ -6852,10 +6829,6 @@ mod tests {
             whole.maximum_time_step(),
             reused.maximum_time_step(),
             "the reused base must give the same trajectory bound"
-        );
-        assert_eq!(
-            whole.forced_composition_supported(),
-            reused.forced_composition_supported()
         );
         assert_eq!(
             whole.conservative_bulk_supported(),
@@ -8093,7 +8066,6 @@ mod tests {
         let lossy = compile(&lossy_scene).unwrap();
         assert!(lossy.has_loss());
         assert!(!lossy.conservative_bulk_supported());
-        assert!(lossy.forced_composition_supported());
         assert!(CanonicalTemporalWaveState::zero(&lossy, 0.1 * lossy.maximum_time_step()).is_ok());
 
         let scene = Scene::initial();
@@ -8116,7 +8088,6 @@ mod tests {
         let damped =
             CanonicalTemporalWaveOperator::compile_scene(&mesh, &first_order, &scene, 1).unwrap();
         assert!(!damped.conservative_bulk_supported());
-        assert!(damped.forced_composition_supported());
         assert!(
             CanonicalTemporalWaveState::zero(&damped, 0.1 * damped.maximum_time_step()).is_ok()
         );
@@ -8132,7 +8103,6 @@ mod tests {
         let open =
             CanonicalTemporalWaveOperator::compile_scene(&mesh, &second_order, &scene, 1).unwrap();
         assert!(!open.conservative_bulk_supported());
-        assert!(open.forced_composition_supported());
         assert!(CanonicalTemporalWaveState::zero(&open, 0.1 * open.maximum_time_step()).is_ok());
     }
 
@@ -9565,11 +9535,202 @@ mod tests {
         assert!(middle / fine > 3.6, "{middle:e} {fine:e}");
     }
 
+    /// Prescribed data on a second-order wall's trace, under a breathing mass.
+    /// A pinned trace node's field enters the wall's implicit solve beside the
+    /// free trace nodes, so it has to be the signal at the kick's own instant,
+    /// as a pinned interior node's is. Formed from the flux the node carried
+    /// in, it mixes in the mass that flux was pinned against at the other
+    /// stage: these ratios read 2.00 and 2.05, first order, that way.
+    #[test]
+    fn a_pinned_trace_under_a_pump_steps_at_second_order() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.drive = pump(0.4, 1.1, 0.3);
+        let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
+        let base = operator.base();
+        let boundary = base.outgoing_boundary().unwrap();
+        // A short pinned patch among free trace nodes, as a pinned span that
+        // ends on the wall makes.
+        let mut prescribed = vec![None; base.degrees_of_freedom()];
+        for (node, point) in base.node_points().iter().enumerate() {
+            if point.x < -0.999 && point.y.abs() < 0.1 {
+                prescribed[node] = Some(TimeSignal::harmonic(1.0, 0.2, 1.3, 0.2));
+            }
+        }
+        let pinned = boundary
+            .trace_nodes()
+            .iter()
+            .filter(|node| prescribed[**node as usize].is_some())
+            .count();
+        assert!(
+            pinned > 0 && pinned < boundary.trace_nodes().len() / 4,
+            "the fixture pins a few trace nodes"
+        );
+        let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+        let run = |steps: u64| {
+            let time_step = 0.3 / steps as f64;
+            let mut state = CanonicalTemporalWaveState::zero(&operator, time_step)
+                .unwrap()
+                .pinned(&operator, &forcing)
+                .unwrap();
+            for _ in 0..steps {
+                state.step_with_forcing(&operator, &forcing).unwrap();
+            }
+            state
+        };
+        let reference = run(2000);
+        let error = |steps| {
+            let state = run(steps);
+            let complementary = state
+                .complementary_flux()
+                .iter()
+                .zip(reference.complementary_flux())
+                .map(|(a, b)| (*a - *b).norm());
+            let primary = state
+                .primary_flux()
+                .iter()
+                .zip(reference.primary_flux())
+                .map(|(a, b)| (a - b).abs());
+            let poles = state
+                .outgoing_pole_currents()
+                .iter()
+                .zip(reference.outgoing_pole_currents())
+                .map(|(a, b)| (a - b).abs());
+            complementary
+                .chain(primary)
+                .chain(poles)
+                .fold(0.0_f64, f64::max)
+        };
+        let (coarse, middle, fine) = (error(50), error(100), error(200));
+        assert!(coarse / middle > 3.6, "{coarse:e} {middle:e}");
+        assert!(middle / fine > 3.6, "{middle:e} {fine:e}");
+    }
+
+    /// A nonlinear trace does not hold a pin yet, and says so rather than
+    /// stepping past it.
+    #[test]
+    fn a_pinned_nonlinear_trace_is_refused_by_name() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.field = kerr(0.8);
+        let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
+        let base = operator.base();
+        let prescribed = base
+            .node_points()
+            .iter()
+            .map(|point| (point.x < -0.999).then_some(TimeSignal::harmonic(0.2, 0.1, 1.3, 0.2)))
+            .collect();
+        let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+        let (primary, complementary) = strong_fluxes(&operator, 1.0);
+        let mut state = CanonicalTemporalWaveState::new(
+            &operator,
+            0.4 * operator.maximum_time_step(),
+            primary,
+            complementary,
+        )
+        .unwrap()
+        .pinned(&operator, &forcing)
+        .unwrap();
+        assert_eq!(
+            state.step_with_forcing(&operator, &forcing).unwrap_err(),
+            WaveError::Unsupported(
+                "prescribed data on a nonlinear outgoing trace is not composed yet"
+            )
+        );
+    }
+
+    /// A pinned trace node holds `Q = M(t) g(t)` at every step, under a pump,
+    /// and the composed step runs backwards onto the state it started from:
+    /// both of the wall's kicks are implicit midpoint rules, each the other's
+    /// inverse under a reversed step, and a pin depends on the clock alone.
+    /// The wall's trace solve is iterative, so the same wall without pins sets
+    /// how closely it returns: 1.7e-12 in `Q` and 7e-10 in `b`, against 3.4e-12
+    /// and 1.1e-9 pinned.
+    #[test]
+    fn a_pinned_trace_holds_its_signal_and_reverses() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.drive = pump(0.4, 1.1, 0.3);
+        let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
+        let base = operator.base();
+        let boundary = base.outgoing_boundary().unwrap();
+        let signal = TimeSignal::harmonic(1.0, 0.2, 1.3, 0.2);
+        let mut prescribed = vec![None; base.degrees_of_freedom()];
+        for (node, point) in base.node_points().iter().enumerate() {
+            if point.x < -0.999 && point.y.abs() < 0.1 {
+                prescribed[node] = Some(signal);
+            }
+        }
+        let pinned = boundary
+            .trace_nodes()
+            .iter()
+            .map(|node| *node as usize)
+            .filter(|node| prescribed[*node].is_some())
+            .collect::<Vec<_>>();
+        assert!(!pinned.is_empty());
+        let time_step = 0.4 * operator.maximum_time_step();
+        // How far 30 steps and 30 reversed ones leave a state from its start,
+        // in the primary flux, the complementary flux and the pole currents.
+        let round_trip = |forcing: &CanonicalForcing,
+                          holds: &dyn Fn(&CanonicalTemporalWaveState)| {
+            let (primary, complementary) = strong_fluxes(&operator, 1.0);
+            let start =
+                CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+                    .unwrap()
+                    .pinned(&operator, forcing)
+                    .unwrap();
+            let mut state = start.clone();
+            for _ in 0..30 {
+                state.step_with_forcing(&operator, forcing).unwrap();
+                holds(&state);
+            }
+            assert!(state.outgoing_pole_currents().iter().any(|z| *z != 0.0));
+            for _ in 0..30 {
+                state
+                    .step_with_forcing_by(&operator, forcing, -time_step)
+                    .unwrap();
+            }
+            [
+                state
+                    .primary_flux()
+                    .iter()
+                    .zip(start.primary_flux())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max),
+                state
+                    .complementary_flux()
+                    .iter()
+                    .zip(start.complementary_flux())
+                    .map(|(a, b)| (*a - *b).norm())
+                    .fold(0.0_f64, f64::max),
+                state
+                    .outgoing_pole_currents()
+                    .iter()
+                    .fold(0.0_f64, |a, b| a.max(b.abs())),
+            ]
+        };
+        let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+        let pinned_trip = round_trip(&forcing, &|state| {
+            let mass = operator
+                .primary_mass_at(state.time(), state.runtime())
+                .unwrap();
+            for node in &pinned {
+                let held = mass[*node] * signal.value(state.time());
+                assert!((state.primary_flux()[*node] - held).abs() <= 1e-14 * held.abs());
+            }
+        });
+        let free_trip = round_trip(&CanonicalForcing::none(base), &|_| {});
+        for (pinned, free) in pinned_trip.iter().zip(free_trip) {
+            assert!(
+                *pinned <= 4.0 * free.max(1e-13),
+                "{pinned_trip:?} against {free_trip:?}"
+            );
+        }
+    }
+
     /// The same defect under a breathing mass: a constant held value beside a
-    /// moving free field balanced at order 0.5-0.9.
+    /// moving free field balanced at order 0.5-0.9. Beside a second-order
+    /// wall the held side is on the wall's trace.
     #[test]
     fn prescribed_data_beside_a_pumped_mass_balances_at_second_order() {
-        for signal in [
+        for (signal, condition) in [
             TimeSignal::Harmonic {
                 offset: 0.3,
                 amplitude: 0.0,
@@ -9577,10 +9738,18 @@ mod tests {
                 phase_radians: 0.0,
             },
             TimeSignal::harmonic(0.3, 0.2, 1.3, 0.2),
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|signal| {
+            [
+                OuterBoundaryCondition::Reflecting,
+                OuterBoundaryCondition::SecondOrderOutgoing,
+            ]
+            .map(|condition| (signal, condition))
+        }) {
             let mut scene = Scene::default();
             scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
-            let operator = compile(&scene).unwrap();
+            let operator = walled(condition, &scene);
             let base = operator.base();
             let mut prescribed = vec![None; base.degrees_of_freedom()];
             for (node, point) in base.node_points().iter().enumerate() {
@@ -9590,7 +9759,10 @@ mod tests {
             }
             let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
             let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.3, 0.5);
-            assert!(total.prescribed_exchange.abs() > 1e-4, "{total:?}");
+            assert!(
+                total.prescribed_exchange.abs() > 1e-4,
+                "{condition:?}: {total:?}"
+            );
         }
     }
 
@@ -9770,7 +9942,6 @@ mod tests {
         for (label, scene, condition) in filter_compositions() {
             let operator = filter_operator(&scene, condition);
             let base = operator.base();
-            assert!(operator.forced_composition_supported(), "{label}");
             // The prescribed wall is forcing handed to the step, not authored
             // data, so only its operator still reads as a closed bulk.
             assert_eq!(

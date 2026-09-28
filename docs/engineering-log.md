@@ -15854,3 +15854,48 @@ cap did the same, so it was not the cap.
   control went from Delete control, leaving the loop one control fewer.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — A driven medium holds a pin on an outgoing wall's trace
+
+- **Defect** (reported 2026-09-24, awaiting a decision until today). The
+  operator refused prescribed data on an outgoing trace only when it came from
+  the assembled Dirichlet signals, so pins handed to the step in the forcing
+  alone passed, and then the CPU nonlinear trace kick skipped them (its
+  comment assumed the refusal) while the device pinned them at the authored
+  mass through the linear map: `NONLINEAR_WALL=2 NONLINEAR_FORCED=1` missed by
+  Q 1.6e-1. The app hands the step exactly the assembled signals, so it never
+  ran that; it refused the whole scene instead. A pinned or electric-wall
+  side beside an outgoing one pins the two corners on the trace, as does a
+  pinned span that ends on the wall: with one side pinned, every linear
+  gallery scene ran and all ten driven, nonlinear and oscillator scenes with
+  a second-order wall were refused ("the time-driven operator cannot compose
+  a forced step for this scene").
+- **First, a linear trace under a drive.** The shared outgoing kick already
+  held pinned trace rows, at the stage's own mass, but formed a pinned node's
+  field as the mean of the flux it carried in and the one it is pinned to.
+  The time-driven step pins at its stages, so under a moving mass the carried
+  flux was pinned against the other stage's mass. `TracePinField::Staged`
+  holds a pinned trace node at its signal at the kick's instant, as a pinned
+  interior node already is, and measures its energy change from the flux it
+  stored; the fixed path keeps `Carried`, bit for bit. Measured on a short
+  pinned patch among free trace nodes under a pump of depth 0.4 (errors
+  against 2000 steps over 0.3 s): the carried field's ratios read 2.00 and
+  2.05, first order, the staged 4.02 and 4.03. Pinning a whole side hides it
+  at these steps (3.9 and 3.7 carried) because few free trace nodes sit
+  beside the pins; refined to 1600 steps the carried ratios fell to 2.3.
+- **Admission.** The refusal is gone and with it
+  `forced_composition_supported`, which it was the last condition of; the
+  device plan's filter flag, which read it, stays as its guard. Until the
+  next two changes land, two named refusals remain: a nonlinear trace with a
+  pin, at the kick, and any pinned trace on a time-driven device plan, at
+  `compile_temporal`, which reads the forcing and not the assembly.
+- **Tests.** `a_pinned_trace_under_a_pump_steps_at_second_order`;
+  `a_pinned_trace_holds_its_signal_and_reverses` (the pin exact to 1e-14
+  every step, and 30 steps back land within 4× the same wall's unpinned
+  round trip, 3.4e-12 in Q and 1.1e-9 in b against 1.7e-12 and 7e-10: the
+  trace solve is iterative); the inert parity with the fixed path and the
+  pumped balance now also beside a second-order wall with the pinned side on
+  its trace; `a_pinned_nonlinear_trace_is_refused_by_name` and
+  `a_pinned_trace_on_a_driven_generation_waits_for_the_device`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

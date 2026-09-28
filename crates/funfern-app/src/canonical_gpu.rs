@@ -1075,12 +1075,22 @@ impl CanonicalGpuPlan {
         clock: CanonicalGpuClock,
     ) -> Result<Self, CanonicalGpuBuildError> {
         let scale = state.time().abs().max(clock.time().abs()).max(1.0);
-        if !operator.forced_composition_supported()
-            || state.time_step() != clock.time_step
+        if state.time_step() != clock.time_step
             || (state.time() - clock.time()).abs() > 16.0 * f64::EPSILON * scale
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "the temporal state, clock and operator must share one boundary",
+            ));
+        }
+        if operator.base().outgoing_boundary().is_some_and(|boundary| {
+            boundary
+                .trace_nodes()
+                .iter()
+                .any(|node| forcing.prescribed()[*node as usize].is_some())
+        }) {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "the device does not yet hold a pinned wall beside an outgoing wall \
+                 in a time-driven or nonlinear medium",
             ));
         }
         if state.thin_gap_jump().iter().any(|jump| *jump != 0.0)
@@ -1177,10 +1187,10 @@ impl CanonicalGpuPlan {
                 - trace_dispatches(self.trace_count, self.trace_sweeps, false)
                 + nonlinear_trace_dispatches(self.trace_count, self.trace_sweeps);
         }
-        // The filter composes wherever the stepper does: the correction keeps
-        // pins, pole currents and gap jumps, and commits only when the total
-        // stored energy does not rise.
-        self.grid_filter_admitted = operator.forced_composition_supported();
+        // The filter composes wherever the stepper does, as the fixed plan
+        // this one extends already admits it: the correction keeps pins, pole
+        // currents and gap jumps, and commits only when the total stored
+        // energy does not rise.
         // Every site's record is read from the operator as it is packed,
         // never gathered first: a generation has one per contribution and one
         // per sample, and a gathered copy of them all cost the pack a few
@@ -7554,6 +7564,58 @@ mod tests {
             CanonicalGpuClock::initial(time_step).unwrap(),
         )
         .unwrap()
+    }
+
+    /// The device does not hold a pin on a driven generation's outgoing trace
+    /// yet: the trace system pins at the authored mass. The same pins beside
+    /// reflecting walls are interior pins and pack.
+    #[test]
+    fn a_pinned_trace_on_a_driven_generation_waits_for_the_device() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(0.9),
+            phase_radians: ScalarField::constant(0.1),
+        };
+        let mut fixed_scene = scene.clone();
+        fixed_scene.materials[0].mass_law = CoefficientLaw::linear();
+        let mesh = mesh_scene(
+            &fixed_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.24,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        for (boundary, packs) in [
+            (OuterBoundaryCondition::Reflecting, true),
+            (OuterBoundaryCondition::SecondOrderOutgoing, false),
+        ] {
+            let scalar =
+                QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, boundary).unwrap();
+            let operator =
+                CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
+            let base = operator.base();
+            let prescribed = base
+                .node_points()
+                .iter()
+                .map(|point| (point.x < -0.999).then_some(TimeSignal::harmonic(0.1, 0.1, 1.2, 0.0)))
+                .collect();
+            let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+            let time_step = 0.4 * operator.maximum_time_step();
+            let state = CanonicalTemporalWaveState::zero(&operator, time_step)
+                .unwrap()
+                .pinned(&operator, &forcing)
+                .unwrap();
+            let plan = CanonicalGpuPlan::compile_temporal(
+                &operator,
+                &state,
+                &forcing,
+                CanonicalGpuClock::initial(time_step).unwrap(),
+            );
+            assert_eq!(plan.is_ok(), packs, "{boundary:?}");
+        }
     }
 
     /// Gate O: an oscillator generation packs `r` as the tail of its

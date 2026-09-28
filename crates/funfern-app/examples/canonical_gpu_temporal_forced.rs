@@ -141,8 +141,7 @@ fn main() -> AppExit {
         .expect("forced temporal operator");
     let base = operator.base();
     assert!(
-        operator.forced_composition_supported()
-            && operator.conservative_bulk_supported() == conservative,
+        operator.conservative_bulk_supported() == conservative,
         "the fixture must exercise the widened admission"
     );
     assert!(

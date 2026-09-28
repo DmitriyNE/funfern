@@ -2257,6 +2257,7 @@ impl CanonicalWaveState {
             duration,
             forcing,
             target_time,
+            TracePinField::Carried,
         );
         self.boundary_prescribed_cache = prescribed_cache;
         if boundary.auxiliary_count > 0 {
@@ -2322,6 +2323,22 @@ impl CanonicalWaveState {
     }
 }
 
+/// The field a pinned trace node holds through an outgoing kick, where it
+/// enters the wall's implicit solve beside the free trace nodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TracePinField {
+    /// The mean of the flux the node carried in and the flux it is pinned to,
+    /// over the one mass: the fixed path, which pins its first kick half a
+    /// step in and whose mass does not move.
+    Carried,
+    /// The signal at the kick's own instant, as a pinned interior node holds
+    /// it. A time-driven path pins at its stages, and the flux a node carries
+    /// into a kick was pinned against the other stage's mass, so the mean
+    /// would mix two masses: an error of order `h` in the wall's input,
+    /// measured as the order falling from 2 towards 1 under a pump.
+    Staged,
+}
+
 /// The force-coupled outgoing kick, over explicit state rather than a state's
 /// own fields.
 ///
@@ -2343,6 +2360,7 @@ pub(crate) fn force_coupled_outgoing_kick_with(
     duration: f64,
     forcing: &CanonicalForcing,
     target_time: f64,
+    pin_field: TracePinField,
 ) -> Result<(f64, f64, f64), WaveError> {
     let trace_count = boundary.trace_nodes.len();
     let auxiliary_count = boundary.auxiliary_count;
@@ -2362,6 +2380,24 @@ pub(crate) fn force_coupled_outgoing_kick_with(
         old[position] = primary_flux[node];
     }
     old[trace_count..].copy_from_slice(&old_z);
+    let has_prescribed_trace = trace_position
+        .iter()
+        .any(|(node, _)| forcing.prescribed[*node].is_some());
+    let prescribed_trace = trace_position
+        .iter()
+        .map(|(node, _)| forcing.prescribed[*node].is_some())
+        .collect::<Vec<_>>();
+    // A staged pin enters the solve at its signal, while its energy change
+    // is still measured from the flux it stores on entry.
+    let staged = pin_field == TracePinField::Staged && has_prescribed_trace;
+    let stored_pins = staged.then(|| old[..trace_count].to_vec());
+    if staged {
+        for &(node, position) in &trace_position {
+            if let Some(signal) = forcing.prescribed[node] {
+                old[position] = mass[node] * signal.value(target_time);
+            }
+        }
+    }
     let derivative = apply_outgoing_generator(operator, boundary, mass, &old)?;
     let mut right = old
         .iter()
@@ -2371,13 +2407,6 @@ pub(crate) fn force_coupled_outgoing_kick_with(
     if right.len() != dimension {
         return Err(WaveError::InvalidState);
     }
-    let has_prescribed_trace = trace_position
-        .iter()
-        .any(|(node, _)| forcing.prescribed[*node].is_some());
-    let prescribed_trace = trace_position
-        .iter()
-        .map(|(node, _)| forcing.prescribed[*node].is_some())
-        .collect::<Vec<_>>();
     for &(node, position) in &trace_position {
         right[position] += duration * (source[node] - force[node]);
     }
@@ -2416,6 +2445,7 @@ pub(crate) fn force_coupled_outgoing_kick_with(
     let mut primary_energy_change = 0.0;
     let mut midpoint_field = vec![0.0; operator.degrees_of_freedom()];
     let mut has_prescribed = false;
+    let stored = stored_pins.as_deref().unwrap_or(&old[..trace_count]);
     for &(node, position) in &trace_position {
         let mass = mass[node];
         let midpoint = 0.5 * (old[position] + new[position]) / mass;
@@ -2425,7 +2455,7 @@ pub(crate) fn force_coupled_outgoing_kick_with(
         first_order_loss +=
             duration * operator.first_order_boundary_damping[node] * midpoint * midpoint;
         primary_energy_change +=
-            0.5 * (new[position] * new[position] - old[position] * old[position]) / mass;
+            0.5 * (new[position] * new[position] - stored[position] * stored[position]) / mass;
         has_prescribed |= forcing.prescribed[node].is_some();
     }
     let auxiliary_energy_change =
