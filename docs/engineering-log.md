@@ -15984,3 +15984,58 @@ cap did the same, so it was not the cap.
   stage.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — Where the grid filter's strength goes
+
+Element-scale modes fade slowly, on linear media as well as Kerr ones. The
+filter's calibration was left until the material-law milestone closed; this is
+its first stage, which measures and changes nothing.
+
+- **The filter.** Every 16 steps a mode at eigenvalue `λ` keeps
+  `1 − s(λ/Λ)²` of its amplitude, with `s = 1` (`resident_filter_begin`) and
+  `Λ = 4/dt_max²`, the operator's global Gershgorin bound.
+- **Where the bound sits** (a scratch probe over the gallery at its own edge,
+  0.08, before any adaptation). The true top eigenvalue is 0.56-0.74 of `Λ`.
+  The median row's own bound is 0.06-0.42 of it: `Λ` is set by the stiffest
+  rows, the fastest material or the smallest element, and every other row is
+  filtered `(row/Λ)²` as hard. AMR's 0.02-0.16 edges put a coarse row at
+  1/64 of a fine one.
+- **In the app** (scratch HOME, a temporary hook; removed). Five scenes with
+  AMR on. The hook split the Q field into a band above about four nodes per
+  wavelength and the rest, by 400 applications of a filter bounded row by row,
+  and read the resident filter's e-folding time on each part:
+
+  | Scene | Band, of Q energy | Band e-fold | Rest, loss per 32 s |
+  |---|---|---|---|
+  | Obstacle over a mirror | 0.05% | 62 s | 0.05% |
+  | Phased array | 0.04% | 53 s | 0.05% |
+  | Material lens | 0.02-0.03% | 46-87 s | 0.01% |
+  | Ring resonator | 0.08-0.10% | 81-93 s | 0.04-0.1% |
+  | Kerr slab | 0.57-0.63% | 9-10 s | 0.04% |
+
+  On the obstacle and the array 89-95% of the nodes, and the band with them,
+  sit at 1/16-1/4 of `Λ`, which the 5-11% that adaptation refined most set.
+  On the lens and the ring the band gathers in the slow medium: 34-61% of it
+  under 1/16 of `Λ`, on 0.2-23% of the nodes. On the Kerr slab three quarters
+  of the nodes sit at 1/16-1/4. Bounded row by row instead, the same band
+  would e-fold in 0.35-2.5 s and the rest would lose 0.8-5.9% per 32 s.
+- **Calibration example** `grid_filter_calibration` (CPU reference, the core's
+  own filter, at each scene's own edge). One application on a plane wave, as
+  an e-folding rate per second at 3 and 12 nodes per wavelength: Obstacle
+  over a mirror 6.5e-3 and 4.6e-5, Phased array 1.4e-3 and 8.8e-6, Material
+  lens 7.4e-3 and 5.0e-5, Ring resonator 1.1e-2 and 7.0e-5, Dielectric
+  whispering gallery 1.2e-2 and 7.6e-5. A pulse one element wide, released
+  with every wall second-order outgoing, leaves 4.0e-6 of its energy at 16 s
+  filtered against 2.1e-5 unfiltered on the first, 5.8e-7 against 1.6e-6 on
+  the second; on the lens and the ring what is left is resolved and held
+  there, 9e-4 either way. A 12-node wave between reflecting walls keeps
+  0.9990, 0.9998, 0.9989, 0.9984 and 0.9983 of its energy over 32 s against
+  the unfiltered run. Drum modes is left out of that last one: its rim is
+  pinned, the seed jumps there, and the filter clears what the jump makes.
+- **Not a strength problem alone.** The `λ²` shape fixes the ratio of the
+  rates at 3 and 12 nodes per wavelength at 110-150 whatever `s` or `Λ`, and
+  `s` is capped at 2 by the modes at the ceiling, so a stronger filter always
+  costs resolved waves in proportion. What is free to fix is that the bound
+  is global. Next: a bound per node, then the strength.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
