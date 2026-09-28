@@ -210,6 +210,10 @@ pub struct PreparedTopology {
     pub probe_definitions: Arc<[TopologyProbeDefinition]>,
     pub far_field_settings: FarFieldSettings,
     pub transfer: Option<Arc<QuadraticTransferMap>>,
+    /// Target nodes the field transfer copied exactly, when the field crossed
+    /// over. It is what the handoff record reads, and it outlives the maps,
+    /// which the commit releases.
+    pub exact_transfer_nodes: Option<usize>,
     /// Smallest transaction that can publish this candidate. Measurement-only
     /// edits do not touch solver buffers; drive-only edits use the staged GPU
     /// source event when the timestep is unchanged.
@@ -1196,6 +1200,10 @@ impl TopologyPreparationJob {
             point_source: self.point_source,
             probe_definitions: self.probes.clone(),
             far_field_settings: self.far_field,
+            exact_transfer_nodes: self
+                .transfer
+                .as_ref()
+                .map(|transfer| transfer.exact_nodes()),
             transfer: self.transfer.take(),
             solver_update,
             fresh: self.fresh,
@@ -1609,7 +1617,13 @@ impl TopologyRuntime {
         {
             return Err("Candidate is stale or not ready".into());
         }
-        let committed = Arc::new(self.ready.take().unwrap());
+        let mut committed = self.ready.take().unwrap();
+        // The maps carried the field into this generation and nothing reads
+        // them once it is published: the next handoff builds its own from
+        // this one's mesh. At 130k DOFs they hold some 60 MiB.
+        committed.canonical_transfer = None;
+        committed.transfer = None;
+        let committed = Arc::new(committed);
         self.active = Some(committed.clone());
         Ok(committed)
     }
@@ -1883,6 +1897,22 @@ mod tests {
         SampledTopologyGeometry, ScreenPoint, TopologySpanTarget, ViewportTransform,
     };
 
+    /// The candidate as prepared, committed once it is read. The commit
+    /// releases the handoff maps, which these tests inspect.
+    fn commit_prepared(
+        runtime: &mut TopologyRuntime,
+        token: TopologyToken,
+    ) -> Arc<PreparedTopology> {
+        let prepared = Arc::new(runtime.ready().expect("a prepared candidate").clone());
+        let committed = runtime.commit_ready(token).unwrap();
+        assert!(committed.transfer.is_none() && committed.canonical_transfer.is_none());
+        assert_eq!(
+            committed.exact_transfer_nodes,
+            prepared.exact_transfer_nodes
+        );
+        prepared
+    }
+
     fn options() -> MeshingOptions {
         MeshingOptions {
             curve_tolerance: 1.0e-3,
@@ -2116,7 +2146,7 @@ mod tests {
             );
         };
         assert_eq!(finished, token);
-        let second = runtime.commit_ready(token).unwrap();
+        let second = commit_prepared(&mut runtime, token);
         assert!(seen["Assembling wave operator"] > 1, "{seen:?}");
         assert!(seen["Carrying the field across"] > 1, "{seen:?}");
 
@@ -2296,7 +2326,7 @@ mod tests {
         };
         let token = request(&mut runtime, editor.revision, fine, false);
         assert_eq!(prepare(&mut runtime).unwrap(), token);
-        let second = runtime.commit_ready(token).unwrap();
+        let second = commit_prepared(&mut runtime, token);
         assert_eq!(
             second.mesh_action,
             TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::MeshingOptionsChanged)
@@ -2337,7 +2367,7 @@ mod tests {
         runtime.request_full_rebuild();
         let token = request(&mut runtime, editor.revision, false);
         assert_eq!(prepare(&mut runtime).unwrap(), token);
-        let second = runtime.commit_ready(token).unwrap();
+        let second = commit_prepared(&mut runtime, token);
         assert_eq!(
             second.mesh_action,
             TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::Requested)
@@ -3037,7 +3067,7 @@ mod tests {
         );
         assert_eq!(runtime.phase(), Some(TopologyPreparationPhase::Repairing));
         assert_eq!(prepare(&mut runtime).unwrap(), token);
-        let repaired = runtime.commit_ready(token).unwrap();
+        let repaired = commit_prepared(&mut runtime, token);
         assert_eq!(
             repaired.mesh_action,
             TopologyMeshUpdateAction::Repair(TopologyRepairReason::CurveOrJunctionMoved)
@@ -3086,7 +3116,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(prepare(&mut runtime).unwrap(), token);
-        let rebuilt = runtime.commit_ready(token).unwrap();
+        let rebuilt = commit_prepared(&mut runtime, token);
         assert_eq!(
             rebuilt.mesh_action,
             TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::RepairFailed)
@@ -3289,7 +3319,7 @@ mod tests {
             TopologyMeshUpdateAction::Repair(TopologyRepairReason::CurveOrSpanTopologyChanged)
         );
         assert_eq!(prepare(&mut runtime).unwrap(), token);
-        let repaired = runtime.commit_ready(token).unwrap();
+        let repaired = commit_prepared(&mut runtime, token);
         let report = repaired.carve.expect("a repair reports its carve");
         assert!(
             report.kept_triangles * 2 > before.mesh.triangles.len(),
@@ -3356,7 +3386,7 @@ mod tests {
             TopologyMeshUpdateAction::Repair(TopologyRepairReason::CurveOrSpanTopologyChanged)
         );
         assert_eq!(prepare(&mut runtime).unwrap(), token);
-        let repaired = runtime.commit_ready(token).unwrap();
+        let repaired = commit_prepared(&mut runtime, token);
         let report = repaired.carve.unwrap_or_else(|| {
             panic!(
                 "the carve should follow the chain: {:?}",

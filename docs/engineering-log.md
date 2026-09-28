@@ -15594,3 +15594,27 @@ Third of the memory fixes; same scene and measure.
   over the gallery; the skin-change test checks both generations' layouts.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — A committed generation releases its handoff maps
+
+Fourth of the memory fixes; same scene and measure.
+
+- **Defect.** The canonical and legacy transfer maps that carried the field
+  into a generation stayed in it until the next handoff replaced it, some
+  60 MiB at 128k DOFs. After the commit nothing reads them but the handoff
+  record, for whether the field crossed and how many nodes it copied
+  exactly; the next handoff builds its own maps from this mesh.
+- **Change.** `commit_ready` drops both maps. The count the record reads is
+  kept as `exact_transfer_nodes`, taken when the candidate is prepared.
+- **Measured.** The three map entries of the call tree (`CanonicalPrimaryTransferMap::prepare`
+  27 MiB, `CanonicalVectorTransferWork::step` 18, `QuadraticTransferWork::step`
+  15) are gone at rest. With the three fixes before it the live heap at rest
+  is 422 MiB at 128k DOFs, against 909 at 137k: 3.3 KiB per DOF against 6.6.
+- **Tests.** The runtime tests that inspect a candidate's maps read the
+  prepared candidate through `commit_prepared`, which also requires the
+  committed generation to hold no maps and to keep the count. The helpers
+  that pack a candidate - the domain wall, the preset handoffs, the remesh
+  that restores component totals - pack it as prepared, before the commit,
+  as the app does; they had packed the committed generation instead.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

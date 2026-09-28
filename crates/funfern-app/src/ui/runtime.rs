@@ -226,11 +226,8 @@ impl Playground {
             action: active.mesh_action,
             operator_reused: active.operator_reused,
             adapted: active.adapted,
-            transferred: active.transfer.is_some(),
-            exact_nodes: active
-                .transfer
-                .as_ref()
-                .map_or(0, |transfer| transfer.exact_nodes()),
+            transferred: active.exact_transfer_nodes.is_some(),
+            exact_nodes: active.exact_transfer_nodes.unwrap_or(0),
             fresh: active.fresh,
             degrees_of_freedom: active.operator.degrees_of_freedom(),
             triangles: active.mesh.triangles.len(),

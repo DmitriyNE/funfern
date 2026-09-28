@@ -1972,7 +1972,11 @@ mod second_preset_reproduction {
             for _ in 0..1_000_000 {
                 if let Some(result) = state.runtime.advance(4096) {
                     result.unwrap();
-                    return state.runtime.commit_ready(token).unwrap();
+                    // As prepared: the commit releases the handoff maps the
+                    // pack below reads, as the app packs before it commits.
+                    let prepared = Arc::new(state.runtime.ready().unwrap().clone());
+                    state.runtime.commit_ready(token).unwrap();
+                    return prepared;
                 }
             }
             panic!("preparation did not finish");
@@ -2085,7 +2089,11 @@ mod second_preset_reproduction {
             for _ in 0..1_000_000 {
                 if let Some(result) = state.runtime.advance(4096) {
                     result.unwrap();
-                    return state.runtime.commit_ready(token).unwrap();
+                    // As prepared: the commit releases the handoff maps the
+                    // pack below reads, as the app packs before it commits.
+                    let prepared = Arc::new(state.runtime.ready().unwrap().clone());
+                    state.runtime.commit_ready(token).unwrap();
+                    return prepared;
                 }
             }
             panic!("preparation did not finish");
@@ -2152,7 +2160,11 @@ mod second_preset_reproduction {
             for _ in 0..1_000_000 {
                 if let Some(result) = state.runtime.advance(4096) {
                     result.unwrap();
-                    return state.runtime.commit_ready(token).unwrap();
+                    // As prepared: the commit releases the handoff maps the
+                    // pack below reads, as the app packs before it commits.
+                    let prepared = Arc::new(state.runtime.ready().unwrap().clone());
+                    state.runtime.commit_ready(token).unwrap();
+                    return prepared;
                 }
             }
             panic!("preparation did not finish");

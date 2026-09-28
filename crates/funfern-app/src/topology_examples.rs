@@ -5050,7 +5050,11 @@ mod tests {
             loop {
                 if let Some(result) = runtime.advance(1 << 16) {
                     result.unwrap();
-                    return runtime.commit_ready(token).unwrap();
+                    // As prepared: the commit releases the handoff maps the
+                    // drag below carries the state through.
+                    let prepared = Arc::new(runtime.ready().unwrap().clone());
+                    runtime.commit_ready(token).unwrap();
+                    return prepared;
                 }
             }
         }
