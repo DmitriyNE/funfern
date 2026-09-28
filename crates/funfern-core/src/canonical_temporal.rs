@@ -4410,21 +4410,12 @@ fn forced_kick(
             })
         });
         let (work, escaped, exchange) = if let Some(terms) = nonlinear_trace {
-            if boundary
-                .trace_nodes()
-                .iter()
-                .any(|node| forcing.prescribed()[*node as usize].is_some())
-            {
-                return Err(WaveError::Unsupported(
-                    "prescribed data on a nonlinear outgoing trace is not composed yet",
-                ));
-            }
             let trace = TemporalTrace {
                 operator,
                 terms,
                 runtime,
             };
-            let (work, escaped) = crate::canonical_wave::nonlinear_outgoing_kick_with(
+            crate::canonical_wave::nonlinear_outgoing_kick_with(
                 primary,
                 outgoing_z,
                 &factor,
@@ -4435,8 +4426,9 @@ fn forced_kick(
                 force,
                 source,
                 duration,
-            )?;
-            (work, escaped, 0.0)
+                forcing,
+                target_time,
+            )?
         } else {
             let mut prescribed_cache = None;
             crate::canonical_wave::force_coupled_outgoing_kick_with(
@@ -4994,6 +4986,12 @@ impl crate::canonical_wave::TraceConstitutive for TemporalTrace<'_> {
     fn energy(&self, node: usize, flux: f64) -> Result<f64, WaveError> {
         self.operator
             .primary_node_energy(self.terms, node, flux, self.runtime)
+    }
+
+    fn flux_of_field(&self, node: usize, field: f64) -> Result<f64, WaveError> {
+        self.operator
+            .primary_flux_and_energy_of_field(self.terms, node, field, self.runtime)
+            .map(|(flux, _)| flux)
     }
 }
 
@@ -8312,8 +8310,12 @@ mod tests {
     #[test]
     fn a_zero_response_on_a_wall_kicks_as_the_linear_wall_does() {
         // χ = 0 runs the Newton trace solve and the discrete gradient, which
-        // must converge onto the linear midpoint kick.
-        for condition in WALLS {
+        // must converge onto the linear midpoint kick, pins on the wall
+        // included.
+        for (condition, pins) in WALLS
+            .into_iter()
+            .flat_map(|condition| [false, true].map(|pins| (condition, pins)))
+        {
             let mut scene = Scene::default();
             let linear = walled(condition, &scene);
             scene.materials[0].mass_law.field = kerr(0.0);
@@ -8322,27 +8324,46 @@ mod tests {
             let time_step = 0.4 * linear.maximum_time_step();
             let (primary, complementary) = strong_fluxes(&linear, 6.0);
             let run = |operator: &CanonicalTemporalWaveOperator| {
+                let base = operator.base();
+                let prescribed = base
+                    .node_points()
+                    .iter()
+                    .map(|point| {
+                        (pins && point.x < -0.999 && point.y.abs() < 0.1)
+                            .then_some(TimeSignal::harmonic(0.4, 0.2, 1.3, 0.2))
+                    })
+                    .collect();
+                let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
                 let mut state = CanonicalTemporalWaveState::new(
                     operator,
                     time_step,
                     primary.clone(),
                     complementary.clone(),
                 )
+                .unwrap()
+                .pinned(operator, &forcing)
                 .unwrap();
-                let mut escaped = 0.0;
+                let (mut escaped, mut exchange) = (0.0, 0.0);
                 for _ in 0..20 {
-                    escaped += state.step(operator).unwrap().boundary_loss;
+                    let accounting = state.step_with_forcing(operator, &forcing).unwrap();
+                    escaped += accounting.boundary_loss;
+                    exchange += accounting.prescribed_exchange;
                 }
-                (state.primary_flux().to_vec(), escaped)
+                (state.primary_flux().to_vec(), escaped, exchange)
             };
-            let (expected, expected_loss) = run(&linear);
-            let (actual, actual_loss) = run(&nonlinear);
+            let (expected, expected_loss, expected_exchange) = run(&linear);
+            let (actual, actual_loss, actual_exchange) = run(&nonlinear);
             let scale = expected.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
             for (a, b) in expected.iter().zip(&actual) {
-                assert!((a - b).abs() <= 1e-12 * scale, "{condition:?}");
+                assert!((a - b).abs() <= 1e-12 * scale, "{condition:?}, pins {pins}");
             }
             assert!(expected_loss > 0.0);
             assert!((expected_loss - actual_loss).abs() <= 1e-11 * expected_loss);
+            assert_eq!(expected_exchange != 0.0, pins);
+            assert!(
+                (expected_exchange - actual_exchange).abs() <= 1e-11 * expected_loss,
+                "{condition:?}: {expected_exchange} against {actual_exchange}"
+            );
         }
     }
 
@@ -9543,8 +9564,16 @@ mod tests {
     /// stage: these ratios read 2.00 and 2.05, first order, that way.
     #[test]
     fn a_pinned_trace_under_a_pump_steps_at_second_order() {
+        pinned_trace_steps_at_second_order(None);
+        pinned_trace_steps_at_second_order(Some(kerr(0.8)));
+    }
+
+    fn pinned_trace_steps_at_second_order(field: Option<FieldLaw>) {
         let mut scene = Scene::default();
         scene.materials[0].mass_law.drive = pump(0.4, 1.1, 0.3);
+        if let Some(field) = field {
+            scene.materials[0].mass_law.field = field;
+        }
         let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
         let base = operator.base();
         let boundary = base.outgoing_boundary().unwrap();
@@ -9605,21 +9634,38 @@ mod tests {
         assert!(middle / fine > 3.6, "{middle:e} {fine:e}");
     }
 
-    /// A nonlinear trace does not hold a pin yet, and says so rather than
-    /// stepping past it.
+    /// A pin on a nonlinear trace holds its field through the map in force at
+    /// each stage, `Q = P(g(t))`, beside a pumped Kerr and saturable medium,
+    /// and the balance keeps its order with what the pins put in charged to
+    /// their own lane.
     #[test]
-    fn a_pinned_nonlinear_trace_is_refused_by_name() {
+    fn a_pinned_nonlinear_trace_holds_its_field_and_balances_at_second_order() {
         let mut scene = Scene::default();
         scene.materials[0].mass_law.field = kerr(0.8);
+        scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+        scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
         let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
         let base = operator.base();
+        let boundary = base.outgoing_boundary().unwrap();
+        let signal = TimeSignal::harmonic(0.4, 0.2, 1.3, 0.2);
         let prescribed = base
             .node_points()
             .iter()
-            .map(|point| (point.x < -0.999).then_some(TimeSignal::harmonic(0.2, 0.1, 1.3, 0.2)))
-            .collect();
+            .map(|point| (point.x < -0.999 && point.y.abs() < 0.1).then_some(signal))
+            .collect::<Vec<_>>();
+        let pinned = boundary
+            .trace_nodes()
+            .iter()
+            .map(|node| *node as usize)
+            .filter(|node| prescribed[*node].is_some())
+            .collect::<Vec<_>>();
+        assert!(!pinned.is_empty());
         let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
-        let (primary, complementary) = strong_fluxes(&operator, 1.0);
+        let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
+        assert!(total.prescribed_exchange.abs() > 1e-5, "{total:?}");
+        assert!(total.boundary_loss > 1e-5, "{total:?}");
+
+        let (primary, complementary) = strong_fluxes(&operator, 4.0);
         let mut state = CanonicalTemporalWaveState::new(
             &operator,
             0.4 * operator.maximum_time_step(),
@@ -9629,12 +9675,22 @@ mod tests {
         .unwrap()
         .pinned(&operator, &forcing)
         .unwrap();
-        assert_eq!(
-            state.step_with_forcing(&operator, &forcing).unwrap_err(),
-            WaveError::Unsupported(
-                "prescribed data on a nonlinear outgoing trace is not composed yet"
-            )
-        );
+        for _ in 0..20 {
+            state.step_with_forcing(&operator, &forcing).unwrap();
+            let (terms, _) = operator
+                .primary_terms_at(state.time(), state.runtime())
+                .unwrap();
+            for node in &pinned {
+                let field = operator
+                    .primary_inverse(&terms, *node, state.primary_flux()[*node], state.runtime())
+                    .unwrap();
+                let held = signal.value(state.time());
+                assert!(
+                    (field - held).abs() <= 1e-12 * held.abs(),
+                    "{field} against {held}"
+                );
+            }
+        }
     }
 
     /// A pinned trace node holds `Q = M(t) g(t)` at every step, under a pump,

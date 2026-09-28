@@ -15899,3 +15899,25 @@ cap did the same, so it was not the cap.
   `a_pinned_trace_on_a_driven_generation_waits_for_the_device`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — A nonlinear outgoing trace holds a pin through its map
+
+- **Change.** The nonlinear trace kick (`nonlinear_outgoing_kick_with`) takes
+  the forcing. A pinned trace node is held at `Q = P(g(t))`, the flux the map
+  in force at the kick's instant gives its signal (`TraceConstitutive` gains
+  `flux_of_field`), both on entry and as its constrained row's value in every
+  Newton iteration, which solve through the factor's prescribed export. So its
+  discrete gradient is the signal itself, the staged field of the linear
+  trace: the per-node mass and offset Newton assigns it put exactly `g(t)`
+  into the wall's coupling. Its energy change is measured from the flux it
+  stored, and the balance the free rows leave is returned as the pins'
+  exchange, where the kick checked a closed balance before. The refusal the
+  previous change left at the kick is gone.
+- **Tests.** `a_pinned_nonlinear_trace_holds_its_field_and_balances_at_second_order`
+  (pumped Kerr and saturable: the pinned field within 1e-12 of its signal
+  every step, the balance second order, the pins' exchange and the wall's
+  loss both active); the zero-response parity with the linear wall now also
+  pinned, flux, loss and exchange to 1e-12 and 1e-11 on either wall; the
+  pumped order test on a Kerr medium as well, ratios 4.01 and 4.03.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -2536,6 +2536,9 @@ pub(crate) trait TraceConstitutive {
     fn discrete_gradient(&self, node: usize, old: f64, new: f64) -> Result<(f64, f64), WaveError>;
     /// Stored energy `T(Q)` at one node.
     fn energy(&self, node: usize, flux: f64) -> Result<f64, WaveError>;
+    /// The flux `P(u)` a node holds at field `u`, which is where a pin puts
+    /// it.
+    fn flux_of_field(&self, node: usize, field: f64) -> Result<f64, WaveError>;
 }
 
 /// Newton iterations the nonlinear boundary kick may take before its failure
@@ -2563,6 +2566,13 @@ const NONLINEAR_TRACE_ITERATIONS: usize = 60;
 /// the existing trace factor, sweeps included, is the whole inner solve. A
 /// linear node has `g = 1/2m` and `c = Q_old/2m`, and reproduces the linear
 /// kick in one iteration.
+///
+/// A pinned trace node holds `Q = P(g(t))` at the kick's instant, and enters
+/// the solve as [`TracePinField::Staged`] has it on a linear trace: its flux
+/// is held on entry as well, so its discrete gradient is the signal itself
+/// and its row is the constrained factor's identity row in every iteration.
+/// Its energy change is measured from the flux it stored, and what the pins
+/// put in is the balance the free rows leave, returned as the third value.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn nonlinear_outgoing_kick_with(
     primary_flux: &mut [f64],
@@ -2575,7 +2585,9 @@ pub(crate) fn nonlinear_outgoing_kick_with(
     force: &[f64],
     source: &[f64],
     duration: f64,
-) -> Result<(f64, f64), WaveError> {
+    forcing: &CanonicalForcing,
+    target_time: f64,
+) -> Result<(f64, f64, f64), WaveError> {
     let trace_count = boundary.trace_nodes.len();
     let auxiliary_count = boundary.auxiliary_count;
     let dimension = trace_count + auxiliary_count;
@@ -2590,10 +2602,29 @@ pub(crate) fn nonlinear_outgoing_kick_with(
         .iter()
         .map(|node| *node as usize)
         .collect::<Vec<_>>();
-    let old_q = nodes
+    let stored_q = nodes
         .iter()
         .map(|node| primary_flux[*node])
         .collect::<Vec<_>>();
+    let pinned = nodes
+        .iter()
+        .map(|node| {
+            forcing.prescribed[*node]
+                .map(|signal| trace_map.flux_of_field(*node, signal.value(target_time)))
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let old_q = stored_q
+        .iter()
+        .zip(&pinned)
+        .map(|(stored, pin)| pin.unwrap_or(*stored))
+        .collect::<Vec<_>>();
+    let constrained = if pinned.iter().any(Option::is_some) {
+        let pattern = pinned.iter().map(Option::is_some).collect::<Vec<_>>();
+        Some(cache.export_with_prescribed(&pattern)?)
+    } else {
+        None
+    };
     let old_z = outgoing_z.to_vec();
 
     // Everything on the right that does not depend on the trace field: the
@@ -2629,12 +2660,22 @@ pub(crate) fn nonlinear_outgoing_kick_with(
             iteration_mass[nodes[position]] = 0.5 / slope;
         }
         let offset_derivative = apply_outgoing_generator(operator, boundary, &unit_mass, &offset)?;
-        let right = fixed_right
+        let mut right = fixed_right
             .iter()
             .zip(&offset_derivative)
             .map(|(fixed, derivative)| fixed + duration * derivative)
             .collect::<Vec<_>>();
-        solution = cache.solve(boundary, &iteration_mass, &right)?;
+        solution = match &constrained {
+            Some(factor) => {
+                for (position, pin) in pinned.iter().enumerate() {
+                    if let Some(flux) = pin {
+                        right[position] = *flux;
+                    }
+                }
+                factor.solve(&iteration_mass, boundary, &right)?
+            }
+            None => cache.solve(boundary, &iteration_mass, &right)?,
+        };
         let step = solution[..trace_count]
             .iter()
             .zip(&current)
@@ -2680,7 +2721,7 @@ pub(crate) fn nonlinear_outgoing_kick_with(
         first_order_loss +=
             duration * operator.first_order_boundary_damping[node] * gradient * gradient;
         primary_energy_change += trace_map.energy(node, solution[position])?
-            - trace_map.energy(node, old_q[position])?;
+            - trace_map.energy(node, stored_q[position])?;
     }
     let new_z = &solution[trace_count..];
     let auxiliary_energy_change = 0.5 * (dot(new_z, new_z) - dot(&old_z, &old_z));
@@ -2700,10 +2741,13 @@ pub(crate) fn nonlinear_outgoing_kick_with(
         .max(force_work.abs())
         .max(boundary_loss.abs())
         .max(1.0);
+    if constrained.is_some() {
+        return Ok((source_work, boundary_loss.max(0.0), balance));
+    }
     if balance.abs() > 2.0e-10 * magnitude {
         return Err(WaveError::InvalidState);
     }
-    Ok((source_work, boundary_loss.max(0.0)))
+    Ok((source_work, boundary_loss.max(0.0), 0.0))
 }
 
 impl CanonicalOutgoingMidpointFactor {
