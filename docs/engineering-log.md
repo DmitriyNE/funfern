@@ -15536,3 +15536,27 @@ app, Parametric pump with the target lowered to 0.3% so it settles at
   236 MiB and now holds none.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — Sites share one law record per material
+
+Second of the memory fixes; same scene and measure as the entry before.
+
+- **Defect.** The temporal operator stored a full law record at every
+  primary contribution and every quadrature sample: coefficient, drive, loss
+  and restoring law, about 400 bytes, 240 MiB at 137k DOFs. Almost every
+  material's laws read no coordinate, so the records were copies.
+- **Change.** `TemporalSites` keeps each site's point, coordinates and an
+  index into the distinct records. A site reuses the record its material used
+  last only when that record, placed at the site, equals what the site
+  evaluated, so a spatial law keeps one per site and nothing is
+  approximated. The accessors return the same values as before.
+- **Verified.** A scratch digest over all eight device buffers and the
+  transfer words, for the 36 gallery scenes packed fresh and through a
+  remeshing handoff, is byte-identical to the previous commit.
+- **Measured.** `from_base` 240 → 40 MiB at rest. The CPU reference is no
+  slower (`canonical_temporal_timing`, median of five, µs per step): driven
+  bulk 2679 → 2646, second-order wall 4963 → 4869, nonlinear bulk
+  15156 → 14624, nonlinear first-order wall 33896 → 33447.
+- **Tests.** `sites_share_a_law_record_only_where_its_values_agree`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

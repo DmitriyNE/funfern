@@ -308,6 +308,142 @@ struct TemporalComplementarySample {
     loss: TemporalLossSample,
 }
 
+/// A sample that knows where it sits, so a table can store its law record once
+/// and its place at each site.
+trait TemporalSited: Copy + PartialEq {
+    fn material(&self) -> MaterialId;
+    fn point(&self) -> Point2;
+    fn coordinates(&self) -> MaterialCoordinates;
+    /// The same record at another site.
+    fn placed(self, point: Point2, coordinates: MaterialCoordinates) -> Self;
+}
+
+impl TemporalSited for TemporalPrimarySample {
+    fn material(&self) -> MaterialId {
+        self.coefficient.material
+    }
+
+    fn point(&self) -> Point2 {
+        self.coefficient.point
+    }
+
+    fn coordinates(&self) -> MaterialCoordinates {
+        self.coefficient.coordinates
+    }
+
+    fn placed(mut self, point: Point2, coordinates: MaterialCoordinates) -> Self {
+        self.coefficient.point = point;
+        self.coefficient.coordinates = coordinates;
+        self.loss.point = point;
+        self.loss.coordinates = coordinates;
+        self
+    }
+}
+
+impl TemporalSited for TemporalComplementarySample {
+    fn material(&self) -> MaterialId {
+        self.coefficient.material
+    }
+
+    fn point(&self) -> Point2 {
+        self.coefficient.point
+    }
+
+    fn coordinates(&self) -> MaterialCoordinates {
+        self.coefficient.coordinates
+    }
+
+    fn placed(mut self, point: Point2, coordinates: MaterialCoordinates) -> Self {
+        self.coefficient.point = point;
+        self.coefficient.coordinates = coordinates;
+        self.loss.point = point;
+        self.loss.coordinates = coordinates;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TemporalSite {
+    point: Point2,
+    coordinates: MaterialCoordinates,
+    record: u32,
+}
+
+/// One law sample per compiled site, held as each site's place and an index
+/// into the distinct law records.
+///
+/// A record is the whole law - coefficient, drive, loss and restoring law, some
+/// 400 bytes - and a generation samples it at every primary contribution and
+/// every quadrature point, 590k sites at 130k DOFs. A material whose laws read
+/// no coordinate evaluates to the same record everywhere, so its sites share
+/// one. Sharing is decided on equal values alone: a site reuses the record its
+/// material used last only when that record, placed at the site, is the sample
+/// the site evaluated. A spatial law therefore keeps a record per site and
+/// nothing it holds is approximated.
+#[derive(Clone, Debug, PartialEq)]
+struct TemporalSites<S> {
+    records: Vec<S>,
+    sites: Vec<TemporalSite>,
+}
+
+impl<S: TemporalSited> TemporalSites<S> {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            records: Vec::new(),
+            sites: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Adds the next site. `last` holds each material's latest record.
+    fn push(&mut self, sample: S, last: &mut BTreeMap<MaterialId, u32>) -> Result<(), WaveError> {
+        let (point, coordinates) = (sample.point(), sample.coordinates());
+        debug_assert!(sample.placed(point, coordinates) == sample);
+        let reused = last
+            .get(&sample.material())
+            .copied()
+            .filter(|record| self.records[*record as usize].placed(point, coordinates) == sample);
+        let record = match reused {
+            Some(record) => record,
+            None => {
+                let record = u32::try_from(self.records.len())
+                    .map_err(|_| WaveError::InvalidMesh("too many temporal law records"))?;
+                self.records.push(sample);
+                last.insert(sample.material(), record);
+                record
+            }
+        };
+        self.sites.push(TemporalSite {
+            point,
+            coordinates,
+            record,
+        });
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.sites.len()
+    }
+
+    fn place(&self, site: &TemporalSite) -> S {
+        self.records[site.record as usize].placed(site.point, site.coordinates)
+    }
+
+    /// The sample at one site; out of range panics, as indexing does.
+    fn at(&self, index: usize) -> S {
+        self.place(&self.sites[index])
+    }
+
+    fn iter(&self) -> impl ExactSizeIterator<Item = S> + '_ {
+        self.sites.iter().map(|site| self.place(site))
+    }
+
+    /// The samples at `count` consecutive sites from `start`, if all exist.
+    fn window(&self, start: usize, count: usize) -> Option<Vec<S>> {
+        let sites = self.sites.get(start..start.checked_add(count)?)?;
+        Some(sites.iter().map(|site| self.place(site)).collect())
+    }
+}
+
 /// GPU-facing, field-linear coefficient metadata at one compiled physical
 /// sample. Runtime phase/Switch ownership remains material-wide and is exposed
 /// separately through [`CanonicalMaterialRuntimeState`].
@@ -366,13 +502,12 @@ impl CanonicalTemporalPointStencil {
         let start = element
             .checked_mul(6)
             .ok_or(WaveError::InvalidMesh("invalid complementary sample range"))?;
-        let samples =
-            operator
-                .complementary
-                .get(start..start + 6)
-                .ok_or(WaveError::InvalidMesh(
-                    "the point stencil has no temporal complementary samples",
-                ))?;
+        let samples = operator
+            .complementary
+            .window(start, 6)
+            .ok_or(WaveError::InvalidMesh(
+                "the point stencil has no temporal complementary samples",
+            ))?;
         let material = samples[0].coefficient.material;
         if samples
             .iter()
@@ -385,13 +520,13 @@ impl CanonicalTemporalPointStencil {
         let x = fixed
             .complementary_weights
             .iter()
-            .zip(samples)
+            .zip(&samples)
             .map(|(weight, sample)| weight * sample.coefficient.coordinates.x)
             .sum::<f64>();
         let y = fixed
             .complementary_weights
             .iter()
-            .zip(samples)
+            .zip(&samples)
             .map(|(weight, sample)| weight * sample.coefficient.coordinates.y)
             .sum::<f64>();
         let coordinates = MaterialCoordinates {
@@ -408,7 +543,7 @@ impl CanonicalTemporalPointStencil {
             .base
             .primary_contributions()
             .iter()
-            .zip(&operator.primary)
+            .zip(operator.primary.iter())
             .find(|(contribution, sample)| {
                 contribution.element as usize == element && sample.coefficient.material == material
             })
@@ -613,13 +748,12 @@ impl CanonicalTemporalAreaContribution {
         let start = parent
             .checked_mul(6)
             .ok_or(WaveError::InvalidMesh("invalid complementary sample range"))?;
-        let samples =
-            operator
-                .complementary
-                .get(start..start + 6)
-                .ok_or(WaveError::InvalidMesh(
-                    "the area element has no temporal complementary samples",
-                ))?;
+        let samples = operator
+            .complementary
+            .window(start, 6)
+            .ok_or(WaveError::InvalidMesh(
+                "the area element has no temporal complementary samples",
+            ))?;
         // The parent's seven contributions are emitted together in local
         // order, so they are a direct slice rather than a scan.
         let contributions = operator.base().primary_contributions();
@@ -641,7 +775,7 @@ impl CanonicalTemporalAreaContribution {
         let temporal =
             operator
                 .primary
-                .get(first..first + owned.len())
+                .window(first, owned.len())
                 .ok_or(WaveError::InvalidMesh(
                     "the area element has no temporal primary samples",
                 ))?;
@@ -780,7 +914,7 @@ pub fn canonical_temporal_indicator_supplement(
     for (sample, temporal) in base
         .constitutive_samples()
         .iter()
-        .zip(&operator.complementary)
+        .zip(operator.complementary.iter())
         .filter(|_| !nonlinear)
     {
         let factor = coefficient_factor(temporal.coefficient, time, runtime)?;
@@ -907,7 +1041,10 @@ pub fn canonical_temporal_indicator_supplement(
         }
         let element = contribution.element as usize;
         let factor = coefficient_factor(
-            operator.primary[element * 7 + contribution.local_node as usize].coefficient,
+            operator
+                .primary
+                .at(element * 7 + contribution.local_node as usize)
+                .coefficient,
             time,
             runtime,
         )?;
@@ -919,7 +1056,11 @@ pub fn canonical_temporal_indicator_supplement(
 
     // The restoring store, each contribution's share on its own element.
     if operator.has_restoring() {
-        for (contribution, sample) in base.primary_contributions().iter().zip(&operator.primary) {
+        for (contribution, sample) in base
+            .primary_contributions()
+            .iter()
+            .zip(operator.primary.iter())
+        {
             element_energy[contribution.element as usize] += contribution.geometric_weight
                 * contribution.reference_coefficient
                 * sample
@@ -1592,7 +1733,10 @@ pub fn sample_temporal_canonical_area(
             let law = sample.law.field;
             energy += coefficient * (law.multiplier(r) * r * r - law.coenergy(r));
             if let Some(integrated) = integrated_field.get(node) {
-                let restoring = operator.primary[element.element as usize * 7 + local].restoring;
+                let restoring = operator
+                    .primary
+                    .at(element.element as usize * 7 + local)
+                    .restoring;
                 energy += reference * restoring.potential(*integrated);
             }
         }
@@ -1705,8 +1849,8 @@ pub struct CanonicalTemporalWaveOperator {
     /// Shared, because an application that assembled this base through its own
     /// resumable job holds it too and must not carry a second copy.
     base: Arc<CanonicalWaveOperator>,
-    primary: Vec<TemporalPrimarySample>,
-    complementary: Vec<TemporalComplementarySample>,
+    primary: TemporalSites<TemporalPrimarySample>,
+    complementary: TemporalSites<TemporalComplementarySample>,
     initial_runtime: CanonicalMaterialRuntimeState,
     has_temporal_laws: bool,
     /// Whether any sample's coefficient follows its own field. Such a
@@ -1802,8 +1946,9 @@ impl CanonicalTemporalWaveOperator {
     ) -> Result<Self, WaveError> {
         let authored_owned = model.to_owned();
         let authored = authored_owned.as_model();
-        let mut primary = Vec::with_capacity(base.primary_contributions().len());
-        let mut complementary = Vec::with_capacity(base.constitutive_samples().len());
+        let mut primary = TemporalSites::with_capacity(base.primary_contributions().len());
+        let mut complementary = TemporalSites::with_capacity(base.constitutive_samples().len());
+        let mut last_record = BTreeMap::new();
         let mut used_materials = BTreeSet::new();
         let mut has_temporal_laws = false;
 
@@ -1820,12 +1965,16 @@ impl CanonicalTemporalWaveOperator {
                 || sample.coefficient.law.alternate.is_some()
                 || sample.loss.law.drive != TimeDriveValues::None;
             used_materials.insert(sample.coefficient.material);
-            primary.push(TemporalPrimarySample {
-                coefficient: sample.coefficient,
-                loss: sample.loss,
-                restoring: sample.restoring,
-            });
+            primary.push(
+                TemporalPrimarySample {
+                    coefficient: sample.coefficient,
+                    loss: sample.loss,
+                    restoring: sample.restoring,
+                },
+                &mut last_record,
+            )?;
         }
+        last_record.clear();
         for sample in base.constitutive_samples() {
             let triangle = mesh
                 .triangles
@@ -1837,10 +1986,13 @@ impl CanonicalTemporalWaveOperator {
                 || temporal.coefficient.law.alternate.is_some()
                 || temporal.loss.law.drive != TimeDriveValues::None;
             used_materials.insert(temporal.coefficient.material);
-            complementary.push(TemporalComplementarySample {
-                coefficient: temporal.coefficient,
-                loss: temporal.loss,
-            });
+            complementary.push(
+                TemporalComplementarySample {
+                    coefficient: temporal.coefficient,
+                    loss: temporal.loss,
+                },
+                &mut last_record,
+            )?;
         }
         let has_field_laws = primary
             .iter()
@@ -2032,7 +2184,8 @@ impl CanonicalTemporalWaveOperator {
                     + *shape_curl * stable_difference(primary_field[*node as usize], reference);
             }
             let stress = curl * (orientation * self.short_wave[index]);
-            let factor = coefficient_factor(self.complementary[index].coefficient, time, runtime)?;
+            let factor =
+                coefficient_factor(self.complementary.at(index).coefficient, time, runtime)?;
             let field = sample.complementary_inverse.apply(stress) / factor;
             for (node, shape_curl) in nodes.iter().zip(sample.curls()) {
                 force[*node as usize] +=
@@ -2059,7 +2212,12 @@ impl CanonicalTemporalWaveOperator {
         let count = self.base.degrees_of_freedom();
         let (mut mass, mut beta, mut alpha) =
             (vec![0.0; count], vec![0.0; count], vec![0.0; count]);
-        for (contribution, sample) in self.base.primary_contributions().iter().zip(&self.primary) {
+        for (contribution, sample) in self
+            .base
+            .primary_contributions()
+            .iter()
+            .zip(self.primary.iter())
+        {
             let share = contribution.geometric_weight
                 * contribution.reference_coefficient
                 * coefficient_factor(sample.coefficient, time, runtime)?;
@@ -2090,7 +2248,12 @@ impl CanonicalTemporalWaveOperator {
         if !self.has_restoring {
             return Ok(force);
         }
-        for (contribution, sample) in self.base.primary_contributions().iter().zip(&self.primary) {
+        for (contribution, sample) in self
+            .base
+            .primary_contributions()
+            .iter()
+            .zip(self.primary.iter())
+        {
             if sample.restoring.is_none() {
                 continue;
             }
@@ -2121,7 +2284,7 @@ impl CanonicalTemporalWaveOperator {
         self.base
             .primary_contributions()
             .iter()
-            .zip(&self.primary)
+            .zip(self.primary.iter())
             .map(|(contribution, sample)| {
                 contribution.geometric_weight
                     * contribution.reference_coefficient
@@ -2181,7 +2344,7 @@ impl CanonicalTemporalWaveOperator {
         let field = self.primary_field_at(primary_flux, time, runtime)?;
         for (node, value) in field.iter().enumerate() {
             for index in &self.node_contributions[self.primary_range(node)] {
-                let coefficient = self.primary[*index as usize].coefficient;
+                let coefficient = self.primary.at(*index as usize).coefficient;
                 if coefficient.law.field == FieldLawValues::Linear {
                     continue;
                 }
@@ -2324,7 +2487,11 @@ impl CanonicalTemporalWaveOperator {
         }
         let mut mass = vec![0.0; self.base.degrees_of_freedom()];
         let mut rate = vec![0.0; self.base.degrees_of_freedom()];
-        for (contribution, temporal) in self.base.primary_contributions().iter().zip(&self.primary)
+        for (contribution, temporal) in self
+            .base
+            .primary_contributions()
+            .iter()
+            .zip(self.primary.iter())
         {
             let (factor, factor_rate) =
                 coefficient_factor_and_rate(temporal.coefficient, time, runtime)?;
@@ -2385,7 +2552,7 @@ impl CanonicalTemporalWaveOperator {
         let mut rates = Vec::with_capacity(self.node_contributions.len());
         for index in &self.node_contributions {
             let contribution = &contributions[*index as usize];
-            let temporal = &self.primary[*index as usize];
+            let temporal = self.primary.at(*index as usize);
             let (factor, factor_rate) =
                 coefficient_factor_and_rate(temporal.coefficient, time, runtime)?;
             let reference = contribution.geometric_weight * contribution.reference_coefficient;
@@ -2414,7 +2581,7 @@ impl CanonicalTemporalWaveOperator {
         let site = ConstitutiveSite::new(&terms[range.clone()]);
         signed_inverse(site, flux).map_err(|error| {
             let contribution = self.node_contributions[range.start] as usize;
-            let coefficient = self.primary[contribution].coefficient;
+            let coefficient = self.primary.at(contribution).coefficient;
             inverse_error(error, coefficient, runtime)
         })
     }
@@ -2441,7 +2608,7 @@ impl CanonicalTemporalWaveOperator {
             let contribution = self.node_contributions[range.start] as usize;
             return Err(inverse_error(
                 ConstitutiveInverseError::OutsideDomain,
-                self.primary[contribution].coefficient,
+                self.primary.at(contribution).coefficient,
                 runtime,
             ));
         }
@@ -2598,7 +2765,7 @@ impl CanonicalTemporalWaveOperator {
             .base
             .constitutive_samples()
             .iter()
-            .zip(&self.complementary)
+            .zip(self.complementary.iter())
             .zip(complementary_flux)
             .enumerate()
         {
@@ -2646,7 +2813,7 @@ impl CanonicalTemporalWaveOperator {
             .constitutive_samples()
             .get(index)
             .ok_or(WaveError::InvalidState)?;
-        let temporal = self.complementary[index].coefficient;
+        let temporal = self.complementary.at(index).coefficient;
         if temporal.law.field == FieldLawValues::Linear {
             let factor = coefficient_factor(temporal, time, runtime)?;
             return Ok(sample.complementary_inverse.apply(flux) / factor);
@@ -2664,7 +2831,7 @@ impl CanonicalTemporalWaveOperator {
         runtime: &CanonicalMaterialRuntimeState,
     ) -> Result<f64, WaveError> {
         let sample = &self.base.constitutive_samples()[index];
-        let temporal = self.complementary[index].coefficient;
+        let temporal = self.complementary.at(index).coefficient;
         if temporal.law.field == FieldLawValues::Linear {
             let factor = coefficient_factor(temporal, time, runtime)?;
             return Ok(0.5
@@ -2687,7 +2854,7 @@ impl CanonicalTemporalWaveOperator {
         time: f64,
         runtime: &CanonicalMaterialRuntimeState,
     ) -> Result<(ConstitutiveTerm, f64), WaveError> {
-        let temporal = self.complementary[index].coefficient;
+        let temporal = self.complementary.at(index).coefficient;
         let (factor, factor_rate) = coefficient_factor_and_rate(temporal, time, runtime)?;
         let reference = self.base.constitutive_samples()[index]
             .complementary_inverse
@@ -2721,7 +2888,7 @@ impl CanonicalTemporalWaveOperator {
             .base
             .constitutive_samples()
             .iter()
-            .zip(&self.complementary)
+            .zip(self.complementary.iter())
             .zip(complementary_flux)
             .enumerate()
         {
@@ -2790,7 +2957,11 @@ impl CanonicalTemporalWaveOperator {
         }
         let mut mass = vec![0.0; self.base.degrees_of_freedom()];
         let mut weighted_loss = vec![0.0; self.base.degrees_of_freedom()];
-        for (contribution, temporal) in self.base.primary_contributions().iter().zip(&self.primary)
+        for (contribution, temporal) in self
+            .base
+            .primary_contributions()
+            .iter()
+            .zip(self.primary.iter())
         {
             let coefficient = coefficient_factor(temporal.coefficient, time, runtime)?;
             let share =
@@ -2916,10 +3087,10 @@ impl CanonicalTemporalWaveOperator {
             .constitutive_samples()
             .get(index)
             .ok_or(WaveError::InvalidState)?;
-        let temporal = self
-            .complementary
-            .get(index)
-            .ok_or(WaveError::InvalidState)?;
+        if index >= self.complementary.len() {
+            return Err(WaveError::InvalidState);
+        }
+        let temporal = self.complementary.at(index);
         if temporal.coefficient.law.field != FieldLawValues::Linear {
             let (term, _) = self.complementary_term_at(index, time, runtime)?;
             let field = radial_inverse(term, flux, temporal.coefficient, runtime)?;
@@ -2951,7 +3122,7 @@ impl CanonicalTemporalWaveOperator {
             .base
             .constitutive_samples()
             .iter()
-            .zip(&self.complementary)
+            .zip(self.complementary.iter())
             .zip(complementary_flux)
             .enumerate()
         {
@@ -3998,14 +4169,14 @@ fn add_restoring_force(
 fn short_wave_viscosity(
     base: &CanonicalWaveOperator,
     quadratic: &QuadraticWaveOperator,
-    primary: &[TemporalPrimarySample],
+    primary: &TemporalSites<TemporalPrimarySample>,
     maximum_time_step: f64,
 ) -> Result<Vec<f64>, WaveError> {
     if quadratic.degrees_of_freedom() != base.degrees_of_freedom() {
         return Err(WaveError::InvalidState);
     }
     let mut gain = vec![0.0_f64; base.element_nodes().len()];
-    for (contribution, sample) in base.primary_contributions().iter().zip(primary) {
+    for (contribution, sample) in base.primary_contributions().iter().zip(primary.iter()) {
         if matches!(sample.loss.law.rate, RateLawValues::VanDerPol { .. }) {
             let element = contribution.element as usize;
             gain[element] = gain[element].max(sample.loss.base_rate);
@@ -4897,8 +5068,8 @@ fn inverse_error(
 /// (`nonlinear_outgoing_kick_with`, `damped_nonlinear_kick`).
 fn nonlinear_admission(
     base: &CanonicalWaveOperator,
-    _primary: &[TemporalPrimarySample],
-    complementary: &[TemporalComplementarySample],
+    _primary: &TemporalSites<TemporalPrimarySample>,
+    complementary: &TemporalSites<TemporalComplementarySample>,
     model: TopologyWaveModel<'_>,
 ) -> Result<(), WaveError> {
     let name = |material: MaterialId| {
@@ -4906,7 +5077,7 @@ fn nonlinear_admission(
             .material(material)
             .map_or_else(String::new, |material| material.name.clone())
     };
-    for (sample, temporal) in base.constitutive_samples().iter().zip(complementary) {
+    for (sample, temporal) in base.constitutive_samples().iter().zip(complementary.iter()) {
         let coefficient = temporal.coefficient;
         if coefficient.law.field == FieldLawValues::Linear {
             continue;
@@ -7584,7 +7755,7 @@ mod tests {
             .base()
             .primary_contributions()
             .iter()
-            .zip(&temporal.primary)
+            .zip(temporal.primary.iter())
         {
             let factor = coefficient_factor(sample.coefficient, 0.0, &runtime).unwrap();
             expected[contribution.node as usize] +=
@@ -7646,7 +7817,7 @@ mod tests {
             .base()
             .primary_contributions()
             .iter()
-            .zip(&temporal.primary)
+            .zip(temporal.primary.iter())
         {
             owners[contribution.node as usize].insert(sample.coefficient.material);
         }
@@ -8085,6 +8256,43 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn sites_share_a_law_record_only_where_its_values_agree() {
+        // A uniform law is one record per row, however many sites read it.
+        let operator = compile(&kerr_scene()).unwrap();
+        assert!(operator.primary.len() > 100);
+        assert_eq!(operator.primary.records.len(), 1);
+        assert_eq!(operator.complementary.records.len(), 1);
+
+        // A spatial one keeps what each site evaluated, and the uniform row
+        // beside it still shares.
+        let mut scene = kerr_scene();
+        scene.materials[0].mass_law.field = FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::formula("0.5 + 0.2 * x").unwrap(),
+            amplitude_bound: None,
+        };
+        let operator = compile(&scene).unwrap();
+        assert!(operator.primary.records.len() > 100);
+        assert_eq!(operator.complementary.records.len(), 1);
+        let material = &scene.materials[0];
+        let mut distinct = Vec::new();
+        for sample in operator.primary.iter() {
+            let expected = material
+                .mass_law
+                .evaluate_at(sample.coefficient.coordinates, &material.parameters)
+                .unwrap();
+            assert_eq!(sample.coefficient.law, expected);
+            if !distinct.contains(&expected) {
+                distinct.push(expected);
+            }
+        }
+        // Consecutive sites that evaluate alike, such as nodes at one `x`,
+        // still share.
+        assert!(operator.primary.records.len() >= distinct.len());
+        assert!(operator.primary.records.len() < operator.primary.len());
     }
 
     fn walled(condition: OuterBoundaryCondition, scene: &Scene) -> CanonicalTemporalWaveOperator {
@@ -8828,7 +9036,7 @@ mod tests {
             .base()
             .primary_contributions()
             .iter()
-            .zip(&operator.primary)
+            .zip(operator.primary.iter())
         {
             let node = contribution.node as usize;
             let u = field[node];
