@@ -20,7 +20,7 @@ use bevy::{
         Render, RenderApp, RenderStartup, RenderSystems,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         gpu_readback::{Readback, ReadbackComplete},
-        render_asset::RenderAssets,
+        render_asset::{ExtractedAssets, RenderAssets, prepare_assets},
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
             CachedComputePipelineId, CachedPipelineState, ComputePassDescriptor,
@@ -5259,6 +5259,12 @@ impl Plugin for CanonicalWaveGpuPlugin {
             .add_systems(RenderStartup, init_canonical_pipeline)
             .add_systems(
                 Render,
+                destroy_released_shader_buffers
+                    .in_set(RenderSystems::PrepareAssets)
+                    .before(prepare_assets::<GpuShaderBuffer>),
+            )
+            .add_systems(
+                Render,
                 (
                     prepare_canonical_bind_group,
                     prepare_canonical_handoff_bind_groups,
@@ -5278,6 +5284,27 @@ impl Plugin for CanonicalWaveGpuPlugin {
                 RenderGraph,
                 retire_canonical_steps.in_set(RenderGraphSystems::Finish),
             );
+    }
+}
+
+/// Destroys the device buffer of each shader buffer Bevy is about to drop.
+///
+/// On the web wgpu does not destroy a buffer it drops, so its device memory
+/// waits for the garbage collector: at 137k DOFs every handoff left the
+/// retired generation's 240 MB there, and after an adaptation the GPU process
+/// held 4.9 GiB at rest. A buffer is released only once its last handle is
+/// gone, the render world's copy of the request's included, and every bind
+/// group built from one is matched to its generation and revision before it
+/// is used, so nothing encoded from now on names it. Work already submitted
+/// keeps it until that work completes.
+fn destroy_released_shader_buffers(
+    extracted: Res<ExtractedAssets<GpuShaderBuffer>>,
+    buffers: Res<RenderAssets<GpuShaderBuffer>>,
+) {
+    for id in &extracted.removed {
+        if let Some(buffer) = buffers.get(*id) {
+            buffer.buffer.destroy();
+        }
     }
 }
 

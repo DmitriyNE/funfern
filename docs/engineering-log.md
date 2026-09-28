@@ -15695,3 +15695,36 @@ cap did the same, so it was not the cap.
   of sawing. What it held is the next entry's.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — A shader buffer is destroyed as Bevy releases it
+
+- **Defect.** The same web behaviour for shader buffers: every handoff left
+  the retired generation's device buffers, some 240 MB at 137k DOFs (its
+  tables alone 99 MB), to the garbage collector. After an adaptation the GPU
+  process held 4.6–4.9 GiB at rest, most of it generations long retired.
+- **Change.** `destroy_released_shader_buffers` runs just before Bevy's
+  `prepare_assets` drops the render assets its extraction marked removed, and
+  destroys their buffers.
+  - Bevy releases one only after its last strong handle is gone, the render
+    world's extracted copy of the request included.
+  - Every bind group built from a shader buffer is matched to its generation
+    and revision before it is encoded: the canonical step, handoff and live
+    event groups, the point, curve, area, far-field and vector-overlay
+    consumers, and the legacy scalar path. None that will still be used names
+    a released buffer, and work already submitted keeps one until it is done.
+- **Verified.** The 20 canonical GPU examples pass natively. A native run at
+  0.3% destroyed 473 buffers, 4.9 GiB, in 180 s of handoffs, reached 136,595
+  DOFs and logged no validation error. In the browser (2 GiB scratch bundle,
+  300 s) 725 buffers, 4.4 GiB, were destroyed and no device was lost at
+  127,769 DOFs; the GPU process held 3.0–3.4 GiB at rest against 4.6–4.9.
+- **Found, not fixed.**
+  - Bevy's readback pool drops a staging buffer left idle for 10 frames, a
+    private setting, and the estimator's one-shot state snapshots come about
+    every 1.7 s. Each therefore allocates a fresh 6.4 MB buffer at 137k DOFs
+    that on the web waits for the garbage collector: about 3.7 MB/s, the
+    3.0 → 3.4 GiB creep at rest. The app staging that snapshot itself would
+    end it.
+  - The wasm memory peaked at 1019 MiB in the same run, so the 1 GiB cap
+    still binds at this mesh.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
