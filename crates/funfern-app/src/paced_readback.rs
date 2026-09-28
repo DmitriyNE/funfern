@@ -24,31 +24,24 @@ use bevy::{
 
 const IDLE: u8 = 0;
 const IN_FLIGHT: u8 = 1;
-const DONE: u8 = 2;
 
 /// Shares the submission state between the main and render worlds. The render
 /// world claims an idle readback immediately before Bevy allocates its staging
-/// buffer; the completion observer releases continuous readbacks for the same
-/// render frame's next submission.
+/// buffer; the completion observer releases it for the same render frame's
+/// next submission.
 #[derive(Component, Clone, ExtractComponent)]
 pub(crate) struct PacedReadback {
     state: Arc<AtomicU8>,
-    continuous: bool,
 }
 
 impl PacedReadback {
     pub(crate) fn continuous(readback: Readback) -> (Readback, Self) {
-        (readback, Self::new(true))
+        (readback, Self::new())
     }
 
-    pub(crate) fn once(readback: Readback) -> (Readback, Self) {
-        (readback, Self::new(false))
-    }
-
-    fn new(continuous: bool) -> Self {
+    fn new() -> Self {
         Self {
             state: Arc::new(AtomicU8::new(IDLE)),
-            continuous,
         }
     }
 
@@ -59,8 +52,7 @@ impl PacedReadback {
     }
 
     fn complete(&self) {
-        self.state
-            .store(if self.continuous { IDLE } else { DONE }, Ordering::Release);
+        self.state.store(IDLE, Ordering::Release);
     }
 }
 
@@ -121,18 +113,10 @@ mod tests {
 
     #[test]
     fn continuous_readback_rearms_only_after_completion() {
-        let paced = PacedReadback::new(true);
+        let paced = PacedReadback::new();
         assert!(paced.try_submit());
         assert!(!paced.try_submit());
         paced.complete();
         assert!(paced.try_submit());
-    }
-
-    #[test]
-    fn one_shot_readback_never_rearms() {
-        let paced = PacedReadback::new(false);
-        assert!(paced.try_submit());
-        paced.complete();
-        assert!(!paced.try_submit());
     }
 }

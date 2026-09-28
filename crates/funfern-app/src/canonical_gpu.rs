@@ -7,7 +7,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -22,10 +22,10 @@ use bevy::{
         gpu_readback::{Readback, ReadbackComplete},
         render_asset::{ExtractedAssets, RenderAssets, prepare_assets},
         render_resource::{
-            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-            CachedComputePipelineId, CachedPipelineState, ComputePassDescriptor,
-            ComputePipelineDescriptor, PipelineCache, ShaderStages, ShaderType,
-            binding_types::storage_buffer,
+            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
+            BufferDescriptor, BufferUsages, CachedComputePipelineId, CachedPipelineState,
+            ComputePassDescriptor, ComputePipelineDescriptor, MapMode, PipelineCache, ShaderStages,
+            ShaderType, binding_types::storage_buffer,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue},
         storage::{GpuShaderBuffer, ShaderBuffer},
@@ -3804,7 +3804,9 @@ pub struct CanonicalGpuRequest {
     stats: Arc<CanonicalGpuStats>,
     readback_entities: Vec<Entity>,
     status_readback_entity: Option<Entity>,
-    full_state_readback_entity: Option<Entity>,
+    /// The full-state snapshot asked of the device and not yet received.
+    snapshot: Option<CanonicalSnapshotRequest>,
+    snapshot_serial: u64,
     continuous_full_state_readback: bool,
     /// Gate O: whether the integrated field is read back every frame, for a
     /// view that paints it, and the readback that does it.
@@ -3831,7 +3833,8 @@ impl Default for CanonicalGpuRequest {
             stats: Arc::new(CanonicalGpuStats::default()),
             readback_entities: Vec::new(),
             status_readback_entity: None,
-            full_state_readback_entity: None,
+            snapshot: None,
+            snapshot_serial: 0,
             continuous_full_state_readback: false,
             integrated_display: false,
             integrated_readback_entity: None,
@@ -3850,7 +3853,6 @@ fn spawn_canonical_state_readback(
     handles: &CanonicalGpuBufferHandles,
     generation: u64,
     full: bool,
-    one_shot: bool,
 ) -> Entity {
     let readback = if full {
         Readback::buffer(handles.state.clone())
@@ -3863,29 +3865,33 @@ fn spawn_canonical_state_readback(
     };
     commands
         .spawn((
-            if one_shot {
-                PacedReadback::once(readback)
-            } else {
-                PacedReadback::continuous(readback)
-            },
-            CanonicalStateReadback {
-                generation,
-                node_count: handles.node_count,
-                sample_count: handles.sample_count,
-                material_runtime_count: handles.material_runtime_count,
-                integrated_count: handles.integrated_count,
-                state_count: if full {
-                    handles.state_count
-                        + 1
-                        + handles.material_runtime_count * TEMPORAL_RUNTIME_WORDS_PER_SLOT as u32
-                } else {
-                    handles.node_count
-                },
-                full,
-                one_shot,
-            },
+            PacedReadback::continuous(readback),
+            canonical_state_tag(handles, generation, full),
         ))
         .id()
+}
+
+/// What a state readback holds: the whole state or the primary node prefix.
+fn canonical_state_tag(
+    handles: &CanonicalGpuBufferHandles,
+    generation: u64,
+    full: bool,
+) -> CanonicalStateReadback {
+    CanonicalStateReadback {
+        generation,
+        node_count: handles.node_count,
+        sample_count: handles.sample_count,
+        material_runtime_count: handles.material_runtime_count,
+        integrated_count: handles.integrated_count,
+        state_count: if full {
+            handles.state_count
+                + 1
+                + handles.material_runtime_count * TEMPORAL_RUNTIME_WORDS_PER_SLOT as u32
+        } else {
+            handles.node_count
+        },
+        full,
+    }
 }
 
 struct AddedCanonicalBuffers {
@@ -3982,7 +3988,6 @@ impl CanonicalGpuRequest {
             &handles,
             generation,
             self.continuous_full_state_readback,
-            false,
         );
         let control_entity = commands
             .spawn((
@@ -4015,7 +4020,7 @@ impl CanonicalGpuRequest {
         self.buffers = Some(handles);
         self.readback_entities = vec![state_entity, control_entity, status_entity];
         self.status_readback_entity = Some(status_entity);
-        self.full_state_readback_entity = None;
+        self.snapshot = None;
         self.integrated_readback_entity = None;
         self.spawn_integrated_readback(commands);
         self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
@@ -4041,7 +4046,7 @@ impl CanonicalGpuRequest {
             commands.entity(entity).despawn();
         }
         self.status_readback_entity = None;
-        self.full_state_readback_entity = None;
+        self.snapshot = None;
         self.integrated_readback_entity = None;
         self.manifest = None;
         self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
@@ -4184,16 +4189,19 @@ impl CanonicalGpuRequest {
 
     /// Queues one full physical-state snapshot without changing the continuous
     /// primary-only display stream. Returns whether a new request was queued.
-    pub fn request_full_state_readback(&mut self, commands: &mut Commands) -> bool {
-        if self.continuous_full_state_readback || self.full_state_readback_entity.is_some() {
+    pub fn request_full_state_readback(&mut self) -> bool {
+        if self.continuous_full_state_readback || self.snapshot.is_some() {
             return false;
         }
         let Some(handles) = self.buffers.as_ref() else {
             return false;
         };
-        let entity = spawn_canonical_state_readback(commands, handles, self.generation, true, true);
-        self.full_state_readback_entity = Some(entity);
-        self.readback_entities.push(entity);
+        self.snapshot_serial = self.snapshot_serial.wrapping_add(1);
+        self.snapshot = Some(CanonicalSnapshotRequest {
+            serial: self.snapshot_serial,
+            tag: canonical_state_tag(handles, self.generation, true),
+            result: Arc::default(),
+        });
         true
     }
 
@@ -4740,7 +4748,7 @@ pub struct CanonicalGpuDisplayClock {
     pub event_serial: u32,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 struct CanonicalStateReadback {
     generation: u64,
     node_count: u32,
@@ -4749,7 +4757,163 @@ struct CanonicalStateReadback {
     material_runtime_count: u32,
     integrated_count: u32,
     full: bool,
-    one_shot: bool,
+}
+
+/// One full-state snapshot asked of the device. It is copied through the
+/// render world's own staging buffer (`CanonicalSnapshotStaging`), which the
+/// result slot is filled from once the copy maps.
+#[derive(Clone)]
+struct CanonicalSnapshotRequest {
+    serial: u64,
+    tag: CanonicalStateReadback,
+    result: Arc<Mutex<CanonicalSnapshotResult>>,
+}
+
+#[derive(Default)]
+enum CanonicalSnapshotResult {
+    #[default]
+    Pending,
+    Ready(Vec<u8>),
+    Failed,
+}
+
+/// The render world's staging buffer for full-state snapshots.
+///
+/// These go through their own buffer rather than a `Readback`. Bevy's
+/// readback pool drops a staging buffer once it has sat idle for ten frames,
+/// and snapshots are asked for four times a second, so each one was copied
+/// into a buffer allocated for it, 6.4 MB at 137k DOFs. On the web wgpu does
+/// not destroy a buffer it drops, so each waited for the garbage collector.
+/// This one is replaced only when a generation's state changes size, and the
+/// one it replaces is destroyed.
+#[derive(Resource, Default)]
+struct CanonicalSnapshotStaging {
+    buffer: Option<Buffer>,
+    /// The request last copied, so each is copied once.
+    copied_serial: u64,
+    /// A copy encoded this frame, mapped once the frame is submitted.
+    encoded: Option<Arc<Mutex<CanonicalSnapshotResult>>>,
+    /// Whether the buffer is mapping or mapped; nothing is copied into it
+    /// until it is unmapped.
+    busy: Arc<AtomicBool>,
+}
+
+/// Copies the state into the snapshot staging buffer when a snapshot of the
+/// current generation is waiting and the buffer is free. It runs after the
+/// frame's steps whether or not any were encoded, as a readback would.
+fn copy_canonical_snapshot(
+    mut render_context: RenderContext,
+    request: Option<Res<CanonicalGpuRequest>>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+    render_device: Res<RenderDevice>,
+    mut staging: ResMut<CanonicalSnapshotStaging>,
+) {
+    let Some(request) = request else { return };
+    let (Some(snapshot), Some(handles)) = (request.snapshot.as_ref(), request.buffers.as_ref())
+    else {
+        return;
+    };
+    if snapshot.serial == staging.copied_serial
+        || snapshot.tag.generation != request.generation
+        || staging.busy.load(Ordering::Acquire)
+    {
+        return;
+    }
+    let Some(state) = gpu_buffers.get(&handles.state) else {
+        return;
+    };
+    let size = state.buffer.size();
+    if staging
+        .buffer
+        .as_ref()
+        .is_none_or(|buffer| buffer.size() != size)
+    {
+        if let Some(replaced) = staging.buffer.take() {
+            replaced.destroy();
+        }
+        staging.buffer = Some(render_device.create_buffer(&BufferDescriptor {
+            label: Some("canonical snapshot staging"),
+            size,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+    let Some(buffer) = staging.buffer.as_ref() else {
+        return;
+    };
+    render_context
+        .command_encoder()
+        .copy_buffer_to_buffer(&state.buffer, 0, buffer, 0, size);
+    staging.copied_serial = snapshot.serial;
+    staging.encoded = Some(snapshot.result.clone());
+    staging.busy.store(true, Ordering::Release);
+}
+
+/// Maps the copy encoded this frame, once the frame is submitted.
+fn map_canonical_snapshot(mut staging: ResMut<CanonicalSnapshotStaging>) {
+    let Some(result) = staging.encoded.take() else {
+        return;
+    };
+    let Some(buffer) = staging.buffer.clone() else {
+        return;
+    };
+    let busy = staging.busy.clone();
+    let mapped = buffer.clone();
+    buffer.slice(..).map_async(MapMode::Read, move |outcome| {
+        let received = match outcome {
+            Ok(()) => {
+                let data = mapped.slice(..).get_mapped_range().to_vec();
+                mapped.unmap();
+                CanonicalSnapshotResult::Ready(data)
+            }
+            Err(_) => CanonicalSnapshotResult::Failed,
+        };
+        *result.lock().unwrap() = received;
+        busy.store(false, Ordering::Release);
+    });
+}
+
+/// Hands a mapped snapshot to the decoder, or gives up on one that failed so
+/// the next can be asked for.
+///
+/// A snapshot waits until the clock the control readback brings has reached
+/// its step. Its material runtime is decoded against that clock, which refuses
+/// a snapshot newer than itself, and the two arrive by different paths: the
+/// snapshot here, the clock with Bevy's readbacks at the next extraction. When
+/// both were readbacks they came in the same batch, so the clock always had.
+/// The wait is a frame, and the snapshot is still the last readback applied
+/// when the estimate reads it.
+fn receive_canonical_snapshot(
+    mut request: ResMut<CanonicalGpuRequest>,
+    mut display: ResMut<CanonicalGpuDisplay>,
+) {
+    let Some(snapshot) = request.snapshot.as_ref() else {
+        return;
+    };
+    let received = std::mem::take(&mut *snapshot.result.lock().unwrap());
+    match received {
+        CanonicalSnapshotResult::Pending => {}
+        CanonicalSnapshotResult::Failed => request.snapshot = None,
+        CanonicalSnapshotResult::Ready(data) => {
+            let tag = snapshot.tag;
+            if snapshot_step(&tag, &data).is_some_and(|step| {
+                display
+                    .clock
+                    .is_none_or(|clock| clock.accepted_steps < step)
+            }) {
+                *snapshot.result.lock().unwrap() = CanonicalSnapshotResult::Ready(data);
+                return;
+            }
+            request.snapshot = None;
+            // Decoded exactly as a readback's bytes are.
+            let words = ReadbackComplete {
+                entity: Entity::PLACEHOLDER,
+                data,
+            }
+            .to_shader_type();
+            apply_canonical_state(&tag, words, &request, &mut display);
+        }
+    }
 }
 
 /// Gate O: a continuous copy of the integrated field's tail of the state.
@@ -4816,38 +4980,42 @@ struct CanonicalHandoffReceiptReadback {
     integrated_count: u32,
 }
 
+/// The completed-step count a full snapshot's metadata word carries, read as
+/// `apply_canonical_state` reads it; `None` when the bytes hold no metadata.
+fn snapshot_step(tag: &CanonicalStateReadback, data: &[u8]) -> Option<u32> {
+    let word = size_of::<GpuCanonicalStateWord>();
+    let index = (tag.state_count as usize)
+        .checked_sub(1 + tag.material_runtime_count as usize * TEMPORAL_RUNTIME_WORDS_PER_SLOT)?;
+    let bytes = data.get(index * word..(index + 1) * word)?;
+    let lane = |lane: usize| f32::from_le_bytes(bytes[4 * lane..4 * lane + 4].try_into().unwrap());
+    (lane(0) == SNAPSHOT_METADATA_MAGIC).then(|| lane(2) as u32 | (lane(3) as u32) << 16)
+}
+
 fn receive_canonical_state(
     event: On<ReadbackComplete>,
     tags: Query<&CanonicalStateReadback>,
-    mut commands: Commands,
-    mut request: ResMut<CanonicalGpuRequest>,
+    request: Res<CanonicalGpuRequest>,
     mut display: ResMut<CanonicalGpuDisplay>,
 ) {
     let Ok(tag) = tags.get(event.entity) else {
         return;
     };
-    if tag.one_shot {
-        // A readback component is continuous until its deferred despawn reaches
-        // the render world. Ignore duplicate completions after the first one;
-        // otherwise one requested snapshot can be counted and decoded more
-        // than once, and can queue several despawns for the same entity.
-        if request.full_state_readback_entity != Some(event.entity) {
-            return;
-        }
-        request
-            .readback_entities
-            .retain(|candidate| *candidate != event.entity);
-        request.full_state_readback_entity = None;
-        commands.entity(event.entity).try_despawn();
-    }
+    apply_canonical_state(tag, event.to_shader_type(), &request, &mut display);
+}
+
+fn apply_canonical_state(
+    tag: &CanonicalStateReadback,
+    mut words: Vec<GpuCanonicalStateWord>,
+    request: &CanonicalGpuRequest,
+    display: &mut CanonicalGpuDisplay,
+) {
     if tag.generation != request.generation {
         return;
     }
-    let mut words: Vec<GpuCanonicalStateWord> = event.to_shader_type();
     if words.len() != tag.state_count as usize {
         return;
     }
-    begin_canonical_display_generation(&mut display, tag.generation);
+    begin_canonical_display_generation(display, tag.generation);
     display.node_count = tag.node_count as usize;
     display.sample_count = tag.sample_count as usize;
     display.integrated_count = tag.integrated_count as usize;
@@ -4884,7 +5052,7 @@ fn receive_canonical_state(
         display.raw_primary = words;
         display.raw_primary_self_describing = false;
     }
-    refresh_canonical_display(&mut display);
+    refresh_canonical_display(display);
     display.readbacks = display.readbacks.saturating_add(1);
     if tag.full {
         display.full_readbacks = display.full_readbacks.saturating_add(1);
@@ -5160,7 +5328,6 @@ fn settle_canonical_handoff(
         &target,
         generation,
         request.continuous_full_state_readback,
-        false,
     );
     let control_entity = commands
         .spawn((
@@ -5190,7 +5357,7 @@ fn settle_canonical_handoff(
     request.stats = stats;
     request.readback_entities = vec![state_entity, control_entity, status_entity];
     request.status_readback_entity = Some(status_entity);
-    request.full_state_readback_entity = None;
+    request.snapshot = None;
     request.integrated_readback_entity = None;
     // Admission and the first target display state came from one GPU receipt.
     // Publish them together, after success, so the UI never waits through a
@@ -5249,13 +5416,18 @@ impl Plugin for CanonicalWaveGpuPlugin {
             .add_observer(receive_canonical_integrated)
             .add_systems(
                 Update,
-                (settle_canonical_handoff, settle_canonical_live_event),
+                (
+                    settle_canonical_handoff,
+                    settle_canonical_live_event,
+                    receive_canonical_snapshot,
+                ),
             )
             .add_plugins(ExtractResourcePlugin::<CanonicalGpuRequest>::default());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
         render_app
+            .init_resource::<CanonicalSnapshotStaging>()
             .add_systems(RenderStartup, init_canonical_pipeline)
             .add_systems(
                 Render,
@@ -5277,12 +5449,17 @@ impl Plugin for CanonicalWaveGpuPlugin {
                 (
                     compute_canonical_wave,
                     compute_canonical_handoff.after(compute_canonical_wave),
+                    copy_canonical_snapshot.after(compute_canonical_handoff),
                 )
                     .before(camera_driver),
             )
             .add_systems(
                 RenderGraph,
                 retire_canonical_steps.in_set(RenderGraphSystems::Finish),
+            )
+            .add_systems(
+                Render,
+                map_canonical_snapshot.in_set(RenderSystems::Cleanup),
             );
     }
 }

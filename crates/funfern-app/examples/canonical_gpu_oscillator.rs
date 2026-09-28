@@ -412,7 +412,6 @@ fn install(
 }
 
 fn drive(
-    mut commands: Commands,
     mut request: ResMut<CanonicalGpuRequest>,
     display: Res<CanonicalGpuDisplay>,
     mut expected: ResMut<Expected>,
@@ -438,7 +437,7 @@ fn drive(
     if request.stats().completed_steps() < expected.steps {
         return;
     }
-    if !request.request_full_state_readback(&mut commands) && display.full_readbacks == 0 {
+    if !request.request_full_state_readback() && display.full_readbacks == 0 {
         return;
     }
     // Every lane, or a comparison runs before its readback has populated it

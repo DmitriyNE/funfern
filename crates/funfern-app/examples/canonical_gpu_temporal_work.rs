@@ -203,7 +203,6 @@ fn install(
 }
 
 fn drive(
-    mut commands: Commands,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut pending: ResMut<Pending>,
     mut request: ResMut<CanonicalGpuRequest>,
@@ -244,7 +243,7 @@ fn drive(
     if request.stats().completed_steps() < TOTAL_STEPS {
         return;
     }
-    if !request.request_full_state_readback(&mut commands) && display.full_readbacks == 0 {
+    if !request.request_full_state_readback() && display.full_readbacks == 0 {
         return;
     }
     let Some(runtime) =

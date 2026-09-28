@@ -258,7 +258,7 @@ fn drive(
     if display.full_readbacks <= expected.failed_readbacks
         || display.full_snapshot_completed_steps() != request.stats().completed_steps()
     {
-        request.request_full_state_readback(&mut commands);
+        request.request_full_state_readback();
         return;
     }
     let completed = request.stats().completed_steps();

@@ -15728,3 +15728,44 @@ cap did the same, so it was not the cap.
     still binds at this mesh.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — Full snapshots are staged in a buffer of their own
+
+- **Defect** (the leftover of the previous entry). The full-state snapshot
+  the estimator and the energy diagnostics ask for four times a second went
+  through a one-shot `Readback`. Bevy's readback pool drops a staging buffer
+  left idle for ten frames, a private setting added inside `RenderPlugin`,
+  and the snapshots come about fifteen frames apart, so each was copied into
+  a buffer allocated for it: 6.4 MB at 137k DOFs, and on the web one more for
+  the garbage collector each time.
+- **Change.** A snapshot is a serial and a result slot on the request. The
+  render world copies the state into `CanonicalSnapshotStaging` after the
+  frame's canonical passes, whether or not steps ran, maps it once the frame
+  is submitted, and the main world decodes the bytes through the code the
+  readback used (`apply_canonical_state`). The staging buffer is replaced
+  only when the state changes size, and the one it replaces is destroyed.
+  The continuous streams stay on `Readback`: their buffers are taken again
+  within a frame or two, so the pool keeps them. `PacedReadback::once` had
+  no other user and goes.
+- **Found on the way.** In the browser the first version starved the
+  estimator: every snapshot was refused as "waiting for aligned readback".
+  A driven generation's runtime is decoded against the clock the control
+  readback brings, which refuses a snapshot newer than itself, and snapshots
+  now arrived a frame before the clock read from the same GPU frame (step 29
+  against 27, 60 against 57). As readbacks the two had come in one batch.
+  A mapped snapshot now waits in its slot until the clock has reached its
+  step, one frame, and is still the last readback applied when the estimate
+  reads it. Natively the callbacks' timing had hidden it.
+- **Verified.** A scratch probe put a Bevy readback of the whole state beside
+  each staged snapshot: over 90 s of adaptation at a 0.3% target all 354
+  pairs were byte-identical, metadata included. The 20 canonical GPU examples
+  pass, 13 of them checking such snapshots against the CPU reference.
+- **Measured in the browser** (2 GiB scratch bundle, Parametric pump at
+  0.3%, 300 s): the mesh reached 137,165 DOFs as before, no buffer at all was
+  created at rest, 840 were destroyed (5.5 GiB), the 173 alive held 341 MiB,
+  and the GPU process sat at 3.3–3.4 GiB. The wasm memory peaked at
+  1113 MiB, so the 1 GiB cap still binds at this mesh.
+- **Plan.** Maintenance now lists testing a larger wasm cap on an iPhone;
+  the cap stays at 1 GiB until then.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -618,7 +618,7 @@ fn drive(
             if request.stats().completed_steps() < TOTAL_STEPS {
                 return;
             }
-            if !request.request_full_state_readback(&mut commands) && display.full_readbacks == 0 {
+            if !request.request_full_state_readback() && display.full_readbacks == 0 {
                 return;
             }
             let Some((device, _)) = read_estimate(&display, &expected, false) else {
@@ -670,7 +670,7 @@ fn drive(
         // host applies the same maps to the same input the device just
         // consumed, so whatever is left is the transfer's own arithmetic.
         Phase::Transferred => {
-            if !request.request_full_state_readback(&mut commands)
+            if !request.request_full_state_readback()
                 && display.full_readbacks <= expected.readbacks_at_handoff
             {
                 return;
@@ -769,7 +769,7 @@ fn drive(
             {
                 return;
             }
-            if !request.request_full_state_readback(&mut commands) {
+            if !request.request_full_state_readback() {
                 return;
             }
             let Some((device, lanes)) = read_estimate(&display, &expected, true) else {

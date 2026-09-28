@@ -988,6 +988,15 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   scene switches found `clear` leaving the old step backlog outstanding,
   which held the next upload forever; it now owes no steps.
 
+- Test a larger wasm memory cap on iOS Safari before shipping one. The
+  threaded web build caps its shared memory at 1 GiB (`--max-memory` in
+  `scripts/trunk`). After the memory fixes of 2026-09-28, Parametric pump at
+  a 0.3% target still peaks at 1005–1019 MiB at 128–137k DOFs, so that mesh
+  runs out of memory in the browser; a 2 GiB scratch build ran it on desktop
+  Chrome. A browser reserves a shared memory's maximum up front, which is
+  where mobile Safari is the risk, so the check is an iPhone through a
+  tunnel, as for the iOS start-up fix of 2026-09-27.
+
 - Enable fat LTO and `codegen-units = 1` for the native release build. The
   browser bundle already gets both through `scripts/trunk`, which exports
   `CARGO_PROFILE_RELEASE_LTO` and `CARGO_PROFILE_RELEASE_CODEGEN_UNITS`; that

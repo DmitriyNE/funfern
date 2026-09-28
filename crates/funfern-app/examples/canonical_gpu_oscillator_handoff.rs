@@ -620,7 +620,7 @@ fn validate(
             if request.stats().completed_steps() < WARMUP_STEPS + TARGET_STEPS {
                 return;
             }
-            if !request.request_full_state_readback(&mut commands) && display.full_readbacks == 0 {
+            if !request.request_full_state_readback() && display.full_readbacks == 0 {
                 return;
             }
             if display.primary_flux.len() != expected.primary.len()

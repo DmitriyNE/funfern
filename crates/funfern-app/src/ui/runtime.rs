@@ -790,7 +790,7 @@ impl Playground {
         // the integrated-field view its own stream of `r` alone.
         request.set_integrated_display(commands, self.integrated_field_shown());
         if self.full_snapshot_requested.elapsed().as_secs_f64() >= 0.25
-            && request.request_full_state_readback(commands)
+            && request.request_full_state_readback()
         {
             self.full_snapshot_requested = Instant::now();
         }

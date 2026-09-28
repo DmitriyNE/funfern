@@ -619,7 +619,7 @@ fn finish_when_ready(
         expected.completed_elapsed = Some(expected.started.unwrap().elapsed());
     }
     if display.complementary_flux.len() != expected.complementary.len() {
-        request.request_full_state_readback(&mut commands);
+        request.request_full_state_readback();
         return;
     }
     if expected.settle_after.is_none() {
