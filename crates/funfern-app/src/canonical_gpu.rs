@@ -73,7 +73,11 @@ macro_rules! add_shader_buffer {
 pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 5;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
 pub const CANONICAL_GPU_WORKGROUP_SIZE: u32 = 128;
-pub const CANONICAL_GPU_MAX_TRACE: usize = 1024;
+/// The most workgroups one dispatch launches along a dimension, WebGPU's
+/// portable `maxComputeWorkgroupsPerDimension`. Each boundary pass gives every
+/// trace node a workgroup of its own, so this is the longest outgoing trace the
+/// device takes; the passes themselves stride over any length.
+pub const CANONICAL_GPU_MAX_WORKGROUPS: usize = 65_535;
 
 const NO_INDEX: u32 = u32::MAX;
 const FORCE_KIND_GAP: u32 = 1;
@@ -2982,9 +2986,14 @@ fn compile_boundary(
     ))?;
     let export = factor.export_with_prescribed(prescribed_trace)?;
     let trace_count = outgoing.trace_nodes().len();
-    if trace_count > CANONICAL_GPU_MAX_TRACE || export.trace_count != trace_count {
+    if export.trace_count != trace_count {
         return Err(CanonicalGpuBuildError::InvalidLayout(
-            "the outgoing trace exceeds the portable workgroup contract",
+            "the outgoing factor does not match its trace",
+        ));
+    }
+    if trace_count > CANONICAL_GPU_MAX_WORKGROUPS {
+        return Err(CanonicalGpuBuildError::InvalidLayout(
+            "the outgoing trace has more nodes than a dispatch has workgroups",
         ));
     }
     let mut words = Vec::new();
@@ -7420,7 +7429,6 @@ mod tests {
             "const SAMPLE_STRIDE: u32 = 112u;",
             "const TABLE_WORD_STRIDE: u32 = 16u;",
             "const SNAPSHOT_METADATA_MAGIC: f32 = 8675309.0;",
-            "const MAX_TRACE: u32 = 1024u;",
         ] {
             assert!(shader.contains(declaration), "missing {declaration}");
         }
@@ -7843,7 +7851,6 @@ mod tests {
         assert!(plan.trace_count > 0);
         assert_eq!(plan.trace_count, plan.mode_count);
         assert!(plan.boundary.len() > plan.trace_count + plan.mode_count * MODE_WORDS);
-        assert!(plan.trace_count <= CANONICAL_GPU_MAX_TRACE);
         // A fixed generation applies its packed inverse in one pass a stage,
         // and the inverse follows the transposed trace matrix in full.
         assert!(plan.trace_direct);

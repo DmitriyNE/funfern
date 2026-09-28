@@ -151,8 +151,8 @@ traps in the gallery window.
 | `NONLINEAR_WALL=2` with `NONLINEAR_FORCED=1` | pins on the second-order trace bypass `prescribed_on_trace` and miss by 0.16; predates the stage; awaiting a decision |
 | Device `exp_minus_one` above 0.02 per half step | kept as a known inaccuracy: the emitter reads 5.2e-5 at 500 steps; such scenes are bounded at 1e-4 (`docs/plan.md`, "Worth checking sometime") |
 | f32 accumulation of `r` | kept: 5.4e-5 in a rebuilt `b` across an opened-ground handoff, bounded at 1e-4 |
-| Constitutive compile time | 25.7 s of 28 s at 123,422 DOFs, 11× the time for 4× the DOFs; a lead, not scoped |
-| The device's outgoing-trace cap, 1,024 nodes | a 2×2 domain with outgoing walls meshes at edge 0.02 and its upload is then refused; the large-mesh warning could say so |
+| Constitutive compile time | 25.7 s of 28 s at 123,422 DOFs, 11× the time for 4× the DOFs. On the empty 2×2 domain at 0.02 with second-order walls, 30.7 s of 33 s is the outgoing trace's dense eigensolve, against 0.25 s with reflecting walls; whether the reported scene's time is the same is not checked. Under Maintenance in `docs/plan.md` |
+| The device's outgoing-trace cap, 1,024 nodes | removed on 28 September: nothing on the device read it, and the device matches the reference at 1,166 and 1,236 trace nodes. The one limit left is the 65,535 workgroups a dispatch launches, one per trace node. See the log |
 | Long-run drift past 1000 steps | as at Stage 10, plus: the soliton is chaotic (CPU twins part at about 0.9 per simulated second, the device reads 0.15 at 3000 steps) |
 | Filter calibration | deferred to after the milestone, as at Stage 10 |
 | Pulses, a true polariton, saturable and polynomial loss | blocked, in the gallery plan |

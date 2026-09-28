@@ -16151,3 +16151,52 @@ resolved waves, and the filter's `λ²` shape fixes the exchange rate.
   records the fix under Maintenance.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — The device takes an outgoing trace of any length
+
+The Stage 11 report left the device's 1,024-node cap on the outgoing trace
+open, with the large-mesh warning as the suggested remedy.
+
+- **Reproduced.** The empty 2 × 2 domain with second-order walls, at edge
+  0.02 (the slider's end), has a 1,042-node trace. Preparing it took 33 s,
+  and then the plan refused it: `InvalidLayout("the outgoing trace exceeds
+  the portable workgroup contract")` in the status line, over the previous
+  mesh, which kept running. Phased array at 0.02 has 1,018 nodes, just
+  under.
+- **Cause: the cap guarded nothing.** `MAX_TRACE` in the shader was declared
+  at Stage 4 and never read. Every boundary pass strides over the trace in
+  128-wide reductions, and no workgroup array has the trace's length. The
+  one device limit is WebGPU's 65,535 workgroups a dispatch, since each
+  boundary pass gives each trace node a workgroup.
+- **Fix.** `CANONICAL_GPU_MAX_TRACE` and the shader constant are gone.
+  `compile_boundary` refuses a trace past `CANONICAL_GPU_MAX_WORKGROUPS`
+  (65,535), with its own message, and a factor that does not match its
+  trace, with another.
+- **Measured past the old cap** on the M1 Max, 400 steps against the f64
+  reference:
+  - Phased array at edge 0.017 with every wall second-order: 189,041 DOFs,
+    1,166 trace nodes, direct inverse. Q 6.7e-7, b 9.4e-7.
+  - Parametric pump the same way: 188,929 DOFs, 1,236 trace nodes, swept.
+    Q 5.5e-7, b 6.6e-7.
+
+  Over 2,000 more steps the fixed scene steps in 2.09 ms against 1.69 ms
+  with reflecting walls, and the driven one in 8.27 ms against 5.58 ms. The
+  boundary buffer is about 13 MB at 1,042 nodes, a tenth of the whole.
+- **What makes a long trace slow is preparation.** The trace's dense cyclic
+  Jacobi eigensolve is about cubic. Assembly takes about 6.4 s at 698 trace
+  nodes (edge 0.03), 12.9 s at 828, 20 s at 898 and 30.7 s at 1,042, where
+  reflecting walls take 0.25 s at 0.02. A sampled profile of the
+  preparation is all Jacobi rotations. Filed under Maintenance in
+  `docs/plan.md`, and probably the "constitutive compile" of 2026-09-26,
+  which is not checked.
+- **Gate.** `canonical_gpu_long_run` takes `LONG_RUN_EDGE` and
+  `LONG_RUN_WALLS=second`, meshes with the application's caps for that
+  edge, and prints the trace length. Its two runs above exit 0, as do the
+  default run, Phased array as authored, `canonical_gpu_timing`,
+  `canonical_gpu_filter_boundary`, `canonical_gpu_handoff`,
+  `canonical_gpu_live_events`, `canonical_gpu_temporal`,
+  `canonical_gpu_driven_document DRIVEN_WALLS=outgoing` and
+  `canonical_gpu_nonlinear NONLINEAR_WALL=2`.
+- **Docs.** The Stage 11 report's two rows; `docs/plan.md` Maintenance.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

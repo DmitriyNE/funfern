@@ -5,7 +5,6 @@ const NODE_STRIDE: u32 = 96u;
 const SAMPLE_STRIDE: u32 = 112u;
 const TABLE_WORD_STRIDE: u32 = 16u;
 const WORKGROUP_SIZE: u32 = 128u;
-const MAX_TRACE: u32 = 1024u;
 const MODE_WORDS: u32 = 12u;
 const NO_INDEX: u32 = 0xffffffffu;
 const FORCE_KIND_GAP: u32 = 1u;

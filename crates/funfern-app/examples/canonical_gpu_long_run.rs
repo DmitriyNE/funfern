@@ -10,7 +10,12 @@
 //! the step count each step, and this gate keeps it that way.
 //!
 //! `LONG_RUN_SCENE` names a catalogue scene (default "Parametric pump") and
-//! `LONG_RUN_STEPS` the step count (default 400). `LONG_RUN_LOSS` puts an
+//! `LONG_RUN_STEPS` the step count (default 400). `LONG_RUN_EDGE` meshes it
+//! at another target edge, with the application's caps for that edge, and
+//! `LONG_RUN_WALLS=second` makes every outer wall second-order outgoing. The
+//! two together make an outgoing trace longer than the 1,024 nodes the device
+//! once refused: Phased array at 0.017 has 1,166 and Parametric pump 1,236.
+//! `LONG_RUN_LOSS` puts an
 //! electric loss of 0.6 on the scene's second material: `none` a constant
 //! one, a number a pump of that depth on the rate. On the pumped slab both
 //! failed before the device read its loss records: the constant one because a
@@ -89,7 +94,19 @@ fn main() -> AppExit {
             });
         }
     }
+    if let Ok(edge) = std::env::var("LONG_RUN_EDGE") {
+        document.presentation.mesh_edge = edge.parse().expect("a mesh edge");
+    }
+    if let Ok(walls) = std::env::var("LONG_RUN_WALLS") {
+        assert_eq!(walls, "second", "LONG_RUN_WALLS takes only second");
+        for scene in [&mut document.model.draft, &mut document.model.accepted] {
+            scene.outer_boundaries = funfern_core::OuterBoundaryConditions::uniform(
+                funfern_core::OuterBoundaryCondition::SecondOrderOutgoing,
+            );
+        }
+    }
     let edge = document.presentation.mesh_edge;
+    let domain = document.model.accepted.geometry.domain;
     let editor = TopologyEditor::from_document(document).unwrap();
     let mut runtime = TopologyRuntime::default();
     let token = runtime
@@ -101,7 +118,8 @@ fn main() -> AppExit {
                 target_edge_length: edge,
                 curve_tolerance: (edge * 0.02).min(5e-4),
                 ..MeshingOptions::default()
-            },
+            }
+            .sized_for_area(domain.width() * domain.height()),
             true,
         )
         .unwrap();
@@ -112,6 +130,10 @@ fn main() -> AppExit {
         }
     };
     let forcing = prepared.canonical_forcing.clone();
+    let trace = prepared
+        .canonical_operator
+        .outgoing_boundary()
+        .map_or(0, |boundary| boundary.trace_nodes().len());
     let mut fastest_rate = 0.0_f64;
     let (plan, primary, complementary) =
         if let Some(op) = prepared.canonical_temporal_operator.clone() {
@@ -139,8 +161,8 @@ fn main() -> AppExit {
                 oracle.step_with_forcing(&op, &forcing).unwrap();
             }
             println!(
-                "long run {name:?}: temporal, {} dofs, dt {dt:.4e}, {} steps, fastest rate \
-                 {fastest_rate:.3} per half step",
+                "long run {name:?}: temporal, {} dofs, {trace} trace nodes, dt {dt:.4e}, {} \
+                 steps, fastest rate {fastest_rate:.3} per half step",
                 op.base().degrees_of_freedom(),
                 steps()
             );
@@ -165,7 +187,7 @@ fn main() -> AppExit {
                 oracle.step_with_forcing(&base, &forcing).unwrap();
             }
             println!(
-                "long run {name:?}: fixed, {} dofs, dt {dt:.4e}, {} steps",
+                "long run {name:?}: fixed, {} dofs, {trace} trace nodes, dt {dt:.4e}, {} steps",
                 base.degrees_of_freedom(),
                 steps()
             );
