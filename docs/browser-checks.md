@@ -34,7 +34,9 @@ plain `trunk` builds the cooperative static-host variant.
   snaps a tap. On a phone, upright and on its side, confirm that the tools
   leave the palette while a tool draws, that its kind of curve and material
   stay, and that the tools come back on Finish, Cancel and a completed
-  circle or rectangle.
+  circle or rectangle. With nothing drawing, select a curve, a control and a
+  probe by tap and delete each from the palette's Delete, including a curve
+  whose deletion asks which subdomain keeps its material.
 - [ ] While drawing an open curve, confirm that eligible outer edges, curve
   interiors, junctions, loose ends, and vertex-less corners all highlight, and that
   starting or finishing on a loose end welds the new curve into that one. A click

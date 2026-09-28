@@ -10,6 +10,7 @@ use funfern_app::topology_viewport::{
 use funfern_core::*;
 use std::collections::BTreeSet;
 
+use super::draw_tools::span_deletion;
 use super::*;
 
 impl Playground {
@@ -652,16 +653,8 @@ impl Playground {
             // One button for every selection, running the same path as the
             // Delete key: whole curves, partial runs, and the survivor picker
             // when a deletion merges two subdomains.
-            let whole = self.selected_complete_curves(&curve_spans).len();
-            if ui
-                .button("Delete")
-                .on_hover_text(match whole {
-                    0 => "Delete the selected spans and leave the rest as baffles",
-                    1 => "Delete the selected curve",
-                    _ => "Delete the selected curves",
-                })
-                .clicked()
-            {
+            let (_, hover) = span_deletion(self.selected_complete_curves(&curve_spans).len());
+            if ui.button("Delete").on_hover_text(hover).clicked() {
                 self.delete_selection();
                 self.invalidate_samples();
             }

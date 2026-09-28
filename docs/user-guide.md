@@ -135,15 +135,18 @@ running; this file covers using it.
   and closing it gives up a drawing under way. While a tool draws, the palette
   marks it, says what it is waiting for, and offers Finish, Undo point and
   Cancel, which Enter, Backspace and Escape also do, so a touchscreen can draw
-  without a keyboard. On a small screen, a phone either way up, the drawing
-  then has the palette to itself: the tools make way for its kind of curve and
-  its controls, and come back when it ends. Holding Shift places each point on
-  the same grid dragging snaps to, except where the point attaches to existing
-  geometry, which outranks it. Snap to grid, in View and in the palette, snaps
-  every point, drag, rotation and scale as Shift does, and Shift then places
-  off the grid. That grid is the one drawn in the viewport: it steps in 1/2/5
-  per decade from the zoom and divides each step into four or five, and Shift
-  lands on those divisions, so what is drawn is what can be reached. Zooming in makes it finer.
+  without a keyboard. On a small screen, a phone either way up, the drawing then
+  has the palette to itself: the tools make way for its kind of curve and its
+  controls, and come back when it ends. There the palette also offers the
+  selection's Delete while nothing is being drawn, doing what the Delete key
+  does, so a touchscreen need not open Edit to remove a curve, a control or a
+  probe. Holding Shift places each point on the same grid dragging snaps to,
+  except where the point attaches to existing geometry, which outranks it. Snap
+  to grid, in View and in the palette, snaps every point, drag, rotation and
+  scale as Shift does, and Shift then places off the grid. That grid is the one
+  drawn in the viewport: it steps in 1/2/5 per decade from the zoom and divides
+  each step into four or five, and Shift lands on those divisions, so what is
+  drawn is what can be reached. Zooming in makes it finer.
   Closed curves start as subdomains or holes. Open curves start as transmitting separators or
   two-sided baffles, either of which may be left unattached. The material chosen
   for a separator applies only if it encloses a face as it is drawn; a face

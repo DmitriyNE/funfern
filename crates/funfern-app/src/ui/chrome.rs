@@ -227,7 +227,8 @@ impl Playground {
             let ctx = root.ctx().clone();
             let mut open = true;
             let active = self.draw.as_ref().map(|draw| draw.tool);
-            let drawing = active.filter(|_| small_screen(&ctx));
+            let small = small_screen(&ctx);
+            let drawing = active.filter(|_| small);
             let closed_tools = drawing.is_none_or(|tool| !tool.draws_open());
             let open_tools = drawing.is_none_or(DrawTool::draws_open);
             egui::Window::new("Draw")
@@ -269,6 +270,19 @@ impl Playground {
                     }
                     ui.separator();
                     self.snap_checkbox(ui);
+                    // A small screen's palette offers the selection's Delete
+                    // as well: a keyboard has it in its key, and a touchscreen
+                    // otherwise only in the Edit panel, over the scene.
+                    if small && let Some(offer) = self.deletion_offer() {
+                        ui.separator();
+                        let response = ui
+                            .add_enabled(offer.refusal.is_none(), egui::Button::new(offer.label))
+                            .on_hover_text(offer.hover)
+                            .on_disabled_hover_text(offer.refusal.unwrap_or_default());
+                        if response.clicked() {
+                            self.delete_selection();
+                        }
+                    }
                 });
             if !open {
                 self.set_draw_open(false);
@@ -636,6 +650,8 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use funfern_app::topology_editor::TopologyProbeTarget;
+    use funfern_app::topology_viewport::TopologyHandle;
 
     /// The top bar laid out alone on a screen `width` wide, in the app's look.
     fn bar_at(state: &mut Playground, context: &egui::Context, width: f32) -> ToolbarFit {
@@ -831,6 +847,95 @@ mod tests {
                     "{tool:?} on {width}x{height}"
                 );
             }
+        }
+    }
+
+    /// A small screen's palette offers the selection's Delete, as the command
+    /// would answer it, whenever nothing is being drawn: for a control, a
+    /// probe and a curve. A tap on it does what the Delete key does. A larger screen leaves it to the key and the
+    /// Edit panel.
+    #[test]
+    fn a_small_screens_palette_deletes_the_selection() {
+        for (width, height) in [(390.0, 844.0), (844.0, 390.0), (1280.0, 800.0)] {
+            let size = egui::vec2(width, height);
+            let small = width < FLOATING_INSPECTOR_BELOW || height < SHORT_SCREEN_BELOW;
+            let mut state = with_baffles(&[]);
+            state.draw_open = true;
+            let context = palette_context();
+            let delete = |state: &mut Playground| {
+                let (_, widgets) = settled_palette(state, &context, size);
+                offered(&widgets, "Delete").cloned()
+            };
+            assert!(delete(&mut state).is_none(), "nothing selected");
+
+            // A probe, in a scene of its own: adding one leaves the draft to
+            // be compiled again before a curve can be deleted.
+            let mut probed = with_baffles(&[]);
+            probed.draw_open = true;
+            let probe = probed
+                .editor
+                .create_probe(
+                    "Spot".into(),
+                    [91, 220, 194],
+                    TopologyProbeTarget::Point(Point2::new(0.25, 0.25)),
+                )
+                .unwrap();
+            probed.selected_probe = Some(probe);
+            assert_eq!(
+                delete(&mut probed).map(|button| button.label),
+                small.then(|| "Delete probe".to_owned())
+            );
+
+            let curve = state.editor.document.model.draft.geometry.curves[0].id;
+            state.selection =
+                TopologySelection::Handle(TopologyHandle::Control { curve, control: 1 });
+            let refusal = state.editor.control_removal_error(curve, 1);
+            let control = delete(&mut state);
+            assert_eq!(
+                control.as_ref().map(|button| button.label.as_str()),
+                small.then_some("Delete control")
+            );
+            assert!(control.is_none_or(|button| button.enabled == refusal.is_none()));
+
+            state.selection = TopologySelection::Spans(every_span(&state));
+            let Some(button) = delete(&mut state) else {
+                assert!(!small, "{width}x{height}");
+                continue;
+            };
+            assert!(small, "{width}x{height}");
+            assert_eq!(
+                (button.label.as_str(), button.enabled),
+                ("Delete curve", true)
+            );
+
+            state.begin_draw(DrawTool::Polyline);
+            state.selection = TopologySelection::Spans(every_span(&state));
+            assert!(delete(&mut state).is_none(), "offered while drawing");
+            state.draw = None;
+
+            // Laid out again with nothing drawing, which the tap lands on.
+            let button = delete(&mut state).expect("offered again");
+            let at = button.rect.center();
+            let press = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            palette_pass(
+                &mut state,
+                &context,
+                size,
+                1.0,
+                vec![egui::Event::PointerMoved(at), press(true)],
+            );
+            palette_pass(&mut state, &context, size, 1.05, vec![press(false)]);
+            assert!(
+                state.editor.document.model.draft.geometry.curves.is_empty(),
+                "{width}x{height}"
+            );
+            assert!(matches!(state.selection, TopologySelection::None));
+            assert!(delete(&mut state).is_none(), "nothing left selected");
         }
     }
 

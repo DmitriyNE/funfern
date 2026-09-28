@@ -64,6 +64,30 @@ impl DrawGesture {
     }
 }
 
+/// What the Delete key would remove of the selection, for a button that
+/// does the same.
+pub(super) struct DeletionOffer {
+    /// The button's name.
+    pub(super) label: &'static str,
+    /// What it removes, said on hover.
+    pub(super) hover: &'static str,
+    /// Why the deletion would be refused, when it would.
+    pub(super) refusal: Option<String>,
+}
+
+/// A deletion of curve spans, `whole` of the curves in full: its button's
+/// name and what it does.
+pub(super) fn span_deletion(whole: usize) -> (&'static str, &'static str) {
+    match whole {
+        0 => (
+            "Delete spans",
+            "Delete the selected spans and leave the rest as baffles",
+        ),
+        1 => ("Delete curve", "Delete the selected curve"),
+        _ => ("Delete curves", "Delete the selected curves"),
+    }
+}
+
 impl Playground {
     pub(super) fn draw_click(
         &mut self,
@@ -216,6 +240,49 @@ impl Playground {
                     .map(|span| TopologySpanTarget::Curve(span.id))
                     .collect(),
             );
+        }
+    }
+    /// What of the selection [`Self::delete_selection`] would remove: a
+    /// probe, a control or curve spans. The outer boundary and a junction
+    /// are not deleted, and nothing is while a gesture is under way.
+    pub(super) fn deletion_offer(&self) -> Option<DeletionOffer> {
+        if self.interaction_in_progress() {
+            return None;
+        }
+        if self.selected_probe.is_some() {
+            return Some(DeletionOffer {
+                label: "Delete probe",
+                hover: "Delete the selected probe",
+                refusal: None,
+            });
+        }
+        match &self.selection {
+            TopologySelection::Handle(TopologyHandle::Control { curve, control }) => {
+                Some(DeletionOffer {
+                    label: "Delete control",
+                    hover: "Delete the selected control",
+                    refusal: self.editor.control_removal_error(*curve, *control),
+                })
+            }
+            TopologySelection::Spans(targets) => {
+                let spans = targets
+                    .iter()
+                    .filter_map(|target| match target {
+                        TopologySpanTarget::Curve(span) => Some(*span),
+                        TopologySpanTarget::Outer(_) => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                if spans.is_empty() {
+                    return None;
+                }
+                let (label, hover) = span_deletion(self.selected_complete_curves(&spans).len());
+                Some(DeletionOffer {
+                    label,
+                    hover,
+                    refusal: None,
+                })
+            }
+            _ => None,
         }
     }
     pub(super) fn delete_selection(&mut self) {

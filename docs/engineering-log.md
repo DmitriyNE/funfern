@@ -15826,3 +15826,31 @@ cap did the same, so it was not the cap.
   Finish ended the polyline.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — A small screen's Draw palette offers the selection's Delete
+
+- **Request.** On a touchscreen a selection could be deleted only from the
+  Edit panel, which on a phone floats over the scene the selection was made
+  in, with Delete below the curve list and the transform fields.
+- **Change.** On a small screen the palette ends with a Delete for the
+  selection while nothing is being drawn: Delete curve, curves or spans,
+  Delete control or Delete probe, whichever the selection is. It runs the
+  Delete key's path, the survivor question included when a deletion merges
+  two subdomains, and a control that cannot go greys it out with the
+  editor's own reason, as in the Edit panel. It sits at the palette's foot,
+  so nothing above it moves when a selection comes or goes.
+  `Playground::deletion_offer` says what Delete would remove, and the Edit
+  panel's span Delete takes its hover text from the same `span_deletion`.
+- **Test.** `a_small_screens_palette_deletes_the_selection` on a phone
+  upright, on its side and a desktop: nothing offered with nothing
+  selected, a control offered as `control_removal_error` answers, a probe
+  as Delete probe, a whole baffle as Delete curve, nothing while drawing,
+  and on the phone a tap on it deletes the baffle and clears the selection.
+  The desktop offers none.
+- **Browser.** On a scratch bundle in Chrome with touch at 390 by 844, in a
+  new scene: a drawn baffle, selected as it is finished, went from the
+  palette's Delete curve; a drawn circle's Delete curve asked which
+  subdomain keeps its material, and a tap on one merged it away; a tapped
+  control went from Delete control, leaving the loop one control fewer.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
