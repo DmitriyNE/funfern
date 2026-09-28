@@ -9883,7 +9883,8 @@ mod tests {
     }
 
     /// Each composition the stepper admits beside the bulk: both walls, a
-    /// prescribed wall, a thin gap and a constant loss.
+    /// prescribed wall, a thin gap, a constant loss and a prescribed side on
+    /// a second-order wall's trace.
     fn filter_compositions() -> Vec<(&'static str, Scene, OuterBoundaryCondition)> {
         let mut gapped = Scene::default();
         gapped.internal_boundaries.push(crate::InternalBoundary {
@@ -9923,6 +9924,11 @@ mod tests {
             ),
             ("thin gap", gapped, OuterBoundaryCondition::Reflecting),
             ("loss", lossy, OuterBoundaryCondition::Reflecting),
+            (
+                "pinned trace",
+                Scene::default(),
+                OuterBoundaryCondition::SecondOrderOutgoing,
+            ),
         ]
     }
 
@@ -9947,9 +9953,9 @@ mod tests {
         CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap()
     }
 
-    /// A constant prescribed wall on the left for the case that asks for one.
+    /// A constant prescribed wall on the left for the cases that ask for one.
     fn filter_forcing(label: &str, base: &CanonicalWaveOperator) -> CanonicalForcing {
-        if label != "prescribed wall" {
+        if label != "prescribed wall" && label != "pinned trace" {
             return CanonicalForcing::none(base);
         }
         let prescribed = base
@@ -10967,6 +10973,7 @@ mod tests {
                 let exchanged = match label {
                     "first-order wall" | "second-order wall" => total.boundary_loss,
                     "prescribed wall" => total.prescribed_exchange.abs(),
+                    "pinned trace" => total.prescribed_exchange.abs().min(total.boundary_loss),
                     "loss" => total.primary_loss,
                     "source" => total.source_work.abs(),
                     _ => 1.0,

@@ -4250,6 +4250,168 @@ mod tests {
         }
     }
 
+    /// Steps a law-carrying generation 40 steps on the CPU reference with its
+    /// own forcing and estimates it along the adaptation worker's path.
+    fn estimate_as_the_worker_does(
+        name: &str,
+        prepared: &crate::topology_runtime::PreparedTopology,
+    ) {
+        let operator = prepared.canonical_temporal_operator.clone().unwrap();
+        let forcing = prepared.canonical_forcing.clone();
+        let dt = prepared.recommended_time_step();
+        let mut state = CanonicalTemporalWaveState::zero(&operator, dt)
+            .unwrap()
+            .pinned(&operator, &forcing)
+            .unwrap();
+        let auxiliary_of = |state: &CanonicalTemporalWaveState| {
+            state
+                .thin_gap_jump()
+                .iter()
+                .chain(state.outgoing_pole_currents())
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        let mut previous = state.clone();
+        for _ in 0..40 {
+            previous = state.clone();
+            state
+                .step_with_forcing(&operator, &forcing)
+                .unwrap_or_else(|error| panic!("{name}: step: {error}"));
+        }
+        let snapshot = funfern_core::CanonicalIndicatorSnapshot {
+            mesh_revision: prepared.mesh.mesh_revision,
+            primary_flux: state.primary_flux().to_vec(),
+            previous_primary_flux: previous.primary_flux().to_vec(),
+            complementary_flux: state.complementary_flux().to_vec(),
+            previous_complementary_flux: previous.complementary_flux().to_vec(),
+            auxiliary: auxiliary_of(&state),
+            previous_auxiliary: auxiliary_of(&previous),
+            integrated_field: state.integrated_field().to_vec(),
+            previous_integrated_field: previous.integrated_field().to_vec(),
+            time: state.time(),
+            time_step: dt,
+        };
+        let supplement = funfern_core::canonical_temporal_indicator_supplement(
+            &prepared.mesh,
+            &operator,
+            &forcing,
+            &snapshot,
+            state.runtime(),
+            0.0,
+        )
+        .unwrap_or_else(|error| panic!("{}: supplement: {error}", name));
+        let velocity = funfern_core::canonical_temporal_primary_rate(
+            &operator,
+            &forcing,
+            &snapshot,
+            state.runtime(),
+        )
+        .unwrap_or_else(|error| panic!("{}: rate: {error}", name));
+        let displacement = operator
+            .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+            .unwrap();
+        let count = displacement.len();
+        let defaults = crate::document::AdaptationSettings::default();
+        let mut job = SolutionIndicatorJob::new_topology(
+            prepared.mesh.clone(),
+            prepared.operator.clone(),
+            &prepared.bundle.plan,
+            prepared.bundle.model(),
+            QuadraticSolutionSnapshot {
+                mesh_revision: prepared.mesh.mesh_revision,
+                displacement,
+                velocity,
+                acceleration: vec![0.0; count],
+                auxiliary: vec![0.0; count],
+                volume_acceleration: vec![0.0; count],
+                time: state.time(),
+                time_step: dt,
+            },
+            SolutionIndicatorOptions {
+                minimum_edge_length: defaults.minimum_edge,
+                maximum_edge_length: defaults.maximum_edge,
+                relative_tolerance: defaults.accuracy_percent / 100.0,
+                elements_per_wavelength: defaults.elements_per_wavelength,
+                ..Default::default()
+            },
+        )
+        .with_canonical_supplement(supplement)
+        .with_instantaneous_materials(state.runtime().clone());
+        let report = loop {
+            if let Some(result) = job.advance(1 << 16) {
+                break result
+                    .unwrap_or_else(|error| panic!("{}: estimate: {error}", name))
+                    .report;
+            }
+        };
+        assert!(
+            report.global_indicator.is_finite(),
+            "{}: the estimate is {}",
+            name,
+            report.global_indicator
+        );
+    }
+
+    /// A pinned or electric-wall side beside a second-order outgoing one pins
+    /// the corner nodes they share, which sit on the outgoing wall's trace.
+    /// Every law-carrying gallery scene behind such a wall used to be refused
+    /// whole; with one side pinned, each steps on the reference, packs for the
+    /// device and is estimated as the adaptation worker estimates it.
+    #[test]
+    fn every_driven_gallery_scene_runs_with_a_side_pinned_beside_an_outgoing_wall() {
+        let outgoing = OuterBoundaryCondition::SecondOrderOutgoing;
+        let mut ran = Vec::new();
+        for example in catalog() {
+            let mut document = example.document.clone();
+            let sides = document.model.accepted.outer_boundaries.sides;
+            // A side with an outgoing neighbour and no pinned one, whose own
+            // signal would have to agree at their corner.
+            let pinned_side =
+                |side: usize| matches!(sides[side], OuterBoundaryCondition::Dirichlet { .. });
+            let Some(side) = (0..4).find(|side| {
+                let neighbours = [(side + 1) % 4, (side + 3) % 4];
+                neighbours.iter().any(|next| sides[*next] == outgoing)
+                    && !neighbours.iter().any(|next| pinned_side(*next))
+            }) else {
+                continue;
+            };
+            let pinned = OuterBoundaryCondition::Dirichlet {
+                signal: TimeSignal::ZERO,
+            };
+            for scene in [&mut document.model.draft, &mut document.model.accepted] {
+                scene.outer_boundaries.sides[side] = pinned;
+            }
+            let prepared = prepare(&document, 0.16);
+            let Some(operator) = prepared.canonical_temporal_operator.clone() else {
+                continue;
+            };
+            let boundary = operator.base().outgoing_boundary().unwrap();
+            assert!(
+                boundary
+                    .trace_nodes()
+                    .iter()
+                    .any(|node| prepared.canonical_forcing.prescribed()[*node as usize].is_some()),
+                "{}: no pin on the trace",
+                example.name
+            );
+            let time_step = prepared.recommended_time_step();
+            let state = CanonicalTemporalWaveState::zero(&operator, time_step)
+                .unwrap()
+                .pinned(&operator, &prepared.canonical_forcing)
+                .unwrap();
+            crate::canonical_gpu::CanonicalGpuPlan::compile_temporal(
+                &operator,
+                &state,
+                &prepared.canonical_forcing,
+                crate::canonical_gpu::CanonicalGpuClock::initial(time_step).unwrap(),
+            )
+            .unwrap_or_else(|error| panic!("{}: device plan: {error:?}", example.name));
+            estimate_as_the_worker_does(example.name, &prepared);
+            ran.push(example.name);
+        }
+        assert!(ran.len() >= 9, "{ran:?}");
+    }
+
     /// Every gallery scene whose medium carries a law is estimated the way the
     /// application's adaptation worker estimates it: production's rate, the
     /// temporal supplement, the scene's own walls and the instantaneous
@@ -4260,101 +4422,10 @@ mod tests {
         let mut estimated = Vec::new();
         for example in catalog() {
             let prepared = prepare(&example.document, 0.16);
-            let Some(operator) = prepared.canonical_temporal_operator.clone() else {
-                continue;
-            };
-            let forcing = prepared.canonical_forcing.clone();
-            let dt = prepared.recommended_time_step();
-            let mut state = CanonicalTemporalWaveState::zero(&operator, dt)
-                .unwrap()
-                .pinned(&operator, &forcing)
-                .unwrap();
-            let auxiliary_of = |state: &CanonicalTemporalWaveState| {
-                state
-                    .thin_gap_jump()
-                    .iter()
-                    .chain(state.outgoing_pole_currents())
-                    .copied()
-                    .collect::<Vec<_>>()
-            };
-            let mut previous = state.clone();
-            for _ in 0..40 {
-                previous = state.clone();
-                state.step_with_forcing(&operator, &forcing).unwrap();
+            if prepared.canonical_temporal_operator.is_some() {
+                estimate_as_the_worker_does(example.name, &prepared);
+                estimated.push(example.name);
             }
-            let snapshot = funfern_core::CanonicalIndicatorSnapshot {
-                mesh_revision: prepared.mesh.mesh_revision,
-                primary_flux: state.primary_flux().to_vec(),
-                previous_primary_flux: previous.primary_flux().to_vec(),
-                complementary_flux: state.complementary_flux().to_vec(),
-                previous_complementary_flux: previous.complementary_flux().to_vec(),
-                auxiliary: auxiliary_of(&state),
-                previous_auxiliary: auxiliary_of(&previous),
-                integrated_field: state.integrated_field().to_vec(),
-                previous_integrated_field: previous.integrated_field().to_vec(),
-                time: state.time(),
-                time_step: dt,
-            };
-            let supplement = funfern_core::canonical_temporal_indicator_supplement(
-                &prepared.mesh,
-                &operator,
-                &forcing,
-                &snapshot,
-                state.runtime(),
-                0.0,
-            )
-            .unwrap_or_else(|error| panic!("{}: supplement: {error}", example.name));
-            let velocity = funfern_core::canonical_temporal_primary_rate(
-                &operator,
-                &forcing,
-                &snapshot,
-                state.runtime(),
-            )
-            .unwrap_or_else(|error| panic!("{}: rate: {error}", example.name));
-            let displacement = operator
-                .primary_field_at(state.primary_flux(), state.time(), state.runtime())
-                .unwrap();
-            let count = displacement.len();
-            let defaults = crate::document::AdaptationSettings::default();
-            let mut job = SolutionIndicatorJob::new_topology(
-                prepared.mesh.clone(),
-                prepared.operator.clone(),
-                &prepared.bundle.plan,
-                prepared.bundle.model(),
-                QuadraticSolutionSnapshot {
-                    mesh_revision: prepared.mesh.mesh_revision,
-                    displacement,
-                    velocity,
-                    acceleration: vec![0.0; count],
-                    auxiliary: vec![0.0; count],
-                    volume_acceleration: vec![0.0; count],
-                    time: state.time(),
-                    time_step: dt,
-                },
-                SolutionIndicatorOptions {
-                    minimum_edge_length: defaults.minimum_edge,
-                    maximum_edge_length: defaults.maximum_edge,
-                    relative_tolerance: defaults.accuracy_percent / 100.0,
-                    elements_per_wavelength: defaults.elements_per_wavelength,
-                    ..Default::default()
-                },
-            )
-            .with_canonical_supplement(supplement)
-            .with_instantaneous_materials(state.runtime().clone());
-            let report = loop {
-                if let Some(result) = job.advance(1 << 16) {
-                    break result
-                        .unwrap_or_else(|error| panic!("{}: estimate: {error}", example.name))
-                        .report;
-                }
-            };
-            assert!(
-                report.global_indicator.is_finite(),
-                "{}: the estimate is {}",
-                example.name,
-                report.global_indicator
-            );
-            estimated.push(example.name);
         }
         for name in [
             "Parametric pump",

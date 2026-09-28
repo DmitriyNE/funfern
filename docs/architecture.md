@@ -1694,7 +1694,10 @@ This is a genuinely nonlocal trace operation. Disconnected trace components are
 prepared separately, while corners share the assembled trace graph. Generation
 handoff maps physical trace histories and then composes the target modal basis;
 it never interpolates modal indices. Prescribed trace intersections use a cached
-constrained factor and essential ownership wins at mixed junctions.
+constrained factor and essential ownership wins at mixed junctions. A driven or
+nonlinear generation pins a trace node at its kick's own instant through the map
+in force there, and the node enters the wall's solve at that pinned flux, so its
+field through the kick is its signal, as an interior pin's is.
 
 The candidate retains the quadratic angular expansion of the old Engquist-Majda
 condition but trades some planar reflection accuracy for passivity and robustness.

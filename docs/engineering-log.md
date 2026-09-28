@@ -15952,3 +15952,35 @@ cap did the same, so it was not the cap.
 - **Test.** `a_pinned_trace_on_a_driven_generation_packs_a_held_row`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — Everything after a step holds a pinned outgoing trace
+
+- **Compositions** (CPU reference). `filter_compositions` gains a pinned
+  side on a second-order wall's trace, so three tests take it beside the
+  rest: inert, the filter is the fixed path's filter to 1e-12; the driven and
+  nonlinear filters (pump, sine-Gordon, Kerr sine-Gordon, Kerr and
+  saturable, pumped Kerr) commit, only remove energy and leave the pins and
+  the pole currents where they were; and five oscillator media keep a
+  second-order balance beside it with the pins' lane active. The driven
+  estimate already skipped a pinned trace row's defect.
+- **Application.** `every_driven_gallery_scene_runs_with_a_side_pinned_beside_an_outgoing_wall`:
+  a side with an outgoing neighbour and no pinned one is pinned on each
+  law-carrying gallery scene, and nine (Plasma skin depth, Plasma mirror,
+  Plasma whispering gallery, Doppler mirror, Parametric fiber amplifier,
+  Spatial soliton, Symmetry breaking, Pinned domain wall, Self-sustained
+  emitter; Josephson line has no such side) each put a pin on the trace,
+  step 40 steps on the reference, pack for the device and are estimated as
+  the adaptation worker estimates them, through the helper
+  `every_driven_gallery_scene_is_estimated` now shares. Every one of them was
+  refused whole before.
+- **App run** (scratch HOME, a temporary hook opening a scene with such a
+  side pinned; removed). Parametric fiber amplifier ran 75 s on the device,
+  refined from 20.9k to 60.4k DOFs through the handoffs, estimate 23-28%;
+  Spatial soliton, whose trace is Kerr, 45 s, 20.5k to 53.9k DOFs. Neither
+  paused on a fault.
+- **Docs.** The architecture's outgoing-trace paragraph says how a driven or
+  nonlinear generation holds a pin. The stage reports that list prescribed
+  data on an outgoing trace as refused are left as the record of their
+  stage.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
