@@ -15921,3 +15921,34 @@ cap did the same, so it was not the cap.
   pumped order test on a Kerr medium as well, ratios 4.01 and 4.03.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — The device holds a pin on a driven or nonlinear outgoing trace
+
+- **Change** (`canonical_wave.wgsl`). A pinned trace row was held at the
+  authored mass times its signal, sampled at the fixed path's instant, and
+  entered the wall's coupling at the flux it carried in. On a driven or
+  nonlinear generation `pinned_trace_flux` now pins it through the map in
+  force at the boundary stage's own instant, as the local kick does, and
+  `trace_entry_flux` enters it at that flux in the modal prepare, the reduce,
+  the Newton linearization and the finalize, so its field through the kick
+  is its signal: the reference's staged pin. With a pin on the trace the
+  pins' lane is the whole kick's balance, every trace node's share plus every
+  mode's; on a nonlinear trace each node's share now measures its energy
+  through its map, where the quadratic form had read Newton's iteration
+  mass. The fixed path runs the same expressions as before. The plan's
+  refusal of a pinned trace on a time-driven generation is gone.
+- **Measured** (`canonical_gpu_nonlinear`, M1 Max, Metal, 5485 nodes, 200
+  steps, the left side pinned on the second-order wall's trace):
+  `NONLINEAR_WALL=2 NONLINEAR_FORCED=1`, which missed by Q 1.6e-1, reads
+  Q 9.4e-7 and b 7.8e-7; with `NONLINEAR_LINEAR=1`, the driven linear trace,
+  Q 7.1e-7 and b 7.5e-7; with the resident filter as well, 8.8e-7 and
+  7.6e-7, and 6.0e-7 and 7.0e-7 linear. `canonical_gpu_oscillator` gains
+  `OSCILLATOR_COMPOSE=wall2-pins`: all seven media within Q 1.5e-6, b 7.2e-7
+  and r 7.4e-7, and with the filter on Klein-Gordon and Kerr sine-Gordon.
+- **Regression.** Every canonical GPU gate and its modes, 106 runs, exits 0
+  and inside its bounds (script `device_suite.sh` in the scratchpad).
+  `canonical_gpu_temporal` reads b 4.17e-5 against its 6e-5, identically
+  before this change.
+- **Test.** `a_pinned_trace_on_a_driven_generation_packs_a_held_row`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -17,7 +17,8 @@
 //!   compared lane for lane with the reference's.
 //!
 //! `OSCILLATOR_COMPOSE` adds one composition: `wall1`, `wall2`, `gap`,
-//! `pins`, `source`, `loss`, or `junction`: a second material inside the
+//! `pins`, `wall2-pins` (the pinned side on the second-order wall's trace),
+//! `source`, `loss`, or `junction`: a second material inside the
 //! scene's obstacle, with its own Klein-Gordon cutoff and a constant primary
 //! loss, so interface nodes sum two restoring laws and weigh an active rate
 //! against a passive one. `OSCILLATOR_FILTER=1` turns the resident grid
@@ -187,7 +188,7 @@ fn main() -> AppExit {
     }
     let wall = match compose.as_str() {
         "wall1" => OuterBoundaryCondition::FirstOrderOutgoing,
-        "wall2" => OuterBoundaryCondition::SecondOrderOutgoing,
+        "wall2" | "wall2-pins" => OuterBoundaryCondition::SecondOrderOutgoing,
         _ => OuterBoundaryCondition::Reflecting,
     };
     let mut fixed_scene = scene.clone();
@@ -212,7 +213,7 @@ fn main() -> AppExit {
     assert!(operator.has_restoring());
     let base = operator.base();
     let mut forcing = CanonicalForcing::none(base);
-    if compose == "pins" {
+    if compose == "pins" || compose == "wall2-pins" {
         let mut prescribed = vec![None; base.degrees_of_freedom()];
         for (node, point) in base.node_points().iter().enumerate() {
             if point.x < -0.999 {

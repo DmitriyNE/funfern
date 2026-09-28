@@ -2226,6 +2226,29 @@ fn trace_inverse_mass(trace_word: vec4<u32>, instant: f32) -> f32 {
     return bitcast<f32>(trace_word.y);
 }
 
+// A pinned trace node's flux at a boundary stage: its authored mass times its
+// signal on the fixed path, and on a driven or nonlinear generation the flux
+// the map in force at the stage gives the signal, as the local kick pins.
+fn pinned_trace_flux(node: u32, instant: f32) -> f32 {
+    let field = harmonic_value(nodes[node].prescribed, instant);
+    if temporal_enabled() {
+        return temporal_primary_flux_of_field(node, field, instant);
+    }
+    return nodes[node].mass_loss.x * field;
+}
+
+// The flux a trace node enters a boundary stage with. A driven or nonlinear
+// generation's pin enters at its pinned flux, so that its field through the
+// kick is its signal at the stage: the reference's `TracePinField::Staged`.
+// The flux it carries in was pinned against the other stage's map. Every
+// other node, and the fixed path's pins, enter at the flux carried in.
+fn trace_entry_flux(node: u32, second: bool) -> f32 {
+    if temporal_enabled() && nodes[node].boundary.z != 0u {
+        return pinned_trace_flux(node, boundary_instant(second));
+    }
+    return select(accepted_q(node), candidate_q(node), second || has_loss_stages());
+}
+
 fn reduce_boundary_scalar(local: u32, value: f32) -> f32 {
     reduced_values[local] = value;
     workgroupBarrier();
@@ -2280,8 +2303,7 @@ fn boundary_prepare(mode: u32, local: u32, second: bool) {
         for (var trace = local; trace < trace_count; trace += WORKGROUP_SIZE) {
             let trace_word = boundary[control.table_offsets.z + trace].data;
             let node = trace_word.x;
-            let current = select(
-                accepted_q(node), candidate_q(node), second || has_loss_stages());
+            let current = trace_entry_flux(node, second);
             var old_field = current * trace_inverse_mass(trace_word, instant);
             if nonlinear_trace() {
                 old_field = bitcast<f32>(trace_word.y);
@@ -2356,8 +2378,7 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
     let node = trace_word.x;
     var inverse_mass = trace_inverse_mass(trace_word, boundary_instant(second));
     let damping = bitcast<f32>(trace_word.z);
-    let old = select(
-        accepted_q(node), candidate_q(node), second || has_loss_stages());
+    let old = trace_entry_flux(node, second);
     var old_field = inverse_mass * old;
     // On a nonlinear wall each Newton iteration is this same linear kick at
     // the per-node mass `1/(2g_k)` with the old field replaced by `2c_k`,
@@ -2375,10 +2396,7 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
     var reduced = old + control.evolution.w * derivative
         + control.evolution.z * (source - held_force);
     if nodes[node].boundary.z != 0u {
-        let target_time = control.clock_f32.y
-            + select(control.evolution.z, control.clock_f32.x, second);
-        reduced = nodes[node].mass_loss.x
-            * harmonic_value(nodes[node].prescribed, target_time);
+        reduced = pinned_trace_flux(node, boundary_instant(second));
     } else {
         reduced -= coupling.y;
     }
@@ -2513,12 +2531,13 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
         let damping = bitcast<f32>(trace_word.z);
         let old = select(
             accepted_q(node), candidate_q(node), second || has_loss_stages());
+        let entry = trace_entry_flux(node, second);
         let next = scratch[trace_solution_offset() + trace].values.x;
         let source_time = control.clock_f32.y
             + select(0.0, control.clock_f32.x, second);
         let source = source_rate(node, source_time);
         let held_force = force(node, second);
-        var midpoint = 0.5 * (old + next) * inverse_mass;
+        var midpoint = 0.5 * (entry + next) * inverse_mass;
         if nonlinear_trace() {
             // The last Newton step must have settled: a solve still moving
             // at its cap is a detected failure, not an accepted state.
@@ -2526,16 +2545,25 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
             if abs(next - iterate) > 1.0e-5 * max(trace_scale, 1.0e-30) {
                 reject(STATUS_INVERSE_CONVERGENCE);
             }
-            midpoint = trace_gradient(node, old, next, boundary_instant(second)).x;
+            midpoint = trace_gradient(node, entry, next, boundary_instant(second)).x;
         }
         let source_work = duration * midpoint * source;
         let force_work = duration * midpoint * held_force;
         let boundary_loss = duration * damping * midpoint * midpoint;
-        let energy_change = 0.5 * (next * next - old * old) * inverse_mass;
         set_candidate_q(node, next);
         scratch[node].values.x += source_work;
         scratch[node].values.w += boundary_loss;
+        // With a pin on the trace, what the pins put in is the whole kick's
+        // balance: every trace node's own, here, and every mode's, which the
+        // reduction adds. Each node's change is measured from the flux it
+        // stored, through its map, where Newton's iteration mass is not one.
         if has_prescribed_trace() {
+            var energy_change = 0.5 * (next * next - old * old) * inverse_mass;
+            if nonlinear_trace() {
+                let instant = boundary_instant(second);
+                energy_change = temporal_primary_energy(node, next, instant)
+                    - temporal_primary_energy(node, old, instant);
+            }
             scratch[node].values.y += energy_change - source_work + force_work + boundary_loss;
         }
         if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
@@ -2598,7 +2626,7 @@ fn boundary_linearize(trace: u32, second: bool, first_iteration: bool) {
     if stopped() || trace >= control.counts_b.y { return; }
     let word_index = control.table_offsets.z + trace;
     let node = boundary[word_index].data.x;
-    let old = select(accepted_q(node), candidate_q(node), second || has_loss_stages());
+    let old = trace_entry_flux(node, second);
     let region = nonlinear_trace_offset() + trace;
     var iterate = old;
     var step = 0.0;

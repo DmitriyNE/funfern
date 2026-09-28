@@ -1082,17 +1082,6 @@ impl CanonicalGpuPlan {
                 "the temporal state, clock and operator must share one boundary",
             ));
         }
-        if operator.base().outgoing_boundary().is_some_and(|boundary| {
-            boundary
-                .trace_nodes()
-                .iter()
-                .any(|node| forcing.prescribed()[*node as usize].is_some())
-        }) {
-            return Err(CanonicalGpuBuildError::InvalidLayout(
-                "the device does not yet hold a pinned wall beside an outgoing wall \
-                 in a time-driven or nonlinear medium",
-            ));
-        }
         if state.thin_gap_jump().iter().any(|jump| *jump != 0.0)
             || state.outgoing_pole_currents().iter().any(|z| *z != 0.0)
         {
@@ -7566,11 +7555,11 @@ mod tests {
         .unwrap()
     }
 
-    /// The device does not hold a pin on a driven generation's outgoing trace
-    /// yet: the trace system pins at the authored mass. The same pins beside
-    /// reflecting walls are interior pins and pack.
+    /// A pin on a driven generation's outgoing trace packs as a held row of
+    /// the swept trace system; the same pins beside reflecting walls are
+    /// interior pins and hold no row.
     #[test]
-    fn a_pinned_trace_on_a_driven_generation_waits_for_the_device() {
+    fn a_pinned_trace_on_a_driven_generation_packs_a_held_row() {
         let mut scene = Scene::initial();
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.2),
@@ -7588,9 +7577,9 @@ mod tests {
             },
         )
         .unwrap();
-        for (boundary, packs) in [
-            (OuterBoundaryCondition::Reflecting, true),
-            (OuterBoundaryCondition::SecondOrderOutgoing, false),
+        for (boundary, held) in [
+            (OuterBoundaryCondition::Reflecting, false),
+            (OuterBoundaryCondition::SecondOrderOutgoing, true),
         ] {
             let scalar =
                 QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, boundary).unwrap();
@@ -7613,8 +7602,14 @@ mod tests {
                 &state,
                 &forcing,
                 CanonicalGpuClock::initial(time_step).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                plan.control.boundary_offsets.w & 8 != 0,
+                held,
+                "{boundary:?}"
             );
-            assert_eq!(plan.is_ok(), packs, "{boundary:?}");
+            assert!(!plan.trace_direct, "{boundary:?}");
         }
     }
 
