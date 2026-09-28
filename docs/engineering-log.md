@@ -15560,3 +15560,37 @@ Second of the memory fixes; same scene and measure as the entry before.
 - **Tests.** `sites_share_a_law_record_only_where_its_values_agree`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — A handoff packs the candidate alone, without gathering it
+
+Third of the memory fixes; same scene and measure.
+
+- **Defect, in two parts.**
+  - A driven handoff packed the running generation's whole plan once more,
+    to read its counts, material runtime records, drive signatures and
+    integrated-field count. That is as much memory as the candidate's own
+    plan, at the moment the handoff already holds both generations.
+  - Every temporal pack gathered each site's coefficient and loss values
+    into vectors, then copied the primary ones again into per-node lists,
+    before writing a table word: some 350 bytes per site across 590k sites
+    at 130k DOFs, next to the plan being built. This is where the browser's
+    pack worker ran out of memory.
+- **Change.**
+  - `CanonicalGpuGenerationLayout` holds what a transfer reads of a
+    generation. `CanonicalGpuPlan::layout` reads it off a packed plan and
+    `of_generation` off the prepared operators, and the transfer builders
+    take layouts (`with_temporal_material_runtime_of`,
+    `with_integrated_field_of`; the plan forms wrap them). `compile_gpu_upload`
+    reads the running side off its operators, and `TraceLane` goes with the
+    second pack.
+  - The pack streams its sites through per-index accessors in a node order
+    built once (`contributions_by_node`), and reads drive signatures in
+    place. One drive-kind mapping serves the pack and the layout.
+- **Verified.** The scratch digest of the previous entry is byte-identical
+  to it for all 36 scenes, fresh and through a handoff.
+- **Measured.** The last handoff at 128k DOFs packs in 349 ms, against
+  917–932 ms in two baseline runs.
+- **Tests.** `a_generations_layout_reads_the_same_off_its_operators_as_off_its_plan`
+  over the gallery; the skin-change test checks both generations' layouts.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

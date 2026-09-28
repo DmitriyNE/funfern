@@ -5,7 +5,8 @@
 use super::BROWSER_BACKGROUND_POOL_READY;
 use super::PreparedGpuUpload;
 use crate::canonical_gpu::{
-    CanonicalGpuClock, CanonicalGpuPlan, CanonicalGpuRuntimeTransfer, CanonicalGpuTransferPlan,
+    CanonicalGpuClock, CanonicalGpuGenerationLayout, CanonicalGpuPlan, CanonicalGpuRuntimeTransfer,
+    CanonicalGpuTransferPlan,
 };
 #[cfg(any(
     not(target_arch = "wasm32"),
@@ -632,7 +633,7 @@ pub(super) fn compile_gpu_upload(
     runtime_serials: [u32; 4],
 ) -> Result<PreparedGpuUpload, String> {
     let clock = CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?;
-    let plan = compile_generation_plan(&candidate, time_step, clock, TraceLane::Direct)?;
+    let plan = compile_generation_plan(&candidate, time_step, clock)?;
     if candidate.fresh || active.is_none() {
         return Ok(PreparedGpuUpload {
             plan,
@@ -676,33 +677,27 @@ pub(super) fn compile_gpu_upload(
     // is also what keeps a pump's phase and a Switch mid-ramp across an edit
     // rather than restarting them from their authored anchors.
     //
-    // The source plan is rebuilt rather than kept, because the request holds
-    // device buffers rather than the plan they came from. Only its layout and
-    // its drives' identities are read, and those follow from the operator and
-    // the forcing, so rebuilding recovers them exactly. It is packing work on a
-    // worker thread, not frame work.
-    //
-    // It is rebuilt at the *source's* own step, not the candidate's. Nothing
-    // read back from it depends on a step, but a driven generation runs at the
-    // tighter step its coefficient trajectory demands rather than the one its
-    // authored coefficients allow, so the two rarely agree - and undriving a
-    // medium loosens the step, which leaves the candidate's above what the
-    // source will hold a state at. Packing the source at the candidate's step
-    // is what refused every switch from a pump back to a linear material.
+    // The running generation's side is read off its prepared operators, not
+    // packed again: the request holds its device buffers rather than the plan
+    // they came from, and only its layout and its drives' identities are
+    // read. Packing it once more cost as much memory as the candidate's own
+    // plan, at the moment the handoff already holds both generations.
     let gpu_transfer = if active.driven() || candidate.driven() {
-        let source_step = active.recommended_time_step();
-        let source_clock =
-            CanonicalGpuClock::initial(source_step).map_err(|error| format!("{error:?}"))?;
-        let source = compile_generation_plan(&active, source_step, source_clock, TraceLane::Sweep)?;
+        let source = CanonicalGpuGenerationLayout::of_generation(
+            &active.canonical_operator,
+            active.canonical_temporal_operator.as_deref(),
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        let target = plan.layout().map_err(|error| format!("{error:?}"))?;
         let gpu_transfer = gpu_transfer
-            .with_temporal_material_runtime(&source, &plan)
+            .with_temporal_material_runtime_of(&source, &target)
             .map_err(|error| format!("{error:?}"))?;
         // Gate O: an oscillator generation on either side carries the
         // integrated field across, starts it from zero, or drops it, and the
         // handoff refuses a transfer that does not say which.
-        if source.integrated_count != 0 || plan.integrated_count != 0 {
+        if source.integrated_count() != 0 || target.integrated_count() != 0 {
             gpu_transfer
-                .with_integrated_field(&transfer.primary, &source, &plan)
+                .with_integrated_field_of(&transfer.primary, &source, &target)
                 .map_err(|error| format!("{error:?}"))?
         } else {
             gpu_transfer
@@ -716,26 +711,11 @@ pub(super) fn compile_gpu_upload(
     })
 }
 
-/// Whether a fixed generation's plan carries its trace inverse. A plan that will
-/// be installed does; one rebuilt only so its layout can be read does not pay
-/// for an inversion that nothing reads. A driven generation sweeps either way.
-#[derive(Clone, Copy)]
-enum TraceLane {
-    Direct,
-    Sweep,
-}
-
 /// The device plan for one prepared generation, driven or not.
-///
-/// The source plan is rebuilt rather than kept, because the request holds
-/// device buffers rather than the plan they came from. Only its layout and its
-/// drives' identities are read back out of it, and both follow from the
-/// operator and the forcing, so rebuilding recovers them exactly.
 fn compile_generation_plan(
     prepared: &PreparedTopology,
     time_step: f64,
     clock: CanonicalGpuClock,
-    lane: TraceLane,
 ) -> Result<CanonicalGpuPlan, String> {
     match &prepared.canonical_temporal_operator {
         Some(temporal) => {
@@ -746,15 +726,8 @@ fn compile_generation_plan(
         // A fixed generation inverts its trace system here, once, so the device
         // applies it in one pass where a driven one has to sweep.
         None => {
-            let state = match lane {
-                TraceLane::Direct => {
-                    CanonicalWaveState::zero(&prepared.canonical_operator, time_step)
-                }
-                TraceLane::Sweep => {
-                    CanonicalWaveState::zero_for_backend(&prepared.canonical_operator, time_step)
-                }
-            }
-            .map_err(|error| error.to_string())?;
+            let state = CanonicalWaveState::zero(&prepared.canonical_operator, time_step)
+                .map_err(|error| error.to_string())?;
             CanonicalGpuPlan::compile_with_quadratic(
                 &prepared.canonical_operator,
                 &prepared.operator,
@@ -841,6 +814,53 @@ mod tests {
     use super::super::*;
     use super::*;
     use funfern_app::topology_editor::TopologyAcceptance;
+
+    /// A handoff describes the running generation from its prepared operators
+    /// instead of packing it again. That description has to be the one its
+    /// packed plan carries, for every kind of generation the gallery holds:
+    /// fixed, driven, nonlinear and oscillating.
+    #[test]
+    fn a_generations_layout_reads_the_same_off_its_operators_as_off_its_plan() {
+        use funfern_app::topology_editor::TopologyEditor;
+        use funfern_app::topology_examples::catalog;
+        use funfern_app::topology_runtime::TopologyRuntime;
+        for example in catalog() {
+            let editor = TopologyEditor::from_document(example.document.clone()).unwrap();
+            let mut runtime = TopologyRuntime::default();
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    MeshingOptions {
+                        target_edge_length: 0.2,
+                        ..MeshingOptions::default()
+                    },
+                    true,
+                )
+                .unwrap();
+            let prepared = loop {
+                if let Some(result) = runtime.advance(1 << 16) {
+                    result.unwrap();
+                    break runtime.commit_ready(token).unwrap();
+                }
+            };
+            let step = prepared.recommended_time_step();
+            let plan =
+                compile_generation_plan(&prepared, step, CanonicalGpuClock::initial(step).unwrap())
+                    .unwrap();
+            assert_eq!(
+                CanonicalGpuGenerationLayout::of_generation(
+                    &prepared.canonical_operator,
+                    prepared.canonical_temporal_operator.as_deref(),
+                )
+                .unwrap(),
+                plan.layout().unwrap(),
+                "{}",
+                example.name
+            );
+        }
+    }
 
     /// Adding a hole, and taking it away again, used to be refused about half
     /// the time: the handoff enforced an area-weighted share of the old flux

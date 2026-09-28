@@ -2442,6 +2442,28 @@ impl CanonicalTemporalWaveOperator {
             .map(|sample| sample.coefficient.into())
     }
 
+    /// One primary contribution's coefficient, by its contribution index.
+    pub fn primary_coefficient_sample(
+        &self,
+        contribution: usize,
+    ) -> Option<CanonicalTemporalCoefficientSample> {
+        (contribution < self.primary.len())
+            .then(|| self.primary.at(contribution).coefficient.into())
+    }
+
+    /// One primary contribution's loss, by its contribution index.
+    pub fn primary_loss_sample(&self, contribution: usize) -> Option<CanonicalTemporalLossSample> {
+        (contribution < self.primary.len()).then(|| self.primary.at(contribution).loss.into())
+    }
+
+    /// One primary contribution's restoring law, by its contribution index.
+    pub fn primary_restoring_sample(
+        &self,
+        contribution: usize,
+    ) -> Option<crate::RestoringLawValues> {
+        (contribution < self.primary.len()).then(|| self.primary.at(contribution).restoring)
+    }
+
     /// Each primary contribution's loss, in contribution order.
     pub fn primary_loss_samples(
         &self,

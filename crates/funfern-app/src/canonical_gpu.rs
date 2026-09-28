@@ -39,8 +39,8 @@ use funfern_core::{
     CanonicalTemporalLossSample, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
     CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWaveOperator,
     CanonicalWaveState, CoefficientLawValues, FieldLawValues, GRID_SCALE_FILTER_CADENCE,
-    MaterialId, MaterialSwitchRuntime, Point2, QuadraticWaveOperator, RateLawValues,
-    RestoringLawValues, TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
+    LinearPrimaryContribution, MaterialId, MaterialSwitchRuntime, Point2, QuadraticWaveOperator,
+    RateLawValues, RestoringLawValues, TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
 };
 
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
@@ -1181,12 +1181,13 @@ impl CanonicalGpuPlan {
         // pins, pole currents and gap jumps, and commits only when the total
         // stored energy does not rise.
         self.grid_filter_admitted = operator.forced_composition_supported();
-        let primary_samples = operator.primary_coefficient_samples().collect::<Vec<_>>();
-        let complementary_samples = operator
-            .complementary_coefficient_samples()
-            .collect::<Vec<_>>();
-        if primary_samples.len() != operator.base().primary_contributions().len()
-            || complementary_samples.len() != self.sample_count
+        // Every site's record is read from the operator as it is packed,
+        // never gathered first: a generation has one per contribution and one
+        // per sample, and a gathered copy of them all cost the pack a few
+        // hundred MiB at 130k DOFs.
+        let contributions = operator.base().primary_contributions();
+        if operator.primary_coefficient_samples().len() != contributions.len()
+            || operator.complementary_coefficient_samples().len() != self.sample_count
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "temporal coefficient samples do not match the fixed operator",
@@ -1204,7 +1205,10 @@ impl CanonicalGpuPlan {
             .map(|record| record.material())
             .collect();
         let mut drives = BTreeMap::<(MaterialId, u32), TimeDriveValues>::new();
-        for sample in primary_samples.iter().chain(&complementary_samples) {
+        for sample in operator
+            .primary_coefficient_samples()
+            .chain(operator.complementary_coefficient_samples())
+        {
             let key = (sample.material, temporal_drive_index(sample.drive));
             if drives
                 .insert(key, sample.law.drive)
@@ -1215,16 +1219,15 @@ impl CanonicalGpuPlan {
                 ));
             }
         }
-        let primary_losses = operator.primary_loss_samples().collect::<Vec<_>>();
-        let complementary_losses = operator.complementary_loss_samples().collect::<Vec<_>>();
-        for (index, loss) in primary_losses
-            .iter()
-            .chain(&complementary_losses)
+        let primary_loss_count = operator.primary_loss_samples().len();
+        for (index, loss) in operator
+            .primary_loss_samples()
+            .chain(operator.complementary_loss_samples())
             .enumerate()
         {
             // Van der Pol on the primary row runs as the exact Bernoulli
             // stage map (Gate O); any other field-dependent rate does not.
-            let active = index < primary_losses.len()
+            let active = index < primary_loss_count
                 && matches!(loss.law.rate, RateLawValues::VanDerPol { .. });
             if loss.law.rate != RateLawValues::Constant && !active {
                 return Err(CanonicalGpuBuildError::Unrepresentable(
@@ -1242,9 +1245,9 @@ impl CanonicalGpuPlan {
                 ));
             }
         }
-        if primary_samples
-            .iter()
-            .chain(&complementary_samples)
+        if operator
+            .primary_coefficient_samples()
+            .chain(operator.complementary_coefficient_samples())
             .any(|sample| !runtime_indices.contains_key(&sample.material))
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
@@ -1252,35 +1255,41 @@ impl CanonicalGpuPlan {
             ));
         }
 
+        // A node's coefficient, loss and restoring records each sit
+        // together, in contribution order.
+        let (node_offsets, node_contributions) =
+            contributions_by_node(contributions, self.node_count)?;
+        let node_run =
+            |node: usize| &node_contributions[node_offsets[node]..node_offsets[node + 1]];
+        let missing = || {
+            CanonicalGpuBuildError::InvalidLayout(
+                "temporal coefficient samples do not match the fixed operator",
+            )
+        };
+
         let header_offset = self.tables.len();
         // Three words: record offsets, record shape, and the loss blocks.
         self.tables.extend([GpuCanonicalTableWord::default(); 3]);
         let primary_offset = self.tables.len();
-        let mut by_node = vec![Vec::new(); self.node_count];
-        for (contribution, sample) in operator
-            .base()
-            .primary_contributions()
-            .iter()
-            .zip(primary_samples)
-        {
-            let reference = contribution.geometric_weight * contribution.reference_coefficient;
-            by_node[contribution.node as usize].push((sample, reference));
-        }
-        for (node, coefficients) in by_node.into_iter().enumerate() {
+        for node in 0..self.node_count {
             let start = self.tables.len();
-            for (sample, reference) in &coefficients {
+            for index in node_run(node) {
+                let contribution = &contributions[*index as usize];
+                let sample = operator
+                    .primary_coefficient_sample(*index as usize)
+                    .ok_or_else(missing)?;
                 self.tables.extend(pack_temporal_coefficient(
-                    *sample,
+                    sample,
                     runtime_indices[&sample.material],
-                    *reference,
+                    contribution.geometric_weight * contribution.reference_coefficient,
                 )?);
             }
             self.nodes[node].stiffness.z = usize_u32(start)?;
-            self.nodes[node].stiffness.w = usize_u32(coefficients.len())?;
+            self.nodes[node].stiffness.w = usize_u32(node_run(node).len())?;
         }
 
         let complementary_offset = self.tables.len();
-        for (index, sample) in complementary_samples.iter().copied().enumerate() {
+        for (index, sample) in operator.complementary_coefficient_samples().enumerate() {
             self.samples[index].nodes_b.w = usize_u32(self.tables.len())?;
             self.tables.extend(pack_temporal_coefficient(
                 sample,
@@ -1330,47 +1339,37 @@ impl CanonicalGpuPlan {
         // node's or sample's loss is found at the same distance into its
         // block as its coefficient is into the coefficient block.
         let primary_loss_offset = self.tables.len();
-        let mut by_node = vec![Vec::new(); self.node_count];
-        for (contribution, loss) in operator
-            .base()
-            .primary_contributions()
-            .iter()
-            .zip(&primary_losses)
-        {
-            by_node[contribution.node as usize].push(*loss);
-            // An active node's loss stage is gain, charged to its own lane.
-            if matches!(loss.law.rate, RateLawValues::VanDerPol { .. }) && loss.base_rate > 0.0 {
-                self.nodes[contribution.node as usize].boundary.w = 1;
-            }
-        }
-        for losses in by_node {
-            for loss in losses {
+        for node in 0..self.node_count {
+            for index in node_run(node) {
+                let loss = operator
+                    .primary_loss_sample(*index as usize)
+                    .ok_or_else(missing)?;
+                // An active node's loss stage is gain, charged to its own lane.
+                if matches!(loss.law.rate, RateLawValues::VanDerPol { .. }) && loss.base_rate > 0.0
+                {
+                    self.nodes[node].boundary.w = 1;
+                }
                 self.tables
                     .extend(pack_temporal_loss(loss, &runtime_indices)?);
             }
         }
         let complementary_loss_offset = self.tables.len();
-        for loss in &complementary_losses {
+        for loss in operator.complementary_loss_samples() {
             self.tables
-                .extend(pack_temporal_loss(*loss, &runtime_indices)?);
+                .extend(pack_temporal_loss(loss, &runtime_indices)?);
         }
         // Restoring records mirror the coefficient records too, one word
         // each, so a node's record for the coefficient `c` words into the
         // coefficient block sits `c / 4` words into this one.
         let restoring_offset = self.tables.len();
         if operator.has_restoring() {
-            let mut by_node = vec![Vec::new(); self.node_count];
-            for (contribution, law) in operator
-                .base()
-                .primary_contributions()
-                .iter()
-                .zip(operator.primary_restoring_samples())
-            {
-                let mass = contribution.geometric_weight * contribution.reference_coefficient;
-                by_node[contribution.node as usize].push((law, mass));
-            }
-            for records in by_node {
-                for (law, mass) in records {
+            for node in 0..self.node_count {
+                for index in node_run(node) {
+                    let contribution = &contributions[*index as usize];
+                    let law = operator
+                        .primary_restoring_sample(*index as usize)
+                        .ok_or_else(missing)?;
+                    let mass = contribution.geometric_weight * contribution.reference_coefficient;
                     self.tables.push(pack_restoring(law, mass)?);
                 }
             }
@@ -2526,10 +2525,20 @@ impl CanonicalGpuTransferPlan {
     /// which. A handoff refuses a transfer whose counts do not match its
     /// plans, so one prepared without this cannot carry `r` by accident.
     pub fn with_integrated_field(
-        mut self,
+        self,
         primary: &CanonicalPrimaryTransferMap,
         source: &CanonicalGpuPlan,
         target: &CanonicalGpuPlan,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        self.with_integrated_field_of(primary, &source.layout()?, &target.layout()?)
+    }
+
+    /// [`Self::with_integrated_field`] from the two generations' layouts.
+    pub fn with_integrated_field_of(
+        mut self,
+        primary: &CanonicalPrimaryTransferMap,
+        source: &CanonicalGpuGenerationLayout,
+        target: &CanonicalGpuGenerationLayout,
     ) -> Result<Self, CanonicalGpuBuildError> {
         if source.node_count != self.source_node_count
             || target.node_count != self.target_node_count
@@ -2615,9 +2624,20 @@ impl CanonicalGpuTransferPlan {
     }
 
     pub fn with_temporal_material_runtime(
-        mut self,
+        self,
         source: &CanonicalGpuPlan,
         target: &CanonicalGpuPlan,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        self.with_temporal_material_runtime_of(&source.layout()?, &target.layout()?)
+    }
+
+    /// [`Self::with_temporal_material_runtime`] from the two generations'
+    /// layouts, which a handoff reads off the running generation without
+    /// packing it again.
+    pub fn with_temporal_material_runtime_of(
+        mut self,
+        source: &CanonicalGpuGenerationLayout,
+        target: &CanonicalGpuGenerationLayout,
     ) -> Result<Self, CanonicalGpuBuildError> {
         // Either side may carry no runtime bank at all, because a medium can
         // start or stop being driven. A target record with no source is written
@@ -2625,20 +2645,12 @@ impl CanonicalGpuTransferPlan {
         // was just switched on should begin from - so the two generations still
         // share everything that exists in both, and the field crosses rather
         // than being thrown away.
-        let source_records = source
-            .manifest
-            .temporal
-            .map_or(0, |manifest| manifest.runtime_record_count);
-        let target_records = target
-            .manifest
-            .temporal
-            .map_or(0, |manifest| manifest.runtime_record_count);
+        let source_records = source.runtime_materials.len();
+        let target_records = target.runtime_materials.len();
         if source.node_count != self.source_node_count
             || source.sample_count != self.source_sample_count
             || target.node_count != self.target_node_count
             || target.sample_count != self.target_sample_count
-            || source_records != source.temporal_runtime_materials.len()
-            || target_records != target.temporal_runtime_materials.len()
             || self.words[8].data.w != 0
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
@@ -2646,16 +2658,10 @@ impl CanonicalGpuTransferPlan {
             ));
         }
 
-        let source_signatures = match source.manifest.temporal {
-            Some(_) => temporal_drive_signatures(source)?,
-            None => Vec::new(),
-        };
-        let target_signatures = match target.manifest.temporal {
-            Some(_) => temporal_drive_signatures(target)?,
-            None => Vec::new(),
-        };
+        let source_signatures = &source.drive_signatures;
+        let target_signatures = &target.drive_signatures;
         let source_indices = source
-            .temporal_runtime_materials
+            .runtime_materials
             .iter()
             .copied()
             .enumerate()
@@ -2665,7 +2671,7 @@ impl CanonicalGpuTransferPlan {
         // Remove receipt padding before extending the immutable map payload.
         self.words.truncate(self.manifest.word_count);
         let mapping_offset = self.words.len();
-        for (target_index, material) in target.temporal_runtime_materials.iter().enumerate() {
+        for (target_index, material) in target.runtime_materials.iter().enumerate() {
             let Some(&source_index) = source_indices.get(material) else {
                 self.words.push(transfer_word(NO_INDEX, 0, 0, 0));
                 continue;
@@ -2720,6 +2726,138 @@ impl CanonicalGpuTransferPlan {
 
 type TemporalDriveSignature = Option<(u32, u32)>;
 
+/// What a handoff's transfer reads of the generation on either side: its
+/// counts, its material runtime records, and the drive each record's lanes
+/// carry, as kind and authored phase. A packed plan yields it, and so does
+/// the prepared generation it would be packed from. The second is what lets a
+/// handoff describe the running generation without packing it again: the
+/// device holds that generation's buffers, not its plan, and a full pack of
+/// it cost as much memory as the candidate's own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalGpuGenerationLayout {
+    node_count: usize,
+    sample_count: usize,
+    integrated_count: usize,
+    runtime_materials: Vec<MaterialId>,
+    drive_signatures: Vec<[TemporalDriveSignature; 4]>,
+}
+
+impl CanonicalGpuGenerationLayout {
+    /// The layout a generation packs to, read from its operators: a fixed one
+    /// when `temporal` is absent.
+    pub fn of_generation(
+        base: &CanonicalWaveOperator,
+        temporal: Option<&CanonicalTemporalWaveOperator>,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        let node_count = base.degrees_of_freedom();
+        let sample_count = base.constitutive_samples().len();
+        let Some(temporal) = temporal else {
+            return Ok(Self {
+                node_count,
+                sample_count,
+                integrated_count: 0,
+                runtime_materials: Vec::new(),
+                drive_signatures: Vec::new(),
+            });
+        };
+        let runtime_materials = temporal
+            .initial_runtime()
+            .records()
+            .iter()
+            .map(|record| record.material())
+            .collect::<Vec<_>>();
+        let indices = runtime_materials
+            .iter()
+            .enumerate()
+            .map(|(index, material)| (*material, index))
+            .collect::<BTreeMap<_, _>>();
+        let mut drive_signatures = vec![[None; 4]; runtime_materials.len()];
+        for sample in temporal
+            .primary_coefficient_samples()
+            .chain(temporal.complementary_coefficient_samples())
+        {
+            let runtime =
+                *indices
+                    .get(&sample.material)
+                    .ok_or(CanonicalGpuBuildError::InvalidLayout(
+                        "a temporal coefficient has no material runtime record",
+                    ))?;
+            let phase = finite_f32(
+                sample.law.drive.authored_phase_radians(),
+                "temporal coefficient",
+            )?;
+            record_drive_signature(
+                &mut drive_signatures,
+                runtime,
+                temporal_drive_index(sample.drive) as usize,
+                (temporal_drive_kind(sample.law.drive), phase.to_bits()),
+            )?;
+        }
+        Ok(Self {
+            node_count,
+            sample_count,
+            integrated_count: if temporal.has_restoring() {
+                node_count
+            } else {
+                0
+            },
+            runtime_materials,
+            drive_signatures,
+        })
+    }
+
+    /// Nodes carrying the integrated field `r`; zero without a restoring law.
+    pub fn integrated_count(&self) -> usize {
+        self.integrated_count
+    }
+}
+
+impl CanonicalGpuPlan {
+    /// This plan's layout, read back from its packed records.
+    pub fn layout(&self) -> Result<CanonicalGpuGenerationLayout, CanonicalGpuBuildError> {
+        if self
+            .manifest
+            .temporal
+            .map_or(0, |manifest| manifest.runtime_record_count)
+            != self.temporal_runtime_materials.len()
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "temporal runtime tables do not match the transfer generations",
+            ));
+        }
+        Ok(CanonicalGpuGenerationLayout {
+            node_count: self.node_count,
+            sample_count: self.sample_count,
+            integrated_count: self.integrated_count,
+            runtime_materials: self.temporal_runtime_materials.clone(),
+            drive_signatures: match self.manifest.temporal {
+                Some(_) => temporal_drive_signatures(self)?,
+                None => Vec::new(),
+            },
+        })
+    }
+}
+
+fn record_drive_signature(
+    signatures: &mut [[TemporalDriveSignature; 4]],
+    runtime: usize,
+    lane: usize,
+    signature: (u32, u32),
+) -> Result<(), CanonicalGpuBuildError> {
+    if runtime >= signatures.len() || lane >= 4 || signature.0 > TEMPORAL_DRIVE_TRAVELLING {
+        return Err(CanonicalGpuBuildError::InvalidLayout(
+            "a temporal coefficient names an invalid runtime drive",
+        ));
+    }
+    if signatures[runtime][lane].is_some_and(|existing| existing != signature) {
+        return Err(CanonicalGpuBuildError::InvalidLayout(
+            "one material runtime lane has inconsistent drive metadata",
+        ));
+    }
+    signatures[runtime][lane] = Some(signature);
+    Ok(())
+}
+
 fn temporal_drive_signatures(
     plan: &CanonicalGpuPlan,
 ) -> Result<Vec<[TemporalDriveSignature; 4]>, CanonicalGpuBuildError> {
@@ -2731,22 +2869,20 @@ fn temporal_drive_signatures(
         ))?;
     let header = plan.tables[manifest.header_offset].data;
     let mut signatures = vec![[None; 4]; manifest.runtime_record_count];
-    for record in temporal_coefficient_records(plan, header)? {
-        let metadata = record[0].data;
-        let runtime = metadata.x as usize;
-        let lane = metadata.y as usize;
-        if runtime >= signatures.len() || lane >= 4 || metadata.z > TEMPORAL_DRIVE_TRAVELLING {
-            return Err(CanonicalGpuBuildError::InvalidLayout(
-                "a temporal coefficient names an invalid runtime drive",
-            ));
+    let ranges = [
+        (header.x as usize, manifest.primary_record_count),
+        (header.z as usize, manifest.complementary_record_count),
+    ];
+    for (start, count) in ranges {
+        for record in temporal_coefficient_range(plan, start, count)? {
+            let metadata = record[0].data;
+            record_drive_signature(
+                &mut signatures,
+                metadata.x as usize,
+                metadata.y as usize,
+                (metadata.z, record[2].data.z),
+            )?;
         }
-        let signature = (metadata.z, record[2].data.z);
-        if signatures[runtime][lane].is_some_and(|existing| existing != signature) {
-            return Err(CanonicalGpuBuildError::InvalidLayout(
-                "one material runtime lane has inconsistent drive metadata",
-            ));
-        }
-        signatures[runtime][lane] = Some(signature);
     }
     Ok(signatures)
 }
@@ -3051,6 +3187,16 @@ fn gpu_drive(
     ])
 }
 
+/// The drive kind a coefficient record carries in its metadata word.
+fn temporal_drive_kind(drive: TimeDriveValues) -> u32 {
+    match drive {
+        TimeDriveValues::None => TEMPORAL_DRIVE_NONE,
+        TimeDriveValues::ParametricPump { .. } => TEMPORAL_DRIVE_PUMP,
+        TimeDriveValues::TimeCrystal { .. } => TEMPORAL_DRIVE_CRYSTAL,
+        TimeDriveValues::TravellingModulation { .. } => TEMPORAL_DRIVE_TRAVELLING,
+    }
+}
+
 fn temporal_drive_index(drive: CanonicalMaterialDrive) -> u32 {
     match drive {
         CanonicalMaterialDrive::MassCoefficient => 0,
@@ -3058,6 +3204,51 @@ fn temporal_drive_index(drive: CanonicalMaterialDrive) -> u32 {
         CanonicalMaterialDrive::ElectricLoss => 2,
         CanonicalMaterialDrive::MagneticLoss => 3,
     }
+}
+
+/// Primary contribution indices grouped by node, stable within each node, as
+/// CSR offsets and indices: the order a node's records are packed in.
+fn contributions_by_node(
+    contributions: &[LinearPrimaryContribution],
+    node_count: usize,
+) -> Result<(Vec<usize>, Vec<u32>), CanonicalGpuBuildError> {
+    let mut offsets = vec![0_usize; node_count + 1];
+    for contribution in contributions {
+        let node = contribution.node as usize;
+        if node >= node_count {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a primary contribution names a node outside its generation",
+            ));
+        }
+        offsets[node + 1] += 1;
+    }
+    for node in 0..node_count {
+        offsets[node + 1] += offsets[node];
+    }
+    let mut next = offsets.clone();
+    let mut indices = vec![0_u32; contributions.len()];
+    for (index, contribution) in contributions.iter().enumerate() {
+        let slot = &mut next[contribution.node as usize];
+        indices[*slot] = usize_u32(index)?;
+        *slot += 1;
+    }
+    Ok((offsets, indices))
+}
+
+/// One block of packed coefficient records, read in place.
+fn temporal_coefficient_range(
+    plan: &CanonicalGpuPlan,
+    start: usize,
+    count: usize,
+) -> Result<std::slice::ChunksExact<'_, GpuCanonicalTableWord>, CanonicalGpuBuildError> {
+    let end = count
+        .checked_mul(TEMPORAL_COEFFICIENT_WORDS)
+        .and_then(|words| start.checked_add(words))
+        .filter(|end| *end <= plan.tables.len())
+        .ok_or(CanonicalGpuBuildError::InvalidLayout(
+            "a temporal coefficient range exceeds its table",
+        ))?;
+    Ok(plan.tables[start..end].chunks_exact(TEMPORAL_COEFFICIENT_WORDS))
 }
 
 fn temporal_coefficient_records(
@@ -3077,13 +3268,7 @@ fn temporal_coefficient_records(
     let mut records =
         Vec::with_capacity(manifest.primary_record_count + manifest.complementary_record_count);
     for (start, count) in ranges {
-        let end = start
-            .checked_add(count * TEMPORAL_COEFFICIENT_WORDS)
-            .filter(|end| *end <= plan.tables.len())
-            .ok_or(CanonicalGpuBuildError::InvalidLayout(
-                "a temporal coefficient range exceeds its table",
-            ))?;
-        for words in plan.tables[start..end].chunks_exact(TEMPORAL_COEFFICIENT_WORDS) {
+        for words in temporal_coefficient_range(plan, start, count)? {
             records.push([words[0], words[1], words[2], words[3]]);
         }
     }
@@ -3176,31 +3361,20 @@ fn pack_temporal_coefficient(
     runtime_index: u32,
     reference: f64,
 ) -> Result<[GpuCanonicalTableWord; TEMPORAL_COEFFICIENT_WORDS], CanonicalGpuBuildError> {
-    let (kind, depth, angular_frequency, shape, spatial_phase) = match sample.law.drive {
-        TimeDriveValues::None => (TEMPORAL_DRIVE_NONE, 0.0, 0.0, 0.0, 0.0),
+    let kind = temporal_drive_kind(sample.law.drive);
+    let (depth, angular_frequency, shape, spatial_phase) = match sample.law.drive {
+        TimeDriveValues::None => (0.0, 0.0, 0.0, 0.0),
         TimeDriveValues::ParametricPump {
             depth,
             frequency_hz,
             ..
-        } => (
-            TEMPORAL_DRIVE_PUMP,
-            depth,
-            std::f64::consts::TAU * frequency_hz,
-            0.0,
-            0.0,
-        ),
+        } => (depth, std::f64::consts::TAU * frequency_hz, 0.0, 0.0),
         TimeDriveValues::TimeCrystal {
             depth,
             frequency_hz,
             sharpness,
             ..
-        } => (
-            TEMPORAL_DRIVE_CRYSTAL,
-            depth,
-            std::f64::consts::TAU * frequency_hz,
-            sharpness,
-            0.0,
-        ),
+        } => (depth, std::f64::consts::TAU * frequency_hz, sharpness, 0.0),
         TimeDriveValues::TravellingModulation {
             depth,
             frequency_hz,
@@ -3211,7 +3385,6 @@ fn pack_temporal_coefficient(
             let along = sample.coordinates.x * angle_radians.cos()
                 + sample.coordinates.y * angle_radians.sin();
             (
-                TEMPORAL_DRIVE_TRAVELLING,
                 depth,
                 std::f64::consts::TAU * frequency_hz,
                 0.0,
@@ -7727,6 +7900,15 @@ mod tests {
         .unwrap()
         .with_temporal_material_runtime(&source_plan, &target_plan)
         .unwrap();
+        // A handoff reads the running side's layout off its operator rather
+        // than its packed plan; the lanes moved, and the two still agree.
+        for (operator, plan) in [(&operator, &source_plan), (&target_operator, &target_plan)] {
+            assert_eq!(
+                CanonicalGpuGenerationLayout::of_generation(operator.base(), Some(operator))
+                    .unwrap(),
+                plan.layout().unwrap()
+            );
+        }
 
         let mapping = transfer.words[transfer.words[8].data.x as usize].data;
         assert_eq!(mapping.x, 0, "the material itself still maps across");
