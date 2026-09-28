@@ -15516,3 +15516,23 @@ nothing stepping, and nothing in the console.
   the sideband test.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — The device buffers keep no copy on the CPU
+
+First of the memory fixes the previous entry found. Measured on the native
+app, Parametric pump with the target lowered to 0.3% so it settles at
+128–137k DOFs, live heap at rest from the malloc call tree.
+
+- **Defect.** Every canonical device buffer was added with Bevy's default
+  usage, which keeps its data in the main world for the generation's life,
+  and extracting such an asset clones it in full on top. Nothing reads a
+  buffer's CPU data once it is added: readbacks go through the device, and
+  a replaced status buffer is a new asset, never a modified one.
+- **Change.** `add_shader_buffer!` marks the buffer render-world only, so
+  Bevy moves the data to the device and drops it. Bevy's default policy on a
+  lost device quits the app and the app sets no other, so the copy never
+  served a recovery either.
+- **Measured.** Live heap 909 → 689 MiB; `add_canonical_buffers` held
+  236 MiB and now holds none.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

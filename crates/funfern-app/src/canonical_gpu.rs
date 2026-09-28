@@ -12,7 +12,7 @@ use std::{
 };
 
 use bevy::{
-    asset::{embedded_asset, load_embedded_asset},
+    asset::{RenderAssetUsages, embedded_asset, load_embedded_asset},
     core_pipeline::schedule::camera_driver,
     math::{UVec4, Vec4},
     prelude::*,
@@ -54,10 +54,17 @@ use crate::wave_gpu::{
 // that vector once more through `ShaderBuffer::new`. Canonical generations can
 // exceed 80 MiB, so doing that for every handoff creates a visible main-thread
 // pause. `set_data` keeps the serializer's owned vector directly.
+//
+// The buffers live in the render world alone. Nothing reads or changes one on
+// the CPU once it is added - every readback goes through the device - and the
+// default usage kept the whole layout as a main-world copy for the
+// generation's life, about as much as the solver's own operator at 130k DOFs,
+// on top of a full clone made to extract it.
 macro_rules! add_shader_buffer {
     ($assets:expr, $value:expr) => {{
         let mut buffer = ShaderBuffer::default();
         buffer.set_data($value);
+        buffer.asset_usage = RenderAssetUsages::RENDER_WORLD;
         $assets.add(buffer)
     }};
 }
