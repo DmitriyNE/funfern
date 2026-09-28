@@ -196,11 +196,17 @@
     const statusLine = document.getElementById('startup-status');
     let failed = false;
     const running = () => !failed && !startup.hidden;
+    // The app hides this once it runs, so an error that finds it hidden stopped
+    // a running app rather than its start. A wasm trap there is most often an
+    // allocation the memory could no longer grow for.
     const fail = detail => {
+      const started = !failed && startup.hidden;
       failed = true;
       startup.hidden = false;
       startup.classList.add('failed');
-      statusLine.textContent = 'Unable to start WebGPU. Use a WebGPU-capable browser with hardware acceleration on, over HTTPS or localhost. ' + detail;
+      statusLine.textContent = started
+        ? 'funfern stopped' + (/unreachable/.test(detail) ? ', most likely out of memory' : '') + '. Reload the page to start again. ' + detail
+        : 'Unable to start WebGPU. Use a WebGPU-capable browser with hardware acceleration on, over HTTPS or localhost. ' + detail;
     };
     if (!navigator.gpu) fail('This browser does not expose navigator.gpu.');
     addEventListener('error', e => fail(e.message));

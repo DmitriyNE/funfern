@@ -97,6 +97,38 @@ static BROWSER_BACKGROUND_POOL_READY: AtomicBool = AtomicBool::new(false);
 pub(crate) fn set_browser_background_pool_ready(ready: bool) {
     BROWSER_BACKGROUND_POOL_READY.store(ready, Ordering::Release);
 }
+
+/// Set by a pool worker just before it aborts: 2 when an allocation failed,
+/// 1 on any other panic. The hooks `main` installs write it. A worker that
+/// aborts is gone for good - the page is not told, and the job it held never
+/// reports back - so without this the app would wait on that job forever.
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+pub(crate) static BROWSER_BACKGROUND_FAILURE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+/// What to tell the user once a background worker has aborted. The pool does
+/// not replace it, so edits and adaptation cannot complete again; the field
+/// that is running keeps running.
+fn browser_background_failure() -> Option<&'static str> {
+    #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+    match BROWSER_BACKGROUND_FAILURE.load(Ordering::Acquire) {
+        0 => {}
+        2 => {
+            return Some(
+                "A background worker ran out of memory. The simulation keeps running; \
+                 reload the page to edit it or adapt the mesh",
+            );
+        }
+        _ => {
+            return Some(
+                "A background worker stopped on an error. The simulation keeps running; \
+                 reload the page to edit it or adapt the mesh",
+            );
+        }
+    }
+    None
+}
+
 /// Seconds of progress the steps-per-second readout averages over.
 const STEP_RATE_WINDOW: f64 = 0.5;
 /// Below one percent of the run's meaningful amplitude, automatic exposure is

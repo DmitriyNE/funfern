@@ -790,6 +790,9 @@ impl Playground {
     /// none. The latest request owns whatever is preparing or uploading, and
     /// an edit's request replaces an adaptation's.
     pub(super) fn status(&self) -> (String, Activity) {
+        if let Some(failure) = browser_background_failure() {
+            return (failure.into(), Activity::Idle);
+        }
         let phase = match self.editor.acceptance {
             TopologyAcceptance::Invalid(issue) => {
                 return (format!("Geometry invalid: {issue}"), Activity::Idle);

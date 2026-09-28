@@ -147,6 +147,13 @@ impl Playground {
             self.amr_status = "off".into();
             return;
         }
+        // No candidate could be packed any more, and each one asked for
+        // would hold its memory while it waited.
+        if browser_background_failure().is_some() {
+            self.stop_adaptation_work();
+            self.amr_status = "stopped".into();
+            return;
+        }
         // An adaptation spans many frames while the user may remesh underneath
         // it. Its result is only meaningful against the mesh it started from,
         // so once another mesh is active the job is dropped here instead of

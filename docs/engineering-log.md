@@ -15618,3 +15618,49 @@ Fourth of the memory fixes; same scene and measure.
   as the app does; they had packed the committed generation instead.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — A background worker that aborts says so
+
+Last of the memory fixes, with the browser measured before and after all of
+them (headless Chrome with WebGPU, M1 Max, Parametric pump at a 0.3% target,
+240 s from open, wasm memory polled every 2 s; the memory never shrinks, so
+its last size is the heap's high-water mark).
+
+- **Defect.** In the threaded web build a pool worker that fails an
+  allocation or panics traps (`panic = "abort"`), and nothing outside it
+  hears. Listeners on the window, on each `Worker` and inside each worker
+  showed where it goes: the pool's message handler is async, so the trap is
+  an unhandled rejection inside the worker and nothing else. The job it held
+  never reports back and the app waits on it for good. A trap on the main
+  thread does reach the page, whose startup overlay then said "Unable to
+  start WebGPU".
+- **Change.**
+  - An allocation-error hook (the nightly `alloc_error_hook`, threaded web
+    build only; an allocation failure reaches no panic hook) and a panic hook
+    chained after Bevy's record the abort in `BROWSER_BACKGROUND_FAILURE`
+    before either allocates. The status line then says a background worker
+    ran out of memory, or stopped on an error, that the simulation keeps
+    running, and that editing or adapting needs a reload; adaptation stops
+    asking for candidates that could never be packed.
+  - The page tells a stop after startup from a failed start: "funfern
+    stopped, most likely out of memory" for a wasm trap.
+  - Correction to the entry that found the hang: the web build does have a
+    panic hook, Bevy's, and panics reach the console. Only allocation
+    failures were silent.
+- **Verified** with scratch triggers on the pool's free slot, where the pack
+  runs: a 1.5 GB allocation, and a panic. Each put its message in the status
+  line while the field kept running at 60 fps. An uncaught trap raised after
+  startup put the new text on the page.
+- **Measured in the browser.**
+  - Before the fixes: the pack worker trapped at 26 s, at 906 MiB, and the
+    app stayed at 63k DOFs on "Adapting mesh: ready for GPU upload".
+  - After the four memory fixes: the mesh reached 125–131k DOFs, and the
+    memory 979–1011 MiB. In one run the main thread ran out of memory at
+    100 s, just after the mesh reached 130,841 DOFs; in another, at 979 MiB,
+    every GPU readback failed to map at 213 s and Bevy's readback panicked.
+- **Found, not fixed.** The 1 GiB cap still binds at 125–130k DOFs, which
+  the pump reaches at a 0.3% target. A handoff's peak is about 2.4 times the
+  heap at rest. Raising the cap is the user's decision, pending tests of
+  larger shared memories on desktop and mobile Safari.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

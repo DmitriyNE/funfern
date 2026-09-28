@@ -1,3 +1,9 @@
+// The threaded web build is nightly, for `-Zbuild-std`; an allocation failure
+// reaches no panic hook, so it takes its own (`record_worker_aborts`).
+#![cfg_attr(
+    all(target_arch = "wasm32", feature = "browser-threads"),
+    feature(alloc_error_hook)
+)]
 #[allow(dead_code)]
 mod canonical_gpu;
 mod capture;
@@ -27,16 +33,18 @@ fn run_app() {
             ..default()
         }),
         ..default()
-    }))
-    .add_plugins(EguiPlugin::default())
-    .add_plugins(field_paint::FieldPaintPlugin)
-    .add_plugins(wave_gpu::WaveGpuPlugin)
-    .add_plugins(canonical_gpu::CanonicalWaveGpuPlugin)
-    .init_resource::<ui::Playground>()
-    .add_systems(Startup, |mut commands: Commands| {
-        commands.spawn(Camera2d);
-    })
-    .add_systems(EguiPrimaryContextPass, ui::frame);
+    }));
+    #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+    record_worker_aborts();
+    app.add_plugins(EguiPlugin::default())
+        .add_plugins(field_paint::FieldPaintPlugin)
+        .add_plugins(wave_gpu::WaveGpuPlugin)
+        .add_plugins(canonical_gpu::CanonicalWaveGpuPlugin)
+        .init_resource::<ui::Playground>()
+        .add_systems(Startup, |mut commands: Commands| {
+            commands.spawn(Camera2d);
+        })
+        .add_systems(EguiPrimaryContextPass, ui::frame);
     app.run();
 }
 
@@ -74,6 +82,37 @@ pub(crate) fn set_browser_amr_job_status(status: &str) {
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
 pub(crate) fn set_browser_gpu_pack_status(status: &str) {
     set_browser_worker_status("data-funfern-gpu-pack", status);
+}
+
+/// Records a background worker's abort where the main thread reads it
+/// (`ui::BROWSER_BACKGROUND_FAILURE`). With `panic = "abort"` a pool worker
+/// that panics or fails an allocation traps, and nothing outside it hears:
+/// the pool's message handler is async, so the trap is only an unhandled
+/// rejection inside the worker. Both hooks record before they allocate.
+///
+/// The panic hook is chained, so it goes in once `DefaultPlugins` have set
+/// theirs: on the web Bevy's replaces whatever was there.
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+fn record_worker_aborts() {
+    use std::sync::atomic::Ordering;
+    std::alloc::set_alloc_error_hook(|layout| {
+        ui::BROWSER_BACKGROUND_FAILURE.store(2, Ordering::Release);
+        web_sys::console::error_2(
+            &"funfern: an allocation failed, bytes:".into(),
+            &(layout.size() as f64).into(),
+        );
+    });
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = ui::BROWSER_BACKGROUND_FAILURE.compare_exchange(
+            0,
+            1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        web_sys::console::error_1(&format!("funfern: {info}").into());
+        previous(info);
+    }));
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
