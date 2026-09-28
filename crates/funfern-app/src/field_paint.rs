@@ -78,7 +78,18 @@ struct FieldPaintUniform {
     lines: [f32; 4],
 }
 
-#[derive(Component)]
+/// The field paint's device buffers, kept across frames in the render world.
+///
+/// They used to sit on the render entity the paint callback is handed, but
+/// that is egui's UI view, which bevy_egui respawns every frame as a temporary
+/// entity. Each frame then built all seven buffers again and uploaded the whole
+/// mesh, about 10 MB at 137k DOFs. Natively the old ones were freed as they
+/// dropped; on the web wgpu does not destroy a dropped buffer, so each waited
+/// for the garbage collector, and at that size the device was lost within a
+/// few minutes. One field paint is drawn per frame, so one set is kept.
+#[derive(Resource, Default)]
+struct FieldPaintCache(Option<FieldPaintBuffers>);
+
 struct FieldPaintBuffers {
     mesh_revision: u64,
     vertex_count: usize,
@@ -96,6 +107,25 @@ struct FieldPaintBuffers {
     field_pipeline: CachedRenderPipelineId,
     overlay_pipeline: CachedRenderPipelineId,
     line_pipeline: CachedRenderPipelineId,
+}
+
+impl FieldPaintBuffers {
+    /// Frees the device memory now. The buffers are replaced before the
+    /// frame that would draw with them, so only work already submitted used
+    /// them, and a destroyed buffer outlives that work.
+    fn destroy(&self) {
+        for buffer in [
+            &self.positions,
+            &self.values,
+            &self.indices,
+            &self.triangles,
+            &self.overlay_colors,
+            &self.edges,
+            &self.uniform,
+        ] {
+            buffer.destroy();
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -262,7 +292,7 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
     fn update(
         &self,
         _info: egui::PaintCallbackInfo,
-        render_entity: RenderEntity,
+        _render_entity: RenderEntity,
         key: EguiPipelineKey,
         world: &mut World,
     ) {
@@ -299,9 +329,9 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
             },
         );
         let replace = world
-            .get_entity(render_entity.id())
-            .ok()
-            .and_then(|entity| entity.get::<FieldPaintBuffers>())
+            .resource::<FieldPaintCache>()
+            .0
+            .as_ref()
             .is_none_or(|buffers| {
                 buffers.mesh_revision != self.topology.mesh_revision
                     || buffers.vertex_count != self.topology.positions.len()
@@ -374,9 +404,10 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
             queue.write_buffer(&indices, 0, cast_slice(self.topology.indices.as_ref()));
             queue.write_buffer(&triangles, 0, cast_slice(self.topology.triangles.as_ref()));
             queue.write_buffer(&edges, 0, cast_slice(self.topology.edges.as_ref()));
-            world
-                .entity_mut(render_entity.id())
-                .insert(FieldPaintBuffers {
+            let replaced = world
+                .resource_mut::<FieldPaintCache>()
+                .0
+                .replace(FieldPaintBuffers {
                     mesh_revision: self.topology.mesh_revision,
                     vertex_count: self.topology.positions.len(),
                     index_count: self.topology.indices.len() as u32,
@@ -394,10 +425,12 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
                     overlay_pipeline: pipeline_ids[1],
                     line_pipeline: pipeline_ids[2],
                 });
+            if let Some(replaced) = replaced {
+                replaced.destroy();
+            }
         }
 
-        let entity = world.entity(render_entity.id());
-        let Some(buffers) = entity.get::<FieldPaintBuffers>() else {
+        let Some(buffers) = world.resource::<FieldPaintCache>().0.as_ref() else {
             return;
         };
         let uniform = FieldPaintUniform {
@@ -437,15 +470,11 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
         &self,
         _info: egui::PaintCallbackInfo,
         render_pass: &mut TrackedRenderPass<'pass>,
-        render_entity: RenderEntity,
+        _render_entity: RenderEntity,
         _key: EguiPipelineKey,
         world: &'pass World,
     ) {
-        let Some(buffers) = world
-            .get_entity(render_entity.id())
-            .ok()
-            .and_then(|entity| entity.get::<FieldPaintBuffers>())
-        else {
+        let Some(buffers) = world.resource::<FieldPaintCache>().0.as_ref() else {
             return;
         };
         let cache = world.resource::<PipelineCache>();
@@ -493,7 +522,8 @@ impl Plugin for FieldPaintPlugin {
         app.get_sub_app_mut(RenderApp)
             .expect("render app")
             .insert_resource(SpecializedRenderPipelines::<FieldPaintPipeline>::default())
-            .init_resource::<FieldPaintPipeline>();
+            .init_resource::<FieldPaintPipeline>()
+            .init_resource::<FieldPaintCache>();
     }
 }
 

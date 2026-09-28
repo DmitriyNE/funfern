@@ -15664,3 +15664,34 @@ its last size is the heap's high-water mark).
   larger shared memories on desktop and mobile Safari.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — The field paint keeps its buffers across frames
+
+Found by the browser runs of the memory fixes: with the heap fixed, Parametric
+pump at a 0.3% target reached 128–137k DOFs, and there the WebGPU device was
+lost at 210–222 s ("A valid external Instance reference no longer exists"),
+while the mesh sat still and nothing was being handed off. Every GPU readback
+then failed to map and Bevy's readback panicked. The run with a 2 GiB wasm
+cap did the same, so it was not the cap.
+
+- **Measured.** A wrapper on `createBuffer` and `destroy` in the page showed
+  68,171 buffers, about 62 GiB, created in 190 s and none destroyed. The
+  Chrome GPU process's footprint, Metal included, climbed by about
+  100 MiB/s even at 19k DOFs and fell back only when the garbage collector
+  ran, peaking at 7–8 GiB; `main` shows the same churn.
+- **Defect.** The field paint kept its seven buffers on the render entity its
+  egui callback is given, which is egui's UI view, and bevy_egui 0.41 spawns
+  that as a temporary entity every frame. Every frame therefore rebuilt all
+  seven and uploaded the whole mesh again, about 10 MB at 137k DOFs. Natively
+  the old ones freed as they dropped. On the web wgpu does not destroy a
+  buffer it drops, so each waited for the garbage collector.
+- **Change.** A render-world `FieldPaintCache` keeps one set, since one field
+  paint is drawn per frame, and rebuilds it only when the mesh revision, a
+  size or a pipeline changes. The set it replaces is destroyed then; only
+  work already submitted used it.
+- **Measured after** (2 GiB scratch bundle, same scene, 300 s): the field
+  paint creates its buffers once per mesh, no device was lost at 134k DOFs,
+  and the GPU process footprint rose to 4.6–4.9 GiB and stayed there instead
+  of sawing. What it held is the next entry's.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
