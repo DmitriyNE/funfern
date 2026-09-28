@@ -31,7 +31,10 @@ plain `trunk` builds the cooperative static-host variant.
   viewport overlay identifies vertices versus control points. On a touchscreen,
   draw every tool with the palette's Finish, Undo point and Cancel alone, and
   confirm that closing the palette gives the drawing up and that Snap to grid
-  snaps a tap.
+  snaps a tap. On a phone, upright and on its side, confirm that the tools
+  leave the palette while a tool draws, that its kind of curve and material
+  stay, and that the tools come back on Finish, Cancel and a completed
+  circle or rectangle.
 - [ ] While drawing an open curve, confirm that eligible outer edges, curve
   interiors, junctions, loose ends, and vertex-less corners all highlight, and that
   starting or finishing on a loose end welds the new curve into that one. A click

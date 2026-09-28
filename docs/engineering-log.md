@@ -15797,3 +15797,32 @@ cap did the same, so it was not the cap.
   It fails without the fix.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — On a small screen a drawing has the Draw palette to itself
+
+- **Request.** While a tool draws, the palette carried the tools and the
+  drawing's controls together, and on a phone that covered half the scene
+  being drawn in: 349 by 329 points on a 390 by 844 screen.
+- **Change.** On a small screen, narrower than the floating inspector's 700
+  points or shorter than 500 (a phone on its side), the tools leave the
+  palette while a tool draws. What stays is the drawing's own kind of curve
+  with what that kind takes (Subdomain or Hole and the material for a closed
+  curve, separator or baffle for an open one), what the tool waits for,
+  Finish, Undo point, Cancel and Snap to grid. The tools come back when the
+  drawing ends. Picking another tool mid-drawing already started the
+  drawing again, so Cancel and the tool do what it did. The palette is then
+  214 points tall for a closed curve and 185 for an open one. A larger
+  screen keeps the whole palette.
+- **Test.** `on_a_small_screen_a_drawing_has_the_draw_palette_to_itself`
+  lays the palette out on a phone upright, on its side and a desktop, for a
+  closed and an open tool, and reads what it holds from egui's AccessKit
+  tree: the controls with Finish and Undo point disabled before a point is
+  placed, the kind of curve kept, the tools gone on the phone and kept on the
+  desktop, a shorter palette on the phone, and the palette as it was once
+  the drawing ends. `test_support::laid_out` reads that tree for any test.
+- **Browser.** On a scratch bundle in Chrome with touch, 390 by 844 and 844
+  by 390, taps drew a circle and a polyline from the palette alone: the tools
+  left while each drew and came back when the circle was placed and when
+  Finish ended the polyline.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

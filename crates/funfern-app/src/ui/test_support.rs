@@ -160,3 +160,36 @@ pub(super) fn every_span(state: &Playground) -> BTreeSet<TopologySpanTarget> {
         })
         .collect()
 }
+
+/// A widget of a pass as AccessKit was told of it: its label, or a label's
+/// own text, where it was laid out, and whether it was enabled.
+#[derive(Clone, Debug)]
+pub(super) struct LaidOut {
+    pub(super) label: String,
+    pub(super) rect: Rect,
+    pub(super) enabled: bool,
+}
+
+/// Every labelled widget of `output`'s pass, which a context with AccessKit
+/// enabled reports.
+pub(super) fn laid_out(output: &egui::FullOutput) -> Vec<LaidOut> {
+    let Some(update) = &output.platform_output.accesskit_update else {
+        return Vec::new();
+    };
+    update
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| {
+            let label = node.label().or_else(|| node.value())?;
+            let bounds = node.bounds()?;
+            Some(LaidOut {
+                label: label.to_owned(),
+                rect: Rect::from_min_max(
+                    Pos2::new(bounds.x0 as f32, bounds.y0 as f32),
+                    Pos2::new(bounds.x1 as f32, bounds.y1 as f32),
+                ),
+                enabled: !node.is_disabled(),
+            })
+        })
+        .collect()
+}

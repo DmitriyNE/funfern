@@ -162,6 +162,20 @@ impl ToolbarItem {
 /// docking beside it.
 pub(super) const FLOATING_INSPECTOR_BELOW: f32 = 700.0;
 
+/// Below this height a screen is a phone's on its side, as one narrower than
+/// [`FLOATING_INSPECTOR_BELOW`] is a phone's upright.
+pub(super) const SHORT_SCREEN_BELOW: f32 = 500.0;
+
+/// A phone's screen either way up, where the Draw palette floats over much
+/// of the scene and so holds only what the moment needs.
+pub(super) fn small_screen(ctx: &egui::Context) -> bool {
+    let screen = ctx.viewport_rect();
+    screen.width() < FLOATING_INSPECTOR_BELOW || screen.height() < SHORT_SCREEN_BELOW
+}
+
+/// The Draw palette's window.
+pub(super) const DRAW_PALETTE: &str = "draw-palette";
+
 /// Where the top bar's two ends landed, for the tests that hold them apart.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ToolbarFit {
@@ -205,82 +219,33 @@ impl Playground {
         // drawing is under way it carries that drawing's controls, which a
         // keyboard also has but a touchscreen has nowhere else. They go below
         // the tools, so the button a finger has just pressed does not move.
+        // On a small screen, where the tools and those controls together
+        // cover half the scene, a drawing has the palette to itself: its kind
+        // of curve with what that kind takes, and the controls. The tools
+        // come back when it ends.
         if self.draw_open && !self.capturing() {
             let ctx = root.ctx().clone();
             let mut open = true;
             let active = self.draw.as_ref().map(|draw| draw.tool);
+            let drawing = active.filter(|_| small_screen(&ctx));
+            let closed_tools = drawing.is_none_or(|tool| !tool.draws_open());
+            let open_tools = drawing.is_none_or(DrawTool::draws_open);
             egui::Window::new("Draw")
+                .id(egui::Id::new(DRAW_PALETTE))
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .default_pos([300.0, 42.0])
                 .show(&ctx, |ui| {
-                    ui.label("Closed curve");
-                    ui.horizontal(|ui| {
-                        ui.radio_value(
-                            &mut self.closed_purpose,
-                            ClosedPurpose::Subdomain,
-                            "Subdomain",
-                        );
-                        ui.radio_value(&mut self.closed_purpose, ClosedPurpose::Hole, "Hole");
-                    });
-                    if self.closed_purpose == ClosedPurpose::Subdomain {
-                        let selected = self.resolved_material_selection();
-                        let materials = self
-                            .editor
-                            .document
-                            .model
-                            .draft
-                            .materials
-                            .iter()
-                            .map(|material| (material.id, material.name.clone()))
-                            .collect::<Vec<_>>();
-                        let selected_name = materials
-                            .iter()
-                            .find(|(id, _)| *id == selected)
-                            .map_or("Missing", |(_, name)| name.as_str());
-                        egui::ComboBox::from_label("Material")
-                            .selected_text(selected_name)
-                            .show_ui(ui, |ui| {
-                                for (id, name) in &materials {
-                                    ui.selectable_value(&mut self.material_selection, *id, name);
-                                }
-                            });
+                    if closed_tools {
+                        self.closed_curve_tools(ui, active, drawing.is_none());
                     }
-                    ui.horizontal(|ui| {
-                        for (tool, label) in [
-                            (DrawTool::Circle, "Circle"),
-                            (DrawTool::Rectangle, "Rectangle"),
-                            (DrawTool::Polygon, "Polygon"),
-                            (DrawTool::ClosedSpline, "Spline"),
-                        ] {
-                            let button = egui::Button::new(label).selected(active == Some(tool));
-                            if ui.add(button).clicked() {
-                                self.begin_draw(tool);
-                            }
-                        }
-                    });
-                    ui.separator();
-                    ui.label("Open curve");
-                    ui.horizontal(|ui| {
-                        ui.radio_value(
-                            &mut self.open_purpose,
-                            OpenPurpose::Separator,
-                            "Subdomain separator",
-                        );
-                        ui.radio_value(&mut self.open_purpose, OpenPurpose::Baffle, "BC baffle");
-                    });
-                    ui.horizontal(|ui| {
-                        for (tool, label) in [
-                            (DrawTool::Polyline, "Polyline"),
-                            (DrawTool::OpenSpline, "Spline"),
-                        ] {
-                            let button = egui::Button::new(label).selected(active == Some(tool));
-                            if ui.add(button).clicked() {
-                                self.begin_draw(tool);
-                            }
-                        }
-                    });
+                    if drawing.is_none() {
+                        ui.separator();
+                    }
+                    if open_tools {
+                        self.open_curve_tools(ui, active, drawing.is_none());
+                    }
                     if let Some(draw) = &self.draw {
                         let (tool, points) = (draw.tool, draw.points.len());
                         ui.separator();
@@ -310,6 +275,96 @@ impl Playground {
             }
         }
         fit
+    }
+
+    /// The palette's closed curves: what one drawn is for, the material a
+    /// subdomain takes, and, with `tools`, a button per tool, the one
+    /// drawing marked.
+    fn closed_curve_tools(&mut self, ui: &mut egui::Ui, active: Option<DrawTool>, tools: bool) {
+        ui.label("Closed curve");
+        ui.horizontal(|ui| {
+            ui.radio_value(
+                &mut self.closed_purpose,
+                ClosedPurpose::Subdomain,
+                "Subdomain",
+            );
+            ui.radio_value(&mut self.closed_purpose, ClosedPurpose::Hole, "Hole");
+        });
+        if self.closed_purpose == ClosedPurpose::Subdomain {
+            let selected = self.resolved_material_selection();
+            let materials = self
+                .editor
+                .document
+                .model
+                .draft
+                .materials
+                .iter()
+                .map(|material| (material.id, material.name.clone()))
+                .collect::<Vec<_>>();
+            let selected_name = materials
+                .iter()
+                .find(|(id, _)| *id == selected)
+                .map_or("Missing", |(_, name)| name.as_str());
+            egui::ComboBox::from_label("Material")
+                .selected_text(selected_name)
+                .show_ui(ui, |ui| {
+                    for (id, name) in &materials {
+                        ui.selectable_value(&mut self.material_selection, *id, name);
+                    }
+                });
+        }
+        if tools {
+            self.tool_buttons(
+                ui,
+                active,
+                &[
+                    (DrawTool::Circle, "Circle"),
+                    (DrawTool::Rectangle, "Rectangle"),
+                    (DrawTool::Polygon, "Polygon"),
+                    (DrawTool::ClosedSpline, "Spline"),
+                ],
+            );
+        }
+    }
+
+    /// The palette's open curves: what one drawn is for and, with `tools`, a
+    /// button per tool, the one drawing marked.
+    fn open_curve_tools(&mut self, ui: &mut egui::Ui, active: Option<DrawTool>, tools: bool) {
+        ui.label("Open curve");
+        ui.horizontal(|ui| {
+            ui.radio_value(
+                &mut self.open_purpose,
+                OpenPurpose::Separator,
+                "Subdomain separator",
+            );
+            ui.radio_value(&mut self.open_purpose, OpenPurpose::Baffle, "BC baffle");
+        });
+        if tools {
+            self.tool_buttons(
+                ui,
+                active,
+                &[
+                    (DrawTool::Polyline, "Polyline"),
+                    (DrawTool::OpenSpline, "Spline"),
+                ],
+            );
+        }
+    }
+
+    fn tool_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        active: Option<DrawTool>,
+        tools: &[(DrawTool, &str)],
+    ) {
+        ui.horizontal(|ui| {
+            for &(tool, label) in tools {
+                let button = egui::Button::new(label).selected(active == Some(tool));
+                if ui.add(button).clicked() {
+                    self.begin_draw(tool);
+                }
+            }
+        });
     }
 
     /// One control of the top bar as `fold` shows it. An icon names what it
@@ -641,6 +696,141 @@ mod tests {
             let paused = bar_at(&mut state, &context, width as f32).fold;
             state.wave_running = true;
             assert_eq!(bar_at(&mut state, &context, width as f32).fold, paused);
+        }
+    }
+
+    /// One pass of the top bar on a screen of `size` at `time`, with
+    /// `events`: the Draw palette's rect and the labelled widgets inside it.
+    fn palette_pass(
+        state: &mut Playground,
+        context: &egui::Context,
+        size: egui::Vec2,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> (egui::Rect, Vec<LaidOut>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            time: Some(time),
+            events,
+            ..egui::RawInput::default()
+        };
+        let output = context.run_ui(input, |ui| {
+            state.top_bar(ui);
+        });
+        let palette = context
+            .memory(|memory| memory.area_rect(egui::Id::new(DRAW_PALETTE)))
+            .unwrap_or(egui::Rect::NOTHING);
+        let widgets = laid_out(&output)
+            .into_iter()
+            .filter(|widget| palette.contains_rect(widget.rect))
+            .collect();
+        (palette, widgets)
+    }
+
+    /// A context laying the palette out as the app does, telling AccessKit of
+    /// each widget so a test can find it by its label.
+    fn palette_context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.enable_accesskit();
+        context
+    }
+
+    /// The widget called `name` among `widgets`, a button's shortcut text
+    /// after its name included.
+    fn offered<'a>(widgets: &'a [LaidOut], name: &str) -> Option<&'a LaidOut> {
+        widgets.iter().find(|widget| {
+            widget
+                .label
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        })
+    }
+
+    /// The palette as it settles on a screen of `size`: three passes, for the
+    /// window to size itself to what it holds.
+    fn settled_palette(
+        state: &mut Playground,
+        context: &egui::Context,
+        size: egui::Vec2,
+    ) -> (egui::Rect, Vec<LaidOut>) {
+        for _ in 0..2 {
+            palette_pass(state, context, size, 0.0, vec![]);
+        }
+        palette_pass(state, context, size, 0.0, vec![])
+    }
+
+    /// On a phone, upright or on its side, a drawing has the Draw palette to
+    /// itself: while it draws the tools go and what its kind of curve takes
+    /// stays, and when it ends they come back. A larger screen keeps them.
+    #[test]
+    fn on_a_small_screen_a_drawing_has_the_draw_palette_to_itself() {
+        let tools = ["Circle", "Rectangle", "Polygon", "Polyline"];
+        for (width, height) in [(390.0, 844.0), (844.0, 390.0), (1280.0, 800.0)] {
+            let size = egui::vec2(width, height);
+            let small = width < FLOATING_INSPECTOR_BELOW || height < SHORT_SCREEN_BELOW;
+            for tool in [DrawTool::Circle, DrawTool::Polyline] {
+                let mut state = Playground {
+                    draw_open: true,
+                    ..Playground::default()
+                };
+                let context = palette_context();
+                let (idle_palette, idle) = settled_palette(&mut state, &context, size);
+                let labels = |widgets: &[LaidOut]| {
+                    widgets
+                        .iter()
+                        .map(|widget| widget.label.clone())
+                        .collect::<BTreeSet<_>>()
+                };
+                assert!(
+                    tools.iter().all(|name| offered(&idle, name).is_some()),
+                    "{:?}",
+                    labels(&idle)
+                );
+
+                state.begin_draw(tool);
+                let (palette, drawing) = settled_palette(&mut state, &context, size);
+                let case = format!("{tool:?} on {width}x{height}: {:?}", labels(&drawing));
+                // Nothing placed yet: nothing to finish or take back.
+                for (control, enabled) in [
+                    ("Finish", false),
+                    ("Undo point", false),
+                    ("Cancel", true),
+                    ("Snap to grid", true),
+                ] {
+                    let widget = offered(&drawing, control);
+                    assert_eq!(widget.map(|widget| widget.enabled), Some(enabled), "{case}");
+                }
+                assert!(offered(&drawing, tool.prompt()).is_some(), "{case}");
+                let (own, other) = if tool.draws_open() {
+                    ("BC baffle", "Hole")
+                } else {
+                    ("Hole", "BC baffle")
+                };
+                assert!(offered(&drawing, own).is_some(), "{case}");
+                assert_eq!(offered(&drawing, other).is_some(), !small, "{case}");
+                assert_eq!(
+                    tools.iter().any(|name| offered(&drawing, name).is_some()),
+                    !small,
+                    "{case}"
+                );
+                if small {
+                    assert!(
+                        palette.height() < idle_palette.height(),
+                        "{case}: {:.0} tall drawing, {:.0} idle",
+                        palette.height(),
+                        idle_palette.height()
+                    );
+                }
+
+                state.draw = None;
+                let (_, after) = settled_palette(&mut state, &context, size);
+                assert_eq!(
+                    labels(&after),
+                    labels(&idle),
+                    "{tool:?} on {width}x{height}"
+                );
+            }
         }
     }
 

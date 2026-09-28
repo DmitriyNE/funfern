@@ -351,6 +351,11 @@ impl DrawTool {
         matches!(self, Self::Rectangle | Self::Polygon | Self::Polyline)
     }
 
+    /// Whether the tool draws an open curve rather than a closed one.
+    fn draws_open(self) -> bool {
+        matches!(self, Self::Polyline | Self::OpenSpline)
+    }
+
     /// Whether tapping the first point again closes the loop, so that point
     /// is drawn larger.
     fn closes_on_first(self) -> bool {
