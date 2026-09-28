@@ -32,8 +32,8 @@ use bevy::{
     },
 };
 use funfern_core::{
-    CanonicalAuxiliaryState, CanonicalForcing, CanonicalMaterialDrive,
-    CanonicalMaterialRuntimeState, CanonicalOutgoingHistoryTransferMap,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalAuxiliaryState, CanonicalForcing,
+    CanonicalMaterialDrive, CanonicalMaterialRuntimeState, CanonicalOutgoingHistoryTransferMap,
     CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
     CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalTemporalCoefficientSample,
     CanonicalTemporalLossSample, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
@@ -244,7 +244,7 @@ pub(crate) struct GpuCanonicalControl {
     pub candidate_accounting_a: Vec4,
     /// Candidate counterparts of `accepted_accounting_b`.
     pub candidate_accounting_b: Vec4,
-    /// Reserved, orientation, half step and quarter step.
+    /// The resident filter's strength, orientation, half step and quarter step.
     pub evolution: Vec4,
     /// Gate O: accepted active gain (x); the other lanes are reserved.
     pub accepted_accounting_c: Vec4,
@@ -1858,7 +1858,12 @@ impl CanonicalGpuPlan {
             accepted_accounting_b: Vec4::ZERO,
             candidate_accounting_a: Vec4::ZERO,
             candidate_accounting_b: Vec4::ZERO,
-            evolution: Vec4::new(0.0, operator.orientation() as f32, 0.5 * dt, 0.25 * dt),
+            evolution: Vec4::new(
+                CANONICAL_GRID_FILTER_STRENGTH as f32,
+                operator.orientation() as f32,
+                0.5 * dt,
+                0.25 * dt,
+            ),
             accepted_accounting_c: Vec4::ZERO,
             candidate_accounting_c: Vec4::ZERO,
         };
@@ -7778,6 +7783,31 @@ mod tests {
                 assert_eq!(admitted.manifest.event_dispatches, dispatches);
             }
         }
+    }
+
+    /// The resident filter commits at the calibrated strength, packed with
+    /// each generation, and every node carries its compiled reach: the fixed
+    /// one on a fixed generation, the trajectory's on a driven one.
+    #[test]
+    fn a_plan_packs_the_resident_strength_and_each_nodes_reach() {
+        let fixed = plan(OuterBoundaryCondition::SecondOrderOutgoing);
+        let (_, _, _, operator, _, driven) = temporal_plan();
+        for packed in [&fixed, &driven] {
+            assert_eq!(
+                packed.control.evolution.x,
+                CANONICAL_GRID_FILTER_STRENGTH as f32
+            );
+        }
+        for (node, reach) in driven.nodes.iter().zip(operator.grid_filter_reach()) {
+            assert_eq!(node.damping_support.z, *reach as f32);
+        }
+        assert!(
+            driven
+                .nodes
+                .iter()
+                .zip(operator.base().grid_filter_reach())
+                .any(|(node, fixed)| node.damping_support.z < *fixed as f32)
+        );
     }
 
     #[test]

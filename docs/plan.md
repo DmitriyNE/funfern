@@ -972,6 +972,18 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   a loss that rises with frequency cost the resolved signal too much. That
   loss is filed under "Later experiments".
 
+- [x] Element-scale modes faded slowly, on linear media as well as Kerr
+  ones. Fixed on 2026-09-28. The grid filter scaled itself by one bound for
+  the whole mesh, set by its stiffest rows: the elements adaptation refined
+  most, or a fast medium beside a slow one. Everywhere else it was 16 to 256
+  times weaker, and the speckle there took 9-93 s to fade. Each node now
+  carries its own reach (`grid_filter_reach`), which a Schur-test bound keeps
+  a contraction up to twice the strength, compiled over a driven or
+  field-dependent generation's whole trajectory. At the calibrated
+  `CANONICAL_GRID_FILTER_STRENGTH` of one, the band fades in 0.1-2.4 s and a
+  wave at the twelve nodes per wavelength adaptation asks for keeps 97-98%
+  of its energy over 32 s. `grid_filter_calibration` measures both.
+
 - [x] A scene change stops the old field at once. Fixed on 2026-09-26.
   New, a load, an example, a link, and Undo or Redo across any of them go
   through `scene_replaced`, which drops the outgoing generation at the next

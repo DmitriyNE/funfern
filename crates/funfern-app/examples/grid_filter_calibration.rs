@@ -35,12 +35,10 @@ use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
 use funfern_app::topology_examples::catalog;
 use funfern_app::topology_runtime::{PreparedTopology, TopologyRuntime};
 use funfern_core::{
-    CanonicalForcing, CanonicalWaveState, GRID_SCALE_FILTER_CADENCE, MeshingOptions,
-    OuterBoundaryCondition, OuterBoundaryConditions, Point2,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalWaveState,
+    GRID_SCALE_FILTER_CADENCE, MeshingOptions, OuterBoundaryCondition, OuterBoundaryConditions,
+    Point2,
 };
-
-/// The strength `resident_filter_begin` commits.
-const RESIDENT_STRENGTH: f64 = 1.0;
 
 const DEFAULT_SCENES: [&str; 5] = [
     "Obstacle over a mirror",
@@ -232,7 +230,9 @@ fn main() {
         .unwrap_or_else(|_| "transfer,residue,retention".to_owned());
     let strength = std::env::var("CALIBRATION_STRENGTH")
         .ok()
-        .map_or(RESIDENT_STRENGTH, |value| value.parse().unwrap());
+        .map_or(CANONICAL_GRID_FILTER_STRENGTH, |value| {
+            value.parse().unwrap()
+        });
     println!("grid filter at strength {strength}, every {GRID_SCALE_FILTER_CADENCE} steps");
     for name in scenes {
         let example = catalog()

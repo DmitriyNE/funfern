@@ -34,11 +34,12 @@ use funfern_app::canonical_gpu::{
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
-    BACKGROUND_REGION, CanonicalForcing, CanonicalSource, CanonicalTemporalWaveOperator,
-    CanonicalTemporalWaveState, CoefficientLaw, DampingLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE,
-    InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw,
-    LossChannel, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition, Point2,
-    QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
+    BACKGROUND_REGION, CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalSource,
+    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, DampingLaw,
+    FieldLaw, GRID_SCALE_FILTER_CADENCE, InternalBoundary, InternalBoundaryCoupling,
+    InternalBoundaryId, InternalBoundaryLaw, LossChannel, MeshingOptions, OpenCubicSpline,
+    OuterBoundaryCondition, Point2, QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive,
+    TimeSignal, mesh_scene,
 };
 
 const TOTAL_STEPS: u64 = 200;
@@ -200,7 +201,11 @@ fn main() -> AppExit {
         if filter && step.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
             filters += 1;
             // A candidate that gains energy is not taken, on either side.
-            match oracle.apply_grid_filter_with_forcing(&operator, &forcing, 1.0) {
+            match oracle.apply_grid_filter_with_forcing(
+                &operator,
+                &forcing,
+                CANONICAL_GRID_FILTER_STRENGTH,
+            ) {
                 Ok(energy) => removed += energy,
                 Err(_) => skipped += 1,
             }

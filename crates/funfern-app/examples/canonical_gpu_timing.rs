@@ -18,8 +18,8 @@ use funfern_app::canonical_gpu::{
 };
 use funfern_app::wave_gpu::{VectorOverlayDisplay, WaveGpuPlugin, WaveGpuRequest};
 use funfern_core::{
-    BACKGROUND_REGION, CanonicalAuxiliaryState, CanonicalForcing, CanonicalPointStencil,
-    CanonicalSource, CanonicalWaveOperator, CanonicalWaveState, DampingLaw,
+    BACKGROUND_REGION, CANONICAL_GRID_FILTER_STRENGTH, CanonicalAuxiliaryState, CanonicalForcing,
+    CanonicalPointStencil, CanonicalSource, CanonicalWaveOperator, CanonicalWaveState, DampingLaw,
     GRID_SCALE_FILTER_CADENCE, InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId,
     InternalBoundaryLaw, LossChannel, MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline,
     OuterBoundaryCondition, PeriodicCubicSpline, Point2, QuadraticPointStencil,
@@ -350,7 +350,7 @@ fn main() -> AppExit {
             && (initial_step + oracle.steps()).is_multiple_of(GRID_SCALE_FILTER_CADENCE)
         {
             oracle
-                .apply_grid_filter(&operator, &forcing, 1.0)
+                .apply_grid_filter(&operator, &forcing, CANONICAL_GRID_FILTER_STRENGTH)
                 .expect("CPU periodic grid filter");
         }
     }

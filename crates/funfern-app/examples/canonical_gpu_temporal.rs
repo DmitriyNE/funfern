@@ -13,9 +13,9 @@ use funfern_app::canonical_gpu::{
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
-    CanonicalMaterialDrive, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CoefficientLaw, GRID_SCALE_FILTER_CADENCE, MeshingOptions, OuterBoundaryCondition,
-    QuadraticWaveOperator, ScalarField, Scene, TimeDrive, mesh_scene,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalMaterialDrive, CanonicalTemporalWaveOperator,
+    CanonicalTemporalWaveState, CoefficientLaw, GRID_SCALE_FILTER_CADENCE, MeshingOptions,
+    OuterBoundaryCondition, QuadraticWaveOperator, ScalarField, Scene, TimeDrive, mesh_scene,
 };
 
 const DEFAULT_STEPS: u64 = 96;
@@ -210,7 +210,7 @@ fn main() -> AppExit {
             && (clock.step_in_epoch as u64 + step + 1).is_multiple_of(GRID_SCALE_FILTER_CADENCE)
         {
             oracle
-                .apply_grid_filter(&operator, 1.0)
+                .apply_grid_filter(&operator, CANONICAL_GRID_FILTER_STRENGTH)
                 .expect("f64 resident frozen-time filter");
         }
     }
@@ -225,7 +225,7 @@ fn main() -> AppExit {
             && (clock.step_in_epoch as u64 + step + 1).is_multiple_of(GRID_SCALE_FILTER_CADENCE)
         {
             oracle
-                .apply_grid_filter(&operator, 1.0)
+                .apply_grid_filter(&operator, CANONICAL_GRID_FILTER_STRENGTH)
                 .expect("f64 resident frozen-time filter");
         }
     }
@@ -256,7 +256,7 @@ fn main() -> AppExit {
             && (clock.step_in_epoch as u64 + step + 1).is_multiple_of(GRID_SCALE_FILTER_CADENCE)
         {
             oracle
-                .apply_grid_filter(&target_operator, 1.0)
+                .apply_grid_filter(&target_operator, CANONICAL_GRID_FILTER_STRENGTH)
                 .expect("f64 resident frozen-time filter");
         } else if !resident_filter && step + 1 == filter_steps {
             oracle

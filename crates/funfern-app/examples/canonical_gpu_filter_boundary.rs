@@ -23,9 +23,9 @@ use funfern_app::{
     wave_gpu::{ProbeDisplay, RecorderContext, RecorderHistory, WaveGpuPlugin, WaveGpuRequest},
 };
 use funfern_core::{
-    CanonicalForcing, CanonicalWaveOperator, CanonicalWaveState, GRID_SCALE_FILTER_CADENCE,
-    MeshingOptions, OuterBoundaryCondition, PhysicsModel, Point2, QuadraticPointStencil,
-    QuadraticWaveOperator, Scene, mesh_scene,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalWaveOperator, CanonicalWaveState,
+    GRID_SCALE_FILTER_CADENCE, MeshingOptions, OuterBoundaryCondition, PhysicsModel, Point2,
+    QuadraticPointStencil, QuadraticWaveOperator, Scene, mesh_scene,
 };
 
 const PROBE_ID: u64 = 91;
@@ -117,7 +117,7 @@ fn main() -> AppExit {
         state.step(&operator).expect("f64 step");
         if step.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
             state
-                .apply_grid_filter(&operator, &forcing, 1.0)
+                .apply_grid_filter(&operator, &forcing, CANONICAL_GRID_FILTER_STRENGTH)
                 .expect("f64 resident filter");
         }
     }
@@ -143,14 +143,14 @@ fn main() -> AppExit {
         at_commit.step(&operator).expect("f64 step");
         if step.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
             at_commit
-                .apply_grid_filter(&operator, &forcing, 1.0)
+                .apply_grid_filter(&operator, &forcing, CANONICAL_GRID_FILTER_STRENGTH)
                 .expect("f64 resident filter");
         }
     }
     at_commit.step(&operator).expect("f64 step");
     let before_filter = field(at_commit.primary_flux());
     at_commit
-        .apply_grid_filter(&operator, &forcing, 1.0)
+        .apply_grid_filter(&operator, &forcing, CANONICAL_GRID_FILTER_STRENGTH)
         .expect("f64 resident filter");
     let collapsed_rate = (field(at_commit.primary_flux()) - before_filter) / time_step;
 

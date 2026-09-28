@@ -16104,3 +16104,50 @@ mesh (previous entry). Each node now carries its own.
   reach comes from.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-28 — The grid filter's strength, calibrated
+
+The last stage of the calibration: with each node bounded by its own rows,
+the strength is a choice between clearing element-scale detail and keeping
+resolved waves, and the filter's `λ²` shape fixes the exchange rate.
+
+- **Measured** at strengths 0.5, 1 and 2 (`grid_filter_calibration`, and the
+  in-app split of the previous entries with adaptation on):
+
+  | Strength | Band e-fold in the app | Kept over 32 s, 12 / 8 / 16 nodes |
+  |---|---|---|
+  | global bound, 1 (before) | 9-93 s | 99.8-100% / 99.2-99.9% / 99.9-100% |
+  | 0.5 | about 0.2-5 s | 98.6-99.1% / 94-96% / 99.4-99.6% |
+  | 1 | 0.1-2.4 s | 97.2-98.2% / 89-93% / 98.9-99.2% |
+  | 2 | about 0.05-1.2 s | 94.7-96.6% / 80-87% / 97.9-98.5% |
+
+  A pulse one element wide, released with every wall radiating, leaves on
+  Obstacle over a mirror 1.8e-7, 9.9e-8 and 1.5e-7 of its energy at 16 s at
+  the three strengths, against 4.0e-6 before and 2.1e-5 unfiltered; on
+  Phased array 8.1e-8, 8.9e-8 and 1.4e-7, against 5.8e-7 and 1.6e-6. Past one
+  the residue clears no faster. In the app at one, the Kerr slab's harmonic
+  band e-folds in 0.9 s where it took 9-10 s, and a Ring resonator's resolved
+  field loses 3% of its energy per 32 s. The ring radiates far faster: with
+  the filter off, the field the pulse leaves in it e-folds in about 3 s, and
+  the whispering gallery's in about 7 s.
+- **Chosen:** one, by the user. `CANONICAL_GRID_FILTER_STRENGTH` names it in
+  the core. The plan packs it into the control's first evolution lane, which
+  the previous entry freed, and `resident_filter_begin` commits it from
+  there instead of a literal. The nine f64 references that stand for the
+  resident filter in `canonical_gpu_oscillator`, `canonical_gpu_filter_boundary`,
+  `canonical_gpu_nonlinear`, `canonical_gpu_temporal` and
+  `canonical_gpu_timing`, and the calibration example's default, read the
+  constant, so the strength has one home.
+- **App.** The filter's hover text promised well under a percent per half
+  minute to a wave resolved as adaptation aims; it now says the speckle goes
+  within a second or two, at two or three percent per half minute.
+- **Test.** `a_plan_packs_the_resident_strength_and_each_nodes_reach`: fixed
+  and driven plans carry the strength, and a driven plan's nodes carry the
+  trajectory's reach, below the fixed operator's somewhere.
+- **Regression.** Every canonical GPU gate and its modes, 106 runs, exit 0
+  with every error figure what the previous entry's run read; only the
+  timings moved.
+- **Docs.** Plan section 7.3 names the resident strength; `docs/plan.md`
+  records the fix under Maintenance.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

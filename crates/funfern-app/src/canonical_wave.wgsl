@@ -1330,7 +1330,8 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
 fn resident_filter_begin() {
     if stopped() { return; }
     control.event.z = accepted_slot() | (2u << 8u);
-    control.event.w = bitcast<u32>(1.0);
+    // `CANONICAL_GRID_FILTER_STRENGTH`, packed with the generation.
+    control.event.w = bitcast<u32>(control.evolution.x);
 }
 
 @compute @workgroup_size(128)

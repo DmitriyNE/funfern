@@ -659,8 +659,9 @@ impl Playground {
                          modes a mesh can hold barely travel, so a sharp event - deleting a \
                          wall the field had a step across, or a source narrower than a few \
                          nodes - leaves a speckle that stays put for the rest of the run. \
-                         This removes it, at a cost of well under a percent per half minute \
-                         to a wave resolved as finely as the adaptation above aims for. \
+                         This removes it within a second or two, at a cost of two or three \
+                         percent of its energy per half minute to a wave resolved as finely \
+                         as the adaptation above aims for. \
                          It preserves constants and stationary force-free flux; it is not a \
                          terminal-silence or DC-removal control. \
                          Turn it off to see the untouched scheme.",

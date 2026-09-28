@@ -3488,6 +3488,19 @@ fn orientation(physics: PhysicsModel) -> f64 {
     }
 }
 
+/// The strength the solver's own every-sixteen-step filter runs at, against
+/// the [`GRID_SCALE_FILTER_LIMIT`] its bound admits. Measured with
+/// `grid_filter_calibration` over gallery scenes and in the app with
+/// adaptation on (engineering log, 2026-09-28): the element-scale band a sharp
+/// event, a remap or a Kerr harmonic leaves e-folds in 0.1-2.4 s, where the
+/// global bound it replaced took 9-93 s, and a wave at the twelve nodes per
+/// wavelength adaptation asks for keeps 97-98% of its energy over 32 s, 89-93%
+/// at eight. Half the strength halves both rates. Twice it clears a released
+/// pulse's residue no faster and costs a resolved wave twice as much.
+///
+/// [`GRID_SCALE_FILTER_LIMIT`]: crate::GRID_SCALE_FILTER_LIMIT
+pub const CANONICAL_GRID_FILTER_STRENGTH: f64 = 1.0;
+
 /// The most one constitutive sample's map can reach against its reference
 /// tensor `J`. A linear or driven map is `a J` with `a ≤ largest`. A field
 /// law's tangent is `J (a P⊥ + b P∥)` about the flux's direction, with both
