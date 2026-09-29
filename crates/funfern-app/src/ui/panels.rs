@@ -456,7 +456,7 @@ impl Playground {
                     .prefix("Width "),
             );
         });
-        let fire_at = self.pulse_fire_time();
+        let fire_at = self.fire_times();
         edit_time_signal(
             ui,
             &mut source.signal,

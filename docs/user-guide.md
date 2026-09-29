@@ -272,6 +272,10 @@ names or with every expression evaluated at the material frame's origin. Each ro
   its carrier counted from each pulse's centre, and Shape draws the
   coefficient factor and the spectrum of its swing. A pump at 0 Hz under a
   gate is a temporal slab: the medium changes for the pulse and returns.
+  Fire now commits that drive at once, as its editor shows it, without
+  Apply; the material's other edits still wait for Apply. It fires far
+  enough ahead to cover the new generation a material edit takes, as long as
+  the last one took.
   In Mechanical it presents the stiffness row as the reciprocal stiffness
   `s₀ = 1/k₀` the solver uses, written back as `k₀` only when edited. χ is
   relative: the coefficient is `c₀(1 + χ|u|²)`, not `c₀u + a₃|u|²u`. Only laws

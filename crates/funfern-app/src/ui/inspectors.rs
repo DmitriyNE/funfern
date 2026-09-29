@@ -441,7 +441,7 @@ impl Playground {
                         CurveTraceSide::Right => right,
                     },
                 };
-                let fire_at = self.pulse_fire_time();
+                let fire_at = self.fire_times();
                 if edit_face_condition(
                     ui,
                     self.editor.document.model.draft.physics,
@@ -674,7 +674,7 @@ impl Playground {
             let sides = outer.iter().copied().collect::<BTreeSet<_>>();
             let mut condition =
                 self.editor.document.model.draft.outer_boundaries.sides[outer[0].index()];
-            let fire_at = self.pulse_fire_time();
+            let fire_at = self.fire_times();
             if edit_outer_condition(
                 ui,
                 self.editor.document.model.draft.physics,

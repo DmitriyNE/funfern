@@ -193,3 +193,18 @@ pub(super) fn laid_out(output: &egui::FullOutput) -> Vec<LaidOut> {
         })
         .collect()
 }
+
+/// A primary click at the centre of `widget`, as the events of one pass.
+pub(super) fn click(widget: &LaidOut) -> Vec<egui::Event> {
+    let at = widget.rect.center();
+    [true, false]
+        .map(|pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        })
+        .into_iter()
+        .chain([egui::Event::PointerMoved(at)])
+        .collect()
+}

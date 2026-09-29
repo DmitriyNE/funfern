@@ -16965,3 +16965,43 @@ loss channels too, and gates are an Advanced setting.
   slab, a pump burst and a chopper, each still without a measured claim.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — Fire a gate at once, ahead of its handoff
+
+The app check, run on a scratch HOME with the user's say-so, found that
+"Fire now" on a material gate worked only if Apply followed at once.
+
+- **The defect.** The Materials panel edits a working copy and commits it at
+  Apply, so Fire set the start at the click and the pulse reached the solver
+  at the Apply. With a 1.5 s flat-top slab, Fire at simulated 9.40 s set the
+  start to 9.52 s. An Apply two seconds later landed the gate at 10.92 s,
+  1.4 s into the pulse, so only its last 0.1 s ran, from the middle of the
+  pulse. Fire and Apply in the same frame landed 0.08 s early.
+- **Fire commits its drive.** "Fire now" now commits that drive at once, the
+  drive with its gate as the editor shows them, so what fires is what is on
+  screen; the material's other edits stay pending (the user chose this over
+  enabling Fire only once applied, or applying everything). A loss drive
+  goes with its channel, since the edit may have just made the channel out
+  of a legacy damping.
+- **The lead covers the handoff.** A material edit takes a new generation,
+  about 0.4–0.8 s of wall time at 36–57k DOFs here, and the 0.25 s lead only
+  sufficed because the run went at half real time. So the Fire time now
+  comes in two: the live one, as before, for edits that patch the running
+  generation, and one later by the last handoff's measured wall time, from
+  request to commit, at the run's speed. A pinned wall's signal is part of
+  the generation's layout, so a Dirichlet side's Fire, which also takes a
+  handoff, now uses the later time too; point sources and Neumann sides keep
+  the live one.
+- **Rerun.** Two Fires without any Apply. Fired at simulated 11.54 s after a
+  0.51 s handoff: start 12.32 s, gate on the device at 11.65 s. Fired at
+  15.50 s after a 0.82 s handoff: start 16.59 s, gate on the device at
+  15.70 s.
+- **Tests.**
+  - A click on Fire now in the Materials panel commits the gate, envelope
+    and start, and leaves a pending density edit pending.
+  - A fired loss drive made out of a legacy damping takes its channel and
+    stays valid, and a fired coefficient drive takes nothing else.
+  - The two fire times, paused and running.
+  - The gate editor reports its Fire.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

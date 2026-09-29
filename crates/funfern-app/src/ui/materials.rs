@@ -297,7 +297,7 @@ impl Playground {
                 signal: TimeSignal::harmonic(0.0, 12.0, 3.0, SWITCH_ON_PHASE),
             });
             let mut source_changed = false;
-            let fire_at = self.pulse_fire_time();
+            let fire_at = self.fire_times();
             ui.horizontal(|ui| {
                 source_changed = ui.checkbox(&mut source.enabled, "Volume source").changed();
                 // Only beside a visible profile editor: with the source off
@@ -555,7 +555,7 @@ impl Playground {
                 }
             }
             let labels = material_editor_labels(physics);
-            let fire_at = self.pulse_fire_time();
+            let fire_at = self.fire_times();
             let sources = source_frequencies(
                 &self.editor.document.model.source,
                 &self.editor.document.model.draft,
@@ -626,6 +626,7 @@ impl Playground {
             }
             // One group per coefficient: its base value, its loss, and every
             // law that multiplies it, so nothing about ε is found under μ.
+            let mut fired = None;
             for row in [LawPresetRow::Mass, LawPresetRow::Stiffness] {
                 let title = match row {
                     LawPresetRow::Stiffness if reciprocal => "Reciprocal stiffness s₀",
@@ -673,8 +674,9 @@ impl Playground {
                             ),
                         }
                         let mut timing = law_editor::DriveTiming {
-                            fire_at,
+                            fire_at: fire_at.handoff,
                             preview: &mut self.pulse_preview,
+                            fired: None,
                         };
                         law_editor::loss_rate_editor(
                             ui,
@@ -697,6 +699,7 @@ impl Playground {
                         } else {
                             preset_values(ui, &mut material, matched.as_ref(), Some(row), &sources);
                         }
+                        fired = fired.or(timing.fired);
                         // How far the field has taken this coefficient from its
                         // small-signal value right now, so a Kerr run that is
                         // barely nonlinear is told apart from one running no
@@ -713,6 +716,21 @@ impl Playground {
                             );
                         }
                     });
+            }
+            // "Fire now" commits its drive at once, not at Apply.
+            if let Some(fired) = fired
+                && let Some(applied) = self
+                    .editor
+                    .document
+                    .model
+                    .draft
+                    .material(material.id)
+                    .cloned()
+                && let Err(error) = self.editor.update_material(law_editor::with_fired_drive(
+                    &applied, &material, physics, fired,
+                ))
+            {
+                self.notify(error);
             }
             // Gate O: the restoring force on the integrated field, which is
             // not a coefficient and so is not under either row. The simple
@@ -1469,6 +1487,80 @@ mod tests {
         assert!(
             open - folded > faces as f32 * row,
             "the panel is {open:.0} tall open and {folded:.0} folded"
+        );
+    }
+
+    /// "Fire now" on a gate commits its drive at once, as the editor shows it,
+    /// so the pulse runs when it was fired rather than at the next Apply, and
+    /// leaves the material's other edits pending.
+    #[test]
+    fn fire_now_commits_its_drive_and_leaves_other_edits_pending() {
+        let mut state = Playground::default();
+        let selection = state.resolved_material_selection();
+        let mut applied = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(selection)
+            .unwrap()
+            .clone();
+        applied.mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(1.0),
+            phase_radians: ScalarField::constant(0.0),
+        };
+        applied.mass_law.gate = Some(PulseTrain {
+            envelope: PulseEnvelope::FlatTop {
+                duration: 1.0,
+                edge: 0.25,
+            },
+            start: 1.0,
+            repeat: 0.0,
+        });
+        state.editor.update_material(applied).unwrap();
+        state.set_material_advanced(selection, true);
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.enable_accesskit();
+        let pass = |state: &mut Playground, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(480.0, 6000.0),
+                )),
+                events,
+                ..egui::RawInput::default()
+            };
+            let output = context.run_ui(input, |ui| state.materials_panel(ui));
+            laid_out(&output)
+        };
+        pass(&mut state, vec![]);
+        let edit = state.material_edit.as_mut().unwrap();
+        edit.mass_law.gate.as_mut().unwrap().envelope = PulseEnvelope::Gaussian { width: 0.1 };
+        edit.mass_density = ScalarField::constant(2.0);
+        let widgets = pass(&mut state, vec![]);
+        let fire = widgets
+            .iter()
+            .find(|widget| widget.label == "Fire now")
+            .unwrap_or_else(|| panic!("no Fire now among {widgets:?}"));
+        pass(&mut state, click(fire));
+
+        let applied = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(selection)
+            .unwrap();
+        let gate = applied.mass_law.gate.unwrap();
+        assert_eq!(gate.envelope, PulseEnvelope::Gaussian { width: 0.1 });
+        assert_eq!(gate.start, state.fire_times().handoff);
+        assert_eq!(applied.mass_density, ScalarField::constant(1.0));
+        assert!(state.material_edits_pending());
+        assert_eq!(
+            state.material_edit.as_ref().unwrap().mass_density,
+            ScalarField::constant(2.0)
         );
     }
 

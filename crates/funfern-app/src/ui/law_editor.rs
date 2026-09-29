@@ -74,10 +74,52 @@ pub(super) fn reciprocal_stiffness_editor(
 }
 
 /// What a drive's gate needs from the panel: when "Fire now" starts a pulse,
-/// and the shape window its "Shape" opens.
+/// the shape window its "Shape" opens, and, back to the panel, which drive's
+/// "Fire now" was pressed.
 pub(super) struct DriveTiming<'a> {
     pub(super) fire_at: f64,
     pub(super) preview: &'a mut PulsePreview,
+    pub(super) fired: Option<FiredDrive>,
+}
+
+/// The drive a "Fire now" belongs to: a row's coefficient law, or the loss
+/// channel of that row's field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FiredDrive {
+    Coefficient(LawPresetRow),
+    Loss(LawPresetRow),
+}
+
+/// The applied material with the fired drive taken from the edited copy.
+/// "Fire now" commits this at once rather than at Apply, whose moment would
+/// otherwise decide when the pulse runs. The drive goes with its gate as its
+/// editor shows them, so what fires is what is on screen; the material's
+/// other edits stay pending. A loss drive goes with its channel, which the
+/// edit may have just made out of a legacy damping.
+pub(super) fn with_fired_drive(
+    applied: &Material,
+    edited: &Material,
+    physics: PhysicsModel,
+    fired: FiredDrive,
+) -> Material {
+    let mut material = applied.clone();
+    match fired {
+        FiredDrive::Coefficient(LawPresetRow::Stiffness) => {
+            material.stiffness_law.drive = edited.stiffness_law.drive.clone();
+            material.stiffness_law.gate = edited.stiffness_law.gate;
+        }
+        FiredDrive::Coefficient(_) => {
+            material.mass_law.drive = edited.mass_law.drive.clone();
+            material.mass_law.gate = edited.mass_law.gate;
+        }
+        FiredDrive::Loss(row) => {
+            let mut edited = edited.clone();
+            material.damping = edited.damping.clone();
+            *row_channel(&mut material, physics, row) =
+                row_channel(&mut edited, physics, row).clone();
+        }
+    }
+    material
 }
 
 /// The law slots of one row: field response, drive, Switch alternate and
@@ -97,7 +139,7 @@ pub(super) fn law_slots_editor(
         LawPresetRow::Stiffness => (STIFFNESS_ROW, &mut material.stiffness_law),
         _ => (MASS_ROW, &mut material.mass_law),
     };
-    coefficient_law_editor(
+    if coefficient_law_editor(
         ui,
         id,
         base,
@@ -107,7 +149,9 @@ pub(super) fn law_slots_editor(
         field_laws,
         formulas,
         timing,
-    );
+    ) {
+        timing.fired = Some(FiredDrive::Coefficient(row));
+    }
 }
 
 /// Whether a material's loss self-oscillates. Van der Pol's node map assumes
@@ -301,7 +345,7 @@ pub(super) fn loss_rate_editor(
     if advanced {
         let before = (found.law.drive.clone(), found.law.gate);
         let (mut drive, mut gate) = before.clone();
-        drive_editor(
+        if drive_editor(
             ui,
             id,
             base + 4,
@@ -311,7 +355,9 @@ pub(super) fn loss_rate_editor(
             &[],
             formulas,
             timing,
-        );
+        ) {
+            timing.fired = Some(FiredDrive::Loss(row));
+        }
         if (drive.clone(), gate) != before {
             adopt_legacy_damping(material, physics);
             if let Some(found) = row_channel(material, physics, row) {
@@ -696,7 +742,7 @@ fn coefficient_law_editor(
     field_laws: bool,
     formulas: &mut FormulaEdits,
     timing: &mut DriveTiming,
-) {
+) -> bool {
     let kind = response_kind(&law.field);
     let mut chosen = kind;
     ui.horizontal(|ui| {
@@ -805,7 +851,7 @@ fn coefficient_law_editor(
             );
         }
     }
-    drive_editor(
+    let fired = drive_editor(
         ui,
         id,
         base + 4,
@@ -844,6 +890,7 @@ fn coefficient_law_editor(
     } else if law.inverted {
         ui.small("A divided field response does not run; clear it or choose Linear.");
     }
+    fired
 }
 
 const RELATIVE_CHI: &str = "Nonlinearity χ";
@@ -851,8 +898,8 @@ const RELATIVE_CHI_HOVER: &str = "Relative: the coefficient is c₀(1 + χ|u|²)
      absolute cubic coefficient of the expanded map c₀u + a₃|u|²u is a₃ = c₀χ, a \
      different quantity with the base coefficient's own spatial dependence.";
 
-/// A drive and, below its numbers, its timing. A drive set to none takes
-/// its gate with it.
+/// A drive and, below its numbers, its timing; true when its gate's "Fire
+/// now" was pressed. A drive set to none takes its gate with it.
 #[allow(clippy::too_many_arguments)]
 fn drive_editor(
     ui: &mut egui::Ui,
@@ -864,7 +911,7 @@ fn drive_editor(
     sources: &[(String, f64)],
     formulas: &mut FormulaEdits,
     timing: &mut DriveTiming,
-) {
+) -> bool {
     let kind = drive_kind(drive);
     let mut chosen = kind;
     ui.horizontal(|ui| {
@@ -976,12 +1023,13 @@ fn drive_editor(
     }
     if drive.is_none() {
         *gate = None;
-        return;
+        return false;
     }
     let values = drive.evaluate(parameters).ok();
     ui.push_id(("drive-gate", id, base), |ui| {
-        super::signals::edit_drive_gate(ui, values, gate, timing.fire_at, timing.preview);
-    });
+        super::signals::edit_drive_gate(ui, values, gate, timing.fire_at, timing.preview)
+    })
+    .inner
 }
 
 /// One row's effective law, by its names or with every expression evaluated
@@ -1089,6 +1137,7 @@ mod tests {
         let mut timing = DriveTiming {
             fire_at: 0.0,
             preview: &mut preview,
+            fired: None,
         };
         for row in [LawPresetRow::Mass, LawPresetRow::Stiffness] {
             loss_rate_editor(ui, material, physics, row, advanced, formulas, &mut timing);
@@ -1096,6 +1145,61 @@ mod tests {
                 law_slots_editor(ui, material, row, sources, formulas, &mut timing);
             }
         }
+    }
+
+    /// Firing a loss drive that the edit made out of a legacy damping takes
+    /// the channel with it, so the committed material stays valid; firing a
+    /// coefficient's drive takes that drive and its gate and nothing else.
+    #[test]
+    fn a_fired_drive_takes_what_its_editor_shows_and_nothing_else() {
+        let physics = PhysicsModel::Mechanical;
+        let mut applied = Scene::initial().materials[0].clone();
+        applied.damping = ScalarField::constant(0.2);
+        let gate = Some(PulseTrain {
+            envelope: PulseEnvelope::Gaussian { width: 0.1 },
+            start: 4.0,
+            repeat: 0.0,
+        });
+        let mut edited = applied.clone();
+        adopt_legacy_damping(&mut edited, physics);
+        let primary = legacy_damping_row(physics);
+        let channel = row_channel(&mut edited, physics, primary).as_mut().unwrap();
+        channel.law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.5),
+            frequency_hz: ScalarField::constant(0.0),
+            phase_radians: ScalarField::constant(0.0),
+        };
+        channel.law.gate = gate;
+        edited.mass_density = ScalarField::constant(3.0);
+        let fired = with_fired_drive(&applied, &edited, physics, FiredDrive::Loss(primary));
+        assert!(fired.valid());
+        assert_eq!(fired.damping, ScalarField::constant(0.0));
+        assert_eq!(
+            row_channel(&mut fired.clone(), physics, primary)
+                .as_ref()
+                .unwrap()
+                .law
+                .gate,
+            gate
+        );
+        assert_eq!(fired.mass_density, applied.mass_density);
+
+        edited.stiffness_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.1),
+            frequency_hz: ScalarField::constant(2.0),
+            phase_radians: ScalarField::constant(0.0),
+        };
+        edited.stiffness_law.gate = gate;
+        let fired = with_fired_drive(
+            &applied,
+            &edited,
+            physics,
+            FiredDrive::Coefficient(LawPresetRow::Stiffness),
+        );
+        assert_eq!(fired.stiffness_law, edited.stiffness_law);
+        assert_eq!(fired.damping, applied.damping);
+        assert_eq!(fired.magnetic_loss, applied.magnetic_loss);
+        assert_eq!(fired.mass_density, applied.mass_density);
     }
 
     fn edits() -> (Texts, Texts) {

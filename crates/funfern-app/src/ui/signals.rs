@@ -34,6 +34,12 @@ impl SignalUse {
         }
     }
 
+    /// Whether an edit of a signal here takes a new generation rather than a
+    /// live patch: a pinned field is part of the generation's layout.
+    const fn takes_handoff(self) -> bool {
+        matches!(self, Self::Field)
+    }
+
     fn units(self, pulsed: bool) -> &'static str {
         match (self, pulsed) {
             (Self::Source, false) => {
@@ -50,22 +56,43 @@ impl SignalUse {
     }
 }
 
-/// Wall seconds ahead of the queued steps that "Fire now" starts a pulse:
-/// the frames in flight, and the handoff a wall's edit takes, so the pulse
-/// starts from zero rather than partway in.
+/// Wall seconds ahead of the queued steps that "Fire now" starts a pulse: the
+/// frames in flight, so the pulse starts from zero rather than partway in.
 const FIRE_LEAD_SECONDS: f64 = 0.25;
 
+/// When "Fire now" starts a pulse, on the simulated clock, for an edit the
+/// running generation takes as a live patch and for one that takes a new
+/// generation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct FireTimes {
+    pub(super) live: f64,
+    pub(super) handoff: f64,
+}
+
 impl Playground {
-    /// When a pulse fired now starts, on the simulated clock: past every step
-    /// already asked of the device, and a quarter second of wall time more.
-    /// Paused, nothing is queued and the pulse starts where the run stands.
-    pub(super) fn pulse_fire_time(&self) -> f64 {
+    /// Past every step already asked of the device and a quarter second of
+    /// wall time more; an edit that takes a new generation waits as long
+    /// again as the last handoff took. Paused, nothing is queued, a handoff
+    /// lands before the next step, and a pulse starts where the run stands.
+    pub(super) fn fire_times(&self) -> FireTimes {
         let now = self.simulated_time();
         if !self.wave_running {
-            return now;
+            return FireTimes {
+                live: now,
+                handoff: now,
+            };
         }
-        now + self.step_backlog as f64 * self.solver_time_step()
-            + FIRE_LEAD_SECONDS * self.editor.document.presentation.simulation_speed
+        let speed = self.editor.document.presentation.simulation_speed;
+        let live =
+            now + self.step_backlog as f64 * self.solver_time_step() + FIRE_LEAD_SECONDS * speed;
+        let handoff = self
+            .last_handoff
+            .as_ref()
+            .map_or(0.0, HandoffRecord::seconds);
+        FireTimes {
+            live,
+            handoff: live + handoff * speed,
+        }
     }
 }
 
@@ -146,15 +173,20 @@ enum Previewed {
     Drive(Option<TimeDriveValues>, PulseTrain),
 }
 
-/// Edits `signal` in place. `fire_at` is when "Fire now" starts a pulse, and
+/// Edits `signal` in place. `fire` is when "Fire now" starts a pulse, and
 /// `preview` the shape window a pulse's "Shape" opens.
 pub(super) fn edit_time_signal(
     ui: &mut egui::Ui,
     signal: &mut TimeSignal,
     role: SignalUse,
-    fire_at: f64,
+    fire: FireTimes,
     preview: &mut PulsePreview,
 ) {
+    let fire_at = if role.takes_handoff() {
+        fire.handoff
+    } else {
+        fire.live
+    };
     ui.push_id(("time-signal", role), |ui| {
         edit_time_signal_in(ui, signal, role, fire_at, preview);
     });
@@ -213,7 +245,7 @@ fn edit_time_signal_in(
             repeat: *repeat,
         };
         let carrier = (*amplitude != 0.0).then_some(*frequency_hz);
-        if edit_pulse_train(ui, &mut train, fire_at, carrier) {
+        if edit_pulse_train(ui, &mut train, fire_at, carrier).shape {
             preview.open = true;
             preview.editor = Some(editor);
         }
@@ -225,18 +257,24 @@ fn edit_time_signal_in(
     }
 }
 
+/// What a press in the pulse controls asks of their owner.
+#[derive(Clone, Copy, Default)]
+struct PulseButtons {
+    fired: bool,
+    shape: bool,
+}
+
 /// A pulse's envelope, start and repeat, with "Fire now", which starts it at
-/// `fire_at`, and "Shape"; true when "Shape" was pressed. The summary counts
-/// the cycles of `carrier_hz`.
+/// `fire_at`, and "Shape". The summary counts the cycles of `carrier_hz`.
 fn edit_pulse_train(
     ui: &mut egui::Ui,
     train: &mut PulseTrain,
     fire_at: f64,
     carrier_hz: Option<f64>,
-) -> bool {
+) -> PulseButtons {
     edit_pulse_envelope(ui, &mut train.envelope);
     let duration = train.envelope.duration();
-    let mut shape = false;
+    let mut pressed = PulseButtons::default();
     ui.horizontal(|ui| {
         ui.add(
             egui::DragValue::new(&mut train.start)
@@ -246,8 +284,9 @@ fn edit_pulse_train(
         );
         if ui.button("Fire now").clicked() {
             train.start = fire_at;
+            pressed.fired = true;
         }
-        shape = ui.button("Shape").clicked();
+        pressed.shape = ui.button("Shape").clicked();
     });
     ui.horizontal(|ui| {
         let mut repeats = train.repeat > 0.0;
@@ -274,20 +313,21 @@ fn edit_pulse_train(
         train.repeat,
         carrier_hz,
     ));
-    shape
+    pressed
 }
 
 /// A material drive's timing: running throughout, or in pulses under one of
 /// the envelopes. `drive` is the drive's numbers where they are constants,
 /// for the cycle count and the shape window; a gate first set on a drive
-/// is a Hann burst three of its cycles long, fired at `fire_at`.
+/// is a Hann burst three of its cycles long, fired at `fire_at`. True when
+/// "Fire now" was pressed, which its owner commits at once.
 pub(super) fn edit_drive_gate(
     ui: &mut egui::Ui,
     drive: Option<TimeDriveValues>,
     gate: &mut Option<PulseTrain>,
     fire_at: f64,
     preview: &mut PulsePreview,
-) {
+) -> bool {
     let editor = ui.id();
     let frequency = drive.map(TimeDriveValues::frequency_hz);
     let mut pulsed = gate.is_some();
@@ -299,8 +339,11 @@ pub(super) fn edit_drive_gate(
     if pulsed != gate.is_some() {
         *gate = pulsed.then(|| burst(frequency.unwrap_or(0.0), fire_at));
     }
+    let mut fired = false;
     if let Some(train) = gate {
-        if edit_pulse_train(ui, train, fire_at, frequency) {
+        let pressed = edit_pulse_train(ui, train, fire_at, frequency);
+        fired = pressed.fired;
+        if pressed.shape {
             preview.open = true;
             preview.editor = Some(editor);
         }
@@ -312,6 +355,7 @@ pub(super) fn edit_drive_gate(
     if preview.editor == Some(editor) {
         preview.shown = gate.map(|train| Previewed::Drive(drive, train));
     }
+    fired
 }
 
 impl Playground {
@@ -674,23 +718,15 @@ mod tests {
             ..egui::RawInput::default()
         };
         let output = context.run_ui(input, |ui| {
-            edit_time_signal(ui, signal, SignalUse::Source, 12.5, preview);
+            // A source's edit patches the running generation, so it fires
+            // at the live time.
+            let fire = FireTimes {
+                live: 12.5,
+                handoff: 13.0,
+            };
+            edit_time_signal(ui, signal, SignalUse::Source, fire, preview);
         });
         laid_out(&output)
-    }
-
-    fn click(widget: &LaidOut) -> Vec<egui::Event> {
-        let at = widget.rect.center();
-        [true, false]
-            .map(|pressed| egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            })
-            .into_iter()
-            .chain([egui::Event::PointerMoved(at)])
-            .collect()
     }
 
     /// "Pulse" turns a continuous source into a pulse fired at the time it
@@ -746,7 +782,7 @@ mod tests {
         gate: &mut Option<PulseTrain>,
         preview: &mut PulsePreview,
         events: Vec<egui::Event>,
-    ) -> Vec<LaidOut> {
+    ) -> (Vec<LaidOut>, bool) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -755,10 +791,11 @@ mod tests {
             events,
             ..egui::RawInput::default()
         };
+        let mut fired = false;
         let output = context.run_ui(input, |ui| {
-            edit_drive_gate(ui, Some(drive), gate, 7.25, preview);
+            fired = edit_drive_gate(ui, Some(drive), gate, 7.25, preview);
         });
-        laid_out(&output)
+        (laid_out(&output), fired)
     }
 
     /// "Pulsed" gates a drive with a burst three of its cycles long fired at
@@ -780,15 +817,15 @@ mod tests {
                      gate: &mut Option<PulseTrain>,
                      preview: &mut PulsePreview,
                      label: &str| {
-            let widgets = gate_pass(context, drive, gate, preview, vec![]);
+            let (widgets, _) = gate_pass(context, drive, gate, preview, vec![]);
             let widget = widgets
                 .iter()
                 .find(|widget| widget.label == label)
                 .unwrap_or_else(|| panic!("no {label} among {:?}", widgets));
             let events = click(widget);
-            gate_pass(context, drive, gate, preview, events);
+            gate_pass(context, drive, gate, preview, events).1
         };
-        press(&context, &mut gate, &mut preview, "Pulsed");
+        assert!(!press(&context, &mut gate, &mut preview, "Pulsed"));
         assert_eq!(
             gate,
             Some(PulseTrain {
@@ -801,7 +838,8 @@ mod tests {
             })
         );
         gate.as_mut().unwrap().start = 1.0;
-        press(&context, &mut gate, &mut preview, "Fire now");
+        // "Fire now" tells the panel, which commits the drive at once.
+        assert!(press(&context, &mut gate, &mut preview, "Fire now"));
         assert_eq!(gate.unwrap().start, 7.25);
         press(&context, &mut gate, &mut preview, "Shape");
         assert!(preview.open);
@@ -816,9 +854,10 @@ mod tests {
 
     /// Paused, a pulse fires where the run stands. Running, it starts past
     /// the steps already queued and a quarter second of wall time on, at the
-    /// speed the run goes.
+    /// speed the run goes, and an edit that takes a new generation later
+    /// again by as long as the last handoff took.
     #[test]
-    fn fire_now_starts_past_the_queued_steps_while_running() {
+    fn fire_now_starts_past_the_queued_steps_and_the_handoff_while_running() {
         let mut state = Playground {
             sim_time_offset: 3.0,
             sim_time_step: 1.0e-3,
@@ -826,12 +865,38 @@ mod tests {
             uploaded_time_step: 2.0e-3,
             step_backlog: 40,
             wave_running: false,
+            last_handoff: Some(HandoffRecord {
+                prepare_ms: 250.0,
+                pack_ms: 60.0,
+                drain_ms: 30.0,
+                upload_ms: 60.0,
+                timing: TopologyPreparationTiming::default(),
+                action: TopologyMeshUpdateAction::Reuse,
+                operator_reused: false,
+                adapted: false,
+                transferred: true,
+                exact_nodes: 0,
+                fresh: false,
+                degrees_of_freedom: 0,
+                triangles: 0,
+                carve: None,
+                repair_fallback: None,
+            }),
             ..Playground::default()
         };
-        assert_eq!(state.pulse_fire_time(), 3.5);
+        assert_eq!(
+            state.fire_times(),
+            FireTimes {
+                live: 3.5,
+                handoff: 3.5
+            }
+        );
         state.wave_running = true;
         state.editor.document.presentation.simulation_speed = 2.0;
-        assert!((state.pulse_fire_time() - (3.5 + 40.0 * 2.0e-3 + 0.5)).abs() < 1.0e-12);
+        let fire = state.fire_times();
+        let live = 3.5 + 40.0 * 2.0e-3 + 0.5;
+        assert!((fire.live - live).abs() < 1.0e-12);
+        assert!((fire.handoff - (live + 0.8)).abs() < 1.0e-12);
     }
 
     /// The shape window's spectrum of a pulsed signal, or nothing for one

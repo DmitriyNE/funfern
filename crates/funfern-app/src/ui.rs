@@ -431,6 +431,13 @@ struct HandoffRecord {
     repair_fallback: Option<String>,
 }
 
+impl HandoffRecord {
+    /// Wall seconds from the request to the generation's commit.
+    fn seconds(&self) -> f64 {
+        (self.prepare_ms + self.pack_ms + self.drain_ms + self.upload_ms) / 1000.0
+    }
+}
+
 struct Uploading {
     token: TopologyToken,
     generation: u64,
@@ -1196,13 +1203,13 @@ fn material_scalar_editor(
     }
 }
 
-/// `fire_at` is when "Fire now" starts a driven face's pulse, and `preview`
+/// `fire` is when "Fire now" starts a driven face's pulse, and `preview`
 /// the shape window its "Shape" opens.
 fn edit_face_condition(
     ui: &mut egui::Ui,
     physics: PhysicsModel,
     condition: &mut FaceBoundaryCondition,
-    fire_at: f64,
+    fire: FireTimes,
     preview: &mut PulsePreview,
 ) -> bool {
     let before = *condition;
@@ -1246,23 +1253,23 @@ fn edit_face_condition(
             );
         }
         FaceBoundaryCondition::Neumann { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Flux, fire_at, preview)
+            edit_time_signal(ui, signal, SignalUse::Flux, fire, preview)
         }
         FaceBoundaryCondition::Dirichlet { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Field, fire_at, preview)
+            edit_time_signal(ui, signal, SignalUse::Field, fire, preview)
         }
         _ => {}
     }
     *condition != before
 }
 
-/// `fire_at` is when "Fire now" starts a driven wall's pulse, and `preview`
+/// `fire` is when "Fire now" starts a driven wall's pulse, and `preview`
 /// the shape window its "Shape" opens.
 fn edit_outer_condition(
     ui: &mut egui::Ui,
     physics: PhysicsModel,
     condition: &mut OuterBoundaryCondition,
-    fire_at: f64,
+    fire: FireTimes,
     preview: &mut PulsePreview,
 ) -> bool {
     let before = *condition;
@@ -1289,10 +1296,10 @@ fn edit_outer_condition(
     }
     match condition {
         OuterBoundaryCondition::Neumann { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Flux, fire_at, preview)
+            edit_time_signal(ui, signal, SignalUse::Flux, fire, preview)
         }
         OuterBoundaryCondition::Dirichlet { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Field, fire_at, preview)
+            edit_time_signal(ui, signal, SignalUse::Field, fire, preview)
         }
         _ => {}
     }
