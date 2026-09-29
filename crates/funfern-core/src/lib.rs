@@ -13,6 +13,7 @@ mod mesh;
 mod portable;
 mod predicates;
 mod probe;
+mod source_reach;
 mod spline;
 mod topology;
 mod topology_scene;

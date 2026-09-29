@@ -336,8 +336,10 @@ Law-only plan changes reuse the existing mesh. The application cutover waits for
 the remaining numerical consumers so one transaction cannot mix label models.
 GPU upload no longer caps a node at two incident regions: host-filtered source
 weights plus a per-node source-membership flag support arbitrary junction degree
-without increasing the portable WebGPU binding count. Unified separated traces
-also participate in the source's mesh-path distance calculation. Volume sources
+without increasing the portable WebGPU binding count. The point source drives
+only the nodes it sees in a straight line, at their distance: nothing behind a
+wall, any element edge no other element shares, so nothing beyond a baffle, a
+separated curve or a hole (2026-09-29). Volume sources
 now compile from active plan regions and the shared material library, retain their
 resumable snapshot semantics, and use sparse GPU channel/weight records so every
 driven face at a multi-region junction contributes without a two-channel cap. The

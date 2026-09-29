@@ -4673,7 +4673,10 @@ mod tests {
     /// The double-slit gallery claim. Slits 0.5 apart at wavelength 1/3 put
     /// the far field's zeros at sin θ = 1/3 and its side lobes at
     /// sin θ = 2/3: 19.5° and 41.8°. The screen 0.85 behind the slits is in
-    /// the near zone, so its fringes sit a little inside those angles.
+    /// the near zone, so its fringes sit a little inside those angles. Nothing
+    /// leaves the box but through the slits: straight behind it the far field
+    /// holds 0.023 of the centre, where it held 0.25 while the source's
+    /// Gaussian reached through the back wall, 1.4 widths away.
     #[test]
     fn the_double_slit_draws_its_fringes_on_the_screen_and_in_the_far_field() {
         let scene = Harmonic::run(&double_slit(), 0.08, 6.0, 3.0, 3.0);
@@ -4688,7 +4691,7 @@ mod tests {
             assert!(lobe > 0.5, "{side}: the side lobe holds {lobe:.3}");
         }
         let behind = scene.far_field(180.0) / centre;
-        assert!(behind < 0.35, "{behind:.3} went back round the box");
+        assert!(behind < 0.05, "{behind:.3} went back round the box");
         let screen = scene.along(Point2::new(0.85, 0.0), Point2::new(0.85, 0.85), 18);
         let dark = screen[5..9].iter().cloned().fold(f64::MAX, f64::min) / screen[0];
         let bright = screen[12..16].iter().cloned().fold(0.0, f64::max) / screen[0];

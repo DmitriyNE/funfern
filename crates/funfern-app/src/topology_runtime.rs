@@ -1655,17 +1655,14 @@ fn compile_canonical_forcing(
     let mut forcing =
         CanonicalForcing::from_legacy_boundaries(canonical, quadratic, BOUNDARY_SOURCE_ANCHOR_TIME)
             .map_err(|error| error.to_string())?;
-    let mut membership = vec![false; canonical.degrees_of_freedom()];
-    for (triangle, nodes) in mesh.triangles.iter().zip(canonical.element_nodes()) {
-        if triangle.region == point.region {
-            for node in nodes {
-                membership[*node as usize] = true;
-            }
-        }
-    }
+    let elements = mesh
+        .triangles
+        .iter()
+        .map(|triangle| triangle.region == point.region)
+        .collect::<Vec<_>>();
     forcing
         .push_source(
-            CanonicalForcing::legacy_point_source(canonical, point, &membership, 0.0)
+            CanonicalForcing::point_source(canonical, point, &elements, 0.0)
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;

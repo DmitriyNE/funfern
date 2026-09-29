@@ -16324,3 +16324,93 @@ outgoing trace costs: the trace's dense cyclic Jacobi eigensolve.
   `EIGEN_MAXIMUM_ITERATIONS`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — A point source drives only its side of a wall
+
+- **Reported:** in the double slit the source partly falls out of its box
+  and radiates behind it; faint, but the far field is drawn over 40 dB.
+- **Cause.** The canonical point source masked its Gaussian by region
+  alone and read every node at its straight-line distance, so it reached
+  through walls. The double slit's source sits 0.07, 1.4 widths, in front of
+  the box's black back wall, and about 8% of its load drove the wall's outer
+  face and the space behind it. That was most of the 0.25 of the centre the
+  far field held at 180°, which the 2026-09-25 entry put down to diffraction
+  round the screen's ends. The old device code had switched to mesh-path
+  distances when baffles were present (2026-09-13); the canonical forcing
+  never took that over. The only other gallery scene with a wall in reach
+  was the acoustic whispering gallery, whose source 1.7 widths inside the
+  arc drove 3% of its load on the arc's outer face. Every other source is at
+  least 7.5 widths from a wall.
+- **Change.** `point_source_squared_distances`, in a new
+  `funfern-core/src/source_reach.rs`:
+  - A wall is an element edge no other element shares: a face of a baffle,
+    a separated curve or a thin gap, a hole's rim, or the outer boundary.
+    Walls split their nodes, so the two faces are different nodes at one
+    place.
+  - A node is seen when no wall properly crosses the segment from the
+    source to it (exact `orient2d`), when the segment passes through no
+    point a wall has split, and, for a node on a wall, when the source lies
+    in front of that node's face: the direction to it points into one of the
+    node's elements.
+  - A node seen keeps `|x − p|²` exactly, and nothing hidden is driven, the
+    shadow of a free tip included. A path round the tip, along the mesh from
+    the seen nodes, was built first and dropped: in the gallery it reached
+    nothing, since no tip is within nine widths of a source, and for a wide
+    source behind long walls it took most of the time.
+  - Nothing is driven beyond nine widths, where `exp(−81/2) ≈ 2.6e-18` is
+    under the last bit of the peak. Before, the canonical source kept its
+    tails and the old device code cut at six.
+  - Walls and split points are filed under pseudo-angle bins as seen from
+    the source, so a node tests only those in its direction.
+- **`CanonicalForcing::legacy_point_source` is now `point_source`.** "Legacy"
+  named its drive, the integral of a version-22 acceleration, not an old
+  path, and it is the only point source. It takes the region's element mask.
+  Support stays every node of the region wherever the source sits, so a
+  drag still patches the device's weights.
+- **Not the old device code's mesh path.** It read every node at its path
+  along element nodes once a baffle was present, which overstates distance.
+  On the five scenes with a wall it would have cut the source's
+  load by 9-12% and moved a node's weight by up to 0.18 of the peak:
+  obstacle over a mirror 0.915, double slit 0.909, obstacle array 0.906, drum
+  0.882, acoustic whispering gallery 0.909. `wave_gpu::forcing_weights` is
+  left as it was: only `update_source`, `inject_pulse` and `create_buffers`
+  reach it, and only tests reach those.
+- **Holes block too.** The old device code took paths only for baffle
+  labels, so its Gaussian could jump across a hole. No gallery source is
+  within 7.5 widths of one.
+- **Behaviour at a tip.** A source near a baffle's free end now has a hard
+  shadow behind it; the old device code's path gave the shadow a tail.
+- **Measured** at edge 0.08, from the scene's own far-field contour:
+
+  | Double slit | Before | After |
+  | --- | --- | --- |
+  | 180°, of the centre | 0.25 | 0.023 |
+  | worst behind the box | −11.3 dB | −22.1 dB, round the screen's ends near 120° |
+  | zeros at ±19.5° | 0.068 | 0.092, 0.094 |
+  | side lobes at ±41.8° | 0.65 | 0.654, 0.656 |
+  | screen: dark, bright fringe | 0.308, 0.700 | 0.310, 0.693 |
+
+  In the acoustic whispering gallery, the far wall hears 3.903× the centre
+  (3.9 before) and 0.701 without the wall.
+- **Cost**, at 137k DOFs with three baffles and a load average of 20,
+  against 0.43 ms for the plain Gaussian: 2.6 ms at width 0.05 and 11.4 ms at
+  widths 0.2 and 1.0, paid only at preparation. Testing every node against
+  every wall took 2.4 s at width 0.2; with the dropped path search the wide
+  widths took 50-60 ms (both under a load average of 130-200).
+- **Tests:**
+  - `a_source_drives_only_its_side_of_a_baffle`: straight-line distances
+    bit for bit on the open side, one face of each pair and nothing behind.
+  - `a_free_tips_shadow_is_not_driven`: nothing in the shadow, and
+    straight-line distances past the tip and along the line it grazes.
+  - `a_source_without_walls_keeps_the_plain_gaussian_within_its_reach`,
+    which also checks the region's elements.
+  - `a_hole_hides_its_far_side`: nothing behind it.
+  - The double slit's 180° bound tightens from 0.35 to 0.05, and its doc
+    says why.
+- **Docs.** The `docs/plan.md` source line.
+- **Device.** `canonical_gpu_long_run` at 400 steps against the reference:
+  double slit Q 1.6e-6, b 1.4e-6; acoustic whispering gallery Q 1.5e-6,
+  b 1.7e-6. `canonical_gpu_temporal_live_source`, which patches the weights
+  of a moved source, exits 0.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -11,6 +11,7 @@ use crate::{
     MaterialFrame, OuterBoundaryCondition, OuterSide, OwnedTopologyWaveModel, PhysicsModel, Point2,
     PointSource, QuadraticWaveOperator, Scene, SymmetricTensor2, ThinGapSample, TimeSignal,
     TopologyWaveModel, TriMesh, VolumeSource, WaveError, enriched_quadratic_basis_gradients,
+    source_reach::point_source_squared_distances,
 };
 
 const LOCAL_NODES: usize = 7;
@@ -394,37 +395,49 @@ impl CanonicalForcing {
     }
 
     /// Peak-one Gaussian point carrier multiplied by immutable generation
-    /// reference mass. `membership` is the already resolved physical trace side.
-    pub fn legacy_point_source(
+    /// reference mass, over `elements`, the elements of the source's region.
+    /// It drives only the nodes `point_source_squared_distances` finds it
+    /// sees, so nothing behind a wall. Support is every node of those elements
+    /// wherever the source sits, so moving it only reweights it.
+    pub fn point_source(
         operator: &CanonicalWaveOperator,
         source: PointSource,
-        membership: &[bool],
+        elements: &[bool],
         anchor_time: f64,
     ) -> Result<CanonicalSource, WaveError> {
-        if !source.valid() || membership.len() != operator.degrees_of_freedom() {
+        if !source.valid() || elements.len() != operator.element_nodes().len() {
             return Err(WaveError::Unsupported(
-                "a volume source does not match the generation it drives",
+                "a point source does not match the generation it drives",
             ));
         }
-        let variance = source.width * source.width;
-        let weights = operator
-            .node_points()
+        let mut support = vec![false; operator.degrees_of_freedom()];
+        for (nodes, included) in operator.element_nodes().iter().zip(elements) {
+            if *included {
+                for node in nodes {
+                    support[*node as usize] = true;
+                }
+            }
+        }
+        let weights = if source.enabled {
+            let variance = source.width * source.width;
+            point_source_squared_distances(
+                operator.node_points(),
+                operator.element_nodes(),
+                elements,
+                source.position,
+                source.width,
+            )
             .iter()
             .zip(operator.primary_mass())
-            .zip(membership)
-            .map(|((point, mass), included)| {
-                if *included && source.enabled {
-                    let delta = *point - source.position;
-                    mass * (-0.5 * delta.dot(delta) / variance).exp()
-                } else {
-                    0.0
-                }
-            })
-            .collect();
+            .map(|(squared, mass)| mass * (-0.5 * squared / variance).exp())
+            .collect()
+        } else {
+            vec![0.0; operator.degrees_of_freedom()]
+        };
         CanonicalSource::new_with_support(
             operator,
             weights,
-            membership.to_vec(),
+            support,
             CanonicalRateDrive::legacy(source.signal, anchor_time)?,
         )
     }
@@ -5651,6 +5664,7 @@ mod tests {
     #[test]
     fn point_source_support_is_structural_across_gaussian_underflow() {
         let (_, operator) = compile(&Scene::default());
+        let elements = vec![true; operator.element_nodes().len()];
         let membership = vec![true; operator.degrees_of_freedom()];
         let first_point = operator.node_points()[0];
         let second_node = operator
@@ -5665,12 +5679,11 @@ mod tests {
             ..PointSource::default()
         };
         let first =
-            CanonicalForcing::legacy_point_source(&operator, source(first_point), &membership, 0.0)
-                .unwrap();
-        let second = CanonicalForcing::legacy_point_source(
+            CanonicalForcing::point_source(&operator, source(first_point), &elements, 0.0).unwrap();
+        let second = CanonicalForcing::point_source(
             &operator,
             source(operator.node_points()[second_node]),
-            &membership,
+            &elements,
             0.0,
         )
         .unwrap();
