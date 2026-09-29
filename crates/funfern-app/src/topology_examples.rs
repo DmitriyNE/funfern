@@ -4617,6 +4617,7 @@ mod tests {
                         amplitude_bound: ScalarField::constant(1.0e3),
                     },
                     drive: TimeDrive::None,
+                    gate: None,
                 },
             });
             // The primary row's own channel: E in TM, H in TE, and the

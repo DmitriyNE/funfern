@@ -167,6 +167,7 @@ fn main() -> AppExit {
             law: DampingLaw {
                 rate: RateLaw::Constant,
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
         scene.materials[0].magnetic_loss = Some(LossChannel {
@@ -174,6 +175,7 @@ fn main() -> AppExit {
             law: DampingLaw {
                 rate: RateLaw::Constant,
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
     }

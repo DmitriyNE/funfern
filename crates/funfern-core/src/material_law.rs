@@ -8,7 +8,7 @@
 
 use crate::{
     ElectromagneticPolarization, Material, MaterialCoordinates, MaterialError, MaterialParameter,
-    PhysicsModel, ScalarField,
+    PhysicsModel, PulseEnvelope, PulseTrain, ScalarField,
 };
 
 // ---------------------------------------------------------------------------
@@ -75,6 +75,8 @@ pub enum TimeDrive {
 pub struct CoefficientLaw {
     pub field: FieldLaw,
     pub drive: TimeDrive,
+    /// Pulses the drive runs in, or `None` for a drive that never stops.
+    pub gate: Option<PulseTrain>,
     /// The factor the coefficient takes while the material is switched. The
     /// switch itself is runtime state; this is what it switches to.
     pub alternate: Option<ScalarField>,
@@ -109,6 +111,8 @@ pub enum RateLaw {
 pub struct DampingLaw {
     pub rate: RateLaw,
     pub drive: TimeDrive,
+    /// Pulses the drive runs in, or `None` for a drive that never stops.
+    pub gate: Option<PulseTrain>,
 }
 
 /// One physically named flux-loss channel. `base_rate` has inverse-time units;
@@ -173,6 +177,7 @@ impl CoefficientLaw {
         Self {
             field: FieldLaw::Linear,
             drive: TimeDrive::None,
+            gate: None,
             alternate: None,
             inverted: false,
         }
@@ -219,6 +224,7 @@ impl CoefficientLaw {
             .is_none_or(|factor| constant_passes(factor, parameters, |a| a > 0.0));
         alternate_valid
             && self.drive.valid(parameters)
+            && gate_valid(&self.drive, self.gate)
             && self.field.valid(parameters, self.inverted)
     }
 
@@ -242,6 +248,7 @@ impl CoefficientLaw {
         Ok(Self {
             field: self.field.rename_parameter(old, new)?,
             drive: self.drive.rename_parameter(old, new)?,
+            gate: self.gate,
             alternate: self
                 .alternate
                 .as_ref()
@@ -260,6 +267,7 @@ impl CoefficientLaw {
         Ok(CoefficientLawValues {
             field: self.field.evaluate_at(coordinates, parameters)?,
             drive: self.drive.evaluate(parameters)?,
+            gate: self.gate,
             alternate: self
                 .alternate
                 .as_ref()
@@ -563,6 +571,7 @@ impl DampingLaw {
         Self {
             rate: RateLaw::Constant,
             drive: TimeDrive::None,
+            gate: None,
         }
     }
 
@@ -571,7 +580,9 @@ impl DampingLaw {
     }
 
     pub fn valid(&self, parameters: &[MaterialParameter]) -> bool {
-        self.drive.valid(parameters) && self.rate.valid(parameters)
+        self.drive.valid(parameters)
+            && gate_valid(&self.drive, self.gate)
+            && self.rate.valid(parameters)
     }
 
     pub fn parameter_names(&self) -> impl Iterator<Item = &str> {
@@ -594,6 +605,7 @@ impl DampingLaw {
         Ok(Self {
             rate: self.rate.rename_parameter(old, new)?,
             drive: self.drive.rename_parameter(old, new)?,
+            gate: self.gate,
         })
     }
 
@@ -608,6 +620,7 @@ impl DampingLaw {
         Ok(DampingLawValues {
             rate: self.rate.evaluate_at(coordinates, parameters)?,
             drive: self.drive.evaluate(parameters)?,
+            gate: self.gate,
         })
     }
 
@@ -824,6 +837,12 @@ impl RestoringLaw {
     }
 }
 
+/// A gate needs a drive to gate: on no drive it would be a law that looks
+/// timed and does nothing.
+fn gate_valid(drive: &TimeDrive, gate: Option<PulseTrain>) -> bool {
+    gate.is_none_or(|gate| !drive.is_none() && gate.valid())
+}
+
 fn origin() -> MaterialCoordinates {
     MaterialCoordinates {
         x: 0.0,
@@ -908,6 +927,7 @@ pub enum TimeDriveValues {
 pub struct CoefficientLawValues {
     pub field: FieldLawValues,
     pub drive: TimeDriveValues,
+    pub gate: Option<PulseTrain>,
     pub alternate: Option<f64>,
     pub inverted: bool,
 }
@@ -919,6 +939,7 @@ pub struct CoefficientLawValues {
 pub struct DampingLawValues {
     pub rate: RateLawValues,
     pub drive: TimeDriveValues,
+    pub gate: Option<PulseTrain>,
 }
 
 /// Bounded carrier phase state for one material drive.
@@ -1698,6 +1719,51 @@ impl TimeDriveValues {
             return Err(MaterialError::InvalidValue);
         }
         let carrier_phase = runtime.carrier_phase(self, time)?;
+        self.multiplier_and_rate_at_phase(carrier_phase, coordinates)
+    }
+
+    /// The multiplier and its rate under `gate`: the drive's swing `m − 1`
+    /// scaled by the envelope, and exactly one between pulses. Its carrier
+    /// counts from the pulse's centre, as a pulsed signal's does, so every
+    /// pulse of a train is the same and none has a running carrier to keep;
+    /// the runtime anchor serves only a drive with no gate. The envelope
+    /// stays within ±1, so the multiplier never leaves the range the drive
+    /// sweeps ungated, and the step bound and every admission taken on that
+    /// range hold unchanged.
+    pub fn gated_multiplier_and_rate(
+        self,
+        gate: Option<PulseTrain>,
+        time: f64,
+        coordinates: MaterialCoordinates,
+        runtime: TimeDriveRuntime,
+    ) -> Result<(f64, f64), MaterialError> {
+        let Some(gate) = gate else {
+            return self.multiplier_and_rate_with_runtime(time, coordinates, runtime);
+        };
+        if !time.is_finite() || !coordinates.x.is_finite() || !coordinates.y.is_finite() {
+            return Err(MaterialError::InvalidValue);
+        }
+        let Some(from_centre) = gate.seconds_from_centre(time) else {
+            return Ok((1.0, 0.0));
+        };
+        let carrier_phase = reduce_phase(
+            self.authored_phase_radians()
+                + std::f64::consts::TAU * self.frequency_hz() * from_centre,
+        );
+        let (multiplier, rate) = self.multiplier_and_rate_at_phase(carrier_phase, coordinates)?;
+        let (envelope, envelope_rate) = gate.envelope.value_and_rate(from_centre);
+        finite_positive_with_rate(
+            1.0 + envelope * (multiplier - 1.0),
+            envelope_rate * (multiplier - 1.0) + envelope * rate,
+        )
+    }
+
+    /// The multiplier and its rate at a given carrier phase.
+    fn multiplier_and_rate_at_phase(
+        self,
+        carrier_phase: f64,
+        coordinates: MaterialCoordinates,
+    ) -> Result<(f64, f64), MaterialError> {
         let angular_frequency = std::f64::consts::TAU * self.frequency_hz();
         match self {
             Self::None => Ok((1.0, 0.0)),
@@ -1771,7 +1837,7 @@ impl TimeDriveValues {
         }
     }
 
-    /// The multiplier's range over a cycle.
+    /// The multiplier's range over a cycle, which a gate keeps it within.
     pub fn range(self) -> (f64, f64) {
         let depth = self.depth();
         (1.0 - depth, 1.0 + depth)
@@ -1829,7 +1895,7 @@ impl CoefficientLawValues {
     ) -> Result<(f64, f64), MaterialError> {
         let (drive, drive_rate) =
             self.drive
-                .multiplier_and_rate_with_runtime(time, coordinates, drive_runtime)?;
+                .gated_multiplier_and_rate(self.gate, time, coordinates, drive_runtime)?;
         let (blend, blend_rate) = switch_runtime.blend_and_rate(time)?;
         let switch = self
             .alternate
@@ -1896,10 +1962,10 @@ impl DampingLawValues {
         coordinates: MaterialCoordinates,
         drive_runtime: TimeDriveRuntime,
     ) -> Result<f64, MaterialError> {
-        let value = self.rate.multiplier(field)
-            * self
-                .drive
-                .multiplier_with_runtime(time, coordinates, drive_runtime)?;
+        let (drive, _) =
+            self.drive
+                .gated_multiplier_and_rate(self.gate, time, coordinates, drive_runtime)?;
+        let value = self.rate.multiplier(field) * drive;
         if value.is_finite() && value >= 0.0 {
             Ok(value)
         } else {
@@ -2132,6 +2198,7 @@ pub fn migrate_legacy_material_loss(
         law: DampingLaw {
             rate: RateLaw::Constant,
             drive: TimeDrive::None,
+            gate: None,
         },
     };
     match physics {
@@ -2182,7 +2249,8 @@ pub fn effective_law_lines(
         if let Some(text) = rate_text(&loss.law.rate, field_name, parameters, style) {
             factors.push(text);
         }
-        if let Some(text) = drive_text(&loss.law.drive, parameters, style) {
+        if let Some(text) = drive_text(&loss.law.drive, loss.law.gate.is_some(), parameters, style)
+        {
             factors.push(text);
         }
         let arguments = arguments(
@@ -2202,7 +2270,13 @@ pub fn effective_law_lines(
         } else {
             format!("{base} · {}", factors.join(" · "))
         };
-        lines.push(format!("{head} = {product}"));
+        match loss.law.gate {
+            Some(gate) => lines.push(format!(
+                "{head} = {product} — g: {}",
+                pulse_train_text(gate)
+            )),
+            None => lines.push(format!("{head} = {product}")),
+        }
     }
     if let Some(text) = restoring_text(&material.restoring, names.primary_field, parameters, style)
     {
@@ -2266,7 +2340,7 @@ fn coefficient_line(
         return None;
     }
     let mut factors = Vec::new();
-    if let Some(text) = drive_text(&law.drive, parameters, style) {
+    if let Some(text) = drive_text(&law.drive, law.gate.is_some(), parameters, style) {
         factors.push(text);
     }
     if let Some(text) = field_text(&law.field, field, parameters, style) {
@@ -2304,6 +2378,9 @@ fn coefficient_line(
         } else {
             line.push_str(&format!(" — switched: ×{factor}"));
         }
+    }
+    if let Some(gate) = law.gate {
+        line.push_str(&format!(" — g: {}", pulse_train_text(gate)));
     }
     Some(line)
 }
@@ -2349,12 +2426,16 @@ fn field_text(
     }
 }
 
+/// A drive's multiplier. Under a gate its swing is scaled by the envelope `g`
+/// and its carrier counts from each pulse's centre, `τ`.
 fn drive_text(
     drive: &TimeDrive,
+    gated: bool,
     parameters: &[MaterialParameter],
     style: LawTextStyle,
 ) -> Option<String> {
     let text = |value: &ScalarField| scalar_text(value, parameters, style);
+    let (g, t) = if gated { ("g·", "τ") } else { ("", "t") };
     match drive {
         TimeDrive::None => None,
         TimeDrive::ParametricPump {
@@ -2362,7 +2443,7 @@ fn drive_text(
             frequency_hz,
             phase_radians,
         } => Some(format!(
-            "(1 + {}·cos(2π·{}·t{}))",
+            "(1 + {}·{g}cos(2π·{}·{t}{}))",
             text(depth),
             text(frequency_hz),
             phase_text(phase_radians, parameters, style)
@@ -2373,7 +2454,7 @@ fn drive_text(
             phase_radians,
             sharpness,
         } => Some(format!(
-            "(1 + {}·square(2π·{}·t{}; {}))",
+            "(1 + {}·{g}square(2π·{}·{t}{}; {}))",
             text(depth),
             text(frequency_hz),
             phase_text(phase_radians, parameters, style),
@@ -2386,7 +2467,7 @@ fn drive_text(
             wavenumber,
             angle_radians,
         } => Some(format!(
-            "(1 + {}·cos(2π·{}·t − {}·x∠{}{}))",
+            "(1 + {}·{g}cos(2π·{}·{t} − {}·x∠{}{}))",
             text(depth),
             text(frequency_hz),
             text(wavenumber),
@@ -2394,6 +2475,28 @@ fn drive_text(
             phase_text(phase_radians, parameters, style)
         )),
     }
+}
+
+/// A gate in words: its envelope, when the first pulse starts and how often
+/// the train repeats.
+pub fn pulse_train_text(train: PulseTrain) -> String {
+    let shape = match train.envelope {
+        PulseEnvelope::FlatTop { duration, edge } => format!(
+            "flat top {} s, edges {} s",
+            number_text(duration),
+            number_text(edge)
+        ),
+        PulseEnvelope::Gaussian { width } => format!("Gaussian σ = {} s", number_text(width)),
+        PulseEnvelope::Sinc {
+            bandwidth_hz,
+            lobes,
+        } => format!("sinc {} Hz, {lobes} lobes", number_text(bandwidth_hz)),
+    };
+    let mut text = format!("{shape}, from {} s", number_text(train.start));
+    if train.repeat > 0.0 {
+        text.push_str(&format!(", every {} s", number_text(train.repeat)));
+    }
+    text
 }
 
 fn phase_text(
@@ -2715,6 +2818,7 @@ mod tests {
                 frequency_hz: 2.0,
                 phase_radians: 0.0,
             },
+            gate: None,
             alternate: Some(1.6),
             inverted: false,
         };
@@ -2803,6 +2907,7 @@ mod tests {
                 frequency_hz: constant(2.0),
                 phase_radians: constant(0.0),
             },
+            gate: None,
             alternate: Some(ScalarField::formula("1 + chi").unwrap()),
             inverted: false,
         };
@@ -2848,6 +2953,7 @@ mod tests {
                     amplitude_bound: Some(constant(0.1)),
                 },
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
         material.restoring = RestoringLaw::KleinGordon {
@@ -3082,6 +3188,7 @@ mod tests {
         let direct = CoefficientLawValues {
             field: FieldLawValues::Linear,
             drive: TimeDriveValues::None,
+            gate: None,
             alternate: Some(4.0),
             inverted: false,
         };
@@ -3116,6 +3223,7 @@ mod tests {
                 frequency_hz: 0.7,
                 phase_radians: 0.3,
             },
+            gate: None,
             alternate: Some(2.5),
             inverted: true,
         };
@@ -3139,6 +3247,187 @@ mod tests {
         assert_eq!(switch.blend_and_rate(2.0).unwrap().1, 0.0);
     }
 
+    /// One pulse train under each envelope, every one starting at 0.3 s and
+    /// repeating every 1.5 s.
+    fn trains() -> [PulseTrain; 3] {
+        [
+            PulseEnvelope::FlatTop {
+                duration: 0.8,
+                edge: 0.2,
+            },
+            PulseEnvelope::Gaussian { width: 0.1 },
+            PulseEnvelope::Sinc {
+                bandwidth_hz: 6.0,
+                lobes: 4,
+            },
+        ]
+        .map(|envelope| PulseTrain {
+            envelope,
+            start: 0.3,
+            repeat: 1.5,
+        })
+    }
+
+    #[test]
+    fn a_gated_drive_rests_between_pulses_and_stays_within_its_range() {
+        let drives = [
+            TimeDriveValues::ParametricPump {
+                depth: 0.3,
+                frequency_hz: 2.5,
+                phase_radians: 0.4,
+            },
+            TimeDriveValues::TimeCrystal {
+                depth: 0.25,
+                frequency_hz: 3.0,
+                phase_radians: 0.1,
+                sharpness: 3.0,
+            },
+            TimeDriveValues::TravellingModulation {
+                depth: 0.2,
+                frequency_hz: 2.0,
+                phase_radians: 0.3,
+                wavenumber: 1.5,
+                angle_radians: 0.7,
+            },
+        ];
+        let at = MaterialCoordinates {
+            x: 0.3,
+            y: -0.2,
+            r: 0.0,
+            theta: 0.0,
+        };
+        let epsilon = 1.0e-6;
+        for drive in drives {
+            let runtime = TimeDriveRuntime::authored(drive).unwrap();
+            let (low, high) = drive.range();
+            for train in trains() {
+                let gated = |time: f64| {
+                    drive
+                        .gated_multiplier_and_rate(Some(train), time, at, runtime)
+                        .unwrap()
+                };
+                let half = 0.5 * train.envelope.duration();
+                let mut inside = 0;
+                for step in 0..4000 {
+                    let time = -0.5 + 4.5 * f64::from(step) / 4000.0;
+                    let (multiplier, rate) = gated(time);
+                    let Some(from_centre) = train.seconds_from_centre(time) else {
+                        assert_eq!((multiplier, rate), (1.0, 0.0), "{drive:?} at {time}");
+                        continue;
+                    };
+                    inside += 1;
+                    assert!(
+                        (low - 1.0e-12..=high + 1.0e-12).contains(&multiplier),
+                        "{drive:?} under {train:?} at {time}: {multiplier}"
+                    );
+                    // Each pulse of the train is the same.
+                    let (next, next_rate) = gated(time + train.repeat);
+                    assert!((next - multiplier).abs() < 1.0e-9);
+                    assert!((next_rate - rate).abs() < 1.0e-6 * (1.0 + rate.abs()));
+                    if from_centre.abs() < half - 1.0e-3 {
+                        let difference =
+                            (gated(time + epsilon).0 - gated(time - epsilon).0) / (2.0 * epsilon);
+                        assert!(
+                            (difference - rate).abs() < 1.0e-5 * (1.0 + rate.abs()),
+                            "{drive:?} under {train:?} at {time}: {rate} against {difference}"
+                        );
+                    }
+                }
+                assert!(inside > 1000, "{train:?} was sampled {inside} times");
+            }
+        }
+    }
+
+    /// At 0 Hz a gated pump is a temporal slab: the coefficient rises by the
+    /// depth under the envelope and returns, `1 + d·g`.
+    #[test]
+    fn a_gated_pump_at_zero_hertz_is_a_temporal_slab() {
+        let drive = TimeDriveValues::ParametricPump {
+            depth: 0.4,
+            frequency_hz: 0.0,
+            phase_radians: 0.0,
+        };
+        let runtime = TimeDriveRuntime::authored(drive).unwrap();
+        for train in trains() {
+            for time in [0.2, 0.5, 0.7, 1.0, 1.6, 2.2] {
+                let envelope = train
+                    .seconds_from_centre(time)
+                    .map_or((0.0, 0.0), |tau| train.envelope.value_and_rate(tau));
+                let (multiplier, rate) = drive
+                    .gated_multiplier_and_rate(Some(train), time, origin(), runtime)
+                    .unwrap();
+                assert!((multiplier - (1.0 + 0.4 * envelope.0)).abs() < 1.0e-15);
+                assert!((rate - 0.4 * envelope.1).abs() < 1.0e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn a_gate_needs_a_drive_and_a_train_whose_pulses_do_not_overlap() {
+        let [train, ..] = trains();
+        let pumped = CoefficientLaw {
+            drive: TimeDrive::ParametricPump {
+                depth: constant(0.2),
+                frequency_hz: constant(1.0),
+                phase_radians: constant(0.0),
+            },
+            gate: Some(train),
+            ..CoefficientLaw::linear()
+        };
+        assert!(pumped.valid(&[]));
+        let undriven = CoefficientLaw {
+            drive: TimeDrive::None,
+            ..pumped.clone()
+        };
+        assert!(!undriven.valid(&[]));
+        let overlapping = CoefficientLaw {
+            gate: Some(PulseTrain {
+                repeat: 0.5,
+                ..train
+            }),
+            ..pumped.clone()
+        };
+        assert!(!overlapping.valid(&[]));
+        let loss = DampingLaw {
+            drive: pumped.drive.clone(),
+            gate: Some(train),
+            ..DampingLaw::constant()
+        };
+        assert!(loss.valid(&[]));
+        assert!(
+            !DampingLaw {
+                gate: Some(train),
+                ..DampingLaw::constant()
+            }
+            .valid(&[])
+        );
+        // A loss drive under a gate moves the rate it multiplies.
+        let values = loss.evaluate_at(origin(), &[]).unwrap();
+        let runtime = TimeDriveRuntime::authored(values.drive).unwrap();
+        assert_eq!(values.multiplier(0.0, 0.1, origin(), runtime).unwrap(), 1.0);
+        assert!((values.multiplier(0.0, 0.7, origin(), runtime).unwrap() - 1.2).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn a_gated_law_says_what_gates_it() {
+        let [train, ..] = trains();
+        let mut material = Material::default_medium();
+        material.mass_law.drive = TimeDrive::ParametricPump {
+            depth: constant(0.2),
+            frequency_hz: constant(1.5),
+            phase_radians: constant(0.0),
+        };
+        material.mass_law.gate = Some(train);
+        let lines = effective_law_lines(&material, PhysicsModel::Mechanical, LawTextStyle::Numbers);
+        assert_eq!(
+            lines,
+            [
+                "ρ(t) = ρ₀ · (1 + 0.2·g·cos(2π·1.5·τ)) — g: flat top 0.8 s, edges 0.2 s, from 0.3 s, \
+              every 1.5 s"
+            ]
+        );
+    }
+
     #[test]
     fn evaluated_loss_keeps_its_stage_time_drive() {
         let law = DampingLaw {
@@ -3148,6 +3437,7 @@ mod tests {
                 frequency_hz: constant(1.0),
                 phase_radians: constant(0.0),
             },
+            gate: None,
         };
         let values = law.evaluate_at(origin(), &[]).unwrap();
         let runtime = TimeDriveRuntime::authored(values.drive).unwrap();
@@ -3278,6 +3568,7 @@ mod tests {
                 frequency_hz: constant(6.0),
                 phase_radians: constant(0.0),
             },
+            gate: None,
             alternate: Some(constant(1.6)),
             inverted: false,
         };
@@ -3322,6 +3613,7 @@ mod tests {
                     saturation: constant(1.5),
                 },
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
         material.magnetic_loss = Some(LossChannel {

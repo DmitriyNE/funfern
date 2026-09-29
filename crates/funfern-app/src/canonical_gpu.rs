@@ -3425,6 +3425,7 @@ fn pack_temporal_loss(
             } else {
                 TimeDriveValues::None
             },
+            gate: loss.drive.and(loss.law.gate),
             alternate: None,
             inverted: false,
         },
@@ -3477,6 +3478,11 @@ fn pack_temporal_coefficient(
     runtime_index: u32,
     reference: f64,
 ) -> Result<[GpuCanonicalTableWord; TEMPORAL_COEFFICIENT_WORDS], CanonicalGpuBuildError> {
+    if sample.law.gate.is_some() {
+        return Err(CanonicalGpuBuildError::Unrepresentable(
+            "a gated material drive, which runs on the CPU reference only",
+        ));
+    }
     let kind = temporal_drive_kind(sample.law.drive);
     let (depth, angular_frequency, shape, spatial_phase) = match sample.law.drive {
         TimeDriveValues::None => (0.0, 0.0, 0.0, 0.0),
@@ -7972,6 +7978,7 @@ mod tests {
                     amplitude_bound: ScalarField::constant(10.0),
                 },
                 drive: funfern_core::TimeDrive::None,
+                gate: None,
             },
         });
         let mut fixed_scene = scene.clone();

@@ -2094,6 +2094,7 @@ mod tests {
             law: crate::DampingLaw {
                 rate: crate::RateLaw::Constant,
                 drive: crate::TimeDrive::None,
+                gate: None,
             },
         });
         assert!(lossy.time_invariant());
@@ -2122,6 +2123,7 @@ mod tests {
                     amplitude_bound: ScalarField::constant(10.0),
                 },
                 drive: crate::TimeDrive::None,
+                gate: None,
             },
         });
         assert!(!active.time_invariant());

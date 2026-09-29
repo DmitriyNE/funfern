@@ -79,6 +79,7 @@ fn main() -> AppExit {
             law: DampingLaw {
                 rate: RateLaw::Constant,
                 drive: TimeDrive::None,
+                gate: None,
             },
         };
         scene.materials[0].electric_loss = Some(channel(0.4));

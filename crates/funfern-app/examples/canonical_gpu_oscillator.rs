@@ -104,6 +104,7 @@ fn main() -> AppExit {
                 law: DampingLaw {
                     rate: RateLaw::Constant,
                     drive: TimeDrive::None,
+                    gate: None,
                 },
             }),
             ..Material::default_medium()
@@ -149,6 +150,7 @@ fn main() -> AppExit {
         law: DampingLaw {
             rate: RateLaw::Constant,
             drive: TimeDrive::None,
+            gate: None,
         },
     };
     if compose == "loss" {
@@ -165,6 +167,7 @@ fn main() -> AppExit {
                     amplitude_bound: ScalarField::constant(10.0),
                 },
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
     }

@@ -175,7 +175,7 @@ fn coefficient_response(
     if let Some(text) = field_multiplier(&law.field, field, parameters, detail)? {
         factors.push(text);
     }
-    if let Some(text) = drive_multiplier(&law.drive, parameters, detail)? {
+    if let Some(text) = drive_multiplier(&law.drive, law.gate.is_some(), parameters, detail)? {
         factors.push(text);
     }
     if let Some(alternate) = &law.alternate {
@@ -188,14 +188,20 @@ fn coefficient_response(
         return Ok(base.to_owned());
     }
     let product = factors.join(" · ");
-    if law.inverted {
+    let response = if law.inverted {
         // A single factor already carries its own parentheses.
         if factors.len() == 1 {
-            return Ok(format!("{base} / {product}"));
+            format!("{base} / {product}")
+        } else {
+            format!("{base} / ({product})")
         }
-        return Ok(format!("{base} / ({product})"));
-    }
-    Ok(format!("{base} · {product}"))
+    } else {
+        format!("{base} · {product}")
+    };
+    Ok(match law.gate {
+        Some(gate) => format!("{response}, g: {}", crate::pulse_train_text(gate)),
+        None => response,
+    })
 }
 
 fn field_multiplier(
@@ -228,11 +234,15 @@ fn field_multiplier(
     })
 }
 
+/// A drive's multiplier. Under a gate its swing is scaled by the envelope `g`
+/// and its carrier counts from each pulse's centre, `τ`.
 fn drive_multiplier(
     drive: &TimeDrive,
+    gated: bool,
     parameters: &[MaterialParameter],
     detail: LawSummaryDetail,
 ) -> Result<Option<String>, MaterialError> {
+    let (g, t) = if gated { ("g·", "τ") } else { ("", "t") };
     Ok(match drive {
         TimeDrive::None => None,
         TimeDrive::ParametricPump {
@@ -240,7 +250,7 @@ fn drive_multiplier(
             frequency_hz,
             phase_radians,
         } => Some(format!(
-            "(1 + {}·cos(2π·{}·t + {}))",
+            "(1 + {}·{g}cos(2π·{}·{t} + {}))",
             scalar(depth, parameters, detail)?,
             scalar(frequency_hz, parameters, detail)?,
             scalar(phase_radians, parameters, detail)?
@@ -253,7 +263,7 @@ fn drive_multiplier(
         } => {
             let sharpness = scalar(sharpness, parameters, detail)?;
             Some(format!(
-                "(1 + {}·tanh({sharpness}·cos(2π·{}·t + {})) / tanh({sharpness}))",
+                "(1 + {}·{g}tanh({sharpness}·cos(2π·{}·{t} + {})) / tanh({sharpness}))",
                 scalar(depth, parameters, detail)?,
                 scalar(frequency_hz, parameters, detail)?,
                 scalar(phase_radians, parameters, detail)?
@@ -266,7 +276,7 @@ fn drive_multiplier(
             wavenumber,
             angle_radians,
         } => Some(format!(
-            "(1 + {}·cos(2π·{}·t − {}·(x·cos {} + y·sin {}) + {}))",
+            "(1 + {}·{g}cos(2π·{}·{t} − {}·(x·cos {} + y·sin {}) + {}))",
             scalar(depth, parameters, detail)?,
             scalar(frequency_hz, parameters, detail)?,
             scalar(wavenumber, parameters, detail)?,

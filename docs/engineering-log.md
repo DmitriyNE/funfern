@@ -16810,3 +16810,52 @@ analyser.
   DOFs.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — Gated material drives in the core, the CPU solver and the file
+
+Material drives get the pulse envelopes signals already have. The user
+agreed the design: the carrier counts from each pulse's centre, gates go on
+loss channels too, and gates are an Advanced setting.
+
+- **One pulse clock.** `PulseTrain` (envelope, start, repeat) takes over the
+  start, repeat and centre arithmetic from `TimeSignal::Pulsed`, which now
+  delegates to it, so a pulsed signal and a gated drive keep the same time.
+- **Laws.** `CoefficientLaw` and `DampingLaw` and their evaluated forms carry
+  `gate: Option<PulseTrain>`. It sits beside the drive rather than inside
+  each `TimeDrive` variant, which would have touched some 140 construction
+  sites for no gain. A gate on no drive, or a train whose pulses overlap, is
+  invalid.
+- **Evaluation.** Under a gate the multiplier is `1 + e(τ)·(m − 1)`, where
+  the carrier counts from the pulse's centre, so every pulse of a train is
+  the same and there is no running carrier to keep. Between pulses it is
+  exactly 1, with a zero rate. The rate is the product rule on the envelope's
+  own `value_and_rate`, so the temporal-work ledger needed nothing else.
+- **No new admission.** Every envelope stays within ±1, the sinc's lobes
+  included, so a gated multiplier never leaves the `[1 − d, 1 + d]` its
+  ungated carrier sweeps. The step bound, the positivity check, the device's
+  range check and the grid filter's reach all hold unchanged. A test samples
+  every carrier under every envelope against that range.
+- **Temporal slab.** At 0 Hz a gated pump is `1 + d·g`: the medium changes
+  for the length of the pulse and then returns.
+- **Text.** The law line writes the gated carrier with `g·` and `τ` and
+  names the gate at its end, for example "— g: flat top 0.8 s, edges 0.2 s,
+  from 0.3 s, every 1.5 s".
+- **File.** A gate is stored beside its drive with the signals' envelope
+  form. A law without one writes no gate key, so files without gates are
+  unchanged and version 22 stands, as it did for pulsed signals.
+- **Device.** The GPU plan refuses a gated drive until the next commit, so a
+  file holding one cannot run with its gate silently dropped.
+- **Tests.**
+  - Every carrier under every envelope stays in range, rests at exactly 1
+    between pulses, repeats exactly, and has a rate that matches a centred
+    difference.
+  - The splitting residual under a flat-top mass gate and a Gaussian
+    stiffness gate falls by 24× when the step halves.
+  - A step outside both pulses does exactly zero temporal work.
+  - A slow Gaussian gate on the mass keeps every mode's action. The energy at
+    the peak is 0.87672 against the predicted `1/√1.3 = 0.87706`; the gap is
+    the adiabatic term in `g''`, about 1e-3. Afterwards the energy is
+    1.00004 of the start, the leapfrog's own wobble.
+  - Gates round-trip through the file on both rows and on a loss channel.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

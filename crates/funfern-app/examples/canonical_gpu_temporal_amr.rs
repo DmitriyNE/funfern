@@ -144,6 +144,7 @@ fn main() -> AppExit {
             law: DampingLaw {
                 rate: RateLaw::Constant,
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
     }

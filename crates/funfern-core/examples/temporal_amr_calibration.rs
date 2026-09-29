@@ -359,6 +359,7 @@ fn loss_rows() -> Vec<(&'static str, Scene, bool)> {
         law: DampingLaw {
             rate: RateLaw::Constant,
             drive: TimeDrive::None,
+            gate: None,
         },
     };
     // The mechanical skin's complementary row carries the electric channel.
@@ -381,6 +382,7 @@ fn loss_rows() -> Vec<(&'static str, Scene, bool)> {
                 amplitude_bound: ScalarField::constant(50.0),
             },
             drive: TimeDrive::None,
+            gate: None,
         },
     });
     vec![

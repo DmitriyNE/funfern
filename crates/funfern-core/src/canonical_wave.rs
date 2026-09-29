@@ -5482,6 +5482,7 @@ mod tests {
                 law: DampingLaw {
                     rate: RateLaw::Constant,
                     drive: TimeDrive::None,
+                    gate: None,
                 },
             });
             scene.materials[0].magnetic_loss = Some(LossChannel {
@@ -5489,6 +5490,7 @@ mod tests {
                 law: DampingLaw {
                     rate: RateLaw::Constant,
                     drive: TimeDrive::None,
+                    gate: None,
                 },
             });
             let mut legacy_geometry = scene.clone();
@@ -5526,6 +5528,7 @@ mod tests {
             law: DampingLaw {
                 rate: RateLaw::Constant,
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
         scene.materials[0].magnetic_loss = Some(LossChannel {
@@ -5533,6 +5536,7 @@ mod tests {
             law: DampingLaw {
                 rate: RateLaw::Constant,
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
         let mut legacy_geometry = scene.clone();

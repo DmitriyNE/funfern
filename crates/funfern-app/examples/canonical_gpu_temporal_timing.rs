@@ -116,6 +116,7 @@ fn main() -> AppExit {
                     amplitude_bound: ScalarField::constant(10.0),
                 },
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
     }
@@ -125,6 +126,7 @@ fn main() -> AppExit {
             law: funfern_core::DampingLaw {
                 rate: funfern_core::RateLaw::Constant,
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
     }

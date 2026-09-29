@@ -610,6 +610,39 @@ impl PulseEnvelope {
     }
 }
 
+/// When pulses run: the envelope, the start of the first, and the period of
+/// a train, zero for a single pulse. A pulsed signal and a gated material
+/// drive keep time the same way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PulseTrain {
+    pub envelope: PulseEnvelope,
+    pub start: f64,
+    pub repeat: f64,
+}
+
+impl PulseTrain {
+    pub fn valid(self) -> bool {
+        self.envelope.valid()
+            && self.start.is_finite()
+            && self.repeat.is_finite()
+            && (self.repeat == 0.0 || self.repeat >= self.envelope.duration())
+    }
+
+    /// Seconds from the centre of the pulse under way at `time`, or `None`
+    /// between pulses.
+    pub fn seconds_from_centre(self, time: f64) -> Option<f64> {
+        let mut since = time - self.start;
+        if since.is_nan() || since < 0.0 {
+            return None;
+        }
+        if self.repeat > 0.0 {
+            since = since.rem_euclid(self.repeat);
+        }
+        let duration = self.envelope.duration();
+        (since < duration).then_some(since - 0.5 * duration)
+    }
+}
+
 /// The phase a new harmonic source starts at: a quarter turn, so it switches
 /// on as a cosine. Switching a sinusoid on at t = 0 leaves the field a mean
 /// velocity of `amplitude * cos(phase) / omega`, because that is what the
@@ -673,44 +706,30 @@ impl TimeSignal {
             && frequency_hz.is_finite()
             && frequency_hz >= 0.0
             && phase_radians.is_finite();
+        carrier && self.train().is_none_or(PulseTrain::valid)
+    }
+
+    /// When a pulse runs, or `None` for a harmonic signal, which always does.
+    pub const fn train(self) -> Option<PulseTrain> {
         match self {
-            Self::Harmonic { .. } => carrier,
+            Self::Harmonic { .. } => None,
             Self::Pulsed {
                 envelope,
                 start,
                 repeat,
                 ..
-            } => {
-                carrier
-                    && envelope.valid()
-                    && start.is_finite()
-                    && repeat.is_finite()
-                    && (repeat == 0.0 || repeat >= envelope.duration())
-            }
+            } => Some(PulseTrain {
+                envelope,
+                start,
+                repeat,
+            }),
         }
     }
 
     /// Seconds from the centre of the pulse under way at `time`, or `None`
     /// between pulses and for a harmonic signal, which has none.
     fn seconds_from_pulse_centre(self, time: f64) -> Option<f64> {
-        let Self::Pulsed {
-            envelope,
-            start,
-            repeat,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        let mut since = time - start;
-        if since.is_nan() || since < 0.0 {
-            return None;
-        }
-        if repeat > 0.0 {
-            since = since.rem_euclid(repeat);
-        }
-        let duration = envelope.duration();
-        (since < duration).then_some(since - 0.5 * duration)
+        self.train()?.seconds_from_centre(time)
     }
 
     pub fn value(self, time: f64) -> f64 {
@@ -2159,6 +2178,7 @@ mod tests {
             law: crate::DampingLaw {
                 rate: crate::RateLaw::Constant,
                 drive: crate::TimeDrive::None,
+                gate: None,
             },
         });
         assert_eq!(

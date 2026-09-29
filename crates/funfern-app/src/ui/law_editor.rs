@@ -162,6 +162,7 @@ pub(super) fn adopt_legacy_damping(material: &mut Material, physics: PhysicsMode
                 law: DampingLaw {
                     rate: RateLaw::Constant,
                     drive: TimeDrive::None,
+                    gate: None,
                 },
             })
         }
@@ -245,6 +246,7 @@ pub(super) fn loss_rate_editor(
                     law: DampingLaw {
                         rate: RateLaw::Constant,
                         drive: TimeDrive::None,
+                        gate: None,
                     },
                 })
             }
@@ -369,6 +371,7 @@ pub(super) fn set_self_oscillating(
                     amplitude_bound: ScalarField::constant(1.0e3),
                 },
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
     } else if let Some(found) = channel {
@@ -1128,6 +1131,7 @@ mod tests {
                     frequency_hz: ScalarField::constant(1.0),
                     phase_radians: ScalarField::constant(0.0),
                 },
+                gate: None,
             },
         });
         let before = material.clone();

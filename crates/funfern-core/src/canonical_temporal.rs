@@ -289,6 +289,7 @@ impl TemporalLossSample {
             law: DampingLawValues {
                 rate: RateLawValues::Constant,
                 drive: TimeDriveValues::None,
+                gate: None,
             },
         }
     }
@@ -4843,6 +4844,7 @@ fn loss_for(
             law: DampingLawValues {
                 rate: RateLawValues::Constant,
                 drive: TimeDriveValues::None,
+                gate: None,
             },
         });
     }
@@ -5235,9 +5237,10 @@ mod tests {
     use crate::{
         BACKGROUND_REGION, CanonicalSource, CanonicalWaveState, ElectromagneticPolarization,
         FieldLaw, LoopRole, LossChannel, MaterialFrame, MeshingOptions, Obstacle, ObstacleId,
-        OuterBoundaryCondition, PeriodicCubicSpline, QuadraticSolutionSnapshot, Region, RegionId,
-        ScalarField, SolutionIndicatorJob, SolutionIndicatorOptions, SymmetricTensor2, TimeDrive,
-        TimeSignal, enriched_quadratic_basis, mesh_scene, sample_canonical_area,
+        OuterBoundaryCondition, PeriodicCubicSpline, PulseEnvelope, PulseTrain,
+        QuadraticSolutionSnapshot, Region, RegionId, ScalarField, SolutionIndicatorJob,
+        SolutionIndicatorOptions, SymmetricTensor2, TimeDrive, TimeSignal,
+        enriched_quadratic_basis, mesh_scene, sample_canonical_area,
     };
 
     fn compile(scene: &Scene) -> Result<CanonicalTemporalWaveOperator, WaveError> {
@@ -6216,6 +6219,7 @@ mod tests {
                     frequency_hz: ScalarField::constant(0.8),
                     phase_radians: ScalarField::constant(-0.3),
                 },
+                gate: None,
             },
         });
         let operator = compile(&scene).unwrap();
@@ -7986,6 +7990,7 @@ mod tests {
             law: DampingLaw {
                 rate: RateLaw::Constant,
                 drive: pump(0.25, 1.0, 0.0),
+                gate: None,
             },
         });
         let temporal = compile(&scene).unwrap();
@@ -8147,6 +8152,145 @@ mod tests {
         let fine = accumulated_residual(0.5 * coarse_step, 32).abs();
         assert!(coarse > 1.0e-12);
         assert!(fine < 0.35 * coarse, "coarse={coarse:e}, fine={fine:e}");
+    }
+
+    /// A gated pump on each row: a flat top on the mass, a Gaussian on the
+    /// stiffness, placed by the length `span` of the run that watches them.
+    fn gated_scene(span: f64) -> Scene {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = pump(0.31, 1.1, 0.27);
+        scene.materials[0].mass_law.gate = Some(PulseTrain {
+            envelope: PulseEnvelope::FlatTop {
+                duration: 0.5 * span,
+                edge: 0.15 * span,
+            },
+            start: 0.1 * span,
+            repeat: 0.0,
+        });
+        scene.materials[0].stiffness_law.drive = pump(0.21, 0.9, -0.34);
+        scene.materials[0].stiffness_law.gate = Some(PulseTrain {
+            envelope: PulseEnvelope::Gaussian { width: 0.06 * span },
+            start: 0.3 * span,
+            repeat: 0.0,
+        });
+        scene
+    }
+
+    #[test]
+    fn a_gated_drive_balances_its_temporal_work_at_second_order() {
+        let steps = 48;
+        let coarse_step = 0.6 * compile(&gated_scene(1.0)).unwrap().maximum_time_step();
+        let operator = compile(&gated_scene(steps as f64 * coarse_step)).unwrap();
+        let (primary, complementary) = reference_fluxes(&operator);
+        let accumulated_residual = |time_step: f64, steps: usize| {
+            let mut state = CanonicalTemporalWaveState::new(
+                &operator,
+                time_step,
+                primary.clone(),
+                complementary.clone(),
+            )
+            .unwrap();
+            (0..steps)
+                .map(|_| state.step(&operator).unwrap().splitting_residual)
+                .sum::<f64>()
+        };
+        let coarse = accumulated_residual(coarse_step, steps).abs();
+        let fine = accumulated_residual(0.5 * coarse_step, 2 * steps).abs();
+        assert!(coarse > 1.0e-12);
+        assert!(fine < 0.35 * coarse, "coarse={coarse:e}, fine={fine:e}");
+    }
+
+    /// Between pulses a gated medium is exactly its base: no temporal work
+    /// at all, not a small one.
+    #[test]
+    fn a_gated_drive_does_no_work_between_its_pulses() {
+        let steps = 60;
+        let time_step = 0.6 * compile(&gated_scene(1.0)).unwrap().maximum_time_step();
+        let span = 48.0 * time_step;
+        let operator = compile(&gated_scene(span)).unwrap();
+        let (primary, complementary) = reference_fluxes(&operator);
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary).unwrap();
+        let (mut quiet, mut driven) = (0, 0);
+        for _ in 0..steps {
+            let start = state.time();
+            let work = state.step(&operator).unwrap().temporal_work;
+            // The mass pulse runs over [0.1, 0.6] of the span and the
+            // stiffness pulse over [0.3, 0.78].
+            if state.time() <= 0.1 * span || start >= 0.78 * span {
+                assert_eq!(work, 0.0, "at {start}");
+                quiet += 1;
+            } else if start > 0.15 * span && state.time() < 0.7 * span {
+                assert_ne!(work, 0.0, "at {start}");
+                driven += 1;
+            }
+        }
+        assert!(quiet > 10 && driven > 10, "{quiet} quiet, {driven} driven");
+    }
+
+    /// Raising a uniform mass slowly lowers every mode's frequency by
+    /// `1/√(1 + d·g)` while each mode keeps its action `E/ω`. A field with no
+    /// static part therefore holds `E₀/√(1 + d·g)` at the pulse's peak and
+    /// `E₀` again once it has passed. A Gaussian four periods of the slowest
+    /// mode wide excites it at twice its frequency by `e^-79`, nothing at all.
+    /// At the peak the energy still sits off the invariant by the adiabatic
+    /// term in `g''`, of order `d/(ωσ)²/8 ≈ 1e-3` (3.4e-4 measured); after
+    /// it, only the leapfrog's own `(ωh)²/4 ≈ 9e-5` remains (3.6e-5).
+    #[test]
+    fn a_slow_gate_on_the_mass_keeps_every_modes_action() {
+        let depth = 0.3;
+        // The slowest mode of the 2 × 2 box runs at 0.25 Hz.
+        let width = 4.0;
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.drive = pump(depth, 0.0, 0.0);
+        scene.materials[0].mass_law.gate = Some(PulseTrain {
+            envelope: PulseEnvelope::Gaussian { width },
+            start: 0.0,
+            repeat: 0.0,
+        });
+        let operator = compile(&scene).unwrap();
+        let mass = operator.base().primary_mass();
+        let points = operator.base().node_points();
+        assert_eq!(points.len(), mass.len());
+        // Close to the slowest mode, less its mass-weighted mean, which is
+        // the static uniform field.
+        let field = points
+            .iter()
+            .map(|point| (0.5 * std::f64::consts::PI * point.x).sin())
+            .collect::<Vec<_>>();
+        let mean =
+            field.iter().zip(mass).map(|(u, m)| u * m).sum::<f64>() / mass.iter().sum::<f64>();
+        let primary = field
+            .iter()
+            .zip(mass)
+            .map(|(u, m)| (u - mean) * m)
+            .collect::<Vec<_>>();
+        let time_step = 0.5 * operator.maximum_time_step();
+        let mut state = CanonicalTemporalWaveState::new(
+            &operator,
+            time_step,
+            primary,
+            vec![Point2::default(); operator.base().complementary_degrees_of_freedom()],
+        )
+        .unwrap();
+        let initial = state.energy(&operator).unwrap();
+        let peak_time = 4.0 * width;
+        let end_time = 8.0 * width + 1.0;
+        let mut peak = None;
+        while state.time() < end_time {
+            state.step(&operator).unwrap();
+            if peak.is_none() && state.time() >= peak_time {
+                peak = Some(state.energy(&operator).unwrap());
+            }
+        }
+        let peak = peak.unwrap() / initial;
+        let after = state.energy(&operator).unwrap() / initial;
+        let expected = 1.0 / (1.0 + depth).sqrt();
+        assert!(
+            (peak - expected).abs() < 1.0e-3,
+            "{peak} against {expected}"
+        );
+        assert!((after - 1.0).abs() < 2.0e-4, "{after}");
     }
 
     #[test]
@@ -8342,6 +8486,7 @@ mod tests {
                     saturation: ScalarField::constant(1.0),
                 },
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
         assert!(matches!(
@@ -9667,6 +9812,7 @@ mod tests {
             law: DampingLaw {
                 rate: RateLaw::Constant,
                 drive: TimeDrive::None,
+                gate: None,
             },
         };
         scene.materials[0].electric_loss = Some(channel(0.5));
@@ -10982,6 +11128,7 @@ mod tests {
                     amplitude_bound: ScalarField::constant(10.0),
                 },
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
         let mut base_scene = scene.clone();
@@ -11179,6 +11326,7 @@ mod tests {
                             amplitude_bound: ScalarField::constant(10.0),
                         },
                         drive: TimeDrive::None,
+                        gate: None,
                     },
                 });
             }),
@@ -11741,6 +11889,7 @@ mod tests {
                         amplitude_bound: ScalarField::constant(10.0),
                     },
                     drive: TimeDrive::None,
+                    gate: None,
                 },
             });
             if complementary_rate > 0.0 {
@@ -11749,6 +11898,7 @@ mod tests {
                     law: DampingLaw {
                         rate: crate::RateLaw::Constant,
                         drive: TimeDrive::None,
+                        gate: None,
                     },
                 });
             }

@@ -94,6 +94,7 @@ fn main() -> AppExit {
                                 amplitude_bound: ScalarField::constant(1.0e3),
                             },
                             drive: TimeDrive::None,
+                            gate: None,
                         },
                     });
                     // The primary row's own channel, as the editor writes it.

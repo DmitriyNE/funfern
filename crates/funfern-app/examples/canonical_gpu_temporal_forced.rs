@@ -111,6 +111,7 @@ fn main() -> AppExit {
             law: funfern_core::DampingLaw {
                 rate: funfern_core::RateLaw::Constant,
                 drive: TimeDrive::None,
+                gate: None,
             },
         };
         scene.materials[0].electric_loss = Some(channel(0.4));

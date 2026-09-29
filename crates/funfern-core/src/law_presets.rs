@@ -949,6 +949,7 @@ fn apply_self_oscillation(
                         amplitude_bound: ScalarField::constant(SELF_OSCILLATION_BOUND),
                     },
                     drive: TimeDrive::None,
+                    gate: None,
                 },
             });
         },
@@ -1613,6 +1614,7 @@ mod tests {
                     amplitude_bound: ScalarField::constant(SELF_OSCILLATION_BOUND),
                 },
                 drive: TimeDrive::None,
+                gate: None,
             },
         });
         assert_eq!(identify_medium_preset(&constant, physics), None);

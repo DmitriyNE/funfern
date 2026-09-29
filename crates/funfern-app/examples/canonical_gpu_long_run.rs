@@ -90,6 +90,7 @@ fn main() -> AppExit {
                 law: funfern_core::DampingLaw {
                     rate: funfern_core::RateLaw::Constant,
                     drive: drive.clone(),
+                    gate: None,
                 },
             });
         }

@@ -1539,6 +1539,8 @@ enum StoredScalarField {
 struct StoredCoefficientLaw {
     field: StoredFieldLaw,
     drive: StoredTimeDrive,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gate: Option<StoredPulseTrain>,
     #[serde(default)]
     alternate: Option<StoredScalarField>,
     #[serde(default)]
@@ -1590,6 +1592,8 @@ enum StoredTimeDrive {
 struct StoredDampingLaw {
     rate: StoredRateLaw,
     drive: StoredTimeDrive,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gate: Option<StoredPulseTrain>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1638,6 +1642,7 @@ fn stored_linear_coefficient_law() -> StoredCoefficientLaw {
     StoredCoefficientLaw {
         field: StoredFieldLaw::Linear,
         drive: StoredTimeDrive::None,
+        gate: None,
         alternate: None,
         inverted: false,
     }
@@ -1689,6 +1694,14 @@ enum StoredTimeSignal {
         start: f64,
         repeat: f64,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredPulseTrain {
+    envelope: StoredPulseEnvelope,
+    start: f64,
+    repeat: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1760,6 +1773,7 @@ fn encode_coefficient_law(law: &CoefficientLaw) -> StoredCoefficientLaw {
             },
         },
         drive: encode_time_drive(&law.drive),
+        gate: law.gate.map(encode_pulse_train),
         alternate: law.alternate.as_ref().map(encode_scalar_field),
         inverted: law.inverted,
     }
@@ -1784,6 +1798,7 @@ fn decode_coefficient_law(law: StoredCoefficientLaw) -> Result<CoefficientLaw, S
             },
         },
         drive: decode_time_drive(law.drive)?,
+        gate: law.gate.map(decode_pulse_train),
         alternate: law.alternate.map(decode_scalar_field).transpose()?,
         inverted: law.inverted,
     }
@@ -1893,6 +1908,7 @@ fn encode_damping_law(law: &DampingLaw) -> StoredDampingLaw {
             },
         },
         drive: encode_time_drive(&law.drive),
+        gate: law.gate.map(encode_pulse_train),
     }
 }
 
@@ -1928,6 +1944,7 @@ fn decode_damping_law(law: StoredDampingLaw) -> Result<DampingLaw, String> {
             },
         },
         drive: decode_time_drive(law.drive)?,
+        gate: law.gate.map(decode_pulse_train),
     })
 }
 
@@ -1995,22 +2012,58 @@ fn encode_signal(signal: TimeSignal) -> StoredTimeSignal {
             amplitude,
             frequency_hz,
             phase_radians,
-            envelope: match envelope {
-                PulseEnvelope::FlatTop { duration, edge } => {
-                    StoredPulseEnvelope::FlatTop { duration, edge }
-                }
-                PulseEnvelope::Gaussian { width } => StoredPulseEnvelope::Gaussian { width },
-                PulseEnvelope::Sinc {
-                    bandwidth_hz,
-                    lobes,
-                } => StoredPulseEnvelope::Sinc {
-                    bandwidth_hz,
-                    lobes,
-                },
-            },
+            envelope: encode_pulse_envelope(envelope),
             start,
             repeat,
         },
+    }
+}
+
+fn encode_pulse_envelope(envelope: PulseEnvelope) -> StoredPulseEnvelope {
+    match envelope {
+        PulseEnvelope::FlatTop { duration, edge } => {
+            StoredPulseEnvelope::FlatTop { duration, edge }
+        }
+        PulseEnvelope::Gaussian { width } => StoredPulseEnvelope::Gaussian { width },
+        PulseEnvelope::Sinc {
+            bandwidth_hz,
+            lobes,
+        } => StoredPulseEnvelope::Sinc {
+            bandwidth_hz,
+            lobes,
+        },
+    }
+}
+
+fn decode_pulse_envelope(envelope: StoredPulseEnvelope) -> PulseEnvelope {
+    match envelope {
+        StoredPulseEnvelope::FlatTop { duration, edge } => {
+            PulseEnvelope::FlatTop { duration, edge }
+        }
+        StoredPulseEnvelope::Gaussian { width } => PulseEnvelope::Gaussian { width },
+        StoredPulseEnvelope::Sinc {
+            bandwidth_hz,
+            lobes,
+        } => PulseEnvelope::Sinc {
+            bandwidth_hz,
+            lobes,
+        },
+    }
+}
+
+fn encode_pulse_train(train: PulseTrain) -> StoredPulseTrain {
+    StoredPulseTrain {
+        envelope: encode_pulse_envelope(train.envelope),
+        start: train.start,
+        repeat: train.repeat,
+    }
+}
+
+fn decode_pulse_train(train: StoredPulseTrain) -> PulseTrain {
+    PulseTrain {
+        envelope: decode_pulse_envelope(train.envelope),
+        start: train.start,
+        repeat: train.repeat,
     }
 }
 
@@ -2032,19 +2085,7 @@ fn decode_signal(signal: StoredTimeSignal) -> TimeSignal {
             repeat,
         } => TimeSignal::pulsed(
             [offset, amplitude, frequency_hz, phase_radians],
-            match envelope {
-                StoredPulseEnvelope::FlatTop { duration, edge } => {
-                    PulseEnvelope::FlatTop { duration, edge }
-                }
-                StoredPulseEnvelope::Gaussian { width } => PulseEnvelope::Gaussian { width },
-                StoredPulseEnvelope::Sinc {
-                    bandwidth_hz,
-                    lobes,
-                } => PulseEnvelope::Sinc {
-                    bandwidth_hz,
-                    lobes,
-                },
-            },
+            decode_pulse_envelope(envelope),
             start,
             repeat,
         ),
@@ -2409,6 +2450,14 @@ mod tests {
                     wavenumber: ScalarField::constant(2.0),
                     angle_radians: ScalarField::constant(0.3),
                 },
+                gate: Some(PulseTrain {
+                    envelope: PulseEnvelope::FlatTop {
+                        duration: 0.8,
+                        edge: 0.2,
+                    },
+                    start: 1.25,
+                    repeat: 3.0,
+                }),
                 alternate: Some(ScalarField::constant(1.4)),
                 inverted: true,
             };
@@ -2423,6 +2472,11 @@ mod tests {
                     phase_radians: ScalarField::constant(0.2),
                     sharpness: ScalarField::constant(4.0),
                 },
+                gate: Some(PulseTrain {
+                    envelope: PulseEnvelope::Gaussian { width: 0.15 },
+                    start: -0.5,
+                    repeat: 0.0,
+                }),
                 alternate: None,
                 inverted: false,
             };
@@ -2439,6 +2493,14 @@ mod tests {
                         frequency_hz: ScalarField::constant(1.0),
                         phase_radians: ScalarField::constant(0.0),
                     },
+                    gate: Some(PulseTrain {
+                        envelope: PulseEnvelope::Sinc {
+                            bandwidth_hz: 2.5,
+                            lobes: 4,
+                        },
+                        start: 0.75,
+                        repeat: 2.0,
+                    }),
                 },
             });
             material.magnetic_loss = Some(LossChannel {
@@ -2448,6 +2510,7 @@ mod tests {
                         saturation: ScalarField::constant(1.2),
                     },
                     drive: TimeDrive::None,
+                    gate: None,
                 },
             });
             material.restoring = RestoringLaw::Phi4 {
@@ -2469,7 +2532,11 @@ mod tests {
     #[test]
     fn earlier_version_22_materials_receive_inert_law_defaults() {
         let document = TopologyDocument::default();
-        let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        let encoded = save(&document).unwrap();
+        // An ungated law writes no gate, so the file reads in a build that
+        // predates gates.
+        assert!(!encoded.contains("\"gate\""), "{encoded}");
+        let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         for scene_name in ["draft", "accepted"] {
             let materials = value["model"][scene_name]["materials"]
                 .as_array_mut()
@@ -3076,6 +3143,7 @@ mod tests {
                     frequency_hz: ScalarField::constant(1.0),
                     phase_radians: ScalarField::constant(0.0),
                 },
+                gate: None,
                 alternate: None,
                 inverted: false,
             };
