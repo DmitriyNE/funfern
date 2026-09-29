@@ -16456,3 +16456,56 @@ one logged then.
   cleared.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — The old scalar device solver is removed
+
+The quadratic scalar solver's device path had been unreachable since the
+canonical cutover: nothing outside `wave_gpu.rs` and its tests called its
+setup, so its buffers were never created and everything that ran on them
+never ran. `WaveGpuRequest` keeps only what it still does, hosting the
+canonical recorders.
+
+- **Removed from `wave_gpu.rs`:**
+  - the setup and edit paths: `replace_with_volume_sources`,
+    `replace_transferred_with_volume_sources`, `reset`, `update_source`,
+    `update_volume_sources`, `update_volume_source_signals`, `inject_pulse`,
+    `finish_transfer`, `rollback_transfer`, `volume_acceleration`, and
+    `create_buffers` with the forcing, node and mesh-path Gaussian packers
+    (`forcing_weights`) under it;
+  - the step, pulse, grid-filter and transfer pipelines, their bind groups,
+    `compute_wave` and the state readback;
+  - the legacy point, line, area and far-field recorders, which read that
+    solver's state, and the `canonical` flag that told the two kinds apart.
+    The area recorder's reduction group, optional only for the legacy pass,
+    is now always there;
+  - the recorders' own grid-filter switch, which only that dispatcher read;
+  - `WaveDisplay`'s `previous` and `indicator_*` lanes, which only its
+    readback filled.
+- **Shaders deleted:** `wave.wgsl`, `wave_transfer_old.wgsl`,
+  `wave_transfer_new.wgsl`, `probe.wgsl`, `curve_probe.wgsl`,
+  `area_probe.wgsl`, `far_field.wgsl`: 1,315 lines.
+- **Core:** the f32 packers only that solver took
+  (`QuadraticWaveOperator::normalized_stiffness_f32`,
+  `normalized_auxiliary_stiffness_f32`, `damping_ratios_f32`, and
+  `WaveOperator`'s two), with the test that mirrored its gather kernel. The
+  CPU scalar formulation stays as the comparison path
+  `docs/architecture.md` describes, now without its device kernel.
+- **Moved:** `MAX_STEPS_PER_FRAME` (64) is the app's per-frame request
+  ceiling, not an encoder's, and lives in `ui/pacing.rs`.
+- **Tests.** Those of the removed code went with it. Where a legacy shader
+  test held for the canonical shader too it now reads that one: the far
+  field's retarded time, its NaN-free validity and its clock-keyed ring, and
+  the area reduction. The two ring-inheritance tests had covered only the
+  legacy recorders; they now run the canonical ones, whose keep rule had no
+  test, and pass.
+- **Device.** `canonical_gpu_temporal_consumer` exits 0 (point u 8.8e-8,
+  line normal flow 1.9e-6, area energy 3.3e-7, arrows 1.4e-6), and
+  `canonical_gpu_filter_boundary` exits 0 (rate 4.9e-7). No example records
+  the far field on the device, so a 30 s app run with a scratch home and a
+  readback probe checked it through the run's adaptation handoffs: its ring
+  filled to 512 finite records by 9.8 s and never shrank, and the newest
+  record's time never went back.
+- **Size:** about 5,100 lines out, 3,829 of them Rust.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
+

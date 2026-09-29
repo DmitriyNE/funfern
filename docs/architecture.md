@@ -1137,9 +1137,10 @@ hold the measurements.
 
 ## Legacy scalar evolution model
 
-The following centered scalar formulation is retained as a numerical comparison
-path and as historical context for older fixtures. It is not selected by any
-production skin after the canonical Stage 6 cutover.
+The following centered scalar formulation is retained on the CPU as a numerical
+comparison path and as historical context for older fixtures. It is not selected
+by any production skin after the canonical Stage 6 cutover, and its f32 device
+kernel was removed on 2026-09-29.
 
 Use a dimensionless scalar model
 
@@ -1164,20 +1165,14 @@ a near-degenerate element from silently reducing the timestep by many orders of
 magnitude. The f64 CPU implementation is the reference and conserves the scheme's
 discrete half-step energy to roundoff in the undamped test.
 
-The f32 GPU kernel stores both committed time levels, a scratch level, and the two
-inverse-derivative filter stages in one storage buffer. Each solution-DOF invocation
-gathers its CSR row and writes only its own scratch value; a second dispatch advances
-the reconstruction and rotates levels. This avoids scatter atomics.
-
-Both stiffness operators are applied in difference form, `Σ_j K_ij (u_j - u_i)`, on
-the CPU and the GPU. Every assembled row sums to zero in exact arithmetic, so the
-two forms agree, but only the difference form is exactly zero on a constant field
-once the rows have been divided by the lumped mass and rounded to f32. The plain
-row product leaves a residual of about `1e-7` relative that acts as a permanent
-force on the free constant mode of a reflecting cavity and grew a uniform offset
-quadratically in time; Dirichlet walls pin that mode, which is why they seemed
-immune. A row-sum test covers every assembly path, and an f32 emulation of the
-kernel checks that a constant field is held bit for bit.
+Both stiffness operators are applied in difference form, `Σ_j K_ij (u_j - u_i)`.
+Every assembled row sums to zero in exact arithmetic, so the two forms agree, but
+only the difference form is exactly zero on a constant field once the rows have
+been rounded. On the removed f32 device kernel the plain row product left a
+residual of about `1e-7` relative that acted as a permanent force on the free
+constant mode of a reflecting cavity and grew a uniform offset quadratically in
+time; Dirichlet walls pin that mode, which is why they seemed immune. A row-sum
+test covers every assembly path.
 The operator, state, sources, and controls use Bevy's render-world buffers and its
 existing wgpu device. State remains GPU-resident; asynchronous primary readback
 supplies the egui field colors, while lower-cadence full snapshots supply the

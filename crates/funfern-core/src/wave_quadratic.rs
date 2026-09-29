@@ -652,53 +652,6 @@ impl QuadraticWaveOperator {
             .collect()
     }
 
-    /// Values for the GPU gather kernel, normalized row-wise by lumped mass.
-    pub fn normalized_stiffness_f32(&self) -> Result<Vec<f32>, WaveError> {
-        let mut result = Vec::with_capacity(self.stiffness.len());
-        for row in 0..self.degrees_of_freedom() {
-            for entry in self.row_offsets[row] as usize..self.row_offsets[row + 1] as usize {
-                let value = (self.stiffness[entry] / self.lumped_mass[row]) as f32;
-                if !value.is_finite() {
-                    return Err(WaveError::InvalidMesh("the f32 GPU operator overflows"));
-                }
-                result.push(value);
-            }
-        }
-        Ok(result)
-    }
-
-    pub fn normalized_auxiliary_stiffness_f32(&self) -> Result<Vec<f32>, WaveError> {
-        let mut result = Vec::with_capacity(self.auxiliary_stiffness.len());
-        for row in 0..self.degrees_of_freedom() {
-            for entry in self.row_offsets[row] as usize..self.row_offsets[row + 1] as usize {
-                let value = (self.auxiliary_stiffness[entry] / self.lumped_mass[row]) as f32;
-                if !value.is_finite() {
-                    return Err(WaveError::InvalidMesh(
-                        "the f32 GPU auxiliary operator overflows",
-                    ));
-                }
-                result.push(value);
-            }
-        }
-        Ok(result)
-    }
-
-    pub fn damping_ratios_f32(&self) -> Result<Vec<f32>, WaveError> {
-        self.lumped_damping
-            .iter()
-            .zip(&self.lumped_mass)
-            .map(|(damping, mass)| {
-                let value = (damping / mass) as f32;
-                value
-                    .is_finite()
-                    .then_some(value)
-                    .ok_or(WaveError::InvalidMesh(
-                        "the f32 GPU damping ratio overflows",
-                    ))
-            })
-            .collect()
-    }
-
     pub fn estimated_gpu_bytes(&self) -> usize {
         self.row_offsets.len() * 4 + self.columns.len() * 12 + self.degrees_of_freedom() * 112
     }
@@ -4424,63 +4377,6 @@ mod tests {
         );
         // Measured here: the residue comes back a little under a quarter of what
         // the bare scheme leaves, and the resolved mode keeps 99.95%.
-    }
-
-    /// Mirrors `advance_wave` in `wave.wgsl` on the f32 operator the GPU
-    /// receives. A reflecting cavity holding a constant field must keep it bit
-    /// for bit; the plain row product drifts because its rounded rows do not
-    /// sum to zero, which is the uniform offset that used to grow in enclosed
-    /// Neumann subdomains.
-    #[test]
-    fn the_f32_kernel_form_holds_a_constant_field_exactly() {
-        let mesh = mesh_scene(
-            &Scene::default(),
-            5,
-            MeshingOptions {
-                target_edge_length: 0.12,
-                ..MeshingOptions::default()
-            },
-        )
-        .unwrap();
-        let operator = QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()).unwrap();
-        let normalized = operator.normalized_stiffness_f32().unwrap();
-        let dt2 = (operator.recommended_time_step() as f32).powi(2);
-        let count = operator.degrees_of_freedom();
-        let run = |difference_form: bool| {
-            let mut previous = vec![1.0f32; count];
-            let mut current = vec![1.0f32; count];
-            let mut next = vec![0.0f32; count];
-            for _ in 0..2_000 {
-                for i in 0..count {
-                    let row =
-                        operator.row_offsets[i] as usize..operator.row_offsets[i + 1] as usize;
-                    let mut ku = 0.0f32;
-                    for (coefficient, column) in
-                        normalized[row.clone()].iter().zip(&operator.columns[row])
-                    {
-                        let column = *column as usize;
-                        ku += coefficient
-                            * if difference_form {
-                                current[column] - current[i]
-                            } else {
-                                current[column]
-                            };
-                    }
-                    next[i] = 2.0 * current[i] - previous[i] - dt2 * ku;
-                }
-                std::mem::swap(&mut previous, &mut current);
-                std::mem::swap(&mut current, &mut next);
-            }
-            current
-                .iter()
-                .map(|value| (value - 1.0).abs())
-                .fold(0.0f32, f32::max)
-        };
-        assert_eq!(run(true), 0.0);
-        assert!(
-            run(false) > 1.0e-7,
-            "the row-product form is expected to drift"
-        );
     }
 
     #[test]

@@ -1005,39 +1005,6 @@ impl WaveOperator {
         Ok(result)
     }
 
-    /// Values for the GPU gather kernel, normalized row-wise by lumped mass.
-    pub fn normalized_stiffness_f32(&self) -> Result<Vec<f32>, WaveError> {
-        let mut result = Vec::with_capacity(self.stiffness.len());
-        for row in 0..self.degrees_of_freedom() {
-            let start = self.row_offsets[row] as usize;
-            let end = self.row_offsets[row + 1] as usize;
-            for entry in start..end {
-                let value = (self.stiffness[entry] / self.lumped_mass[row]) as f32;
-                if !value.is_finite() {
-                    return Err(WaveError::InvalidMesh("the f32 GPU operator overflows"));
-                }
-                result.push(value);
-            }
-        }
-        Ok(result)
-    }
-
-    pub fn damping_ratios_f32(&self) -> Result<Vec<f32>, WaveError> {
-        self.lumped_damping
-            .iter()
-            .zip(&self.lumped_mass)
-            .map(|(damping, mass)| {
-                let value = (damping / mass) as f32;
-                value
-                    .is_finite()
-                    .then_some(value)
-                    .ok_or(WaveError::InvalidMesh(
-                        "the f32 GPU damping ratio overflows",
-                    ))
-            })
-            .collect()
-    }
-
     pub fn discrete_energy(
         &self,
         current: &[f64],

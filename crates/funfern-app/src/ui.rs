@@ -2167,11 +2167,6 @@ fn refresh_canonical_wave_display(
     }
     if display.generation != canonical.generation {
         display.complementary_flux.clear();
-        display.previous.clear();
-        display.indicator_displacement.clear();
-        display.indicator_velocity.clear();
-        display.indicator_acceleration.clear();
-        display.indicator_potential.clear();
         display.snapshot_current.clear();
         display.snapshot_previous.clear();
         display.snapshot_velocity.clear();

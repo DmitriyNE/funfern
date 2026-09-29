@@ -6523,8 +6523,7 @@ fn compute_canonical_wave(
         let consumer_pipeline = consumer_pipeline.as_ref()?;
         let handles = recorders.probes.as_ref()?;
         let bind_group = probe_group.as_ref()?;
-        (handles.canonical
-            && bind_group.generation == request.generation
+        (bind_group.generation == request.generation
             && bind_group.revision == recorders.probe_revision)
             .then(|| {
                 (
@@ -6538,8 +6537,7 @@ fn compute_canonical_wave(
         let consumer_pipeline = consumer_pipeline.as_ref()?;
         let handles = recorders.curve_probes.as_ref()?;
         let bind_group = curve_probe_group.as_ref()?;
-        (handles.canonical
-            && bind_group.generation == request.generation
+        (bind_group.generation == request.generation
             && bind_group.revision == recorders.curve_probe_revision)
             .then(|| {
                 (
@@ -6553,8 +6551,7 @@ fn compute_canonical_wave(
         let consumer_pipeline = consumer_pipeline.as_ref()?;
         let handles = recorders.area_probes.as_ref()?;
         let bind_group = area_probe_group.as_ref()?;
-        (handles.canonical
-            && bind_group.generation == request.generation
+        (bind_group.generation == request.generation
             && bind_group.revision == recorders.area_probe_revision)
             .then(|| {
                 (
@@ -6571,8 +6568,7 @@ fn compute_canonical_wave(
         let consumer_pipeline = consumer_pipeline.as_ref()?;
         let handles = recorders.far_field.as_ref()?;
         let bind_group = far_field_group.as_ref()?;
-        (handles.canonical
-            && bind_group.generation == request.generation
+        (bind_group.generation == request.generation
             && bind_group.revision == recorders.far_field_revision)
             .then(|| {
                 (
@@ -6723,11 +6719,7 @@ fn compute_canonical_wave(
             }
             // The reduction reads the descriptors and the output ring, which
             // the element pass does not bind, so it has its own group.
-            pass.set_bind_group(
-                0,
-                bind_group.reduce.as_ref().unwrap_or(&bind_group.bind_group),
-                &[],
-            );
+            pass.set_bind_group(0, &bind_group.reduce, &[]);
             pass.set_pipeline(reduce);
             pass.dispatch_workgroups(1, 1, 1);
             pass.set_bind_group(0, &group.bind_group, &[]);

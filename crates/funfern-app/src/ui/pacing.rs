@@ -1,7 +1,10 @@
 //! Pacing the solver against the display: how many steps a frame asks for,
 //! the step it uses, and when a shortfall is worth reporting.
 
-use crate::wave_gpu::MAX_STEPS_PER_FRAME;
+/// Steps a frame may ask for, and steps the solver may owe at once. The
+/// requested and completed counters therefore cannot drift apart without
+/// limit when the solver cannot keep up with wall-clock time.
+pub(super) const MAX_STEPS_PER_FRAME: u64 = 64;
 
 /// Wall-clock seconds a frame is budgeted when deciding how small the solver's
 /// step has to be.

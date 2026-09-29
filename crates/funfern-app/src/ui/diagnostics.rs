@@ -1,8 +1,8 @@
 //! The status strip and the windows behind it: diagnostics sections, the
 //! event log, the example gallery and the formula reference.
 
+use super::pacing::MAX_STEPS_PER_FRAME;
 use crate::recording::{self};
-use crate::wave_gpu::MAX_STEPS_PER_FRAME;
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, Pos2, Sense, Stroke};
 use funfern_app::topology_editor::{TopologyAcceptance, TopologyDocument};
