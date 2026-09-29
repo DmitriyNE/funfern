@@ -1453,8 +1453,8 @@ mod tests {
     fn the_subdomain_listing_folds_away() {
         let crystal = funfern_app::topology_examples::catalog()
             .iter()
-            .find(|example| example.name == "Photonic crystal")
-            .expect("the catalog carries the photonic crystal");
+            .find(|example| example.name == "Disordered crystal")
+            .expect("the catalog carries the disordered crystal");
         let mut state = Playground {
             editor: funfern_app::topology_editor::TopologyEditor::from_document(
                 crystal.document.clone(),

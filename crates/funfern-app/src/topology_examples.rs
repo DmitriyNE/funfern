@@ -3,7 +3,7 @@
 use crate::document::{
     FarFieldSettings, LineProbeQuantity, LineProbeRepresentation, MaterialOverlay,
     MaterialProperty, PresentationSettings, ProbeId, ProbeReadout, ProbeReadouts,
-    ProbeSamplingPreset, VectorOverlay,
+    ProbeSamplingPreset, TransferReference, VectorOverlay,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -198,10 +198,14 @@ pub fn catalog() -> &'static [TopologyExample] {
             example(
                 ExampleGroup::GuidesAndCrystals,
                 "Photonic crystal",
-                "A plane wave at 1.85 Hz meets five columns of ceramic rods, ε = 9, in a square \
-                 lattice: the frequency is in the crystal's band gap, the wave turns back, and \
-                 under a thousandth of its power gets through. Tune the launcher to 1 Hz, below \
-                 the gap, or 2.5 Hz, above it, and most of it passes.",
+                "A plane-wave pulse every 20 s, flat from 0.8 to 3 Hz, meets five columns of \
+                 ceramic rods, ε = 9, in a square lattice filling the upper of two arms; the \
+                 lower arm is empty, the reference, as in a double-beam spectrometer. The probe \
+                 behind the crystal, divided by the one at the same place in the reference arm, \
+                 reads the crystal's transmission: under a tenth from 1.5 to 2.1 Hz, inside the \
+                 band gap its lattice puts between 1.375 and 2.225 Hz, against 1.0 at 1 Hz and \
+                 0.82 at 2.5 Hz either side. The readout averages 20 s segments, so it fills \
+                 after the first.",
                 photonic_crystal(),
             ),
             example(
@@ -752,6 +756,153 @@ impl Builder {
         region
     }
 
+    fn junction(&mut self, point: Point2) -> TopologyVertexId {
+        let id = TopologyVertexId(self.next_vertex);
+        self.next_vertex += 1;
+        self.scene.geometry.vertices.push(TopologyVertex {
+            id,
+            location: TopologyVertexLocation::Interior(point),
+        });
+        id
+    }
+
+    /// A polyline through `points`, one span of `behavior` per piece, whose
+    /// breakpoints sit on `vertices` where given.
+    fn pinned_polyline(
+        &mut self,
+        points: Vec<Point2>,
+        vertices: &[Option<TopologyVertexId>],
+        behavior: SpanBehavior,
+    ) -> CurveId {
+        assert_eq!(points.len(), vertices.len());
+        let behaviors = vec![behavior; points.len() - 1];
+        let curve = self.open_curve(OpenCubicSpline::polyline(points).unwrap(), &behaviors);
+        let authored = self
+            .scene
+            .geometry
+            .curves
+            .iter_mut()
+            .find(|candidate| candidate.id == curve)
+            .unwrap();
+        for (node, vertex) in authored.nodes.iter_mut().zip(vertices) {
+            node.vertex = *vertex;
+        }
+        curve
+    }
+
+    /// A region of `material` for the face the outer anchor `(side, x)`
+    /// names, `x` along the floor or the ceiling.
+    fn face_on(&mut self, side: OuterSide, x: f64, material: MaterialId) -> RegionId {
+        let domain = self.scene.geometry.domain;
+        let fraction = match side {
+            OuterSide::Top => (domain.max_x - x) / domain.width(),
+            _ => (x - domain.min_x) / domain.width(),
+        };
+        let region = RegionId(self.next_region);
+        self.next_region += 1;
+        self.scene.regions.push(Region {
+            id: region,
+            material,
+            frame: MaterialFrame::world(),
+        });
+        self.scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Outer { side, fraction },
+            region: Some(region),
+        });
+        region
+    }
+
+    /// The channel as two arms, one above the other, split along `y = 0` by
+    /// a reflecting wall welded to both ends of the domain, which a wave
+    /// uniform in `y` does not see. One launcher at `x` lights both: its two
+    /// halves, a strip 0.06 wide across each arm, carry `signal`. The upper
+    /// arm is cut from the split to the ceiling at the edges of each of
+    /// `layers`, `(x0, x1, material)`, which fill it between them; the lower
+    /// arm is empty, the reference. Every face is named from the floor or the
+    /// ceiling, so the background's own anchor, on the floor at `x = 0`,
+    /// names the lower arm's face past the launcher.
+    fn arms(&mut self, x: f64, signal: TimeSignal, layers: &[(f64, f64, MaterialId)]) {
+        let domain = self.scene.geometry.domain;
+        let background = self.scene.regions[0].material;
+        let (left, right) = (x - 0.03, x + 0.03);
+        assert!(right < 0.0, "a launcher left of the centre");
+        let mut cuts = layers
+            .iter()
+            .flat_map(|(x0, x1, _)| [*x0, *x1])
+            .collect::<Vec<_>>();
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
+        assert!(cuts.iter().all(|cut| *cut > right && *cut < domain.max_x));
+        let mut crossings = vec![left, right];
+        crossings.extend(&cuts);
+        let junctions = crossings
+            .iter()
+            .map(|cut| (*cut, self.junction(Point2::new(*cut, 0.0))))
+            .collect::<Vec<_>>();
+        let start = self.outer_vertex(OuterSide::Left, 0.5);
+        let end = self.outer_vertex(OuterSide::Right, 0.5);
+        let mut points = vec![Point2::new(domain.min_x, 0.0)];
+        let mut vertices = vec![Some(start)];
+        for (cut, junction) in &junctions {
+            points.push(Point2::new(*cut, 0.0));
+            vertices.push(Some(*junction));
+        }
+        points.push(Point2::new(domain.max_x, 0.0));
+        vertices.push(Some(end));
+        self.pinned_polyline(points, &vertices, SpanBehavior::REFLECTING);
+        for (cut, junction) in &junctions {
+            let top = self.outer_vertex(OuterSide::Top, (domain.max_x - cut) / domain.width());
+            if *cut == left || *cut == right {
+                let bottom =
+                    self.outer_vertex(OuterSide::Bottom, (cut - domain.min_x) / domain.width());
+                self.pinned_polyline(
+                    vec![
+                        Point2::new(*cut, domain.min_y),
+                        Point2::new(*cut, 0.0),
+                        Point2::new(*cut, domain.max_y),
+                    ],
+                    &[Some(bottom), Some(*junction), Some(top)],
+                    SpanBehavior::Transmitting,
+                );
+            } else {
+                self.pinned_polyline(
+                    vec![Point2::new(*cut, 0.0), Point2::new(*cut, domain.max_y)],
+                    &[Some(*junction), Some(top)],
+                    SpanBehavior::Transmitting,
+                );
+            }
+        }
+        // The lower arm: behind the launcher, the launcher, and the face past
+        // it, which is the background's own.
+        let behind = 0.5 * (domain.min_x + left);
+        self.face_on(OuterSide::Bottom, behind, background);
+        let lower = self.face_on(OuterSide::Bottom, x, background);
+        let upper = self.face_on(OuterSide::Top, x, background);
+        for region in [upper, lower] {
+            self.scene.volume_sources.push(VolumeSource {
+                region,
+                enabled: true,
+                profile: ScalarField::constant(1.0),
+                parameters: vec![],
+                signal,
+            });
+        }
+        let mut edges = vec![domain.min_x, left, right];
+        edges.extend(&cuts);
+        edges.push(domain.max_x);
+        for pair in edges.windows(2) {
+            if pair[0] == left {
+                continue;
+            }
+            let middle = 0.5 * (pair[0] + pair[1]);
+            let material = layers
+                .iter()
+                .find(|(x0, x1, _)| *x0 <= pair[0] && pair[1] <= *x1)
+                .map_or(background, |layer| layer.2);
+            self.face_on(OuterSide::Top, middle, material);
+        }
+    }
+
     fn document(self) -> TopologyDocument {
         let scene = self.scene;
         scene.compile(0).unwrap();
@@ -812,6 +963,19 @@ fn spectrum_readout(span: f64, max_hz: f64, decibels: bool) -> ProbeReadout {
         spectrum_decibels: decibels,
         spectrum_max_hz: max_hz,
         ..field_readout(span)
+    }
+}
+
+/// A point probe whose claim is a frequency response: its field, with its
+/// transfer from the probe `reference` in decibels up to `max_hz`, averaged
+/// over segments `segment` seconds long.
+fn transfer_readout(reference: ProbeId, max_hz: f64, segment: f64) -> ProbeReadout {
+    ProbeReadout {
+        spectrum_decibels: true,
+        spectrum_max_hz: max_hz,
+        transfer_from: Some(TransferReference::Probe(reference)),
+        transfer_segment: segment,
+        ..field_readout(4.0)
     }
 }
 
@@ -2389,23 +2553,47 @@ fn octagonal_rod(center: Point2, radius: f64) -> PeriodicCubicSpline {
 }
 
 fn photonic_crystal() -> TopologyDocument {
-    photonic_crystal_with(CRYSTAL_GAP_HZ, true)
+    photonic_crystal_with(CRYSTAL_PULSE_REPEAT, true)
 }
 
-/// A TM channel lit by a launcher at `frequency` at the left, with a square
-/// lattice of ceramic rods, `ε = 9` and 0.2 of the pitch in radius, five
-/// columns deep and ten rows filling the height. The reflecting walls sit on
-/// the lattice's mirror planes, so the channel is the infinite crystal at
+/// The crystal's sinc pulse: flat from 0.8 to 3 Hz, across the gap and
+/// either side of it. It repeats once a segment of the transfer readout: the
+/// crystal rings for seconds at its band edges, so a segment must be long,
+/// and a train that put several pulses in one segment would hand the average
+/// only its harmonics, `k/repeat` Hz, whose phases the ringing turns apart.
+const CRYSTAL_PULSE_HZ: f64 = 1.9;
+const CRYSTAL_PULSE_BANDWIDTH: f64 = 1.1;
+const CRYSTAL_PULSE_REPEAT: f64 = CRYSTAL_SEGMENT;
+const CRYSTAL_BEHIND: Point2 = Point2::new(0.75, 0.5);
+const CRYSTAL_REFERENCE: Point2 = Point2::new(0.75, -0.5);
+
+/// A TM channel in two arms (`Builder::arms`) lit from the left by a sinc
+/// pulse every `repeat` seconds, zero for one, with a square lattice of
+/// ceramic rods, `ε = 9` and 0.2 of the pitch in radius, five columns deep
+/// and five rows filling the upper arm. The walls either side of that arm
+/// sit on the lattice's mirror planes, so the arm is the infinite crystal at
 /// normal incidence, whose TM gap runs from 0.275 to 0.445 of the pitch over
-/// the wavelength. A line probe runs along the midline, between two rows,
-/// and a point probe reads the transmitted wave.
-fn photonic_crystal_with(frequency: f64, rods: bool) -> TopologyDocument {
+/// the wavelength: 1.375 to 2.225 Hz. A probe behind the crystal reads its
+/// transfer from a probe at the same place in the empty arm.
+fn photonic_crystal_with(repeat: f64, rods: bool) -> TopologyDocument {
     let mut builder = Builder::new();
     builder.scene.physics = PhysicsModel::Electromagnetic {
         polarization: ElectromagneticPolarization::Tm,
     };
     builder.scene.outer_boundaries = channel();
-    builder.launcher(-0.85, frequency, 40.0);
+    builder.arms(
+        -0.85,
+        TimeSignal::pulsed(
+            [0.0, 40.0, CRYSTAL_PULSE_HZ, 0.0],
+            PulseEnvelope::Sinc {
+                bandwidth_hz: CRYSTAL_PULSE_BANDWIDTH,
+                lobes: 4,
+            },
+            0.1,
+            repeat,
+        ),
+        &[],
+    );
     builder.scene.materials.push(Material {
         id: MaterialId(2),
         name: "Ceramic".into(),
@@ -2415,10 +2603,10 @@ fn photonic_crystal_with(frequency: f64, rods: bool) -> TopologyDocument {
     });
     if rods {
         for column in 0..5 {
-            for row in 0..10 {
+            for row in 0..5 {
                 let centre = Point2::new(
                     (column as f64 - 2.0) * CRYSTAL_PITCH,
-                    -1.0 + (row as f64 + 0.5) * CRYSTAL_PITCH,
+                    (row as f64 + 0.5) * CRYSTAL_PITCH,
                 );
                 builder.subdomain(
                     octagonal_rod(centre, CRYSTAL_ROD_FRACTION * CRYSTAL_PITCH),
@@ -2430,31 +2618,30 @@ fn photonic_crystal_with(frequency: f64, rods: bool) -> TopologyDocument {
     }
     let mut document = builder.document();
     document.model.source.enabled = false;
-    document.model.probes.push(TopologyProbeDefinition {
-        id: ProbeId(1),
-        name: "Along the channel".into(),
-        color: [248, 196, 112],
-        enabled: true,
-        target: TopologyProbeTarget::Segment {
-            start: Point2::new(-0.75, 0.0),
-            end: Point2::new(0.6, 0.0),
-            preset: ProbeSamplingPreset::Medium,
-        },
-    });
-    document.model.probes.push(TopologyProbeDefinition {
-        id: ProbeId(2),
-        name: "Behind the crystal".into(),
-        color: [91, 220, 194],
-        enabled: true,
-        target: TopologyProbeTarget::Point(Point2::new(0.75, 0.0)),
-    });
-    // Fifty rods' control polygons and handles would hide the crystal.
+    for (id, name, color, point) in [
+        (1, "Behind the crystal", [91, 220, 194], CRYSTAL_BEHIND),
+        (2, "Reference", [248, 196, 112], CRYSTAL_REFERENCE),
+    ] {
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(id),
+            name: name.into(),
+            color,
+            enabled: true,
+            target: TopologyProbeTarget::Point(point),
+        });
+    }
+    // Twenty-five rods' control polygons and handles would hide the crystal.
     document.presentation.control_polygons = false;
     document.presentation.handles = false;
-    document.readouts.set_probe(ProbeId(1), profile_readout());
-    document.readouts.set_probe(ProbeId(2), field_readout(2.0));
+    document.readouts.set_probe(
+        ProbeId(1),
+        transfer_readout(ProbeId(2), 3.5, CRYSTAL_SEGMENT),
+    );
+    document.readouts.set_probe(ProbeId(2), field_readout(4.0));
     document
 }
+
+const CRYSTAL_SEGMENT: f64 = 20.0;
 
 /// The lattice sites, three either side of the centre, a crystal bend's
 /// channel runs through: in along the middle row from the left, round the
@@ -5939,40 +6126,106 @@ mod tests {
         );
     }
 
-    /// The photonic-crystal claims, at edge 0.08, from the transmitted plane
-    /// wave: the phasor averaged across the channel 0.25 behind the last
-    /// column, where every other diffraction order has died, against the
-    /// empty channel. In the gap, at 1.85 Hz, five columns pass under 1% of
-    /// the power (0.08%); below it, at 1 Hz, more than 90% (99.6%); above
-    /// it, at 2.5 Hz, more than half (79%). At edge 0.05 the three are 0.08%,
-    /// 99.5% and 79%.
+    /// What a live transfer readout of `response` from `reference`, records
+    /// sampled every `dt`, has averaged by their end: segments `segment`
+    /// seconds long ending every `every` seconds from the first whole one.
+    fn welch(
+        reference: &[f64],
+        response: &[f64],
+        dt: f64,
+        segment: f64,
+        every: f64,
+    ) -> TransferSpectrum {
+        let count = (segment / dt).floor() as usize + 1;
+        let stride = ((every / dt).round() as usize).max(1);
+        let mut average = TransferAverage::default();
+        let mut end = count;
+        while end <= response.len() {
+            average
+                .add(
+                    &reference[end - count..end],
+                    &response[end - count..end],
+                    dt,
+                )
+                .unwrap();
+            end += stride;
+        }
+        average.transfer().unwrap()
+    }
+
+    /// `transfer`'s gain at the bin nearest `hz`.
+    fn gain_at(transfer: &TransferSpectrum, hz: f64) -> Option<f64> {
+        transfer.magnitude((hz / transfer.frequency_step_hz).round() as usize)
+    }
+
+    /// The photonic-crystal claims, at edge 0.08, from one pulse's whole
+    /// records behind the crystal and in the reference arm, unwindowed, 30 s
+    /// from rest. With both arms empty they read the same to within 1%
+    /// (0.25%). Across 1.5 to 2.1 Hz, inside the gap, the crystal passes
+    /// under a tenth of the field (0.068 at most, 0.024 at 1.85 Hz: 0.06% of
+    /// the power, as the continuous wave measured 0.08%); at the band
+    /// structure's edges, 1.375 and 2.225 Hz, under a third (0.22 and 0.23);
+    /// below the gap, at 1 Hz, over 0.95 (0.999), and above it, at 2.5 Hz,
+    /// over 0.7 (0.825). The readout, a pulse a segment for 80 s, reads the
+    /// gap as the whole pulse does, every frequency from 1.45 to 2.1 Hz
+    /// within 12% (6.7%), and 1 and 2.5 Hz within 10% (3.0% and 5.9% low). Its
+    /// 20 s segments cannot resolve the crystal's narrowest transmission
+    /// peaks, 0.1 Hz wide at 1.25 and 2.3 Hz, which it reads 14% and 25% low.
     #[test]
     fn a_rod_crystal_turns_back_its_gap_and_passes_either_side() {
-        let transmission = |frequency: f64| {
-            let behind = |rods: bool| {
-                let scene = Harmonic::run(
-                    &photonic_crystal_with(frequency, rods),
-                    0.08,
-                    10.0,
-                    frequency,
-                    3.0,
-                );
-                let (re, im) = (0..40)
-                    .map(|index| {
-                        let y = -1.0 + 2.0 * (index as f64 + 0.5) / 40.0;
-                        scene.interpolated(Point2::new(0.75, y))
-                    })
-                    .fold((0.0, 0.0), |sum, (a, b)| (sum.0 + a, sum.1 + b));
-                re.hypot(im)
-            };
-            (behind(true) / behind(false)).powi(2)
+        let points = [CRYSTAL_BEHIND, CRYSTAL_REFERENCE];
+        let whole = |rods: bool| {
+            let (times, series) = records(&photonic_crystal_with(0.0, rods), 0.08, 30.0, &points);
+            transfer_spectrum(&series[1], &series[0], times[1] - times[0]).unwrap()
         };
-        let gap = transmission(CRYSTAL_GAP_HZ);
-        assert!(gap < 0.01, "the gap passes {gap:.4}");
-        let below = transmission(1.0);
-        assert!(below > 0.9, "1 Hz passes {below:.3}");
-        let above = transmission(2.5);
-        assert!(above > 0.5, "2.5 Hz passes {above:.3}");
+        let band = |transfer: &TransferSpectrum, low: f64, high: f64| {
+            (0..transfer.ratios.len())
+                .filter(|index| (low..=high).contains(&transfer.frequency_hz(*index)))
+                .map(|index| {
+                    (
+                        transfer.frequency_hz(index),
+                        transfer.magnitude(index).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let empty = band(&whole(false), 0.8, 3.0)
+            .into_iter()
+            .fold(0.0_f64, |worst, (_, gain)| worst.max((gain - 1.0).abs()));
+        assert!(empty < 0.01, "the empty arms differ by {empty:.3e}");
+        let truth = whole(true);
+        let gap = band(&truth, 1.5, 2.1)
+            .into_iter()
+            .fold(0.0_f64, |worst, (_, gain)| worst.max(gain));
+        assert!(gap < 0.1, "the gap passes {gap:.4}");
+        let gain = |hz: f64| gain_at(&truth, hz).unwrap();
+        for (hz, bound) in [(1.375, 1.0 / 3.0), (2.225, 1.0 / 3.0)] {
+            assert!(gain(hz) < bound, "{hz} Hz passes {:.3}", gain(hz));
+        }
+        assert!(gain(1.0) > 0.95, "1 Hz passes {:.3}", gain(1.0));
+        assert!(gain(2.5) > 0.7, "2.5 Hz passes {:.3}", gain(2.5));
+
+        let document = photonic_crystal();
+        let readout = document.readouts.probe(ProbeId(1));
+        assert_eq!(
+            readout.transfer_from,
+            Some(TransferReference::Probe(ProbeId(2)))
+        );
+        let (times, series) = records(&document, 0.08, 4.0 * CRYSTAL_SEGMENT, &points);
+        let dt = times[1] - times[0];
+        let average = welch(&series[1], &series[0], dt, readout.transfer_segment, 0.25);
+        let off = |hz: f64| gain_at(&average, hz).unwrap() / gain_at(&truth, hz).unwrap() - 1.0;
+        let inside = band(&average, 1.45, 2.1)
+            .into_iter()
+            .fold(0.0_f64, |worst, (hz, _)| worst.max(off(hz).abs()));
+        assert!(inside < 0.12, "the readout's gap is {inside:.3} off");
+        for hz in [1.0, 2.5] {
+            assert!(
+                off(hz).abs() < 0.1,
+                "the readout at {hz} Hz is {:.3} off",
+                off(hz)
+            );
+        }
     }
 
     /// The crystal-bend claims, at edge 0.08, 12 s from rest at 1.85 Hz, from

@@ -17244,3 +17244,50 @@ overtones are not a string's.
   6.5e-3 s through the knock: Q 1.2e-6, b 1.4e-6.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — The photonic crystal measured in a reference arm
+
+Batch F's third step (`docs/spikes/funfern-gallery-plan.md`, F3): the channel
+split into two arms, and the photonic crystal's band gap read at once as a
+transfer, the sample arm over the empty one.
+
+- **Groundwork.** `Builder::arms(x, signal, layers)`: a reflecting wall along
+  `y = 0`, a polyline welded to both outgoing ends, whose breakpoints are
+  junctions (`Builder::junction`, `pinned_polyline`) where the launcher's two
+  dividers cross it and where the upper arm's layer edges meet it. The
+  launcher is a strip 0.06 wide in each arm, each with a volume source of the
+  same signal. Every face is named from the floor or the ceiling
+  (`face_on`), so the background's own anchor names the lower arm's face past
+  the launcher. `transfer_readout(reference, max_hz, segment)` opens a probe
+  on its field and its transfer from another, in decibels.
+- **Scene.** The crystal keeps its pitch, rods and five columns, with five
+  rows filling the upper arm between walls on the lattice's mirror planes.
+  A sinc pulse, flat from 0.8 to 3 Hz, every 20 s; "Behind the crystal" at
+  (0.75, 0.5) reads its transfer from "Reference" at (0.75, −0.5) over 20 s
+  segments. The line probe along the channel goes: a profile of a pulse's
+  energy says little. The description is rewritten.
+- **Explored** (the plan's F3 has the figures): the empty arms read 1 to
+  2.5e-3; one whole pulse reads the gap, 0.024 at 1.85 Hz, and its edges at
+  the band structure's. The crystal rings at its band edges for seconds, so
+  the pulse train had to be chosen with the readout's average. Several
+  pulses to a segment hand it the train's harmonics only, and between them
+  the ringing's phases make the passbands scallop (0.36 for 0.99). A single
+  pulse sits at the start of each segment and reads 1.3 to 5 times high. A
+  repeat equal to the segment keeps one pulse to a segment: at 20 s within
+  5% across the gap and below it and 15% above it, but for peaks narrower
+  than the segment resolves.
+- **Measured claim** (`a_rod_crystal_turns_back_its_gap_and_passes_either_side`,
+  replacing the three continuous-wave runs): the empty arms within 1% of
+  one; the whole pulse under 0.1 across 1.5 to 2.1 Hz, under a third at the
+  band structure's edges, over 0.95 at 1 Hz and 0.7 at 2.5 Hz; the readout's
+  own average over 80 s within 12% of it across the gap (6.7%) and 10% at 1
+  and 2.5 Hz (3.0%, 5.9%). Test helpers: `welch`, the live readout's average
+  of segments ending every 0.25 s, and `gain_at`.
+- **Also.** The materials panel's folding test took the photonic crystal for
+  its 53 faces; the crystal now has 31, and the test takes the disordered
+  crystal, which still has 53.
+- **Device:** `canonical_gpu_long_run` on "Photonic crystal", 8,858 dofs and
+  118 trace nodes: Q 9.6e-7, b 1.0e-6 at 400 steps; Q 2.4e-6, b 5.7e-6 at
+  1000 steps, through the whole pulse.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

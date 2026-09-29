@@ -987,6 +987,53 @@ Claims at edge 0.08, 20 s from one knock (the lines the same at 0.05):
 
 ### F3. Photonic crystal, in a reference arm
 
+Scene 13 revised. `Builder::arms` splits the channel along `y = 0` with a
+reflecting wall welded to both outgoing ends, crossed by the launcher's two
+dividers at junctions, so the launcher is two strips, one per arm, carrying
+one signal. Every face is named from the floor or the ceiling. The crystal
+keeps its pitch, rods and columns and fills the upper arm with five rows,
+whose walls still sit on the lattice's mirror planes. A sinc pulse flat from
+0.8 to 3 Hz lights both arms; "Behind the crystal" at (0.75, 0.5) opens on
+its field and its transfer from "Reference" at (0.75, −0.5), in decibels to
+3.5 Hz. The continuous-wave text, "tune the launcher to 1 Hz or 2.5 Hz", is
+what one pulse now shows at once.
+
+Explored on the CPU, at edge 0.08:
+
+- **The arms.** Both empty, the probe-to-probe transfer is 1 to 2.5e-3 across
+  0.8 to 3 Hz.
+- **The crystal, one whole pulse.** 0.024 at 1.85 Hz, 0.06% of the power
+  where the continuous wave measured 0.08%; 0.999 at 1 Hz and 0.825 at
+  2.5 Hz. At the band structure's edges, 1.375 and 2.225 Hz, 0.22 and 0.23;
+  half is crossed at 1.32 and 2.26 Hz. The crystal rings at its band edges:
+  5% of the energy behind it comes more than 8 s after the pulse, 0.1% after
+  20 s.
+- **The readout.** A train that puts several pulses in one segment carries
+  power only at its harmonics, `k/repeat` Hz. With segments twice the
+  repeat, the readout reads the whole pulse to within 9% there; between
+  them it averages the two neighbours as complex numbers, and the band
+  edges' slow light turns their phases up to 140° apart, so the passbands
+  scallop: 0.36 against 0.99 at 1.25 Hz for a 6 s repeat. A single pulse
+  sits at the start of every segment that holds it, where the taper weighs
+  it less than the response after it, and reads 1.3 to 5 times high. A
+  repeat as long as the segment keeps one pulse to a segment: at 16 s the
+  readout is within 26% but 43% low on the 2.3 Hz peak; at 20 s within 5%
+  across the gap and below it and within 15% above it; at 30 s within 18% at
+  worst. What stays off at 20 s is the
+  crystal's narrowest transmission peaks, about 0.1 Hz wide, finer than a
+  20 s Hann window resolves: 14% and 25% low at 1.25 and 2.3 Hz. The scene
+  repeats every 20 s and reads 20 s segments.
+
+Claims at edge 0.08:
+
+- Both arms empty, the transfer is within 1% of one (0.25%).
+- One whole pulse, unwindowed, 30 s: under a tenth from 1.5 to 2.1 Hz
+  (0.068 at most); under a third at 1.375 and 2.225 Hz (0.22, 0.23); over
+  0.95 at 1 Hz (0.999) and over 0.7 at 2.5 Hz (0.825).
+- The readout's own average, a pulse a segment for 80 s: within 12% of the
+  whole pulse from 1.45 to 2.1 Hz (6.7%), and within 10% at 1 and 2.5 Hz
+  (3.0% and 5.9% low).
+
 ### F4. Etalon
 
 ### F5. Cavity filter
