@@ -553,10 +553,15 @@ pub struct ProbeReadout {
     pub far_waterfall: bool,
     pub far_polar: bool,
     pub far_power: bool,
-    /// Whether a point or area probe's plots are the amplitude spectra of the
-    /// span in view rather than traces over it; in decibels or linearly; and
-    /// up to how many hertz, where zero follows the scene's own band.
-    pub spectrum: bool,
+    /// Amplitude spectra of the span in view, each drawn under its trace: a
+    /// point probe's field and its rate, and an area probe's mean field. The
+    /// other quantities are magnitudes, RMS values and energies, never
+    /// negative, whose spectra are a rectified signal's. In decibels or
+    /// linearly, and up to `spectrum_max_hz`, where zero follows the scene's
+    /// own band.
+    pub field_spectrum: bool,
+    pub secondary_field_spectrum: bool,
+    pub area_mean_field_spectrum: bool,
     pub spectrum_decibels: bool,
     pub spectrum_max_hz: f64,
 }
@@ -593,7 +598,9 @@ impl Default for ProbeReadout {
             far_waterfall: true,
             far_polar: true,
             far_power: true,
-            spectrum: false,
+            field_spectrum: false,
+            secondary_field_spectrum: false,
+            area_mean_field_spectrum: false,
             spectrum_decibels: false,
             spectrum_max_hz: 0.0,
         }
@@ -629,6 +636,11 @@ impl ProbeReadout {
     ) -> Self {
         self.line_plots[quantity.offset() + view.offset()] = true;
         self
+    }
+
+    /// Whether a point or an area probe's readout draws any spectrum.
+    pub fn any_spectrum(&self) -> bool {
+        self.field_spectrum || self.secondary_field_spectrum || self.area_mean_field_spectrum
     }
 
     pub fn valid(&self) -> bool {

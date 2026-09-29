@@ -15,24 +15,18 @@ use super::*;
 impl Playground {
     /// One pannable, zoomable time trace. Every trace in a readout shares the
     /// window held by `view`, so they stay aligned while the user navigates.
-    /// A point or area probe's plot: its trace over the span in view, or,
-    /// in a spectrum readout, that span's amplitude spectrum up to `top_hz`,
-    /// drawn from the readout's cache and computed only when it has none.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn probe_trace(
+    /// The amplitude spectrum of the span the readout's traces show, up to
+    /// `top_hz`, drawn from the readout's cache and computed only when it has
+    /// none.
+    pub(super) fn probe_spectrum(
         ui: &mut egui::Ui,
         label: &str,
         samples: &[PointProbeRecord],
         value: impl Fn(&PointProbeRecord) -> f64,
         color: Color32,
         view: &mut ProbeViewState,
-        maximum_span: f64,
         top_hz: f64,
     ) {
-        if !view.readout.spectrum {
-            Self::probe_plot(ui, label, samples, value, color, view, maximum_span);
-            return;
-        }
         let decibels = view.readout.spectrum_decibels;
         let window = Self::probe_time_window(samples, view);
         let points = view
@@ -45,10 +39,50 @@ impl Playground {
                 })
             });
         ui.small(format!(
-            "{label} · {}",
+            "{label} spectrum · {}",
             if decibels { "dB re 1" } else { "amplitude" }
         ));
         line_plot(ui, points, color, "Hz", &[], 92.0, "Waiting for samples");
+    }
+
+    /// The spectrum settings under a readout's Plots grid: decibels, and the
+    /// highest frequency drawn.
+    fn spectrum_settings(ui: &mut egui::Ui, readout: &mut funfern_app::document::ProbeReadout) {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut readout.spectrum_decibels, "Spectra in dB");
+            ui.add(
+                egui::DragValue::new(&mut readout.spectrum_max_hz)
+                    .range(0.0..=1.0e4)
+                    .speed(0.1)
+                    .prefix("to ")
+                    .custom_formatter(|value, _| spectrum_ceiling_text(value))
+                    .custom_parser(parse_spectrum_ceiling),
+            )
+            .on_hover_text(
+                "Highest frequency drawn; auto is four times the scene's band, and never \
+                 past half the sample rate",
+            );
+        });
+    }
+
+    /// One row of a readout's Plots grid: the quantity, its trace, and its
+    /// spectrum where it has one.
+    fn plot_row(ui: &mut egui::Ui, label: &str, trace: &mut bool, spectrum: Option<&mut bool>) {
+        ui.label(label);
+        ui.checkbox(trace, "")
+            .on_hover_text(format!("{label} over time"));
+        match spectrum {
+            Some(spectrum) => {
+                ui.checkbox(spectrum, "").on_hover_text(format!(
+                    "{label}'s amplitude spectrum over the span in view"
+                ));
+            }
+            None => {
+                ui.label("");
+            }
+        }
+        ui.end_row();
     }
 
     pub(super) fn probe_plot(
@@ -971,6 +1005,7 @@ impl Playground {
                         } else if is_area {
                             let active = [
                                 view.readout.area_mean_field,
+                                view.readout.area_mean_field_spectrum,
                                 view.readout.area_rms_field,
                                 view.readout.area_rms_transverse,
                                 view.readout.area_mean_energy,
@@ -986,34 +1021,57 @@ impl Playground {
                                     ),
                                 )
                                 .ui(ui, |ui| {
-                                    ui.checkbox(
-                                        &mut view.readout.area_mean_field,
-                                        format!("Mean {}", primary_field_label(physics)),
-                                    );
-                                    ui.checkbox(
-                                        &mut view.readout.area_rms_field,
-                                        format!("RMS {}", primary_field_label(physics)),
-                                    );
-                                    ui.checkbox(
-                                        &mut view.readout.area_rms_transverse,
-                                        format!(
-                                            "RMS {}",
-                                            transverse_field_magnitude_label(physics)
-                                        ),
-                                    );
-                                    ui.checkbox(
-                                        &mut view.readout.area_mean_energy,
-                                        "Mean energy density",
-                                    );
-                                    ui.checkbox(
-                                        &mut view.readout.area_total_energy,
-                                        total_energy_label(physics),
-                                    );
+                                    let readout = &mut view.readout;
+                                    egui::Grid::new(("area_probe_plots", id.0))
+                                        .num_columns(3)
+                                        .spacing(egui::vec2(12.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.label("");
+                                            ui.small("Trace");
+                                            ui.small("Spectrum");
+                                            ui.end_row();
+                                            Self::plot_row(
+                                                ui,
+                                                &format!("Mean {}", primary_field_label(physics)),
+                                                &mut readout.area_mean_field,
+                                                Some(&mut readout.area_mean_field_spectrum),
+                                            );
+                                            Self::plot_row(
+                                                ui,
+                                                &format!("RMS {}", primary_field_label(physics)),
+                                                &mut readout.area_rms_field,
+                                                None,
+                                            );
+                                            Self::plot_row(
+                                                ui,
+                                                &format!(
+                                                    "RMS {}",
+                                                    transverse_field_magnitude_label(physics)
+                                                ),
+                                                &mut readout.area_rms_transverse,
+                                                None,
+                                            );
+                                            Self::plot_row(
+                                                ui,
+                                                "Mean energy density",
+                                                &mut readout.area_mean_energy,
+                                                None,
+                                            );
+                                            Self::plot_row(
+                                                ui,
+                                                total_energy_label(physics),
+                                                &mut readout.area_total_energy,
+                                                None,
+                                            );
+                                        });
+                                    Self::spectrum_settings(ui, readout);
                                 });
                         } else {
                             let active = [
                                 view.readout.field,
+                                view.readout.field_spectrum,
                                 view.readout.secondary_field,
+                                view.readout.secondary_field_spectrum,
                                 view.readout.transverse_field,
                                 view.readout.poynting,
                                 view.readout.energy,
@@ -1028,51 +1086,51 @@ impl Playground {
                                     ),
                                 )
                                 .ui(ui, |ui| {
-                                    ui.checkbox(
-                                        &mut view.readout.field,
-                                        primary_field_label(physics),
-                                    );
-                                    ui.checkbox(
-                                        &mut view.readout.secondary_field,
-                                        primary_field_rate_label(physics),
-                                    );
-                                    ui.checkbox(
-                                        &mut view.readout.transverse_field,
-                                        transverse_field_magnitude_label(physics),
-                                    );
-                                    ui.checkbox(
-                                        &mut view.readout.poynting,
-                                        energy_flow_magnitude_label(physics),
-                                    );
-                                    ui.checkbox(&mut view.readout.energy, "Energy density");
+                                    let readout = &mut view.readout;
+                                    egui::Grid::new(("point_probe_plots", id.0))
+                                        .num_columns(3)
+                                        .spacing(egui::vec2(12.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.label("");
+                                            ui.small("Trace");
+                                            ui.small("Spectrum");
+                                            ui.end_row();
+                                            Self::plot_row(
+                                                ui,
+                                                primary_field_label(physics),
+                                                &mut readout.field,
+                                                Some(&mut readout.field_spectrum),
+                                            );
+                                            Self::plot_row(
+                                                ui,
+                                                primary_field_rate_label(physics),
+                                                &mut readout.secondary_field,
+                                                Some(&mut readout.secondary_field_spectrum),
+                                            );
+                                            Self::plot_row(
+                                                ui,
+                                                transverse_field_magnitude_label(physics),
+                                                &mut readout.transverse_field,
+                                                None,
+                                            );
+                                            Self::plot_row(
+                                                ui,
+                                                energy_flow_magnitude_label(physics),
+                                                &mut readout.poynting,
+                                                None,
+                                            );
+                                            Self::plot_row(
+                                                ui,
+                                                "Energy density",
+                                                &mut readout.energy,
+                                                None,
+                                            );
+                                        });
+                                    Self::spectrum_settings(ui, readout);
                                 });
                         }
                         if ui.small_button("Clear").clicked() {
                             clear = true;
-                        }
-                        if !is_curve {
-                            ui.separator();
-                            ui.selectable_value(&mut view.readout.spectrum, false, "Time");
-                            ui.selectable_value(&mut view.readout.spectrum, true, "Spectrum")
-                                .on_hover_text(
-                                    "Each plot's amplitude spectrum over the span in view: a \
-                                     steady tone reads its amplitude",
-                                );
-                            if view.readout.spectrum {
-                                ui.checkbox(&mut view.readout.spectrum_decibels, "dB");
-                                ui.add(
-                                    egui::DragValue::new(&mut view.readout.spectrum_max_hz)
-                                        .range(0.0..=1.0e4)
-                                        .speed(0.1)
-                                        .prefix("to ")
-                                        .custom_formatter(|value, _| spectrum_ceiling_text(value))
-                                        .custom_parser(parse_spectrum_ceiling),
-                                )
-                                .on_hover_text(
-                                    "Highest frequency drawn; auto is four times the scene's \
-                                     band, and never past half the sample rate",
-                                );
-                            }
                         }
                     });
                     let spectrum_top = if view.readout.spectrum_max_hz > 0.0 {
@@ -1080,7 +1138,7 @@ impl Playground {
                     } else {
                         4.0 * band_hz
                     };
-                    if view.readout.spectrum && !is_curve {
+                    if !is_curve && view.readout.any_spectrum() {
                         view.spectra.refresh(
                             SpectrumKey {
                                 decibels: view.readout.spectrum_decibels,
@@ -1214,40 +1272,45 @@ impl Playground {
                                 })
                                 .collect::<Vec<_>>()
                         };
-                        for (enabled, label, values, color) in [
+                        for (enabled, spectrum, label, values, color) in [
                             (
                                 view.readout.area_mean_field,
+                                view.readout.area_mean_field_spectrum,
                                 format!("Mean {}", primary_field_label(physics)),
                                 history_of(|s| s.mean_displacement),
                                 SELECT,
                             ),
                             (
                                 view.readout.area_rms_field,
+                                false,
                                 format!("RMS {}", primary_field_label(physics)),
                                 history_of(|s| s.rms_displacement),
                                 TEAL,
                             ),
                             (
                                 view.readout.area_rms_transverse,
+                                false,
                                 format!("RMS {}", transverse_field_magnitude_label(physics)),
                                 history_of(|s| s.rms_transverse_magnitude),
                                 Color32::from_rgb(188, 139, 255),
                             ),
                             (
                                 view.readout.area_mean_energy,
+                                false,
                                 "Mean energy density".to_owned(),
                                 history_of(|s| s.mean_energy_density),
                                 GOLD,
                             ),
                             (
                                 view.readout.area_total_energy,
+                                false,
                                 total_energy_label(physics).to_owned(),
                                 history_of(|s| s.total_energy),
                                 RED,
                             ),
                         ] {
                             if enabled {
-                                Self::probe_trace(
+                                Self::probe_plot(
                                     ui,
                                     &label,
                                     &values,
@@ -1255,76 +1318,90 @@ impl Playground {
                                     color,
                                     &mut view,
                                     history,
+                                );
+                            }
+                            if spectrum {
+                                Self::probe_spectrum(
+                                    ui,
+                                    &label,
+                                    &values,
+                                    |sample| sample.displacement,
+                                    color,
+                                    &mut view,
                                     spectrum_top,
                                 );
                             }
                         }
                     } else {
-                        if view.readout.field {
-                            Self::probe_trace(
-                                ui,
+                        // Each spectrum under its trace; only the signed
+                        // quantities have one.
+                        type Value = fn(&PointProbeRecord) -> f64;
+                        let quantities: [(bool, bool, &str, Value, Color32); 5] = [
+                            (
+                                view.readout.field,
+                                view.readout.field_spectrum,
                                 primary_field_label(physics),
-                                &point_samples,
                                 |sample| sample.displacement,
                                 SELECT,
-                                &mut view,
-                                history,
-                                spectrum_top,
-                            );
-                        }
-                        if view.readout.secondary_field {
-                            Self::probe_trace(
-                                ui,
+                            ),
+                            (
+                                view.readout.secondary_field,
+                                view.readout.secondary_field_spectrum,
                                 primary_field_rate_label(physics),
-                                &point_samples,
                                 |sample| sample.velocity,
                                 TEAL,
-                                &mut view,
-                                history,
-                                spectrum_top,
-                            );
-                        }
-                        if view.readout.transverse_field {
-                            Self::probe_trace(
-                                ui,
+                            ),
+                            (
+                                view.readout.transverse_field,
+                                false,
                                 transverse_field_magnitude_label(physics),
-                                &point_samples,
                                 |sample| sample.transverse_magnitude,
                                 Color32::from_rgb(188, 139, 255),
-                                &mut view,
-                                history,
-                                spectrum_top,
-                            );
-                        }
-                        if view.readout.poynting {
-                            Self::probe_trace(
-                                ui,
+                            ),
+                            (
+                                view.readout.poynting,
+                                false,
                                 energy_flow_magnitude_label(physics),
-                                &point_samples,
                                 |sample| sample.poynting_magnitude,
                                 RED,
-                                &mut view,
-                                history,
-                                spectrum_top,
-                            );
-                        }
-                        if view.readout.energy {
-                            Self::probe_trace(
-                                ui,
+                            ),
+                            (
+                                view.readout.energy,
+                                false,
                                 "Local energy density",
-                                &point_samples,
                                 |sample| sample.energy_density,
                                 GOLD,
-                                &mut view,
-                                history,
-                                spectrum_top,
-                            );
+                            ),
+                        ];
+                        for (trace, spectrum, label, value, color) in quantities {
+                            if trace {
+                                Self::probe_plot(
+                                    ui,
+                                    label,
+                                    &point_samples,
+                                    value,
+                                    color,
+                                    &mut view,
+                                    history,
+                                );
+                            }
+                            if spectrum {
+                                Self::probe_spectrum(
+                                    ui,
+                                    label,
+                                    &point_samples,
+                                    value,
+                                    color,
+                                    &mut view,
+                                    spectrum_top,
+                                );
+                            }
                         }
                     }
                     ui.small(if is_curve {
                         "Drag traces horizontally or waterfalls vertically · wheel to zoom"
-                    } else if view.readout.spectrum {
-                        "Spectra of the span in view · switch to Time to move or zoom it"
+                    } else if view.readout.any_spectrum() {
+                        "Drag right for earlier time · wheel to zoom · spectra follow the span"
                     } else {
                         "Drag right for earlier time · wheel to zoom"
                     });

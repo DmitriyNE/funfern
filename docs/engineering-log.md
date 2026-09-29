@@ -16774,3 +16774,39 @@ was removed afterwards.
   a parser reads either back, with or without the unit. Tested.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — Spectra under their traces
+
+The user preferred the spectra with the traces rather than behind a
+Time/Spectrum switch: the span coupling is the point, as in any real-time
+analyser.
+
+- **Readout.** The switch is gone. The Plots menu of a point or area probe is
+  a grid of each quantity against Trace and Spectrum, and each spectrum is
+  drawn directly under its trace, over the span the traces show, so panning
+  and zooming move it. dB and the highest frequency sit under the grid, as a
+  line probe's gain and mean window sit under its grid.
+- **Only signed quantities** have a spectrum: a point probe's field and its
+  rate, and an area probe's mean field. The flow magnitude and the energies
+  are powers, and the transverse magnitude and the RMS values are never
+  negative either. Their spectra are a rectified signal's, with everything
+  at twice the drive and a floor the mean removal takes. The user asked for
+  the powers to go; the magnitudes and RMS values went for the same reason.
+  No spectrum is drawn by default.
+- **File.** The one switch becomes a flag for each of the three spectra, beside
+  the point and area plots, each with a serde default. The dB choice and the
+  highest frequency stay in their own block. Neither had been merged, so no
+  file carries the old form.
+- **Cost of a pan.** A parked view's spectra redraw whenever its span moves,
+  so a drag redraws them every frame; the live refresh stays four a second.
+  Measured natively, one spectrum takes 0.013 ms at the default 2 s span
+  (120 records), 0.09 ms at 600 and 0.74 ms at the whole 4,096-record
+  history. No throttle for now.
+- **App check** on the pulse train, with the field and its rate each over
+  its spectrum. It drew as designed, linear and in dB. Four 21 s runs, spectra
+  off, on, off, on, averaged 78, 67, 65 and 65 frames a second: the two
+  runs without spectra differ by more than any run with them does. Steps a
+  second swung from 60 to 400 in every run as adaptation refined to 50-60k
+  DOFs.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

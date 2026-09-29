@@ -300,13 +300,12 @@ struct StoredProbeReadout {
     far_field: StoredFarFieldPlots,
     /// Absent from files written before readouts had spectra.
     #[serde(default)]
-    spectrum: StoredSpectrumPlots,
+    spectrum: StoredSpectrumSettings,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredSpectrumPlots {
-    shown: bool,
+struct StoredSpectrumSettings {
     decibels: bool,
     max_hz: f64,
 }
@@ -319,6 +318,12 @@ struct StoredPointPlots {
     transverse: bool,
     flow: bool,
     energy: bool,
+    /// Absent, as the spectra below, from files written before readouts had
+    /// spectra.
+    #[serde(default)]
+    field_spectrum: bool,
+    #[serde(default)]
+    rate_spectrum: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -329,6 +334,8 @@ struct StoredAreaPlots {
     rms_transverse: bool,
     mean_energy: bool,
     total_energy: bool,
+    #[serde(default)]
+    mean_field_spectrum: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -481,6 +488,8 @@ fn encode_readout(readout: &ProbeReadout) -> StoredProbeReadout {
             transverse: readout.transverse_field,
             flow: readout.poynting,
             energy: readout.energy,
+            field_spectrum: readout.field_spectrum,
+            rate_spectrum: readout.secondary_field_spectrum,
         },
         area: StoredAreaPlots {
             mean_field: readout.area_mean_field,
@@ -488,6 +497,7 @@ fn encode_readout(readout: &ProbeReadout) -> StoredProbeReadout {
             rms_transverse: readout.area_rms_transverse,
             mean_energy: readout.area_mean_energy,
             total_energy: readout.area_total_energy,
+            mean_field_spectrum: readout.area_mean_field_spectrum,
         },
         line: LineProbeQuantity::ALL
             .into_iter()
@@ -520,8 +530,7 @@ fn encode_readout(readout: &ProbeReadout) -> StoredProbeReadout {
             polar: readout.far_polar,
             power: readout.far_power,
         },
-        spectrum: StoredSpectrumPlots {
-            shown: readout.spectrum,
+        spectrum: StoredSpectrumSettings {
             decibels: readout.spectrum_decibels,
             max_hz: readout.spectrum_max_hz,
         },
@@ -547,7 +556,9 @@ fn decode_readout(stored: StoredProbeReadout) -> ProbeReadout {
         far_waterfall: stored.far_field.waterfall,
         far_polar: stored.far_field.polar,
         far_power: stored.far_field.power,
-        spectrum: stored.spectrum.shown,
+        field_spectrum: stored.point.field_spectrum,
+        secondary_field_spectrum: stored.point.rate_spectrum,
+        area_mean_field_spectrum: stored.area.mean_field_spectrum,
         spectrum_decibels: stored.spectrum.decibels,
         spectrum_max_hz: stored.spectrum.max_hz,
     };
@@ -3167,7 +3178,8 @@ mod tests {
         document.readouts.set_probe(
             screen,
             ProbeReadout {
-                spectrum: true,
+                field_spectrum: true,
+                area_mean_field_spectrum: true,
                 spectrum_decibels: true,
                 spectrum_max_hz: 12.5,
                 ..document.readouts.probe(screen)
@@ -3182,9 +3194,12 @@ mod tests {
         assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
         let readout = &mut value["presentation"]["probe_readouts"][0]["readout"];
         readout.as_object_mut().unwrap().remove("spectrum");
+        for (plots, key) in [("point", "field_spectrum"), ("area", "mean_field_spectrum")] {
+            readout[plots].as_object_mut().unwrap().remove(key);
+        }
         let older = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
         let read = older.readouts.probe(screen);
-        assert!(!read.spectrum && !read.spectrum_decibels);
+        assert!(!read.any_spectrum() && !read.spectrum_decibels);
         assert_eq!(read.spectrum_max_hz, 0.0);
     }
 
