@@ -1025,11 +1025,11 @@ stopped being where the app starts.
 
 ## Blocked
 
-- **Pulses.** `TimeSignal` is harmonic only, so a document cannot hold a
-  pulse. That blocks time of flight, group delay in the plasma, echoes, an
-  ellipse refocusing a flash and pulsed Doppler. Filed in `docs/plan.md`
-  under "Later experiments": a windowed harmonic or a burst envelope on every
-  signal consumer, persisted.
+- **Pulses.** Unblocked on 2026-09-29: every signal consumer takes a pulse
+  under a flat-top, Gaussian or sinc envelope, once or repeated, and point and
+  area probes read spectra (`docs/engineering-log.md`). Time of flight, group
+  delay in the plasma, echoes, an ellipse refocusing a flash and pulsed
+  Doppler are ready to be written as scenes.
 - **A true polariton.** Needs a Lorentz restoring law with a second auxiliary
   state, which Gate O did not add. Scene 10 uses the Drude plasma the
   catalogue has.

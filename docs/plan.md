@@ -928,16 +928,16 @@ documented numerical and performance observations.
 Multipatch/trimmed IGA, higher-order triangles, and physical moving-boundary effects.
 Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
-- [ ] Pulsed and gated signals. `TimeSignal` was harmonic only, so a document
+- [x] Pulsed and gated signals. `TimeSignal` was harmonic only, so a document
   could not hold a pulse, and the run-time pulse act is not a document feature.
-  That keeps time of flight, group delay in a Klein-Gordon medium, echoes, an
+  That kept time of flight, group delay in a Klein-Gordon medium, echoes, an
   ellipse refocusing a flash and pulsed Doppler out of the gallery
-  (`docs/spikes/funfern-gallery-plan.md`, "Blocked"). In progress since
-  2026-09-29 (`docs/engineering-log.md`): a `Pulsed` variant with a flat-top,
-  Gaussian or sinc envelope, a start and a repeat, imposed as authored by point
-  and volume sources and Dirichlet and Neumann walls and faces, persisted in
-  version 22, run on the device, and edited in one signal editor with a
-  shape window. Still to come: probe spectra.
+  (`docs/spikes/funfern-gallery-plan.md`, "Blocked"). Done on 2026-09-29
+  (`docs/engineering-log.md`): a `Pulsed` variant with a flat-top, Gaussian or
+  sinc envelope, a start and a repeat, imposed as authored by point and volume
+  sources and Dirichlet and Neumann walls and faces, persisted in version 22,
+  run on the device, edited in one signal editor with a shape window, and read
+  by probe spectra. The five scenes are still to build.
 
 - [ ] Pulsed and gated material time drives, straight after the signals: the
   same envelopes on a material's `TimeDrive`. Unlike a signal it enters the

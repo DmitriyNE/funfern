@@ -75,7 +75,12 @@ free disks, and stable material regions. The far-field monitor is singleton
 document state rather than another selectable probe: it is enabled with one inset
 distance and derives its contour from the outer domain. Point readouts share one
 pan/zoom time window across their independently hideable observable sections; Live
-mode follows the newest solver-clock sample. Probe timestamps come
+mode follows the newest solver-clock sample. A point or area readout can draw each
+plot as the amplitude spectrum of the span in view instead: the records are
+resampled at their median spacing, since a handoff that changes the step changes
+it, Hann-windowed and transformed by the core's radix-2 FFT, so a steady tone
+reads its amplitude. A live readout redraws its spectra four times a second, only
+when new samples have come. Probe timestamps come
 directly from the solver's transferred absolute clock. The host handoff offset is
 only used to map the continuous accepted-step total across timestep changes; a
 fresh install establishes a new rate baseline instead of treating its absolute

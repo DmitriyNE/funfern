@@ -553,6 +553,12 @@ pub struct ProbeReadout {
     pub far_waterfall: bool,
     pub far_polar: bool,
     pub far_power: bool,
+    /// Whether a point or area probe's plots are the amplitude spectra of the
+    /// span in view rather than traces over it; in decibels or linearly; and
+    /// up to how many hertz, where zero follows the scene's own band.
+    pub spectrum: bool,
+    pub spectrum_decibels: bool,
+    pub spectrum_max_hz: f64,
 }
 
 impl Default for ProbeReadout {
@@ -587,6 +593,9 @@ impl Default for ProbeReadout {
             far_waterfall: true,
             far_polar: true,
             far_power: true,
+            spectrum: false,
+            spectrum_decibels: false,
+            spectrum_max_hz: 0.0,
         }
     }
 }
@@ -629,6 +638,8 @@ impl ProbeReadout {
             && self.mean_window > 0.0
             && self.waterfall_gain.is_finite()
             && self.waterfall_gain > 0.0
+            && self.spectrum_max_hz.is_finite()
+            && self.spectrum_max_hz >= 0.0
     }
 }
 

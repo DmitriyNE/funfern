@@ -298,6 +298,17 @@ struct StoredProbeReadout {
     mean_window: f64,
     waterfall_gain: f32,
     far_field: StoredFarFieldPlots,
+    /// Absent from files written before readouts had spectra.
+    #[serde(default)]
+    spectrum: StoredSpectrumPlots,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSpectrumPlots {
+    shown: bool,
+    decibels: bool,
+    max_hz: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -509,6 +520,11 @@ fn encode_readout(readout: &ProbeReadout) -> StoredProbeReadout {
             polar: readout.far_polar,
             power: readout.far_power,
         },
+        spectrum: StoredSpectrumPlots {
+            shown: readout.spectrum,
+            decibels: readout.spectrum_decibels,
+            max_hz: readout.spectrum_max_hz,
+        },
     }
 }
 
@@ -531,6 +547,9 @@ fn decode_readout(stored: StoredProbeReadout) -> ProbeReadout {
         far_waterfall: stored.far_field.waterfall,
         far_polar: stored.far_field.polar,
         far_power: stored.far_field.power,
+        spectrum: stored.spectrum.shown,
+        spectrum_decibels: stored.spectrum.decibels,
+        spectrum_max_hz: stored.spectrum.max_hz,
     };
     for plot in stored.line {
         readout = readout.with_line_plot(
@@ -3138,6 +3157,35 @@ mod tests {
             parse_document(&save_compact(&document).unwrap()).unwrap(),
             document
         );
+    }
+
+    /// A readout's spectrum settings travel with it, a file from before
+    /// readouts had spectra reads them off, and a negative ceiling is refused.
+    #[test]
+    fn a_readouts_spectrum_round_trips_and_an_older_file_reads_none() {
+        let (mut document, screen) = readout_scene();
+        document.readouts.set_probe(
+            screen,
+            ProbeReadout {
+                spectrum: true,
+                spectrum_decibels: true,
+                spectrum_max_hz: 12.5,
+                ..document.readouts.probe(screen)
+            },
+        );
+        let decoded = parse_document(save(&document).unwrap().as_bytes()).unwrap();
+        assert_eq!(decoded.readouts, document.readouts);
+
+        let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        let readout = &mut value["presentation"]["probe_readouts"][0]["readout"];
+        readout["spectrum"]["max_hz"] = (-1.0).into();
+        assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
+        let readout = &mut value["presentation"]["probe_readouts"][0]["readout"];
+        readout.as_object_mut().unwrap().remove("spectrum");
+        let older = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+        let read = older.readouts.probe(screen);
+        assert!(!read.spectrum && !read.spectrum_decibels);
+        assert_eq!(read.spectrum_max_hz, 0.0);
     }
 
     /// A scene that chose no readouts writes none, so it stays readable by a

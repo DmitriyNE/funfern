@@ -9,11 +9,48 @@ use bevy_egui::egui::{self, Color32, Rect, Stroke};
 use funfern_app::topology_editor::TopologyProbeTarget;
 use funfern_core::*;
 
+use super::line_plot::line_plot;
 use super::*;
 
 impl Playground {
     /// One pannable, zoomable time trace. Every trace in a readout shares the
     /// window held by `view`, so they stay aligned while the user navigates.
+    /// A point or area probe's plot: its trace over the span in view, or,
+    /// in a spectrum readout, that span's amplitude spectrum up to `top_hz`,
+    /// drawn from the readout's cache and computed only when it has none.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn probe_trace(
+        ui: &mut egui::Ui,
+        label: &str,
+        samples: &[PointProbeRecord],
+        value: impl Fn(&PointProbeRecord) -> f64,
+        color: Color32,
+        view: &mut ProbeViewState,
+        maximum_span: f64,
+        top_hz: f64,
+    ) {
+        if !view.readout.spectrum {
+            Self::probe_plot(ui, label, samples, value, color, view, maximum_span);
+            return;
+        }
+        let decibels = view.readout.spectrum_decibels;
+        let window = Self::probe_time_window(samples, view);
+        let points = view
+            .spectra
+            .plots
+            .entry(label.to_owned())
+            .or_insert_with(|| {
+                window.map_or_else(Vec::new, |window| {
+                    trace_spectrum(samples, &value, window, top_hz, decibels)
+                })
+            });
+        ui.small(format!(
+            "{label} · {}",
+            if decibels { "dB re 1" } else { "amplitude" }
+        ));
+        line_plot(ui, points, color, "Hz", &[], 92.0, "Waiting for samples");
+    }
+
     pub(super) fn probe_plot(
         ui: &mut egui::Ui,
         label: &str,
@@ -737,6 +774,15 @@ impl Playground {
     pub(super) fn probe_windows(&mut self, ctx: &egui::Context) {
         let physics = self.editor.document.model.accepted.physics;
         let history = self.probe_history_seconds;
+        // How far the scene's signals reach, which an automatic spectrum shows
+        // four times over, for the harmonics a medium makes of them.
+        let band_hz = self.runtime.active().map_or(0.0, |active| {
+            highest_forcing(
+                &active.bundle.authored,
+                active.point_source,
+                TimeSignal::frequency_ceiling_hz,
+            )
+        });
         let ids = self.probe_windows.iter().copied().collect::<Vec<_>>();
         for id in ids {
             let Some(probe) = self
@@ -1004,7 +1050,54 @@ impl Playground {
                         if ui.small_button("Clear").clicked() {
                             clear = true;
                         }
+                        if !is_curve {
+                            ui.separator();
+                            ui.selectable_value(&mut view.readout.spectrum, false, "Time");
+                            ui.selectable_value(&mut view.readout.spectrum, true, "Spectrum")
+                                .on_hover_text(
+                                    "Each plot's amplitude spectrum over the span in view: a \
+                                     steady tone reads its amplitude",
+                                );
+                            if view.readout.spectrum {
+                                ui.checkbox(&mut view.readout.spectrum_decibels, "dB");
+                                ui.add(
+                                    egui::DragValue::new(&mut view.readout.spectrum_max_hz)
+                                        .range(0.0..=1.0e4)
+                                        .speed(0.1)
+                                        .prefix("to ")
+                                        .suffix(" Hz")
+                                        .custom_formatter(|value, _| {
+                                            if value == 0.0 {
+                                                "auto".to_owned()
+                                            } else {
+                                                format!("{value:.1}")
+                                            }
+                                        }),
+                                )
+                                .on_hover_text(
+                                    "Highest frequency drawn; auto is four times the scene's \
+                                     band, and never past half the sample rate",
+                                );
+                            }
+                        }
                     });
+                    let spectrum_top = if view.readout.spectrum_max_hz > 0.0 {
+                        view.readout.spectrum_max_hz
+                    } else {
+                        4.0 * band_hz
+                    };
+                    if view.readout.spectrum && !is_curve {
+                        view.spectra.refresh(
+                            SpectrumKey {
+                                decibels: view.readout.spectrum_decibels,
+                                top_hz: spectrum_top,
+                                span: view.readout.span,
+                                end_time: (!view.live).then_some(view.end_time),
+                            },
+                            newest_time.unwrap_or(0.0),
+                            Instant::now(),
+                        );
+                    }
                     if let Some(status) = &status {
                         ui.colored_label(GOLD, status);
                     }
@@ -1160,7 +1253,7 @@ impl Playground {
                             ),
                         ] {
                             if enabled {
-                                Self::probe_plot(
+                                Self::probe_trace(
                                     ui,
                                     &label,
                                     &values,
@@ -1168,12 +1261,13 @@ impl Playground {
                                     color,
                                     &mut view,
                                     history,
+                                    spectrum_top,
                                 );
                             }
                         }
                     } else {
                         if view.readout.field {
-                            Self::probe_plot(
+                            Self::probe_trace(
                                 ui,
                                 primary_field_label(physics),
                                 &point_samples,
@@ -1181,10 +1275,11 @@ impl Playground {
                                 SELECT,
                                 &mut view,
                                 history,
+                                spectrum_top,
                             );
                         }
                         if view.readout.secondary_field {
-                            Self::probe_plot(
+                            Self::probe_trace(
                                 ui,
                                 primary_field_rate_label(physics),
                                 &point_samples,
@@ -1192,10 +1287,11 @@ impl Playground {
                                 TEAL,
                                 &mut view,
                                 history,
+                                spectrum_top,
                             );
                         }
                         if view.readout.transverse_field {
-                            Self::probe_plot(
+                            Self::probe_trace(
                                 ui,
                                 transverse_field_magnitude_label(physics),
                                 &point_samples,
@@ -1203,10 +1299,11 @@ impl Playground {
                                 Color32::from_rgb(188, 139, 255),
                                 &mut view,
                                 history,
+                                spectrum_top,
                             );
                         }
                         if view.readout.poynting {
-                            Self::probe_plot(
+                            Self::probe_trace(
                                 ui,
                                 energy_flow_magnitude_label(physics),
                                 &point_samples,
@@ -1214,10 +1311,11 @@ impl Playground {
                                 RED,
                                 &mut view,
                                 history,
+                                spectrum_top,
                             );
                         }
                         if view.readout.energy {
-                            Self::probe_plot(
+                            Self::probe_trace(
                                 ui,
                                 "Local energy density",
                                 &point_samples,
@@ -1225,11 +1323,14 @@ impl Playground {
                                 GOLD,
                                 &mut view,
                                 history,
+                                spectrum_top,
                             );
                         }
                     }
                     ui.small(if is_curve {
                         "Drag traces horizontally or waterfalls vertically · wheel to zoom"
+                    } else if view.readout.spectrum {
+                        "Spectra of the span in view · switch to Time to move or zoom it"
                     } else {
                         "Drag right for earlier time · wheel to zoom"
                     });

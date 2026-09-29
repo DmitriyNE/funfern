@@ -16709,3 +16709,37 @@ The fourth of five commits.
   as the forcing frequency does, and leaves the estimate as it was.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — Probe spectra
+
+The last of five commits: a point or area probe's readout draws each of its
+plots as a spectrum.
+
+- **Readout.** Time or Spectrum in the header, and with Spectrum a dB switch
+  and a highest frequency, which at "auto" is four times the scene's band
+  and never past half the sample rate. The band is the highest frequency
+  ceiling of the scene's signals, so a pulse's envelope counts. The plots
+  the readout has switched on are drawn from the span in view. Line and
+  boundary probes and the far field are as they were.
+- **Spectrum.** The span's records, less any that are not finite, are
+  resampled at their median spacing and taken through `amplitude_spectrum`:
+  a steady tone reads its amplitude, and in dB its level re one unit,
+  floored 100 dB under the peak.
+- **Cost.** Each spectrum is an FFT of up to 4,096 records padded to 16,384
+  points. A readout keeps its spectra and redraws them when its settings or
+  its parked span change, and a live one four times a second, only when new
+  samples have come.
+- **File.** `ProbeReadout` keeps the switch, the dB choice and the highest
+  frequency, stored with a serde default, so older files read Time.
+- **Tests:**
+  - a 2 Hz tone recorded at 60 Hz and then, past a handoff, at 48 Hz, with
+    one record missing, peaks at 2 Hz within 0.05 Hz and reads its amplitude
+    within 3%, in dB within 0.3 dB;
+  - the cache redraws on a change of settings and on a live refresh with new
+    samples, and leaves a parked view alone;
+  - the settings round-trip, an older file reads none, and a negative
+    highest frequency is refused.
+- **Docs.** The pulse todo is ticked in `docs/plan.md`, pulses leave "Blocked"
+  in the gallery plan, and `docs/architecture.md` describes spectra.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
