@@ -961,6 +961,30 @@ the lines there (measured at the claims' own meshes):
 
 ### F2. Struck drum
 
+Resonators, after the drum modes. The drum's membrane, radius 0.6, clamped,
+velocity loss 0.1/s, knocked at its centre every 20 s: a point source 0.03
+wide whose rate is a Gaussian 0.05 s wide with nothing but an offset under
+it, a velocity impulse, whose spectrum is still 60% of its peak at 3 Hz.
+Struck at the centre it excites only the round modes, which stand at
+`j₀ₙ/(2πa)`: 0.638, 1.464, 2.296 and 3.128 Hz, in the ratios 1 : 2.30 : 3.60
+: 4.90. A probe at (0, 0.08), where every one of them moves nearly as much
+as at the centre, opens on its field and its spectrum over 20 s, linear to
+4 Hz.
+
+The control planned first, the knock moved off-centre so the modes with
+diameters join in, cannot be heard beside the centre, where those modes
+vanish. What the scene is about, a drum's overtones not being a string's, is
+measured instead at the string's: whole multiples of the fundamental.
+
+Claims at edge 0.08, 20 s from one knock (the lines the same at 0.05):
+
+- The probe's four strongest lines sit at the round modes within 0.5%
+  (0.17%, 0.05%, 0.05% and 0.05%), each over a third of the strongest
+  (0.53), and its readout, over its own 20 s, finds each within a quarter of
+  its window's main lobe.
+- At 2, 3 and 4 times the fundamental the readout shows under 5% of the
+  fundamental's line (1.9%, 0.26% and 0.70%).
+
 ### F3. Photonic crystal, in a reference arm
 
 ### F4. Etalon
@@ -1063,7 +1087,8 @@ example to the next walks the gallery as it is shown
 - **Guides and crystals:** bent fiber, frustrated TIR, photonic crystal,
   crystal bend, disordered crystal.
 - **Resonators:** drum modes, the acoustic, dielectric and plasma whispering
-  galleries, ring resonator.
+  galleries, ring resonator. Batch F adds the struck drum after the drum
+  modes.
 - **Time-varying media:** parametric pump, time crystal, travelling
   modulation, Doppler mirror, parametric fiber amplifier.
 - **Nonlinear and self-organizing:** Kerr slab, spatial soliton, Josephson

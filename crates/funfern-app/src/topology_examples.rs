@@ -234,6 +234,16 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 ExampleGroup::Resonators,
+                "Struck drum",
+                "The clamped drum knocked once every 20 s at its centre: it rings at all its \
+                 round modes at once, and a probe beside the centre hears them at 0.64, 1.46, \
+                 2.30 and 3.13 Hz, the zeros of J₀ over 2πa, in the ratios 1 : 2.30 : 3.60 : \
+                 4.90. A string's overtones would stand at whole multiples of its fundamental; \
+                 at 2, 3 and 4 times it the drum is all but silent.",
+                struck_drum(),
+            ),
+            example(
+                ExampleGroup::Resonators,
                 "Acoustic whispering gallery",
                 "A 4 Hz source just inside a round room's reflecting wall, open on the left: \
                  the sound clings to the wall all the way round, so the far wall, half a turn \
@@ -3224,6 +3234,80 @@ fn drum() -> TopologyDocument {
 /// with two still nodal diameters between them. A point probe sits on
 /// another lobe and one on a nodal diameter.
 fn drum_with(frequency: f64) -> TopologyDocument {
+    let mut document = membrane();
+    document.model.source = source(Point2::new(0.3, 0.0), frequency, 10.0, 0.03);
+    let diagonal = std::f64::consts::FRAC_PI_4;
+    for (id, name, color, point) in [
+        (1, "Lobe", [91, 220, 194], Point2::new(0.0, 0.36)),
+        (
+            2,
+            "Nodal diameter",
+            [248, 196, 112],
+            Point2::new(diagonal.cos(), diagonal.sin()) * 0.36,
+        ),
+    ] {
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(id),
+            name: name.into(),
+            color,
+            enabled: true,
+            target: TopologyProbeTarget::Point(point),
+        });
+    }
+    // The lobes building up, and the diameter staying still.
+    document
+        .readouts
+        .set_probe(ProbeId(1), field_readout(WHOLE_HISTORY));
+    document
+        .readouts
+        .set_probe(ProbeId(2), field_readout(WHOLE_HISTORY));
+    document
+}
+
+fn struck_drum() -> TopologyDocument {
+    struck_drum_with(Point2::default())
+}
+
+/// The drum struck at `at` every 20 s: a point source whose rate is a
+/// Gaussian 0.05 s wide, a velocity impulse whose spectrum is still 60% of
+/// its peak at 3 Hz. A probe sits just beside the centre, where every round
+/// mode moves nearly as much as at the centre itself.
+fn struck_drum_with(at: Point2) -> TopologyDocument {
+    let mut document = membrane();
+    document.model.source = PointSource {
+        enabled: true,
+        position: at,
+        width: 0.03,
+        region: BACKGROUND_REGION,
+        signal: TimeSignal::pulsed(
+            [10.0, 0.0, 0.0, 0.0],
+            PulseEnvelope::Gaussian {
+                width: DRUM_KNOCK_WIDTH,
+            },
+            0.1,
+            DRUM_KNOCK_REPEAT,
+        ),
+    };
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Beside the centre".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(DRUM_LISTENER),
+    });
+    document
+        .readouts
+        .set_probe(ProbeId(1), spectrum_readout(DRUM_SPAN, 4.0, false));
+    document
+}
+
+const DRUM_SPAN: f64 = 20.0;
+const DRUM_KNOCK_WIDTH: f64 = 0.05;
+const DRUM_KNOCK_REPEAT: f64 = 20.0;
+const DRUM_LISTENER: Point2 = Point2::new(0.0, 0.08);
+
+/// The clamped drum's membrane, radius 0.6, with nothing driving it.
+fn membrane() -> TopologyDocument {
     let mut builder = Builder::new();
     builder.scene.materials[0].name = "Membrane".into();
     builder.scene.materials[0].magnetic_loss = Some(LossChannel {
@@ -3244,34 +3328,8 @@ fn drum_with(frequency: f64) -> TopologyDocument {
     let last = builder.scene.face_assignments.len() - 1;
     builder.scene.face_assignments[last].region = Some(BACKGROUND_REGION);
     let mut document = builder.document();
-    document.model.source = source(Point2::new(0.3, 0.0), frequency, 10.0, 0.03);
-    let diagonal = std::f64::consts::FRAC_PI_4;
-    for (id, name, color, point) in [
-        (1, "Lobe", [91, 220, 194], Point2::new(0.0, 0.36)),
-        (
-            2,
-            "Nodal diameter",
-            [248, 196, 112],
-            Point2::new(diagonal.cos(), diagonal.sin()) * 0.36,
-        ),
-    ] {
-        document.model.probes.push(TopologyProbeDefinition {
-            id: ProbeId(id),
-            name: name.into(),
-            color,
-            enabled: true,
-            target: TopologyProbeTarget::Point(point),
-        });
-    }
     // The membrane's elements.
     document.presentation.mesh = true;
-    // The lobes building up, and the diameter staying still.
-    document
-        .readouts
-        .set_probe(ProbeId(1), field_readout(WHOLE_HISTORY));
-    document
-        .readouts
-        .set_probe(ProbeId(2), field_readout(WHOLE_HISTORY));
     document
 }
 
@@ -3514,7 +3572,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 36);
+        assert_eq!(catalog().len(), 37);
         assert_eq!(catalog()[0].name, "Obstacle over a mirror");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -6677,6 +6735,60 @@ mod tests {
         for frequency in [0.0, 8.0] {
             assert!(between.ratios[at(frequency)].is_none());
             assert!(launched.ratios[at(frequency)].is_none());
+        }
+    }
+
+    /// The first four zeros of `J₀`, where the round modes of a clamped drum
+    /// stand: `j₀ₙ/(2πa)`.
+    const BESSEL_J0: [f64; 4] = [2.404_826, 5.520_078, 8.653_728, 11.791_534];
+
+    /// The struck drum's claims, at edge 0.08, 20 s from one knock at the
+    /// centre. The probe beside it hears its four strongest lines at the
+    /// round modes' `j₀ₙ/(2πa)`, within 0.5% (0.17%, 0.05%, 0.05% and 0.05%;
+    /// the same at edge 0.05), each over a third of the strongest (0.53); its
+    /// readout, over its own 20 s, finds each within a quarter of its window's
+    /// main lobe. At 2, 3 and 4 times the fundamental, where a string's
+    /// overtones would stand, the readout shows under 5% of the fundamental's
+    /// line (1.9%, 0.26% and 0.70%).
+    #[test]
+    fn a_struck_drum_rings_at_its_round_modes_and_not_at_a_strings_overtones() {
+        let document = struck_drum();
+        let (times, series) = records(&document, 0.08, DRUM_SPAN, &[DRUM_LISTENER]);
+        let dt = times[1] - times[0];
+        let series = &series[0];
+        let lines = Lines::read(&document, ProbeId(1), series, dt, 3.2);
+        let modes = BESSEL_J0.map(|zero| zero / (std::f64::consts::TAU * DRUM_RADIUS));
+        let heights = modes.map(|expected| {
+            let found = tone(
+                series,
+                dt,
+                0.95 * expected,
+                1.05 * expected,
+                DRUM_SPAN - 1.0,
+            );
+            assert!(
+                (found / expected - 1.0).abs() < 5e-3,
+                "{found:.4} Hz for {expected:.4}"
+            );
+            let (shown, _) = lines.strongest(0.9 * expected, 1.1 * expected);
+            assert!(
+                (shown - expected).abs() < 1.0 / lines.span,
+                "the readout's line at {shown:.4} Hz for {expected:.4}"
+            );
+            let (re, im) = phasor(series, dt, found, DRUM_SPAN - 1.0);
+            re.hypot(im)
+        });
+        let strongest = heights.iter().copied().fold(0.0, f64::max);
+        assert!(
+            heights.iter().all(|height| *height > strongest / 3.0),
+            "{heights:.4?}"
+        );
+        for multiple in [2.0, 3.0, 4.0] {
+            let overtone = lines.at(multiple * modes[0]);
+            assert!(
+                overtone < 0.05 * lines.at(modes[0]),
+                "{multiple} times the fundamental: {overtone:.3e}"
+            );
         }
     }
 }

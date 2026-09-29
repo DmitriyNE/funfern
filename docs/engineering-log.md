@@ -17214,3 +17214,33 @@ claims are lines now open with the spectrum under their probe's trace.
   read.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — A struck drum
+
+Batch F's second scene (`docs/spikes/funfern-gallery-plan.md`, F2), in
+Resonators after the drum modes: the clamped drum knocked at its centre, whose
+overtones are not a string's.
+
+- **Scene.** `membrane()` is the drum's rim and membrane, shared with the
+  driven drum. `struck_drum_with(at)` knocks it every 20 s with a point
+  source 0.03 wide whose rate is a Gaussian 0.05 s wide under a bare offset:
+  a velocity impulse whose spectrum is still 60% of its peak at 3 Hz. A probe
+  "Beside the centre" at (0, 0.08) opens on its field and its spectrum over
+  20 s, linear to 4 Hz. 37 scenes.
+- **Explored.** Struck at the centre, the probe's lines sit at
+  `j₀ₙ/(2πa)`, 0.638, 1.464, 2.296 and 3.128 Hz, to +0.17%, +0.05%, +0.05%
+  and +0.05% at edge 0.08, and the same at 0.05; heights 0.014, 0.025,
+  0.023 and 0.013. The planned control, the knock off-centre so the modes
+  with diameters join in, does not show beside the centre, where those
+  modes vanish: the (1,1) line there reads 9e-4 against 1.2e-3 of leakage
+  with the centred knock. The claim reads the string's overtones instead.
+- **Measured claim** (`a_struck_drum_rings_at_its_round_modes_and_not_at_a_strings_overtones`,
+  edge 0.08, 20 s from one knock): the four strongest lines within 0.5% of
+  the round modes, each over a third of the strongest (0.53), and the
+  readout's own 20 s spectrum finds each within a quarter of its main lobe;
+  at 2, 3 and 4 times the fundamental the readout shows under 5% of the
+  fundamental's line (1.9%, 0.26%, 0.70%).
+- **Device:** `canonical_gpu_long_run` on "Struck drum", 400 steps of
+  6.5e-3 s through the knock: Q 1.2e-6, b 1.4e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
