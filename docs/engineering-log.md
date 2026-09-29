@@ -16952,3 +16952,16 @@ loss channels too, and gates are an Advanced setting.
     mass drive and on a loss drive, in every skin, without changing it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — Gated drives in the docs
+
+- **Architecture:** the gated multiplier, why it needs no admission term, and
+  the device's per-lane gate windows.
+- **User guide:** the Advanced drive editor's Timing row.
+- **Catalogue:** row M-T5.
+- **Stage 7 report:** an addendum with the measurements.
+- **Plan:** the todo is ticked.
+- **Gallery plan:** three candidate scenes under "Still open": a temporal
+  slab, a pump burst and a chopper, each still without a measured claim.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

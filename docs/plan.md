@@ -939,10 +939,17 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   run on the device, edited in one signal editor with a shape window, and read
   by probe spectra. The five scenes are still to build.
 
-- [ ] Pulsed and gated material time drives, straight after the signals: the
+- [x] Pulsed and gated material time drives, straight after the signals: the
   same envelopes on a material's `TimeDrive`. Unlike a signal it enters the
   step's timestep bound through its extrema and the energy balance through its
-  rate, so it takes its own admission and temporal-work terms.
+  rate, so it takes its own admission and temporal-work terms. Done on
+  2026-09-29 (`docs/engineering-log.md`): a gate beside each drive, on both
+  coefficient rows and both loss channels, its carrier counted from each
+  pulse's centre. Every envelope stays within ±1, so the extrema are the
+  ungated carrier's and no admission term was needed; the temporal work took
+  only the product rule. Run on the device with one window per lane, and set
+  from a Timing row in the Advanced drive editor. The scenes are still to
+  build (`docs/spikes/funfern-gallery-plan.md`, "Still open").
 
 - [ ] Pulse start marks on the probe time plots, so a time of flight or an
   echo reads straight off a trace. Waiting on a way to draw them that does not

@@ -226,3 +226,33 @@ inverses and tangent bounds, Kerr and saturable first. The three
 closeout defects should be fixed before it does. The first two let the
 application run a composition its own policy refuses, and Stage 8 will lean on
 exactly those refusals when it adds field-dependent laws.
+
+## Addendum, 29 September 2026: gated drives
+
+Drives took the pulse envelopes signals have (`docs/engineering-log.md`,
+"Gated material drives", three entries).
+
+- **Law.** A `PulseTrain` beside a drive, on either coefficient row or either
+  loss channel, makes the multiplier `1 + e(τ)·(d − 1)`, the carrier counted
+  from each pulse's centre. Between pulses the coefficient is exactly its
+  base.
+- **No new admission.** Every envelope stays within ±1, so the gated
+  multiplier stays in the ungated carrier's `[1 − d, 1 + d]`. The trajectory
+  CFL, the positivity check and the grid filter's reach are unchanged.
+- **Energy.** The temporal work's rate adds the envelope's own by the product
+  rule. The splitting residual under a flat-top mass gate and a Gaussian
+  stiffness gate falls by 24× when the step halves, and a step between
+  pulses does exactly zero temporal work. A slow Gaussian gate on the mass
+  keeps every mode's action: the energy at the peak is `1/√(1 + d)` of the
+  start to 3.4e-4, and it returns to the start to 3.6e-5.
+- **Device.** One gate window per lane follows a material's two runtime
+  slots, moved at each rebase and handoff. Against the f64 reference:
+  - `canonical_gpu_temporal_gate`, four gated lanes across a clock rebase:
+    Q 1.57e-6, b 2.90e-6;
+  - the gated handoff: Q 3.0e-7, b 2.1e-6;
+  - the gated consumers: 1e-6 or better.
+  Deliberately broken shaders miss by 0.046 to 0.16, a broken handoff by
+  8.2e-3 in b, and a broken probe gate by 5.1e-2. An ungated driven step
+  costs what it did.
+- **Not done.** The live temporal-law patch does not carry gates, since the
+  application never sends it. The gallery scenes are still to write.

@@ -266,7 +266,12 @@ names or with every expression evaluated at the material frame's origin. Each ro
   moves to that named loss the first time it is edited. **Advanced view**,
   under the material's name, opens every law slot of each row - field response,
   drive, Switch alternate, divide, and a driven loss - with the effective law
-  evaluated at the frame origin.
+  evaluated at the frame origin. A drive's **Timing** is Continuous, or Pulsed
+  under a flat-top, Gaussian or sinc envelope with a start, Fire now and a
+  repeat, as a pulsed source has. Pulsed, the drive runs only in its pulses,
+  its carrier counted from each pulse's centre, and Shape draws the
+  coefficient factor and the spectrum of its swing. A pump at 0 Hz under a
+  gate is a temporal slab: the medium changes for the pulse and returns.
   In Mechanical it presents the stiffness row as the reciprocal stiffness
   `s₀ = 1/k₀` the solver uses, written back as `k₀` only when edited. χ is
   relative: the coefficient is `c₀(1 + χ|u|²)`, not `c₀u + a₃|u|²u`. Only laws

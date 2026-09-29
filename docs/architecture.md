@@ -1130,8 +1130,25 @@ cannot both be active. The timestep ceiling covers the whole coefficient
 trajectory: each row's lowest tangent factor over every drive phase, Switch
 state and admitted amplitude.
 
+A drive can be gated. A `PulseTrain` beside it on the law, the envelope, start
+and repeat a pulsed signal has, makes its multiplier `1 + e(τ)·(d − 1)`. The
+carrier counts from each pulse's centre, so every pulse of a train is the same
+and none has a running carrier to keep, and between pulses the coefficient is
+exactly its base. Every envelope stays within ±1, so a gated drive never leaves
+the range its carrier sweeps ungated: the timestep ceiling and every admission
+taken over that range hold as they are, and the temporal work adds only the
+envelope's own rate by the product rule. At 0 Hz a gated pump is a temporal
+slab, `1 + d·e`.
+
 On the device, laws are records beside the node and sample tables, and runtime
-phases and Switch states live in a bank carried with the state snapshot.
+phases and Switch states live in a bank carried with the state snapshot. A
+material's runtime record also holds one gate window per lane after its two
+slots, and a record's flags say whether its drive is gated and under which
+envelope. Like a pulse's, a gate's start is held against the epoch origin and
+moved at each rebase and handoff. A gate is authored, not stamped at a commit,
+so it is not in the published bank; the live temporal-law patch refuses a
+generation holding one, and the application takes a new generation for every
+material edit anyway, a Fire included.
 - **Clock:** the epoch-local time is `step count × dt` in f32, formed each
   step, never a running sum.
 - **Loss:** a lossy time-driven generation carries one loss record per

@@ -1023,6 +1023,14 @@ stopped being where the app starts.
   complementary row first. The user agreed on 27 September and left the
   analysis for later.
 
+- **Gated-drive scenes.** Proposed on 29 September, once material drives
+  took gates. A temporal slab: a flat-top gate on a 0 Hz pump raises the
+  index for a while and returns it, so a wave splits at each edge into
+  forward and time-reversed parts. A pump burst: a gated pump at twice a
+  mode's frequency amplifies it for a set time, and the gain follows the
+  gate's length. A chopper: a gated loss across a guide cuts pulses out of
+  a continuous wave. Each still needs its measured claim.
+
 ## Blocked
 
 - **Pulses.** Unblocked on 2026-09-29: every signal consumer takes a pulse

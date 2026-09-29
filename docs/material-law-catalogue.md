@@ -31,10 +31,14 @@ Per node, exact, stepped as `q = m·u`. Stored as `Material::mass_law`.
 | M-T2 | harmonic `1 + A sin(2πft + φ)` | parametric amplification at `f ≈ 2f0`, time-crystal band gaps | `TimeDrive::ParametricPump` | runs |
 | M-T3 | travelling `1 + A sin(2πft − q·x + φ)` | non-reciprocity, one-way bands, indirect frequency conversion | `TimeDrive::TravellingModulation` | runs |
 | M-T4 | smoothed square / pulse train | the Floquet-standard modulation; sharper gaps than a sinusoid | `TimeDrive::TimeCrystal` | runs |
+| M-T5 | gated `1 + e(τ)·(d − 1)`: M-T2 to M-T4 under a flat-top, Gaussian or sinc envelope, once or repeated | temporal slab (a 0 Hz pump), pump bursts, a chopped loss | `CoefficientLaw::gate`, `DampingLaw::gate` | runs |
 
 M-T1's `t0` is not authored. A Switch is stamped by the GPU at its own commit
 boundary, so the material carries the shape and the runtime carries the moment;
 `MaterialSwitchRuntime` is what a consumer reads back.
+
+M-T5's carrier counts from each pulse's centre, as a pulsed signal's does, and
+the envelope stays within ±1, so a gate adds no timestep or admission term.
 
 M-T3 needs only a two-float wavevector, and node positions are already in the
 node table, so it costs no buffer.
