@@ -297,6 +297,7 @@ impl Playground {
                 signal: TimeSignal::harmonic(0.0, 12.0, 3.0, SWITCH_ON_PHASE),
             });
             let mut source_changed = false;
+            let fire_at = self.pulse_fire_time();
             ui.horizontal(|ui| {
                 source_changed = ui.checkbox(&mut source.enabled, "Volume source").changed();
                 // Only beside a visible profile editor: with the source off
@@ -323,13 +324,8 @@ impl Playground {
                 source_changed |= source.profile != before;
                 ui.label("Signal");
                 let before = source.signal;
-                edit_time_signal(ui, &mut source.signal);
+                edit_time_signal(ui, &mut source.signal, SignalUse::Source, fire_at);
                 source_changed |= source.signal != before;
-                ui.small(
-                    "Version-22 acceleration control: this signal is analytically integrated \
-                     into a canonical primary-field-rate drive using immutable \
-                     accepted-generation normalization.",
-                );
             }
             // Committed outside the block so unchecking is recorded rather than
             // springing back on the next frame.

@@ -444,34 +444,20 @@ impl Playground {
             }
         });
         ui.separator();
-        ui.label("Continuous source");
+        ui.label("Point source");
         let mut source = self.editor.document.model.source;
         let before = source;
-        ui.checkbox(&mut source.enabled, "Enabled");
-        let (_, amplitude, frequency, phase) = source.signal.carrier_mut();
-        ui.add(
-            egui::DragValue::new(amplitude)
-                .speed(0.05)
-                .prefix("Amplitude "),
-        );
-        ui.add(
-            egui::DragValue::new(frequency)
-                .speed(0.1)
-                .range(0.0..=1.0e5)
-                .prefix("Frequency "),
-        );
-        ui.add(egui::DragValue::new(phase).speed(0.05).prefix("Phase "));
-        ui.add(
-            egui::DragValue::new(&mut source.width)
-                .speed(0.002)
-                .range(0.001..=1.0)
-                .prefix("Width "),
-        );
-        ui.small(
-            "Version-22 acceleration control: the canonical solver integrates this signal \
-             analytically into a primary-field-rate drive and applies the accepted \
-             generation's immutable reference mass.",
-        );
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut source.enabled, "Enabled");
+            ui.add(
+                egui::DragValue::new(&mut source.width)
+                    .speed(0.002)
+                    .range(0.001..=1.0)
+                    .prefix("Width "),
+            );
+        });
+        let fire_at = self.pulse_fire_time();
+        edit_time_signal(ui, &mut source.signal, SignalUse::Source, fire_at);
         if source != before {
             if let Err(error) = self.editor.set_point_source(source) {
                 self.notify(error)

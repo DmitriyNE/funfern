@@ -441,12 +441,15 @@ impl Playground {
                         CurveTraceSide::Right => right,
                     },
                 };
-                if edit_face_condition(ui, self.editor.document.model.draft.physics, &mut condition)
-                    && let Err(error) = self.editor.set_span_face_condition(
-                        &curve_spans,
-                        self.selected_side,
-                        condition,
-                    )
+                let fire_at = self.pulse_fire_time();
+                if edit_face_condition(
+                    ui,
+                    self.editor.document.model.draft.physics,
+                    &mut condition,
+                    fire_at,
+                ) && let Err(error) =
+                    self.editor
+                        .set_span_face_condition(&curve_spans, self.selected_side, condition)
                 {
                     self.notify(error);
                 }
@@ -670,8 +673,13 @@ impl Playground {
             let sides = outer.iter().copied().collect::<BTreeSet<_>>();
             let mut condition =
                 self.editor.document.model.draft.outer_boundaries.sides[outer[0].index()];
-            if edit_outer_condition(ui, self.editor.document.model.draft.physics, &mut condition)
-                && let Err(error) = self.editor.set_outer_condition(&sides, condition)
+            let fire_at = self.pulse_fire_time();
+            if edit_outer_condition(
+                ui,
+                self.editor.document.model.draft.physics,
+                &mut condition,
+                fire_at,
+            ) && let Err(error) = self.editor.set_outer_condition(&sides, condition)
             {
                 self.notify(error);
             }

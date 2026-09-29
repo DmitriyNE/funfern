@@ -936,8 +936,8 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   2026-09-29 (`docs/engineering-log.md`): a `Pulsed` variant with a flat-top,
   Gaussian or sinc envelope, a start and a repeat, imposed as authored by point
   and volume sources and Dirichlet and Neumann walls and faces, persisted in
-  version 22, and run on the device. Still to come: the signal editor with
-  its shape window, and probe spectra.
+  version 22, run on the device, and edited in one signal editor. Still to
+  come: its shape window, and probe spectra.
 
 - [ ] Pulsed and gated material time drives, straight after the signals: the
   same envelopes on a material's `TimeDrive`. Unlike a signal it enters the

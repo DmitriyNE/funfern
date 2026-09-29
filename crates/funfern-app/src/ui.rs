@@ -62,6 +62,7 @@ mod scene_card;
 mod selection;
 
 mod session;
+mod signals;
 mod state;
 #[cfg(test)]
 mod test_support;
@@ -80,6 +81,7 @@ use exposure::*;
 use gesture::*;
 use pacing::*;
 use probe_view::*;
+use signals::*;
 #[cfg(test)]
 use test_support::*;
 use theme::*;
@@ -1192,10 +1194,12 @@ fn material_scalar_editor(
     }
 }
 
+/// `fire_at` is when "Fire now" starts a driven face's pulse.
 fn edit_face_condition(
     ui: &mut egui::Ui,
     physics: PhysicsModel,
     condition: &mut FaceBoundaryCondition,
+    fire_at: f64,
 ) -> bool {
     let before = *condition;
     let mut kind = match condition {
@@ -1237,18 +1241,23 @@ fn edit_face_condition(
                     .prefix("Ratio "),
             );
         }
-        FaceBoundaryCondition::Neumann { signal } | FaceBoundaryCondition::Dirichlet { signal } => {
-            edit_time_signal(ui, signal)
+        FaceBoundaryCondition::Neumann { signal } => {
+            edit_time_signal(ui, signal, SignalUse::Flux, fire_at)
+        }
+        FaceBoundaryCondition::Dirichlet { signal } => {
+            edit_time_signal(ui, signal, SignalUse::Field, fire_at)
         }
         _ => {}
     }
     *condition != before
 }
 
+/// `fire_at` is when "Fire now" starts a driven wall's pulse.
 fn edit_outer_condition(
     ui: &mut egui::Ui,
     physics: PhysicsModel,
     condition: &mut OuterBoundaryCondition,
+    fire_at: f64,
 ) -> bool {
     let before = *condition;
     let mut kind = outer_kind(*condition).presented(physics);
@@ -1273,8 +1282,12 @@ fn edit_outer_condition(
         };
     }
     match condition {
-        OuterBoundaryCondition::Neumann { signal }
-        | OuterBoundaryCondition::Dirichlet { signal } => edit_time_signal(ui, signal),
+        OuterBoundaryCondition::Neumann { signal } => {
+            edit_time_signal(ui, signal, SignalUse::Flux, fire_at)
+        }
+        OuterBoundaryCondition::Dirichlet { signal } => {
+            edit_time_signal(ui, signal, SignalUse::Field, fire_at)
+        }
         _ => {}
     }
     *condition != before
@@ -1315,27 +1328,6 @@ fn boundary_combo_height(ui: &egui::Ui, physics: PhysicsModel) -> f32 {
     // row of headroom so the six-entry EM picker never acquires an unobvious
     // scrollbar through rounding, font scaling, or popup padding.
     ui.spacing().interact_size.y * (BoundaryKind::choices(physics).len() as f32 + 1.0)
-}
-
-fn edit_time_signal(ui: &mut egui::Ui, signal: &mut TimeSignal) {
-    let (offset, amplitude, frequency, phase) = signal.carrier_mut();
-    ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(offset).speed(0.02).prefix("Offset "));
-        ui.add(
-            egui::DragValue::new(amplitude)
-                .speed(0.02)
-                .prefix("Amplitude "),
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::DragValue::new(frequency)
-                .speed(0.05)
-                .range(0.0..=1.0e6)
-                .prefix("Hz "),
-        );
-        ui.add(egui::DragValue::new(phase).speed(0.05).prefix("Phase "));
-    });
 }
 
 /// Average of the triangle centroids carrying one region, used to anchor a

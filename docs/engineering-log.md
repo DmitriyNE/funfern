@@ -16629,3 +16629,36 @@ the first.
   of the runs, not the build.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — One signal editor, with pulses
+
+The third of five commits: the editor.
+
+- **One editor** (`ui/signals.rs`) for the point source, region sources, and
+  Neumann and Dirichlet walls and faces. The point-source panel had its own
+  harmonic-only copy without the offset, and it and the region source each
+  carried a note about version-22 acceleration; both are gone. The panel is
+  now "Point source".
+- **Controls.** Continuous or Pulse. A pulse has its carrier, an envelope
+  (flat top with duration and edge, Gaussian with width, sinc with band and
+  lobes), a start, and a repeat that is off or at least the duration. A line
+  says how long it lasts, when it peaks, how many carrier cycles it holds and
+  how often it recurs. The last line names the units for each use: an
+  acceleration or a field rate for a source, a flux rate or a flux for a
+  Neumann side, a field for a Dirichlet side.
+- **Switching** a source or a Neumann side to Pulse carries its rate
+  amplitude over, A/ω, so its strength does not jump, and back multiplies by
+  ω; a Dirichlet side keeps its numbers. The new pulse is a Hann burst three
+  carrier cycles long with a sine carrier, so it has no area, fired now. A
+  source turned back starts on a cosine, as a new source does.
+- **Fire now** starts the pulse on the simulated clock past every step
+  already queued, plus a quarter second of wall time at the run's speed. The
+  displayed clock trails the device by the readback's frames. A wall's edit
+  takes a handoff, which can run well past one frame. So a pulse started at
+  the displayed time would land partway in, as a step in a pinned field.
+  Paused, it fires where the run stands.
+- **Tests:** conversions both ways for each use, shape changes over the same
+  duration, the summary line, the fire time paused and running, and an egui
+  pass that presses Pulse, Fire now and Continuous.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
