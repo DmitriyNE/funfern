@@ -353,6 +353,7 @@ mod tests {
         activate(&mut state);
         state.uploaded_time_step = 0.01;
         state.sim_time_offset = 3.0;
+        state.sim_time_step = 0.01;
         state.amr_status = "monitoring solution".into();
         let example = &funfern_app::topology_examples::catalog()[0];
         state
@@ -363,8 +364,12 @@ mod tests {
         state.drop_generation();
         assert!(state.runtime.active().is_none());
         assert_eq!(
-            (state.uploaded_time_step, state.sim_time_offset),
-            (0.0, 0.0)
+            (
+                state.uploaded_time_step,
+                state.sim_time_offset,
+                state.sim_time_step
+            ),
+            (0.0, 0.0, 0.0)
         );
         assert_eq!(state.amr_status, "waiting for solution");
         settle(&mut state.editor);

@@ -1,6 +1,7 @@
 //! Probes end to end: the Probes inspector and its editors, the GPU
 //! recorder configuration, and folding readbacks back into the traces.
 
+use crate::canonical_gpu::CanonicalGpuDisplayClock;
 use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, CurveProbeDisplay, CurveProbeInput, FarFieldDisplay,
     FarFieldHandoff, FarFieldInput, ProbeDisplay, RecorderContext, RecorderHistory, WaveGpuRequest,
@@ -567,8 +568,25 @@ impl Playground {
         }
     }
 
+    /// Steps accepted since the last clock readback count at that clock's step.
+    /// A handoff uploads the next generation's step before that generation has
+    /// taken one, and pricing the steps behind it at that step put the clock
+    /// seconds out until the new generation's first readback: behind, then a
+    /// jump ahead, at every refinement.
     pub(super) fn simulated_time(&self) -> f64 {
-        self.sim_time_offset + self.completed_steps as f64 * self.solver_time_step()
+        let step = if self.sim_time_step > 0.0 {
+            self.sim_time_step
+        } else {
+            self.solver_time_step()
+        };
+        self.sim_time_offset + self.completed_steps as f64 * step
+    }
+    /// Takes a readback of the device's clock as the one `simulated_time`
+    /// carries on.
+    pub(super) fn read_device_clock(&mut self, clock: CanonicalGpuDisplayClock) {
+        self.sim_time_step = f64::from(clock.time_step);
+        self.sim_time_offset =
+            clock.absolute_seconds - f64::from(clock.accepted_steps) * self.sim_time_step;
     }
     /// How much of the delay window the far-field recorder holds, once it is
     /// running and has not filled it yet. Nothing can be projected before it is
@@ -752,6 +770,53 @@ mod tests {
                 ..token
             },
             7
+        ));
+    }
+
+    /// Adaptation refining a mesh at 7,223 steps, from a step of 1.69e-3 to
+    /// 1.18e-3, as measured in the app. Pricing those steps at the uploaded
+    /// step put the clock 3.68 s behind for as long as the handoff took, and
+    /// 3.72 s ahead again at the new generation's first readback.
+    #[test]
+    fn a_handoff_keeps_the_clock_of_the_generation_that_took_the_steps() {
+        let old_step = 1.692_918_7e-3_f32;
+        let new_step = 1.183_126_4e-3_f32;
+        let mut state = Playground {
+            uploaded_time_step: f64::from(old_step),
+            completed_steps: 7223,
+            ..Playground::default()
+        };
+        state.read_device_clock(CanonicalGpuDisplayClock {
+            absolute_seconds: 15.723_040,
+            accepted_steps: 7223,
+            time_step: old_step,
+            ..CanonicalGpuDisplayClock::default()
+        });
+        let close = |time: f64, expected: f64| (time - expected).abs() < 1.0e-9;
+        assert!(close(state.simulated_time(), 15.723_040));
+        // The handoff begins: the candidate's step is uploaded and the running
+        // generation holds its step count.
+        state.uploaded_time_step = f64::from(new_step);
+        assert!(close(state.simulated_time(), 15.723_040));
+        // It completes two steps later, taken on the old mesh, and the new
+        // generation starts from that count before its first readback.
+        state.completed_steps = 7225;
+        let handed_over = 15.723_040 + 2.0 * f64::from(old_step);
+        assert!(close(state.simulated_time(), handed_over));
+        // Its first readback continues the same clock at the new step.
+        state.completed_steps = 7256;
+        let resumed = handed_over + 31.0 * f64::from(new_step);
+        state.read_device_clock(CanonicalGpuDisplayClock {
+            absolute_seconds: resumed,
+            accepted_steps: 7256,
+            time_step: new_step,
+            ..CanonicalGpuDisplayClock::default()
+        });
+        assert!(close(state.simulated_time(), resumed));
+        state.completed_steps = 7258;
+        assert!(close(
+            state.simulated_time(),
+            resumed + 2.0 * f64::from(new_step)
         ));
     }
 

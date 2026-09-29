@@ -135,7 +135,11 @@ pub struct Playground {
     /// Frame interval the display is actually reaching, measured rather than
     /// assumed. See [`DisplayCadence`].
     pub(super) display_cadence: DisplayCadence,
+    /// The device clock the app last read, as an offset from the accepted-step
+    /// count and the step that clock ran at. `simulated_time` carries it on by
+    /// the steps accepted since.
     pub(super) sim_time_offset: f64,
+    pub(super) sim_time_step: f64,
     pub(super) completed_steps: u64,
     pub(super) steps_per_second: f64,
     /// The best simulated-seconds-per-wall-second seen lately, which is what the
@@ -390,6 +394,7 @@ impl Default for Playground {
             last_batch: FrameBatch::default(),
             display_cadence: DisplayCadence::new(),
             sim_time_offset: 0.0,
+            sim_time_step: 0.0,
             completed_steps: 0,
             steps_per_second: 0.0,
             speed_reached: 0.0,

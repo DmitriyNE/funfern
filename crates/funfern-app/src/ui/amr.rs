@@ -436,7 +436,8 @@ impl Playground {
         };
         let dt = self.solver_time_step();
         let time = canonical.clock.map_or(self.simulated_time(), |clock| {
-            clock.absolute_seconds + (step as f64 - f64::from(clock.accepted_steps)) * dt
+            clock.absolute_seconds
+                + (step as f64 - f64::from(clock.accepted_steps)) * f64::from(clock.time_step)
         });
         let canonical_snapshot = CanonicalIndicatorSnapshot {
             mesh_revision: active.mesh.mesh_revision,

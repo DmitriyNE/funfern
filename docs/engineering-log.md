@@ -3437,8 +3437,9 @@ Reported 2026-09-23, not yet reproduced or diagnosed:
 
 Found while pacing the solver, not yet diagnosed:
 
-- [ ] `simulated_time()` runs backwards for a frame or two at a handoff. The
-  offset is only updated when the upload commits, while the step counter resets
+- [x] `simulated_time()` runs backwards for a frame or two at a handoff
+  (2026-09-29; the cause was the step, not the count, see that day's entry).
+  The offset is only updated when the upload commits, while the step counter resets
   when the buffers install, so between the two the steps taken on the old
   generation are missing from the total. Counted per frame over a twenty-second
   run: 18 of 1876 frames go backwards, worst 1.23 s. Pre-existing and unchanged
@@ -16412,5 +16413,46 @@ outgoing trace costs: the trace's dense cyclic Jacobi eigensolve.
   double slit Q 1.6e-6, b 1.4e-6; acoustic whispering gallery Q 1.5e-6,
   b 1.7e-6. `canonical_gpu_temporal_live_source`, which patches the weights
   of a moved source, exits 0.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — The simulated clock keeps its step across a handoff
+
+Logged on 2026-09-16 and never taken up: the simulated time runs backwards
+for a moment at a handoff. It still did, and for a different reason than the
+one logged then.
+
+- **Reproduced** in the app with a clock probe, 35 s with a scratch home on a
+  TM point source with adaptation on: 14 of 3,706 frames went backwards, the
+  worst by 3.68 s, and 213 frames in 15 windows read the wrong time, one
+  window per refining handoff, about 45 frames each.
+- **Cause.** `simulated_time()` is an offset read off the device clock plus
+  the accepted steps since, priced at `solver_time_step()`. That is the
+  uploaded step, which a handoff sets to the candidate's the moment it
+  begins, while the running generation is still the one that took every
+  step. Until the new generation's first clock readback the time read
+  `N·(dt_new − dt_old)` out: at 7,223 steps, a step going from 1.69e-3 to
+  1.18e-3 read 3.68 s behind, then jumped 3.72 s ahead. Refining reads
+  behind, coarsening ahead, and the error grows with the run. The step count
+  did carry across the handoff; the note's reading was out of date.
+- **Fix.** The step is kept with the offset (`sim_time_step`), both taken from
+  each device clock readback (`read_device_clock`), so steps count at the
+  step of the clock they follow. Reset and an install start the clock at
+  zero at the new step, and dropping a scene clears both. The adaptation
+  snapshot's time, extrapolated from its clock by the uploaded step, now uses
+  that clock's own.
+- **Who read it.** The Diagnostics "Simulated time" line, where it showed.
+  The far-field recording start reads the same clock but only restarts with
+  a new contour, never at an adaptation. The install path, which kept the
+  previous run's offset until its first readback, is fixed by reading the
+  code and was not measured.
+- **Measured after**, the same run: 0 of 4,064 frames backwards or off by
+  more than 0.1 ms, over 29 generations and 277 frames of pending handoff.
+- **Tests:** `a_handoff_keeps_the_clock_of_the_generation_that_took_the_steps`
+  walks the measured handoff: readback, the candidate's step uploaded, the
+  count carried two old steps further, the new generation's first readback.
+  It fails with the steps priced at the uploaded step.
+  `a_replaced_scene_drops_the_outgoing_generation` also checks the step is
+  cleared.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.

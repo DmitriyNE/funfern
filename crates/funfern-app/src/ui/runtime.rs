@@ -68,6 +68,7 @@ impl Playground {
         self.gpu_upload_preparation = None;
         self.uploaded_time_step = 0.0;
         self.sim_time_offset = 0.0;
+        self.sim_time_step = 0.0;
         self.accumulator = 0.0;
         self.step_backlog = 0;
         self.canonical_event_serial = 0;
@@ -506,6 +507,12 @@ impl Playground {
             match upload {
                 Ok(()) => {
                     self.uploaded_time_step = dt;
+                    // An install starts its clock at zero, and publishes at
+                    // once: its first steps are the new generation's.
+                    if !handed_off {
+                        self.sim_time_offset = 0.0;
+                        self.sim_time_step = dt;
+                    }
                     self.handoff_upload = Some(Instant::now());
                     self.uploading = Some(Uploading {
                         token,
@@ -641,6 +648,7 @@ impl Playground {
                     self.reset_requested = false;
                     self.uploaded_time_step = dt;
                     self.sim_time_offset = 0.0;
+                    self.sim_time_step = dt;
                     self.canonical_event_serial = 0;
                     self.canonical_event_observed = 0;
                     self.restart_probe_traces();
@@ -873,8 +881,7 @@ impl Playground {
                 self.energy_updated = Instant::now();
             }
             if let Some(clock) = display.clock {
-                self.sim_time_offset = clock.absolute_seconds
-                    - self.completed_steps as f64 * f64::from(clock.time_step);
+                self.read_device_clock(clock);
             }
         }
         self.accumulate_step_rate(
