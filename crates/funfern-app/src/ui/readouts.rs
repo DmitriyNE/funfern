@@ -1065,14 +1065,8 @@ impl Playground {
                                         .range(0.0..=1.0e4)
                                         .speed(0.1)
                                         .prefix("to ")
-                                        .suffix(" Hz")
-                                        .custom_formatter(|value, _| {
-                                            if value == 0.0 {
-                                                "auto".to_owned()
-                                            } else {
-                                                format!("{value:.1}")
-                                            }
-                                        }),
+                                        .custom_formatter(|value, _| spectrum_ceiling_text(value))
+                                        .custom_parser(parse_spectrum_ceiling),
                                 )
                                 .on_hover_text(
                                     "Highest frequency drawn; auto is four times the scene's \
@@ -1569,6 +1563,26 @@ impl RunningRow {
     }
 }
 
+/// A spectrum's highest frequency as its field shows it: "auto" at zero,
+/// which follows the scene's band.
+fn spectrum_ceiling_text(value: f64) -> String {
+    if value == 0.0 {
+        "auto".to_owned()
+    } else {
+        format!("{value:.1} Hz")
+    }
+}
+
+/// What `spectrum_ceiling_text` writes, read back, with or without its unit.
+fn parse_spectrum_ceiling(text: &str) -> Option<f64> {
+    let number = text.trim().trim_end_matches("Hz").trim();
+    if number.eq_ignore_ascii_case("auto") {
+        Some(0.0)
+    } else {
+        number.parse().ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1578,6 +1592,19 @@ mod tests {
     /// has been recorded. Those clamps are the display's: only what the user
     /// changes reaches the document, so a look does not shorten a window for
     /// good.
+    #[test]
+    fn the_spectrum_ceiling_reads_back_what_it_shows() {
+        for value in [0.0, 12.5, 400.0] {
+            assert_eq!(
+                parse_spectrum_ceiling(&spectrum_ceiling_text(value)),
+                Some(value)
+            );
+        }
+        assert_eq!(spectrum_ceiling_text(0.0), "auto");
+        assert_eq!(parse_spectrum_ceiling("7"), Some(7.0));
+        assert_eq!(parse_spectrum_ceiling("fast"), None);
+    }
+
     #[test]
     fn only_what_the_user_changes_reaches_the_document() {
         use funfern_app::document::ProbeReadout;

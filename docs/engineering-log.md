@@ -16743,3 +16743,34 @@ plots as a spectrum.
   in the gallery plan, and `docs/architecture.md` describes spectra.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — Pulses in the app, and the spectrum ceiling's text
+
+An app run with a scratch home on the working scene: the point source as a
+Hann train, three cycles of 2.5 Hz every 3 s, starting at 0.5 s, at the rate
+amplitude the harmonic had (60/ω). A temporary system opened the receiver's
+readout and the shape window, switched the readout to spectrum and then to
+dB, and saved screenshots; the receiver's records were printed. All of that
+was removed afterwards.
+
+- **Arrivals.** The receiver's RMS in quarter-second bins peaks at 2.25,
+  5.25, 8.25, 11.25 and 14.25 s. That is 3.00 s apart, and the first is the
+  start, plus half the burst, plus 1.15 s of travel. All five peak at
+  2.1e-2, through the run's adaptation handoffs. Nothing reached the
+  receiver before 1.5 s; between bursts about 7% is left, scattered by the
+  box and the walls.
+- **Screens.**
+  - The shape window drew two pulses of the train, and a spectrum peaked
+    near 2.5 Hz with the 4.17 Hz mark.
+  - The readout's spectrum is a comb of lines 1/3 Hz apart under the burst's
+    envelope, as a train with a 3 s repeat makes. It runs to 16.6 Hz on
+    auto, four times the band, and floors 100 dB under the peak in dB.
+  - The point-source editor laid out as designed.
+  - Adaptation asked for 0.007 elements inside the slow box, under the 0.020
+    floor. The 2.5 Hz harmonic alone would have asked for about 0.012 there,
+    so the scene sits at the floor either way.
+- **Fixed.** The ceiling field read "to auto Hz": the unit was a suffix and
+  "auto" the formatter's. The formatter now writes "auto" or "12.5 Hz", and
+  a parser reads either back, with or without the unit. Tested.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
