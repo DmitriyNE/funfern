@@ -789,20 +789,26 @@ impl TimeSignal {
         matches!(self, Self::Pulsed { .. })
     }
 
+    /// The frequency the signal oscillates at: its carrier's, when the
+    /// carrier has an amplitude.
+    pub fn carrier_frequency_hz(self) -> f64 {
+        let [_, amplitude, frequency_hz, _] = self.carrier();
+        if amplitude == 0.0 { 0.0 } else { frequency_hz }
+    }
+
     /// The highest frequency the signal puts appreciable content at: a
     /// harmonic's own, and a pulse's carrier widened by its envelope. A pulse
     /// of offset alone, a flash, has no carrier but still its envelope's
     /// width.
     pub fn frequency_ceiling_hz(self) -> f64 {
-        let [offset, amplitude, frequency_hz, _] = self.carrier();
-        let carrier = if amplitude == 0.0 { 0.0 } else { frequency_hz };
+        let [offset, amplitude, _, _] = self.carrier();
         match self {
-            Self::Harmonic { .. } => carrier,
+            Self::Harmonic { .. } => self.carrier_frequency_hz(),
             Self::Pulsed { envelope, .. } => {
                 if amplitude == 0.0 && offset == 0.0 {
                     0.0
                 } else {
-                    carrier + envelope.bandwidth_hz()
+                    self.carrier_frequency_hz() + envelope.bandwidth_hz()
                 }
             }
         }
@@ -1628,6 +1634,8 @@ mod tests {
         assert_eq!(tone(sinc).frequency_ceiling_hz(), 3.0 + 3.0);
         let flash = TimeSignal::pulsed([0.5, 0.0, 3.0, 0.0], flat, 0.0, 0.0);
         assert_eq!(flash.frequency_ceiling_hz(), 4.0);
+        assert_eq!(flash.carrier_frequency_hz(), 0.0);
+        assert_eq!(tone(flat).carrier_frequency_hz(), 3.0);
         assert_eq!(flash.characteristic_amplitude(), 0.5);
         let silent = TimeSignal::pulsed([0.0, 0.0, 3.0, 0.0], flat, 0.0, 0.0);
         assert_eq!(silent.frequency_ceiling_hz(), 0.0);

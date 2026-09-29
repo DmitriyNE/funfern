@@ -698,6 +698,12 @@ pub struct SolutionIndicatorOptions {
     /// and flat to between 4 and 9 and climbing. The sidebands a drive mixes
     /// in are left to the error estimate, which reads them where they exist.
     pub forcing_frequency_hz: f64,
+    /// The highest frequency a source puts appreciable content at, which the
+    /// size rule's wavelength floor resolves along with the forcing
+    /// frequency. A pulse's envelope widens its carrier's band this far.
+    /// Unlike the forcing frequency it does not scale the estimate: the field
+    /// spends most of its energy nearer the carrier.
+    pub band_edge_hz: f64,
     /// Shortest spatial period the operator's own coefficients carry, from a
     /// travelling modulation. Infinity where none does.
     ///
@@ -727,6 +733,7 @@ impl Default for SolutionIndicatorOptions {
             relative_tolerance: 0.06,
             elements_per_wavelength: 5.0,
             forcing_frequency_hz: 0.0,
+            band_edge_hz: 0.0,
             coefficient_wavelength: f64::INFINITY,
             grading_ratio: 1.5,
             minimum_scale: 0.6,
@@ -1333,6 +1340,8 @@ impl SolutionIndicatorJob {
             || options.elements_per_wavelength <= 0.0
             || !options.forcing_frequency_hz.is_finite()
             || options.forcing_frequency_hz < 0.0
+            || !options.band_edge_hz.is_finite()
+            || options.band_edge_hz < 0.0
             || options.coefficient_wavelength.is_nan()
             || options.coefficient_wavelength <= 0.0
             || !options.grading_ratio.is_finite()
@@ -2366,6 +2375,7 @@ impl SolutionIndicatorJob {
         let resolved_frequency_hz = self
             .options
             .forcing_frequency_hz
+            .max(self.options.band_edge_hz)
             .max(material.harmonic_frequency_hz);
         let wavelength_target = (resolved_frequency_hz > 0.0).then(|| {
             material.minimum_wave_speed
@@ -3522,6 +3532,43 @@ mod tests {
                 .all(|indicator| *indicator == 0.0)
         );
 
+        // A pulse's band edge is resolved as a floor, but the estimate does
+        // not scale with it as it does with the forcing frequency.
+        let banded = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator.clone(),
+                scene.clone(),
+                state.clone(),
+                SolutionIndicatorOptions {
+                    band_edge_hz: 10.0,
+                    ..options
+                },
+            ),
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            banded.report.global_indicator,
+            active.report.global_indicator
+        );
+        let widened = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator.clone(),
+                scene.clone(),
+                state.clone(),
+                SolutionIndicatorOptions {
+                    dormant_below_energy: f64::MAX,
+                    band_edge_hz: 10.0,
+                    elements_per_wavelength: 5.0,
+                    ..options
+                },
+            ),
+            100,
+        )
+        .unwrap();
+
         // Dormancy suppresses only relative-error chasing. A declared forcing
         // wavelength remains a hard resolution floor.
         let forced = run(
@@ -3542,6 +3589,10 @@ mod tests {
         .unwrap();
         assert!(forced.report.dormant);
         assert!(forced.report.limit_refine_candidates > 0);
+        assert_eq!(
+            widened.report.limit_refine_candidates,
+            forced.report.limit_refine_candidates
+        );
     }
 
     #[test]

@@ -457,7 +457,13 @@ impl Playground {
             );
         });
         let fire_at = self.pulse_fire_time();
-        edit_time_signal(ui, &mut source.signal, SignalUse::Source, fire_at);
+        edit_time_signal(
+            ui,
+            &mut source.signal,
+            SignalUse::Source,
+            fire_at,
+            &mut self.pulse_preview,
+        );
         if source != before {
             if let Err(error) = self.editor.set_point_source(source) {
                 self.notify(error)

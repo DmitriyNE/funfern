@@ -447,6 +447,7 @@ impl Playground {
                     self.editor.document.model.draft.physics,
                     &mut condition,
                     fire_at,
+                    &mut self.pulse_preview,
                 ) && let Err(error) =
                     self.editor
                         .set_span_face_condition(&curve_spans, self.selected_side, condition)
@@ -679,6 +680,7 @@ impl Playground {
                 self.editor.document.model.draft.physics,
                 &mut condition,
                 fire_at,
+                &mut self.pulse_preview,
             ) && let Err(error) = self.editor.set_outer_condition(&sides, condition)
             {
                 self.notify(error);

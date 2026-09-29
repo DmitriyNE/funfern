@@ -49,6 +49,7 @@ mod gizmo;
 mod input;
 mod inspectors;
 mod law_editor;
+mod line_plot;
 mod materials;
 mod pacing;
 mod paint;
@@ -813,6 +814,7 @@ impl Playground {
             });
         if !self.capturing() {
             self.probe_windows(root.ctx());
+            self.pulse_shape_window(root.ctx());
             self.diagnostics_window(root.ctx());
             self.formula_help_window(root.ctx());
             self.scene_card(root.ctx(), viewport);
@@ -1194,12 +1196,14 @@ fn material_scalar_editor(
     }
 }
 
-/// `fire_at` is when "Fire now" starts a driven face's pulse.
+/// `fire_at` is when "Fire now" starts a driven face's pulse, and `preview`
+/// the shape window its "Shape" opens.
 fn edit_face_condition(
     ui: &mut egui::Ui,
     physics: PhysicsModel,
     condition: &mut FaceBoundaryCondition,
     fire_at: f64,
+    preview: &mut PulsePreview,
 ) -> bool {
     let before = *condition;
     let mut kind = match condition {
@@ -1242,22 +1246,24 @@ fn edit_face_condition(
             );
         }
         FaceBoundaryCondition::Neumann { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Flux, fire_at)
+            edit_time_signal(ui, signal, SignalUse::Flux, fire_at, preview)
         }
         FaceBoundaryCondition::Dirichlet { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Field, fire_at)
+            edit_time_signal(ui, signal, SignalUse::Field, fire_at, preview)
         }
         _ => {}
     }
     *condition != before
 }
 
-/// `fire_at` is when "Fire now" starts a driven wall's pulse.
+/// `fire_at` is when "Fire now" starts a driven wall's pulse, and `preview`
+/// the shape window its "Shape" opens.
 fn edit_outer_condition(
     ui: &mut egui::Ui,
     physics: PhysicsModel,
     condition: &mut OuterBoundaryCondition,
     fire_at: f64,
+    preview: &mut PulsePreview,
 ) -> bool {
     let before = *condition;
     let mut kind = outer_kind(*condition).presented(physics);
@@ -1283,10 +1289,10 @@ fn edit_outer_condition(
     }
     match condition {
         OuterBoundaryCondition::Neumann { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Flux, fire_at)
+            edit_time_signal(ui, signal, SignalUse::Flux, fire_at, preview)
         }
         OuterBoundaryCondition::Dirichlet { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Field, fire_at)
+            edit_time_signal(ui, signal, SignalUse::Field, fire_at, preview)
         }
         _ => {}
     }
@@ -1912,15 +1918,21 @@ fn scene_resolution_demand(scene: &TopologyScene) -> CanonicalTemporalResolution
     )
 }
 
-fn highest_forcing_frequency(scene: &TopologyScene, source: PointSource) -> f64 {
+/// The most `measure` gives of any signal the scene drives with: the point
+/// source, the driven walls and faces, and the region sources.
+fn highest_forcing(
+    scene: &TopologyScene,
+    source: PointSource,
+    measure: impl Fn(TimeSignal) -> f64,
+) -> f64 {
     let mut frequency = if source.enabled {
-        source.signal.frequency_ceiling_hz()
+        measure(source.signal)
     } else {
         0.0
     };
     for condition in scene.outer_boundaries.sides {
         if let Some(signal) = condition.signal() {
-            frequency = frequency.max(signal.frequency_ceiling_hz());
+            frequency = frequency.max(measure(signal));
         }
     }
     for curve in &scene.geometry.curves {
@@ -1928,7 +1940,7 @@ fn highest_forcing_frequency(scene: &TopologyScene, source: PointSource) -> f64 
             if let SpanBehavior::Separated { left, right, .. } = span.behavior {
                 for condition in [left, right] {
                     if let Some(signal) = condition.signal() {
-                        frequency = frequency.max(signal.frequency_ceiling_hz());
+                        frequency = frequency.max(measure(signal));
                     }
                 }
             }
@@ -1936,7 +1948,7 @@ fn highest_forcing_frequency(scene: &TopologyScene, source: PointSource) -> f64 
     }
     for source in &scene.volume_sources {
         if source.enabled {
-            frequency = frequency.max(source.signal.frequency_ceiling_hz());
+            frequency = frequency.max(measure(source.signal));
         }
     }
     frequency

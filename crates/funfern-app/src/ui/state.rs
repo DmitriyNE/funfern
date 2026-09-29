@@ -160,6 +160,8 @@ pub struct Playground {
     pub(super) rate_window_steps: u64,
     pub(super) rate_started: Instant,
     pub(super) pulse_mode: bool,
+    /// The pulse shape window, which a signal editor's "Shape" opens.
+    pub(super) pulse_preview: PulsePreview,
     pub(super) pulse_amplitude: f32,
     pub(super) pulse_width: f32,
     pub(super) pending_pulse: Option<(Point2, RegionId)>,
@@ -404,6 +406,7 @@ impl Default for Playground {
             rate_window_steps: 0,
             rate_started: Instant::now(),
             pulse_mode: false,
+            pulse_preview: PulsePreview::default(),
             pulse_amplitude: 1.0,
             pulse_width: 0.06,
             pending_pulse: None,

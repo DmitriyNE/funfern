@@ -16662,3 +16662,50 @@ The third of five commits: the editor.
   pass that presses Pulse, Fire now and Continuous.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — An FFT in core, and the pulse shape window
+
+The fourth of five commits.
+
+- **`funfern_core::spectrum`**, written here as the linear algebra was:
+  - an in-place radix-2 FFT by decimation in time, with one twiddle table;
+  - `amplitude_spectrum`, for a record while its signal runs. It uses a Hann
+    window sampled between its zeros, so the window sums to exactly half the
+    record, removes the window's own mean, and zero-pads to four times the
+    record rounded up to a power of two. A steady tone reads its amplitude.
+    Removing the plain mean first left the window's leakage of every line at
+    0 Hz; the window's mean leaves the windowed record summing to zero;
+  - `transient_spectrum`, for a pulse whole within its record: interval
+    times |X_k|, neither windowed nor detrended;
+  - `resample_evenly`, since probes record at a stride of whole steps and a
+    handoff that changes the step changes their spacing.
+
+  Tests: the FFT against a direct DFT at 1 to 256 points, with Parseval.
+  Tones read their amplitude within 2% on a bin and between bins, and at a
+  length that is no power of two, with nothing at 0 Hz. A Gaussian's
+  transform is a Gaussian to 1e-9. An uneven record resamples onto the line
+  through its neighbours.
+- **Shape window.** A pulse's "Shape" opens a window of what it imposes:
+  one pulse, or two periods of a train, and one pulse's spectrum relative to
+  its peak, with the frequency adaptation resolves marked. It follows the
+  editor that opened it while that editor is drawn, and each editor has its
+  own id scope, so the point source's and a region's do not share their
+  widgets. Tests: a burst peaks at its carrier, a sinc is flat across its
+  band and quiet past it, and a flash peaks at 0 Hz; the editor's pass
+  opens the window on the pulse and keeps it following.
+- **Adaptation.** The first commit gave AMR the whole ceiling, carrier plus
+  the envelope's width. The estimator used that one frequency twice:
+  - as the wavelength the size rule's floor resolves, which is what the
+    ceiling is for;
+  - as the spectral scale of the error estimate, whose doc records that
+    raising it for a driven medium took the efficiency index from about
+    1.4 to between 4 and 9.
+
+  A sharp Gaussian flash has a ceiling of 9.5 Hz with no carrier at all. So
+  the scale stays at the carrier, `TimeSignal::carrier_frequency_hz`, and a
+  new `band_edge_hz` option carries the ceiling to the floor alone, as the
+  floor already took a nonlinear medium's harmonics. A harmonic scene gives
+  the same numbers as before. Tested: the band edge floors the size exactly
+  as the forcing frequency does, and leaves the estimate as it was.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

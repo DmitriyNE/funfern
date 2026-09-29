@@ -555,10 +555,18 @@ impl Playground {
                     .adaptation
                     .elements_per_wavelength,
                 // What the field oscillates at: the estimator's spectral
-                // scale, and the frequency the size rule resolves.
-                forcing_frequency_hz: highest_forcing_frequency(
+                // scale, and a frequency the size rule resolves.
+                forcing_frequency_hz: highest_forcing(
                     &active.bundle.authored,
                     active.point_source,
+                    TimeSignal::carrier_frequency_hz,
+                ),
+                // How far a pulse's envelope widens that band, which the size
+                // rule resolves too.
+                band_edge_hz: highest_forcing(
+                    &active.bundle.authored,
+                    active.point_source,
+                    TimeSignal::frequency_ceiling_hz,
                 ),
                 coefficient_wavelength: demand.coefficient_wavelength,
                 coarsen_ratio: AMR_COARSEN_EDGE_RATIO,

@@ -1,9 +1,11 @@
 //! The signal editor every source and driven wall shares: a continuous
-//! harmonic, or a pulse under one of the core's envelopes.
+//! harmonic, or a pulse under one of the core's envelopes, and the window
+//! that shows a pulse's shape and spectrum.
+use super::line_plot::{PlotMarker, line_plot};
 use super::*;
 
 /// What a signal drives, which is what its numbers mean.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum SignalUse {
     /// A point or region source. A continuous signal is the version-22
     /// acceleration it integrates; a pulse is the field rate it drives.
@@ -20,6 +22,15 @@ impl SignalUse {
     /// and a pulse's differ by the carrier's angular frequency.
     const fn integrates(self) -> bool {
         matches!(self, Self::Source | Self::Flux)
+    }
+
+    /// What a pulse here imposes, for the shape window's trace.
+    const fn pulse_quantity(self) -> &'static str {
+        match self {
+            Self::Source => "Field rate",
+            Self::Flux => "Flux",
+            Self::Field => "Field",
+        }
     }
 
     fn units(self, pulsed: bool) -> &'static str {
@@ -104,13 +115,38 @@ pub(super) fn continuous_from(signal: TimeSignal, role: SignalUse) -> TimeSignal
     TimeSignal::harmonic(offset, amplitude, frequency_hz, phase)
 }
 
-/// Edits `signal` in place. `fire_at` is when "Fire now" starts a pulse.
+/// The shape window: whether it is open, which editor opened it, and what
+/// that editor showed last. It follows that editor while the editor is drawn,
+/// and keeps the last pulse once it is not.
+#[derive(Default)]
+pub(super) struct PulsePreview {
+    pub(super) open: bool,
+    editor: Option<egui::Id>,
+    signal: Option<(TimeSignal, SignalUse)>,
+}
+
+/// Edits `signal` in place. `fire_at` is when "Fire now" starts a pulse, and
+/// `preview` the shape window a pulse's "Shape" opens.
 pub(super) fn edit_time_signal(
     ui: &mut egui::Ui,
     signal: &mut TimeSignal,
     role: SignalUse,
     fire_at: f64,
+    preview: &mut PulsePreview,
 ) {
+    ui.push_id(("time-signal", role), |ui| {
+        edit_time_signal_in(ui, signal, role, fire_at, preview);
+    });
+}
+
+fn edit_time_signal_in(
+    ui: &mut egui::Ui,
+    signal: &mut TimeSignal,
+    role: SignalUse,
+    fire_at: f64,
+    preview: &mut PulsePreview,
+) {
+    let editor = ui.id();
     let mut pulsed = signal.is_pulsed();
     ui.horizontal(|ui| {
         ui.selectable_value(&mut pulsed, false, "Continuous");
@@ -162,6 +198,10 @@ pub(super) fn edit_time_signal(
             if ui.button("Fire now").clicked() {
                 *start = fire_at;
             }
+            if ui.button("Shape").clicked() {
+                preview.open = true;
+                preview.editor = Some(editor);
+            }
         });
         ui.horizontal(|ui| {
             let mut repeats = *repeat > 0.0;
@@ -190,6 +230,111 @@ pub(super) fn edit_time_signal(
         ));
     }
     ui.small(role.units(signal.is_pulsed()));
+    if preview.editor == Some(editor) {
+        preview.signal = Some((*signal, role));
+    }
+}
+
+impl Playground {
+    pub(super) fn pulse_shape_window(&mut self, ctx: &egui::Context) {
+        if !self.pulse_preview.open {
+            return;
+        }
+        let mut open = true;
+        let shown = self.pulse_preview.signal;
+        egui::Window::new("Pulse shape")
+            .open(&mut open)
+            .default_width(380.0)
+            .show(ctx, |ui| match shown {
+                Some((signal, role)) if signal.is_pulsed() => pulse_shape(ui, signal, role),
+                _ => {
+                    ui.label("The editor that opened this no longer shows a pulse.");
+                }
+            });
+        self.pulse_preview.open = open;
+    }
+}
+
+/// Samples the spectrum takes a period of the highest frequency the pulse
+/// holds, and the most it takes of one pulse.
+const SPECTRUM_SAMPLES_PER_PERIOD: f64 = 16.0;
+const MOST_SPECTRUM_SAMPLES: usize = 1 << 14;
+const TRACE_POINTS: usize = 1024;
+
+/// One pulse's spectrum up to twice the frequency adaptation resolves,
+/// relative to its peak.
+fn relative_spectrum(signal: TimeSignal) -> Vec<[f64; 2]> {
+    let TimeSignal::Pulsed {
+        envelope, start, ..
+    } = signal
+    else {
+        return Vec::new();
+    };
+    let ceiling = signal.frequency_ceiling_hz();
+    if ceiling <= 0.0 {
+        return Vec::new();
+    }
+    let duration = envelope.duration();
+    let count = ((duration * SPECTRUM_SAMPLES_PER_PERIOD * ceiling).ceil() as usize + 1)
+        .clamp(2, MOST_SPECTRUM_SAMPLES);
+    let interval = duration / (count - 1) as f64;
+    let samples = (0..count)
+        .map(|index| signal.value(start + index as f64 * interval))
+        .collect::<Vec<_>>();
+    let Ok(spectrum) = transient_spectrum(&samples, interval) else {
+        return Vec::new();
+    };
+    let peak = spectrum.magnitudes.iter().copied().fold(0.0, f64::max);
+    (0..spectrum.magnitudes.len())
+        .map(|index| [spectrum.frequency_hz(index), spectrum.magnitudes[index]])
+        .take_while(|[frequency, _]| *frequency <= 2.0 * ceiling)
+        .map(|[frequency, magnitude]| [frequency, magnitude / peak.max(f64::MIN_POSITIVE)])
+        .collect()
+}
+
+/// One pulse, or two periods of a train, over time, and one pulse's
+/// spectrum relative to its peak with the frequency adaptation resolves
+/// marked.
+fn pulse_shape(ui: &mut egui::Ui, signal: TimeSignal, role: SignalUse) {
+    let TimeSignal::Pulsed {
+        envelope,
+        start,
+        repeat,
+        ..
+    } = signal
+    else {
+        return;
+    };
+    let duration = envelope.duration();
+    let (from, to) = if repeat > 0.0 {
+        (start, start + 2.0 * repeat)
+    } else {
+        (start - 0.1 * duration, start + 1.1 * duration)
+    };
+    let trace = (0..TRACE_POINTS)
+        .map(|index| {
+            let time = from + (to - from) * index as f64 / (TRACE_POINTS - 1) as f64;
+            [time, signal.value(time)]
+        })
+        .collect::<Vec<_>>();
+    ui.small(role.pulse_quantity());
+    line_plot(ui, &trace, SELECT, "s", &[], 110.0, "No pulse");
+    let ceiling = signal.frequency_ceiling_hz();
+    let points = relative_spectrum(signal);
+    ui.small("Spectrum, relative to its peak");
+    line_plot(
+        ui,
+        &points,
+        TEAL,
+        "Hz",
+        &[PlotMarker {
+            x: ceiling,
+            label: format!("{ceiling:.2} Hz"),
+        }],
+        110.0,
+        "No spectrum",
+    );
+    ui.small("Adaptation sizes the mesh for waves up to the marked frequency.");
 }
 
 /// How long the pulse lasts, when it peaks, and how many carrier cycles it
@@ -391,6 +536,7 @@ mod tests {
     fn editor_pass(
         context: &egui::Context,
         signal: &mut TimeSignal,
+        preview: &mut PulsePreview,
         events: Vec<egui::Event>,
     ) -> Vec<LaidOut> {
         let input = egui::RawInput {
@@ -402,7 +548,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let output = context.run_ui(input, |ui| {
-            edit_time_signal(ui, signal, SignalUse::Source, 12.5);
+            edit_time_signal(ui, signal, SignalUse::Source, 12.5, preview);
         });
         laid_out(&output)
     }
@@ -429,26 +575,36 @@ mod tests {
         theme::apply(&context);
         context.enable_accesskit();
         let mut signal = TimeSignal::harmonic(0.0, 6.0, 3.0, SWITCH_ON_PHASE);
-        let press = |context: &egui::Context, signal: &mut TimeSignal, label: &str| {
-            let widgets = editor_pass(context, signal, vec![]);
+        let mut preview = PulsePreview::default();
+        let press = |context: &egui::Context,
+                     signal: &mut TimeSignal,
+                     preview: &mut PulsePreview,
+                     label: &str| {
+            let widgets = editor_pass(context, signal, preview, vec![]);
             let widget = widgets
                 .iter()
                 .find(|widget| widget.label == label)
                 .unwrap_or_else(|| panic!("no {label} among {:?}", widgets));
             let events = click(widget);
-            editor_pass(context, signal, events);
+            editor_pass(context, signal, preview, events);
         };
-        press(&context, &mut signal, "Pulse");
+        press(&context, &mut signal, &mut preview, "Pulse");
         assert!(signal.is_pulsed(), "{signal:?}");
         assert!(matches!(signal, TimeSignal::Pulsed { start: 12.5, .. }));
         if let TimeSignal::Pulsed { start, .. } = &mut signal {
             *start = 1.0;
         }
-        press(&context, &mut signal, "Fire now");
+        press(&context, &mut signal, &mut preview, "Fire now");
         assert!(matches!(signal, TimeSignal::Pulsed { start: 12.5, .. }));
-        press(&context, &mut signal, "Continuous");
+        // "Shape" opens the window on this pulse, which then follows it.
+        assert!(!preview.open && preview.signal.is_none());
+        press(&context, &mut signal, &mut preview, "Shape");
+        assert!(preview.open);
+        assert_eq!(preview.signal, Some((signal, SignalUse::Source)));
+        press(&context, &mut signal, &mut preview, "Continuous");
         assert!(!signal.is_pulsed());
         assert!((signal.carrier()[1] - 6.0).abs() < 1.0e-12);
+        assert_eq!(preview.signal, Some((signal, SignalUse::Source)));
     }
 
     /// Paused, a pulse fires where the run stands. Running, it starts past
@@ -469,6 +625,56 @@ mod tests {
         state.wave_running = true;
         state.editor.document.presentation.simulation_speed = 2.0;
         assert!((state.pulse_fire_time() - (3.5 + 40.0 * 2.0e-3 + 0.5)).abs() < 1.0e-12);
+    }
+
+    /// A burst peaks at its carrier, a sinc is flat across its band and quiet
+    /// past it, and a flash, having no carrier, peaks at 0 Hz.
+    #[test]
+    fn the_shape_window_draws_each_pulse_its_own_spectrum() {
+        let at = |points: &[[f64; 2]], frequency: f64| {
+            points
+                .iter()
+                .min_by(|a, b| {
+                    (a[0] - frequency)
+                        .abs()
+                        .total_cmp(&(b[0] - frequency).abs())
+                })
+                .unwrap()[1]
+        };
+        let peak =
+            |points: &[[f64; 2]]| points.iter().max_by(|a, b| a[1].total_cmp(&b[1])).unwrap()[0];
+        let burst = TimeSignal::pulsed(
+            [0.0, 1.0, 3.0, 0.0],
+            PulseEnvelope::FlatTop {
+                duration: 4.0,
+                edge: 2.0,
+            },
+            1.0,
+            0.0,
+        );
+        assert!((peak(&relative_spectrum(burst)) - 3.0).abs() < 0.05);
+        let sinc = TimeSignal::pulsed(
+            [0.0, 1.0, 5.0, 0.0],
+            PulseEnvelope::Sinc {
+                bandwidth_hz: 2.0,
+                lobes: 8,
+            },
+            0.0,
+            0.0,
+        );
+        let points = relative_spectrum(sinc);
+        for frequency in [3.8, 4.5, 5.0, 5.5, 6.2] {
+            assert!(at(&points, frequency) > 0.85, "{frequency} Hz");
+        }
+        assert!(at(&points, 8.5) < 0.05);
+        let flash = TimeSignal::pulsed(
+            [1.0, 0.0, 0.0, 0.0],
+            PulseEnvelope::Gaussian { width: 0.05 },
+            0.0,
+            0.0,
+        );
+        assert_eq!(peak(&relative_spectrum(flash)), 0.0);
+        assert!(relative_spectrum(TimeSignal::ZERO).is_empty());
     }
 
     #[test]

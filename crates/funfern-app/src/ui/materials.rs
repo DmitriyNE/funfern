@@ -324,7 +324,13 @@ impl Playground {
                 source_changed |= source.profile != before;
                 ui.label("Signal");
                 let before = source.signal;
-                edit_time_signal(ui, &mut source.signal, SignalUse::Source, fire_at);
+                edit_time_signal(
+                    ui,
+                    &mut source.signal,
+                    SignalUse::Source,
+                    fire_at,
+                    &mut self.pulse_preview,
+                );
                 source_changed |= source.signal != before;
             }
             // Committed outside the block so unchecking is recorded rather than
