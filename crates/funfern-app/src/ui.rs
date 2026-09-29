@@ -1318,7 +1318,7 @@ fn boundary_combo_height(ui: &egui::Ui, physics: PhysicsModel) -> f32 {
 }
 
 fn edit_time_signal(ui: &mut egui::Ui, signal: &mut TimeSignal) {
-    let (offset, amplitude, frequency, phase) = signal.harmonic_parameters_mut();
+    let (offset, amplitude, frequency, phase) = signal.carrier_mut();
     ui.horizontal(|ui| {
         ui.add(egui::DragValue::new(offset).speed(0.02).prefix("Offset "));
         ui.add(

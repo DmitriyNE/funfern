@@ -73,7 +73,7 @@ pub struct TopologyWaveModel<'a> {
     pub physics: PhysicsModel,
     pub materials: &'a [Material],
     pub regions: &'a [Region],
-    pub outer_boundaries: OuterBoundaryConditions,
+    pub outer_boundaries: &'a OuterBoundaryConditions,
 }
 
 /// Owned material/physics snapshot for cooperative topology consumers.
@@ -104,7 +104,7 @@ impl OwnedTopologyWaveModel {
             physics: self.physics,
             materials: &self.materials,
             regions: &self.regions,
-            outer_boundaries: self.outer_boundaries,
+            outer_boundaries: &self.outer_boundaries,
         }
     }
 }
@@ -115,7 +115,7 @@ impl<'a> TopologyWaveModel<'a> {
             physics: scene.physics,
             materials: &scene.materials,
             regions: &scene.regions,
-            outer_boundaries: scene.outer_boundaries,
+            outer_boundaries: &scene.outer_boundaries,
         }
     }
 
@@ -124,7 +124,7 @@ impl<'a> TopologyWaveModel<'a> {
             physics: scene.physics,
             materials: &scene.materials,
             regions: &scene.regions,
-            outer_boundaries: scene.outer_boundaries,
+            outer_boundaries: &scene.outer_boundaries,
         }
     }
 
@@ -133,7 +133,7 @@ impl<'a> TopologyWaveModel<'a> {
             physics: self.physics,
             materials: self.materials.to_vec(),
             regions: self.regions.to_vec(),
-            outer_boundaries: self.outer_boundaries,
+            outer_boundaries: *self.outer_boundaries,
         }
     }
 
@@ -295,7 +295,7 @@ impl QuadraticWaveOperator {
         Self::assemble_with_provider(
             mesh,
             CoefficientProvider::Topology(model),
-            model.outer_boundaries,
+            *model.outer_boundaries,
             None,
             Some(plan),
             model.physics,
@@ -2294,7 +2294,7 @@ impl QuadraticAssemblyJob {
                 "the scene does not describe every region the mesh plan holds",
             ));
         }
-        let work = QuadraticAssemblyWork::new(model.outer_boundaries, model.physics)?;
+        let work = QuadraticAssemblyWork::new(*model.outer_boundaries, model.physics)?;
         Ok(Self {
             mesh,
             plan,
@@ -2302,7 +2302,7 @@ impl QuadraticAssemblyJob {
                 physics: model.physics,
                 materials: model.materials.to_vec(),
                 regions: model.regions.to_vec(),
-                outer_boundaries: model.outer_boundaries,
+                outer_boundaries: *model.outer_boundaries,
             },
             work,
             done: false,
@@ -2520,9 +2520,8 @@ mod tests {
         CurveNode, CurveSpan, CurveSpanId, CurveSpline, FaceRegionAssignment, InternalBoundary,
         InternalBoundaryLaw, Material, MaterialId, MeshQuality, MeshTriangle, MeshVertex,
         MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline, OuterSide, PeriodicCubicSpline,
-        Region, SOURCE_RAMP_PERIODS, TopologyCurve, TopologyGeometry, TopologyVertex,
-        TopologyVertexId, TopologyVertexLocation, compile_topology, mesh_scene, mesh_topology_plan,
-        source_envelope, source_ramp_seconds,
+        Region, TopologyCurve, TopologyGeometry, TopologyVertex, TopologyVertexId,
+        TopologyVertexLocation, compile_topology, mesh_scene, mesh_topology_plan,
     };
 
     fn topology_span(id: u64, behavior: SpanBehavior) -> CurveSpan {
@@ -4041,6 +4040,29 @@ mod tests {
         .unwrap();
         QuadraticWaveOperator::assemble_with_boundary(&mesh, WaveCoefficients::default(), boundary)
             .unwrap()
+    }
+
+    /// Periods of the source a switch-on ramp spans. The canonical solver
+    /// starts a harmonic source on a cosine instead (`SWITCH_ON_PHASE`); this
+    /// ramp is what the scalar solver's tests ease a sine in with.
+    const SOURCE_RAMP_PERIODS: f64 = 4.0;
+
+    fn source_ramp_seconds(lowest_frequency_hz: f64) -> f64 {
+        if !lowest_frequency_hz.is_finite() || lowest_frequency_hz <= 0.0 {
+            return 0.0;
+        }
+        SOURCE_RAMP_PERIODS / lowest_frequency_hz
+    }
+
+    /// Smooth switch-on: zero at the start with zero slope, one after `ramp`.
+    /// The vanishing slope at both ends is what leaves the residual impulse at
+    /// second order in `1 / (w * ramp)` rather than first.
+    fn source_envelope(time: f64, ramp: f64) -> f64 {
+        if !ramp.is_finite() || ramp <= 0.0 || !time.is_finite() {
+            return 1.0;
+        }
+        let fraction = (time / ramp).clamp(0.0, 1.0);
+        fraction * fraction * (3.0 - 2.0 * fraction)
     }
 
     /// Drives `operator` with one spatial bump, eased in over `ramp`, and

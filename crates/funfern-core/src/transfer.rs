@@ -1109,7 +1109,7 @@ mod tests {
             physics: crate::PhysicsModel::Mechanical,
             materials: &materials,
             regions: &regions,
-            outer_boundaries: OuterBoundaryConditions::default(),
+            outer_boundaries: &OuterBoundaryConditions::default(),
         };
         let source_operator =
             QuadraticWaveOperator::assemble_topology(&before, &before_plan, model).unwrap();
@@ -1654,7 +1654,7 @@ mod tests {
             physics: crate::PhysicsModel::Mechanical,
             materials: &materials,
             regions: &regions,
-            outer_boundaries: OuterBoundaryConditions::default(),
+            outer_boundaries: &OuterBoundaryConditions::default(),
         };
         let unsplit_operator =
             QuadraticWaveOperator::assemble_topology(&unsplit, &unsplit_plan, model).unwrap();
@@ -1710,7 +1710,7 @@ mod tests {
                 physics: crate::PhysicsModel::Mechanical,
                 materials: &materials,
                 regions: &regions,
-                outer_boundaries: OuterBoundaryConditions::default(),
+                outer_boundaries: &OuterBoundaryConditions::default(),
             },
         )
         .unwrap();

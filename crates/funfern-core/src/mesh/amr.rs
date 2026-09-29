@@ -175,9 +175,10 @@ struct BoundaryCollapsePlan {
     merged: Option<BoundaryEdge>,
 }
 
+/// Boxed: one lives per adaptation, and either variant is a few hundred bytes.
 enum AdaptationInput {
-    Scene(Scene),
-    Topology(TopologyAdaptationContract),
+    Scene(Box<Scene>),
+    Topology(Box<TopologyAdaptationContract>),
 }
 
 #[derive(Clone)]
@@ -531,7 +532,7 @@ impl MeshAdaptationJob {
         let domain = scene.domain;
         Self::from_input(
             source,
-            AdaptationInput::Scene(scene),
+            AdaptationInput::Scene(Box::new(scene)),
             domain,
             state,
             target_mesh_revision,
@@ -553,7 +554,7 @@ impl MeshAdaptationJob {
     ) -> Self {
         Self::from_input(
             source,
-            AdaptationInput::Topology(TopologyAdaptationContract::new(plan)),
+            AdaptationInput::Topology(Box::new(TopologyAdaptationContract::new(plan))),
             plan.domain,
             state,
             target_mesh_revision,

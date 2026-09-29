@@ -448,7 +448,7 @@ impl Playground {
         let mut source = self.editor.document.model.source;
         let before = source;
         ui.checkbox(&mut source.enabled, "Enabled");
-        let (_, amplitude, frequency, phase) = source.signal.harmonic_parameters_mut();
+        let (_, amplitude, frequency, phase) = source.signal.carrier_mut();
         ui.add(
             egui::DragValue::new(amplitude)
                 .speed(0.05)

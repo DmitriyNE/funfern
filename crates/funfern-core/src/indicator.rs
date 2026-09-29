@@ -2277,13 +2277,13 @@ impl SolutionIndicatorJob {
             if let Some((face, forward)) = wall {
                 let slot = if forward { slot } else { 2 - slot };
                 // What the kick imposes on the time-integrated flux: nothing
-                // on a reflecting wall, the integrated load on a Neumann one,
-                // and `−Z u` on an absorbing one, whose kick term is `−d u`
-                // at the impedance the step freezes.
+                // on a reflecting wall, the integrated load on a Neumann one
+                // (a pulse as authored), and `−Z u` on an absorbing one,
+                // whose kick term is `−d u` at the impedance the step freezes.
                 let imposed = match record.condition {
                     FaceBoundaryCondition::Reflecting => 0.0,
                     FaceBoundaryCondition::Neumann { signal } => {
-                        CanonicalRateDrive::legacy(signal, BOUNDARY_SOURCE_ANCHOR_TIME)
+                        CanonicalRateDrive::authored(signal, BOUNDARY_SOURCE_ANCHOR_TIME)
                             .and_then(|drive| drive.value(self.snapshot.time))
                             .map_err(|_| SolutionIndicatorError::InvalidMesh)?
                     }

@@ -928,15 +928,33 @@ documented numerical and performance observations.
 Multipatch/trimmed IGA, higher-order triangles, and physical moving-boundary effects.
 Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
-- [ ] Pulsed and gated signals. `TimeSignal` is harmonic only, so a document
-  cannot hold a pulse, and the run-time pulse act is not a document feature.
+- [ ] Pulsed and gated signals. `TimeSignal` was harmonic only, so a document
+  could not hold a pulse, and the run-time pulse act is not a document feature.
   That keeps time of flight, group delay in a Klein-Gordon medium, echoes, an
   ellipse refocusing a flash and pulsed Doppler out of the gallery
-  (`docs/spikes/funfern-gallery-plan.md`, "Blocked"). Add a windowed harmonic
-  (start, duration, ramp) or a Gaussian burst as a signal variant, honoured by
-  every consumer: point and volume sources, Dirichlet and Neumann walls and
-  faces, and time drives. It is persisted, so it takes a serde default or a
-  file version.
+  (`docs/spikes/funfern-gallery-plan.md`, "Blocked"). In progress since
+  2026-09-29 (`docs/engineering-log.md`): a `Pulsed` variant with a flat-top,
+  Gaussian or sinc envelope, a start and a repeat, imposed as authored by point
+  and volume sources and Dirichlet and Neumann walls and faces, persisted in
+  version 22. Still to come: the device, the signal editor with its shape
+  window, and probe spectra.
+
+- [ ] Pulsed and gated material time drives, straight after the signals: the
+  same envelopes on a material's `TimeDrive`. Unlike a signal it enters the
+  step's timestep bound through its extrema and the energy balance through its
+  rate, so it takes its own admission and temporal-work terms.
+
+- [ ] Pulse start marks on the probe time plots, so a time of flight or an
+  echo reads straight off a trace. Waiting on a way to draw them that does not
+  clutter plots of scenes with many pulses.
+
+- [ ] A transfer spectrum between two probes: one broadband pulse (a sinc is
+  flat across its band) measures what a frequency sweep does now. Waiting on a
+  way to pick the pair and show the ratio without overloading the readout.
+
+- [ ] A time-of-flight or arrival readout, and a probe's envelope trace (the
+  magnitude of its analytic signal), for group delay. Waiting on the same kind
+  of readout design.
 
 - [ ] An authored viscous loss channel: the Gate O short-wave viscosity
   (`docs/spikes/funfern-gate-o.md`, "The short-wave limit") as a named,

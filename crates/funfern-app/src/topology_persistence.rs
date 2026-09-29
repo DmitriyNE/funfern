@@ -1650,6 +1650,23 @@ enum StoredTimeSignal {
         frequency_hz: f64,
         phase_radians: f64,
     },
+    Pulsed {
+        offset: f64,
+        amplitude: f64,
+        frequency_hz: f64,
+        phase_radians: f64,
+        envelope: StoredPulseEnvelope,
+        start: f64,
+        repeat: f64,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "shape", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredPulseEnvelope {
+    FlatTop { duration: f64, edge: f64 },
+    Gaussian { width: f64 },
+    Sinc { bandwidth_hz: f64, lobes: u32 },
 }
 
 fn encode_physics(physics: PhysicsModel) -> StoredPhysicsModel {
@@ -1930,27 +1947,77 @@ fn decode_restoring_law(law: StoredRestoringLaw) -> Result<RestoringLaw, String>
 }
 
 fn encode_signal(signal: TimeSignal) -> StoredTimeSignal {
-    let [offset, amplitude, frequency_hz, phase_radians] = signal.harmonic_parameters();
-    StoredTimeSignal::Harmonic {
-        offset,
-        amplitude,
-        frequency_hz,
-        phase_radians,
+    let [offset, amplitude, frequency_hz, phase_radians] = signal.carrier();
+    match signal {
+        TimeSignal::Harmonic { .. } => StoredTimeSignal::Harmonic {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+        },
+        TimeSignal::Pulsed {
+            envelope,
+            start,
+            repeat,
+            ..
+        } => StoredTimeSignal::Pulsed {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+            envelope: match envelope {
+                PulseEnvelope::FlatTop { duration, edge } => {
+                    StoredPulseEnvelope::FlatTop { duration, edge }
+                }
+                PulseEnvelope::Gaussian { width } => StoredPulseEnvelope::Gaussian { width },
+                PulseEnvelope::Sinc {
+                    bandwidth_hz,
+                    lobes,
+                } => StoredPulseEnvelope::Sinc {
+                    bandwidth_hz,
+                    lobes,
+                },
+            },
+            start,
+            repeat,
+        },
     }
 }
 
 fn decode_signal(signal: StoredTimeSignal) -> TimeSignal {
-    let StoredTimeSignal::Harmonic {
-        offset,
-        amplitude,
-        frequency_hz,
-        phase_radians,
-    } = signal;
-    TimeSignal::Harmonic {
-        offset,
-        amplitude,
-        frequency_hz,
-        phase_radians,
+    match signal {
+        StoredTimeSignal::Harmonic {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+        } => TimeSignal::harmonic(offset, amplitude, frequency_hz, phase_radians),
+        StoredTimeSignal::Pulsed {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+            envelope,
+            start,
+            repeat,
+        } => TimeSignal::pulsed(
+            [offset, amplitude, frequency_hz, phase_radians],
+            match envelope {
+                StoredPulseEnvelope::FlatTop { duration, edge } => {
+                    PulseEnvelope::FlatTop { duration, edge }
+                }
+                StoredPulseEnvelope::Gaussian { width } => PulseEnvelope::Gaussian { width },
+                StoredPulseEnvelope::Sinc {
+                    bandwidth_hz,
+                    lobes,
+                } => PulseEnvelope::Sinc {
+                    bandwidth_hz,
+                    lobes,
+                },
+            },
+            start,
+            repeat,
+        ),
     }
 }
 
@@ -2543,6 +2610,49 @@ mod tests {
                 parse_document(encoded.as_bytes()).unwrap(),
                 document,
                 "{physics:?} did not survive the file"
+            );
+        }
+    }
+
+    /// A pulse survives the file under every envelope, on every consumer: the
+    /// point source, a region's source, and a Neumann and a Dirichlet wall.
+    #[test]
+    fn every_pulse_envelope_round_trips_on_every_signal_consumer() {
+        for envelope in [
+            PulseEnvelope::FlatTop {
+                duration: 0.9,
+                edge: 0.2,
+            },
+            PulseEnvelope::Gaussian { width: 0.07 },
+            PulseEnvelope::Sinc {
+                bandwidth_hz: 3.5,
+                lobes: 5,
+            },
+        ] {
+            let pulse = TimeSignal::pulsed([0.1, 1.5, 2.0, 0.4], envelope, 0.3, 2.5);
+            let (mut editor, _) = divider_document();
+            editor.document.model.source.signal = pulse;
+            for scene in [
+                &mut editor.document.model.draft,
+                &mut editor.document.model.accepted,
+            ] {
+                scene.volume_sources.push(VolumeSource {
+                    region: BACKGROUND_REGION,
+                    enabled: true,
+                    profile: ScalarField::constant(1.0),
+                    parameters: vec![],
+                    signal: pulse,
+                });
+                scene.outer_boundaries.sides[0] = OuterBoundaryCondition::Neumann { signal: pulse };
+                scene.outer_boundaries.sides[1] =
+                    OuterBoundaryCondition::Dirichlet { signal: pulse };
+            }
+            let encoded = save(&editor.document).unwrap();
+            assert!(encoded.contains("\"kind\": \"pulsed\""), "{encoded}");
+            assert_eq!(
+                parse_document(encoded.as_bytes()).unwrap(),
+                editor.document,
+                "{envelope:?} did not survive the file"
             );
         }
     }

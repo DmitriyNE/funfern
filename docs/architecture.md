@@ -271,9 +271,11 @@ material. It combines a signed scalar profile over that region's rigid local fra
 and source-local parameters with `bias + amplitude sin(2 pi frequency t + phase)`.
 Quadratic element mass weights assemble the body acceleration into mass-normalized
 nodal weights. Point sources, distributed sources, and prescribed boundary data all
-own the same dependency-free `TimeSignal`; the initial harmonic variant keeps offset,
-amplitude, frequency, and phase together and leaves waveform extension independent
-of each spatial carrier. Compilation is resumable, and temporal-only source edits
+own the same dependency-free `TimeSignal`. Its harmonic variant keeps offset,
+amplitude, frequency, and phase together from t = 0; its pulsed variant runs the
+same carrier, counted from the pulse's centre, under a flat-top, Gaussian or sinc
+envelope that is exactly zero outside its duration, once or repeated. Waveforms stay
+independent of each spatial carrier. Compilation is resumable, and temporal-only source edits
 replace the forcing buffer while retaining compiled spatial weights, the mesh,
 operator, solution levels, solver clock, and probe history. Conforming material
 junctions share one scalar DOF while incident triangle regions retain their own
@@ -432,19 +434,26 @@ advances through the explicitly sampled pre-filter endpoint, then rebases its
 input to the post-filter state without presenting the zero-duration correction
 as a wave.
 
-Every source in a scene is eased in by one shared smooth envelope spanning
-`SOURCE_RAMP_PERIODS` periods of the slowest oscillating source. A sine started
-from rest at a phase whose cosine is not zero injects a net impulse, and no outer
-condition can remove the uniform offset it becomes: a constant lies in the
-stiffness operator's null space, and a radiating wall adds damping without a
-restoring term, so it is transparent to a static field. Where a wall damps, the
-drift settles into a permanent offset; where none does, it ramps without bound.
-The envelope is shared rather than per source because a phased array steers on
-the phases between its sources, and it is an envelope rather than a phase
-convention because the phase is authored and persisted. It multiplies the point
-source and the compiled volume sources; prescribed boundary data is not a force
-and is left alone. `funfern_core::source_envelope` and `wave.wgsl` carry the same
-smoothstep.
+A harmonic source switches on as a cosine: `SWITCH_ON_PHASE` is the phase a new
+source is given. A sine started from rest at a phase whose cosine is not zero
+injects a net impulse, and no outer condition can remove the uniform offset it
+becomes: a constant lies in the stiffness operator's null space, and a radiating
+wall adds damping without a restoring term, so it is transparent to a static
+field. Where a wall damps, the drift settles into a permanent offset; where none
+does, it ramps without bound. The phase is authored and persisted, so the cosine
+is where a source starts rather than a rule, and a scene that picks another phase
+carries the impulse it asked for. There is no shared start-up envelope; the scalar
+solver's tests still ease a sine in with a smoothstep of their own.
+
+A pulse is imposed as authored rather than integrated: a source takes it as its
+field rate, a Neumann side as its flux and a Dirichlet side as its field, through
+`CanonicalRateDrive::Direct`. Integrated the way a harmonic source's version-22
+acceleration is, a pulse would leave its area behind as a steady drive, which a
+closed scene turns into a drift without end. Imposed directly, it leaves at most its
+area as a static offset, and a sine carrier, odd about the centre of an even
+envelope, has none. A pulse is a function of absolute simulated time alone, so it
+carries no running state across a handoff, a train repeats exactly, and Reset
+fires it again.
 
 Both the scalar field and the vector overlay are drawn against a scale measured
 from the field rather than a fixed gain. The shipped examples span a hundredfold
@@ -1369,7 +1378,7 @@ a shortfall on scenes that are keeping up perfectly well. Pulse injection is an
 accepted `Q` increment and remains an initial-condition action rather than a time
 signal. Version-22 point and volume sources author acceleration waveforms; the
 canonical forcing path uses their zero-initial-rate analytic antiderivative and
-the immutable generation reference mass. The default frequency is 2.5 cycles per
+the immutable generation reference mass. A pulsed source is imposed directly. The default frequency is 2.5 cycles per
 dimensionless time, corresponding to wavelength 0.4 at wave speed one.
 
 The accepted canonical generation keeps running while a replacement is prepared.

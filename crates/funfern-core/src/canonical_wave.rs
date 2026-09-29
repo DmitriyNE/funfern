@@ -61,12 +61,29 @@ impl CanonicalRateDrive {
         Self::legacy_with_rate_anchor(signal, anchor_time, 0.0)
     }
 
+    /// The drive an authored source or Neumann signal compiles to: a
+    /// harmonic is the version-22 acceleration, integrated from
+    /// `anchor_time`, and a pulse is imposed as authored.
+    pub fn authored(signal: TimeSignal, anchor_time: f64) -> Result<Self, WaveError> {
+        if signal.is_pulsed() {
+            Self::direct(signal)
+        } else {
+            Self::legacy(signal, anchor_time)
+        }
+    }
+
     pub fn legacy_with_rate_anchor(
         acceleration: TimeSignal,
         anchor_time: f64,
         rate_anchor: f64,
     ) -> Result<Self, WaveError> {
-        if acceleration.valid() && anchor_time.is_finite() && rate_anchor.is_finite() {
+        // A pulse is never integrated: its area would stay behind as a
+        // steady drive once it was over.
+        if acceleration.valid()
+            && !acceleration.is_pulsed()
+            && anchor_time.is_finite()
+            && rate_anchor.is_finite()
+        {
             Ok(Self::LegacyIntegratedHarmonic {
                 acceleration,
                 anchor_time,
@@ -90,7 +107,7 @@ impl CanonicalRateDrive {
                 anchor_time,
                 rate_anchor,
             } => {
-                let [offset, amplitude, frequency_hz, phase] = acceleration.harmonic_parameters();
+                let [offset, amplitude, frequency_hz, phase] = acceleration.carrier();
                 let elapsed = time - anchor_time;
                 let omega_elapsed = std::f64::consts::TAU * frequency_hz * elapsed;
                 rate_anchor
@@ -185,6 +202,20 @@ impl CanonicalSource {
         )
     }
 
+    /// A source on an authored signal, through `CanonicalRateDrive::authored`.
+    pub fn authored(
+        operator: &CanonicalWaveOperator,
+        weights: Vec<f64>,
+        signal: TimeSignal,
+        anchor_time: f64,
+    ) -> Result<Self, WaveError> {
+        Self::new(
+            operator,
+            weights,
+            CanonicalRateDrive::authored(signal, anchor_time)?,
+        )
+    }
+
     pub fn weights(&self) -> &[f64] {
         &self.weights
     }
@@ -257,7 +288,8 @@ impl CanonicalForcing {
     }
 
     /// Compiles old normalized volume accelerations into immutable reference-
-    /// mass integrated channels and analytically migrated rate drives.
+    /// mass integrated channels and analytically migrated rate drives; a
+    /// pulsed channel is imposed as authored.
     pub fn extend_legacy_volume(
         &mut self,
         operator: &CanonicalWaveOperator,
@@ -279,7 +311,7 @@ impl CanonicalForcing {
                     }
                 }
             }
-            self.push_source(CanonicalSource::legacy(
+            self.push_source(CanonicalSource::authored(
                 operator,
                 weights,
                 signal,
@@ -323,7 +355,7 @@ impl CanonicalForcing {
                     }
                 }
             }
-            self.push_source(CanonicalSource::legacy(
+            self.push_source(CanonicalSource::authored(
                 operator,
                 weights,
                 source.signal,
@@ -334,7 +366,9 @@ impl CanonicalForcing {
     }
 
     /// Compiles the old weak boundary acceleration storage into edge-integrated
-    /// source weights. Prescribed signals are copied as field-valued ownership.
+    /// source weights, integrated for a harmonic side and imposed as authored
+    /// for a pulsed one. Prescribed signals are copied as field-valued
+    /// ownership.
     pub fn from_legacy_boundaries(
         operator: &CanonicalWaveOperator,
         quadratic: &QuadraticWaveOperator,
@@ -357,7 +391,7 @@ impl CanonicalForcing {
                 .zip(operator.primary_mass())
                 .map(|(by_side, mass)| by_side[side.index()] * mass)
                 .collect();
-            forcing.push_source(CanonicalSource::legacy(
+            forcing.push_source(CanonicalSource::authored(
                 operator,
                 weights,
                 signal,
@@ -383,7 +417,7 @@ impl CanonicalForcing {
                 by_signal[channel].1[node] += load.normalized_weight * operator.primary_mass[node];
             }
             for (signal, weights) in by_signal {
-                forcing.push_source(CanonicalSource::legacy(
+                forcing.push_source(CanonicalSource::authored(
                     operator,
                     weights,
                     signal,
@@ -438,7 +472,7 @@ impl CanonicalForcing {
             operator,
             weights,
             support,
-            CanonicalRateDrive::legacy(source.signal, anchor_time)?,
+            CanonicalRateDrive::authored(source.signal, anchor_time)?,
         )
     }
 
@@ -4925,8 +4959,9 @@ mod tests {
     use super::*;
     use crate::{
         BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, DampingLaw, LossChannel, MaterialFrame,
-        MeshQuality, MeshTriangle, MeshVertex, OuterBoundaryCondition, QuadraticWaveState, RateLaw,
-        ScalarField, TimeDrive, VolumeSourceContribution, VolumeSourceNode,
+        MeshQuality, MeshTriangle, MeshVertex, OuterBoundaryCondition, PulseEnvelope,
+        QuadraticWaveState, RateLaw, ScalarField, TimeDrive, VolumeSourceContribution,
+        VolumeSourceNode,
     };
 
     /// The one inversion has to give what the per-column solves gave, on a
@@ -5659,6 +5694,116 @@ mod tests {
                     if acceleration == signal
             ));
         }
+    }
+
+    /// A pulse is imposed as authored by every consumer, so once it is over
+    /// nothing is left driving. A closed reflecting cavity keeps in its
+    /// constant mode whatever a source put there, which for a sine burst is
+    /// nothing; an integrated pulse would instead leave its area behind as a
+    /// steady rate, and the cavity would drift for as long as it ran.
+    #[test]
+    fn a_pulse_drives_as_authored_and_leaves_a_closed_cavity_still() {
+        let envelope = PulseEnvelope::FlatTop {
+            duration: 0.6,
+            edge: 0.2,
+        };
+        let pulse = TimeSignal::pulsed([0.0, 2.0, 3.0, 0.0], envelope, 0.1, 0.0);
+        assert!(CanonicalRateDrive::legacy(pulse, 0.0).is_err());
+        assert_eq!(
+            CanonicalRateDrive::authored(pulse, 0.0).unwrap(),
+            CanonicalRateDrive::Direct(pulse)
+        );
+        assert!(matches!(
+            CanonicalRateDrive::authored(TimeSignal::harmonic(0.0, 2.0, 3.0, 0.0), 0.0).unwrap(),
+            CanonicalRateDrive::LegacyIntegratedHarmonic { .. }
+        ));
+
+        let (_, operator) = compile(&Scene::default());
+        let elements = vec![true; operator.element_nodes().len()];
+        let source = CanonicalForcing::point_source(
+            &operator,
+            PointSource {
+                enabled: true,
+                position: Point2::new(0.5, 0.5),
+                width: 0.3,
+                signal: pulse,
+                ..PointSource::default()
+            },
+            &elements,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(source.drive(), CanonicalRateDrive::Direct(pulse));
+        let mut forcing = CanonicalForcing::none(&operator);
+        forcing.push_source(source).unwrap();
+        let dt = 0.05 * operator.maximum_time_step();
+        let total = |state: &CanonicalWaveState| state.primary_flux().iter().sum::<f64>();
+        let mut state = CanonicalWaveState::zero(&operator, dt).unwrap();
+        let mut peak = 0.0_f64;
+        while state.time() < 0.8 {
+            state.step_with_forcing(&operator, &forcing).unwrap();
+            peak = peak.max(total(&state).abs());
+        }
+        let after = total(&state);
+        while state.time() < 2.5 {
+            state.step_with_forcing(&operator, &forcing).unwrap();
+        }
+        assert!(peak > 1.0e-3, "the pulse put in only {peak}");
+        assert!(
+            (total(&state) - after).abs() < 1.0e-12 * peak,
+            "the cavity drifted from {after} to {}",
+            total(&state)
+        );
+        // The burst itself has no area. What is left is the step's trapezoid
+        // rule on it: 1.5e-5 of the peak here, and under an eighth of that
+        // at each halving of the step.
+        assert!(
+            after.abs() < 1.0e-4 * peak,
+            "the burst left {after} of {peak}"
+        );
+        assert!(
+            forcing
+                .integrated_rate(1.0)
+                .unwrap()
+                .iter()
+                .all(|rate| *rate == 0.0)
+        );
+
+        // A pulsed Neumann side holds its flux as authored.
+        let mesh = square_with_outer_boundary();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &Scene::default(),
+            OuterBoundaryCondition::Neumann { signal: pulse },
+        )
+        .unwrap();
+        let canonical =
+            CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &Scene::default(), 17).unwrap();
+        let walls = CanonicalForcing::from_legacy_boundaries(&canonical, &quadratic, 0.0).unwrap();
+        assert!(!walls.sources().is_empty());
+        assert!(
+            walls
+                .sources()
+                .iter()
+                .all(|source| source.drive() == CanonicalRateDrive::Direct(pulse))
+        );
+
+        // A pulsed Dirichlet node follows its signal, and rests at zero once
+        // the pulse is over.
+        let flash = TimeSignal::pulsed([0.3, 0.0, 1.0, 0.0], envelope, 0.1, 0.0);
+        let mut prescribed = vec![None; operator.degrees_of_freedom()];
+        prescribed[0] = Some(flash);
+        let pinned = CanonicalForcing::from_prescribed(&operator, prescribed).unwrap();
+        let mut state = CanonicalWaveState::zero(&operator, dt).unwrap();
+        let mut largest = 0.0_f64;
+        while state.time() < 1.0 {
+            state.step_with_forcing(&operator, &pinned).unwrap();
+            let field = state.primary_field(&operator).unwrap()[0];
+            assert!((field - flash.value(state.time())).abs() < 1.0e-12);
+            largest = largest.max(field);
+        }
+        assert!(largest > 0.29, "the pinned node reached only {largest}");
+        assert_eq!(state.primary_field(&operator).unwrap()[0], 0.0);
     }
 
     #[test]

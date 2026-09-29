@@ -16509,3 +16509,60 @@ canonical recorders.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
 
+
+## 2026-09-29 — Pulsed signals in core, the CPU reference and the file
+
+`TimeSignal` was harmonic only, so a document could not hold a pulse, and
+five gallery scenes waited on one (`docs/plan.md`, "Later experiments"). This
+is the first of five commits: the signal, the CPU reference and the file. The
+device, the editor, the FFT with its shape window, and probe spectra follow.
+
+- **Signal.** `TimeSignal::Pulsed` runs the harmonic carrier under a
+  `PulseEnvelope`, from a start, once or every `repeat` seconds. The
+  envelopes:
+  - a flat top with raised-cosine edges, which with an edge of half the
+    duration is a Hann burst;
+  - a Gaussian cut at ±4σ with the floor there (e^-8) subtracted;
+  - sinc(2Bτ) under a Hann taper `lobes` lobes either side, flat from B
+    below the carrier to B above it.
+
+  Each is one at its centre, exactly zero outside, and continuous. The
+  carrier counts from the centre, so a sine burst has no area under any of
+  them: Simpson over one pulse gives under 1e-13. `value` and `derivative`
+  are analytic; `frequency_ceiling_hz`, which sizes AMR, adds the envelope's
+  width to the carrier: 1/edge, 3/(2πσ) where a Gaussian's spectrum is down
+  to 1%, and B(1 + 2/N).
+- **Imposed as authored.** A pulse compiles to `CanonicalRateDrive::Direct`
+  on point and volume sources, Neumann walls and faces, and the estimator's
+  wall residual, so a source's pulse amplitude is a field rate where a
+  harmonic's is an acceleration. The integrated drive refuses a pulse:
+  integrated, its area would stay behind as a steady drive, and a closed
+  scene would drift without end. Harmonic signals compile as before.
+- **Measured.** In a closed reflecting cavity a flat-top sine burst from a
+  point source leaves the total Q constant to 1e-12 of its peak once it is
+  over. What stays is 1.5e-5 of that peak: the step's trapezoid rule on the
+  drive, 1.3e-6, 1.3e-7 and 1.8e-8 at steps 8.5e-3, 4.2e-3 and 2.1e-3. A
+  pulsed Dirichlet node follows its signal to 1e-12 and rests at exactly zero
+  after.
+- **File.** A `pulsed` kind in `StoredTimeSignal` with a `shape`-tagged
+  envelope. It stays version 22: files without a pulse read as before.
+- **Device.** Refuses a pulse ("pulsed signals do not run on the device
+  yet") until the next commit; nothing in the app authors one yet.
+- **Renamed.** `harmonic_parameters` is `carrier`, and `_mut` likewise:
+  both variants have one.
+- **Size.** A pulse made `TimeSignal` 72 bytes where it was 32, which put
+  three internal enums over clippy's variant-size limit. `TopologyWaveModel`,
+  a borrowed view of its materials and regions, now borrows its walls too,
+  which fixes the two that hold it. `AdaptationInput`, one per adaptation,
+  boxes both variants.
+- **Left from the dead-code removal.** `source_envelope`,
+  `source_ramp_seconds` and `SOURCE_RAMP_PERIODS` described a shared
+  start-up envelope that only the deleted scalar kernel applied. They now
+  live in the one scalar-solver test that uses them, and
+  `docs/architecture.md` describes the cosine start that runs, and pulses.
+- **Plan.** Pulsed material time drives come next. Filed as todos, each
+  waiting on a readout design: pulse start marks on the time plots, a
+  transfer spectrum between two probes, and time-of-flight and envelope
+  readouts.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -939,13 +939,9 @@ pub(super) fn source_frequencies(
     source: &PointSource,
     scene: &TopologyScene,
 ) -> Vec<(String, f64)> {
-    let frequency = |signal: &TimeSignal| match signal {
-        TimeSignal::Harmonic {
-            amplitude,
-            frequency_hz,
-            ..
-        } if *amplitude != 0.0 && *frequency_hz > 0.0 => Some(*frequency_hz),
-        _ => None,
+    let frequency = |signal: &TimeSignal| {
+        let [_, amplitude, frequency_hz, _] = signal.carrier();
+        (amplitude != 0.0 && frequency_hz > 0.0).then_some(frequency_hz)
     };
     let mut found = Vec::new();
     if source.enabled

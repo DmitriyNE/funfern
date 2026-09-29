@@ -3154,7 +3154,12 @@ fn gpu_signal(
     signal: TimeSignal,
     clock: CanonicalGpuClock,
 ) -> Result<Vec4, CanonicalGpuBuildError> {
-    let [offset, amplitude, frequency, phase] = signal.harmonic_parameters();
+    if signal.is_pulsed() {
+        return Err(CanonicalGpuBuildError::Core(WaveError::Unsupported(
+            "pulsed signals do not run on the device yet",
+        )));
+    }
+    let [offset, amplitude, frequency, phase] = signal.carrier();
     let omega = std::f64::consts::TAU * frequency;
     let omega_f32 = finite_f32(omega, "signal angular frequency")?;
     if omega_f32.abs() > f32::MAX / 256.0 {

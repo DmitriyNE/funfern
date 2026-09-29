@@ -404,7 +404,7 @@ fn main() -> AppExit {
             .expect("target outgoing history");
     }
     let mut target_oracle_forcing = if prescribed {
-        let [offset, amplitude, frequency, phase] = prescribed_signal.harmonic_parameters();
+        let [offset, amplitude, frequency, phase] = prescribed_signal.carrier();
         let shifted = TimeSignal::harmonic(
             offset,
             amplitude,
@@ -418,7 +418,7 @@ fn main() -> AppExit {
         CanonicalForcing::none(&target_operator)
     };
     if source_drive {
-        let [offset, amplitude, frequency, phase] = source_signal.harmonic_parameters();
+        let [offset, amplitude, frequency, phase] = source_signal.carrier();
         let shifted = TimeSignal::harmonic(
             offset,
             amplitude,

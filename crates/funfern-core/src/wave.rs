@@ -448,8 +448,16 @@ impl Default for WaveCoefficients {
 }
 
 /// A bounded temporal drive shared by point and region sources and prescribed
-/// boundary data. Additional waveform variants can extend this representation
-/// without changing the spatial source carriers.
+/// boundary data.
+///
+/// A `Harmonic` signal runs for the whole run, and a source or a Neumann side
+/// takes it as the version-22 acceleration it integrates. A `Pulsed` signal is
+/// the same carrier under an envelope that is exactly zero outside its
+/// duration, and every consumer imposes it as authored: the field rate a
+/// source drives, the flux a Neumann side holds, the field a Dirichlet side
+/// pins. Nothing integrates a pulse, so once it is over nothing is left
+/// driving; integrating it would leave its area behind as a steady drive,
+/// which a closed scene turns into a drift that never stops.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TimeSignal {
     Harmonic {
@@ -458,6 +466,148 @@ pub enum TimeSignal {
         frequency_hz: f64,
         phase_radians: f64,
     },
+    /// `envelope(τ) · (offset + amplitude · sin(2π · frequency · τ + phase))`
+    /// with τ measured from the envelope's centre, so a sine carrier under
+    /// any of the envelopes, all of them even, has exactly zero area. The
+    /// first pulse starts at `start`; with a positive `repeat` another starts
+    /// every `repeat` seconds after it.
+    Pulsed {
+        offset: f64,
+        amplitude: f64,
+        frequency_hz: f64,
+        phase_radians: f64,
+        envelope: PulseEnvelope,
+        start: f64,
+        repeat: f64,
+    },
+}
+
+/// How a pulse rises and falls: one at its centre, exactly zero outside its
+/// duration, and continuous everywhere, so a pinned wall never jumps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PulseEnvelope {
+    /// A flat top between raised-cosine edges `edge` long. An edge of half
+    /// the duration leaves no top at all: a Hann burst.
+    FlatTop { duration: f64, edge: f64 },
+    /// A Gaussian of standard deviation `width`, cut `GAUSSIAN_CUT_WIDTHS`
+    /// widths either side of its peak with the floor there subtracted, so it
+    /// reaches zero without a step.
+    Gaussian { width: f64 },
+    /// `sinc(2 B τ)`, whose spectrum is flat from `B` below the carrier to
+    /// `B` above it, tapered to zero by a Hann window `lobes` lobes either
+    /// side of its peak.
+    Sinc { bandwidth_hz: f64, lobes: u32 },
+}
+
+/// Where a Gaussian envelope is cut, in widths from its peak. What is left
+/// there, `e^-8`, is 3.4e-4 of the peak, and subtracting it everywhere turns
+/// the step it would leave into a kink the size of the Gaussian's slope there.
+pub const GAUSSIAN_CUT_WIDTHS: f64 = 4.0;
+
+/// The most lobes a sinc envelope keeps either side of its peak. Past this
+/// the pulse is mostly tail: sixteen lobes already make it last sixteen
+/// times the reciprocal of its bandwidth.
+pub const MAX_SINC_LOBES: u32 = 16;
+
+impl PulseEnvelope {
+    pub fn valid(self) -> bool {
+        let positive = |value: f64| value.is_finite() && value > 0.0;
+        let valid = match self {
+            Self::FlatTop { duration, edge } => {
+                positive(duration) && positive(edge) && edge <= 0.5 * duration
+            }
+            Self::Gaussian { width } => positive(width),
+            Self::Sinc {
+                bandwidth_hz,
+                lobes,
+            } => positive(bandwidth_hz) && (1..=MAX_SINC_LOBES).contains(&lobes),
+        };
+        valid && positive(self.duration())
+    }
+
+    /// Seconds from the envelope leaving zero to its returning there.
+    pub fn duration(self) -> f64 {
+        match self {
+            Self::FlatTop { duration, .. } => duration,
+            Self::Gaussian { width } => 2.0 * GAUSSIAN_CUT_WIDTHS * width,
+            Self::Sinc {
+                bandwidth_hz,
+                lobes,
+            } => f64::from(lobes) / bandwidth_hz,
+        }
+    }
+
+    /// How far above its carrier the envelope still puts appreciable content:
+    /// a flat top's edges spread it over the main lobe of a Hann window two
+    /// edges long, a Gaussian's spectrum is down to 1% at `3 / (2π σ)`, and
+    /// a sinc's flat band ends at `B`, widened by its taper's own main lobe.
+    pub fn bandwidth_hz(self) -> f64 {
+        match self {
+            Self::FlatTop { edge, .. } => 1.0 / edge,
+            Self::Gaussian { width } => 3.0 / (std::f64::consts::TAU * width),
+            Self::Sinc {
+                bandwidth_hz,
+                lobes,
+            } => bandwidth_hz * (1.0 + 2.0 / f64::from(lobes)),
+        }
+    }
+
+    /// The envelope and its rate `from_centre` seconds after its centre.
+    pub fn value_and_rate(self, from_centre: f64) -> (f64, f64) {
+        use std::f64::consts::PI;
+        let half = 0.5 * self.duration();
+        if from_centre.is_nan() || from_centre.abs() >= half {
+            return (0.0, 0.0);
+        }
+        match self {
+            Self::FlatTop { edge, .. } => {
+                let inside = half - from_centre.abs();
+                if inside >= edge {
+                    return (1.0, 0.0);
+                }
+                let angle = PI * inside / edge;
+                (
+                    0.5 * (1.0 - angle.cos()),
+                    -from_centre.signum() * 0.5 * PI / edge * angle.sin(),
+                )
+            }
+            Self::Gaussian { width } => {
+                let floor = (-0.5 * GAUSSIAN_CUT_WIDTHS * GAUSSIAN_CUT_WIDTHS).exp();
+                let ratio = from_centre / width;
+                let gaussian = (-0.5 * ratio * ratio).exp();
+                // Divided rather than scaled by a reciprocal, so the peak is
+                // exactly one.
+                (
+                    (gaussian - floor) / (1.0 - floor),
+                    -ratio / width * gaussian / (1.0 - floor),
+                )
+            }
+            Self::Sinc { bandwidth_hz, .. } => {
+                let angle = PI * 2.0 * bandwidth_hz * from_centre;
+                // Near the peak the quotient loses its digits; the series
+                // there is exact to rounding for |angle| below 1e-3.
+                let (sinc, slope) = if angle.abs() < 1.0e-3 {
+                    let square = angle * angle;
+                    (
+                        1.0 - square / 6.0 + square * square / 120.0,
+                        angle * (-1.0 / 3.0 + square / 30.0),
+                    )
+                } else {
+                    (
+                        angle.sin() / angle,
+                        (angle * angle.cos() - angle.sin()) / (angle * angle),
+                    )
+                };
+                let taper_angle = PI * from_centre / half;
+                let taper = 0.5 * (1.0 + taper_angle.cos());
+                let taper_rate = -0.5 * PI / half * taper_angle.sin();
+                (
+                    sinc * taper,
+                    PI * 2.0 * bandwidth_hz * slope * taper + sinc * taper_rate,
+                )
+            }
+        }
+    }
 }
 
 /// The phase a new harmonic source starts at: a quarter turn, so it switches
@@ -496,71 +646,170 @@ impl TimeSignal {
         }
     }
 
-    pub fn valid(self) -> bool {
-        let Self::Harmonic {
+    /// A pulse on the carrier `[offset, amplitude, frequency_hz,
+    /// phase_radians]`.
+    pub const fn pulsed(
+        carrier: [f64; 4],
+        envelope: PulseEnvelope,
+        start: f64,
+        repeat: f64,
+    ) -> Self {
+        let [offset, amplitude, frequency_hz, phase_radians] = carrier;
+        Self::Pulsed {
             offset,
             amplitude,
             frequency_hz,
             phase_radians,
-        } = self;
-        offset.is_finite()
+            envelope,
+            start,
+            repeat,
+        }
+    }
+
+    pub fn valid(self) -> bool {
+        let [offset, amplitude, frequency_hz, phase_radians] = self.carrier();
+        let carrier = offset.is_finite()
             && amplitude.is_finite()
             && frequency_hz.is_finite()
             && frequency_hz >= 0.0
-            && phase_radians.is_finite()
+            && phase_radians.is_finite();
+        match self {
+            Self::Harmonic { .. } => carrier,
+            Self::Pulsed {
+                envelope,
+                start,
+                repeat,
+                ..
+            } => {
+                carrier
+                    && envelope.valid()
+                    && start.is_finite()
+                    && repeat.is_finite()
+                    && (repeat == 0.0 || repeat >= envelope.duration())
+            }
+        }
+    }
+
+    /// Seconds from the centre of the pulse under way at `time`, or `None`
+    /// between pulses and for a harmonic signal, which has none.
+    fn seconds_from_pulse_centre(self, time: f64) -> Option<f64> {
+        let Self::Pulsed {
+            envelope,
+            start,
+            repeat,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let mut since = time - start;
+        if since.is_nan() || since < 0.0 {
+            return None;
+        }
+        if repeat > 0.0 {
+            since = since.rem_euclid(repeat);
+        }
+        let duration = envelope.duration();
+        (since < duration).then_some(since - 0.5 * duration)
     }
 
     pub fn value(self, time: f64) -> f64 {
-        let Self::Harmonic {
-            offset,
-            amplitude,
-            frequency_hz,
-            phase_radians,
-        } = self;
-        offset + amplitude * (std::f64::consts::TAU * frequency_hz * time + phase_radians).sin()
+        let [offset, amplitude, frequency_hz, phase_radians] = self.carrier();
+        let omega = std::f64::consts::TAU * frequency_hz;
+        match self {
+            Self::Harmonic { .. } => offset + amplitude * (omega * time + phase_radians).sin(),
+            Self::Pulsed { envelope, .. } => {
+                let Some(tau) = self.seconds_from_pulse_centre(time) else {
+                    return 0.0;
+                };
+                envelope.value_and_rate(tau).0
+                    * (offset + amplitude * (omega * tau + phase_radians).sin())
+            }
+        }
     }
 
     /// Exact time derivative of the authored signal. Keeping this analytic is
     /// important for prescribed canonical fields: differencing two stored f32
     /// endpoints loses the small per-step change long before the field itself.
     pub fn derivative(self, time: f64) -> f64 {
-        let Self::Harmonic {
-            amplitude,
-            frequency_hz,
-            phase_radians,
-            ..
-        } = self;
+        let [offset, amplitude, frequency_hz, phase_radians] = self.carrier();
         let omega = std::f64::consts::TAU * frequency_hz;
-        amplitude * omega * (omega * time + phase_radians).cos()
+        match self {
+            Self::Harmonic { .. } => amplitude * omega * (omega * time + phase_radians).cos(),
+            Self::Pulsed { envelope, .. } => {
+                let Some(tau) = self.seconds_from_pulse_centre(time) else {
+                    return 0.0;
+                };
+                let (window, rate) = envelope.value_and_rate(tau);
+                let phase = omega * tau + phase_radians;
+                rate * (offset + amplitude * phase.sin()) + window * amplitude * omega * phase.cos()
+            }
+        }
     }
 
-    pub const fn harmonic_parameters(self) -> [f64; 4] {
-        let Self::Harmonic {
-            offset,
-            amplitude,
-            frequency_hz,
-            phase_radians,
-        } = self;
-        [offset, amplitude, frequency_hz, phase_radians]
+    /// Offset, amplitude, frequency and phase: what a harmonic signal runs
+    /// from t = 0, and what a pulse runs under its envelope from its centre.
+    pub const fn carrier(self) -> [f64; 4] {
+        match self {
+            Self::Harmonic {
+                offset,
+                amplitude,
+                frequency_hz,
+                phase_radians,
+            }
+            | Self::Pulsed {
+                offset,
+                amplitude,
+                frequency_hz,
+                phase_radians,
+                ..
+            } => [offset, amplitude, frequency_hz, phase_radians],
+        }
     }
 
-    pub fn harmonic_parameters_mut(&mut self) -> (&mut f64, &mut f64, &mut f64, &mut f64) {
-        let Self::Harmonic {
-            offset,
-            amplitude,
-            frequency_hz,
-            phase_radians,
-        } = self;
-        (offset, amplitude, frequency_hz, phase_radians)
+    pub fn carrier_mut(&mut self) -> (&mut f64, &mut f64, &mut f64, &mut f64) {
+        match self {
+            Self::Harmonic {
+                offset,
+                amplitude,
+                frequency_hz,
+                phase_radians,
+            }
+            | Self::Pulsed {
+                offset,
+                amplitude,
+                frequency_hz,
+                phase_radians,
+                ..
+            } => (offset, amplitude, frequency_hz, phase_radians),
+        }
     }
 
+    pub const fn is_pulsed(self) -> bool {
+        matches!(self, Self::Pulsed { .. })
+    }
+
+    /// The highest frequency the signal puts appreciable content at: a
+    /// harmonic's own, and a pulse's carrier widened by its envelope. A pulse
+    /// of offset alone, a flash, has no carrier but still its envelope's
+    /// width.
     pub fn frequency_ceiling_hz(self) -> f64 {
-        let [_, amplitude, frequency_hz, _] = self.harmonic_parameters();
-        if amplitude == 0.0 { 0.0 } else { frequency_hz }
+        let [offset, amplitude, frequency_hz, _] = self.carrier();
+        let carrier = if amplitude == 0.0 { 0.0 } else { frequency_hz };
+        match self {
+            Self::Harmonic { .. } => carrier,
+            Self::Pulsed { envelope, .. } => {
+                if amplitude == 0.0 && offset == 0.0 {
+                    0.0
+                } else {
+                    carrier + envelope.bandwidth_hz()
+                }
+            }
+        }
     }
 
     pub fn characteristic_amplitude(self) -> f64 {
-        let [offset, amplitude, _, _] = self.harmonic_parameters();
+        let [offset, amplitude, _, _] = self.carrier();
         if amplitude == 0.0 { offset } else { amplitude }
     }
 }
@@ -569,46 +818,6 @@ impl Default for TimeSignal {
     fn default() -> Self {
         Self::ZERO
     }
-}
-
-/// Periods of the slowest oscillating source that the switch-on ramp spans.
-///
-/// A sine started from rest at a phase whose cosine is not zero hands the domain
-/// a net impulse: integrating `A sin(w t + p)` from rest leaves the term
-/// `(A cos(p) / w) t`, a uniform drift. Nothing in a closed or radiating scene
-/// removes it — a constant is in the stiffness operator's null space, and an
-/// outgoing wall damps velocity rather than position — so in a cavity the
-/// offset ramps without bound. Easing the amplitude in suppresses that impulse
-/// to about `1 / (w * ramp)` of what it would otherwise be.
-///
-/// One envelope is shared by every source in a scene rather than one per source,
-/// because a phased array steers its beam with the phases *between* its sources
-/// and a per-source delay would turn the beam. Sizing the ramp on the slowest
-/// source keeps the suppression at least this good for all of them.
-pub const SOURCE_RAMP_PERIODS: f64 = 4.0;
-
-/// How long the switch-on envelope runs for a scene whose slowest oscillating
-/// source is at `lowest_frequency_hz`.
-///
-/// Zero when nothing oscillates, which leaves the envelope out of the way: a
-/// steady bias accelerates a free domain however gently it is introduced, so
-/// there is no impulse for a ramp to suppress.
-pub fn source_ramp_seconds(lowest_frequency_hz: f64) -> f64 {
-    if !lowest_frequency_hz.is_finite() || lowest_frequency_hz <= 0.0 {
-        return 0.0;
-    }
-    SOURCE_RAMP_PERIODS / lowest_frequency_hz
-}
-
-/// Smooth switch-on: zero at the start with zero slope, one after `ramp`. The
-/// vanishing slope at both ends is what leaves the residual impulse at second
-/// order in `1 / (w * ramp)` rather than first. `wave.wgsl` mirrors this.
-pub fn source_envelope(time: f64, ramp: f64) -> f64 {
-    if !ramp.is_finite() || ramp <= 0.0 || !time.is_finite() {
-        return 1.0;
-    }
-    let fraction = (time / ramp).clamp(0.0, 1.0);
-    fraction * fraction * (3.0 - 2.0 * fraction)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1249,6 +1458,216 @@ mod tests {
             }
             .valid()
         );
+    }
+
+    const ENVELOPES: [PulseEnvelope; 4] = [
+        PulseEnvelope::FlatTop {
+            duration: 1.2,
+            edge: 0.3,
+        },
+        PulseEnvelope::FlatTop {
+            duration: 0.8,
+            edge: 0.4,
+        },
+        PulseEnvelope::Gaussian { width: 0.15 },
+        PulseEnvelope::Sinc {
+            bandwidth_hz: 2.5,
+            lobes: 3,
+        },
+    ];
+
+    /// Central difference of `f` at `x`, for checking analytic rates.
+    fn slope(f: impl Fn(f64) -> f64, x: f64, h: f64) -> f64 {
+        (f(x + h) - f(x - h)) / (2.0 * h)
+    }
+
+    #[test]
+    fn every_pulse_envelope_peaks_at_one_and_is_zero_outside_its_duration() {
+        for envelope in ENVELOPES {
+            assert!(envelope.valid(), "{envelope:?}");
+            let half = 0.5 * envelope.duration();
+            assert_eq!(envelope.value_and_rate(0.0), (1.0, 0.0), "{envelope:?}");
+            for outside in [half, -half, 1.5 * half, -7.0 * half, f64::NAN] {
+                assert_eq!(envelope.value_and_rate(outside), (0.0, 0.0), "{envelope:?}");
+            }
+            // It reaches zero continuously: just inside the ends it is already
+            // negligible, where a truncated Gaussian or sinc would step.
+            for end in [half, -half] {
+                let inside = end * (1.0 - 1.0e-9);
+                assert!(
+                    envelope.value_and_rate(inside).0.abs() < 1.0e-8,
+                    "{envelope:?} steps at its end"
+                );
+            }
+            let h = 1.0e-6 * envelope.duration();
+            for k in 1..200 {
+                let tau = -half + (k as f64 + 0.37) / 200.0 * 2.0 * half;
+                if tau.abs() >= half - 2.0 * h {
+                    continue;
+                }
+                let (_, rate) = envelope.value_and_rate(tau);
+                let numeric = slope(|x| envelope.value_and_rate(x).0, tau, h);
+                assert!(
+                    (rate - numeric).abs() < 1.0e-6 / envelope.duration(),
+                    "{envelope:?} at {tau}: rate {rate} against {numeric}"
+                );
+            }
+        }
+        // A sinc envelope keeps the zeros of sinc(2Bτ) that set its band.
+        let sinc = ENVELOPES[3];
+        for lobe in 1..3 {
+            let zero = f64::from(lobe) / (2.0 * 2.5);
+            assert!(sinc.value_and_rate(zero).0.abs() < 1.0e-15);
+            assert!(sinc.value_and_rate(-zero).0.abs() < 1.0e-15);
+        }
+    }
+
+    #[test]
+    fn a_pulse_starts_on_time_repeats_exactly_and_differentiates_exactly() {
+        for envelope in ENVELOPES {
+            let duration = envelope.duration();
+            let start = 0.35;
+            let repeat = 1.5 * duration;
+            let pulse = TimeSignal::pulsed([0.2, 1.3, 4.0, 0.6], envelope, start, repeat);
+            assert!(pulse.valid());
+            assert_eq!(pulse.value(start - 1.0e-9), 0.0);
+            assert_eq!(pulse.value(-40.0), 0.0);
+            assert_eq!(pulse.derivative(start - 1.0e-9), 0.0);
+            // Silent between pulses.
+            for gap in [1.01, 1.2, 1.49] {
+                assert_eq!(pulse.value(start + gap * duration), 0.0);
+                assert_eq!(pulse.value(start + repeat + gap * duration), 0.0);
+            }
+            // The carrier counts from the centre: at the peak it reads
+            // `offset + amplitude sin(phase)`.
+            let centre = start + 0.5 * duration;
+            assert!((pulse.value(centre) - (0.2 + 1.3 * 0.6_f64.sin())).abs() < 1.0e-12);
+            let h = 1.0e-6 * duration;
+            for k in 0..120 {
+                let time = start + (k as f64 + 0.41) / 120.0 * duration;
+                for n in [1.0, 7.0] {
+                    let later = time + n * repeat;
+                    assert!(
+                        (pulse.value(later) - pulse.value(time)).abs() < 1.0e-11,
+                        "{envelope:?}: pulse {n} differs at {time}"
+                    );
+                }
+                let numeric = slope(|t| pulse.value(t), time, h);
+                assert!(
+                    (pulse.derivative(time) - numeric).abs() < 1.0e-5,
+                    "{envelope:?} at {time}: {} against {numeric}",
+                    pulse.derivative(time)
+                );
+            }
+            let once = TimeSignal::pulsed([0.2, 1.3, 4.0, 0.6], envelope, start, 0.0);
+            assert_eq!(once.value(start + repeat + 0.5 * duration), 0.0);
+        }
+    }
+
+    /// Simpson's rule over one pulse, on a grid fine enough to be exact to
+    /// rounding for these smooth pulses.
+    fn pulse_area(pulse: TimeSignal, start: f64, duration: f64) -> f64 {
+        let n = 20_000;
+        let h = duration / n as f64;
+        (0..=n)
+            .map(|k| {
+                let weight = if k == 0 || k == n {
+                    1.0
+                } else if k % 2 == 1 {
+                    4.0
+                } else {
+                    2.0
+                };
+                weight * pulse.value(start + k as f64 * h)
+            })
+            .sum::<f64>()
+            * h
+            / 3.0
+    }
+
+    /// A sine carrier counted from the centre of an even envelope is odd
+    /// about it, so the pulse has no area and leaves nothing behind in a
+    /// source's rate. A cosine carrier is not, and has.
+    #[test]
+    fn a_sine_burst_has_no_area_under_any_envelope() {
+        for envelope in ENVELOPES {
+            let duration = envelope.duration();
+            let sine = TimeSignal::pulsed([0.0, 1.0, 3.3, 0.0], envelope, 0.2, 0.0);
+            let cosine = TimeSignal::pulsed([0.0, 1.0, 0.7, SWITCH_ON_PHASE], envelope, 0.2, 0.0);
+            assert!(
+                pulse_area(sine, 0.2, duration).abs() < 1.0e-13,
+                "{envelope:?}: {}",
+                pulse_area(sine, 0.2, duration)
+            );
+            assert!(
+                pulse_area(cosine, 0.2, duration).abs() > 1.0e-2,
+                "{envelope:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pulse_reports_its_bandwidth_and_rejects_malformed_shapes() {
+        let flat = PulseEnvelope::FlatTop {
+            duration: 1.0,
+            edge: 0.25,
+        };
+        let gaussian = PulseEnvelope::Gaussian { width: 0.1 };
+        let sinc = PulseEnvelope::Sinc {
+            bandwidth_hz: 2.0,
+            lobes: 4,
+        };
+        assert_eq!(gaussian.duration(), 0.8);
+        assert_eq!(sinc.duration(), 2.0);
+        let tone = |envelope| TimeSignal::pulsed([0.0, 1.0, 3.0, 0.0], envelope, 0.0, 0.0);
+        assert_eq!(tone(flat).frequency_ceiling_hz(), 3.0 + 4.0);
+        assert!(
+            (tone(gaussian).frequency_ceiling_hz() - (3.0 + 30.0 / std::f64::consts::TAU)).abs()
+                < 1.0e-12
+        );
+        assert_eq!(tone(sinc).frequency_ceiling_hz(), 3.0 + 3.0);
+        let flash = TimeSignal::pulsed([0.5, 0.0, 3.0, 0.0], flat, 0.0, 0.0);
+        assert_eq!(flash.frequency_ceiling_hz(), 4.0);
+        assert_eq!(flash.characteristic_amplitude(), 0.5);
+        let silent = TimeSignal::pulsed([0.0, 0.0, 3.0, 0.0], flat, 0.0, 0.0);
+        assert_eq!(silent.frequency_ceiling_hz(), 0.0);
+        assert!(tone(flat).is_pulsed() && !TimeSignal::ZERO.is_pulsed());
+
+        for envelope in [
+            PulseEnvelope::FlatTop {
+                duration: 1.0,
+                edge: 0.0,
+            },
+            PulseEnvelope::FlatTop {
+                duration: 1.0,
+                edge: 0.51,
+            },
+            PulseEnvelope::FlatTop {
+                duration: -1.0,
+                edge: 0.1,
+            },
+            PulseEnvelope::Gaussian { width: 0.0 },
+            PulseEnvelope::Gaussian { width: f64::NAN },
+            PulseEnvelope::Sinc {
+                bandwidth_hz: 1.0,
+                lobes: 0,
+            },
+            PulseEnvelope::Sinc {
+                bandwidth_hz: 1.0,
+                lobes: MAX_SINC_LOBES + 1,
+            },
+            PulseEnvelope::Sinc {
+                bandwidth_hz: 0.0,
+                lobes: 2,
+            },
+        ] {
+            assert!(!envelope.valid(), "{envelope:?}");
+            assert!(!tone(envelope).valid(), "{envelope:?}");
+        }
+        assert!(!TimeSignal::pulsed([0.0, 1.0, 3.0, 0.0], flat, f64::INFINITY, 0.0).valid());
+        assert!(!TimeSignal::pulsed([0.0, 1.0, 3.0, 0.0], flat, 0.0, 0.99).valid());
+        assert!(TimeSignal::pulsed([0.0, 1.0, 3.0, 0.0], flat, 0.0, 1.0).valid());
+        assert!(!TimeSignal::pulsed([0.0, 1.0, -3.0, 0.0], flat, 0.0, 0.0).valid());
     }
 
     fn grid(n: usize) -> TriMesh {
