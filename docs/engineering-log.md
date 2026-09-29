@@ -17181,3 +17181,36 @@ with the user until it read what the physics does.
     trace; the file keeps a segment length that is not the default.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — Line scenes open on their spectra
+
+The first commit of the gallery's batch F (`docs/spikes/funfern-gallery-plan.md`,
+"Batch F: pulses, spectra and transfers"), planned with the user: scenes whose
+claims are lines now open with the spectrum under their probe's trace.
+
+- **Readouts.** `spectrum_readout(span, max_hz, decibels)` shows a point
+  probe's field with its spectrum. The Kerr slab's receiver reads in decibels
+  to 10 Hz; the time crystal's and the travelling modulation's over 4 s, so
+  lines a hertz apart stand clear, in decibels to 8 Hz; the Doppler mirror's
+  front probe linearly to 5 Hz.
+- **New probes.** The self-sustained emitter gains "In the plasma" at
+  (0, −0.7), the point its claim reads the tone at, and the Josephson line
+  "Down the line" at (0.5, 0), over its whole 10 s history. Both descriptions
+  now say what the probe hears.
+- **Measured.** Each claim test also reads the spectrum the readout draws,
+  its own span through `amplitude_spectrum`, the span clamped to what was
+  recorded as the readout clamps it:
+  - Kerr slab: the third harmonic at 0.29 of the fundamental, 15 times the
+    level at 5 Hz.
+  - Time crystal: the sidebands at 1.5, 3.5 and 5.5 Hz at 0.20, 0.88 and
+    0.20 of the carrier.
+  - Travelling modulation: 3.5 Hz at 1.7 times the carrier and 5.5 Hz at 7.5
+    times: the carrier is outdone.
+  - Doppler mirror: 3 Hz at 1.04 of the carrier and 7 times any other line.
+  - Emitter: the strongest line at 2.99 Hz.
+  - Josephson line: the strongest line at 0.46 Hz against `V/2π` = 0.477,
+    within the 10 s span's 0.1 Hz resolution.
+- **No device run:** the physics of every scene is unchanged; probes only
+  read.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

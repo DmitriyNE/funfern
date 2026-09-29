@@ -334,8 +334,10 @@ pub fn catalog() -> &'static [TopologyExample] {
             example(
                 ExampleGroup::NonlinearAndSelfOrganizing,
                 "Josephson line",
-                "A junction line held at a constant voltage on one end sheds one fluxon per \
-                 turn of its phase; each runs down the line as a kink in the integrated field.",
+                "A junction line held at a constant voltage V on one end sheds one fluxon per \
+                 turn of its phase; each runs down the line as a kink in the integrated field, \
+                 and a probe down the line hears them as a tone at V/2π, the Josephson \
+                 frequency.",
                 josephson_line(),
             ),
             example(
@@ -358,8 +360,9 @@ pub fn catalog() -> &'static [TopologyExample] {
                 ExampleGroup::NonlinearAndSelfOrganizing,
                 "Self-sustained emitter",
                 "A disk of van der Pol oscillators starts from a faint seed and rings at its own \
-                 3 Hz cutoff, sending rings through a plasma. Raise the plasma's cutoff above \
-                 3 Hz and the rings stop: the disk still rings, but its tone cannot leave.",
+                 3 Hz cutoff, sending rings through a plasma, where a probe hears the one tone. \
+                 Raise the plasma's cutoff above 3 Hz and the rings stop: the disk still rings, \
+                 but its tone cannot leave.",
                 emitter(),
             ),
         ]
@@ -788,6 +791,17 @@ fn field_readout(span: f64) -> ProbeReadout {
         span,
         field: true,
         ..ProbeReadout::blank()
+    }
+}
+
+/// A point probe whose claim is about lines: its field over `span` seconds,
+/// with the spectrum of that span under it up to `max_hz`.
+fn spectrum_readout(span: f64, max_hz: f64, decibels: bool) -> ProbeReadout {
+    ProbeReadout {
+        field_spectrum: true,
+        spectrum_decibels: decibels,
+        spectrum_max_hz: max_hz,
+        ..field_readout(span)
     }
 }
 
@@ -1289,7 +1303,9 @@ fn kerr_slab_with(chi: f64, amplitude: f64) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(0.55, 0.0)),
     });
-    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
+    document
+        .readouts
+        .set_probe(ProbeId(1), spectrum_readout(2.0, 10.0, true));
     document
 }
 
@@ -1382,7 +1398,10 @@ fn modulated_slab(
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(side * (half_width + 0.15), 0.0)),
     });
-    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
+    // Four seconds, so lines a hertz apart stand clear of each other.
+    document
+        .readouts
+        .set_probe(ProbeId(1), spectrum_readout(4.0, 8.0, true));
     document
 }
 
@@ -1576,7 +1595,9 @@ fn doppler_mirror_with(pump_hz: f64) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(DOPPLER_BEHIND),
     });
-    document.readouts.set_probe(ProbeId(1), field_readout(2.0));
+    document
+        .readouts
+        .set_probe(ProbeId(1), spectrum_readout(4.0, 5.0, false));
     document.readouts.set_probe(ProbeId(2), field_readout(2.0));
     document
 }
@@ -1683,9 +1704,21 @@ fn josephson_line_with(restoring: &str, bias: f64) -> TopologyDocument {
     builder.scene.materials[0] = line;
     let mut document = builder.document();
     document.model.source.enabled = false;
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Down the line".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(JOSEPHSON_PROBE),
+    });
     document.presentation.integrated_field = true;
     document
+        .readouts
+        .set_probe(ProbeId(1), spectrum_readout(WHOLE_HISTORY, 3.0, false));
+    document
 }
+
+const JOSEPHSON_PROBE: Point2 = Point2::new(0.5, 0.0);
 
 /// φ⁴ at rest sits on the unstable top of its double well. A weak source
 /// tips it, the medium falls into the wells at `r = ±1` in patches, and the
@@ -1887,8 +1920,20 @@ fn emitter_with(plasma_hz: f64) -> TopologyDocument {
         region,
         ..source(Point2::new(0.0, 0.0), 2.5, 0.01, 0.06)
     };
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "In the plasma".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(EMITTER_PROBE),
+    });
+    document
+        .readouts
+        .set_probe(ProbeId(1), spectrum_readout(4.0, 5.0, false));
     document
 }
+
+const EMITTER_PROBE: Point2 = Point2::new(0.0, -0.7);
 
 /// The unit direction at `angle`, from the portable sine and cosine, so a
 /// scene built here has the same geometry, and meshes the same, on every
@@ -3855,6 +3900,58 @@ mod tests {
         2.0 * (re * re + im * im).sqrt() / count as f64
     }
 
+    /// What a point probe's readout shows of its field's spectrum.
+    struct Lines {
+        spectrum: Spectrum,
+        span: f64,
+    }
+
+    impl Lines {
+        /// The spectrum `probe`'s readout draws at the end of `series`,
+        /// recorded every `dt` at the probe's point: its own span, through the
+        /// transform the readout uses, the span clamped to what was recorded
+        /// as the readout clamps it. The readout must show the field's
+        /// spectrum up to at least `top_hz`.
+        fn read(
+            document: &TopologyDocument,
+            probe: ProbeId,
+            series: &[f64],
+            dt: f64,
+            top_hz: f64,
+        ) -> Self {
+            let readout = document.readouts.probe(probe);
+            assert!(readout.field && readout.field_spectrum);
+            assert!(readout.spectrum_max_hz >= top_hz);
+            let count = ((readout.span / dt).round() as usize).min(series.len());
+            Self {
+                spectrum: amplitude_spectrum(&series[series.len() - count..], dt).unwrap(),
+                span: readout.span,
+            }
+        }
+
+        /// The height of the line at `hz`: the largest magnitude within a
+        /// quarter of the Hann window's main lobe of it.
+        fn at(&self, hz: f64) -> f64 {
+            self.strongest(hz - 1.0 / self.span, hz + 1.0 / self.span).1
+        }
+
+        /// The strongest line between `low` and `high` Hz, and its height.
+        fn strongest(&self, low: f64, high: f64) -> (f64, f64) {
+            (0..self.spectrum.magnitudes.len())
+                .map(|index| {
+                    (
+                        self.spectrum.frequency_hz(index),
+                        self.spectrum.magnitudes[index],
+                    )
+                })
+                .filter(|(frequency, _)| (low..=high).contains(frequency))
+                .fold(
+                    (low, 0.0),
+                    |best, next| if next.1 > best.1 { next } else { best },
+                )
+        }
+    }
+
     /// The steady complex amplitude at one frequency on every node, from the
     /// last whole periods of a run from rest.
     struct Harmonic {
@@ -4136,10 +4233,24 @@ mod tests {
                 );
                 lines
             };
-            [spectrum(&series[0]), spectrum(&series[1])]
+            (
+                [spectrum(&series[0]), spectrum(&series[1])],
+                Lines::read(
+                    &doppler_mirror_with(pump_hz),
+                    ProbeId(1),
+                    &series[0],
+                    dt,
+                    3.0,
+                ),
+            )
         };
-        let [front, behind] = lines(2.0 * DOPPLER_HZ);
-        let [rest, _] = lines(0.0);
+        let ([front, behind], readout) = lines(2.0 * DOPPLER_HZ);
+        let ([rest, _], _) = lines(0.0);
+        // The front probe's readout shows it as the front probe's lines do.
+        assert!(readout.at(3.0) > 0.5 * readout.at(1.0));
+        for other in [2.0, 4.0, 5.0] {
+            assert!(readout.at(3.0) > 5.0 * readout.at(other), "{other} Hz");
+        }
         let report = format!("front {front:.4?}, behind {behind:.4?}, at rest {rest:.4?}");
         let reflected = front[2] / front[0];
         assert!(reflected > 0.5, "{report}");
@@ -4168,13 +4279,18 @@ mod tests {
         let run = |chi: f64| {
             let (series, dt, strongest) = trace(&kerr_slab_with(chi, 60.0), 0.15, 4.0, receiver);
             let ratio = amplitude_at(&series, dt, 7.5, 9.0) / amplitude_at(&series, dt, 2.5, 3.0);
-            (ratio, strongest)
+            (ratio, strongest, series, dt)
         };
-        let (kerr, strongest) = run(40.0);
-        let (linear, _) = run(0.0);
+        let (kerr, strongest, series, dt) = run(40.0);
+        let (linear, ..) = run(0.0);
         assert!(kerr > 0.1, "third harmonic {kerr:.3e} of the fundamental");
         assert!(linear < 0.01, "a linear slab made {linear:.3e}");
         assert!(strongest > 0.2, "the slab moved only {strongest:.3}");
+        // The receiver's readout shows it at 0.29 of the fundamental, and
+        // no second harmonic: 15 times the level at 5 Hz.
+        let lines = Lines::read(&kerr_slab(), ProbeId(1), &series, dt, 7.5);
+        assert!(lines.at(7.5) > 0.1 * lines.at(2.5));
+        assert!(lines.at(7.5) > 5.0 * lines.at(5.0));
     }
 
     /// The size rule's report on `document` after `seconds` from rest at
@@ -4506,10 +4622,18 @@ mod tests {
     /// `f − f_m`, `f + f_m` and `f + 3f_m` for a 2.5 Hz source and 1 Hz
     /// modulation.
     fn sidebands(document: &TopologyDocument, receiver: Point2) -> [f64; 3] {
+        sidebands_and_lines(document, receiver).0
+    }
+
+    /// `sidebands`, and what the receiver's readout shows.
+    fn sidebands_and_lines(document: &TopologyDocument, receiver: Point2) -> ([f64; 3], Lines) {
         let (series, dt, _) = trace(document, 0.15, 8.0, receiver);
         let at = |hz: f64| amplitude_at(&series, dt, hz, 4.0 * hz);
         let carrier = at(2.5);
-        [1.5, 3.5, 5.5].map(|hz| at(hz) / carrier)
+        (
+            [1.5, 3.5, 5.5].map(|hz| at(hz) / carrier),
+            Lines::read(document, ProbeId(1), &series, dt, 5.5),
+        )
     }
 
     /// The time-crystal gallery claim: the slab splits the wave into
@@ -4518,7 +4642,12 @@ mod tests {
     #[test]
     fn a_time_crystal_reaches_further_sidebands_than_a_pump() {
         let receiver = Point2::new(0.5, 0.0);
-        let crystal = sidebands(&time_crystal_slab(), receiver);
+        let (crystal, lines) = sidebands_and_lines(&time_crystal_slab(), receiver);
+        // The receiver's readout shows the three at 0.20, 0.88 and 0.20 of
+        // the carrier.
+        for (hz, least) in [(1.5, 0.1), (3.5, 0.3), (5.5, 0.1)] {
+            assert!(lines.at(hz) > least * lines.at(2.5), "{hz} Hz");
+        }
         let pump = sidebands(
             &modulated_slab("Parametric pump", &CRYSTAL[..3], 0.35, false),
             receiver,
@@ -4535,7 +4664,11 @@ mod tests {
     /// against it, the same slab barely does.
     #[test]
     fn a_travelling_modulation_converts_only_the_wave_running_with_it() {
-        let with = sidebands(&travelling_slab(), Point2::new(0.75, 0.0));
+        let (with, lines) = sidebands_and_lines(&travelling_slab(), Point2::new(0.75, 0.0));
+        // The receiver's readout shows the carrier outdone by the lines above
+        // it: 3.5 Hz at 1.7 times it, 5.5 Hz at 7.5 times.
+        assert!(lines.strongest(0.2, 8.0).0 > 3.0);
+        assert!(lines.at(3.5) > lines.at(2.5));
         let against = sidebands(
             &modulated_slab("Travelling modulation", &TRAVELLING, 0.6, true),
             Point2::new(-0.75, 0.0),
@@ -4954,6 +5087,19 @@ mod tests {
         let tau = std::f64::consts::TAU;
         let points = [-0.5, 0.0, 0.5].map(|x| Point2::new(x, 0.0));
         let rows = integrated_traces(&josephson_line(), 0.08, 10.0, &points, 0.02);
+        assert_eq!(points[2], JOSEPHSON_PROBE);
+        let field = rows.iter().map(|row| row.2[2]).collect::<Vec<_>>();
+        let lines = Lines::read(
+            &josephson_line(),
+            ProbeId(1),
+            &field,
+            rows[1].0 - rows[0].0,
+            JOSEPHSON_BIAS / tau,
+        );
+        // Its readout hears the fluxons as a tone at V/2π, the Josephson
+        // frequency, 0.46 Hz in view against 0.477, and its harmonics.
+        let (strongest, _) = lines.strongest(0.1, 3.0);
+        assert!((strongest - JOSEPHSON_BIAS / tau).abs() < 1.0 / lines.span);
         let arrivals = (0..points.len())
             .map(|index| fluxon_arrivals(&rows, index))
             .collect::<Vec<_>>();
@@ -5375,6 +5521,12 @@ mod tests {
             rows.iter().map(|row| row.2[index]).collect::<Vec<_>>()
         };
         let far = series(&rows, 1);
+        assert_eq!(points[1], EMITTER_PROBE);
+        // The probe there shows its strongest line within a quarter of the
+        // window's main lobe of the cutoff, at 2.99 Hz.
+        let lines = Lines::read(&emitter(), ProbeId(1), &far, dt, EMITTER_HZ);
+        let (strongest, _) = lines.strongest(0.2, 5.0);
+        assert!((strongest - EMITTER_HZ).abs() < 1.0 / lines.span);
         let frequency = tone(&far, dt, 2.0, 4.0, window);
         assert!(
             (frequency / EMITTER_HZ - 1.0).abs() < 0.01,

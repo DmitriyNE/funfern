@@ -2,7 +2,8 @@
 
 **Date:** 25 September 2026, closed 27 September 2026
 
-**Status:** done. Every planned scene is built, 8b and 25b with them, each
+**Status:** batches A to E done; batch F, proposed on 30 September 2026, is
+under way (see its section). Every scene of A to E is built, 8b and 25b with them, each
 behind its measured claim and a device run, and the catalogue went from 12
 entries to 36. One scene is left, the plasmonic guide, which needs physics
 the solver does not have; it is under "Still open". The scene sections below
@@ -911,6 +912,66 @@ Claims at edge 0.08, 8 s from rest, the lines over the last 4 s:
 - The transmitted power and a third of the reflected make the incident
   power within 5% (0.988), while the two powers make over 1.5 of it
   (1.71): the grating's work.
+
+## Batch F: pulses, spectra and transfers
+
+Proposed on 30 September 2026, once signals took pulses and probes read
+spectra and transfers, and agreed with the user the same day. Where a scene
+is about lines, its probe opens on a spectrum; where it is about a frequency
+response, on a transfer; where it is about arrival or refocusing, on a pulse.
+
+Rules the transfer scenes keep, from measuring the readout on the user's
+scenes (`docs/engineering-log.md`, 30 September):
+
+- A source reference includes the source's own radiation, and a point source
+  in the plane radiates very differently across a band, so a transfer that
+  should read the medium divides one probe by another.
+- A probe in front of a sample hears the reflection too. The transmission
+  scenes are built with a *reference arm*: a reflecting wall along `y = 0`
+  splits the channel in two, which the channel's mirror symmetry allows, one
+  launcher feeds both arms, the sample sits in the upper one, and a probe
+  behind it is divided by a probe at the same place in the empty one: the
+  transmission itself, as a double-beam spectrometer reads it.
+- The readout's segments must outlast the delay between the two records and
+  any ringing many times over, or the average reads low. The claims are
+  measured on the whole pulse, unwindowed (`transfer_spectrum`).
+- A scene that is pumped or nonlinear has no transfer function; it reads
+  spectra.
+
+### F1. Scenes open on their spectra
+
+The scenes whose claims are lines open with the spectrum under the probe's
+trace: the Kerr slab (in decibels, to 10 Hz), the time crystal and the
+travelling modulation (in decibels, over 4 s, so lines a hertz apart stand
+clear), and the Doppler mirror's front probe (linear, to 5 Hz). The
+self-sustained emitter gains a probe in the plasma at the point its claim
+reads, and the Josephson line one down the line, both linear. Each claim test
+now also reads the spectrum the readout draws, over its own span, and finds
+the lines there (measured at the claims' own meshes):
+
+- Kerr slab: the third harmonic at 0.29 of the fundamental, 15 times the
+  level at 5 Hz.
+- Time crystal: the sidebands at 1.5, 3.5 and 5.5 Hz at 0.20, 0.88 and 0.20
+  of the carrier.
+- Travelling modulation: 3.5 Hz at 1.7 times the carrier, 5.5 Hz at 7.5.
+- Doppler mirror: 3 Hz at 1.04 of the carrier, 7 times any other line.
+- Self-sustained emitter: the strongest line at 2.99 Hz.
+- Josephson line: the strongest line at 0.46 Hz, against `V/2π` = 0.477, over
+  a 10 s span whose resolution is 0.1 Hz.
+
+### F2. Struck drum
+
+### F3. Photonic crystal, in a reference arm
+
+### F4. Etalon
+
+### F5. Cavity filter
+
+### F6. Plasma group delay
+
+### F7. Temporal slab
+
+### F8. Ellipse flash
 
 ## Order, as built
 
