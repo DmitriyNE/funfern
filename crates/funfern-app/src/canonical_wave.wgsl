@@ -1,5 +1,5 @@
 // Canonical direct-state f32 solver. Rust layout version 5.
-const LAYOUT_VERSION: u32 = 5u;
+const LAYOUT_VERSION: u32 = 6u;
 const STATE_WORD_STRIDE: u32 = 16u;
 const NODE_STRIDE: u32 = 96u;
 const SAMPLE_STRIDE: u32 = 112u;
@@ -294,6 +294,93 @@ fn set_candidate_auxiliary(index: u32, value: f32) {
 
 fn harmonic_value(signal: vec4<f32>, local_time: f32) -> f32 {
     return signal.x + signal.y * sin(signal.w + signal.z * local_time);
+}
+
+// A drive record holds, for each of the two runtime slots, the carrier, the
+// runtime word (kind, integrated-rate anchor, pulse shape, and in a patch
+// upload the low half of a pulse's start) and a pulse window.
+const DRIVE_WORDS: u32 = 6u;
+const DRIVE_SLOT_WORDS: u32 = 3u;
+const DRIVE_HARMONIC: u32 = 0u;
+const DRIVE_INTEGRATED: u32 = 1u;
+const DRIVE_PULSE: u32 = 2u;
+const PULSE_FLAT_TOP: u32 = 0u;
+const PULSE_GAUSSIAN: u32 = 1u;
+// A prescribed node's `boundary.z` is one bit for the pin, two for a pulse's
+// shape and, above them, one plus the index of its own pulse window.
+const PRESCRIBED_SHAPE_SHIFT: u32 = 1u;
+const PRESCRIBED_RECORD_SHIFT: u32 = 3u;
+const PI: f32 = 3.14159265;
+// e^-8: what a Gaussian envelope cut at four widths subtracts everywhere.
+const GAUSSIAN_FLOOR: f32 = 3.3546262e-4;
+
+// A pulse window is its start relative to the epoch origin, its repeat (zero
+// for once), its half duration and its shape's own parameter: the edge of a
+// flat top, the width of a Gaussian, the bandwidth of a sinc. This gives the
+// seconds from the centre of the pulse under way at `local_time`, which lie
+// in [-half, half) during a pulse and outside it between pulses.
+fn pulse_offset(window: vec4<f32>, local_time: f32) -> f32 {
+    var since = local_time - window.x;
+    if window.y > 0.0 && since >= 0.0 {
+        since -= window.y * floor(since / window.y);
+    }
+    return since - window.z;
+}
+
+// `funfern_core::PulseEnvelope::value_and_rate`, without the rate.
+fn pulse_envelope(shape: u32, window: vec4<f32>, offset: f32) -> f32 {
+    let half = window.z;
+    if abs(offset) >= half { return 0.0; }
+    if shape == PULSE_FLAT_TOP {
+        let inside = half - abs(offset);
+        if inside >= window.w { return 1.0; }
+        return 0.5 - 0.5 * cos(PI * inside / window.w);
+    }
+    if shape == PULSE_GAUSSIAN {
+        let ratio = offset / window.w;
+        return (exp(-0.5 * ratio * ratio) - GAUSSIAN_FLOOR) / (1.0 - GAUSSIAN_FLOOR);
+    }
+    let angle = 2.0 * PI * window.w * offset;
+    var sinc_value = 1.0 - angle * angle / 6.0;
+    if abs(angle) >= 1.0e-3 { sinc_value = sin(angle) / angle; }
+    return sinc_value * (0.5 + 0.5 * cos(PI * offset / half));
+}
+
+// A pulse's carrier counts from the centre of the pulse, not from the epoch.
+fn pulse_value(carrier: vec4<f32>, window: vec4<f32>, shape: u32, local_time: f32) -> f32 {
+    let offset = pulse_offset(window, local_time);
+    let envelope = pulse_envelope(shape, window, offset);
+    if envelope == 0.0 { return 0.0; }
+    return envelope * (carrier.x + carrier.y * sin(carrier.z * offset + carrier.w));
+}
+
+// A pulse's start once the epoch origin moves `elapsed` later, kept small: a
+// train's within one repeat before the origin, and a single pulse's, once it
+// is over, where it cannot come round again.
+fn pulse_start_after(window: vec4<f32>, elapsed: f32) -> f32 {
+    var start = window.x - elapsed;
+    if window.y > 0.0 {
+        if start < 0.0 { start -= window.y * ceil(start / window.y); }
+    } else {
+        start = max(start, -(2.0 * window.z + 1.0));
+    }
+    return start;
+}
+
+fn prescribed_pulse_word(node: u32) -> u32 {
+    return control.table_offsets.y + DRIVE_WORDS * control.counts_c.z
+        + (nodes[node].boundary.z >> PRESCRIBED_RECORD_SHIFT) - 1u;
+}
+
+// A pinned node's field at `local_time`.
+fn prescribed_value(node: u32, local_time: f32) -> f32 {
+    let flags = nodes[node].boundary.z;
+    if (flags >> PRESCRIBED_RECORD_SHIFT) == 0u {
+        return harmonic_value(nodes[node].prescribed, local_time);
+    }
+    let window = bitcast<vec4<f32>>(tables[prescribed_pulse_word(node)].data);
+    return pulse_value(
+        nodes[node].prescribed, window, (flags >> PRESCRIBED_SHAPE_SHIFT) & 3u, local_time);
 }
 
 fn sinc(value: f32) -> f32 {
@@ -840,13 +927,18 @@ fn packed_boundary_scalar(word_offset: u32, scalar_index: u32) -> f32 {
 }
 
 fn source_drive(drive: u32, local_time: f32) -> f32 {
-    let base = control.table_offsets.y + 4u * drive + 2u * (control.runtime_slots.x & 1u);
+    let base = control.table_offsets.y + DRIVE_WORDS * drive
+        + DRIVE_SLOT_WORDS * (control.runtime_slots.x & 1u);
     let signal = vec4<f32>(
         table_float(base, 0u), table_float(base, 1u),
         table_float(base, 2u), table_float(base, 3u));
-    let kind = tables[base + 1u].data.x;
-    if kind == 0u {
+    let runtime = tables[base + 1u].data;
+    if runtime.x == DRIVE_HARMONIC {
         return harmonic_value(signal, local_time);
+    }
+    if runtime.x == DRIVE_PULSE {
+        return pulse_value(
+            signal, bitcast<vec4<f32>>(tables[base + 2u].data), runtime.z, local_time);
     }
     let rate_anchor = table_float(base + 1u, 1u);
     let half_phase = 0.5 * signal.z * local_time;
@@ -1215,34 +1307,53 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     if (operation == 5u || operation == 6u) && i < control.counts_c.z {
         let source_slot = control.runtime_slots.x & 1u;
-        let accepted_base = control.table_offsets.y + 4u * i + 2u * source_slot;
-        let candidate_base = control.table_offsets.y + 4u * i
-            + 2u * (source_slot ^ 1u);
-        let upload_base = 1u + 4u * i;
+        let accepted_base = control.table_offsets.y + DRIVE_WORDS * i
+            + DRIVE_SLOT_WORDS * source_slot;
+        let candidate_base = control.table_offsets.y + DRIVE_WORDS * i
+            + DRIVE_SLOT_WORDS * (source_slot ^ 1u);
+        let upload_base = 1u + DRIVE_WORDS * i;
         var parameters = bitcast<vec4<f32>>(boundary[upload_base].data);
         var runtime = boundary[upload_base + 1u].data;
-        let old_parameters = vec4<f32>(
-            table_float(accepted_base, 0u), table_float(accepted_base, 1u),
-            table_float(accepted_base, 2u), table_float(accepted_base, 3u));
-        let current_phase = reduced_phase(
-            old_parameters.w + old_parameters.z * control.clock_f32.y);
-        parameters.w = reduced_phase(
-            current_phase - parameters.z * control.clock_f32.y);
-        if runtime.x != 0u {
-            let elapsed = control.clock_f32.y;
-            let half_phase = 0.5 * parameters.z * elapsed;
-            let new_integral = parameters.x * elapsed
-                + parameters.y * elapsed * sinc(half_phase)
-                    * sin(parameters.w + half_phase);
-            runtime.y = bitcast<u32>(
-                source_drive(i, control.clock_f32.y) - new_integral);
+        var window = bitcast<vec4<f32>>(boundary[upload_base + 2u].data);
+        // A patch rewrites a drive's numbers, never whether it is a pulse: the
+        // two carry different runtime, so that change takes a new generation.
+        if (runtime.x == DRIVE_PULSE) != (tables[accepted_base + 1u].data.x == DRIVE_PULSE) {
+            reject(STATUS_LAYOUT);
+        }
+        if runtime.x == DRIVE_PULSE {
+            // A pulse is a function of absolute time alone and takes effect as
+            // authored. The upload is relative to t = 0 with the start as a
+            // compensated pair, which moves here onto the running epoch.
+            let start = add_compensated(
+                window.x, bitcast<f32>(runtime.w), -control.clock_origin.x);
+            window.x = pulse_start_after(
+                vec4<f32>(start.x + (start.y - control.clock_origin.y), window.yzw), 0.0);
+            runtime.w = 0u;
+        } else {
+            let old_parameters = vec4<f32>(
+                table_float(accepted_base, 0u), table_float(accepted_base, 1u),
+                table_float(accepted_base, 2u), table_float(accepted_base, 3u));
+            let current_phase = reduced_phase(
+                old_parameters.w + old_parameters.z * control.clock_f32.y);
+            parameters.w = reduced_phase(
+                current_phase - parameters.z * control.clock_f32.y);
+            if runtime.x == DRIVE_INTEGRATED {
+                let elapsed = control.clock_f32.y;
+                let half_phase = 0.5 * parameters.z * elapsed;
+                let new_integral = parameters.x * elapsed
+                    + parameters.y * elapsed * sinc(half_phase)
+                        * sin(parameters.w + half_phase);
+                runtime.y = bitcast<u32>(
+                    source_drive(i, control.clock_f32.y) - new_integral);
+            }
         }
         tables[candidate_base].data = bitcast<vec4<u32>>(parameters);
         tables[candidate_base + 1u].data = runtime;
-        if !finite_vector(parameters) { reject(STATUS_NON_FINITE); }
+        tables[candidate_base + 2u].data = bitcast<vec4<u32>>(window);
+        if !finite_vector(parameters) || !finite_vector(window) { reject(STATUS_NON_FINITE); }
     }
     if operation == 6u && i < control.counts_a.x {
-        let drive_words = 4u * control.counts_c.z;
+        let drive_words = DRIVE_WORDS * control.counts_c.z;
         let start = nodes[i].ranges.z;
         let count = nodes[i].ranges.w;
         for (var slot = 0u; slot < count; slot += 1u) {
@@ -1364,11 +1475,13 @@ fn event_begin(@builtin(global_invocation_id) id: vec3<u32>) {
         && event_operation() != 5u
         && event_operation() != 6u {
         let source_slot = control.runtime_slots.x & 1u;
-        let accepted_base = control.table_offsets.y + 4u * i + 2u * source_slot;
-        let candidate_base = control.table_offsets.y + 4u * i
-            + 2u * (source_slot ^ 1u);
-        tables[candidate_base].data = tables[accepted_base].data;
-        tables[candidate_base + 1u].data = tables[accepted_base + 1u].data;
+        let accepted_base = control.table_offsets.y + DRIVE_WORDS * i
+            + DRIVE_SLOT_WORDS * source_slot;
+        let candidate_base = control.table_offsets.y + DRIVE_WORDS * i
+            + DRIVE_SLOT_WORDS * (source_slot ^ 1u);
+        for (var word = 0u; word < DRIVE_SLOT_WORDS; word += 1u) {
+            tables[candidate_base + word].data = tables[accepted_base + word].data;
+        }
     }
     inject_at(i);
 }
@@ -1823,11 +1936,11 @@ fn handoff_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
         if nodes[i].boundary.z != 0u {
             if nonlinear {
                 next = temporal_primary_flux_of_field(
-                    i, harmonic_value(nodes[i].prescribed, 0.0), 0.0);
+                    i, prescribed_value(i, 0.0), 0.0);
                 exchange = temporal_primary_energy(i, next, 0.0)
                     - temporal_primary_energy(i, before, 0.0);
             } else {
-                next = nodes[i].mass_loss.x * harmonic_value(nodes[i].prescribed, 0.0);
+                next = nodes[i].mass_loss.x * prescribed_value(i, 0.0);
                 exchange = 0.5 * (next * next - before * before) * nodes[i].mass_loss.y;
             }
             set_candidate_q(i, next);
@@ -1926,28 +2039,39 @@ fn rebase_clock_records(@builtin(global_invocation_id) id: vec3<u32>) {
     if stopped() { return; }
     let elapsed = control.clock_f32.y;
     if i < control.counts_a.x && nodes[i].boundary.z != 0u {
-        nodes[i].prescribed.w = reduced_phase(
-            nodes[i].prescribed.w + nodes[i].prescribed.z * elapsed);
+        if (nodes[i].boundary.z >> PRESCRIBED_RECORD_SHIFT) == 0u {
+            nodes[i].prescribed.w = reduced_phase(
+                nodes[i].prescribed.w + nodes[i].prescribed.z * elapsed);
+        } else {
+            // A pulse's carrier counts from its own centre; only its start
+            // moves with the origin.
+            let word = prescribed_pulse_word(i);
+            var window = bitcast<vec4<f32>>(tables[word].data);
+            window.x = pulse_start_after(window, elapsed);
+            tables[word].data = bitcast<vec4<u32>>(window);
+        }
     }
     if i < control.counts_c.z {
-        let root = control.table_offsets.y + 4u * i;
-        let base = root + 2u * (control.runtime_slots.x & 1u);
-        let kind = tables[base + 1u].data.x;
-        var next_anchor = 0.0;
-        if kind != 0u {
-            next_anchor = source_drive(i, elapsed);
+        let root = control.table_offsets.y + DRIVE_WORDS * i;
+        let base = root + DRIVE_SLOT_WORDS * (control.runtime_slots.x & 1u);
+        var parameters = tables[base].data;
+        var runtime = tables[base + 1u].data;
+        var window = tables[base + 2u].data;
+        if runtime.x == DRIVE_PULSE {
+            window.x = bitcast<u32>(
+                pulse_start_after(bitcast<vec4<f32>>(window), elapsed));
+        } else {
+            if runtime.x == DRIVE_INTEGRATED {
+                runtime.y = bitcast<u32>(source_drive(i, elapsed));
+            }
+            parameters.w = bitcast<u32>(reduced_phase(
+                table_float(base, 3u) + table_float(base, 2u) * elapsed));
         }
-        let phase = reduced_phase(
-            table_float(base, 3u) + table_float(base, 2u) * elapsed);
-        tables[root].data = tables[base].data;
-        tables[root + 2u].data = tables[base].data;
-        tables[root].data.w = bitcast<u32>(phase);
-        tables[root + 2u].data.w = bitcast<u32>(phase);
-        if kind != 0u {
-            tables[root + 1u].data = tables[base + 1u].data;
-            tables[root + 3u].data = tables[base + 1u].data;
-            tables[root + 1u].data.y = bitcast<u32>(next_anchor);
-            tables[root + 3u].data.y = bitcast<u32>(next_anchor);
+        for (var slot = 0u; slot < 2u; slot += 1u) {
+            let slot_base = root + DRIVE_SLOT_WORDS * slot;
+            tables[slot_base].data = parameters;
+            tables[slot_base + 1u].data = runtime;
+            tables[slot_base + 2u].data = window;
         }
     }
     if temporal_enabled() {
@@ -2013,7 +2137,7 @@ fn start_loss(@builtin(global_invocation_id) id: vec3<u32>) {
         // at the authored mass would disagree with it at every pinned node.
         if nodes[i].boundary.z != 0u && !temporal_enabled() {
             owned = nodes[i].mass_loss.x
-                * harmonic_value(nodes[i].prescribed, control.clock_f32.y);
+                * prescribed_value(i, control.clock_f32.y);
             exchange = 0.5 * (owned * owned - old * old) * nodes[i].mass_loss.y;
         }
         var next = owned - owned * node_loss_fraction(i, false);
@@ -2092,14 +2216,14 @@ fn kick_node(node: u32, second: bool) {
     let ratio = 0.5 * duration * damping * inverse_mass;
     var next = ((1.0 - ratio) * old + duration * net) / (1.0 + ratio);
     if nodes[node].boundary.z != 0u {
-        next = mass * harmonic_value(nodes[node].prescribed, target_time);
+        next = mass * prescribed_value(node, target_time);
     }
     var midpoint = 0.5 * (old + next) * inverse_mass;
     // A driven pin's field at its stage is its signal, so its work into the
     // bulk is the trapezoid of `g·F` the midpoint drift exchanges. The flux
     // jump's quotient would mix in the other endpoint's mass.
     if temporal_enabled() && nodes[node].boundary.z != 0u {
-        midpoint = harmonic_value(nodes[node].prescribed, target_time);
+        midpoint = prescribed_value(node, target_time);
     }
     let source_work = duration * midpoint * source;
     let force_work = duration * midpoint * held_force;
@@ -2139,7 +2263,7 @@ fn kick_nonlinear_node(
     var next = old + duration * net;
     var field: f32;
     if pinned {
-        field = harmonic_value(nodes[node].prescribed, target_time);
+        field = prescribed_value(node, target_time);
         next = temporal_primary_flux_of_field(node, field, target_time);
     } else if damping != 0.0 {
         // An absorbing wall makes the kick implicit in the discrete gradient:
@@ -2248,7 +2372,7 @@ fn trace_inverse_mass(trace_word: vec4<u32>, instant: f32) -> f32 {
 // signal on the fixed path, and on a driven or nonlinear generation the flux
 // the map in force at the stage gives the signal, as the local kick pins.
 fn pinned_trace_flux(node: u32, instant: f32) -> f32 {
-    let field = harmonic_value(nodes[node].prescribed, instant);
+    let field = prescribed_value(node, instant);
     if temporal_enabled() {
         return temporal_primary_flux_of_field(node, field, instant);
     }
@@ -2755,7 +2879,7 @@ fn boundary_finalize_second(
 // dividing the endpoint flux by the midpoint mass would be first order.
 fn temporal_drift_field(node: u32, middle_time: f32) -> f32 {
     if nodes[node].boundary.z != 0u {
-        return harmonic_value(nodes[node].prescribed, middle_time);
+        return prescribed_value(node, middle_time);
     }
     if field_laws() {
         return scratch[node_field_offset() + node].values.x;
@@ -2893,7 +3017,7 @@ fn finish_loss_validate(@builtin(global_invocation_id) id: vec3<u32>) {
             - stage_primary_energy(i, next, stage_time);
         if nodes[i].boundary.z != 0u && !temporal_enabled() {
             let owned = nodes[i].mass_loss.x
-                * harmonic_value(nodes[i].prescribed, control.clock_f32.y + control.clock_f32.x);
+                * prescribed_value(i, control.clock_f32.y + control.clock_f32.x);
             scratch[i].values.y += 0.5 * (owned * owned - next * next) * nodes[i].mass_loss.y;
             next = owned;
         }

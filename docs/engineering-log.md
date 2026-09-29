@@ -16566,3 +16566,66 @@ device, the editor, the FFT with its shape window, and probe spectra follow.
   readouts.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — Pulsed signals on the device
+
+The second of five commits: the device runs what the CPU reference ran in
+the first.
+
+- **Drive records** are six words, not four. Each of the two runtime slots
+  holds the carrier, the runtime word and a pulse window: the start relative
+  to the epoch origin, the repeat, the half duration, and the edge, width or
+  bandwidth. The runtime word adds a pulse kind beside the harmonic and the
+  integrated one, and the envelope's shape. `source_drive` evaluates a pulse
+  as the core does, with its carrier counted from the pulse's centre.
+- **Pins.** A pulsed Dirichlet node's `boundary.z` holds its shape and one
+  plus the index of its own window, which follows the drive records; one
+  `prescribed_value` replaces the nine places that read the harmonic. The
+  node struct does not grow. Its doc said `boundary.w` was reserved, which it
+  has not been since Gate O marked active nodes there; corrected.
+- **Starts.** The host packs a start against the epoch origin in f64, a
+  train's reduced to within one repeat before it and a finished pulse's to
+  where it cannot recur. The clock rebase and the handoff move the start by
+  the epoch and leave the carrier's phase alone, where a harmonic's phase
+  moves on. A live source patch's records are relative to t = 0, so the
+  start comes as a compensated pair, the low half in the runtime word, and
+  the device moves it onto its running epoch. A patched train at a late time
+  can be one f32 unit of that time off, once; the next handoff repacks it
+  from f64.
+- **Kinds.** A patch rewrites a drive's numbers but cannot turn a harmonic
+  into a pulse or back, since the two keep different runtime. The app's
+  classifier sends that edit through a handoff, which starts a harmonic that
+  follows a pulse as a new source would start, and the device rejects such a
+  patch should one arrive.
+- **Layout** version 6. The upload-size check still counted four words per
+  drive and refused the first live patch; fixed.
+- **Tests.**
+  - The host packs each shape's parameters, reduces a long-running train's
+    start to -0.5 s modulo 0.7 s, rests a finished pulse at -(D + 1), leaves
+    a pulse's carrier unanchored, and splits a patch's start into halves that
+    sum to it within 1e-9. A pin's flags point at its window.
+  - The classifier sends harmonic to pulse through a handoff, and a pulse
+    edit through a patch.
+- **Device.**
+  - `canonical_gpu_pulse` (new) runs four pulsed sources (flat top, Gaussian
+    flash, sinc, and a Hann train that began 5.3 s before the run) and a
+    pulsed pin from epoch origin 37.25. Partway through, a live patch edits
+    every pulse. Against the CPU reference: Q 5.5e-6, b 4.0e-6 after 1,732
+    steps. With `--long` it runs 68,536 steps, past the rebase at 2^16, to
+    Q 3.8e-5 and b 4.7e-5. An unedited run stands 0.78 from the reference.
+  - `canonical_gpu_handoff --pulse`: with `--source` and `--prescribed` the
+    burst and the flash are under way at the handoff. Q 2.2e-7 and b 1.3e-6
+    across meshes, on the same mesh, and stepping during the upload; without
+    `--pulse` the harmonic runs read as before.
+  - Each place that moves a start was broken on purpose once and failed: no
+    rebase shift gave Q 1.56, no handoff shift on the pin b 2e-3, and none on
+    the source Q 2.9e-4. That last took a source a hundred times stronger in
+    `--pulse` mode; at the harmonic's strength the miss read 3e-6, under the
+    bound. No start conversion in the patch gave Q 0.75.
+  - All 21 canonical device examples exit 0.
+- **Speed.** `canonical_gpu_timing --forcing --edge=0.04 --steps=6000`, with
+  a harmonic source and pin: 0.392 to 0.398 ms a step after, 0.394 to 0.396
+  before. The errors are bit for bit the same. The spread follows the order
+  of the runs, not the build.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

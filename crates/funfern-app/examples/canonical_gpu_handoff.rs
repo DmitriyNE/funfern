@@ -1,4 +1,8 @@
 //! Full render-graph validation of Stage 5 latest-state generation handoff.
+//!
+//! `--pulse` makes the `--source` drive a Hann burst and the `--prescribed`
+//! pin a Gaussian flash, both under way at the handoff, whose starts the
+//! device moves onto the new epoch while their carriers stay put.
 
 use std::{
     sync::Arc,
@@ -17,8 +21,8 @@ use funfern_core::{
     CanonicalPrimaryTransferMap, CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferJob,
     CanonicalWaveOperator, CanonicalWaveState, InternalBoundary, InternalBoundaryCoupling,
     InternalBoundaryId, InternalBoundaryLaw, MeshingOptions, OpenCubicSpline,
-    OuterBoundaryCondition, Point2, QuadraticTransferMap, QuadraticWaveOperator, Scene, TimeSignal,
-    mesh_scene,
+    OuterBoundaryCondition, Point2, PulseEnvelope, QuadraticTransferMap, QuadraticWaveOperator,
+    Scene, TimeSignal, mesh_scene,
 };
 
 const WARMUP_STEPS: u64 = 12;
@@ -93,6 +97,7 @@ fn main() -> AppExit {
         .find_map(|argument| argument.strip_prefix("--steps=")?.parse::<u64>().ok())
         .unwrap_or(MEASURED_STEPS);
     let prescribed = std::env::args().any(|argument| argument == "--prescribed");
+    let pulse = std::env::args().any(|argument| argument == "--pulse");
     let standard = std::env::args().any(|argument| argument == "--standard");
     let requested_edge =
         std::env::args().find_map(|argument| argument.strip_prefix("--edge=")?.parse::<f64>().ok());
@@ -192,7 +197,20 @@ fn main() -> AppExit {
         &potential,
     )
     .expect("source initial state");
-    let prescribed_signal = TimeSignal::harmonic(0.04, 0.03, 0.8, 0.25);
+    let source_steps = WARMUP_STEPS + handoff_steps;
+    let handoff_time = source_steps as f64 * time_step;
+    let prescribed_signal = if pulse {
+        TimeSignal::pulsed(
+            [0.04, 0.03, 0.8, 0.25],
+            PulseEnvelope::Gaussian {
+                width: 0.25 * handoff_time,
+            },
+            0.0,
+            0.0,
+        )
+    } else {
+        TimeSignal::harmonic(0.04, 0.03, 0.8, 0.25)
+    };
     let mut source_prescribed = vec![None; source_operator.degrees_of_freedom()];
     let mut target_prescribed = vec![None; target_operator.degrees_of_freedom()];
     if prescribed {
@@ -203,7 +221,21 @@ fn main() -> AppExit {
         .expect("source forcing");
     let mut target_forcing = CanonicalForcing::from_prescribed(&target_operator, target_prescribed)
         .expect("target forcing");
-    let source_signal = TimeSignal::harmonic(0.012, 0.035, 1.1, -0.37);
+    // A hundred times the harmonic's carrier, so that the burst's timing,
+    // not the initial state, is what the handoff has to get right.
+    let source_signal = if pulse {
+        TimeSignal::pulsed(
+            [1.2, 3.5, 1.1, -0.37],
+            PulseEnvelope::FlatTop {
+                duration: 2.5 * handoff_time,
+                edge: 1.25 * handoff_time,
+            },
+            0.2 * handoff_time,
+            0.0,
+        )
+    } else {
+        TimeSignal::harmonic(0.012, 0.035, 1.1, -0.37)
+    };
     let target_source_weights = target_operator
         .primary_mass()
         .iter()
@@ -358,7 +390,6 @@ fn main() -> AppExit {
             .step_with_forcing(&source_operator, &source_forcing)
             .expect("source oracle step during target upload");
     }
-    let source_steps = WARMUP_STEPS + handoff_steps;
     let desired_totals = (0..target_operator.component_count())
         .map(|component| {
             (component < source_operator.component_count()).then(|| {
@@ -403,34 +434,39 @@ fn main() -> AppExit {
             .set_outgoing_physical_memory(&target_operator, memory)
             .expect("target outgoing history");
     }
+    // The target oracle's clock starts at zero at the handoff: a harmonic's
+    // phase moves on by the time that took, and a pulse's start moves back.
+    let shifted = |signal: TimeSignal| match signal {
+        TimeSignal::Pulsed {
+            envelope,
+            start,
+            repeat,
+            ..
+        } => TimeSignal::pulsed(signal.carrier(), envelope, start - handoff_time, repeat),
+        TimeSignal::Harmonic { .. } => {
+            let [offset, amplitude, frequency, phase] = signal.carrier();
+            TimeSignal::harmonic(
+                offset,
+                amplitude,
+                frequency,
+                phase + std::f64::consts::TAU * frequency * handoff_time,
+            )
+        }
+    };
     let mut target_oracle_forcing = if prescribed {
-        let [offset, amplitude, frequency, phase] = prescribed_signal.carrier();
-        let shifted = TimeSignal::harmonic(
-            offset,
-            amplitude,
-            frequency,
-            phase + std::f64::consts::TAU * frequency * source_steps as f64 * time_step,
-        );
         let mut signals = vec![None; target_operator.degrees_of_freedom()];
-        signals[0] = Some(shifted);
+        signals[0] = Some(shifted(prescribed_signal));
         CanonicalForcing::from_prescribed(&target_operator, signals).expect("target oracle forcing")
     } else {
         CanonicalForcing::none(&target_operator)
     };
     if source_drive {
-        let [offset, amplitude, frequency, phase] = source_signal.carrier();
-        let shifted = TimeSignal::harmonic(
-            offset,
-            amplitude,
-            frequency,
-            phase + std::f64::consts::TAU * frequency * source_steps as f64 * time_step,
-        );
         target_oracle_forcing
             .push_source(
                 funfern_core::CanonicalSource::direct(
                     &target_operator,
                     target_source_weights,
-                    shifted,
+                    shifted(source_signal),
                 )
                 .expect("shifted target drive"),
             )

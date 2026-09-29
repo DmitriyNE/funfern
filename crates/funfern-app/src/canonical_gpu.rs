@@ -40,8 +40,8 @@ use funfern_core::{
     CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWaveOperator,
     CanonicalWaveState, CoefficientLawValues, FieldLawValues, GRID_SCALE_FILTER_CADENCE,
     GRID_SCALE_FILTER_LIMIT, LinearPrimaryContribution, MaterialId, MaterialSwitchRuntime, Point2,
-    QuadraticWaveOperator, RateLawValues, RestoringLawValues, TimeDriveRuntime, TimeDriveValues,
-    TimeSignal, WaveError,
+    PulseEnvelope, QuadraticWaveOperator, RateLawValues, RestoringLawValues, TimeDriveRuntime,
+    TimeDriveValues, TimeSignal, WaveError,
 };
 
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
@@ -70,7 +70,7 @@ macro_rules! add_shader_buffer {
     }};
 }
 
-pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 5;
+pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 6;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
 pub const CANONICAL_GPU_WORKGROUP_SIZE: u32 = 128;
 /// The most workgroups one dispatch launches along a dimension, WebGPU's
@@ -99,6 +99,21 @@ const TRANSFER_HEADER_WORDS: usize = 10;
 const HANDOFF_RECEIPT_MAGIC: u32 = 0x4841_4e44;
 const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
 const DRIVE_INDEX_MASK: u32 = !DRIVE_TARGET_PARAMETERS;
+/// A drive record: carrier, runtime and pulse window for each of the two
+/// runtime slots. The runtime word is the kind, the integrated-rate anchor,
+/// the pulse shape and, in a patch upload, the low half of a pulse's start.
+const DRIVE_WORDS: usize = 6;
+const DRIVE_HARMONIC: u32 = 0;
+const DRIVE_INTEGRATED: u32 = 1;
+const DRIVE_PULSE: u32 = 2;
+const PULSE_FLAT_TOP: u32 = 0;
+const PULSE_GAUSSIAN: u32 = 1;
+const PULSE_SINC: u32 = 2;
+/// A prescribed node's `boundary.z`: the pin bit, two bits of pulse shape,
+/// and above them one plus the index of the node's own pulse window, which
+/// follow the drive records.
+const PRESCRIBED_SHAPE_SHIFT: u32 = 1;
+const PRESCRIBED_RECORD_SHIFT: u32 = 3;
 const TEMPORAL_TABLE_VERSION: u32 = 1;
 const TEMPORAL_ENABLED: u32 = 1;
 const TEMPORAL_COEFFICIENT_WORDS: usize = 4;
@@ -277,9 +292,13 @@ pub(crate) struct GpuCanonicalNode {
     pub mass_loss: Vec4,
     /// Absolute packed-table starts/counts for force and source contributions.
     pub ranges: UVec4,
-    /// trace position, component, prescribed flag, reserved.
+    /// Trace position, component, the pin's flags (`PRESCRIBED_SHAPE_SHIFT`,
+    /// `PRESCRIBED_RECORD_SHIFT`), and whether van der Pol makes the node
+    /// active.
     pub boundary: UVec4,
-    /// Prescribed harmonic offset, amplitude, angular frequency and epoch phase.
+    /// A pin's carrier: offset, amplitude, angular frequency and phase, the
+    /// phase anchored at the epoch origin for a harmonic and at the centre of
+    /// the pulse for a pulse.
     pub prescribed: Vec4,
     /// First-order damping, geometric support and the grid filter's reach
     /// `1/Λ̃`; the last lane is reserved.
@@ -1605,6 +1624,29 @@ impl CanonicalGpuPlan {
         for source in forcing.sources() {
             tables.extend(gpu_drive(source.drive(), clock)?);
         }
+        // Each pulsed pin owns its window, directly after the drive records,
+        // so the rebase that moves its start touches it once.
+        let mut prescribed_flags = Vec::with_capacity(node_count);
+        let mut prescribed_windows = 0_u32;
+        for signal in forcing.prescribed() {
+            let Some(signal) = signal else {
+                prescribed_flags.push(0);
+                continue;
+            };
+            let Some(pulse) = gpu_pulse_window(*signal, clock.epoch_origin_seconds)? else {
+                prescribed_flags.push(1);
+                continue;
+            };
+            prescribed_windows += 1;
+            if prescribed_windows >= 1 << (32 - PRESCRIBED_RECORD_SHIFT) {
+                return Err(CanonicalGpuBuildError::Unrepresentable("pulsed pin count"));
+            }
+            tables.push(float_word(pulse.window));
+            prescribed_flags.push(
+                1 | (pulse.shape << PRESCRIBED_SHAPE_SHIFT)
+                    | (prescribed_windows << PRESCRIBED_RECORD_SHIFT),
+            );
+        }
         let gap_offset = tables.len();
         for (gap_index, gap) in operator.thin_gap_samples().iter().enumerate() {
             tables.push(GpuCanonicalTableWord {
@@ -1732,7 +1774,7 @@ impl CanonicalGpuPlan {
                 boundary: UVec4::new(
                     trace_positions[node],
                     operator.component_labels()[node],
-                    u32::from(prescribed.is_some()),
+                    prescribed_flags[node],
                     0,
                 ),
                 prescribed: prescribed
@@ -3154,11 +3196,6 @@ fn gpu_signal(
     signal: TimeSignal,
     clock: CanonicalGpuClock,
 ) -> Result<Vec4, CanonicalGpuBuildError> {
-    if signal.is_pulsed() {
-        return Err(CanonicalGpuBuildError::Core(WaveError::Unsupported(
-            "pulsed signals do not run on the device yet",
-        )));
-    }
     let [offset, amplitude, frequency, phase] = signal.carrier();
     let omega = std::f64::consts::TAU * frequency;
     let omega_f32 = finite_f32(omega, "signal angular frequency")?;
@@ -3167,42 +3204,103 @@ fn gpu_signal(
             "signal angular frequency",
         ));
     }
+    // A harmonic's phase is anchored at the epoch origin; a pulse's carrier
+    // counts from the pulse's own centre.
+    let anchor = if signal.is_pulsed() {
+        0.0
+    } else {
+        omega * clock.epoch_origin_seconds
+    };
     Ok(Vec4::new(
         finite_f32(offset, "signal offset")?,
         finite_f32(amplitude, "signal amplitude")?,
         omega_f32,
-        finite_f32(
-            reduced_phase(phase + omega * clock.epoch_origin_seconds),
-            "signal phase anchor",
-        )?,
+        finite_f32(reduced_phase(phase + anchor), "signal phase anchor")?,
     ))
+}
+
+/// A pulse's window as the device reads it: its start relative to the epoch
+/// origin, its repeat, its half duration and its shape's own parameter.
+struct GpuPulseWindow {
+    window: Vec4,
+    shape: u32,
+    /// What the f32 start leaves of the f64 one, which only a patch upload,
+    /// relative to t = 0, needs.
+    start_low: f32,
+}
+
+/// The start is kept small as the shader keeps it: a train's within one
+/// repeat before the origin, and a single pulse's, once it is over, where it
+/// cannot come round again.
+fn gpu_pulse_window(
+    signal: TimeSignal,
+    epoch_origin_seconds: f64,
+) -> Result<Option<GpuPulseWindow>, CanonicalGpuBuildError> {
+    let TimeSignal::Pulsed {
+        envelope,
+        start,
+        repeat,
+        ..
+    } = signal
+    else {
+        return Ok(None);
+    };
+    let (shape, parameter) = match envelope {
+        PulseEnvelope::FlatTop { edge, .. } => (PULSE_FLAT_TOP, edge),
+        PulseEnvelope::Gaussian { width } => (PULSE_GAUSSIAN, width),
+        PulseEnvelope::Sinc { bandwidth_hz, .. } => (PULSE_SINC, bandwidth_hz),
+    };
+    let duration = envelope.duration();
+    let mut relative = start - epoch_origin_seconds;
+    if repeat > 0.0 {
+        if relative < 0.0 {
+            relative -= repeat * (relative / repeat).ceil();
+        }
+    } else {
+        relative = relative.max(-(duration + 1.0));
+    }
+    let high = finite_f32(relative, "pulse start")?;
+    let window = Vec4::new(
+        high,
+        finite_f32(repeat, "pulse repeat")?,
+        finite_f32(0.5 * duration, "pulse duration")?,
+        finite_f32(parameter, "pulse envelope")?,
+    );
+    if !(window.z > 0.0 && window.w > 0.0) {
+        return Err(CanonicalGpuBuildError::Unrepresentable("pulse envelope"));
+    }
+    Ok(Some(GpuPulseWindow {
+        window,
+        shape,
+        start_low: finite_f32(relative - f64::from(high), "pulse start residual")?,
+    }))
 }
 
 fn gpu_drive(
     drive: CanonicalRateDrive,
     clock: CanonicalGpuClock,
-) -> Result<[GpuCanonicalTableWord; 4], CanonicalGpuBuildError> {
+) -> Result<[GpuCanonicalTableWord; DRIVE_WORDS], CanonicalGpuBuildError> {
     let (signal, kind, rate_anchor) = match drive {
-        CanonicalRateDrive::Direct(signal) => (signal, 0_u32, 0.0),
-        CanonicalRateDrive::LegacyIntegratedHarmonic { acceleration, .. } => {
-            (acceleration, 1, drive.value(clock.epoch_origin_seconds)?)
-        }
+        CanonicalRateDrive::Direct(signal) if signal.is_pulsed() => (signal, DRIVE_PULSE, 0.0),
+        CanonicalRateDrive::Direct(signal) => (signal, DRIVE_HARMONIC, 0.0),
+        CanonicalRateDrive::LegacyIntegratedHarmonic { acceleration, .. } => (
+            acceleration,
+            DRIVE_INTEGRATED,
+            drive.value(clock.epoch_origin_seconds)?,
+        ),
     };
-    let parameters = gpu_signal(signal, clock)?;
+    let parameters = float_word(gpu_signal(signal, clock)?);
+    let pulse = gpu_pulse_window(signal, clock.epoch_origin_seconds)?;
     let runtime = GpuCanonicalTableWord {
         data: UVec4::new(
             kind,
             finite_f32(rate_anchor, "source rate anchor")?.to_bits(),
-            0,
-            0,
+            pulse.as_ref().map_or(0, |pulse| pulse.shape),
+            pulse.as_ref().map_or(0, |pulse| pulse.start_low.to_bits()),
         ),
     };
-    Ok([
-        float_word(parameters),
-        runtime,
-        float_word(parameters),
-        runtime,
-    ])
+    let window = float_word(pulse.map_or(Vec4::ZERO, |pulse| pulse.window));
+    Ok([parameters, runtime, window, parameters, runtime, window])
 }
 
 /// The drive kind a coefficient record carries in its metadata word.
@@ -4308,10 +4406,14 @@ impl CanonicalGpuRequest {
                 event.upload.len()
                     == handles.node_count as usize + handles.sample_count as usize + 1
             }
-            EVENT_SOURCE_PATCH => event.upload.len() == handles.drive_count as usize * 4 + 1,
+            EVENT_SOURCE_PATCH => {
+                event.upload.len() == handles.drive_count as usize * DRIVE_WORDS + 1
+            }
             EVENT_SOURCE_WEIGHT_PATCH => {
                 event.upload.len()
-                    == handles.drive_count as usize * 4 + handles.source_count as usize + 1
+                    == handles.drive_count as usize * DRIVE_WORDS
+                        + handles.source_count as usize
+                        + 1
                     && event.upload[0].data.w == handles.source_count
             }
             EVENT_TEMPORAL_SWITCH => {
@@ -7269,6 +7371,148 @@ mod tests {
         plan_with_trace_lane(boundary, true)
     }
 
+    /// A pulse packs its start against the epoch origin, kept small as the
+    /// shader keeps it, and its carrier unanchored, since that counts from the
+    /// pulse's centre. A pulsed pin owns a window right after the drives.
+    #[test]
+    fn a_pulse_packs_its_start_against_the_epoch_and_its_pin_a_window() {
+        let flat = PulseEnvelope::FlatTop {
+            duration: 0.6,
+            edge: 0.2,
+        };
+        let carrier = [0.0, 1.0, 2.0, 0.5];
+        let origin = 40.0;
+        let window = |signal| gpu_pulse_window(signal, origin).unwrap().unwrap();
+        let ahead = window(TimeSignal::pulsed(carrier, flat, 41.25, 0.0));
+        assert_eq!(ahead.window, Vec4::new(1.25, 0.0, 0.3, 0.2));
+        assert_eq!(ahead.shape, PULSE_FLAT_TOP);
+        // A train that started long ago is carried within one repeat before
+        // the origin: -36.9 s is -0.5 s modulo 0.7 s.
+        let train = window(TimeSignal::pulsed(carrier, flat, 3.1, 0.7));
+        assert!((f64::from(train.window.x) + 0.5).abs() < 1.0e-6);
+        // A single pulse long over rests where it cannot come round again.
+        let over = window(TimeSignal::pulsed(carrier, flat, 2.0, 0.0));
+        assert_eq!(over.window.x, -1.6);
+        let gaussian = window(TimeSignal::pulsed(
+            carrier,
+            PulseEnvelope::Gaussian { width: 0.05 },
+            origin,
+            0.0,
+        ));
+        assert_eq!(
+            (gaussian.window.z, gaussian.window.w, gaussian.shape),
+            (0.2, 0.05, PULSE_GAUSSIAN)
+        );
+        let sinc = window(TimeSignal::pulsed(
+            carrier,
+            PulseEnvelope::Sinc {
+                bandwidth_hz: 2.0,
+                lobes: 3,
+            },
+            origin,
+            0.0,
+        ));
+        assert_eq!(
+            (sinc.window.z, sinc.window.w, sinc.shape),
+            (0.75, 2.0, PULSE_SINC)
+        );
+        assert!(
+            gpu_pulse_window(TimeSignal::harmonic(0.0, 1.0, 2.0, 0.5), origin)
+                .unwrap()
+                .is_none()
+        );
+
+        let clock = CanonicalGpuClock {
+            epoch: 1,
+            epoch_origin_seconds: origin,
+            step_in_epoch: 0,
+            time_step: 1.0e-3,
+        };
+        let pulse = TimeSignal::pulsed(carrier, flat, 41.25, 0.0);
+        let words = gpu_drive(CanonicalRateDrive::Direct(pulse), clock).unwrap();
+        assert_eq!(
+            (words[1].data.x, words[1].data.z),
+            (DRIVE_PULSE, PULSE_FLAT_TOP)
+        );
+        assert_eq!(words[2].data, float_word(ahead.window).data);
+        assert!(words[..3] == words[3..]);
+        // The carrier is not anchored at the origin, as a harmonic's is.
+        assert_eq!(f32::from_bits(words[0].data.w), 0.5);
+        let harmonic = gpu_drive(
+            CanonicalRateDrive::Direct(TimeSignal::harmonic(0.0, 1.0, 2.37, 0.5)),
+            clock,
+        )
+        .unwrap();
+        assert_eq!(harmonic[1].data.x, DRIVE_HARMONIC);
+        assert_ne!(f32::from_bits(harmonic[0].data.w), 0.5);
+        assert_eq!(harmonic[2].data, UVec4::ZERO);
+        // A patch's records are relative to t = 0, the start's low half in
+        // the runtime word.
+        let patch = gpu_drive(
+            CanonicalRateDrive::Direct(TimeSignal::pulsed(carrier, flat, 1234.567, 0.0)),
+            CanonicalGpuClock::initial(1.0e-3).unwrap(),
+        )
+        .unwrap();
+        let (high, low) = (
+            f32::from_bits(patch[2].data.x),
+            f32::from_bits(patch[1].data.w),
+        );
+        assert!(low != 0.0 && (f64::from(high) + f64::from(low) - 1234.567).abs() < 1.0e-9);
+
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.24,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 7).unwrap();
+        let pin = TimeSignal::pulsed(
+            [0.1, 0.0, 1.0, 0.0],
+            PulseEnvelope::Gaussian { width: 0.05 },
+            41.0,
+            0.0,
+        );
+        let mut prescribed = vec![None; operator.degrees_of_freedom()];
+        prescribed[0] = Some(pin);
+        prescribed[1] = Some(TimeSignal::ZERO);
+        let mut forcing = CanonicalForcing::from_prescribed(&operator, prescribed).unwrap();
+        forcing
+            .push_source(
+                CanonicalSource::direct(&operator, operator.primary_mass().to_vec(), pulse)
+                    .unwrap(),
+            )
+            .unwrap();
+        let clock = CanonicalGpuClock {
+            time_step: 0.8 * operator.maximum_time_step(),
+            ..clock
+        };
+        let state = CanonicalWaveState::zero(&operator, clock.time_step).unwrap();
+        let plan = CanonicalGpuPlan::compile(&operator, &state, &forcing, clock).unwrap();
+        let flags = plan.nodes[0].boundary.z;
+        assert_eq!(flags & 1, 1);
+        assert_eq!((flags >> PRESCRIBED_SHAPE_SHIFT) & 3, PULSE_GAUSSIAN);
+        assert_eq!(flags >> PRESCRIBED_RECORD_SHIFT, 1);
+        assert_eq!(plan.nodes[1].boundary.z, 1);
+        assert_eq!(plan.nodes[2].boundary.z, 0);
+        let word =
+            plan.control.table_offsets.y as usize + DRIVE_WORDS * plan.control.counts_c.z as usize;
+        assert_eq!(
+            plan.tables[word].data,
+            float_word(gpu_pulse_window(pin, origin).unwrap().unwrap().window).data
+        );
+        assert_eq!(plan.control.table_offsets.x as usize, word + 1);
+    }
+
     /// `inverted` builds the state a fixed generation packs; without it, the
     /// state a driven one packs, whose trace the device sweeps.
     fn plan_with_trace_lane(boundary: OuterBoundaryCondition, inverted: bool) -> CanonicalGpuPlan {
@@ -7420,7 +7664,7 @@ mod tests {
     fn rust_and_wgsl_layout_manifests_match_exactly() {
         let shader = include_str!("canonical_wave.wgsl");
         for declaration in [
-            "const LAYOUT_VERSION: u32 = 5u;",
+            "const LAYOUT_VERSION: u32 = 6u;",
             "const STATE_WORD_STRIDE: u32 = 16u;",
             "const NODE_STRIDE: u32 = 96u;",
             "const SAMPLE_STRIDE: u32 = 112u;",
@@ -8303,7 +8547,7 @@ mod tests {
         let drive_offset = transfer.words[4].data.w as usize;
         assert_eq!(transfer.words[drive_offset].data.x, DRIVE_TARGET_PARAMETERS);
         let shader = include_str!("canonical_transfer_runtime.wgsl");
-        assert!(shader.contains("replace_drive(old_base + slot, new_base"));
+        assert!(shader.contains("replace_drive(old_base, new_base, old_control.clock_f32.y);"));
         assert!(shader.contains("runtime.y = bitcast<u32>(old_drive(old_base, old_elapsed));"));
         assert!(shader.contains("start_drive(new_base, preparation_delta);"));
     }

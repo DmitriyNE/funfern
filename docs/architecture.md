@@ -455,6 +455,15 @@ envelope, has none. A pulse is a function of absolute simulated time alone, so i
 carries no running state across a handoff, a train repeats exactly, and Reset
 fires it again.
 
+On the device a pulse's start is held relative to the epoch origin, a train's
+within one repeat before it, and it moves at each clock rebase and handoff while
+the carrier, counted from the pulse's centre, stays put. A pinned node keeps its
+own window after the drive records, found through its flags. A live source
+patch's records are relative to t = 0, so a pulse's start comes up as a
+compensated pair that the device moves onto its running epoch. A patch rewrites
+a drive's numbers but never turns a harmonic into a pulse or back; that edit
+takes a handoff, which starts the new drive as a new source would start.
+
 Both the scalar field and the vector overlay are drawn against a scale measured
 from the field rather than a fixed gain. The shipped examples span a hundredfold
 in amplitude, which is wider than the intensity slider's whole range, so no fixed

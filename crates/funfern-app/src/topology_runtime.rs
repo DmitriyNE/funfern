@@ -1353,6 +1353,19 @@ fn volume_source_layout_eq(left: &[VolumeSource], right: &[VolumeSource]) -> boo
 }
 
 fn forcing_layout_eq(left: &CanonicalForcing, right: &CanonicalForcing) -> bool {
+    forcing_sparse_layout_eq(left, right)
+        && left
+            .sources()
+            .iter()
+            .zip(right.sources())
+            .all(|(left, right)| left.weights() == right.weights())
+}
+
+/// A live patch rewrites a drive's numbers but not whether it is a pulse,
+/// since the device keeps different runtime for the two; changing that takes
+/// a handoff.
+fn forcing_sparse_layout_eq(left: &CanonicalForcing, right: &CanonicalForcing) -> bool {
+    let pulsed = |drive: CanonicalRateDrive| matches!(drive, CanonicalRateDrive::Direct(signal) if signal.is_pulsed());
     left.prescribed() == right.prescribed()
         && left.sources().len() == right.sources().len()
         && left
@@ -1360,18 +1373,8 @@ fn forcing_layout_eq(left: &CanonicalForcing, right: &CanonicalForcing) -> bool 
             .iter()
             .zip(right.sources())
             .all(|(left, right)| {
-                left.support() == right.support() && left.weights() == right.weights()
+                left.support() == right.support() && pulsed(left.drive()) == pulsed(right.drive())
             })
-}
-
-fn forcing_sparse_layout_eq(left: &CanonicalForcing, right: &CanonicalForcing) -> bool {
-    left.prescribed() == right.prescribed()
-        && left.sources().len() == right.sources().len()
-        && left
-            .sources()
-            .iter()
-            .zip(right.sources())
-            .all(|(left, right)| left.support() == right.support())
 }
 
 pub struct TopologyRuntime {
@@ -2594,6 +2597,54 @@ mod tests {
             candidate.solver_update,
             PreparedSolverUpdate::SourceDrivesOnly
         );
+    }
+
+    /// A live patch rewrites a drive's numbers, so a pulse edited into another
+    /// pulse patches, but a source turned from harmonic to pulsed takes a
+    /// handoff: the device keeps different runtime for the two.
+    #[test]
+    fn a_source_turning_into_a_pulse_takes_a_handoff_and_a_pulse_edit_patches() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let first = runtime
+            .request(
+                1,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        runtime.commit_ready(first).unwrap();
+
+        let pulse = |amplitude| {
+            TimeSignal::pulsed(
+                [0.0, amplitude, 3.0, 0.0],
+                PulseEnvelope::Gaussian { width: 0.1 },
+                0.5,
+                0.0,
+            )
+        };
+        let mut document = editor.document.clone();
+        for (revision, amplitude, expected) in [
+            (2, 1.0, PreparedSolverUpdate::FullHandoff),
+            (3, 2.0, PreparedSolverUpdate::SourceDrivesOnly),
+        ] {
+            document.model.source.signal = pulse(amplitude);
+            let token = runtime
+                .request(
+                    revision,
+                    &document,
+                    document.model.accepted.compile(99).unwrap(),
+                    options(),
+                    false,
+                )
+                .unwrap();
+            prepare(&mut runtime).unwrap();
+            assert_eq!(runtime.ready().unwrap().solver_update, expected);
+            runtime.commit_ready(token).unwrap();
+        }
     }
 
     #[test]

@@ -3,6 +3,12 @@ const TRANSFER_LAYOUT_VERSION: u32 = 3u;
 const NO_INDEX: u32 = 0xffffffffu;
 const DRIVE_TARGET_PARAMETERS: u32 = 0x80000000u;
 const DRIVE_INDEX_MASK: u32 = 0x7fffffffu;
+// Drive records and pulse windows as `canonical_wave.wgsl` lays them out.
+const DRIVE_WORDS: u32 = 6u;
+const DRIVE_SLOT_WORDS: u32 = 3u;
+const DRIVE_INTEGRATED: u32 = 1u;
+const DRIVE_PULSE: u32 = 2u;
+const PRESCRIBED_RECORD_SHIFT: u32 = 3u;
 const STATUS_LAYOUT: u32 = 1u;
 // The exponent bits of an f32 that is infinite or NaN. Finiteness is read
 // from them rather than against a float bound: naga writes an f32 constant
@@ -96,7 +102,7 @@ fn old_drive(base: u32, elapsed: f32) -> f32 {
         old_float(base, 0u), old_float(base, 1u),
         old_float(base, 2u), old_float(base, 3u));
     let runtime = old_tables[base + 1u].data;
-    if runtime.x == 0u {
+    if runtime.x != DRIVE_INTEGRATED {
         return parameters.x + parameters.y * sin(parameters.w + parameters.z * elapsed);
     }
     let half_phase = 0.5 * parameters.z * elapsed;
@@ -104,19 +110,31 @@ fn old_drive(base: u32, elapsed: f32) -> f32 {
         + parameters.y * elapsed * sinc(half_phase)
             * sin(parameters.w + half_phase);
 }
-fn write_drive(base: u32, parameters: vec4<f32>, runtime: vec4<u32>) {
+// `canonical_wave.wgsl`'s `pulse_start_after`.
+fn pulse_start_after(window: vec4<f32>, elapsed: f32) -> f32 {
+    var start = window.x - elapsed;
+    if window.y > 0.0 {
+        if start < 0.0 { start -= window.y * ceil(start / window.y); }
+    } else {
+        start = max(start, -(2.0 * window.z + 1.0));
+    }
+    return start;
+}
+fn write_drive(base: u32, parameters: vec4<f32>, runtime: vec4<u32>, window: vec4<u32>) {
     let parameter_bits = bitcast<vec4<u32>>(parameters);
-    new_tables[base].data = parameter_bits;
-    new_tables[base + 1u].data = runtime;
-    new_tables[base + 2u].data = parameter_bits;
-    new_tables[base + 3u].data = runtime;
+    for (var slot = 0u; slot < 2u; slot += 1u) {
+        let slot_base = base + DRIVE_SLOT_WORDS * slot;
+        new_tables[slot_base].data = parameter_bits;
+        new_tables[slot_base + 1u].data = runtime;
+        new_tables[slot_base + 2u].data = window;
+    }
 }
 fn retain_drive(old_base: u32, new_base: u32, elapsed: f32) {
     var parameters = vec4<f32>(
         old_float(old_base, 0u), old_float(old_base, 1u),
         old_float(old_base, 2u), old_float(old_base, 3u));
     var runtime = old_tables[old_base + 1u].data;
-    if runtime.x != 0u {
+    if runtime.x == DRIVE_INTEGRATED {
         let half_phase = 0.5 * parameters.z * elapsed;
         let next_anchor = bitcast<f32>(runtime.y) + parameters.x * elapsed
             + parameters.y * elapsed * sinc(half_phase)
@@ -124,7 +142,7 @@ fn retain_drive(old_base: u32, new_base: u32, elapsed: f32) {
         runtime.y = bitcast<u32>(next_anchor);
     }
     parameters.w = reduced_phase(parameters.w + parameters.z * elapsed);
-    write_drive(new_base, parameters, runtime);
+    write_drive(new_base, parameters, runtime, old_tables[old_base + 2u].data);
 }
 fn replace_drive(old_base: u32, new_base: u32, old_elapsed: f32) {
     var parameters = vec4<f32>(
@@ -135,10 +153,10 @@ fn replace_drive(old_base: u32, new_base: u32, old_elapsed: f32) {
         old_float(old_base, 0u), old_float(old_base, 1u),
         old_float(old_base, 2u), old_float(old_base, 3u));
     parameters.w = reduced_phase(old_parameters.w + old_parameters.z * old_elapsed);
-    if runtime.x != 0u {
+    if runtime.x == DRIVE_INTEGRATED {
         runtime.y = bitcast<u32>(old_drive(old_base, old_elapsed));
     }
-    write_drive(new_base, parameters, runtime);
+    write_drive(new_base, parameters, runtime, new_tables[new_base + 2u].data);
 }
 fn start_drive(base: u32, absolute_elapsed: f32) {
     var parameters = vec4<f32>(
@@ -148,7 +166,20 @@ fn start_drive(base: u32, absolute_elapsed: f32) {
     // A genuinely new legacy drive starts with zero integrated rate at the
     // handoff instant; only its acceleration phase advances to that instant.
     parameters.w = reduced_phase(parameters.w + parameters.z * absolute_elapsed);
-    write_drive(base, parameters, runtime);
+    write_drive(base, parameters, runtime, new_tables[base + 2u].data);
+}
+// A pulse is a function of absolute time alone, so whatever it follows, the
+// new generation's own record holds, its start moved by how far the actual
+// origin is from the one the host prepared against. Its carrier counts from
+// the pulse's centre and does not move.
+fn start_pulse(base: u32, absolute_elapsed: f32) {
+    var window = bitcast<vec4<f32>>(new_tables[base + 2u].data);
+    window.x = pulse_start_after(window, absolute_elapsed);
+    write_drive(
+        base,
+        vec4<f32>(new_float(base, 0u), new_float(base, 1u), new_float(base, 2u), new_float(base, 3u)),
+        new_tables[base + 1u].data,
+        bitcast<vec4<u32>>(window));
 }
 
 @compute @workgroup_size(128)
@@ -164,7 +195,21 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
         + (current_origin.y - new_control.clock_origin.y);
     if i < target_nodes && new_nodes[i].boundary.z != 0u {
         let mapping = mapped_index(transfer[4].data.z, i);
-        if mapping != NO_INDEX {
+        let record = new_nodes[i].boundary.z >> PRESCRIBED_RECORD_SHIFT;
+        // A harmonic carries its carrier over from the node it maps from,
+        // unless that node was pulsed, whose carrier counts from its pulse.
+        var carried = mapping != NO_INDEX;
+        if carried {
+            carried = (old_nodes[mapping & DRIVE_INDEX_MASK].boundary.z
+                >> PRESCRIBED_RECORD_SHIFT) == 0u;
+        }
+        if record != 0u {
+            let word = new_control.table_offsets.y + DRIVE_WORDS * new_control.counts_c.z
+                + record - 1u;
+            var window = bitcast<vec4<f32>>(new_tables[word].data);
+            window.x = pulse_start_after(window, preparation_delta);
+            new_tables[word].data = bitcast<vec4<u32>>(window);
+        } else if carried {
             let source = mapping & DRIVE_INDEX_MASK;
             let old_signal = old_nodes[source].prescribed;
             if (mapping & DRIVE_TARGET_PARAMETERS) != 0u {
@@ -182,18 +227,23 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     if i < target_drives {
         let mapping = mapped_index(transfer[4].data.w, i);
-        let new_base = new_control.table_offsets.y + 4u * i;
-        if mapping != NO_INDEX {
-            let source = mapping & DRIVE_INDEX_MASK;
-            let old_base = old_control.table_offsets.y + 4u * source;
-            let slot = 2u * (old_control.runtime_slots.x & 1u);
-            if (mapping & DRIVE_TARGET_PARAMETERS) != 0u {
-                replace_drive(old_base + slot, new_base, old_control.clock_f32.y);
-            } else {
-                retain_drive(old_base + slot, new_base, old_control.clock_f32.y);
-            }
-        } else {
+        let new_base = new_control.table_offsets.y + DRIVE_WORDS * i;
+        if new_tables[new_base + 1u].data.x == DRIVE_PULSE {
+            start_pulse(new_base, preparation_delta);
+        } else if mapping == NO_INDEX {
             start_drive(new_base, preparation_delta);
+        } else {
+            let source = mapping & DRIVE_INDEX_MASK;
+            let old_base = old_control.table_offsets.y + DRIVE_WORDS * source
+                + DRIVE_SLOT_WORDS * (old_control.runtime_slots.x & 1u);
+            if old_tables[old_base + 1u].data.x == DRIVE_PULSE {
+                // A harmonic taking over from a pulse starts as a new one would.
+                start_drive(new_base, preparation_delta);
+            } else if (mapping & DRIVE_TARGET_PARAMETERS) != 0u {
+                replace_drive(old_base, new_base, old_control.clock_f32.y);
+            } else {
+                retain_drive(old_base, new_base, old_control.clock_f32.y);
+            }
         }
     }
     let material_header = transfer[8].data;
