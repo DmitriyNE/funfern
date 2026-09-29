@@ -17047,3 +17047,53 @@ from one broadband pulse where a frequency sweep took one run per point.
   records resample onto one grid.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — A transfer readout from a probe or a source
+
+The second of three commits: a point probe's readout divides its field by a
+reference, as the user asked, from one list that holds both probes and
+sources.
+
+- **Transfer from.** In a point readout's Plots menu, under the spectrum
+  settings: none, another point probe, or a signal the scene imposes, the
+  point source, a volume source, a signal-carrying wall or a curve span's
+  side. Choosing one draws one more plot under the traces, the field over
+  the reference, in decibels or linearly as the spectra are. A
+  frequency the reference holds under 1% of its strongest is a gap:
+  `line_plot` now breaks its curve at a point that is not finite rather than
+  bridging it.
+- **From a probe.** Both records are taken over the span in view and
+  resampled over the span they share, so two probes whose rings started at
+  different times line up sample for sample.
+- **From a source.** The reference is what the source imposes, evaluated at
+  the probe's own sample times as the solver runs it: a harmonic source or
+  Neumann signal integrated from `SOURCE_ANCHOR_TIME`, a pulse or a pinned
+  field as authored (`SignalUse::imposed`). An edit or a Fire changes a
+  source's signal mid-run, and the response recorded before answered the old
+  one, so each frame the app notes when each signal in the running generation
+  last changed. A transfer from a source counts only from then, and says so.
+  A reset counts every kept signal from zero, where the clock restarts.
+- **Kept with the scene.** `ProbeReadout::transfer_from`, an optional
+  `transfer_from` in the file's spectrum settings, so it stays version 22. A
+  save writes it only while the scene has its target, as it writes readouts
+  only for probes it has. A file naming a probe, region or span it does not
+  have, or a probe as its own reference, is refused.
+- **Tests.**
+  - From a probe, a copy half as strong and 0.7 s late reads 0.5 to 1e-6
+    across the burst's band, in dB too, though the rings started a second
+    apart; out of band there is a gap.
+  - From a source, an earlier unrelated burst is left out and the rest reads
+    its scale to 1e-6; counted from zero the burst would take it 0.1 off.
+  - A continuous signal imposes its integral, a pulse and a pinned field
+    themselves.
+  - Every imposed signal is a candidate, with its name; one that imposes none
+    is not.
+  - A tracked signal keeps its time across a generation that keeps it,
+    starts again when it changes, restarts from zero at a reset, and goes
+    when its source does.
+  - In the readout window: Plots, then Transfer from, then the other probe,
+    keeps the reference with the scene and draws its plot.
+  - The file round-trips every kind of reference, drops a deleted probe's
+    and a probe's own, and refuses one naming nothing it has.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

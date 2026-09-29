@@ -3,7 +3,10 @@
 //! These types are independent of both the retired object-specific editor and
 //! the topology editor. Production topology code imports them from here.
 
-use funfern_core::{ElectromagneticPolarization, MAX_MATERIALS, MaterialId, PhysicsModel};
+use funfern_core::{
+    CurveSpanId, CurveTraceSide, ElectromagneticPolarization, MAX_MATERIALS, MaterialId, OuterSide,
+    PhysicsModel, RegionId,
+};
 
 pub const MAX_PROBES: usize = 16;
 pub const MAX_SEGMENT_PROBE_POINTS: usize = 512;
@@ -517,6 +520,23 @@ impl LineProbeRepresentation {
     }
 }
 
+/// What a point probe's transfer readout divides its field by: another point
+/// probe's field, or what a source imposes as the solver runs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TransferReference {
+    Probe(ProbeId),
+    PointSource,
+    /// The volume source filling a region.
+    VolumeSource(RegionId),
+    /// A side of the domain carrying a prescribed signal.
+    Wall(OuterSide),
+    /// One side of a curve span carrying a prescribed signal.
+    Face {
+        span: CurveSpanId,
+        side: CurveTraceSide,
+    },
+}
+
 /// What a probe's readout shows: which plots, over how many seconds, and the
 /// averaging and waterfall scale behind them. Like the rest of the view it is
 /// a way of looking at the scene: kept with the document so a scene opens its
@@ -564,6 +584,10 @@ pub struct ProbeReadout {
     pub area_mean_field_spectrum: bool,
     pub spectrum_decibels: bool,
     pub spectrum_max_hz: f64,
+    /// A point probe's field over its reference's, frequency by frequency,
+    /// over the span in view: the fraction of each frequency that reaches it.
+    /// Drawn in decibels or linearly as the spectra are.
+    pub transfer_from: Option<TransferReference>,
 }
 
 impl Default for ProbeReadout {
@@ -603,6 +627,7 @@ impl Default for ProbeReadout {
             area_mean_field_spectrum: false,
             spectrum_decibels: false,
             spectrum_max_hz: 0.0,
+            transfer_from: None,
         }
     }
 }
@@ -638,9 +663,13 @@ impl ProbeReadout {
         self
     }
 
-    /// Whether a point or an area probe's readout draws any spectrum.
+    /// Whether a point or an area probe's readout draws any spectrum, a
+    /// transfer among them.
     pub fn any_spectrum(&self) -> bool {
-        self.field_spectrum || self.secondary_field_spectrum || self.area_mean_field_spectrum
+        self.field_spectrum
+            || self.secondary_field_spectrum
+            || self.area_mean_field_spectrum
+            || self.transfer_from.is_some()
     }
 
     pub fn valid(&self) -> bool {

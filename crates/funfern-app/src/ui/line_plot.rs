@@ -1,6 +1,6 @@
 //! A small plot of one curve through given points, in the probe plots'
 //! style: the pulse shape window's trace and spectrum, and a probe's
-//! spectrum.
+//! spectrum and transfer.
 use super::*;
 
 /// A vertical line across the plot at `x`, with its label beside it.
@@ -14,8 +14,9 @@ const MARKER: Color32 = Color32::from_rgb(112, 130, 143);
 
 /// Draws `points`, `x` increasing, scaled to fill a plot `height` tall: the
 /// value range at the left, the `x` range underneath in `x_unit`, and
-/// `markers` inside the range as vertical lines. Nothing is drawn for fewer
-/// than two finite points but the frame and `empty`.
+/// `markers` inside the range as vertical lines. A point that is not finite
+/// breaks the curve. Nothing is drawn for fewer than two finite points but
+/// the frame and `empty`.
 pub(super) fn line_plot(
     ui: &mut egui::Ui,
     points: &[[f64; 2]],
@@ -100,13 +101,23 @@ pub(super) fn line_plot(
             AXIS_TEXT,
         );
     }
-    painter.add(egui::Shape::line(
-        finite
+    // A point that is not finite is a gap: the line stops there and starts
+    // again after it rather than bridging what has no value.
+    for run in points.split(|[x, y]| !x.is_finite() || !y.is_finite()) {
+        let run = run
             .iter()
             .map(|[x, y]| egui::pos2(x_at(*x), y_at(*y)))
-            .collect(),
-        Stroke::new(1.4, color),
-    ));
+            .collect::<Vec<_>>();
+        match run.as_slice() {
+            [] => {}
+            [alone] => {
+                painter.circle_filled(*alone, 1.4, color);
+            }
+            _ => {
+                painter.add(egui::Shape::line(run, Stroke::new(1.4, color)));
+            }
+        }
+    }
     for (text, anchor, at) in [
         (
             format!("{maximum:+.3e}"),

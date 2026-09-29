@@ -8,7 +8,7 @@
 use crate::document::{
     AdaptationSettings, LineProbeQuantity, LineProbeRepresentation, MAX_PROBES,
     MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty, PresentationSettings, ProbeId,
-    ProbeReadout, ProbeReadouts, ProbeSamplingPreset, VectorOverlay,
+    ProbeReadout, ProbeReadouts, ProbeSamplingPreset, TransferReference, VectorOverlay,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -308,6 +308,20 @@ struct StoredProbeReadout {
 struct StoredSpectrumSettings {
     decibels: bool,
     max_hz: f64,
+    /// Absent where no transfer is drawn, as in every file from before
+    /// readouts had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transfer_from: Option<StoredTransferReference>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredTransferReference {
+    Probe { probe: u64 },
+    PointSource,
+    VolumeSource { region: u64 },
+    Wall { side: StoredOuterSide },
+    Face { span: u64, side: StoredCurveSide },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -459,9 +473,15 @@ fn encode_document(document: &TopologyDocument) -> FileV22 {
                 .probes
                 .iter()
                 .filter_map(|probe| {
+                    // Likewise a transfer from a probe or a span deleted this
+                    // session.
+                    let mut readout = *document.readouts.probes.get(&probe.id)?;
+                    readout.transfer_from = readout.transfer_from.filter(|reference| {
+                        holds_transfer_reference(&document.model, probe.id, *reference)
+                    });
                     Some(StoredProbeReadoutEntry {
                         probe: probe.id.0,
-                        readout: encode_readout(document.readouts.probes.get(&probe.id)?),
+                        readout: encode_readout(&readout),
                     })
                 })
                 .collect(),
@@ -533,7 +553,68 @@ fn encode_readout(readout: &ProbeReadout) -> StoredProbeReadout {
         spectrum: StoredSpectrumSettings {
             decibels: readout.spectrum_decibels,
             max_hz: readout.spectrum_max_hz,
+            transfer_from: readout.transfer_from.map(encode_transfer_reference),
         },
+    }
+}
+
+fn encode_transfer_reference(reference: TransferReference) -> StoredTransferReference {
+    match reference {
+        TransferReference::Probe(probe) => StoredTransferReference::Probe { probe: probe.0 },
+        TransferReference::PointSource => StoredTransferReference::PointSource,
+        TransferReference::VolumeSource(region) => {
+            StoredTransferReference::VolumeSource { region: region.0 }
+        }
+        TransferReference::Wall(side) => StoredTransferReference::Wall {
+            side: encode_outer_side(side),
+        },
+        TransferReference::Face { span, side } => StoredTransferReference::Face {
+            span: span.0,
+            side: encode_curve_side(side),
+        },
+    }
+}
+
+fn decode_transfer_reference(stored: StoredTransferReference) -> TransferReference {
+    match stored {
+        StoredTransferReference::Probe { probe } => TransferReference::Probe(ProbeId(probe)),
+        StoredTransferReference::PointSource => TransferReference::PointSource,
+        StoredTransferReference::VolumeSource { region } => {
+            TransferReference::VolumeSource(RegionId(region))
+        }
+        StoredTransferReference::Wall { side } => TransferReference::Wall(decode_outer_side(side)),
+        StoredTransferReference::Face { span, side } => TransferReference::Face {
+            span: CurveSpanId(span),
+            side: decode_curve_side(side),
+        },
+    }
+}
+
+/// Whether a scene has what `probe`'s transfer divides by: another of its
+/// point probes, or a region or a curve span it still has. The point source
+/// and the sides always exist; whether one carries a signal is for the
+/// readout to say.
+fn holds_transfer_reference(
+    model: &TopologyDocumentModel,
+    probe: ProbeId,
+    reference: TransferReference,
+) -> bool {
+    match reference {
+        TransferReference::Probe(id) => {
+            id != probe
+                && model.probes.iter().any(|candidate| {
+                    candidate.id == id && matches!(candidate.target, TopologyProbeTarget::Point(_))
+                })
+        }
+        TransferReference::PointSource | TransferReference::Wall(_) => true,
+        TransferReference::VolumeSource(region) => model.draft.region(region).is_some(),
+        TransferReference::Face { span, .. } => model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .flat_map(|curve| &curve.spans)
+            .any(|candidate| candidate.id == span),
     }
 }
 
@@ -561,6 +642,7 @@ fn decode_readout(stored: StoredProbeReadout) -> ProbeReadout {
         area_mean_field_spectrum: stored.area.mean_field_spectrum,
         spectrum_decibels: stored.spectrum.decibels,
         spectrum_max_hz: stored.spectrum.max_hz,
+        transfer_from: stored.spectrum.transfer_from.map(decode_transfer_reference),
     };
     for plot in stored.line {
         readout = readout.with_line_plot(
@@ -628,7 +710,7 @@ fn decode_document(mut file: FileV22) -> Result<TopologyDocument, String> {
         &draft,
         every_material_advanced,
     );
-    Ok(TopologyDocument {
+    let document = TopologyDocument {
         model: TopologyDocumentModel {
             draft,
             accepted: decode_scene(file.model.accepted)?,
@@ -652,7 +734,17 @@ fn decode_document(mut file: FileV22) -> Result<TopologyDocument, String> {
         },
         presentation,
         readouts,
-    })
+    };
+    if document.readouts.far_field.transfer_from.is_some()
+        || document.readouts.probes.iter().any(|(id, readout)| {
+            readout
+                .transfer_from
+                .is_some_and(|reference| !holds_transfer_reference(&document.model, *id, reference))
+        })
+    {
+        return Err("Scene contains a transfer from nothing it holds".into());
+    }
+    Ok(document)
 }
 
 fn encode_scene(scene: &TopologyScene) -> StoredTopologyScene {
@@ -3269,6 +3361,66 @@ mod tests {
         let read = older.readouts.probe(screen);
         assert!(!read.any_spectrum() && !read.spectrum_decibels);
         assert_eq!(read.spectrum_max_hz, 0.0);
+    }
+
+    /// A point probe's transfer travels with its readout, from each kind of
+    /// reference. A transfer from a probe deleted this session, or from the
+    /// probe itself, is held but not written; a file naming what its scene
+    /// does not have is refused; and a readout with none writes no key.
+    #[test]
+    fn a_readouts_transfer_round_trips_and_names_only_what_the_scene_holds() {
+        let (mut document, _) = readout_scene();
+        let point = |id: u64, x: f64| TopologyProbeDefinition {
+            id: ProbeId(id),
+            name: format!("Point {id}"),
+            color: [255, 255, 255],
+            enabled: true,
+            target: TopologyProbeTarget::Point(Point2::new(x, 0.2)),
+        };
+        document.model.probes.push(point(90, 0.3));
+        document.model.probes.push(point(91, 0.6));
+        let (here, there) = (ProbeId(90), ProbeId(91));
+        let pretty = save(&document).unwrap();
+        assert!(!pretty.contains("transfer_from"), "{pretty}");
+        let region = document.model.draft.regions[0].id;
+        let span = document.model.draft.geometry.curves[0].spans[0].id;
+        let with = |reference| ProbeReadout {
+            transfer_from: Some(reference),
+            ..ProbeReadout::default()
+        };
+        for reference in [
+            TransferReference::Probe(there),
+            TransferReference::PointSource,
+            TransferReference::VolumeSource(region),
+            TransferReference::Wall(OuterSide::Left),
+            TransferReference::Face {
+                span,
+                side: CurveTraceSide::Right,
+            },
+        ] {
+            document.readouts.set_probe(here, with(reference));
+            let decoded = parse_document(save(&document).unwrap().as_bytes()).unwrap();
+            assert_eq!(decoded.readouts, document.readouts, "{reference:?}");
+        }
+        for gone in [ProbeId(92), here] {
+            document
+                .readouts
+                .set_probe(here, with(TransferReference::Probe(gone)));
+            let decoded = parse_document(save(&document).unwrap().as_bytes()).unwrap();
+            assert_eq!(decoded.readouts.probe(here).transfer_from, None, "{gone:?}");
+        }
+        document
+            .readouts
+            .set_probe(here, with(TransferReference::Probe(there)));
+        let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        let entry = value["presentation"]["probe_readouts"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["probe"] == 90)
+            .unwrap();
+        entry["readout"]["spectrum"]["transfer_from"]["probe"] = 92.into();
+        assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
     }
 
     /// A scene that chose no readouts writes none, so it stays readable by a

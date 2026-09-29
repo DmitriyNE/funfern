@@ -66,6 +66,36 @@ impl Playground {
         });
     }
 
+    /// A point probe's transfer setting under its spectrum settings: what its
+    /// field is divided by, from `candidates`, or nothing.
+    fn transfer_settings(
+        ui: &mut egui::Ui,
+        readout: &mut funfern_app::document::ProbeReadout,
+        candidates: &[(funfern_app::document::TransferReference, String)],
+    ) {
+        let chosen = readout.transfer_from.map_or_else(
+            || "none".to_owned(),
+            |reference| {
+                candidates
+                    .iter()
+                    .find(|(candidate, _)| *candidate == reference)
+                    .map_or_else(|| "gone".to_owned(), |(_, label)| label.clone())
+            },
+        );
+        ui.menu_button(format!("Transfer from: {chosen}"), |ui| {
+            ui.selectable_value(&mut readout.transfer_from, None, "None");
+            for (reference, label) in candidates {
+                ui.selectable_value(&mut readout.transfer_from, Some(*reference), label);
+            }
+        })
+        .response
+        .on_hover_text(
+            "This probe's field over another point probe's, or over what a source drives, \
+             frequency by frequency over the span in view: how much of each frequency passes. \
+             Neither record is windowed, so frame the whole of both pulses.",
+        );
+    }
+
     /// One row of a readout's Plots grid: the quantity, its trace, and its
     /// spectrum where it has one.
     fn plot_row(ui: &mut egui::Ui, label: &str, trace: &mut bool, spectrum: Option<&mut bool>) {
@@ -883,6 +913,16 @@ impl Playground {
             // The document holds what the readout shows; the view only where
             // its window sits.
             let stored = self.editor.document.readouts.probe(id);
+            let is_point = matches!(probe.target, TopologyProbeTarget::Point(_));
+            let transfer_candidates = if is_point {
+                self.transfer_candidates(id)
+            } else {
+                Vec::new()
+            };
+            let transfer = stored
+                .transfer_from
+                .filter(|_| is_point)
+                .map(|reference| self.transfer_input(reference));
             let mut view = self
                 .probe_views
                 .remove(&id)
@@ -1075,6 +1115,7 @@ impl Playground {
                                 view.readout.transverse_field,
                                 view.readout.poynting,
                                 view.readout.energy,
+                                view.readout.transfer_from.is_some(),
                             ]
                             .into_iter()
                             .filter(|enabled| *enabled)
@@ -1127,6 +1168,7 @@ impl Playground {
                                             );
                                         });
                                     Self::spectrum_settings(ui, readout);
+                                    Self::transfer_settings(ui, readout, &transfer_candidates);
                                 });
                         }
                         if ui.small_button("Clear").clicked() {
@@ -1145,6 +1187,7 @@ impl Playground {
                                 top_hz: spectrum_top,
                                 span: view.readout.span,
                                 end_time: (!view.live).then_some(view.end_time),
+                                transfer: Self::transfer_key(transfer.as_ref()),
                             },
                             newest_time.unwrap_or(0.0),
                             Instant::now(),
@@ -1396,6 +1439,17 @@ impl Playground {
                                     spectrum_top,
                                 );
                             }
+                        }
+                        if let Some(transfer) = &transfer {
+                            Self::probe_transfer(
+                                ui,
+                                primary_field_label(physics),
+                                &point_samples,
+                                transfer,
+                                Color32::from_rgb(240, 150, 90),
+                                &mut view,
+                                spectrum_top,
+                            );
                         }
                     }
                     ui.small(if is_curve {

@@ -83,7 +83,16 @@ never negative, and their spectra would be a rectified signal's, so they have
 none. The records are resampled at their median spacing, since a handoff that
 changes the step changes it, Hann-windowed and transformed by the core's radix-2
 FFT, so a steady tone reads its amplitude. A live readout redraws its spectra four times a second, only
-when new samples have come. Probe timestamps come
+when new samples have come. A point readout's transfer divides its field by a
+reference over the same span, frequency by frequency, and leaves out what the
+reference holds under 1% of its strongest. The reference is another point probe,
+both records resampled over the span they share, or what a source imposes,
+evaluated at the probe's own sample times as the solver runs it: a harmonic
+source or Neumann signal integrated from `SOURCE_ANCHOR_TIME`, a pulse or a
+pinned field as authored. Neither record is windowed, since a window weights
+each moment differently and would scale a late response against an early
+reference. The app notes when each source's signal last changed in the running
+generation, and a transfer from it counts only from then. Probe timestamps come
 directly from the solver's transferred absolute clock. The host handoff offset is
 only used to map the continuous accepted-step total across timestep changes; a
 fresh install establishes a new rate baseline instead of treating its absolute

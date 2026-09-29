@@ -8,7 +8,7 @@ use crate::recording::VideoRecorder;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Rect};
-use funfern_app::document::{ProbeId, VectorOverlay};
+use funfern_app::document::{ProbeId, TransferReference, VectorOverlay};
 use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
 use funfern_app::topology_persistence::TopologyLoadCandidate;
 use funfern_app::topology_runtime::{TopologyRuntime, TopologyToken};
@@ -28,6 +28,7 @@ use super::events::EventEntry;
 use super::gesture::{DragGesture, DrawGesture, PendingMerge};
 use super::probe_view::{AreaTrace, CurveTrace, FarFieldTrace, ProbeTrace, ProbeViewState};
 use super::scene_card::SceneCard;
+use super::transfer::TrackedSignal;
 use super::workers::{BackgroundAmrWorker, BackgroundPreparationWorker};
 use super::*;
 
@@ -182,6 +183,9 @@ pub struct Playground {
     pub(super) probe_windows: BTreeSet<ProbeId>,
     pub(super) far_field_window: bool,
     pub(super) probe_traces: BTreeMap<ProbeId, ProbeTrace>,
+    /// Each signal the running scene imposes, and since when, for the
+    /// transfers that divide by one.
+    pub(super) transfer_signals: BTreeMap<TransferReference, TrackedSignal>,
     pub(super) probe_views: BTreeMap<ProbeId, ProbeViewState>,
     pub(super) probe_status: BTreeMap<ProbeId, String>,
     pub(super) probe_metrics: BTreeMap<ProbeId, (f64, bool)>,
@@ -420,6 +424,7 @@ impl Default for Playground {
             probe_windows: BTreeSet::new(),
             far_field_window: false,
             probe_traces: BTreeMap::new(),
+            transfer_signals: BTreeMap::new(),
             probe_views: BTreeMap::new(),
             probe_status: BTreeMap::new(),
             probe_metrics: BTreeMap::new(),

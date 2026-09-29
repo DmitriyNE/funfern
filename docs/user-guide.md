@@ -363,7 +363,17 @@ names or with every expression evaluated at the material frame's origin. Each ro
   velocity, and energy density. Hide individual traces, drag right to inspect
   earlier samples, and scroll to
   change the time span. The widest view returns to Live automatically; Live can also
-  be selected directly. Sampling follows
+  be selected directly. The Plots menu adds, under the field and its rate, each
+  one's amplitude spectrum over the span in view, in decibels or linearly and up
+  to a chosen frequency. **Transfer from** divides the field, frequency by
+  frequency, by another point probe's field or by what a source imposes: the
+  field rate a point or volume source drives, a Neumann wall's flux, a Dirichlet
+  wall's field. One broadband pulse, a sinc flat across its band, then measures
+  what a sweep of harmonic runs would; a ratio of 1, or 0 dB, means that
+  frequency passes whole. Neither record is windowed, so frame the whole of both
+  pulses. Frequencies the reference barely holds are left out, and from a source
+  the transfer counts only from when its signal last changed, since what came
+  before answered another signal. Sampling follows
   solver time rather than browser frame rate. Definitions are saved and undoable;
   recorded traces are transient. What each readout shows (its plots, time span,
   mean window and waterfall gain, and the far field's plots) is saved with the

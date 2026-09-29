@@ -955,9 +955,13 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   echo reads straight off a trace. Waiting on a way to draw them that does not
   clutter plots of scenes with many pulses.
 
-- [ ] A transfer spectrum between two probes: one broadband pulse (a sinc is
-  flat across its band) measures what a frequency sweep does now. Waiting on a
-  way to pick the pair and show the ratio without overloading the readout.
+- [x] A transfer spectrum between two probes: one broadband pulse (a sinc is
+  flat across its band) measures what a frequency sweep does now. Done on
+  2026-09-29 (`docs/engineering-log.md`): a point readout's **Transfer from**
+  divides its field by another point probe's or by what a source imposes, and
+  draws the ratio as one more plot. Unwindowed, and measured on an empty
+  channel: flat at one between probes and at `(w/2c) sinc(πfw/c)` from a
+  launcher. The scenes it opens are still to build.
 
 - [ ] A time-of-flight or arrival readout, and a probe's envelope trace (the
   magnitude of its analytic signal), for group delay. Waiting on the same kind

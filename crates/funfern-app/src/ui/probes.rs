@@ -506,6 +506,11 @@ impl Playground {
     /// look like it had frozen the probes until the traces were cleared by hand.
     pub(super) fn restart_probe_traces(&mut self) {
         self.probe_traces.clear();
+        // Every signal is counted from zero, so one kept across the restart
+        // has been in force since it.
+        for tracked in self.transfer_signals.values_mut() {
+            tracked.since = 0.0;
+        }
         self.curve_probe_traces.clear();
         self.area_probe_traces.clear();
         self.far_field_trace = FarFieldTrace::default();

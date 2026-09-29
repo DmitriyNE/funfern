@@ -13,8 +13,8 @@ pub(super) struct ProbeTrace {
     pub(super) last_time: f64,
 }
 
-use funfern_app::document::ProbeReadout;
 pub(super) use funfern_app::document::{LineProbeQuantity, LineProbeRepresentation};
+use funfern_app::document::{ProbeReadout, TransferReference};
 
 /// What the readout draws for each line-probe quantity: its name in this skin,
 /// its colour, and whether the skin has it.
@@ -92,6 +92,8 @@ pub(super) struct SpectrumKey {
     pub(super) top_hz: f64,
     pub(super) span: f64,
     pub(super) end_time: Option<f64>,
+    /// A transfer's reference, and when a source's signal came into force.
+    pub(super) transfer: Option<(TransferReference, f64)>,
 }
 
 /// A readout's spectra as last drawn, by plot label.
@@ -332,6 +334,7 @@ mod tests {
             top_hz: 12.0,
             span: 2.0,
             end_time: None,
+            transfer: None,
         };
         let start = Instant::now();
         let redraws = |cache: &mut SpectrumCache, key, newest, at| {

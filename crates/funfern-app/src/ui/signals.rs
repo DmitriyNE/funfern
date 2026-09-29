@@ -25,6 +25,19 @@ impl SignalUse {
         matches!(self, Self::Source | Self::Flux)
     }
 
+    /// What a signal here imposes at `time` as the solver runs it: a
+    /// continuous source or Neumann signal integrated from the anchor the
+    /// application compiles against, and a pulse or a pinned field as it is.
+    pub(super) fn imposed(self, signal: TimeSignal, time: f64) -> Option<f64> {
+        if self.integrates() {
+            CanonicalRateDrive::authored(signal, SOURCE_ANCHOR_TIME)
+                .and_then(|drive| drive.value(time))
+                .ok()
+        } else {
+            Some(signal.value(time)).filter(|value| value.is_finite())
+        }
+    }
+
     /// What a pulse here imposes, for the shape window's trace.
     const fn pulse_quantity(self) -> &'static str {
         match self {
