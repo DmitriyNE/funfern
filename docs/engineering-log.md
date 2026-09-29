@@ -16921,3 +16921,34 @@ loss channels too, and gates are an Advanced setting.
   environment flags, since the runtime layout moved under all of them.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — Gate a material drive from its editor
+
+- **Drive editor.** In the Advanced view, every drive, on either coefficient
+  row or on a loss channel, has a Timing row below its numbers: Continuous
+  or Pulsed. Pulsed gives the drive a Hann burst three of its cycles long
+  (half a second at 0 Hz) fired at the Fire time. It then shows the signals'
+  own envelope menu, start with "Fire now", "Shape", repeat and the summary
+  line. Setting a drive to none takes its gate with it, and changing the
+  drive's kind keeps it. The simplified view stays preset-only.
+- **One set of pulse controls.** The envelope, start, repeat and summary
+  controls are now `edit_pulse_train`, which the signal editor and the gate
+  editor share.
+- **Shape window.** It shows a gated drive's coefficient factor over one
+  pulse or two periods of a train, at the material frame's origin (where a
+  travelling modulation's is drawn). Beneath it is the spectrum of the
+  factor's swing over one pulse, with the drive's frequency plus the
+  envelope's bandwidth marked. A drive whose numbers are formulas the window
+  cannot evaluate says so.
+- **Fire.** "Fire now" on a gate is a material edit, so it takes a new
+  generation, as every material edit does. The Fire lead already allows for
+  the handoff a wall's edit takes.
+- **Tests.**
+  - The gate editor's buttons, clicked through egui: Pulsed, Fire now,
+    Shape, Continuous.
+  - A gated pump's swing peaks at its carrier; at 0 Hz, a temporal slab, it
+    peaks at zero.
+  - The Advanced view renders a material with a gate on a formula-driven
+    mass drive and on a loss drive, in every skin, without changing it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

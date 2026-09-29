@@ -1,6 +1,7 @@
 //! The signal editor every source and driven wall shares: a continuous
 //! harmonic, or a pulse under one of the core's envelopes, and the window
-//! that shows a pulse's shape and spectrum.
+//! that shows a pulse's shape and spectrum. A material drive's gate takes the
+//! same pulse controls and the same window.
 use super::line_plot::{PlotMarker, line_plot};
 use super::*;
 
@@ -68,6 +69,24 @@ impl Playground {
     }
 }
 
+/// The first pulse a carrier at `frequency_hz` gets: a Hann burst three
+/// cycles long, or half a second with no carrier, fired at `fire_at`.
+fn burst(frequency_hz: f64, fire_at: f64) -> PulseTrain {
+    let duration = if frequency_hz > 0.0 {
+        3.0 / frequency_hz
+    } else {
+        0.5
+    };
+    PulseTrain {
+        envelope: PulseEnvelope::FlatTop {
+            duration,
+            edge: 0.5 * duration,
+        },
+        start: fire_at,
+        repeat: 0.0,
+    }
+}
+
 /// A pulse made from a continuous signal: the same carrier, and for an
 /// integrated use its rate amplitude, so the strength does not jump. A sine
 /// counted from the pulse's centre has no area. The envelope is a Hann burst
@@ -80,19 +99,12 @@ pub(super) fn pulse_from(signal: TimeSignal, role: SignalUse, fire_at: f64) -> T
     } else {
         amplitude
     };
-    let duration = if frequency_hz > 0.0 {
-        3.0 / frequency_hz
-    } else {
-        0.5
-    };
+    let train = burst(frequency_hz, fire_at);
     TimeSignal::pulsed(
         [offset, amplitude, frequency_hz, 0.0],
-        PulseEnvelope::FlatTop {
-            duration,
-            edge: 0.5 * duration,
-        },
-        fire_at,
-        0.0,
+        train.envelope,
+        train.start,
+        train.repeat,
     )
 }
 
@@ -122,7 +134,16 @@ pub(super) fn continuous_from(signal: TimeSignal, role: SignalUse) -> TimeSignal
 pub(super) struct PulsePreview {
     pub(super) open: bool,
     editor: Option<egui::Id>,
-    signal: Option<(TimeSignal, SignalUse)>,
+    shown: Option<Previewed>,
+}
+
+/// What the shape window draws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Previewed {
+    Signal(TimeSignal, SignalUse),
+    /// A material drive under its gate, with `None` for a drive whose
+    /// numbers are formulas the window cannot evaluate on its own.
+    Drive(Option<TimeDriveValues>, PulseTrain),
 }
 
 /// Edits `signal` in place. `fire_at` is when "Fire now" starts a pulse, and
@@ -186,52 +207,110 @@ fn edit_time_signal_in(
         ..
     } = signal
     {
-        edit_pulse_envelope(ui, envelope);
-        let duration = envelope.duration();
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::DragValue::new(start)
-                    .speed(0.02)
-                    .prefix("Start ")
-                    .suffix(" s"),
-            );
-            if ui.button("Fire now").clicked() {
-                *start = fire_at;
-            }
-            if ui.button("Shape").clicked() {
-                preview.open = true;
-                preview.editor = Some(editor);
-            }
-        });
-        ui.horizontal(|ui| {
-            let mut repeats = *repeat > 0.0;
-            if ui.checkbox(&mut repeats, "Repeat").changed() {
-                *repeat = if repeats { 2.0 * duration } else { 0.0 };
-            }
-            if repeats {
-                ui.add(
-                    egui::DragValue::new(repeat)
-                        .speed(0.02)
-                        .range(duration..=1.0e6)
-                        .prefix("every ")
-                        .suffix(" s"),
-                );
-            }
-        });
-        // A pulse lengthened past its repeat would overlap the next one.
-        if *repeat > 0.0 && *repeat < duration {
-            *repeat = duration;
+        let mut train = PulseTrain {
+            envelope: *envelope,
+            start: *start,
+            repeat: *repeat,
+        };
+        let carrier = (*amplitude != 0.0).then_some(*frequency_hz);
+        if edit_pulse_train(ui, &mut train, fire_at, carrier) {
+            preview.open = true;
+            preview.editor = Some(editor);
         }
-        ui.small(pulse_summary(
-            duration,
-            *start,
-            *repeat,
-            (*amplitude != 0.0).then_some(*frequency_hz),
-        ));
+        (*envelope, *start, *repeat) = (train.envelope, train.start, train.repeat);
     }
     ui.small(role.units(signal.is_pulsed()));
     if preview.editor == Some(editor) {
-        preview.signal = Some((*signal, role));
+        preview.shown = Some(Previewed::Signal(*signal, role));
+    }
+}
+
+/// A pulse's envelope, start and repeat, with "Fire now", which starts it at
+/// `fire_at`, and "Shape"; true when "Shape" was pressed. The summary counts
+/// the cycles of `carrier_hz`.
+fn edit_pulse_train(
+    ui: &mut egui::Ui,
+    train: &mut PulseTrain,
+    fire_at: f64,
+    carrier_hz: Option<f64>,
+) -> bool {
+    edit_pulse_envelope(ui, &mut train.envelope);
+    let duration = train.envelope.duration();
+    let mut shape = false;
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::DragValue::new(&mut train.start)
+                .speed(0.02)
+                .prefix("Start ")
+                .suffix(" s"),
+        );
+        if ui.button("Fire now").clicked() {
+            train.start = fire_at;
+        }
+        shape = ui.button("Shape").clicked();
+    });
+    ui.horizontal(|ui| {
+        let mut repeats = train.repeat > 0.0;
+        if ui.checkbox(&mut repeats, "Repeat").changed() {
+            train.repeat = if repeats { 2.0 * duration } else { 0.0 };
+        }
+        if repeats {
+            ui.add(
+                egui::DragValue::new(&mut train.repeat)
+                    .speed(0.02)
+                    .range(duration..=1.0e6)
+                    .prefix("every ")
+                    .suffix(" s"),
+            );
+        }
+    });
+    // A pulse lengthened past its repeat would overlap the next one.
+    if train.repeat > 0.0 && train.repeat < duration {
+        train.repeat = duration;
+    }
+    ui.small(pulse_summary(
+        duration,
+        train.start,
+        train.repeat,
+        carrier_hz,
+    ));
+    shape
+}
+
+/// A material drive's timing: running throughout, or in pulses under one of
+/// the envelopes. `drive` is the drive's numbers where they are constants,
+/// for the cycle count and the shape window; a gate first set on a drive
+/// is a Hann burst three of its cycles long, fired at `fire_at`.
+pub(super) fn edit_drive_gate(
+    ui: &mut egui::Ui,
+    drive: Option<TimeDriveValues>,
+    gate: &mut Option<PulseTrain>,
+    fire_at: f64,
+    preview: &mut PulsePreview,
+) {
+    let editor = ui.id();
+    let frequency = drive.map(TimeDriveValues::frequency_hz);
+    let mut pulsed = gate.is_some();
+    ui.horizontal(|ui| {
+        ui.label("Timing");
+        ui.selectable_value(&mut pulsed, false, "Continuous");
+        ui.selectable_value(&mut pulsed, true, "Pulsed");
+    });
+    if pulsed != gate.is_some() {
+        *gate = pulsed.then(|| burst(frequency.unwrap_or(0.0), fire_at));
+    }
+    if let Some(train) = gate {
+        if edit_pulse_train(ui, train, fire_at, frequency) {
+            preview.open = true;
+            preview.editor = Some(editor);
+        }
+        ui.small(
+            "The drive's swing follows the envelope, its carrier counted from each pulse's \
+             centre. Between pulses the coefficient is its base.",
+        );
+    }
+    if preview.editor == Some(editor) {
+        preview.shown = gate.map(|train| Previewed::Drive(drive, train));
     }
 }
 
@@ -241,13 +320,32 @@ impl Playground {
             return;
         }
         let mut open = true;
-        let shown = self.pulse_preview.signal;
+        let shown = self.pulse_preview.shown;
         egui::Window::new("Pulse shape")
             .open(&mut open)
             .default_width(380.0)
             .show(ctx, |ui| match shown {
-                Some((signal, role)) if signal.is_pulsed() => pulse_shape(ui, signal, role),
-                _ => {
+                Some(Previewed::Signal(signal, role)) => match signal.train() {
+                    Some(train) => shape_plots(
+                        ui,
+                        train,
+                        signal.frequency_ceiling_hz(),
+                        role.pulse_quantity(),
+                        |time| signal.value(time),
+                        |time| signal.value(time),
+                    ),
+                    None => {
+                        ui.label("The editor that opened this no longer shows a pulse.");
+                    }
+                },
+                Some(Previewed::Drive(Some(drive), train)) => drive_shape(ui, drive, train),
+                Some(Previewed::Drive(None, _)) => {
+                    ui.label(
+                        "This drive's numbers are formulas; the window draws a drive whose \
+                         numbers are constants.",
+                    );
+                }
+                None => {
                     ui.label("The editor that opened this no longer shows a pulse.");
                 }
             });
@@ -261,25 +359,18 @@ const SPECTRUM_SAMPLES_PER_PERIOD: f64 = 16.0;
 const MOST_SPECTRUM_SAMPLES: usize = 1 << 14;
 const TRACE_POINTS: usize = 1024;
 
-/// One pulse's spectrum up to twice the frequency adaptation resolves,
-/// relative to its peak.
-fn relative_spectrum(signal: TimeSignal) -> Vec<[f64; 2]> {
-    let TimeSignal::Pulsed {
-        envelope, start, ..
-    } = signal
-    else {
-        return Vec::new();
-    };
-    let ceiling = signal.frequency_ceiling_hz();
+/// The spectrum of `value` over the first pulse of `train`, up to twice the
+/// `ceiling` adaptation resolves, relative to its peak.
+fn relative_spectrum(value: impl Fn(f64) -> f64, train: PulseTrain, ceiling: f64) -> Vec<[f64; 2]> {
     if ceiling <= 0.0 {
         return Vec::new();
     }
-    let duration = envelope.duration();
+    let duration = train.envelope.duration();
     let count = ((duration * SPECTRUM_SAMPLES_PER_PERIOD * ceiling).ceil() as usize + 1)
         .clamp(2, MOST_SPECTRUM_SAMPLES);
     let interval = duration / (count - 1) as f64;
     let samples = (0..count)
-        .map(|index| signal.value(start + index as f64 * interval))
+        .map(|index| value(train.start + index as f64 * interval))
         .collect::<Vec<_>>();
     let Ok(spectrum) = transient_spectrum(&samples, interval) else {
         return Vec::new();
@@ -292,19 +383,55 @@ fn relative_spectrum(signal: TimeSignal) -> Vec<[f64; 2]> {
         .collect()
 }
 
-/// One pulse, or two periods of a train, over time, and one pulse's
-/// spectrum relative to its peak with the frequency adaptation resolves
-/// marked.
-fn pulse_shape(ui: &mut egui::Ui, signal: TimeSignal, role: SignalUse) {
-    let TimeSignal::Pulsed {
+/// A gated drive's coefficient factor over time, at the material frame's
+/// origin, which is where a travelling modulation's is drawn.
+fn gated_factor(drive: TimeDriveValues, train: PulseTrain) -> Option<impl Fn(f64) -> f64> {
+    let origin = MaterialCoordinates {
+        x: 0.0,
+        y: 0.0,
+        r: 0.0,
+        theta: 0.0,
+    };
+    let runtime = TimeDriveRuntime::authored(drive).ok()?;
+    Some(move |time: f64| {
+        drive
+            .gated_multiplier_and_rate(Some(train), time, origin, runtime)
+            .map_or(f64::NAN, |(factor, _)| factor)
+    })
+}
+
+/// A gated drive's coefficient factor over its pulses, and the spectrum of
+/// its swing.
+fn drive_shape(ui: &mut egui::Ui, drive: TimeDriveValues, train: PulseTrain) {
+    let Some(factor) = gated_factor(drive, train) else {
+        return;
+    };
+    shape_plots(
+        ui,
+        train,
+        drive.frequency_hz() + train.envelope.bandwidth_hz(),
+        "Coefficient factor, at the material frame's origin",
+        &factor,
+        |time| factor(time) - 1.0,
+    );
+}
+
+/// One pulse, or two periods of a train, of `value` over time, and the
+/// spectrum of `swing` over one pulse, relative to its peak, with the
+/// frequency adaptation resolves marked.
+fn shape_plots(
+    ui: &mut egui::Ui,
+    train: PulseTrain,
+    ceiling: f64,
+    quantity: &str,
+    value: impl Fn(f64) -> f64,
+    swing: impl Fn(f64) -> f64,
+) {
+    let PulseTrain {
         envelope,
         start,
         repeat,
-        ..
-    } = signal
-    else {
-        return;
-    };
+    } = train;
     let duration = envelope.duration();
     let (from, to) = if repeat > 0.0 {
         (start, start + 2.0 * repeat)
@@ -314,13 +441,12 @@ fn pulse_shape(ui: &mut egui::Ui, signal: TimeSignal, role: SignalUse) {
     let trace = (0..TRACE_POINTS)
         .map(|index| {
             let time = from + (to - from) * index as f64 / (TRACE_POINTS - 1) as f64;
-            [time, signal.value(time)]
+            [time, value(time)]
         })
         .collect::<Vec<_>>();
-    ui.small(role.pulse_quantity());
+    ui.small(quantity);
     line_plot(ui, &trace, SELECT, "s", &[], 110.0, "No pulse");
-    let ceiling = signal.frequency_ceiling_hz();
-    let points = relative_spectrum(signal);
+    let points = relative_spectrum(swing, train, ceiling);
     ui.small("Spectrum, relative to its peak");
     line_plot(
         ui,
@@ -597,14 +723,95 @@ mod tests {
         press(&context, &mut signal, &mut preview, "Fire now");
         assert!(matches!(signal, TimeSignal::Pulsed { start: 12.5, .. }));
         // "Shape" opens the window on this pulse, which then follows it.
-        assert!(!preview.open && preview.signal.is_none());
+        assert!(!preview.open && preview.shown.is_none());
         press(&context, &mut signal, &mut preview, "Shape");
         assert!(preview.open);
-        assert_eq!(preview.signal, Some((signal, SignalUse::Source)));
+        assert_eq!(
+            preview.shown,
+            Some(Previewed::Signal(signal, SignalUse::Source))
+        );
         press(&context, &mut signal, &mut preview, "Continuous");
         assert!(!signal.is_pulsed());
         assert!((signal.carrier()[1] - 6.0).abs() < 1.0e-12);
-        assert_eq!(preview.signal, Some((signal, SignalUse::Source)));
+        assert_eq!(
+            preview.shown,
+            Some(Previewed::Signal(signal, SignalUse::Source))
+        );
+    }
+
+    /// One pass of the gate editor over `gate`, with `events`.
+    fn gate_pass(
+        context: &egui::Context,
+        drive: TimeDriveValues,
+        gate: &mut Option<PulseTrain>,
+        preview: &mut PulsePreview,
+        events: Vec<egui::Event>,
+    ) -> Vec<LaidOut> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(480.0, 640.0),
+            )),
+            events,
+            ..egui::RawInput::default()
+        };
+        let output = context.run_ui(input, |ui| {
+            edit_drive_gate(ui, Some(drive), gate, 7.25, preview);
+        });
+        laid_out(&output)
+    }
+
+    /// "Pulsed" gates a drive with a burst three of its cycles long fired at
+    /// the time it is handed, "Fire now" moves the start there, "Shape"
+    /// shows the drive under its gate, and "Continuous" removes the gate.
+    #[test]
+    fn the_gate_editor_pulses_a_drive_and_fires_it() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.enable_accesskit();
+        let drive = TimeDriveValues::ParametricPump {
+            depth: 0.2,
+            frequency_hz: 2.0,
+            phase_radians: 0.0,
+        };
+        let mut gate = None;
+        let mut preview = PulsePreview::default();
+        let press = |context: &egui::Context,
+                     gate: &mut Option<PulseTrain>,
+                     preview: &mut PulsePreview,
+                     label: &str| {
+            let widgets = gate_pass(context, drive, gate, preview, vec![]);
+            let widget = widgets
+                .iter()
+                .find(|widget| widget.label == label)
+                .unwrap_or_else(|| panic!("no {label} among {:?}", widgets));
+            let events = click(widget);
+            gate_pass(context, drive, gate, preview, events);
+        };
+        press(&context, &mut gate, &mut preview, "Pulsed");
+        assert_eq!(
+            gate,
+            Some(PulseTrain {
+                envelope: PulseEnvelope::FlatTop {
+                    duration: 1.5,
+                    edge: 0.75,
+                },
+                start: 7.25,
+                repeat: 0.0,
+            })
+        );
+        gate.as_mut().unwrap().start = 1.0;
+        press(&context, &mut gate, &mut preview, "Fire now");
+        assert_eq!(gate.unwrap().start, 7.25);
+        press(&context, &mut gate, &mut preview, "Shape");
+        assert!(preview.open);
+        assert_eq!(
+            preview.shown,
+            Some(Previewed::Drive(Some(drive), gate.unwrap()))
+        );
+        press(&context, &mut gate, &mut preview, "Continuous");
+        assert_eq!(gate, None);
+        assert_eq!(preview.shown, None);
     }
 
     /// Paused, a pulse fires where the run stands. Running, it starts past
@@ -625,6 +832,45 @@ mod tests {
         state.wave_running = true;
         state.editor.document.presentation.simulation_speed = 2.0;
         assert!((state.pulse_fire_time() - (3.5 + 40.0 * 2.0e-3 + 0.5)).abs() < 1.0e-12);
+    }
+
+    /// The shape window's spectrum of a pulsed signal, or nothing for one
+    /// that is not a pulse.
+    fn spectrum_of(signal: TimeSignal) -> Vec<[f64; 2]> {
+        signal.train().map_or_else(Vec::new, |train| {
+            relative_spectrum(
+                |time| signal.value(time),
+                train,
+                signal.frequency_ceiling_hz(),
+            )
+        })
+    }
+
+    /// A gated pump's swing peaks at its carrier. At 0 Hz, a temporal slab,
+    /// it peaks at zero, and between pulses the factor is exactly one.
+    #[test]
+    fn the_shape_window_draws_a_gated_drives_swing() {
+        let train = burst(2.0, 0.5);
+        for (frequency_hz, expected) in [(2.0, 2.0), (0.0, 0.0)] {
+            let drive = TimeDriveValues::ParametricPump {
+                depth: 0.3,
+                frequency_hz,
+                phase_radians: 0.0,
+            };
+            let factor = gated_factor(drive, train).unwrap();
+            assert_eq!(factor(0.2), 1.0);
+            assert_eq!(factor(2.5), 1.0);
+            let points = relative_spectrum(
+                |time| factor(time) - 1.0,
+                train,
+                frequency_hz + train.envelope.bandwidth_hz(),
+            );
+            let peak = points.iter().max_by(|a, b| a[1].total_cmp(&b[1])).unwrap()[0];
+            assert!(
+                (peak - expected).abs() < 0.1,
+                "{frequency_hz} Hz peaks at {peak}"
+            );
+        }
     }
 
     /// A burst peaks at its carrier, a sinc is flat across its band and quiet
@@ -652,7 +898,7 @@ mod tests {
             1.0,
             0.0,
         );
-        assert!((peak(&relative_spectrum(burst)) - 3.0).abs() < 0.05);
+        assert!((peak(&spectrum_of(burst)) - 3.0).abs() < 0.05);
         let sinc = TimeSignal::pulsed(
             [0.0, 1.0, 5.0, 0.0],
             PulseEnvelope::Sinc {
@@ -662,7 +908,7 @@ mod tests {
             0.0,
             0.0,
         );
-        let points = relative_spectrum(sinc);
+        let points = spectrum_of(sinc);
         for frequency in [3.8, 4.5, 5.0, 5.5, 6.2] {
             assert!(at(&points, frequency) > 0.85, "{frequency} Hz");
         }
@@ -673,8 +919,8 @@ mod tests {
             0.0,
             0.0,
         );
-        assert_eq!(peak(&relative_spectrum(flash)), 0.0);
-        assert!(relative_spectrum(TimeSignal::ZERO).is_empty());
+        assert_eq!(peak(&spectrum_of(flash)), 0.0);
+        assert!(spectrum_of(TimeSignal::ZERO).is_empty());
     }
 
     #[test]

@@ -555,6 +555,7 @@ impl Playground {
                 }
             }
             let labels = material_editor_labels(physics);
+            let fire_at = self.pulse_fire_time();
             let sources = source_frequencies(
                 &self.editor.document.model.source,
                 &self.editor.document.model.draft,
@@ -671,6 +672,10 @@ impl Playground {
                                 formulas.errors,
                             ),
                         }
+                        let mut timing = law_editor::DriveTiming {
+                            fire_at,
+                            preview: &mut self.pulse_preview,
+                        };
                         law_editor::loss_rate_editor(
                             ui,
                             &mut material,
@@ -678,6 +683,7 @@ impl Playground {
                             row,
                             advanced,
                             &mut formulas,
+                            &mut timing,
                         );
                         if advanced {
                             law_editor::law_slots_editor(
@@ -686,6 +692,7 @@ impl Playground {
                                 row,
                                 &sources,
                                 &mut formulas,
+                                &mut timing,
                             );
                         } else {
                             preset_values(ui, &mut material, matched.as_ref(), Some(row), &sources);

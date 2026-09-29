@@ -73,6 +73,13 @@ pub(super) fn reciprocal_stiffness_editor(
     ));
 }
 
+/// What a drive's gate needs from the panel: when "Fire now" starts a pulse,
+/// and the shape window its "Shape" opens.
+pub(super) struct DriveTiming<'a> {
+    pub(super) fire_at: f64,
+    pub(super) preview: &'a mut PulsePreview,
+}
+
 /// The law slots of one row: field response, drive, Switch alternate and
 /// divide.
 pub(super) fn law_slots_editor(
@@ -81,6 +88,7 @@ pub(super) fn law_slots_editor(
     row: LawPresetRow,
     sources: &[(String, f64)],
     formulas: &mut FormulaEdits,
+    timing: &mut DriveTiming,
 ) {
     let id = material.id.0;
     let parameters = material.parameters.clone();
@@ -98,6 +106,7 @@ pub(super) fn law_slots_editor(
         sources,
         field_laws,
         formulas,
+        timing,
     );
 }
 
@@ -180,6 +189,7 @@ pub(super) fn loss_rate_editor(
     row: LawPresetRow,
     advanced: bool,
     formulas: &mut FormulaEdits,
+    timing: &mut DriveTiming,
 ) {
     let id = material.id.0;
     let base = if row == LawPresetRow::Stiffness {
@@ -289,13 +299,24 @@ pub(super) fn loss_rate_editor(
         ui.small("This field-dependent loss rate does not run; it is kept as authored.");
     }
     if advanced {
-        let before = found.law.drive.clone();
-        let mut drive = before.clone();
-        drive_editor(ui, id, base + 4, &mut drive, &parameters, &[], formulas);
-        if drive != before {
+        let before = (found.law.drive.clone(), found.law.gate);
+        let (mut drive, mut gate) = before.clone();
+        drive_editor(
+            ui,
+            id,
+            base + 4,
+            &mut drive,
+            &mut gate,
+            &parameters,
+            &[],
+            formulas,
+            timing,
+        );
+        if (drive.clone(), gate) != before {
             adopt_legacy_damping(material, physics);
             if let Some(found) = row_channel(material, physics, row) {
                 found.law.drive = drive;
+                found.law.gate = gate;
             }
         }
     }
@@ -674,6 +695,7 @@ fn coefficient_law_editor(
     sources: &[(String, f64)],
     field_laws: bool,
     formulas: &mut FormulaEdits,
+    timing: &mut DriveTiming,
 ) {
     let kind = response_kind(&law.field);
     let mut chosen = kind;
@@ -788,9 +810,11 @@ fn coefficient_law_editor(
         id,
         base + 4,
         &mut law.drive,
+        &mut law.gate,
         parameters,
         sources,
         formulas,
+        timing,
     );
     let mut switchable = law.alternate.is_some();
     if ui
@@ -827,14 +851,19 @@ const RELATIVE_CHI_HOVER: &str = "Relative: the coefficient is c₀(1 + χ|u|²)
      absolute cubic coefficient of the expanded map c₀u + a₃|u|²u is a₃ = c₀χ, a \
      different quantity with the base coefficient's own spatial dependence.";
 
+/// A drive and, below its numbers, its timing. A drive set to none takes
+/// its gate with it.
+#[allow(clippy::too_many_arguments)]
 fn drive_editor(
     ui: &mut egui::Ui,
     id: u64,
     base: u8,
     drive: &mut TimeDrive,
+    gate: &mut Option<PulseTrain>,
     parameters: &[MaterialParameter],
     sources: &[(String, f64)],
     formulas: &mut FormulaEdits,
+    timing: &mut DriveTiming,
 ) {
     let kind = drive_kind(drive);
     let mut chosen = kind;
@@ -945,6 +974,14 @@ fn drive_editor(
             row(4, "Direction", angle_radians, -1.0e6);
         }
     }
+    if drive.is_none() {
+        *gate = None;
+        return;
+    }
+    let values = drive.evaluate(parameters).ok();
+    ui.push_id(("drive-gate", id, base), |ui| {
+        super::signals::edit_drive_gate(ui, values, gate, timing.fire_at, timing.preview);
+    });
 }
 
 /// One row's effective law, by its names or with every expression evaluated
@@ -1048,10 +1085,15 @@ mod tests {
         sources: &[(String, f64)],
         formulas: &mut FormulaEdits,
     ) {
+        let mut preview = PulsePreview::default();
+        let mut timing = DriveTiming {
+            fire_at: 0.0,
+            preview: &mut preview,
+        };
         for row in [LawPresetRow::Mass, LawPresetRow::Stiffness] {
-            loss_rate_editor(ui, material, physics, row, advanced, formulas);
+            loss_rate_editor(ui, material, physics, row, advanced, formulas, &mut timing);
             if advanced {
-                law_slots_editor(ui, material, row, sources, formulas);
+                law_slots_editor(ui, material, row, sources, formulas, &mut timing);
             }
         }
     }
@@ -1115,6 +1157,16 @@ mod tests {
             wavenumber: ScalarField::constant(3.0),
             angle_radians: ScalarField::constant(0.2),
         };
+        // A gate on a drive whose frequency is a formula, which the gate's
+        // own editor cannot evaluate, and one on a loss drive.
+        material.mass_law.gate = Some(PulseTrain {
+            envelope: PulseEnvelope::Sinc {
+                bandwidth_hz: 4.0,
+                lobes: 5,
+            },
+            start: 1.3,
+            repeat: 2.5,
+        });
         material.stiffness_law.field = FieldLaw::Saturable {
             chi: ScalarField::constant(6.0),
             saturation: ScalarField::formula("0.2 + 0.01 * x").unwrap(),
@@ -1131,7 +1183,11 @@ mod tests {
                     frequency_hz: ScalarField::constant(1.0),
                     phase_radians: ScalarField::constant(0.0),
                 },
-                gate: None,
+                gate: Some(PulseTrain {
+                    envelope: PulseEnvelope::Gaussian { width: 0.2 },
+                    start: -0.5,
+                    repeat: 0.0,
+                }),
             },
         });
         let before = material.clone();
