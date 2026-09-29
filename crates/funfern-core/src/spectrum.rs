@@ -141,6 +141,13 @@ fn one_sided(
 /// transient reads its amplitude averaged over the record.
 pub fn amplitude_spectrum(samples: &[f64], interval: f64) -> Result<Spectrum, SpectrumError> {
     validate(samples, interval)?;
+    let (tapered, gain) = hann_tapered(samples);
+    one_sided(tapered.into_iter(), interval, true, 1.0 / gain)
+}
+
+/// `samples` as `amplitude_spectrum` transforms them: the Hann window's own
+/// mean taken out and the window applied; and the window's sum.
+fn hann_tapered(samples: &[f64]) -> (Vec<f64>, f64) {
     let count = samples.len();
     // Sampled between its zeros, so the window's sum is exactly half the
     // record's length whatever that length.
@@ -158,15 +165,12 @@ pub fn amplitude_spectrum(samples: &[f64], interval: f64) -> Result<Spectrum, Sp
         .map(|(index, value)| value * window(index))
         .sum::<f64>()
         / gain;
-    one_sided(
-        samples
-            .iter()
-            .enumerate()
-            .map(|(index, value)| (value - mean) * window(index)),
-        interval,
-        true,
-        1.0 / gain,
-    )
+    let tapered = samples
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (value - mean) * window(index))
+        .collect();
+    (tapered, gain)
 }
 
 /// The magnitude of the Fourier transform of a transient sampled every
@@ -248,6 +252,89 @@ pub fn transfer_spectrum(
     })
 }
 
+/// A transfer averaged over many windows, as a two-channel analyser takes
+/// one: the sum of `Y X̄` over the sum of `|X|²`, every window Hann-tapered
+/// as `amplitude_spectrum` tapers it. Two records a delay apart hold
+/// different parts of a signal in any one window, and leak differently, so a
+/// single window's ratio wobbles as the window slides; summed over windows,
+/// what differs averages out. A window short beside the delay still reads
+/// low, by the window's overlap with itself shifted by the delay: 6% where
+/// the delay is a tenth of the window, 32% where it is a quarter.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TransferAverage {
+    length: usize,
+    interval: f64,
+    cross: Vec<[f64; 2]>,
+    power: Vec<f64>,
+    windows: usize,
+}
+
+impl TransferAverage {
+    /// Adds a window of `reference` and `response`, two records of one
+    /// length sampled together every `interval` seconds. A window of another
+    /// length or spacing than those summed is refused: its frequencies fall
+    /// elsewhere.
+    pub fn add(
+        &mut self,
+        reference: &[f64],
+        response: &[f64],
+        interval: f64,
+    ) -> Result<(), SpectrumError> {
+        validate(reference, interval)?;
+        validate(response, interval)?;
+        if reference.len() != response.len()
+            || (self.windows > 0 && (reference.len() != self.length || interval != self.interval))
+        {
+            return Err(SpectrumError::LengthMismatch);
+        }
+        let (reference_re, reference_im) = padded_transform(hann_tapered(reference).0.into_iter())?;
+        let (response_re, response_im) = padded_transform(hann_tapered(response).0.into_iter())?;
+        let bins = reference_re.len() / 2 + 1;
+        if self.windows == 0 {
+            self.length = reference.len();
+            self.interval = interval;
+            self.cross = vec![[0.0; 2]; bins];
+            self.power = vec![0.0; bins];
+        }
+        for k in 0..bins {
+            let (x_re, x_im) = (reference_re[k], reference_im[k]);
+            let (y_re, y_im) = (response_re[k], response_im[k]);
+            self.cross[k][0] += y_re * x_re + y_im * x_im;
+            self.cross[k][1] += y_im * x_re - y_re * x_im;
+            self.power[k] += x_re * x_re + x_im * x_im;
+        }
+        self.windows += 1;
+        Ok(())
+    }
+
+    /// How many windows the average holds.
+    pub fn windows(&self) -> usize {
+        self.windows
+    }
+
+    /// The averaged transfer, or `None` before any window. A frequency the
+    /// reference's summed power holds under `TRANSFER_FLOOR` of its
+    /// strongest, in amplitude, is left out.
+    pub fn transfer(&self) -> Option<TransferSpectrum> {
+        if self.windows == 0 {
+            return None;
+        }
+        let size = 2 * (self.power.len() - 1);
+        let peak = self.power.iter().copied().fold(0.0, f64::max);
+        let floor = TRANSFER_FLOOR * TRANSFER_FLOOR * peak;
+        let ratios = self
+            .power
+            .iter()
+            .zip(&self.cross)
+            .map(|(power, [re, im])| (*power > floor).then(|| [re / power, im / power]))
+            .collect();
+        Some(TransferSpectrum {
+            frequency_step_hz: 1.0 / (size as f64 * self.interval),
+            ratios,
+        })
+    }
+}
+
 /// A record of `(time, value)` pairs, times increasing, sampled every
 /// `interval` seconds from its first time and linearly between the pairs.
 /// Probes record at a stride of whole steps, and a handoff that changes the
@@ -260,17 +347,19 @@ pub fn resample_evenly(
     let (Some(first), Some(last)) = (times.first(), times.last()) else {
         return Err(SpectrumError::TooFewSamples);
     };
-    resample_between(times, values, *first, *last, interval)
+    let count = ((last - first) / interval).floor() as usize + 1;
+    resample_from(times, values, *first, interval, count)
 }
 
-/// `resample_evenly` from `from` to `to` only, both within the record, so
-/// that two records resampled over the span they share come out on one grid.
-pub fn resample_between(
+/// `count` samples of the record every `interval` seconds from `from`, all
+/// within it, so that records resampled from one time at one spacing come
+/// out on one grid, sample for sample.
+pub fn resample_from(
     times: &[f64],
     values: &[f64],
     from: f64,
-    to: f64,
     interval: f64,
+    count: usize,
 ) -> Result<Vec<f64>, SpectrumError> {
     if times.len() != values.len() {
         return Err(SpectrumError::LengthMismatch);
@@ -280,14 +369,17 @@ pub fn resample_between(
     {
         return Err(SpectrumError::NonFinite);
     }
-    if !from.is_finite() || !to.is_finite() {
+    if !from.is_finite() {
         return Err(SpectrumError::NonFinite);
     }
-    if from < times[0] || to > times[times.len() - 1] || to < from {
+    // A span past the record by under a millionth of a sample is round-off
+    // in where it was asked to start or end, and taken as meeting it.
+    let slack = 1.0e-6 * interval;
+    let to = from + (count.max(1) - 1) as f64 * interval;
+    if from < times[0] - slack || to > times[times.len() - 1] + slack {
         return Err(SpectrumError::OutsideRecord);
     }
     let first = from;
-    let count = ((to - first) / interval).floor() as usize + 1;
     let mut resampled = Vec::with_capacity(count);
     let mut segment = 0;
     for index in 0..count {
@@ -510,9 +602,9 @@ mod tests {
         let early = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5];
         let late = [0.25, 0.35, 0.45, 0.55, 0.65];
         let line = |time: f64| 3.0 * time + 1.0;
-        let (from, to) = (late[0], early[early.len() - 1]);
-        let first = resample_between(&early, &early.map(line), from, to, 0.05).unwrap();
-        let second = resample_between(&late, &late.map(line), from, to, 0.05).unwrap();
+        let from = late[0];
+        let first = resample_from(&early, &early.map(line), from, 0.05, 6).unwrap();
+        let second = resample_from(&late, &late.map(line), from, 0.05, 6).unwrap();
         assert_eq!(first.len(), 6);
         assert_eq!(first.len(), second.len());
         for (index, (a, b)) in first.iter().zip(&second).enumerate() {
@@ -520,13 +612,123 @@ mod tests {
             assert!((a - expected).abs() < 1.0e-12 && (b - expected).abs() < 1.0e-12);
         }
         assert_eq!(
-            resample_between(&late, &late.map(line), 0.2, to, 0.05),
+            resample_from(&late, &late.map(line), 0.2, 0.05, 6),
             Err(SpectrumError::OutsideRecord)
         );
         assert_eq!(
-            resample_between(&early, &early.map(line), from, 0.6, 0.05),
+            resample_from(&early, &early.map(line), from, 0.05, 7),
             Err(SpectrumError::OutsideRecord)
         );
+        // Ending a hair past the record, as a window ending on its last
+        // sample can, is round-off.
+        assert!(resample_from(&early, &early.map(line), 0.25 + 1.0e-15, 0.05, 6).is_ok());
+    }
+
+    /// Hann bursts on a 3 Hz carrier, a second long and back to back.
+    fn bursts(time: f64) -> f64 {
+        let phase = time.rem_euclid(1.0);
+        (std::f64::consts::PI * phase).sin().powi(2) * (TAU * 3.0 * time).sin()
+    }
+
+    /// `count` samples every `interval` from `from` of `signal`.
+    fn sampled(signal: impl Fn(f64) -> f64, from: f64, interval: f64, count: usize) -> Vec<f64> {
+        (0..count)
+            .map(|index| signal(from + index as f64 * interval))
+            .collect()
+    }
+
+    /// The averaged gain at the frequency nearest `frequency`.
+    fn gain_at(transfer: &TransferSpectrum, frequency: f64) -> f64 {
+        let index = (frequency / transfer.frequency_step_hz).round() as usize;
+        transfer.magnitude(index).unwrap()
+    }
+
+    /// Through a window a burst long, a train of bursts and a copy of it
+    /// 0.3 s late read a different gain in each window, which the window's
+    /// position decides. Averaged over windows a quarter second apart it
+    /// settles on a gain that holds from one average to the next: the copy's
+    /// scale times the Hann window's overlap with itself shifted by the delay,
+    /// `R(u) = [(1 − u)(2 + cos 2πu) + 3 sin(2πu)/2π] / 3` at `u` the delay
+    /// over the window, 0.68 here. A window ten bursts long, which the delay
+    /// barely touches, reads the copy's own scale.
+    #[test]
+    fn an_average_of_windows_settles_where_one_window_wobbles() {
+        let interval = 1.0 / 120.0;
+        let count = 150;
+        let response = |time: f64| 0.4 * bursts(time - 0.3);
+        let window = |from: f64| {
+            (
+                sampled(bursts, from, interval, count),
+                sampled(response, from, interval, count),
+            )
+        };
+        let mut single = Vec::new();
+        let mut averages = [TransferAverage::default(), TransferAverage::default()];
+        for step in 0..80 {
+            let from = 0.25 * f64::from(step);
+            let (reference, response) = window(from);
+            let mut one = TransferAverage::default();
+            one.add(&reference, &response, interval).unwrap();
+            single.push(gain_at(&one.transfer().unwrap(), 2.0));
+            averages[usize::from(step >= 40)]
+                .add(&reference, &response, interval)
+                .unwrap();
+        }
+        let spread = single.iter().copied().fold(0.0, f64::max)
+            - single.iter().copied().fold(f64::MAX, f64::min);
+        assert!(spread > 0.1, "single windows spread {spread:.3}");
+        let [first, second] = averages.map(|average| gain_at(&average.transfer().unwrap(), 2.0));
+        assert!((first - second).abs() < 1.0e-3, "{first} then {second}");
+        let u = 0.3 / (count as f64 * interval);
+        let overlap = ((1.0 - u) * (2.0 + (TAU * u).cos()) + 3.0 * (TAU * u).sin() / TAU) / 3.0;
+        // 0.2738 against 0.2726 on the first run.
+        assert!(
+            (first - 0.4 * overlap).abs() < 3.0e-3,
+            "{first} against {}",
+            0.4 * overlap
+        );
+        let mut long = TransferAverage::default();
+        let (reference, response) = (
+            sampled(bursts, 0.0, interval, 1200),
+            sampled(response, 0.0, interval, 1200),
+        );
+        long.add(&reference, &response, interval).unwrap();
+        for line in [2.0, 3.0, 4.0] {
+            let gain = gain_at(&long.transfer().unwrap(), line);
+            assert!((gain - 0.4).abs() < 1.0e-3, "{line} Hz reads {gain}");
+        }
+    }
+
+    /// A tone reads its gain from one window, a window of another length or
+    /// spacing is refused, and an empty average has no transfer.
+    #[test]
+    fn a_tone_reads_its_gain_and_an_average_keeps_its_grid() {
+        let interval = 1.0e-2;
+        let tone = |time: f64| (TAU * 3.0 * time).sin();
+        let late = |time: f64| 0.7 * tone(time - 0.05);
+        let mut average = TransferAverage::default();
+        assert!(average.transfer().is_none());
+        average
+            .add(
+                &sampled(tone, 0.0, interval, 400),
+                &sampled(late, 0.0, interval, 400),
+                interval,
+            )
+            .unwrap();
+        assert_eq!(average.windows(), 1);
+        let transfer = average.transfer().unwrap();
+        // 6.4e-6 off, the window's leakage of the tone's negative frequency.
+        assert!((gain_at(&transfer, 3.0) - 0.7).abs() < 1.0e-4);
+        assert!(transfer.ratios.iter().any(Option::is_none));
+        assert_eq!(
+            average.add(&[0.0; 300], &[0.0; 300], interval),
+            Err(SpectrumError::LengthMismatch)
+        );
+        assert_eq!(
+            average.add(&[0.0; 400], &[0.0; 400], 2.0e-2),
+            Err(SpectrumError::LengthMismatch)
+        );
+        assert_eq!(average.windows(), 1);
     }
 
     /// Records a handoff left at two spacings come out at one, on the line

@@ -957,11 +957,14 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
 - [x] A transfer spectrum between two probes: one broadband pulse (a sinc is
   flat across its band) measures what a frequency sweep does now. Done on
-  2026-09-29 (`docs/engineering-log.md`): a point readout's **Transfer from**
-  divides its field by another point probe's or by what a source imposes, and
-  draws the ratio as one more plot. Unwindowed, and measured on an empty
-  channel: flat at one between probes and at `(w/2c) sinc(πfw/c)` from a
-  launcher. The scenes it opens are still to build.
+  2026-09-29 and 30 (`docs/engineering-log.md`): a point readout's **Transfer
+  from** divides its field by another point probe's or by what a source
+  imposes, averaged over Hann-tapered segments (Welch) of its own length, 8 s
+  by default, and draws the ratio as one more plot, zoomed and panned with the
+  spectra. Measured on the CPU: an empty channel reads flat at one between
+  probes and at `(w/2c) sinc(πfw/c)` from a launcher, and in an open box the
+  readout matches a whole pulse's unwindowed ratio to 1.5% from 4 s segments
+  up. The scenes it opens are still to build.
 
 - [ ] A time-of-flight or arrival readout, and a probe's envelope trace (the
   magnitude of its analytic signal), for group delay. Waiting on the same kind

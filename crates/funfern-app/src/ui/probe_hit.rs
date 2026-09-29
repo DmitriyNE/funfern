@@ -357,10 +357,27 @@ impl Playground {
                         .all(|span| target.spans.contains(&span.id))
             })
     }
+    /// Empties probe `id`'s traces and what its readout drew from them. Every
+    /// readback carries the device's whole ring, and a trace takes only what
+    /// is newer than its last time, so a trace simply dropped took the whole
+    /// ring back at the next readback and Clear showed nothing. Each trace
+    /// takes from now on instead, which also frees one stranded ahead of a
+    /// clock that went back.
     pub(super) fn clear_probe_trace(&mut self, id: ProbeId) {
-        self.probe_traces.remove(&id);
-        self.curve_probe_traces.remove(&id);
-        self.area_probe_traces.remove(&id);
+        let now = self.simulated_time();
+        let point = self.probe_traces.entry(id).or_default();
+        point.samples.clear();
+        point.last_time = now;
+        let curve = self.curve_probe_traces.entry(id).or_default();
+        curve.records.clear();
+        curve.last_time = now;
+        let area = self.area_probe_traces.entry(id).or_default();
+        area.records.clear();
+        area.last_time = now;
+        if let Some(view) = self.probe_views.get_mut(&id) {
+            view.spectra = Default::default();
+            view.transfer = Default::default();
+        }
     }
     pub(super) fn probe_time_window(
         samples: &[PointProbeRecord],

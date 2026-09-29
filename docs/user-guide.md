@@ -368,12 +368,20 @@ names or with every expression evaluated at the material frame's origin. Each ro
   to a chosen frequency. **Transfer from** divides the field, frequency by
   frequency, by another point probe's field or by what a source imposes: the
   field rate a point or volume source drives, a Neumann wall's flux, a Dirichlet
-  wall's field. One broadband pulse, a sinc flat across its band, then measures
-  what a sweep of harmonic runs would; a ratio of 1, or 0 dB, means that
-  frequency passes whole. Neither record is windowed, so frame the whole of both
-  pulses. Frequencies the reference barely holds are left out, and from a source
-  the transfer counts only from when its signal last changed, since what came
-  before answered another signal. Sampling follows
+  wall's field. A ratio of 1, or 0 dB, means that frequency passes whole; one
+  broadband pulse, a sinc flat across its band, measures what a sweep of
+  harmonic runs would. The transfer is averaged over segments of both records,
+  **Segment** seconds long whatever span the plots show (8 s unless changed), as
+  a two-channel analyser averages: make a segment many times the delay between
+  the two records, or the transfer reads low. Frequencies the reference barely
+  holds are left out. **Reset** starts the average again, and so does any
+  change to a source of the running scene. The wheel zooms a spectrum's or the
+  transfer's frequencies about the pointer and a drag pans them, the readout's
+  spectra and transfer together; zoomed all the way out they show everything
+  again, and **Fit** zooms to the band the transfer has values in. From a source
+  the transfer includes how that source radiates: a point source's field falls
+  off towards short waves by its own profile's width, so only a transfer
+  between two probes reads flat where nothing stands between them. Sampling follows
   solver time rather than browser frame rate. Definitions are saved and undoable;
   recorded traces are transient. What each readout shows (its plots, time span,
   mean window and waterfall gain, and the far field's plots) is saved with the

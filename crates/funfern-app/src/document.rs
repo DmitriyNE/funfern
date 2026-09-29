@@ -520,6 +520,10 @@ impl LineProbeRepresentation {
     }
 }
 
+/// Seconds of each segment a transfer averages unless a readout says
+/// otherwise: eight seconds keep a delay of a third of a second to 1%.
+pub const DEFAULT_TRANSFER_SEGMENT: f64 = 8.0;
+
 /// What a point probe's transfer readout divides its field by: another point
 /// probe's field, or what a source imposes as the solver runs it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -584,10 +588,14 @@ pub struct ProbeReadout {
     pub area_mean_field_spectrum: bool,
     pub spectrum_decibels: bool,
     pub spectrum_max_hz: f64,
-    /// A point probe's field over its reference's, frequency by frequency,
-    /// over the span in view: the fraction of each frequency that reaches it.
-    /// Drawn in decibels or linearly as the spectra are.
+    /// A point probe's field over its reference's, frequency by frequency:
+    /// the fraction of each frequency that reaches it. Drawn in decibels or
+    /// linearly as the spectra are.
     pub transfer_from: Option<TransferReference>,
+    /// Seconds of each segment a transfer averages, whatever span the plots
+    /// show. A segment short beside the delay between the two records reads
+    /// low, so it should outlast the delay and any ringing many times over.
+    pub transfer_segment: f64,
 }
 
 impl Default for ProbeReadout {
@@ -628,6 +636,7 @@ impl Default for ProbeReadout {
             spectrum_decibels: false,
             spectrum_max_hz: 0.0,
             transfer_from: None,
+            transfer_segment: DEFAULT_TRANSFER_SEGMENT,
         }
     }
 }
@@ -681,6 +690,8 @@ impl ProbeReadout {
             && self.waterfall_gain > 0.0
             && self.spectrum_max_hz.is_finite()
             && self.spectrum_max_hz >= 0.0
+            && self.transfer_segment.is_finite()
+            && self.transfer_segment > 0.0
     }
 }
 

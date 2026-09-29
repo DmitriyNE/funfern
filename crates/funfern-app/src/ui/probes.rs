@@ -506,11 +506,6 @@ impl Playground {
     /// look like it had frozen the probes until the traces were cleared by hand.
     pub(super) fn restart_probe_traces(&mut self) {
         self.probe_traces.clear();
-        // Every signal is counted from zero, so one kept across the restart
-        // has been in force since it.
-        for tracked in self.transfer_signals.values_mut() {
-            tracked.since = 0.0;
-        }
         self.curve_probe_traces.clear();
         self.area_probe_traces.clear();
         self.far_field_trace = FarFieldTrace::default();
@@ -823,6 +818,61 @@ mod tests {
             state.simulated_time(),
             resumed + 2.0 * f64::from(new_step)
         ));
+    }
+
+    /// Clear takes a probe's trace from now on: the ring the next readback
+    /// carries again is left out, a newer sample comes in, and a trace
+    /// stranded ahead of a clock that went back takes the clock's samples
+    /// again.
+    #[test]
+    fn clear_keeps_what_was_recorded_out() {
+        let sample = |time: f64| PointProbeRecord {
+            probe_id: 1,
+            time,
+            ..PointProbeRecord::default()
+        };
+        let mut state = Playground::default();
+        let token = TopologyToken {
+            document_revision: 1,
+            topology_revision: 1,
+            mesh_generation: 1,
+        };
+        state.probe_upload = Some(probe_upload(token, 1, 1));
+        let samples = |state: &Playground| -> Vec<f64> {
+            state
+                .probe_traces
+                .get(&ProbeId(1))
+                .map(|trace| trace.samples.iter().map(|sample| sample.time).collect())
+                .unwrap_or_default()
+        };
+        let mut readbacks = 0;
+        let mut ingest = |state: &mut Playground, times: &[f64]| {
+            readbacks += 1;
+            state.ingest_probes(&ProbeDisplay {
+                generation: 1,
+                revision: 1,
+                records: times.iter().map(|time| sample(*time)).collect(),
+                readbacks,
+            });
+        };
+        ingest(&mut state, &[4.5, 5.0]);
+        assert_eq!(samples(&state), vec![4.5, 5.0]);
+        state.sim_time_offset = 5.0;
+        state.clear_probe_trace(ProbeId(1));
+        ingest(&mut state, &[4.5, 5.0]);
+        assert_eq!(samples(&state), Vec::<f64>::new());
+        ingest(&mut state, &[4.5, 5.0, 5.25]);
+        assert_eq!(samples(&state), vec![5.25]);
+        assert!(state.curve_probe_traces[&ProbeId(1)].records.is_empty());
+        assert_eq!(state.area_probe_traces[&ProbeId(1)].last_time, 5.0);
+
+        // The clock went back without the traces restarting with it.
+        state.sim_time_offset = 0.1;
+        ingest(&mut state, &[0.25]);
+        assert_eq!(samples(&state), vec![5.25]);
+        state.clear_probe_trace(ProbeId(1));
+        ingest(&mut state, &[0.25]);
+        assert_eq!(samples(&state), vec![0.25]);
     }
 
     #[test]

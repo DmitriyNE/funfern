@@ -1,5 +1,6 @@
 //! Per-probe presentation state: what each readout is showing, over what time
 //! span, and the sample rings behind it.
+use super::transfer::TransferView;
 use super::{GOLD, RED, SELECT, TEAL, primary_field_label, transverse_field_magnitude_label};
 use crate::wave_gpu::{AreaProbeRecord, CurveProbeRecord, FarFieldRecord, PointProbeRecord};
 use bevy::platform::time::Instant;
@@ -66,6 +67,11 @@ pub(super) struct ProbeViewState {
     pub(super) end_time: f64,
     pub(super) readout: ProbeReadout,
     pub(super) spectra: SpectrumCache,
+    /// A point readout's transfer, averaged over the windows it has shown.
+    pub(super) transfer: TransferView,
+    /// The frequencies the readout's spectra and transfer show, all of them
+    /// unless zoomed, shared as their traces share a time window.
+    pub(super) band: Option<[f64; 2]>,
 }
 
 impl ProbeViewState {
@@ -75,6 +81,8 @@ impl ProbeViewState {
             end_time: 0.0,
             readout,
             spectra: SpectrumCache::default(),
+            transfer: TransferView::default(),
+            band: None,
         }
     }
 }
@@ -92,7 +100,7 @@ pub(super) struct SpectrumKey {
     pub(super) top_hz: f64,
     pub(super) span: f64,
     pub(super) end_time: Option<f64>,
-    /// A transfer's reference, and when a source's signal came into force.
+    /// What a transfer divides by, over what segment.
     pub(super) transfer: Option<(TransferReference, f64)>,
 }
 
@@ -121,6 +129,10 @@ impl SpectrumCache {
         }
     }
 }
+
+/// How far under its loudest a readout's plot in decibels reaches, where it
+/// floors: 100 dB, an amplitude a hundred thousand times smaller.
+pub(super) const DECIBEL_RANGE: f64 = 100.0;
 
 /// The amplitude spectrum of `value` over the records from `from` to `to`, as
 /// plot points up to `top_hz` or to half the sample rate, whichever is lower,
@@ -162,7 +174,7 @@ pub(super) fn trace_spectrum(
         nyquist
     };
     let peak = spectrum.magnitudes.iter().copied().fold(0.0, f64::max);
-    let floor = peak * 1.0e-5;
+    let floor = peak * 10.0_f64.powf(-DECIBEL_RANGE / 20.0);
     (0..spectrum.magnitudes.len())
         .map(|index| (spectrum.frequency_hz(index), spectrum.magnitudes[index]))
         .take_while(|(frequency, _)| *frequency <= top)

@@ -84,15 +84,27 @@ none. The records are resampled at their median spacing, since a handoff that
 changes the step changes it, Hann-windowed and transformed by the core's radix-2
 FFT, so a steady tone reads its amplitude. A live readout redraws its spectra four times a second, only
 when new samples have come. A point readout's transfer divides its field by a
-reference over the same span, frequency by frequency, and leaves out what the
-reference holds under 1% of its strongest. The reference is another point probe,
-both records resampled over the span they share, or what a source imposes,
-evaluated at the probe's own sample times as the solver runs it: a harmonic
-source or Neumann signal integrated from `SOURCE_ANCHOR_TIME`, a pulse or a
-pinned field as authored. Neither record is windowed, since a window weights
-each moment differently and would scale a late response against an early
-reference. The app notes when each source's signal last changed in the running
-generation, and a transfer from it counts only from then. Probe timestamps come
+reference, frequency by frequency, averaged as a two-channel analyser averages
+(Welch): each live refresh takes one more segment of both records, of the
+readout's own segment length rather than the span in view, Hann-tapered as the
+spectra are, into the core's `TransferAverage`, which divides the summed
+cross spectrum `Σ Y X̄` by the reference's summed power `Σ |X|²` and leaves
+out what the reference holds under 1% of its strongest. A single window's ratio
+wobbles as it slides, since two records a delay apart hold different parts of
+a signal and leak differently; the sum settles, reading low only by the
+window's overlap with itself shifted by the delay, which a segment many times
+the delay keeps small. The reference is another point probe, resampled on the
+response's own timing, or what a source imposes, evaluated on it as the solver
+runs it: a harmonic source or Neumann signal integrated from
+`SOURCE_ANCHOR_TIME`, a pulse or a pinned field as authored. The average is
+per readout view, not saved, and starts over at its Reset, for another reference
+or segment, when any source of the running scene changes, and when a live
+view's time goes back. The core's unwindowed `transfer_spectrum` stays for the
+CPU claims, which measure whole lone pulses exactly. A readout's spectra and
+transfer share one frequency band the user zooms and pans, as its traces share
+a time window. Clear empties a probe's traces from the current time on: every
+readback carries the device's whole ring, which a trace takes only where it is
+newer than its last time. Probe timestamps come
 directly from the solver's transferred absolute clock. The host handoff offset is
 only used to map the continuous accepted-step total across timestep changes; a
 fresh install establishes a new rate baseline instead of treating its absolute

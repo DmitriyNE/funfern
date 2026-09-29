@@ -6,9 +6,9 @@
 //! one file.
 
 use crate::document::{
-    AdaptationSettings, LineProbeQuantity, LineProbeRepresentation, MAX_PROBES,
-    MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty, PresentationSettings, ProbeId,
-    ProbeReadout, ProbeReadouts, ProbeSamplingPreset, TransferReference, VectorOverlay,
+    AdaptationSettings, DEFAULT_TRANSFER_SEGMENT, LineProbeQuantity, LineProbeRepresentation,
+    MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty, PresentationSettings,
+    ProbeId, ProbeReadout, ProbeReadouts, ProbeSamplingPreset, TransferReference, VectorOverlay,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -303,7 +303,7 @@ struct StoredProbeReadout {
     spectrum: StoredSpectrumSettings,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredSpectrumSettings {
     decibels: bool,
@@ -312,6 +312,33 @@ struct StoredSpectrumSettings {
     /// readouts had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transfer_from: Option<StoredTransferReference>,
+    /// Absent where it is the default, as in every file from before
+    /// transfers had it.
+    #[serde(
+        default = "default_transfer_segment",
+        skip_serializing_if = "is_default_transfer_segment"
+    )]
+    transfer_segment: f64,
+}
+
+/// What a file from before readouts had spectra reads.
+impl Default for StoredSpectrumSettings {
+    fn default() -> Self {
+        Self {
+            decibels: false,
+            max_hz: 0.0,
+            transfer_from: None,
+            transfer_segment: DEFAULT_TRANSFER_SEGMENT,
+        }
+    }
+}
+
+fn default_transfer_segment() -> f64 {
+    DEFAULT_TRANSFER_SEGMENT
+}
+
+fn is_default_transfer_segment(segment: &f64) -> bool {
+    *segment == DEFAULT_TRANSFER_SEGMENT
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -554,6 +581,7 @@ fn encode_readout(readout: &ProbeReadout) -> StoredProbeReadout {
             decibels: readout.spectrum_decibels,
             max_hz: readout.spectrum_max_hz,
             transfer_from: readout.transfer_from.map(encode_transfer_reference),
+            transfer_segment: readout.transfer_segment,
         },
     }
 }
@@ -643,6 +671,7 @@ fn decode_readout(stored: StoredProbeReadout) -> ProbeReadout {
         spectrum_decibels: stored.spectrum.decibels,
         spectrum_max_hz: stored.spectrum.max_hz,
         transfer_from: stored.spectrum.transfer_from.map(decode_transfer_reference),
+        transfer_segment: stored.spectrum.transfer_segment,
     };
     for plot in stored.line {
         readout = readout.with_line_plot(
@@ -3364,9 +3393,10 @@ mod tests {
     }
 
     /// A point probe's transfer travels with its readout, from each kind of
-    /// reference. A transfer from a probe deleted this session, or from the
-    /// probe itself, is held but not written; a file naming what its scene
-    /// does not have is refused; and a readout with none writes no key.
+    /// reference, with its segment length where that is not the default. A
+    /// transfer from a probe deleted this session, or from the probe itself,
+    /// is held but not written; a file naming what its scene does not have is
+    /// refused; and a readout with none writes no key.
     #[test]
     fn a_readouts_transfer_round_trips_and_names_only_what_the_scene_holds() {
         let (mut document, _) = readout_scene();
@@ -3402,6 +3432,17 @@ mod tests {
             let decoded = parse_document(save(&document).unwrap().as_bytes()).unwrap();
             assert_eq!(decoded.readouts, document.readouts, "{reference:?}");
         }
+        let pretty = save(&document).unwrap();
+        assert!(!pretty.contains("transfer_segment"), "{pretty}");
+        document.readouts.set_probe(
+            here,
+            ProbeReadout {
+                transfer_segment: 3.5,
+                ..with(TransferReference::Probe(there))
+            },
+        );
+        let decoded = parse_document(save(&document).unwrap().as_bytes()).unwrap();
+        assert_eq!(decoded.readouts.probe(here).transfer_segment, 3.5);
         for gone in [ProbeId(92), here] {
             document
                 .readouts

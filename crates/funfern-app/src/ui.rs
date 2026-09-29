@@ -2304,7 +2304,6 @@ pub fn frame(
         &mut commands,
         time.delta_secs_f64(),
     );
-    state.track_transfer_signals();
     refresh_canonical_wave_display(
         state.runtime.active(),
         &canonical_display,

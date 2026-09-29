@@ -502,12 +502,13 @@ fn shape_plots(
         })
         .collect::<Vec<_>>();
     ui.small(quantity);
-    line_plot(ui, &trace, SELECT, "s", &[], 110.0, "No pulse");
+    line_plot(ui, &trace, None, SELECT, "s", &[], 110.0, "No pulse");
     let points = relative_spectrum(swing, train, ceiling);
     ui.small("Spectrum, relative to its peak");
     line_plot(
         ui,
         &points,
+        None,
         TEAL,
         "Hz",
         &[PlotMarker {

@@ -9,7 +9,7 @@ use bevy_egui::egui::{self, Color32, Rect, Stroke};
 use funfern_app::topology_editor::TopologyProbeTarget;
 use funfern_core::*;
 
-use super::line_plot::line_plot;
+use super::line_plot::zoomable_line_plot;
 use super::*;
 
 impl Playground {
@@ -42,7 +42,16 @@ impl Playground {
             "{label} spectrum · {}",
             if decibels { "dB re 1" } else { "amplitude" }
         ));
-        line_plot(ui, points, color, "Hz", &[], 92.0, "Waiting for samples");
+        zoomable_line_plot(
+            ui,
+            points,
+            None,
+            color,
+            "Hz",
+            &mut view.band,
+            92.0,
+            "Waiting for samples",
+        );
     }
 
     /// The spectrum settings under a readout's Plots grid: decibels, and the
@@ -91,9 +100,24 @@ impl Playground {
         .response
         .on_hover_text(
             "This probe's field over another point probe's, or over what a source drives, \
-             frequency by frequency over the span in view: how much of each frequency passes. \
-             Neither record is windowed, so frame the whole of both pulses.",
+             frequency by frequency: how much of each frequency passes, averaged over segments \
+             of both records since the last change of a source.",
         );
+        if readout.transfer_from.is_some() {
+            ui.add(
+                egui::DragValue::new(&mut readout.transfer_segment)
+                    .range(0.5..=30.0)
+                    .speed(0.1)
+                    .prefix("Segment ")
+                    .suffix(" s"),
+            )
+            .on_hover_text(
+                "Seconds of each averaged segment, whatever span the plots show. Make it many \
+                 times the delay between the two records and any ringing, or the transfer reads \
+                 low; its resolution is one over it. At most what a probe's record holds, about \
+                 half a minute.",
+            );
+        }
     }
 
     /// One row of a readout's Plots grid: the quantity, its trace, and its
@@ -1187,7 +1211,9 @@ impl Playground {
                                 top_hz: spectrum_top,
                                 span: view.readout.span,
                                 end_time: (!view.live).then_some(view.end_time),
-                                transfer: Self::transfer_key(transfer.as_ref()),
+                                transfer: transfer
+                                    .as_ref()
+                                    .map(|input| (input.reference, view.readout.transfer_segment)),
                             },
                             newest_time.unwrap_or(0.0),
                             Instant::now(),
@@ -1455,13 +1481,16 @@ impl Playground {
                     ui.small(if is_curve {
                         "Drag traces horizontally or waterfalls vertically · wheel to zoom"
                     } else if view.readout.any_spectrum() {
-                        "Drag right for earlier time · wheel to zoom · spectra follow the span"
+                        "Drag right for earlier time · wheel to zoom · spectra follow the span; \
+                         wheel and drag a spectrum to zoom and pan its frequencies"
                     } else {
                         "Drag right for earlier time · wheel to zoom"
                     });
                 });
             if clear {
                 self.clear_probe_trace(id);
+                view.spectra = Default::default();
+                view.transfer = Default::default();
             }
             if !open {
                 self.probe_windows.remove(&id);

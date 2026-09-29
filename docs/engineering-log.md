@@ -17097,3 +17097,87 @@ sources.
     and a probe's own, and refuses one naming nothing it has.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — An averaged transfer, zoomable spectra and a Clear that clears
+
+The third commit for the transfer readout. The app check, on the user's own
+scenes, found the live transfer unreadable, and the readout changed in steps
+with the user until it read what the physics does.
+
+- **What the check found.** Unwindowed over the span in view, the transfer is
+  exact for a lone pulse that span holds whole, but a live span slides. Over
+  cut pulses and leftovers it read 8% off, then 85 to 3800 times off, then
+  ratios of ripple. With a source repeating bursts back to back every span
+  cuts them, and between the bursts' lines it divided leakage by leakage.
+  Dividing the displayed, Hann-windowed spectra instead steadied the lines of
+  a long span, but through a span about a burst long Probe 3 over Probe 2
+  swung from 0.15 to 0.34 at 2 Hz within each burst, because the farther probe
+  hears each burst later. A floor taken over the reference's whole recording,
+  and counting a source's transfer only from its signal's last change, were
+  tried on the way and removed.
+- **Welch.** `TransferAverage` in the core sums `Y X̄` and `|X|²` over
+  Hann-tapered windows, tapered as `amplitude_spectrum` tapers them, and
+  divides; a window of another length or spacing is refused.
+  `resample_from`, an exact count of samples from a given time, replaces
+  `resample_between`, so every segment lands on the first one's grid. Each
+  readout
+  keeps its own average and, live, adds a segment at every refresh that ends
+  later than the last. A parked readout adds only its first. The segments are
+  the readout's own **Segment** seconds long, 8 s unless changed, whatever
+  span the plots show: the average reads low by the Hann window's overlap with
+  itself shifted by the delay between the records, 6% at a tenth of the
+  segment and 32% at a quarter. **Reset** starts it over, and so do another
+  reference or segment length, any change to a source of the running scene
+  (its signal, position or profile), a live view's time going back, and
+  Clear. `transfer_segment` is one more optional field in the file's spectrum
+  settings, written only where it is not 8 s, so it stays version 22.
+- **Measured, in the core.** Through a window a burst long, against a copy
+  0.3 s late, one window's reading swings by 0.71 as it slides, and the
+  average settles at 0.2738 against the overlap's prediction of 0.2726.
+  Through 8 s segments it reads the copy's 0.4 to within 1%.
+- **Measured, on the user's scenes (CPU).**
+  - Behind a baffle with gaps, Probe 3 over Probe 2 reads 0.1235, 0.3301 and
+    0.5967 at the bursts' 2, 3 and 4 Hz by 8 s and 16 s segments, by one 42 s
+    window and by a whole sinc pulse alike: not flat, since the far probe
+    hears the source through the gaps. Sine multitapers gain nothing at 8 s;
+    at 1.25 s six of them read 0.30 at all three lines, the wrong answer
+    spread evenly.
+  - In an empty box, a source over a probe 1.34 away follows the 2D
+    prediction `(ω/4)|H₀(kr)| 2πσ² e^(−k²σ²/2)` to about 5%. It falls tenfold
+    from 2 to 8 Hz, mostly from the source's own 0.05-wide profile, so a
+    source reference cannot read flat. 2 s segments read about half of it.
+  - Between two probes there, 0.64 s apart, segments from 4 s up match a whole
+    pulse's unwindowed ratio to 1–3%. At edge 0.08 the mesh cannot carry 7 and
+    8 Hz; at 0.04 and 0.02 the ratio stays within ±10% of the free plane's
+    0.726, the outgoing walls' reflections, with the source 0.22 from a wall.
+- **Ranged as the spectra are.** A transfer's frequency axis runs from 0 Hz to
+  the spectra's ceiling, with a gap wherever it divides nothing, and its values
+  from zero, or in decibels from 100 dB under the largest, where they are also
+  floored, as a spectrum floors (`DECIBEL_RANGE`). `line_plot` spans every
+  point with a finite frequency and takes a floor for its value range.
+- **Zoom and pan.** A readout's spectra and transfer share one frequency band,
+  as its traces share a time window: the wheel zooms about the pointer, a drag
+  pans, and zooming all the way out shows everything again. **Fit**, beside
+  Reset, zooms once to the band the transfer has values in. The value range
+  follows what the band holds. The band is not saved.
+- **Clear cleared nothing.** Every probe readback carries the device's whole
+  ring, and a trace takes only what is newer than its last time. Clear dropped
+  the trace with that time, so the next readback brought the ring back within
+  a frame, for point, line and area probes and from both Clear buttons. A
+  cleared trace now takes from the current simulated time, which also frees a
+  trace stranded ahead of a clock that went back. It predates the transfer.
+- **Tests.**
+  - Core: the average settles where one window wobbles, and at the overlap's
+    prediction; a tone reads its gain from one window; an average refuses
+    another grid; windows resample onto one grid, sample for sample.
+  - A simultaneous copy reads its scale, and waits for a reference that does
+    not cover the segment yet; a live average holds still; 8 s segments read
+    a late copy to 1%; each reset rule; a source is evaluated on the probe's
+    timing.
+  - The transfer spans the spectrum's axis; a band zooms about the pointer,
+    pans within its extent and ranges what it holds; Fit takes the band the
+    values cover.
+  - Clear keeps the ring out, lets a newer sample in, and frees a stranded
+    trace; the file keeps a segment length that is not the default.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
