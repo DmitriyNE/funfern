@@ -6393,4 +6393,138 @@ mod tests {
             least / greatest
         );
     }
+
+    /// The step times, and the primary field at the node nearest each of
+    /// `points` after every step, from one run from rest.
+    fn records(
+        document: &TopologyDocument,
+        edge: f64,
+        seconds: f64,
+        points: &[Point2],
+    ) -> (Vec<f64>, Vec<Vec<f64>>) {
+        let prepared = prepare(document, edge);
+        let forcing = prepared.canonical_forcing.clone();
+        let dt = prepared.recommended_time_step();
+        let steps = (seconds / dt).ceil() as usize;
+        let mut times = Vec::with_capacity(steps);
+        let mut series = vec![Vec::with_capacity(steps); points.len()];
+        let mut nodes = Vec::new();
+        let mut record = |time: f64, field: &[f64], positions: &[Point2]| {
+            if nodes.is_empty() {
+                nodes = points
+                    .iter()
+                    .map(|point| {
+                        positions
+                            .iter()
+                            .enumerate()
+                            .min_by(|a, b| {
+                                (*a.1 - *point).norm().total_cmp(&(*b.1 - *point).norm())
+                            })
+                            .unwrap()
+                            .0
+                    })
+                    .collect();
+            }
+            times.push(time);
+            for (series, node) in series.iter_mut().zip(&nodes) {
+                series.push(field[*node]);
+            }
+        };
+        match prepared.canonical_temporal_operator.clone() {
+            Some(operator) => {
+                let mut state = CanonicalTemporalWaveState::zero(&operator, dt)
+                    .unwrap()
+                    .pinned(&operator, &forcing)
+                    .unwrap();
+                for _ in 0..steps {
+                    state.step_with_forcing(&operator, &forcing).unwrap();
+                    let field = operator
+                        .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                        .unwrap();
+                    record(state.time(), &field, operator.base().node_points());
+                }
+            }
+            None => {
+                let operator = prepared.canonical_operator.clone();
+                let mut state = CanonicalWaveState::zero(&operator, dt).unwrap();
+                for _ in 0..steps {
+                    state.step_with_forcing(&operator, &forcing).unwrap();
+                    let field = state.primary_field(&operator).unwrap();
+                    record(state.time(), &field, operator.node_points());
+                }
+            }
+        }
+        (times, series)
+    }
+
+    /// A sinc pulse, flat from 1 to 4 Hz, from a launcher down an empty
+    /// channel, with the launcher's own signal.
+    fn launched_pulse() -> (TopologyDocument, TimeSignal) {
+        let mut builder = Builder::new();
+        builder.scene.outer_boundaries = channel();
+        builder.launcher(-0.6, 2.5, 1.0);
+        let signal = TimeSignal::pulsed(
+            [0.0, 1.0, 2.5, 0.0],
+            PulseEnvelope::Sinc {
+                bandwidth_hz: 1.5,
+                lobes: 3,
+            },
+            0.1,
+            0.0,
+        );
+        builder.scene.volume_sources[0].signal = signal;
+        (builder.document(), signal)
+    }
+
+    /// Down an empty channel a pulse reaches one probe from another whole:
+    /// the transfer between them is flat at one across the pulse's band. From
+    /// the launcher's own signal, the field rate it drives, it is flat too:
+    /// a strip `w` wide driving the rate `d(t)` sends `(1/2c) ∫ d(t − |x −
+    /// x'|/c) dx'` each way, so the transfer is `(w/2c) sinc(πfw/c)`.
+    #[test]
+    fn a_pulse_down_an_empty_channel_transfers_flat_between_probes_and_from_its_launcher() {
+        let (document, signal) = launched_pulse();
+        let (times, series) = records(
+            &document,
+            0.05,
+            3.6,
+            &[Point2::new(-0.3, 0.0), Point2::new(0.5, 0.0)],
+        );
+        let interval = times[1] - times[0];
+        let between = transfer_spectrum(&series[0], &series[1], interval).unwrap();
+        let drive = CanonicalRateDrive::authored(signal, SOURCE_ANCHOR_TIME).unwrap();
+        let imposed = times
+            .iter()
+            .map(|time| drive.value(*time).unwrap())
+            .collect::<Vec<_>>();
+        let launched = transfer_spectrum(&imposed, &series[1], interval).unwrap();
+        let width = 0.06;
+        let (mut between_worst, mut launched_worst) = (0.0_f64, 0.0_f64);
+        for index in 0..between.ratios.len() {
+            let frequency = between.frequency_hz(index);
+            if !(1.2..=3.8).contains(&frequency) {
+                continue;
+            }
+            let gain = between.magnitude(index).expect("the band is held");
+            between_worst = between_worst.max((gain - 1.0).abs());
+            let x = std::f64::consts::PI * frequency * width;
+            let expected = 0.5 * width * x.sin() / x;
+            let gain = launched.magnitude(index).expect("the band is held");
+            launched_worst = launched_worst.max((gain / expected - 1.0).abs());
+        }
+        // 3.4e-3 and 3.7e-3 at edge 0.05 on the first run.
+        assert!(
+            between_worst < 1.0e-2,
+            "between the probes {between_worst:.3e}"
+        );
+        assert!(
+            launched_worst < 1.0e-2,
+            "from the launcher {launched_worst:.3e}"
+        );
+        let at = |frequency: f64| (frequency / between.frequency_step_hz).round() as usize;
+        for frequency in [0.0, 8.0] {
+            assert!(between.ratios[at(frequency)].is_none());
+            assert!(launched.ratios[at(frequency)].is_none());
+        }
+    }
 }

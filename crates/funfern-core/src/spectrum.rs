@@ -1,5 +1,6 @@
 //! A radix-2 FFT and the spectra readouts show: which frequencies a probe's
-//! record or a pulse holds, and how much of each.
+//! record or a pulse holds, and how much of each, and how much of each
+//! passes from one record to another.
 
 /// Why a spectrum could not be taken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,6 +11,8 @@ pub enum SpectrumError {
     TooFewSamples,
     InvalidInterval,
     NonFinite,
+    /// A resampled span reaches past either end of its record.
+    OutsideRecord,
 }
 
 /// The forward transform `X_k = Σ x_n e^{-2πikn/N}` in place, of a length
@@ -90,6 +93,20 @@ fn validate(samples: &[f64], interval: f64) -> Result<(), SpectrumError> {
     Ok(())
 }
 
+/// The transform of `samples`, zero padded by `PADDING`.
+fn padded_transform(
+    samples: impl ExactSizeIterator<Item = f64>,
+) -> Result<(Vec<f64>, Vec<f64>), SpectrumError> {
+    let size = (PADDING * samples.len()).next_power_of_two();
+    let mut re = vec![0.0; size];
+    let mut im = vec![0.0; size];
+    for (slot, value) in re.iter_mut().zip(samples) {
+        *slot = value;
+    }
+    fft(&mut re, &mut im)?;
+    Ok((re, im))
+}
+
 /// The transform of `samples`, times `scale` for each input sample, zero
 /// padded, as one-sided magnitudes.
 fn one_sided(
@@ -98,13 +115,8 @@ fn one_sided(
     doubled: bool,
     scale: f64,
 ) -> Result<Spectrum, SpectrumError> {
-    let size = (PADDING * samples.len()).next_power_of_two();
-    let mut re = vec![0.0; size];
-    let mut im = vec![0.0; size];
-    for (slot, value) in re.iter_mut().zip(samples) {
-        *slot = value;
-    }
-    fft(&mut re, &mut im)?;
+    let (re, im) = padded_transform(samples)?;
+    let size = re.len();
     let magnitudes = (0..=size / 2)
         .map(|k| {
             let both = if doubled && k != 0 && k != size / 2 {
@@ -167,6 +179,75 @@ pub fn transient_spectrum(samples: &[f64], interval: f64) -> Result<Spectrum, Sp
     one_sided(samples.iter().copied(), interval, false, interval)
 }
 
+/// How a response follows a reference, frequency by frequency, from 0 Hz one
+/// value every `frequency_step_hz`: the response's transform over the
+/// reference's, whose magnitude is the gain and whose argument the phase.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransferSpectrum {
+    pub frequency_step_hz: f64,
+    /// Each ratio's real and imaginary parts, or `None` where the reference
+    /// holds too little of that frequency to divide by.
+    pub ratios: Vec<Option<[f64; 2]>>,
+}
+
+impl TransferSpectrum {
+    /// The frequency of the `index`th value.
+    pub fn frequency_hz(&self, index: usize) -> f64 {
+        index as f64 * self.frequency_step_hz
+    }
+
+    /// The gain at the `index`th frequency, where there is one.
+    pub fn magnitude(&self, index: usize) -> Option<f64> {
+        self.ratios[index].map(|[re, im]| re.hypot(im))
+    }
+}
+
+/// Below this fraction of its strongest, 40 dB down, a reference holds too
+/// little of a frequency to divide by: the ratio there would be the
+/// response's small errors over nearly nothing.
+pub const TRANSFER_FLOOR: f64 = 1.0e-2;
+
+/// The transfer from `reference` to `response`, two records of one length
+/// sampled together every `interval` seconds. Neither is windowed: a window
+/// weights each moment of a record differently, so a response arriving later
+/// than its reference would come out scaled by the window's shape. The ratio
+/// is exact when both records hold the whole of what passes; a record that
+/// cuts a response short reads the cut as ripple.
+pub fn transfer_spectrum(
+    reference: &[f64],
+    response: &[f64],
+    interval: f64,
+) -> Result<TransferSpectrum, SpectrumError> {
+    validate(reference, interval)?;
+    validate(response, interval)?;
+    if reference.len() != response.len() {
+        return Err(SpectrumError::LengthMismatch);
+    }
+    let (reference_re, reference_im) = padded_transform(reference.iter().copied())?;
+    let (response_re, response_im) = padded_transform(response.iter().copied())?;
+    let size = reference_re.len();
+    let power = |k: usize| reference_re[k] * reference_re[k] + reference_im[k] * reference_im[k];
+    let peak = (0..=size / 2).map(power).fold(0.0, f64::max);
+    let floor = TRANSFER_FLOOR * TRANSFER_FLOOR * peak;
+    let ratios = (0..=size / 2)
+        .map(|k| {
+            let power = power(k);
+            (power > floor).then(|| {
+                let (x_re, x_im) = (reference_re[k], reference_im[k]);
+                let (y_re, y_im) = (response_re[k], response_im[k]);
+                [
+                    (y_re * x_re + y_im * x_im) / power,
+                    (y_im * x_re - y_re * x_im) / power,
+                ]
+            })
+        })
+        .collect();
+    Ok(TransferSpectrum {
+        frequency_step_hz: 1.0 / (size as f64 * interval),
+        ratios,
+    })
+}
+
 /// A record of `(time, value)` pairs, times increasing, sampled every
 /// `interval` seconds from its first time and linearly between the pairs.
 /// Probes record at a stride of whole steps, and a handoff that changes the
@@ -174,6 +255,21 @@ pub fn transient_spectrum(samples: &[f64], interval: f64) -> Result<Spectrum, Sp
 pub fn resample_evenly(
     times: &[f64],
     values: &[f64],
+    interval: f64,
+) -> Result<Vec<f64>, SpectrumError> {
+    let (Some(first), Some(last)) = (times.first(), times.last()) else {
+        return Err(SpectrumError::TooFewSamples);
+    };
+    resample_between(times, values, *first, *last, interval)
+}
+
+/// `resample_evenly` from `from` to `to` only, both within the record, so
+/// that two records resampled over the span they share come out on one grid.
+pub fn resample_between(
+    times: &[f64],
+    values: &[f64],
+    from: f64,
+    to: f64,
     interval: f64,
 ) -> Result<Vec<f64>, SpectrumError> {
     if times.len() != values.len() {
@@ -184,8 +280,14 @@ pub fn resample_evenly(
     {
         return Err(SpectrumError::NonFinite);
     }
-    let first = times[0];
-    let count = ((times[times.len() - 1] - first) / interval).floor() as usize + 1;
+    if !from.is_finite() || !to.is_finite() {
+        return Err(SpectrumError::NonFinite);
+    }
+    if from < times[0] || to > times[times.len() - 1] || to < from {
+        return Err(SpectrumError::OutsideRecord);
+    }
+    let first = from;
+    let count = ((to - first) / interval).floor() as usize + 1;
     let mut resampled = Vec::with_capacity(count);
     let mut segment = 0;
     for index in 0..count {
@@ -306,6 +408,125 @@ mod tests {
                 spectrum.magnitudes[index]
             );
         }
+    }
+
+    /// A Gaussian pulse on a carrier, centred `centre` seconds into a record
+    /// of `count` samples.
+    fn tone_burst(count: usize, interval: f64, centre: f64) -> Vec<f64> {
+        (0..count)
+            .map(|index| {
+                let time = index as f64 * interval - centre;
+                (-0.5 * (time / 0.04).powi(2)).exp() * (TAU * 6.0 * time).sin()
+            })
+            .collect()
+    }
+
+    /// A copy scaled and delayed by whole samples transfers its scale at
+    /// every frequency the reference holds, and its delay as a phase that
+    /// falls with frequency, however late it arrives. A Hann window would
+    /// have weighted a late copy up against an early reference.
+    #[test]
+    fn a_delayed_copy_transfers_its_scale_whatever_its_delay() {
+        let interval = 1.0e-3;
+        let reference = tone_burst(2000, interval, 0.2);
+        for delay in [0, 150, 900, 1500] {
+            let mut response = vec![0.0; 2000];
+            for (index, value) in reference.iter().enumerate() {
+                if index + delay < response.len() {
+                    response[index + delay] = 0.4 * value;
+                }
+            }
+            let transfer = transfer_spectrum(&reference, &response, interval).unwrap();
+            let mut held = 0;
+            for (index, ratio) in transfer.ratios.iter().enumerate() {
+                let Some([re, im]) = *ratio else { continue };
+                held += 1;
+                let phase = -TAU * transfer.frequency_hz(index) * delay as f64 * interval;
+                assert!(
+                    (re - 0.4 * phase.cos()).abs() < 1.0e-9
+                        && (im - 0.4 * phase.sin()).abs() < 1.0e-9,
+                    "delay {delay}, {} Hz: {re} {im}",
+                    transfer.frequency_hz(index)
+                );
+            }
+            assert!(held > 100, "the burst's band holds {held} frequencies");
+        }
+    }
+
+    /// An echo `a` as strong and `τ` late reads the comb `|1 + a e^(-iωτ)|`.
+    #[test]
+    fn an_echo_reads_its_comb() {
+        let interval = 1.0e-3;
+        let reference = tone_burst(2000, interval, 0.2);
+        let (echo, lag) = (0.5, 70);
+        let response = (0..2000)
+            .map(|index| {
+                reference[index]
+                    + index
+                        .checked_sub(lag)
+                        .map_or(0.0, |late| echo * reference[late])
+            })
+            .collect::<Vec<_>>();
+        let transfer = transfer_spectrum(&reference, &response, interval).unwrap();
+        for index in 0..transfer.ratios.len() {
+            let Some(gain) = transfer.magnitude(index) else {
+                continue;
+            };
+            let phase = TAU * transfer.frequency_hz(index) * lag as f64 * interval;
+            let expected = (1.0 + echo * phase.cos()).hypot(echo * phase.sin());
+            assert!(
+                (gain - expected).abs() < 1.0e-9,
+                "{gain} against {expected}"
+            );
+        }
+    }
+
+    /// Where the reference holds under 1% of its strongest there is no
+    /// ratio, and a silent reference has none anywhere.
+    #[test]
+    fn a_transfer_leaves_out_what_its_reference_does_not_hold() {
+        let interval = 1.0e-3;
+        let reference = tone_burst(2000, interval, 0.5);
+        let response = tone_burst(2000, interval, 0.7);
+        let transfer = transfer_spectrum(&reference, &response, interval).unwrap();
+        let at = |frequency: f64| (frequency / transfer.frequency_step_hz).round() as usize;
+        assert!(transfer.ratios[at(6.0)].is_some());
+        // The burst's spectrum, a Gaussian 1/(2π·0.04) wide about 6 Hz, is
+        // down to 1% about 12 Hz either side.
+        assert!(transfer.ratios[at(0.0)].is_none());
+        assert!(transfer.ratios[at(25.0)].is_none());
+        let silent = transfer_spectrum(&[0.0; 64], &response[..64], interval).unwrap();
+        assert!(silent.ratios.iter().all(Option::is_none));
+        assert_eq!(
+            transfer_spectrum(&reference, &response[..100], interval),
+            Err(SpectrumError::LengthMismatch)
+        );
+    }
+
+    /// Two records whose rings started at different times, resampled over
+    /// the span they share, come out on one grid.
+    #[test]
+    fn two_records_resample_onto_one_grid_over_the_span_they_share() {
+        let early = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5];
+        let late = [0.25, 0.35, 0.45, 0.55, 0.65];
+        let line = |time: f64| 3.0 * time + 1.0;
+        let (from, to) = (late[0], early[early.len() - 1]);
+        let first = resample_between(&early, &early.map(line), from, to, 0.05).unwrap();
+        let second = resample_between(&late, &late.map(line), from, to, 0.05).unwrap();
+        assert_eq!(first.len(), 6);
+        assert_eq!(first.len(), second.len());
+        for (index, (a, b)) in first.iter().zip(&second).enumerate() {
+            let expected = line(from + 0.05 * index as f64);
+            assert!((a - expected).abs() < 1.0e-12 && (b - expected).abs() < 1.0e-12);
+        }
+        assert_eq!(
+            resample_between(&late, &late.map(line), 0.2, to, 0.05),
+            Err(SpectrumError::OutsideRecord)
+        );
+        assert_eq!(
+            resample_between(&early, &early.map(line), from, 0.6, 0.05),
+            Err(SpectrumError::OutsideRecord)
+        );
     }
 
     /// Records a handoff left at two spacings come out at one, on the line

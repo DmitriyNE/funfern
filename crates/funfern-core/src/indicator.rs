@@ -4,14 +4,13 @@ use crate::SymmetricTensor2;
 use crate::canonical_consumer::complementary_interpolation_weights;
 use crate::wave::TimedDirectionalWaveCoefficients;
 use crate::{
-    BOUNDARY_SOURCE_ANCHOR_TIME, BoundaryLabel, BoundarySide, CanonicalForcing,
-    CanonicalMaterialRuntimeState, CanonicalRateDrive, CanonicalWaveOperator,
-    DirectionalWaveCoefficients, FaceBoundaryCondition, InternalBoundaryCoupling,
-    InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField, OuterBoundaryCondition,
-    OwnedTopologyWaveModel, PlannedBoundarySource, Point2, QuadraticWaveOperator, RegionId, Scene,
-    SpanBehavior, TopologyMeshPlan, TopologyWaveModel, TriMesh, WaveError,
-    enriched_quadratic_basis, enriched_quadratic_basis_gradients,
-    enriched_quadratic_basis_hessians,
+    BoundaryLabel, BoundarySide, CanonicalForcing, CanonicalMaterialRuntimeState,
+    CanonicalRateDrive, CanonicalWaveOperator, DirectionalWaveCoefficients, FaceBoundaryCondition,
+    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField,
+    OuterBoundaryCondition, OwnedTopologyWaveModel, PlannedBoundarySource, Point2,
+    QuadraticWaveOperator, RegionId, SOURCE_ANCHOR_TIME, Scene, SpanBehavior, TopologyMeshPlan,
+    TopologyWaveModel, TriMesh, WaveError, enriched_quadratic_basis,
+    enriched_quadratic_basis_gradients, enriched_quadratic_basis_hessians,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2292,7 +2291,7 @@ impl SolutionIndicatorJob {
                 let imposed = match record.condition {
                     FaceBoundaryCondition::Reflecting => 0.0,
                     FaceBoundaryCondition::Neumann { signal } => {
-                        CanonicalRateDrive::authored(signal, BOUNDARY_SOURCE_ANCHOR_TIME)
+                        CanonicalRateDrive::authored(signal, SOURCE_ANCHOR_TIME)
                             .and_then(|drive| drive.value(self.snapshot.time))
                             .map_err(|_| SolutionIndicatorError::InvalidMesh)?
                     }

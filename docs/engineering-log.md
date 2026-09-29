@@ -17005,3 +17005,45 @@ The app check, run on a scratch HOME with the user's say-so, found that
   - The gate editor reports its Fire.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — Transfer spectra in the core
+
+The first of three commits for a transfer spectrum: how much of each
+frequency passes from a reference, a probe or a source, to a probe, taken
+from one broadband pulse where a frequency sweep took one run per point.
+
+- **The transfer.** `transfer_spectrum` divides a response's transform by a
+  reference's, frequency by frequency, and keeps the complex ratio, so a
+  later group delay has its phase. Where the reference holds under 1% of its
+  strongest, 40 dB down, it leaves the frequency out rather than dividing by
+  nearly nothing.
+- **Unwindowed.** The readouts' spectra take a Hann window, which weights
+  each moment of a record differently. A response arriving later than its
+  reference would come out scaled by the window: in a 6 s span, a pulse at
+  1 s and its echo at 3 s are weighted 0.25 and 1, four times too much. The
+  transfer takes both records whole, as `transient_spectrum` does, and is
+  exact when both hold the whole of what passes.
+- **One grid.** `resample_between` resamples a record over a span inside it,
+  so two probes whose rings started at different times are resampled over
+  the span they share, sample for sample. `resample_evenly` is that over the
+  whole record.
+- **One anchor.** `BOUNDARY_SOURCE_ANCHOR_TIME` is `SOURCE_ANCHOR_TIME`, and
+  the application compiles its point and region sources against it too,
+  where it wrote 0.0. A readout dividing by what a harmonic source drives
+  integrates from the same time.
+- **Measured.** A sinc pulse, flat from 1 to 4 Hz, from a launcher down an
+  empty channel, recorded on the CPU at edge 0.05:
+  - Between two probes 0.8 apart the transfer is 1 to 3.4e-3 from 1.2 to
+    3.8 Hz.
+  - From the launcher's own signal, the field rate it drives, it is
+    `(w/2c) sinc(πfw/c)`, the strip's own radiation, to 3.7e-3. A pulse is
+    a field rate, so a launcher reads flat; a harmonic signal is the
+    acceleration it integrates, which is why a readout divides by what a
+    source drives rather than by its signal.
+  - 0 and 8 Hz are left out. The test holds both at 1e-2.
+- **Tests.** A copy scaled and delayed by whole samples transfers its scale
+  and its delay's phase to 1e-9, whatever the delay; an echo reads its comb;
+  a reference's empty band and a silent reference leave the ratio out; two
+  records resample onto one grid.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

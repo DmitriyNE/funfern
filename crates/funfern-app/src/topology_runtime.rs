@@ -1656,7 +1656,7 @@ fn compile_canonical_forcing(
     point: PointSource,
 ) -> Result<CanonicalForcing, String> {
     let mut forcing =
-        CanonicalForcing::from_legacy_boundaries(canonical, quadratic, BOUNDARY_SOURCE_ANCHOR_TIME)
+        CanonicalForcing::from_legacy_boundaries(canonical, quadratic, SOURCE_ANCHOR_TIME)
             .map_err(|error| error.to_string())?;
     let elements = mesh
         .triangles
@@ -1665,12 +1665,12 @@ fn compile_canonical_forcing(
         .collect::<Vec<_>>();
     forcing
         .push_source(
-            CanonicalForcing::point_source(canonical, point, &elements, 0.0)
+            CanonicalForcing::point_source(canonical, point, &elements, SOURCE_ANCHOR_TIME)
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
     forcing
-        .extend_legacy_volume_slots(canonical, volume, authored_volume, 0.0)
+        .extend_legacy_volume_slots(canonical, volume, authored_volume, SOURCE_ANCHOR_TIME)
         .map_err(|error| error.to_string())?;
     Ok(forcing)
 }
