@@ -1089,6 +1089,17 @@ is next touched.
   converging, but stays 10 to 11 orders below the estimate, which is the same
   to four digits either way. The driven estimate's trace defect has the same
   omission.
+- The trace eigensolve's QL limit (`EIGEN_MAXIMUM_ITERATIONS` in
+  `crates/funfern-core/src/canonical_wave.rs`) is EISPACK's 30 iterations for
+  each eigenvalue. Past it the preparation fails with "the outgoing trace
+  eigensolve did not converge", and since the solve is deterministic, every
+  preparation of that trace fails the same way. The edit stays in the document
+  and the autosave, but nothing of it reaches the device until a new mesh edge,
+  other walls or an undo change the trace. The message does not say so. It has
+  never been reached: the 698- and 1,042-node traces and a uniform ring take at
+  most 5 for any eigenvalue, 1.7 on average. LAPACK's `dsteqr` budgets 30·n
+  for the whole solve instead, so an eigenvalue that stalls borrows from the
+  others; that, and a message naming the way out, would be the change.
 
 ## Working practice
 

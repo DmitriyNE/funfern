@@ -16303,3 +16303,24 @@ outgoing trace costs: the trace's dense cyclic Jacobi eigensolve.
   and the P4 row of the latency plan.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — What the trace eigensolve's iteration limit leaves behind
+
+- **Asked:** what happens when QL passes its limit. The preparation fails
+  in its canonical-assembly phase with "the outgoing trace eigensolve did not
+  converge"; the candidate is dropped before the device, whatever was
+  running keeps running, the diagnostics warning lights, and the revision is
+  not retried each frame. A preparation reuses the running generation's
+  modes whenever its trace is unchanged, so the solve runs only for a new
+  trace: a new mesh edge, changed walls or domain, a material along the wall,
+  a refined boundary or an opened scene. The solve is deterministic, so that
+  trace fails every time, and nothing of the edit reaches the device until
+  the trace changes. The Jacobi's 80 sweeps ended the same way.
+- **Measured:** at most 5 iterations for any eigenvalue on the 698- and
+  1,042-node traces and a uniform 400-node ring, 1.7 on average, against 30.
+- **Recorded, not changed**, by the user's choice: LAPACK's `dsteqr` budget
+  of 30·n for the whole solve, and a message naming the way out, under
+  "Worth checking sometime" in `docs/plan.md`, with a pointer on
+  `EIGEN_MAXIMUM_ITERATIONS`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

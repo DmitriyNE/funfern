@@ -4103,7 +4103,9 @@ fn apply_outgoing_generator(
 const EIGEN_UNIT_WORK: usize = 1 << 13;
 
 /// Implicit QL iterations one eigenvalue may take before the solve is refused.
-/// EISPACK's bound; the trace operators here take under two on average.
+/// EISPACK's bound; the trace operators here take under two on average and
+/// five at most. LAPACK's `dsteqr` budgets 30·n for the whole solve instead;
+/// see "Worth checking sometime" in `docs/plan.md`.
 const EIGEN_MAXIMUM_ITERATIONS: usize = 30;
 
 /// Dependency-free, cooperative eigensolver for the symmetric trace oracle:
