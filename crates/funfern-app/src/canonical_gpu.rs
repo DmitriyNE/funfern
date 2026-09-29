@@ -40,8 +40,8 @@ use funfern_core::{
     CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWaveOperator,
     CanonicalWaveState, CoefficientLawValues, FieldLawValues, GRID_SCALE_FILTER_CADENCE,
     GRID_SCALE_FILTER_LIMIT, LinearPrimaryContribution, MaterialId, MaterialSwitchRuntime, Point2,
-    PulseEnvelope, QuadraticWaveOperator, RateLawValues, RestoringLawValues, TimeDriveRuntime,
-    TimeDriveValues, TimeSignal, WaveError,
+    PulseEnvelope, PulseTrain, QuadraticWaveOperator, RateLawValues, RestoringLawValues,
+    TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
 };
 
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
@@ -70,7 +70,7 @@ macro_rules! add_shader_buffer {
     }};
 }
 
-pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 6;
+pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 7;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
 pub const CANONICAL_GPU_WORKGROUP_SIZE: u32 = 128;
 /// The most workgroups one dispatch launches along a dimension, WebGPU's
@@ -114,11 +114,17 @@ const PULSE_SINC: u32 = 2;
 /// follow the drive records.
 const PRESCRIBED_SHAPE_SHIFT: u32 = 1;
 const PRESCRIBED_RECORD_SHIFT: u32 = 3;
-const TEMPORAL_TABLE_VERSION: u32 = 1;
+const TEMPORAL_TABLE_VERSION: u32 = 2;
 const TEMPORAL_ENABLED: u32 = 1;
 const TEMPORAL_COEFFICIENT_WORDS: usize = 4;
 const TEMPORAL_RUNTIME_WORDS_PER_SLOT: usize = 3;
 const TEMPORAL_RUNTIME_SLOTS: usize = 2;
+/// A material's runtime record: its two slots, then one gate window per lane,
+/// `(start, repeat, half duration, shape parameter)`, as a pulsed signal's.
+/// A gate is authored and not stamped, so it needs no second copy; the clock
+/// rebase and a handoff move its start in place.
+const TEMPORAL_RUNTIME_GATE_WORD: usize = TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS;
+const TEMPORAL_RUNTIME_WORDS_PER_MATERIAL: usize = TEMPORAL_RUNTIME_GATE_WORD + 4;
 const TEMPORAL_DRIVE_NONE: u32 = 0;
 const TEMPORAL_DRIVE_PUMP: u32 = 1;
 const TEMPORAL_DRIVE_CRYSTAL: u32 = 2;
@@ -147,6 +153,10 @@ const LOSS_RECORDS_FLAG: u32 = 64;
 const RESTORING_FLAG: u32 = 128;
 /// A loss record whose rate is van der Pol's, `β(u²/a² − 1)`.
 const TEMPORAL_LOSS_VAN_DER_POL: u32 = 16;
+/// A record whose drive runs under its lane's gate window, with the
+/// envelope's shape in the two bits above.
+const TEMPORAL_GATED: u32 = 32;
+const TEMPORAL_GATE_SHAPE_SHIFT: u32 = 6;
 const RESTORING_KLEIN_GORDON: u32 = 1;
 const RESTORING_SINE_GORDON: u32 = 2;
 const RESTORING_PHI4: u32 = 3;
@@ -842,6 +852,18 @@ impl CanonicalGpuLiveEvent {
                 "a live temporal-law patch cannot change material ownership or drive kind",
             ));
         }
+        // A gate is a function of absolute time, with its start on the
+        // epoch; the patch carries neither, and the app takes a new
+        // generation for every material edit anyway.
+        if current_records
+            .iter()
+            .chain(&target_records)
+            .any(|record| record[0].data.w & TEMPORAL_GATED != 0)
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a gated drive changes by a generation transition",
+            ));
+        }
         if current_records
             .iter()
             .zip(&target_records)
@@ -877,7 +899,7 @@ impl CanonicalGpuLiveEvent {
         let target_slot = (target.control.runtime_slots.y & 1) as usize;
         for runtime in 0..target_manifest.runtime_record_count {
             let word = target_runtime_offset
-                + runtime * TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS
+                + runtime * TEMPORAL_RUNTIME_WORDS_PER_MATERIAL
                 + target_slot * TEMPORAL_RUNTIME_WORDS_PER_SLOT
                 + 2;
             upload.push(target.tables[word]);
@@ -1234,6 +1256,7 @@ impl CanonicalGpuPlan {
             .map(|record| record.material())
             .collect();
         let mut drives = BTreeMap::<(MaterialId, u32), TimeDriveValues>::new();
+        let mut gates = BTreeMap::<(MaterialId, u32), Option<PulseTrain>>::new();
         for sample in operator
             .primary_coefficient_samples()
             .chain(operator.complementary_coefficient_samples())
@@ -1242,6 +1265,9 @@ impl CanonicalGpuPlan {
             if drives
                 .insert(key, sample.law.drive)
                 .is_some_and(|old| old != sample.law.drive)
+                || gates
+                    .insert(key, sample.law.gate)
+                    .is_some_and(|old| old != sample.law.gate)
             {
                 return Err(CanonicalGpuBuildError::InvalidLayout(
                     "one material runtime lane resolved to multiple drive definitions",
@@ -1268,6 +1294,9 @@ impl CanonicalGpuPlan {
             if drives
                 .insert(key, loss.law.drive)
                 .is_some_and(|old| old != loss.law.drive)
+                || gates
+                    .insert(key, loss.law.gate)
+                    .is_some_and(|old| old != loss.law.gate)
             {
                 return Err(CanonicalGpuBuildError::InvalidLayout(
                     "one material runtime lane resolved to multiple drive definitions",
@@ -1362,6 +1391,15 @@ impl CanonicalGpuPlan {
                 switch_word,
                 frequency_word,
             ]);
+            for lane in 0..4 {
+                let window = match gates.get(&(record.material(), lane)).copied().flatten() {
+                    Some(train) => {
+                        gpu_pulse_train_window(train, clock.epoch_origin_seconds)?.window
+                    }
+                    None => Vec4::ZERO,
+                };
+                self.tables.push(float_word(window));
+            }
         }
 
         // Loss records mirror the coefficient records one for one, so a
@@ -1445,7 +1483,7 @@ impl CanonicalGpuPlan {
             data: UVec4::new(
                 usize_u32(runtime_records.len())?,
                 TEMPORAL_COEFFICIENT_WORDS as u32,
-                (TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS) as u32,
+                TEMPORAL_RUNTIME_WORDS_PER_MATERIAL as u32,
                 TEMPORAL_TABLE_VERSION,
             ),
         };
@@ -1475,7 +1513,7 @@ impl CanonicalGpuPlan {
             complementary_record_count: self.sample_count,
             runtime_record_count: runtime_records.len(),
             coefficient_words: TEMPORAL_COEFFICIENT_WORDS,
-            runtime_words_per_material: TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS,
+            runtime_words_per_material: TEMPORAL_RUNTIME_WORDS_PER_MATERIAL,
         });
         Ok(())
     }
@@ -3236,19 +3274,37 @@ fn gpu_pulse_window(
     signal: TimeSignal,
     epoch_origin_seconds: f64,
 ) -> Result<Option<GpuPulseWindow>, CanonicalGpuBuildError> {
-    let TimeSignal::Pulsed {
+    signal
+        .train()
+        .map(|train| gpu_pulse_train_window(train, epoch_origin_seconds))
+        .transpose()
+}
+
+/// The shape code a pulse window carries beside it.
+fn pulse_shape(envelope: PulseEnvelope) -> u32 {
+    match envelope {
+        PulseEnvelope::FlatTop { .. } => PULSE_FLAT_TOP,
+        PulseEnvelope::Gaussian { .. } => PULSE_GAUSSIAN,
+        PulseEnvelope::Sinc { .. } => PULSE_SINC,
+    }
+}
+
+/// A pulse train's window against the epoch origin, its start kept small as
+/// the device's rebase keeps it.
+fn gpu_pulse_train_window(
+    train: PulseTrain,
+    epoch_origin_seconds: f64,
+) -> Result<GpuPulseWindow, CanonicalGpuBuildError> {
+    let PulseTrain {
         envelope,
         start,
         repeat,
-        ..
-    } = signal
-    else {
-        return Ok(None);
-    };
-    let (shape, parameter) = match envelope {
-        PulseEnvelope::FlatTop { edge, .. } => (PULSE_FLAT_TOP, edge),
-        PulseEnvelope::Gaussian { width } => (PULSE_GAUSSIAN, width),
-        PulseEnvelope::Sinc { bandwidth_hz, .. } => (PULSE_SINC, bandwidth_hz),
+    } = train;
+    let shape = pulse_shape(envelope);
+    let parameter = match envelope {
+        PulseEnvelope::FlatTop { edge, .. } => edge,
+        PulseEnvelope::Gaussian { width } => width,
+        PulseEnvelope::Sinc { bandwidth_hz, .. } => bandwidth_hz,
     };
     let duration = envelope.duration();
     let mut relative = start - epoch_origin_seconds;
@@ -3269,11 +3325,11 @@ fn gpu_pulse_window(
     if !(window.z > 0.0 && window.w > 0.0) {
         return Err(CanonicalGpuBuildError::Unrepresentable("pulse envelope"));
     }
-    Ok(Some(GpuPulseWindow {
+    Ok(GpuPulseWindow {
         window,
         shape,
         start_low: finite_f32(relative - f64::from(high), "pulse start residual")?,
-    }))
+    })
 }
 
 fn gpu_drive(
@@ -3478,11 +3534,6 @@ fn pack_temporal_coefficient(
     runtime_index: u32,
     reference: f64,
 ) -> Result<[GpuCanonicalTableWord; TEMPORAL_COEFFICIENT_WORDS], CanonicalGpuBuildError> {
-    if sample.law.gate.is_some() {
-        return Err(CanonicalGpuBuildError::Unrepresentable(
-            "a gated material drive, which runs on the CPU reference only",
-        ));
-    }
     let kind = temporal_drive_kind(sample.law.drive);
     let (depth, angular_frequency, shape, spatial_phase) = match sample.law.drive {
         TimeDriveValues::None => (0.0, 0.0, 0.0, 0.0),
@@ -3515,9 +3566,17 @@ fn pack_temporal_coefficient(
         }
     };
     let (field_flag, field_words) = pack_field_law(sample.law.field, sample.law.inverted)?;
+    // A gate on no drive has nothing to gate, and the law refuses one.
+    let gate_flags = match sample.law.gate {
+        Some(train) if sample.law.drive != TimeDriveValues::None => {
+            TEMPORAL_GATED | (pulse_shape(train.envelope) << TEMPORAL_GATE_SHAPE_SHIFT)
+        }
+        _ => 0,
+    };
     let flags = (u32::from(sample.law.alternate.is_some()) * TEMPORAL_HAS_ALTERNATE)
         | (u32::from(sample.law.inverted) * TEMPORAL_INVERTED)
-        | field_flag;
+        | field_flag
+        | gate_flags;
     let reference_f32 = finite_f32(reference, "temporal reference coefficient")?;
     let alternate_f32 = finite_f32(
         sample.law.alternate.unwrap_or(1.0),
@@ -7033,18 +7092,30 @@ fn packed_temporal_factor(
     let root = plan.control.runtime_slots.z as usize;
     let runtime_offset = plan.tables[root].data.w as usize;
     let slot = (plan.control.runtime_slots.y & 1) as usize;
-    let runtime_word = runtime_offset
-        + runtime_index * TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS
-        + slot * TEMPORAL_RUNTIME_WORDS_PER_SLOT;
-    let phase = packed_table_float(plan, runtime_word, drive_lane)
-        + packed_table_float(plan, coefficient_word + 1, 3) * local_time;
+    let runtime_root = runtime_offset + runtime_index * TEMPORAL_RUNTIME_WORDS_PER_MATERIAL;
+    let runtime_word = runtime_root + slot * TEMPORAL_RUNTIME_WORDS_PER_SLOT;
+    let angular_frequency = packed_table_float(plan, coefficient_word + 1, 3);
+    let (gate, phase) = if flags & TEMPORAL_GATED != 0 {
+        let window =
+            bits_vec4(plan.tables[runtime_root + TEMPORAL_RUNTIME_GATE_WORD + drive_lane].data);
+        let offset = host_pulse_offset(window, local_time);
+        (
+            host_pulse_envelope((flags >> TEMPORAL_GATE_SHAPE_SHIFT) & 3, window, offset),
+            packed_table_float(plan, coefficient_word + 2, 2) + angular_frequency * offset,
+        )
+    } else {
+        (
+            1.0,
+            packed_table_float(plan, runtime_word, drive_lane) + angular_frequency * local_time,
+        )
+    };
     let depth = packed_table_float(plan, coefficient_word + 1, 2);
     let shape = packed_table_float(plan, coefficient_word + 2, 0);
     let spatial_phase = packed_table_float(plan, coefficient_word + 2, 1);
     let carrier = phase.sin().atan2(phase.cos());
-    let drive = match drive_kind {
-        TEMPORAL_DRIVE_NONE => 1.0,
-        TEMPORAL_DRIVE_PUMP => 1.0 + depth * carrier.cos(),
+    let swing = match drive_kind {
+        TEMPORAL_DRIVE_NONE => 0.0,
+        TEMPORAL_DRIVE_PUMP => depth * carrier.cos(),
         TEMPORAL_DRIVE_CRYSTAL => {
             let cosine = carrier.cos();
             let square = if shape.abs() < 1.0e-3 {
@@ -7052,14 +7123,15 @@ fn packed_temporal_factor(
             } else {
                 (shape * cosine).tanh() / shape.tanh()
             };
-            1.0 + depth * square
+            depth * square
         }
         TEMPORAL_DRIVE_TRAVELLING => {
             let travelling = carrier - spatial_phase;
-            1.0 + depth * travelling.cos()
+            depth * travelling.cos()
         }
         _ => f32::NAN,
     };
+    let drive = 1.0 + gate * swing;
     let switch_word = runtime_word + 1;
     let start_blend = packed_table_float(plan, switch_word, 0);
     let target_blend = packed_table_float(plan, switch_word, 1);
@@ -7084,6 +7156,53 @@ fn packed_temporal_factor(
     } else {
         factor
     }
+}
+
+#[cfg(test)]
+fn bits_vec4(data: UVec4) -> Vec4 {
+    Vec4::from_array(data.to_array().map(f32::from_bits))
+}
+
+/// `canonical_wave.wgsl`'s `pulse_offset`.
+#[cfg(test)]
+fn host_pulse_offset(window: Vec4, local_time: f32) -> f32 {
+    let mut since = local_time - window.x;
+    if window.y > 0.0 && since >= 0.0 {
+        since -= window.y * (since / window.y).floor();
+    }
+    since - window.z
+}
+
+/// `canonical_wave.wgsl`'s `pulse_envelope`, through the core's envelope.
+#[cfg(test)]
+fn host_pulse_envelope(shape: u32, window: Vec4, offset: f32) -> f32 {
+    let (half, parameter) = (f64::from(window.z), f64::from(window.w));
+    let envelope = match shape {
+        PULSE_FLAT_TOP => PulseEnvelope::FlatTop {
+            duration: 2.0 * half,
+            edge: parameter,
+        },
+        PULSE_GAUSSIAN => PulseEnvelope::Gaussian { width: parameter },
+        _ => PulseEnvelope::Sinc {
+            bandwidth_hz: parameter,
+            lobes: (2.0 * half * parameter).round() as u32,
+        },
+    };
+    envelope.value_and_rate(f64::from(offset)).0 as f32
+}
+
+/// `canonical_wave.wgsl`'s `pulse_start_after`.
+#[cfg(test)]
+fn host_pulse_start_after(window: Vec4, elapsed: f32) -> f32 {
+    let mut start = window.x - elapsed;
+    if window.y > 0.0 {
+        if start < 0.0 {
+            start -= window.y * (start / window.y).ceil();
+        }
+    } else {
+        start = start.max(-(2.0 * window.z + 1.0));
+    }
+    start
 }
 
 #[cfg(test)]
@@ -7195,8 +7314,7 @@ fn rebase_packed_temporal_runtime(plan: &mut CanonicalGpuPlan, elapsed: f32) {
     let runtime_count = plan.tables[header_offset + 1].data.x as usize;
     let slot = (plan.control.runtime_slots.y & 1) as usize;
     for runtime in 0..runtime_count {
-        let root =
-            header[3] as usize + runtime * TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS;
+        let root = header[3] as usize + runtime * TEMPORAL_RUNTIME_WORDS_PER_MATERIAL;
         let accepted = root + slot * TEMPORAL_RUNTIME_WORDS_PER_SLOT;
         let mut phases = plan.tables[accepted].data.to_array();
         let frequencies = plan.tables[accepted + 2].data.to_array();
@@ -7214,6 +7332,14 @@ fn rebase_packed_temporal_runtime(plan: &mut CanonicalGpuPlan, elapsed: f32) {
             plan.tables[target].data = UVec4::from_array(phases);
             plan.tables[target + 1].data = UVec4::from_array(switch);
             plan.tables[target + 2].data = UVec4::from_array(frequencies);
+        }
+        for lane in 0..4 {
+            let word = root + TEMPORAL_RUNTIME_GATE_WORD + lane;
+            let mut window = bits_vec4(plan.tables[word].data);
+            if window.z > 0.0 {
+                window.x = host_pulse_start_after(window, elapsed);
+                plan.tables[word] = float_word(window);
+            }
         }
     }
     plan.control.runtime_slots.y = 0;
@@ -7561,14 +7687,40 @@ mod tests {
         .unwrap()
     }
 
-    fn temporal_plan() -> (
+    type TemporalFixture = (
         Scene,
         TriMesh,
         QuadraticWaveOperator,
         CanonicalTemporalWaveOperator,
         CanonicalTemporalWaveState,
         CanonicalGpuPlan,
-    ) {
+    );
+
+    fn temporal_plan() -> TemporalFixture {
+        temporal_plan_with(|_| {})
+    }
+
+    /// The fixture's travelling mass modulation under a flat-top train and
+    /// its time-crystal stiffness under one Gaussian pulse.
+    fn gated_temporal_plan() -> TemporalFixture {
+        temporal_plan_with(|material| {
+            material.mass_law.gate = Some(PulseTrain {
+                envelope: PulseEnvelope::FlatTop {
+                    duration: 0.6,
+                    edge: 0.15,
+                },
+                start: 0.2,
+                repeat: 1.1,
+            });
+            material.stiffness_law.gate = Some(PulseTrain {
+                envelope: PulseEnvelope::Gaussian { width: 0.08 },
+                start: 0.35,
+                repeat: 0.0,
+            });
+        })
+    }
+
+    fn temporal_plan_with(edit: impl FnOnce(&mut funfern_core::Material)) -> TemporalFixture {
         let mut scene = Scene::initial();
         let material = &mut scene.materials[0];
         material.mass_law.drive = TimeDrive::TravellingModulation {
@@ -7587,6 +7739,7 @@ mod tests {
             sharpness: ScalarField::constant(3.2),
         };
         material.stiffness_law.alternate = Some(ScalarField::constant(0.75));
+        edit(material);
 
         let mut fixed_scene = scene.clone();
         for material in &mut fixed_scene.materials {
@@ -7670,7 +7823,7 @@ mod tests {
     fn rust_and_wgsl_layout_manifests_match_exactly() {
         let shader = include_str!("canonical_wave.wgsl");
         for declaration in [
-            "const LAYOUT_VERSION: u32 = 6u;",
+            "const LAYOUT_VERSION: u32 = 7u;",
             "const STATE_WORD_STRIDE: u32 = 16u;",
             "const NODE_STRIDE: u32 = 96u;",
             "const SAMPLE_STRIDE: u32 = 112u;",
@@ -7741,6 +7894,114 @@ mod tests {
 
         plan.stage_grid_filter(0.1, 1).unwrap();
         assert_eq!(plan.manifest.event_dispatches, 9);
+    }
+
+    /// Inside and between the pulses of both gates, and in the train's second
+    /// pulse, the packed tables give the f64 maps.
+    #[test]
+    fn gated_tables_match_the_f64_material_maps_in_and_between_pulses() {
+        let (_, _, _, operator, state, plan) = gated_temporal_plan();
+        let flux = operator
+            .base()
+            .constitutive_samples()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| Point2::new(0.1 + index as f64 * 1.0e-4, -0.07))
+            .collect::<Vec<_>>();
+        let fixed = operator.base().complementary_field(&flux).unwrap();
+        for time in [0.1, 0.27, 0.41, 0.5, 0.73, 0.95, 1.37, 1.6] {
+            let expected_mass = operator.primary_mass_at(time, state.runtime()).unwrap();
+            for (node, expected) in expected_mass.into_iter().enumerate() {
+                let actual = packed_primary_mass(&plan, node, time as f32) as f64;
+                assert!(
+                    (actual - expected).abs() < 3.0e-5 * expected.abs().max(1.0),
+                    "node {node} at {time}: {actual} against {expected}"
+                );
+            }
+            let expected = operator
+                .complementary_field_at(&flux, time, state.runtime())
+                .unwrap();
+            for index in 0..plan.sample_count {
+                let word = plan.samples[index].nodes_b.w as usize;
+                let factor = packed_temporal_factor(&plan, word, time as f32) as f64;
+                let actual = fixed[index] / factor;
+                assert!((actual.x - expected[index].x).abs() < 3.0e-5, "at {time}");
+                assert!((actual.y - expected[index].y).abs() < 3.0e-5, "at {time}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_gate_packs_one_window_per_lane_and_its_shape_in_its_records() {
+        let (_, _, _, _, _, plan) = gated_temporal_plan();
+        let header = plan.tables[plan.control.runtime_slots.z as usize].data;
+        let shape = plan.tables[plan.control.runtime_slots.z as usize + 1].data;
+        assert_eq!(shape.z as usize, TEMPORAL_RUNTIME_WORDS_PER_MATERIAL);
+        let root = header.w as usize;
+        let window =
+            |lane: usize| bits_vec4(plan.tables[root + TEMPORAL_RUNTIME_GATE_WORD + lane].data);
+        assert_eq!(window(0), Vec4::new(0.2, 1.1, 0.3, 0.15));
+        assert_eq!(window(1), Vec4::new(0.35, 0.0, 0.32, 0.08));
+        // Loss lanes carry no drive here, so no gate either.
+        assert_eq!(window(2), Vec4::ZERO);
+        assert_eq!(window(3), Vec4::ZERO);
+        let records = temporal_coefficient_records(&plan, header).unwrap();
+        assert!(!records.is_empty());
+        for record in records {
+            let metadata = record[0].data;
+            assert_ne!(metadata.w & TEMPORAL_GATED, 0);
+            let expected = if metadata.y == 0 {
+                PULSE_FLAT_TOP
+            } else {
+                PULSE_GAUSSIAN
+            };
+            assert_eq!((metadata.w >> TEMPORAL_GATE_SHAPE_SHIFT) & 3, expected);
+        }
+    }
+
+    /// The rebase moves each gate's start with the origin, a train's back
+    /// within one repeat of it, so every gated factor keeps its absolute
+    /// trajectory, the train's next pulse included.
+    #[test]
+    fn a_rebase_keeps_every_gate_on_absolute_time() {
+        let (_, _, _, _, _, mut plan) = gated_temporal_plan();
+        let elapsed = 1.37_f32;
+        let probes = [0.03_f32, 0.12, 0.25, 0.4];
+        let factors = |plan: &CanonicalGpuPlan, offset: f32| {
+            probes
+                .iter()
+                .flat_map(|probe| {
+                    (0..plan.sample_count).map(move |sample| {
+                        packed_temporal_factor(
+                            plan,
+                            plan.samples[sample].nodes_b.w as usize,
+                            offset + probe,
+                        )
+                    })
+                })
+                .chain(probes.iter().flat_map(|probe| {
+                    (0..plan.node_count)
+                        .map(move |node| packed_primary_mass(plan, node, offset + probe))
+                }))
+                .collect::<Vec<_>>()
+        };
+        let before = factors(&plan, elapsed);
+        rebase_packed_temporal_runtime(&mut plan, elapsed);
+        let header = plan.tables[plan.control.runtime_slots.z as usize].data;
+        let train = bits_vec4(plan.tables[header.w as usize + TEMPORAL_RUNTIME_GATE_WORD].data);
+        assert!((-1.1..=0.0).contains(&train.x), "{train}");
+        for (actual, expected) in factors(&plan, 0.0).into_iter().zip(before) {
+            assert!((actual - expected).abs() < 3.0e-6 * expected.abs().max(1.0));
+        }
+    }
+
+    #[test]
+    fn a_gated_drive_takes_a_generation_rather_than_a_patch() {
+        let (_, _, _, _, _, current) = gated_temporal_plan();
+        let (_, _, _, _, _, target) = gated_temporal_plan();
+        assert!(CanonicalGpuLiveEvent::temporal_law_patch(&current, &target, 13).is_err());
+        let (_, _, _, _, _, ungated) = temporal_plan();
+        assert!(CanonicalGpuLiveEvent::temporal_law_patch(&ungated, &current, 13).is_err());
     }
 
     #[test]

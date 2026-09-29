@@ -30,6 +30,10 @@
 //! curvature lowers the step ceiling, so the per-step figure is the
 //! comparison, not the wall clock.
 //!
+//! `--gated` puts both drives under a Gaussian gate wide enough to cover the
+//! run, so every factor pays for the envelope's exponential: the dearest a
+//! gate gets.
+//!
 //! Stepping is unfenced, so the figure is what a step costs the device rather
 //! than the readback round trip the interactive lead fence waits on.
 
@@ -74,6 +78,7 @@ fn main() -> AppExit {
     let van_der_pol = std::env::args().any(|argument| argument == "--van-der-pol");
     let constant_loss = std::env::args().any(|argument| argument == "--loss");
     let oscillator = van_der_pol || std::env::args().any(|argument| argument == "--oscillator");
+    let gated = std::env::args().any(|argument| argument == "--gated");
     let amplitude = if nonlinear { 12.0 } else { 1.0 };
     let mut scene = Scene::initial();
     if driven {
@@ -89,6 +94,15 @@ fn main() -> AppExit {
             wavenumber: ScalarField::constant(2.0),
             angle_radians: ScalarField::constant(0.4),
         };
+    }
+    if gated {
+        let gate = Some(funfern_core::PulseTrain {
+            envelope: funfern_core::PulseEnvelope::Gaussian { width: 1.0e3 },
+            start: -4.0e3,
+            repeat: 0.0,
+        });
+        scene.materials[0].mass_law.gate = gate;
+        scene.materials[0].stiffness_law.gate = gate;
     }
 
     if nonlinear {

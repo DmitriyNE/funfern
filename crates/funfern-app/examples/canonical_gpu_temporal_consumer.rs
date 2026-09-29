@@ -185,6 +185,31 @@ fn main() -> AppExit {
             cadence / gcd(cadence, stride) * stride
         });
     let steps = (8 * sample_stride).div_ceil(cadence) * cadence;
+    // `CONSUMER_GATED=1` gates both drives, timed so the compared state sits
+    // on the falling edge of the mass's flat top and one width past the peak
+    // of the stiffness's Gaussian, where no other envelope would give the
+    // same factor. The consumers evaluate each gate themselves, at the
+    // carrier's phase from the pulse's centre.
+    let operator = if std::env::var("CONSUMER_GATED").is_ok_and(|value| value == "1") {
+        let span = steps as f64 * time_step;
+        scene.materials[0].mass_law.gate = Some(funfern_core::PulseTrain {
+            envelope: funfern_core::PulseEnvelope::FlatTop {
+                duration: 0.8 * span,
+                edge: 0.3 * span,
+            },
+            start: 0.4 * span,
+            repeat: 0.0,
+        });
+        scene.materials[0].stiffness_law.gate = Some(funfern_core::PulseTrain {
+            envelope: funfern_core::PulseEnvelope::Gaussian { width: 0.15 * span },
+            start: 0.25 * span,
+            repeat: 0.0,
+        });
+        CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
+            .expect("gated temporal consumer operator")
+    } else {
+        operator
+    };
 
     let primary = operator
         .base()

@@ -16859,3 +16859,65 @@ loss channels too, and gates are an Advanced setting.
   - Gates round-trip through the file on both rows and on a loss channel.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-29 — Gated material drives on the device
+
+- **Layout.** A material's runtime record grows from its two slots of three
+  words to ten words. The four after the slots are one gate window per lane,
+  `(start, repeat, half duration, shape parameter)`, the window a pulsed
+  signal carries. A gate is authored rather than stamped at a commit, so it
+  needs no second copy: the Switch and patch operations, which work
+  slot to slot, and the runtime bank published with every snapshot, three
+  words a material, are unchanged. The record's flags carry a gated bit and
+  the envelope's shape in the two bits above it, so a coefficient record
+  stays four words. Layout version 7, temporal tables version 2.
+- **Evaluation.** One `temporal_carrier` gives a record its carrier phase and
+  gate. Ungated, the phase runs on from the lane's runtime phase and the gate
+  is 1, which leaves `1 + 1·swing` bit-identical to the old `1 + swing`.
+  Gated, the phase counts from the pulse's centre from the authored phase,
+  and the gate is `pulse_envelope` there. The wave shader, the uploaded
+  candidate's factor, the three probe shaders and the host twin all use it.
+  The point and line probes keep one shared block.
+- **Starts.** The clock rebase moves a gated lane's start as it moves a
+  pulse's, a train's folded back within one repeat. A handoff moves the
+  target's windows, packed against its preparation origin, by the
+  preparation delta, as it does the target's pulse starts.
+- **No live patch for gates.** The live temporal-law patch refuses a
+  generation holding a gate: its upload carries no start and no epoch
+  conversion. The app never sends that patch anyway, since every material
+  edit takes a new generation, a Fire on a gate included.
+- **Device checks.**
+  - `canonical_gpu_temporal_gate` puts a gate on every lane: a flat-top
+    train on the travelling mass modulation that started 5.3 s before the
+    run, a Gaussian on the time-crystal stiffness, a sinc on the pumped
+    primary loss and a flat top on the complementary loss. It installs at
+    epoch origin 1000 s, two steps short of the rebase, and steps 1033
+    times against the f64 reference on the same absolute clock. Result:
+    Q 1.57e-6, b 2.90e-6. The same drives ungated land 0.21 from the
+    reference and the medium undriven 0.13.
+  - Deliberately broken shaders are caught. A rebase that leaves the gate
+    starts behind gives Q 0.135, which is the undriven control, since the
+    gates never fire again. A gated carrier run from the free anchor gives
+    Q 0.16, and the wrong envelope shape gives Q 0.046.
+  - `HANDOFF_GATED=1` on `canonical_gpu_temporal_handoff`: the source's
+    train is mid-pulse at the handoff, and the target keeps it and adds a
+    Gaussian timed just after, as Fire does. Result: Q 3.0e-7, b 2.1e-6.
+    Without the transfer's start shift: Q 6.3e-4, b 8.2e-3.
+  - `CONSUMER_GATED=1` on `canonical_gpu_temporal_consumer`, with the
+    compared state on a flat top's falling edge and one width past a
+    Gaussian's peak. Every consumer agrees to 1e-6 or better. The wrong
+    envelope shape in the probe shaders puts the complement off by 5.1e-2
+    on each of them. At first the Gaussian sat at its peak, where every
+    envelope is 1, and the broken shaders passed; the fixture was re-timed
+    until they failed.
+- **Cost.** Measured by `canonical_gpu_temporal_timing` at 15,264 DOFs,
+  alternating the previous build with this one.
+  - An ungated driven step averaged 453 µs before (five runs, 408–499) and
+    457 µs after (five runs, 441–485): no measurable change.
+  - `--gated`, both drives under a Gaussian that covers the whole run, so
+    every factor pays an exponential: 489 µs against 469 µs ungated, three
+    runs each.
+- **Every device example** exits 0, all 21 and the six variants set by
+  environment flags, since the runtime layout moved under all of them.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

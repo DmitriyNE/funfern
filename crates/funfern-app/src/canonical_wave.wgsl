@@ -1,5 +1,5 @@
 // Canonical direct-state f32 solver. Rust layout version 5.
-const LAYOUT_VERSION: u32 = 6u;
+const LAYOUT_VERSION: u32 = 7u;
 const STATE_WORD_STRIDE: u32 = 16u;
 const NODE_STRIDE: u32 = 96u;
 const SAMPLE_STRIDE: u32 = 112u;
@@ -33,6 +33,10 @@ const STATUS_INVERSE_CONVERGENCE: u32 = 5u;
 // Gate O: a node's integrated field passed its restoring law's declared bound.
 const STATUS_RESTORING_DOMAIN: u32 = 6u;
 const TEMPORAL_LOSS_VAN_DER_POL: u32 = 16u;
+// A record whose drive runs under its lane's gate window, the envelope's
+// shape in the two bits above.
+const TEMPORAL_GATED: u32 = 32u;
+const TEMPORAL_GATE_SHAPE_SHIFT: u32 = 6u;
 const RESTORING_KLEIN_GORDON: u32 = 1u;
 const RESTORING_SINE_GORDON: u32 = 2u;
 const RESTORING_PHI4: u32 = 3u;
@@ -201,6 +205,10 @@ fn event_operation() -> u32 { return control.event.z >> 8u; }
 fn live_event() -> bool { return (control.event.z & 2u) != 0u; }
 
 const TEMPORAL_RUNTIME_WORDS_PER_SLOT: u32 = 3u;
+// A material's runtime record: two slots, then one gate window per lane. A
+// gate is authored rather than stamped, so it has one copy, moved in place.
+const TEMPORAL_RUNTIME_GATE_WORD: u32 = 6u;
+const TEMPORAL_RUNTIME_WORDS_PER_MATERIAL: u32 = 10u;
 
 // The accepted material runtime travels in the state buffer, after the
 // metadata word, rather than beside it. A Switch origin is stamped at a
@@ -425,22 +433,44 @@ fn temporal_switch_blend(runtime_word: u32, local_time: f32) -> f32 {
     return start_blend + (target_blend - start_blend) * smootherstep(z);
 }
 
+// A record's carrier phase and gate at `local_time`. Ungated, the carrier
+// runs on from its lane's runtime phase and the gate is one. Under a gate it
+// counts from the pulse's centre from the authored phase, as a pulsed
+// signal's does, and the gate is the envelope there, zero between pulses.
+fn temporal_carrier(
+    metadata: vec4<u32>, runtime_root: u32, runtime_word: u32,
+    angular_frequency: f32, authored_phase: f32, local_time: f32,
+) -> vec2<f32> {
+    if (metadata.w & TEMPORAL_GATED) == 0u {
+        return vec2<f32>(reduced_phase(
+            table_float(runtime_word, metadata.y) + angular_frequency * local_time), 1.0);
+    }
+    let window = bitcast<vec4<f32>>(
+        tables[runtime_root + TEMPORAL_RUNTIME_GATE_WORD + metadata.y].data);
+    let offset = pulse_offset(window, local_time);
+    return vec2<f32>(
+        reduced_phase(authored_phase + angular_frequency * offset),
+        pulse_envelope((metadata.w >> TEMPORAL_GATE_SHAPE_SHIFT) & 3u, window, offset));
+}
+
 fn temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
     let metadata = tables[coefficient_word].data;
     let runtime_header = tables[control.runtime_slots.z].data;
-    let runtime_word = runtime_header.w + 6u * metadata.x
-        + 3u * (control.runtime_slots.y & 1u);
-    let phase = table_float(runtime_word, metadata.y)
-        + table_float(coefficient_word + 1u, 3u) * local_time;
-    let carrier = reduced_phase(phase);
+    let runtime_root = runtime_header.w + TEMPORAL_RUNTIME_WORDS_PER_MATERIAL * metadata.x;
+    let runtime_word = runtime_root
+        + TEMPORAL_RUNTIME_WORDS_PER_SLOT * (control.runtime_slots.y & 1u);
+    let timing = temporal_carrier(metadata, runtime_root, runtime_word,
+        table_float(coefficient_word + 1u, 3u), table_float(coefficient_word + 2u, 2u),
+        local_time);
+    let carrier = timing.x;
     let depth = table_float(coefficient_word + 1u, 2u);
     let shape = table_float(coefficient_word + 2u, 0u);
     let spatial_phase = table_float(coefficient_word + 2u, 1u);
-    var drive = 1.0;
+    var swing = 0.0;
     switch metadata.z {
         case TEMPORAL_DRIVE_NONE: {}
         case TEMPORAL_DRIVE_PUMP: {
-            drive += depth * cos(carrier);
+            swing = depth * cos(carrier);
         }
         case TEMPORAL_DRIVE_CRYSTAL: {
             let cosine = cos(carrier);
@@ -451,10 +481,10 @@ fn temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
             } else {
                 square = tanh(shape * cosine) / tanh(shape);
             }
-            drive += depth * square;
+            swing = depth * square;
         }
         case TEMPORAL_DRIVE_TRAVELLING: {
-            drive += depth * cos(carrier - spatial_phase);
+            swing = depth * cos(carrier - spatial_phase);
         }
         // Packed metadata admits only the four cases above. Zero makes any
         // corrupted record fail the subsequent positive-factor/non-finite
@@ -462,6 +492,7 @@ fn temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
         // shader modules reject even in an unreachable branch.
         default: { return 0.0; }
     }
+    let drive = 1.0 + timing.y * swing;
     let blend = temporal_switch_blend(runtime_word, local_time);
     var switch_factor = 1.0;
     if (metadata.w & TEMPORAL_HAS_ALTERNATE) != 0u {
@@ -883,18 +914,20 @@ fn boundary_float(word: u32, lane: u32) -> f32 {
 fn uploaded_temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
     let metadata = boundary[coefficient_word].data;
     let runtime_header = tables[control.runtime_slots.z].data;
-    let runtime_word = runtime_header.w + 6u * metadata.x
-        + 3u * ((control.runtime_slots.y & 1u) ^ 1u);
-    let phase = table_float(runtime_word, metadata.y)
-        + boundary_float(coefficient_word + 1u, 3u) * local_time;
-    let carrier = reduced_phase(phase);
+    let runtime_root = runtime_header.w + TEMPORAL_RUNTIME_WORDS_PER_MATERIAL * metadata.x;
+    let runtime_word = runtime_root
+        + TEMPORAL_RUNTIME_WORDS_PER_SLOT * ((control.runtime_slots.y & 1u) ^ 1u);
+    let timing = temporal_carrier(metadata, runtime_root, runtime_word,
+        boundary_float(coefficient_word + 1u, 3u), boundary_float(coefficient_word + 2u, 2u),
+        local_time);
+    let carrier = timing.x;
     let depth = boundary_float(coefficient_word + 1u, 2u);
     let shape = boundary_float(coefficient_word + 2u, 0u);
     let spatial_phase = boundary_float(coefficient_word + 2u, 1u);
-    var drive = 1.0;
+    var swing = 0.0;
     switch metadata.z {
         case TEMPORAL_DRIVE_NONE: {}
-        case TEMPORAL_DRIVE_PUMP: { drive += depth * cos(carrier); }
+        case TEMPORAL_DRIVE_PUMP: { swing = depth * cos(carrier); }
         case TEMPORAL_DRIVE_CRYSTAL: {
             let cosine = cos(carrier);
             var square: f32;
@@ -904,13 +937,14 @@ fn uploaded_temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
             } else {
                 square = tanh(shape * cosine) / tanh(shape);
             }
-            drive += depth * square;
+            swing = depth * square;
         }
         case TEMPORAL_DRIVE_TRAVELLING: {
-            drive += depth * cos(carrier - spatial_phase);
+            swing = depth * cos(carrier - spatial_phase);
         }
         default: { return 0.0; }
     }
+    let drive = 1.0 + timing.y * swing;
     let blend = temporal_switch_blend(runtime_word, local_time);
     var switch_factor = 1.0;
     if (metadata.w & TEMPORAL_HAS_ALTERNATE) != 0u {
@@ -1373,9 +1407,11 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
             return;
         }
         if i < runtime_count {
-            let root = header.w + 6u * i;
-            let accepted = root + 3u * (control.runtime_slots.y & 1u);
-            let candidate = root + 3u * ((control.runtime_slots.y & 1u) ^ 1u);
+            let root = header.w + TEMPORAL_RUNTIME_WORDS_PER_MATERIAL * i;
+            let accepted = root
+                + TEMPORAL_RUNTIME_WORDS_PER_SLOT * (control.runtime_slots.y & 1u);
+            let candidate = root
+                + TEMPORAL_RUNTIME_WORDS_PER_SLOT * ((control.runtime_slots.y & 1u) ^ 1u);
             tables[candidate].data = tables[accepted].data;
             tables[candidate + 1u].data = tables[accepted + 1u].data;
             tables[candidate + 2u].data = tables[accepted + 2u].data;
@@ -1409,9 +1445,11 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
                 + TEMPORAL_COEFFICIENT_WORDS * (upload.z + upload.w);
             let target_frequency = bitcast<vec4<f32>>(
                 boundary[frequency_offset + i].data);
-            let root = header.w + 6u * i;
-            let accepted = root + 3u * (control.runtime_slots.y & 1u);
-            let candidate = root + 3u * ((control.runtime_slots.y & 1u) ^ 1u);
+            let root = header.w + TEMPORAL_RUNTIME_WORDS_PER_MATERIAL * i;
+            let accepted = root
+                + TEMPORAL_RUNTIME_WORDS_PER_SLOT * (control.runtime_slots.y & 1u);
+            let candidate = root
+                + TEMPORAL_RUNTIME_WORDS_PER_SLOT * ((control.runtime_slots.y & 1u) ^ 1u);
             let old_phase = bitcast<vec4<f32>>(tables[accepted].data);
             let old_frequency = bitcast<vec4<f32>>(tables[accepted + 2u].data);
             var next_phase: vec4<f32>;
@@ -2078,8 +2116,9 @@ fn rebase_clock_records(@builtin(global_invocation_id) id: vec3<u32>) {
         let header = tables[control.runtime_slots.z].data;
         let runtime_count = tables[control.runtime_slots.z + 1u].data.x;
         if i < runtime_count {
-            let root = header.w + 6u * i;
-            let accepted = root + 3u * (control.runtime_slots.y & 1u);
+            let root = header.w + TEMPORAL_RUNTIME_WORDS_PER_MATERIAL * i;
+            let accepted = root
+                + TEMPORAL_RUNTIME_WORDS_PER_SLOT * (control.runtime_slots.y & 1u);
             var phase = tables[accepted].data;
             let frequency = tables[accepted + 2u].data;
             for (var lane = 0u; lane < 4u; lane += 1u) {
@@ -2096,6 +2135,16 @@ fn rebase_clock_records(@builtin(global_invocation_id) id: vec3<u32>) {
             tables[root + 3u].data = phase;
             tables[root + 4u].data = switch_runtime;
             tables[root + 5u].data = frequency;
+            // A gate's carrier counts from its own centre; only its start
+            // moves with the origin.
+            for (var lane = 0u; lane < 4u; lane += 1u) {
+                let word = root + TEMPORAL_RUNTIME_GATE_WORD + lane;
+                var window = bitcast<vec4<f32>>(tables[word].data);
+                if window.z > 0.0 {
+                    window.x = pulse_start_after(window, elapsed);
+                    tables[word].data = bitcast<vec4<u32>>(window);
+                }
+            }
         }
     }
 }

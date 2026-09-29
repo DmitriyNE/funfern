@@ -85,6 +85,56 @@ fn table_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(tables[word].data[lane]);
 }
 fn reduced_phase(value: f32) -> f32 { return atan2(sin(value), cos(value)); }
+// `canonical_wave.wgsl`'s gate: the pulse window's offset and envelope, and
+// a record's carrier phase and gate at `local_time`.
+const TEMPORAL_RUNTIME_WORDS_PER_SLOT: u32 = 3u;
+const TEMPORAL_RUNTIME_WORDS_PER_MATERIAL: u32 = 10u;
+const TEMPORAL_RUNTIME_GATE_WORD: u32 = 6u;
+const TEMPORAL_GATED: u32 = 32u;
+const TEMPORAL_GATE_SHAPE_SHIFT: u32 = 6u;
+const PULSE_FLAT_TOP: u32 = 0u;
+const PULSE_GAUSSIAN: u32 = 1u;
+const PULSE_PI: f32 = 3.14159265;
+const GAUSSIAN_FLOOR: f32 = 3.3546262e-4;
+fn pulse_offset(window: vec4<f32>, local_time: f32) -> f32 {
+    var since = local_time - window.x;
+    if window.y > 0.0 && since >= 0.0 {
+        since -= window.y * floor(since / window.y);
+    }
+    return since - window.z;
+}
+fn pulse_envelope(shape: u32, window: vec4<f32>, offset: f32) -> f32 {
+    let half = window.z;
+    if abs(offset) >= half { return 0.0; }
+    if shape == PULSE_FLAT_TOP {
+        let inside = half - abs(offset);
+        if inside >= window.w { return 1.0; }
+        return 0.5 - 0.5 * cos(PULSE_PI * inside / window.w);
+    }
+    if shape == PULSE_GAUSSIAN {
+        let ratio = offset / window.w;
+        return (exp(-0.5 * ratio * ratio) - GAUSSIAN_FLOOR) / (1.0 - GAUSSIAN_FLOOR);
+    }
+    let angle = 2.0 * PULSE_PI * window.w * offset;
+    var sinc_value = 1.0 - angle * angle / 6.0;
+    if abs(angle) >= 1.0e-3 { sinc_value = sin(angle) / angle; }
+    return sinc_value * (0.5 + 0.5 * cos(PULSE_PI * offset / half));
+}
+fn temporal_carrier(
+    metadata: vec4<u32>, runtime_root: u32, runtime_word: u32,
+    angular_frequency: f32, authored_phase: f32, local_time: f32,
+) -> vec2<f32> {
+    if (metadata.w & TEMPORAL_GATED) == 0u {
+        return vec2<f32>(reduced_phase(
+            table_float(runtime_word, metadata.y) + angular_frequency * local_time), 1.0);
+    }
+    let window = bitcast<vec4<f32>>(
+        tables[runtime_root + TEMPORAL_RUNTIME_GATE_WORD + metadata.y].data);
+    let offset = pulse_offset(window, local_time);
+    return vec2<f32>(
+        reduced_phase(authored_phase + angular_frequency * offset),
+        pulse_envelope((metadata.w >> TEMPORAL_GATE_SHAPE_SHIFT) & 3u, window, offset));
+}
 fn smootherstep(value: f32) -> f32 {
     return value * value * value * (value * (value * 6.0 - 15.0) + 10.0);
 }
@@ -103,19 +153,20 @@ fn temporal_switch_blend(runtime_word: u32, local_time: f32) -> f32 {
 }
 fn temporal_factor(
     metadata: vec4<u32>, values: vec4<u32>, shape: f32, spatial_phase: f32,
-    local_time: f32,
+    authored_phase: f32, local_time: f32,
 ) -> f32 {
     let runtime_header = tables[control.runtime_slots.z].data;
-    let runtime_word = runtime_header.w + 6u * metadata.x
-        + 3u * (control.runtime_slots.y & 1u);
-    let phase = table_float(runtime_word, metadata.y)
-        + bitcast<f32>(values.w) * local_time;
-    let carrier = reduced_phase(phase);
+    let runtime_root = runtime_header.w + TEMPORAL_RUNTIME_WORDS_PER_MATERIAL * metadata.x;
+    let runtime_word = runtime_root
+        + TEMPORAL_RUNTIME_WORDS_PER_SLOT * (control.runtime_slots.y & 1u);
+    let timing = temporal_carrier(metadata, runtime_root, runtime_word,
+        bitcast<f32>(values.w), authored_phase, local_time);
+    let carrier = timing.x;
     let depth = bitcast<f32>(values.z);
-    var drive = 1.0;
+    var swing = 0.0;
     switch metadata.z {
         case TEMPORAL_DRIVE_NONE: {}
-        case TEMPORAL_DRIVE_PUMP: { drive += depth * cos(carrier); }
+        case TEMPORAL_DRIVE_PUMP: { swing = depth * cos(carrier); }
         case TEMPORAL_DRIVE_CRYSTAL: {
             let cosine = cos(carrier);
             var square: f32;
@@ -125,13 +176,14 @@ fn temporal_factor(
             } else {
                 square = tanh(shape * cosine) / tanh(shape);
             }
-            drive += depth * square;
+            swing = depth * square;
         }
         case TEMPORAL_DRIVE_TRAVELLING: {
-            drive += depth * cos(carrier - spatial_phase);
+            swing = depth * cos(carrier - spatial_phase);
         }
         default: { return 0.0; }
     }
+    let drive = 1.0 + timing.y * swing;
     let blend = temporal_switch_blend(runtime_word, local_time);
     var switch_factor = 1.0;
     if (metadata.w & TEMPORAL_HAS_ALTERNATE) != 0u {
@@ -171,7 +223,8 @@ fn field_response(word: u32, r: f32) -> vec3<f32> {
 }
 fn record_factor(word: u32, local_time: f32) -> f32 {
     return temporal_factor(tables[word].data, tables[word + 1u].data,
-        table_float(word + 2u, 0u), table_float(word + 2u, 1u), local_time);
+        table_float(word + 2u, 0u), table_float(word + 2u, 1u),
+        table_float(word + 2u, 2u), local_time);
 }
 // The node's field from its flux, through the same assembled map and the
 // same bracketed solve the solver runs. A probe cannot fail the step; a solve
@@ -263,7 +316,7 @@ fn primary_inverse_mass(node: u32, local_time: f32) -> f32 {
         let metadata = tables[word].data;
         mass += table_float(word + 1u, 0u) * temporal_factor(
             metadata, tables[word + 1u].data, table_float(word + 2u, 0u),
-            table_float(word + 2u, 1u), local_time);
+            table_float(word + 2u, 1u), table_float(word + 2u, 2u), local_time);
     }
     return 1.0 / mass;
 }
@@ -291,7 +344,8 @@ fn sample_temporal_factor(stencil: PointStencil, local: u32, local_time: f32) ->
     if !temporal_enabled() { return 1.0; }
     let word = stencil.temporal_complementary.x + local * TEMPORAL_COEFFICIENT_WORDS;
     return temporal_factor(tables[word].data, tables[word + 1u].data,
-        table_float(word + 2u, 0u), table_float(word + 2u, 1u), local_time);
+        table_float(word + 2u, 0u), table_float(word + 2u, 1u),
+        table_float(word + 2u, 2u), local_time);
 }
 // The same law at the probe point, for the pointwise densities only.
 fn probe_temporal_factor(stencil: PointStencil, primary: bool, local_time: f32) -> f32 {
@@ -320,7 +374,7 @@ fn probe_temporal_factor(stencil: PointStencil, primary: bool, local_time: f32) 
                 table_float(words_b.z + 2u, 1u), 0.0), stencil.primary_b);
     }
     return temporal_factor(tables[word].data, tables[word + 1u].data,
-        table_float(word + 2u, 0u), spatial_phase, local_time);
+        table_float(word + 2u, 0u), spatial_phase, table_float(word + 2u, 2u), local_time);
 }
 fn physical_complement(
     stencil: PointStencil, flux: array<vec2<f32>, 6>, local_time: f32,

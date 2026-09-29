@@ -5,6 +5,9 @@ const DRIVE_TARGET_PARAMETERS: u32 = 0x80000000u;
 const DRIVE_INDEX_MASK: u32 = 0x7fffffffu;
 // Drive records and pulse windows as `canonical_wave.wgsl` lays them out.
 const DRIVE_WORDS: u32 = 6u;
+const TEMPORAL_RUNTIME_WORDS_PER_SLOT: u32 = 3u;
+const TEMPORAL_RUNTIME_GATE_WORD: u32 = 6u;
+const TEMPORAL_RUNTIME_WORDS_PER_MATERIAL: u32 = 10u;
 const DRIVE_SLOT_WORDS: u32 = 3u;
 const DRIVE_INTEGRATED: u32 = 1u;
 const DRIVE_PULSE: u32 = 2u;
@@ -91,10 +94,22 @@ fn write_material_runtime(
     let switch_bits = bitcast<vec4<u32>>(switch_state);
     let frequency_bits = bitcast<vec4<u32>>(frequency);
     for (var slot = 0u; slot < 2u; slot += 1u) {
-        let base = root + 3u * slot;
+        let base = root + TEMPORAL_RUNTIME_WORDS_PER_SLOT * slot;
         new_tables[base].data = phase_bits;
         new_tables[base + 1u].data = switch_bits;
         new_tables[base + 2u].data = frequency_bits;
+    }
+}
+// A gate is a function of absolute time, as a pulse is: the target's own
+// windows, packed against its preparation origin, move on to the handoff's.
+fn start_material_gates(root: u32, absolute_elapsed: f32) {
+    for (var lane = 0u; lane < 4u; lane += 1u) {
+        let word = root + TEMPORAL_RUNTIME_GATE_WORD + lane;
+        var window = bitcast<vec4<f32>>(new_tables[word].data);
+        if window.z > 0.0 {
+            window.x = pulse_start_after(window, absolute_elapsed);
+            new_tables[word].data = bitcast<vec4<u32>>(window);
+        }
     }
 }
 fn old_drive(base: u32, elapsed: f32) -> f32 {
@@ -251,7 +266,7 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
     if material_header.w != 0u && i < target_materials {
         let mapping = transfer[material_header.x + i].data;
         let new_header = new_tables[new_control.runtime_slots.z].data;
-        let new_root = new_header.w + 6u * i;
+        let new_root = new_header.w + TEMPORAL_RUNTIME_WORDS_PER_MATERIAL * i;
         let target_phase = bitcast<vec4<f32>>(new_tables[new_root].data);
         var phase = vec4<f32>(0.0);
         var switch_state = bitcast<vec4<f32>>(new_tables[new_root + 1u].data);
@@ -259,7 +274,8 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
         if mapping.x != NO_INDEX {
             let old_header = old_tables[old_control.runtime_slots.z].data;
             let old_slot = old_control.runtime_slots.y & 1u;
-            let old_root = old_header.w + 6u * mapping.x + 3u * old_slot;
+            let old_root = old_header.w + TEMPORAL_RUNTIME_WORDS_PER_MATERIAL * mapping.x
+                + TEMPORAL_RUNTIME_WORDS_PER_SLOT * old_slot;
             let old_phase = bitcast<vec4<f32>>(old_tables[old_root].data);
             let old_switch = bitcast<vec4<f32>>(old_tables[old_root + 1u].data);
             let old_frequency = bitcast<vec4<f32>>(old_tables[old_root + 2u].data);
@@ -289,6 +305,7 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
             switch_state.z -= preparation_delta;
         }
         write_material_runtime(new_root, phase, switch_state, frequency);
+        start_material_gates(new_root, preparation_delta);
     }
     if i != 0u { return; }
     let epoch_low = old_control.clock_u32.x + 1u;

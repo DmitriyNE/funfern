@@ -1,4 +1,10 @@
 //! Real-device validation of temporal material runtime generation handoff.
+//!
+//! `HANDOFF_GATED=1` gates both drives. The source's mass train is in a
+//! pulse when the handoff lands and the target keeps it; the target's
+//! stiffness gets a new Gaussian timed just after the handoff, as Fire does.
+//! A target's windows are packed against its own preparation origin, so the
+//! device has to move them onto the handoff's.
 
 use std::time::{Duration, Instant};
 
@@ -13,8 +19,8 @@ use funfern_core::{
     CanonicalForcing, CanonicalMaterialDrive, CanonicalOutgoingHistoryTransferMap,
     CanonicalPrimaryTransferMap, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
     CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CoefficientLaw, MeshingOptions,
-    OuterBoundaryCondition, QuadraticTransferMap, QuadraticWaveOperator, ScalarField, Scene,
-    TimeDrive, mesh_scene,
+    OuterBoundaryCondition, PulseEnvelope, PulseTrain, QuadraticTransferMap, QuadraticWaveOperator,
+    ScalarField, Scene, TimeDrive, mesh_scene,
 };
 
 const WARMUP_STEPS: u64 = 24;
@@ -133,16 +139,48 @@ fn main() -> AppExit {
         OuterBoundaryCondition::Reflecting,
     )
     .expect("temporal handoff scalar operator");
-    let source_operator =
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &source_scene, 71)
-            .expect("source temporal operator");
-    let target_operator =
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &target_scene, 72)
-            .expect("target temporal operator");
+    let compile = |source_scene: &Scene, target_scene: &Scene| {
+        (
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, source_scene, 71)
+                .expect("source temporal operator"),
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, target_scene, 72)
+                .expect("target temporal operator"),
+        )
+    };
+    let (mut source_operator, mut target_operator) = compile(&source_scene, &target_scene);
     let time_step = 0.38
         * source_operator
             .maximum_time_step()
             .min(target_operator.maximum_time_step());
+    if flag("HANDOFF_GATED") {
+        // Gates leave the step bound alone, so they are timed from the step
+        // the ungated operators set.
+        let handoff = WARMUP_STEPS as f64 * time_step;
+        let after = TARGET_STEPS as f64 * time_step;
+        let train = PulseTrain {
+            envelope: PulseEnvelope::FlatTop {
+                duration: 0.6 * handoff,
+                edge: 0.2 * handoff,
+            },
+            start: 0.1 * handoff,
+            repeat: 0.7 * handoff,
+        };
+        source_scene.materials[0].mass_law.gate = Some(train);
+        source_scene.materials[0].stiffness_law.gate = Some(PulseTrain {
+            envelope: PulseEnvelope::Gaussian {
+                width: 0.08 * handoff,
+            },
+            start: 0.3 * handoff,
+            repeat: 0.0,
+        });
+        target_scene.materials[0].mass_law.gate = Some(train);
+        target_scene.materials[0].stiffness_law.gate = Some(PulseTrain {
+            envelope: PulseEnvelope::Gaussian { width: 0.1 * after },
+            start: handoff + 0.1 * after,
+            repeat: 0.0,
+        });
+        (source_operator, target_operator) = compile(&source_scene, &target_scene);
+    }
 
     let primary = source_operator
         .base()
