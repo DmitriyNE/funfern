@@ -17542,3 +17542,33 @@ step to them.
   gallery plan's F7 says what changed.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — An echo comb
+
+Batch G's first scene (`docs/spikes/funfern-gallery-plan.md`, "Batch G",
+G1), in Basics after the obstacle over a mirror: a pulse and its echo off a
+mirror behind the probe comb the transfer.
+
+- **Scene.** `echo_comb_with(repeat)`: the reference arm with a mirror at
+  `x = 0.95` across the upper arm, probes at `x = 0.45`, a sinc pulse flat
+  from 0.5 to 3.5 Hz every 16 s; "Before the mirror" reads its transfer from
+  "Reference" over 16 s segments. `Builder::arms` takes an optional mirror,
+  a reflecting cut with what lies past it cut away, and `arm_probes_at` puts
+  the probes at any `x`. 43 scenes.
+- **Explored.** The teeth read 2.00 at edge 0.08 but the gaps 0.12 and 0.26,
+  about 0.08 rad per hertz of phase on the second-long round trip; at 0.05,
+  0.01 and 0.05. The readout's teeth sit at `1 + R(1/16)` = 1.975, the echo
+  read low by the segment's overlap with itself.
+- **Measured claim** (`a_mirror_behind_a_probe_combs_its_transfer`, edge
+  0.05): one whole pulse within 0.06 of `2|cos(πfτ)|` from 0.6 to 3.4 Hz
+  (0.048); the readout's own average over two segments with its teeth at
+  `1 + R` within 2% (1.977 to 1.982) and its gaps under 0.1 (0.03, 0.05).
+- **Device:** `canonical_gpu_long_run` on "Echo comb", 8,462 dofs: Q 1.4e-6,
+  b 1.6e-6 at 400 steps and Q 3.2e-6, b 3.4e-6 at 800. At 1000 it reads 7e-4
+  and fails, against a domain the pulse has left: the reference's `|b|` falls
+  from 19 at step 800 to 0.099 at 1000 while the device's absolute error
+  stays at 6.1 to 6.6e-5 (printed for the diagnosis, then removed), about
+  1e-6 of the peak. The gate's relative measure is over the field left, not
+  the field the run carried.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

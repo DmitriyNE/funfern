@@ -1200,6 +1200,48 @@ each arrival:
 - A quarter beside the focus they reach under a fifth of the focus's peak
   (0.14).
 
+## Batch G: the rest of the pulses and gates
+
+Proposed on 30 September 2026 after batch F, from its "Still open" list, and
+agreed with the user: an echo comb, a pumped drum, and pulsed Doppler to be
+explored first and built only if a clean claim holds. The chopper, plain
+amplitude modulation, and the plasmonic guide, which needs a Drude law on
+the complementary row, stay out.
+
+### G1. Echo comb
+
+Basics, after the obstacle over a mirror. The reference arm with a mirror
+(`Builder::arms` takes one now): a reflecting wall across the upper arm at
+`x = 0.95`, the face past it cut away. Probes at `x = 0.45` in both arms; a
+sinc pulse flat from 0.5 to 3.5 Hz every 16 s. The upper probe hears the
+pulse and then, `τ = 2d/c` = 1 s later, its echo, which a reflecting face
+in the E_z skin returns in phase, so over the reference it reads `1 +
+e^{−iωτ}`: `2|cos(πfτ)|`, teeth of two at every whole hertz and gaps of
+nothing halfway between. It is the comb that made the user's first
+transfers, read in front of walls, not flat.
+
+Explored on the CPU: the whole pulse reads the teeth at 2.00 at edge 0.08,
+but the gaps at 0.12 and 0.26, a phase error of about 0.08 rad per hertz on
+a round trip a second long, the mesh's dispersion and the probe's nearest
+node; at edge 0.05, 0.01 and 0.05. The readout over 16 s segments reads the
+echo low by the segment's overlap with itself shifted a second, `R(1/16)` =
+0.975, so its teeth stand at 1.975.
+
+Claims at edge 0.05:
+
+- One whole pulse, 20 s, is within 0.06 of `2|cos(πfτ)|` from 0.6 to
+  3.4 Hz (0.048).
+- The readout, a pulse a segment for two segments, puts its teeth at `1 +
+  R(1/16)` within 2% (1.977 to 1.982 against 1.975) and its gaps under 0.1
+  (0.03 and 0.05).
+
+The device run at 1000 steps fails the long run's relative measure, and the
+scene is not at fault: by 5.5 s both halves of the pulse have left the
+domain, the reference's field falls about 200-fold from step 800 to 1000
+(`|b|` 19 to 0.099), and the device's absolute error stays at 6.1 to 6.6e-5 in
+`b` throughout, about 1e-6 of the peak. At 800 steps, with the field still
+in the domain, Q 3.2e-6 and b 3.4e-6.
+
 ## Order, as built
 
 Built from 25 to 26 September in batch order, A to E, groundwork first.
@@ -1282,7 +1324,8 @@ example to the next walks the gallery as it is shown
 (`the_catalog_runs_section_by_section`):
 
 - **Basics:** obstacle over a mirror, double slit, obstacle array, phased
-  array, Talbot carpet.
+  array, Talbot carpet. Batch G adds the echo comb after the obstacle over a
+  mirror.
 - **Interfaces and media:** anisotropic crystal, Brewster angle, skin depth,
   plasma skin depth, plasma mirror. Batch F adds the etalon after the Brewster
   angle and the plasma group delay after the plasma skin depth.

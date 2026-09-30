@@ -69,6 +69,17 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 ExampleGroup::Basics,
+                "Echo comb",
+                "A plane-wave pulse every 16 s, flat from 0.5 to 3.5 Hz, runs down the upper of \
+                 two arms to a mirror half a unit past a probe, which hears it again a second \
+                 later. Divided by the probe in the open lower arm, it reads the pulse and its \
+                 echo together, 2|cos(πfτ)| with τ = 1 s: a comb whose teeth, twice the field, \
+                 stand at every whole hertz and whose gaps, none of it, fall halfway between. \
+                 Any reflector behind a probe combs what it reads this way.",
+                echo_comb(),
+            ),
+            example(
+                ExampleGroup::Basics,
                 "Double slit",
                 "A source boxed in black walls lights two slits; the screen and the far field show \
                  the fringes.",
@@ -874,10 +885,17 @@ impl Builder {
     /// halves, a strip 0.06 wide across each arm, carry `signal`. The upper
     /// arm is cut from the split to the ceiling at the edges of each of
     /// `layers`, `(x0, x1, material)`, which fill it between them; the lower
-    /// arm is empty, the reference. Every face is named from the floor or the
-    /// ceiling, so the background's own anchor, on the floor at `x = 0`,
-    /// names the lower arm's face past the launcher.
-    fn arms(&mut self, x: f64, signal: TimeSignal, layers: &[(f64, f64, MaterialId)]) {
+    /// arm is empty, the reference. With a `mirror`, a reflecting wall closes
+    /// the upper arm there, and what lies past it is cut away. Every face is
+    /// named from the floor or the ceiling, so the background's own anchor,
+    /// on the floor at `x = 0`, names the lower arm's face past the launcher.
+    fn arms(
+        &mut self,
+        x: f64,
+        signal: TimeSignal,
+        layers: &[(f64, f64, MaterialId)],
+        mirror: Option<f64>,
+    ) {
         let domain = self.scene.geometry.domain;
         let background = self.scene.regions[0].material;
         let (left, right) = (x - 0.03, x + 0.03);
@@ -885,6 +903,7 @@ impl Builder {
         let mut cuts = layers
             .iter()
             .flat_map(|(x0, x1, _)| [*x0, *x1])
+            .chain(mirror)
             .collect::<Vec<_>>();
         cuts.sort_by(f64::total_cmp);
         cuts.dedup();
@@ -924,7 +943,11 @@ impl Builder {
                 self.pinned_polyline(
                     vec![Point2::new(*cut, 0.0), Point2::new(*cut, domain.max_y)],
                     &[Some(*junction), Some(top)],
-                    SpanBehavior::Transmitting,
+                    if Some(*cut) == mirror {
+                        SpanBehavior::REFLECTING
+                    } else {
+                        SpanBehavior::Transmitting
+                    },
                 );
             }
         }
@@ -951,6 +974,16 @@ impl Builder {
                 continue;
             }
             let middle = 0.5 * (pair[0] + pair[1]);
+            if mirror.is_some_and(|mirror| pair[0] >= mirror) {
+                self.scene.face_assignments.push(AuthoredFaceAssignment {
+                    anchor: FaceAnchor::Outer {
+                        side: OuterSide::Top,
+                        fraction: (domain.max_x - middle) / domain.width(),
+                    },
+                    region: None,
+                });
+                continue;
+            }
             let material = layers
                 .iter()
                 .find(|(x0, x1, _)| *x0 <= pair[0] && pair[1] <= *x1)
@@ -1055,9 +1088,19 @@ const ARM_REFERENCE: Point2 = Point2::new(0.75, -0.5);
 /// The two probes of a scene in arms: `behind`, which opens on `readout`,
 /// and "Reference", on its field.
 fn arm_probes(document: &mut TopologyDocument, behind: &str, readout: ProbeReadout) {
+    arm_probes_at(document, behind, ARM_BEHIND.x, readout);
+}
+
+/// `arm_probes` at `x` along the arms.
+fn arm_probes_at(document: &mut TopologyDocument, behind: &str, x: f64, readout: ProbeReadout) {
     for (id, name, color, point) in [
-        (1, behind, [91, 220, 194], ARM_BEHIND),
-        (2, "Reference", [248, 196, 112], ARM_REFERENCE),
+        (1, behind, [91, 220, 194], Point2::new(x, ARM_BEHIND.y)),
+        (
+            2,
+            "Reference",
+            [248, 196, 112],
+            Point2::new(x, ARM_REFERENCE.y),
+        ),
     ] {
         document.model.probes.push(TopologyProbeDefinition {
             id: ProbeId(id),
@@ -2811,7 +2854,7 @@ fn photonic_crystal_with(repeat: f64, rods: bool) -> TopologyDocument {
         polarization: ElectromagneticPolarization::Tm,
     };
     builder.scene.outer_boundaries = channel();
-    builder.arms(-0.85, sinc_pulse(0.8, 3.0, repeat), &[]);
+    builder.arms(-0.85, sinc_pulse(0.8, 3.0, repeat), &[], None);
     builder.scene.materials.push(Material {
         id: MaterialId(2),
         name: "Ceramic".into(),
@@ -3902,6 +3945,41 @@ const SKIN_FRONT: f64 = -0.35;
 const SKIN_BACK: f64 = -0.05;
 
 /// The loss rate, `γ = 2ω`.
+fn echo_comb() -> TopologyDocument {
+    echo_comb_with(ECHO_REPEAT)
+}
+
+/// The echo's mirror, half a unit behind the probe, so that there the echo
+/// trails the pulse by a second.
+const ECHO_PROBE_X: f64 = 0.45;
+const ECHO_MIRROR: f64 = 0.95;
+const ECHO_REPEAT: f64 = ECHO_SEGMENT;
+const ECHO_SEGMENT: f64 = 16.0;
+
+/// A TM channel in two arms lit by a sinc pulse flat from 0.5 to 3.5 Hz every
+/// `repeat` seconds, zero for once, with the upper arm closed by a mirror at
+/// `x = 0.95`. A probe half a unit before it hears the pulse and then, `τ =
+/// 2d/c` = 1 s later, its echo, which a reflecting face in the E_z skin
+/// returns in phase: over the reference's pulse alone the probe reads `1 +
+/// e^{−iωτ}`, `2|cos(πfτ)|` in magnitude.
+fn echo_comb_with(repeat: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    builder.arms(-0.85, sinc_pulse(0.5, 3.5, repeat), &[], Some(ECHO_MIRROR));
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    arm_probes_at(
+        &mut document,
+        "Before the mirror",
+        ECHO_PROBE_X,
+        transfer_readout(ProbeId(2), 4.0, ECHO_SEGMENT),
+    );
+    document
+}
+
 fn etalon() -> TopologyDocument {
     etalon_with(ETALON_PERMITTIVITY, ETALON_REPEAT)
 }
@@ -3940,6 +4018,7 @@ fn etalon_with(permittivity: f64, repeat: f64) -> TopologyDocument {
         -0.85,
         sinc_pulse(0.5, 3.5, repeat),
         &[(ETALON_FRONT, ETALON_FRONT + ETALON_THICKNESS, MaterialId(2))],
+        None,
     );
     let mut document = builder.document();
     document.model.source.enabled = false;
@@ -3994,6 +4073,7 @@ fn cavity_filter_with(repeat: f64) -> TopologyDocument {
             (CAVITY_FRONT, CAVITY_FRONT + CAVITY_PLATE, MaterialId(2)),
             (back, back + CAVITY_PLATE, MaterialId(2)),
         ],
+        None,
     );
     let mut document = builder.document();
     document.model.source.enabled = false;
@@ -4187,6 +4267,7 @@ fn plasma_delay_with(repeat: f64) -> TopologyDocument {
             repeat,
         ),
         &[(PLASMA_DELAY_FRONT, PLASMA_DELAY_BACK, MaterialId(2))],
+        None,
     );
     let mut document = builder.document();
     document.model.source.enabled = false;
@@ -4200,7 +4281,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 42);
+        assert_eq!(catalog().len(), 43);
         assert_eq!(catalog()[0].name, "Obstacle over a mirror");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -7805,5 +7886,54 @@ mod tests {
             "beside the focus they reach {:.3} of it",
             beside / gathered
         );
+    }
+
+    /// The echo comb's claims, at edge 0.05, where the comb's gaps, the
+    /// phase of a round trip a second long, hold to the mesh's dispersion (at
+    /// 0.08 they read 0.12 and 0.26). One pulse's whole records, 20 s, follow
+    /// `2|cos(πfτ)|`, `τ` = 1 s, within 0.06 from 0.6 to 3.4 Hz (0.048): two
+    /// at 1, 2 and 3 Hz, 0.01 and 0.05 at 1.5 and 2.5. The readout, a pulse a
+    /// segment for two of them, reads the echo low by the segment's overlap
+    /// with itself a second on, `R(1/16)` = 0.975, so its teeth stand at
+    /// `1 + R` within 2% (1.977 to 1.982 against 1.975) and its gaps under
+    /// 0.1 (0.03 and 0.05).
+    #[test]
+    fn a_mirror_behind_a_probe_combs_its_transfer() {
+        let pi = std::f64::consts::PI;
+        let tau = 2.0 * (ECHO_MIRROR - ECHO_PROBE_X);
+        let comb = |hz: f64| 2.0 * (pi * hz * tau).cos().abs();
+        let points = [
+            Point2::new(ECHO_PROBE_X, ARM_BEHIND.y),
+            Point2::new(ECHO_PROBE_X, ARM_REFERENCE.y),
+        ];
+        let (times, series) = records(&echo_comb_with(0.0), 0.05, 20.0, &points);
+        let truth = transfer_spectrum(&series[1], &series[0], times[1] - times[0]).unwrap();
+        let off = (0..truth.ratios.len())
+            .filter(|index| (0.6..=3.4).contains(&truth.frequency_hz(*index)))
+            .map(|index| (truth.magnitude(index).unwrap() - comb(truth.frequency_hz(index))).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(off < 0.06, "the whole pulse is {off:.4} off the comb");
+
+        let document = echo_comb();
+        let segment = document.readouts.probe(ProbeId(1)).transfer_segment;
+        let (times, series) = records(&document, 0.05, 2.0 * segment, &points);
+        let dt = times[1] - times[0];
+        let average = welch(&series[1], &series[0], dt, segment, 0.25);
+        let u = tau / segment;
+        let overlap = ((1.0 - u) * (2.0 + (2.0 * pi * u).cos())
+            + 3.0 * (2.0 * pi * u).sin() / (2.0 * pi))
+            / 3.0;
+        for tooth in [1.0, 2.0, 3.0] {
+            let gain = gain_at(&average, tooth).unwrap();
+            assert!(
+                (gain / (1.0 + overlap) - 1.0).abs() < 0.02,
+                "the tooth at {tooth} Hz reads {gain:.4} against {:.4}",
+                1.0 + overlap
+            );
+        }
+        for gap in [1.5, 2.5] {
+            let gain = gain_at(&average, gap).unwrap();
+            assert!(gain < 0.1, "the gap at {gap} Hz reads {gain:.4}");
+        }
     }
 }
