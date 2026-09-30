@@ -17457,3 +17457,27 @@ reflecting ellipse gathers on the other.
   1.6e-6, b 1.8e-6 at 400 steps; Q 7.7e-6, b 3.7e-6 at 1000.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — Batch F closed
+
+The gallery's batch F is built (`docs/spikes/funfern-gallery-plan.md`,
+"Batch F"): seven scenes revised and six added, 42 in all.
+
+- **Revised.** The Kerr slab, the time crystal, the travelling modulation and
+  the Doppler mirror open on their spectra; the self-sustained emitter and
+  the Josephson line gained probes that do; the photonic crystal is read in a
+  reference arm; every gallery spectrum and transfer is linear.
+- **Added.** The struck drum, the etalon, the cavity filter, the plasma
+  group delay, the temporal slab and the ellipse flash, each behind a
+  measured claim and a device run at 400 and 1000 steps.
+- **Groundwork.** `Builder::arms`, the reference arm; `arm_probes`,
+  `sinc_pulse`, `spectrum_readout`, `transfer_readout` and `tm_plasma`; the
+  test helpers `Lines`, `welch`, `gain_at` and `layered_transfer`. Seven
+  gallery columns.
+- **Docs.** The gallery plan's status, "Still open" (echoes, pulsed Doppler,
+  the pump burst and the chopper) and "Blocked" (pulses are no longer);
+  `docs/plan.md`'s pulsed-signal, gated-drive and transfer entries say what
+  was built; the README counts 42 scenes. The driven step ceiling's
+  domain-wide factor is under "Worth checking sometime".
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

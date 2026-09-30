@@ -937,7 +937,10 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   sinc envelope, a start and a repeat, imposed as authored by point and volume
   sources and Dirichlet and Neumann walls and faces, persisted in version 22,
   run on the device, edited in one signal editor with a shape window, and read
-  by probe spectra. The five scenes are still to build.
+  by probe spectra. Batch F built three of the scenes on 2026-09-30, the time
+  of flight and the group delay as one, the plasma group delay, and the
+  ellipse flash; echoes and pulsed Doppler remain
+  (`docs/spikes/funfern-gallery-plan.md`, "Still open").
 
 - [x] Pulsed and gated material time drives, straight after the signals: the
   same envelopes on a material's `TimeDrive`. Unlike a signal it enters the
@@ -948,8 +951,9 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   pulse's centre. Every envelope stays within ±1, so the extrema are the
   ungated carrier's and no admission term was needed; the temporal work took
   only the product rule. Run on the device with one window per lane, and set
-  from a Timing row in the Advanced drive editor. The scenes are still to
-  build (`docs/spikes/funfern-gallery-plan.md`, "Still open").
+  from a Timing row in the Advanced drive editor. Batch F built the temporal
+  slab on 2026-09-30; the pump burst and the chopper remain
+  (`docs/spikes/funfern-gallery-plan.md`, "Still open").
 
 - [ ] Pulse start marks on the probe time plots, so a time of flight or an
   echo reads straight off a trace. Waiting on a way to draw them that does not
@@ -964,7 +968,8 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   spectra. Measured on the CPU: an empty channel reads flat at one between
   probes and at `(w/2c) sinc(πfw/c)` from a launcher, and in an open box the
   readout matches a whole pulse's unwindowed ratio to 1.5% from 4 s segments
-  up. The scenes it opens are still to build.
+  up. Batch F (2026-09-30) reads the photonic crystal, the etalon and the
+  cavity filter with it, each sample divided by an empty reference arm.
 
 - [ ] A time-of-flight or arrival readout, and a probe's envelope trace (the
   magnitude of its analytic signal), for group delay. Waiting on the same kind

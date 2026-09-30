@@ -2,10 +2,10 @@
 
 **Date:** 25 September 2026, closed 27 September 2026
 
-**Status:** batches A to E done; batch F, proposed on 30 September 2026, is
-under way (see its section). Every scene of A to E is built, 8b and 25b with them, each
-behind its measured claim and a device run, and the catalogue went from 12
-entries to 36. One scene is left, the plasmonic guide, which needs physics
+**Status:** batches A to F done. Every scene of A to E is built, 8b and 25b
+with them, each behind its measured claim and a device run, and the catalogue
+went from 12 entries to 36; batch F, proposed and built on 30 September 2026,
+took it to 42 and revised seven scenes (see its section). One scene is left, the plasmonic guide, which needs physics
 the solver does not have; it is under "Still open". The scene sections below
 are the proposals the scenes were built from, some with their measured
 claims added; each scene's entry in the engineering log has what was built
@@ -916,7 +916,13 @@ Claims at edge 0.08, 8 s from rest, the lines over the last 4 s:
 ## Batch F: pulses, spectra and transfers
 
 Proposed on 30 September 2026, once signals took pulses and probes read
-spectra and transfers, and agreed with the user the same day. Where a scene
+spectra and transfers, agreed with the user the same day, and built that day
+in the order below. Where a scene departs from its proposal the section says
+why: the struck drum's control, the crystal's pulse train, the temporal
+slab's direction and the ellipse's shape. After F3 the user found the
+spectra and the transfer read better linearly, and every one is linear. The
+gallery's rows went from six tiles to seven with the cavity filter, so each
+section still sits in one row. Where a scene
 is about lines, its probe opens on a spectrum; where it is about a frequency
 response, on a transfer; where it is about arrival or refocusing, on a pulse.
 
@@ -1307,20 +1313,22 @@ stopped being where the app starts.
   analysis for later.
 
 - **Gated-drive scenes.** Proposed on 29 September, once material drives
-  took gates. A temporal slab: a flat-top gate on a 0 Hz pump raises the
-  index for a while and returns it, so a wave splits at each edge into
-  forward and time-reversed parts. A pump burst: a gated pump at twice a
-  mode's frequency amplifies it for a set time, and the gain follows the
-  gate's length. A chopper: a gated loss across a guide cuts pulses out of
-  a continuous wave. Each still needs its measured claim.
+  took gates. The temporal slab is built (F7), as a drop in the index, which
+  a pump's depth under one allows where a rise to four does not. Still
+  proposals: a pump burst, a gated pump at twice a mode's frequency that
+  amplifies it for a set time, the gain following the gate's length; and a
+  chopper, a gated loss across a guide cutting pulses out of a continuous
+  wave, which is amplitude modulation and was not recommended in batch F.
+
+- **Pulse scenes not built.** Of the five the pulsed signals opened, batch F
+  built the time of flight and the group delay as one scene (F6) and the
+  ellipse (F8). Echoes, a pulse and its echo off a wall, whose spectrum is a
+  comb, and pulsed Doppler, whether the moving grating returns a pulse three
+  times shorter, remain; the grating reflects along its whole length, so the
+  second needs exploring first.
 
 ## Blocked
 
-- **Pulses.** Unblocked on 2026-09-29: every signal consumer takes a pulse
-  under a flat-top, Gaussian or sinc envelope, once or repeated, and point and
-  area probes read spectra (`docs/engineering-log.md`). Time of flight, group
-  delay in the plasma, echoes, an ellipse refocusing a flash and pulsed
-  Doppler are ready to be written as scenes.
 - **A true polariton.** Needs a Lorentz restoring law with a second auxiliary
   state, which Gate O did not add. Scene 10 uses the Drude plasma the
   catalogue has.
