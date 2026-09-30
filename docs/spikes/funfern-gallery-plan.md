@@ -1235,12 +1235,13 @@ Claims at edge 0.05:
   R(1/16)` within 2% (1.977 to 1.982 against 1.975) and its gaps under 0.1
   (0.03 and 0.05).
 
-The device run at 1000 steps fails the long run's relative measure, and the
-scene is not at fault: by 5.5 s both halves of the pulse have left the
-domain, the reference's field falls about 200-fold from step 800 to 1000
-(`|b|` 19 to 0.099), and the device's absolute error stays at 6.1 to 6.6e-5 in
-`b` throughout, about 1e-6 of the peak. At 800 steps, with the field still
-in the domain, Q 3.2e-6 and b 3.4e-6.
+The device run at 1000 steps first failed the long run's relative measure,
+and the scene was not at fault: by 5.5 s both halves of the pulse have left
+the domain, the reference's field falls about 200-fold from step 800 to 1000
+(`|b|` 19 to 0.099), and the device's absolute error stays at 6.1 to 6.6e-5
+in `b` throughout, about 1e-6 of the peak. The long run now measures against
+the largest field the run carried, and reads Q 1.2e-6, b 1.3e-6 at 1000
+steps.
 
 ### G2. Pumped drum
 

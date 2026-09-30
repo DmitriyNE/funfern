@@ -17607,3 +17607,22 @@ density pumped at twice its fundamental, which grows alone.
   dofs: Q 9.8e-7, b 1.5e-6 at 400 steps; Q 2.6e-6, b 1.5e-6 at 1000.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — The long run measures against the run's peak field
+
+The echo comb's device run failed at 1000 steps (G1): its pulse had left the
+domain, and `canonical_gpu_long_run` divided the device's departure by the
+reference's final norm, which had fallen 200-fold while the absolute error
+stayed at 6e-5. With the user's go-ahead the measure is now the L2
+departure over the largest norm each lane of the reference reached in the
+run (`Peak`, recorded at every reference step; `peak_relative_l2`). Where
+the field holds or grows, as in every scene before, the peak is the final
+norm and nothing changes; where it leaves, the device's roundoff no longer
+reads as a departure.
+
+- **Echo comb:** Q 1.2e-6, b 1.3e-6 at 1000 steps, from 7e-4.
+- **All 44 scenes** at 1000 steps exit 0. The largest figures: the fiber
+  amplifier (Q 1.8e-5, b 2.1e-5), the self-sustained emitter (2.0e-5,
+  1.7e-5), Brewster (1.2e-5) and the soliton (1.1e-5); the rest under 1e-5.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

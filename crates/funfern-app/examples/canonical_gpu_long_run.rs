@@ -9,6 +9,11 @@
 //! at 400 steps against the Stage 0 3e-5. The local time is now formed from
 //! the step count each step, and this gate keeps it that way.
 //!
+//! Each figure is the device's L2 departure from the reference over the
+//! largest norm the reference reached in the run, lane by lane: over the
+//! final norm, a scene whose pulse had left the domain read its constant
+//! roundoff as a growing departure.
+//!
 //! `LONG_RUN_SCENE` names a catalogue scene (default "Parametric pump") and
 //! `LONG_RUN_STEPS` the step count (default 400). `LONG_RUN_EDGE` meshes it
 //! at another target edge, with the application's caps for that edge, and
@@ -60,6 +65,9 @@ struct Pending {
 struct Expected {
     primary: Vec<f64>,
     complementary: Vec<Point2>,
+    /// The largest norm each lane of the reference reached over the run,
+    /// which the device's error is measured against.
+    peak: Peak,
     bound: f64,
     started: Instant,
     deadline: Instant,
@@ -136,6 +144,7 @@ fn main() -> AppExit {
         .outgoing_boundary()
         .map_or(0, |boundary| boundary.trace_nodes().len());
     let mut fastest_rate = 0.0_f64;
+    let mut peak = Peak::default();
     let (plan, primary, complementary) =
         if let Some(op) = prepared.canonical_temporal_operator.clone() {
             let dt = prepared.recommended_time_step();
@@ -160,6 +169,7 @@ fn main() -> AppExit {
             let mut oracle = seeded;
             for _ in 0..steps() {
                 oracle.step_with_forcing(&op, &forcing).unwrap();
+                peak.record(oracle.primary_flux(), oracle.complementary_flux());
             }
             println!(
                 "long run {name:?}: temporal, {} dofs, {trace} trace nodes, dt {dt:.4e}, {} \
@@ -186,6 +196,7 @@ fn main() -> AppExit {
             let mut oracle = seeded;
             for _ in 0..steps() {
                 oracle.step_with_forcing(&base, &forcing).unwrap();
+                peak.record(oracle.primary_flux(), oracle.complementary_flux());
             }
             println!(
                 "long run {name:?}: fixed, {} dofs, {trace} trace nodes, dt {dt:.4e}, {} steps",
@@ -214,6 +225,7 @@ fn main() -> AppExit {
     .insert_resource(Expected {
         primary,
         complementary,
+        peak,
         bound: if fastest_rate > 0.02 { 1.0e-4 } else { 3.0e-5 },
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(300),
@@ -272,11 +284,12 @@ fn drive(
     {
         return;
     }
-    let primary = relative_l2(
+    let primary = peak_relative_l2(
         display.primary_flux.iter().map(|value| f64::from(*value)),
         expected.primary.iter().copied(),
+        expected.peak.primary,
     );
-    let complementary = relative_l2(
+    let complementary = peak_relative_l2(
         display
             .complementary_flux
             .iter()
@@ -285,6 +298,7 @@ fn drive(
             .complementary
             .iter()
             .flat_map(|value| [value.x, value.y]),
+        expected.peak.complementary,
     );
     println!(
         "long run after {:.2} ms: Q {primary:.3e}, b {complementary:.3e}",
@@ -297,18 +311,38 @@ fn drive(
     }
 }
 
-fn relative_l2(
+/// The largest norm each lane of the reference reached, step by step.
+#[derive(Default)]
+struct Peak {
+    primary: f64,
+    complementary: f64,
+}
+
+impl Peak {
+    fn record(&mut self, primary: &[f64], complementary: &[Point2]) {
+        let primary = primary.iter().map(|value| value * value).sum::<f64>();
+        let complementary = complementary
+            .iter()
+            .map(|value| value.x * value.x + value.y * value.y)
+            .sum::<f64>();
+        self.primary = self.primary.max(primary.sqrt());
+        self.complementary = self.complementary.max(complementary.sqrt());
+    }
+}
+
+/// The device's error against the reference, over the largest norm the
+/// reference reached in the run. Over the final norm alone, a pulse that has
+/// left the domain made the device's constant roundoff read as a
+/// departure: the echo comb's error stayed at 6e-5 in `b` while the field
+/// left fell 200-fold, and read 7e-4 at 1000 steps.
+fn peak_relative_l2(
     actual: impl Iterator<Item = f64>,
-    expected: impl Iterator<Item = f64> + Clone,
+    expected: impl Iterator<Item = f64>,
+    peak: f64,
 ) -> f64 {
-    let scale = expected
-        .clone()
-        .map(|value| value * value)
-        .sum::<f64>()
-        .max(1.0e-30);
     let difference = actual
         .zip(expected)
         .map(|(actual, expected)| (actual - expected).powi(2))
         .sum::<f64>();
-    (difference / scale).sqrt()
+    difference.sqrt() / peak.max(1.0e-15)
 }
