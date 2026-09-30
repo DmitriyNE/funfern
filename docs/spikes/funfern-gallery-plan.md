@@ -1168,6 +1168,29 @@ checking sometime").
 
 ### F8. Ellipse flash
 
+Lenses and imaging, before the Fresnel zone plate. A Mechanical room inside a
+reflecting ellipse, `a = 0.95`, `b = 0.8`, everything outside cut away, with
+a velocity loss of 0.2/s so one flash has faded to 37% before the next. A
+point source at the left focus, `x = −0.512`, flashes a Gaussian 0.1 s wide
+at 2 Hz every 10 s, a sine carrier, so it leaves the closed room no offset.
+Every path from one focus to the wall and on to the other is `2a` long: the
+echoes reach the far focus together `2a/c` = 1.9 s after the flash, where
+the direct pulse took `2√(a² − b²)/c` = 1.02 s. Probes at the far focus and a
+quarter beside it open on their fields over 4 s.
+
+Explored first at `b = 0.6`, whose foci sit further out: the echoes peaked at
+the far focus 1.903 s after the flash and at 5 times the direct pulse, but
+the two arrive only `2(a − √(a² − b²))/c` = 0.43 s apart, and the direct
+pulse ran into the echoes. At `b = 0.8` they are 0.88 s apart.
+
+Claims at edge 0.05, 5 s from one flash, the largest swing within 0.3 s of
+each arrival:
+
+- At the far focus the echoes peak `2a/c` after the flash's centre within 1%
+  (1.898 s), over six times the direct pulse there (8.8; 8.9 at edge 0.04).
+- A quarter beside the focus they reach under a fifth of the focus's peak
+  (0.14).
+
 ## Order, as built
 
 Built from 25 to 26 September in batch order, A to E, groundwork first.
@@ -1255,7 +1278,8 @@ example to the next walks the gallery as it is shown
   plasma skin depth, plasma mirror. Batch F adds the etalon after the Brewster
   angle and the plasma group delay after the plasma skin depth.
 - **Lenses and imaging:** material lens, GRIN collimator, Luneburg lens,
-  Maxwell's fisheye, Fresnel zone plate.
+  Maxwell's fisheye, Fresnel zone plate. Batch F adds the ellipse flash
+  before the zone plate.
 - **Guides and crystals:** bent fiber, frustrated TIR, photonic crystal,
   crystal bend, disordered crystal.
 - **Resonators:** drum modes, the acoustic, dielectric and plasma whispering

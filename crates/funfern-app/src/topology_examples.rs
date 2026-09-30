@@ -191,6 +191,18 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 ExampleGroup::LensesAndImaging,
+                "Ellipse flash",
+                "A room inside a reflecting ellipse, flashed at one focus every 10 s. Every path \
+                 from one focus to the wall and on to the other is the same length, twice the \
+                 semi-major axis, so all the flash's echoes reach the far focus together, 1.9 s \
+                 after it left, and gather there into a peak nine times the direct flash that \
+                 passed 0.9 s before. A quarter beside the focus they arrive spread out, at a \
+                 seventh of that peak. A lithotripter's reflector focuses a shock wave on a \
+                 kidney stone this way.",
+                ellipse_flash(),
+            ),
+            example(
+                ExampleGroup::LensesAndImaging,
                 "Fresnel zone plate",
                 "A plane wave meets a screen of reflecting strips open over the odd Fresnel zones \
                  for a focus 0.4 behind it: the waves from the open zones arrive there in step \
@@ -2339,6 +2351,21 @@ fn circle(center: Point2, radius: f64) -> PeriodicCubicSpline {
     .unwrap()
 }
 
+/// The circle's spline stretched to semi-axes `a` along `x` and `b` along
+/// `y`: an affine image of a spline is the spline of the moved controls.
+fn ellipse(center: Point2, a: f64, b: f64) -> PeriodicCubicSpline {
+    let reach = 1.0 / 0.974_6;
+    PeriodicCubicSpline::uniform(
+        (0..16)
+            .map(|index| {
+                let unit = direction(index as f64 * std::f64::consts::TAU / 16.0);
+                center + Point2::new(a * unit.x, b * unit.y) * reach
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
 const GALLERY_CENTRE: Point2 = Point2 { x: 0.05, y: 0.0 };
 const GALLERY_RADIUS: f64 = 0.4;
 const GALLERY_CUTOFF_HZ: f64 = 3.5;
@@ -3134,6 +3161,84 @@ fn dielectric_gallery_with(frequency: f64) -> TopologyDocument {
 
 const FISHEYE_RADIUS: f64 = 0.45;
 const FISHEYE_HZ: f64 = 3.0;
+
+fn ellipse_flash() -> TopologyDocument {
+    ellipse_flash_with(ELLIPSE_REPEAT, ELLIPSE_LOSS)
+}
+
+/// The room's semi-axes, its foci `±√(a² − b²)` = ±0.512 on `x`, and its
+/// flash: a Gaussian 0.1 s wide at 2 Hz, so its peak leaves the near focus
+/// 0.5 s after it starts, every `ELLIPSE_REPEAT` seconds.
+const ELLIPSE_A: f64 = 0.95;
+const ELLIPSE_B: f64 = 0.8;
+const ELLIPSE_HZ: f64 = 2.0;
+const ELLIPSE_WIDTH: f64 = 0.1;
+const ELLIPSE_REPEAT: f64 = 10.0;
+const ELLIPSE_LOSS: f64 = 0.2;
+
+fn ellipse_focus() -> f64 {
+    (ELLIPSE_A * ELLIPSE_A - ELLIPSE_B * ELLIPSE_B).sqrt()
+}
+
+/// A Mechanical room inside a reflecting ellipse, everything outside cut
+/// away, with a velocity loss `loss` so one flash has faded before the next,
+/// flashed at one focus by a point source every `repeat` seconds, zero for
+/// once. Every path from one focus to the wall and on to the other is `2a`
+/// long, so all the flash's echoes reach the far focus together, `2a/c`
+/// after it left, where the direct wave took `2√(a² − b²)/c`. The gap
+/// between the two, `2(a − √(a² − b²))/c` = 0.88 s, is why the room is this
+/// round: at `b = 0.6` it is 0.43 s, and the direct pulse runs into the
+/// echoes.
+fn ellipse_flash_with(repeat: f64, loss: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.materials[0].name = "Air".into();
+    builder.scene.materials[0].magnetic_loss = Some(LossChannel {
+        base_rate: ScalarField::constant(loss),
+        law: DampingLaw::constant(),
+    });
+    builder.closed(
+        ellipse(Point2::default(), ELLIPSE_A, ELLIPSE_B),
+        SpanBehavior::REFLECTING,
+        None,
+    );
+    // The room is the background region inside the wall; outside is cut away.
+    builder.scene.face_assignments[0].region = None;
+    let last = builder.scene.face_assignments.len() - 1;
+    builder.scene.face_assignments[last].region = Some(BACKGROUND_REGION);
+    let mut document = builder.document();
+    let focus = ellipse_focus();
+    document.model.source = PointSource {
+        enabled: true,
+        position: Point2::new(-focus, 0.0),
+        width: 0.03,
+        region: BACKGROUND_REGION,
+        signal: TimeSignal::pulsed(
+            [0.0, 10.0, ELLIPSE_HZ, 0.0],
+            PulseEnvelope::Gaussian {
+                width: ELLIPSE_WIDTH,
+            },
+            0.1,
+            repeat,
+        ),
+    };
+    for (id, name, color, point) in [
+        (1, "Far focus", [91, 220, 194], Point2::new(focus, 0.0)),
+        (2, "Beside it", [248, 196, 112], ELLIPSE_BESIDE),
+    ] {
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(id),
+            name: name.into(),
+            color,
+            enabled: true,
+            target: TopologyProbeTarget::Point(point),
+        });
+        document.readouts.set_probe(ProbeId(id), field_readout(4.0));
+    }
+    document
+}
+
+/// A quarter beside the far focus.
+const ELLIPSE_BESIDE: Point2 = Point2::new(0.512, 0.25);
 
 fn fisheye() -> TopologyDocument {
     fisheye_with(true)
@@ -4095,7 +4200,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 41);
+        assert_eq!(catalog().len(), 42);
         assert_eq!(catalog()[0].name, "Obstacle over a mirror");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -7654,5 +7759,51 @@ mod tests {
         let (_, held) = run(false);
         let returned = energy(&window(&held[0], after, 4.5)) / energy(&incident);
         assert!(returned < 1e-3, "held, {returned:.3e} comes back");
+    }
+
+    /// The ellipse flash's claims, at edge 0.05, 5 s from one flash, from the
+    /// field's largest swing within 0.3 s of each arrival. At the far focus
+    /// the echoes peak `2a/c` after the flash's centre within 1% (1.898 s
+    /// against 1.9) and over six times the direct pulse there (8.8; 8.9 at
+    /// edge 0.04). A quarter beside the focus the echoes arrive spread out,
+    /// under a fifth of the focus's peak (0.14).
+    #[test]
+    fn an_ellipse_gathers_a_flash_from_one_focus_onto_the_other() {
+        let focus = ellipse_focus();
+        let centre = 0.1 + 4.0 * ELLIPSE_WIDTH;
+        let (direct, echoes) = (centre + 2.0 * focus, centre + 2.0 * ELLIPSE_A);
+        let points = [Point2::new(focus, 0.0), ELLIPSE_BESIDE];
+        let (times, series) = records(&ellipse_flash_with(0.0, ELLIPSE_LOSS), 0.05, 5.0, &points);
+        let peak = |series: &Vec<f64>, around: f64| {
+            series
+                .iter()
+                .zip(&times)
+                .filter(|(_, time)| (around - 0.3..around + 0.3).contains(*time))
+                .fold((0.0_f64, 0.0), |best, (value, time)| {
+                    if value.abs() > best.0 {
+                        (value.abs(), *time)
+                    } else {
+                        best
+                    }
+                })
+        };
+        let (gathered, when) = peak(&series[0], echoes);
+        let travelled = when - centre;
+        assert!(
+            (travelled / (2.0 * ELLIPSE_A) - 1.0).abs() < 0.01,
+            "the echoes peak {travelled:.4} s after the flash"
+        );
+        let (straight, _) = peak(&series[0], direct);
+        assert!(
+            gathered > 6.0 * straight,
+            "the echoes peak at {:.3} times the direct pulse",
+            gathered / straight
+        );
+        let (beside, _) = peak(&series[1], echoes);
+        assert!(
+            beside < 0.2 * gathered,
+            "beside the focus they reach {:.3} of it",
+            beside / gathered
+        );
     }
 }

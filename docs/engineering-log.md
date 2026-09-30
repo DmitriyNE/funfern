@@ -17431,3 +17431,29 @@ time-reflected one, both at twice its frequency.
   the drop at 2.55 s.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — An ellipse flash
+
+Batch F's eighth scene (`docs/spikes/funfern-gallery-plan.md`, F8), in Lenses
+and imaging before the Fresnel zone plate: a flash at one focus of a
+reflecting ellipse gathers on the other.
+
+- **Scene.** `ellipse_flash_with(repeat, loss)`: a Mechanical room inside a
+  reflecting ellipse, `a = 0.95`, `b = 0.8`, outside cut away, velocity loss
+  0.2/s; a point source at the left focus flashes a Gaussian 0.1 s wide at
+  2 Hz every 10 s. "Far focus" and "Beside it", a quarter away, open on their
+  fields. `ellipse(center, a, b)` is the circle's spline stretched, an
+  affine image of a spline being the spline of the moved controls. 42
+  scenes.
+- **Explored.** At `b = 0.6` the echoes peaked at the far focus 1.903 s
+  after the flash, five times the direct pulse, but only 0.43 s after it, so
+  the direct pulse ran into them. At `b = 0.8` the two are 0.88 s apart.
+- **Measured claim** (`an_ellipse_gathers_a_flash_from_one_focus_onto_the_other`,
+  edge 0.05, 5 s from one flash): the echoes peak 1.898 s after the flash's
+  centre against `2a/c` = 1.9 (within 1%), at 8.8 times the direct pulse
+  (over 6; 8.9 at 0.04); a quarter beside the focus at 0.14 of that peak
+  (under a fifth).
+- **Device:** `canonical_gpu_long_run` on "Ellipse flash", 5,201 dofs: Q
+  1.6e-6, b 1.8e-6 at 400 steps; Q 7.7e-6, b 3.7e-6 at 1000.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
