@@ -369,6 +369,18 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 ExampleGroup::TimeVaryingMedia,
+                "Chopper",
+                "A lossy slab across a channel shuts a 3 Hz wave out, passing under 1% of it, \
+                 until a gated drive cuts its loss a hundredfold for 1 s in every 2 s. Behind \
+                 it the wave comes in bursts, and its spectrum is the carrier with sidebands \
+                 every half hertz: each first sideband carries a third of the open wave's \
+                 field, 1/π, as the Fourier series of a shutter open half the time says, and \
+                 the carrier keeps a little under half, the slab refilling at the wave's speed \
+                 after each opening.",
+                chopper(),
+            ),
+            example(
+                ExampleGroup::TimeVaryingMedia,
                 "Time crystal",
                 "A slab whose permittivity steps up and down once a second splits the wave into \
                  sidebands; its sharp edges reach three steps out.",
@@ -2047,6 +2059,120 @@ fn temporal_slab_with(drop: bool) -> TopologyDocument {
         });
         document.readouts.set_probe(ProbeId(id), field_readout(4.0));
     }
+    document
+}
+
+fn chopper() -> TopologyDocument {
+    chopper_with(Shutter::Chopping, CHOPPER_RATE, CHOPPER_FRONT)
+}
+
+/// How the chopper's shutter runs: opening and shutting, or held either way,
+/// which only the claim's controls do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum Shutter {
+    Chopping,
+    Open,
+    Shut,
+}
+
+/// The carrier, and the shutter: open 1 s in every 2 s, with 50 ms edges.
+const CHOPPER_HZ: f64 = 3.0;
+const CHOPPER_PERIOD: f64 = 2.0;
+const CHOPPER_OPEN: f64 = 1.0;
+const CHOPPER_EDGE: f64 = 0.05;
+const CHOPPER_START: f64 = 2.0;
+/// The shutter's loss when shut, eight times the carrier's angular
+/// frequency, over 0.15: it passes 0.6% of the field. Thicker at a lower
+/// loss it shuts as well but opens slowly, refilling at the wave's speed,
+/// and the bursts lose their shape; thinner it leaks.
+const CHOPPER_RATE: f64 = 8.0 * std::f64::consts::TAU * CHOPPER_HZ;
+const CHOPPER_FRONT: f64 = -0.2;
+const CHOPPER_BACK: f64 = -0.05;
+const CHOPPER_BEHIND: Point2 = Point2::new(0.5, 0.0);
+
+/// A TM channel lit by a 3 Hz launcher, with a lossy slab from `front` to
+/// `x = −0.05` whose electric loss, `rate` when shut, a gated 0 Hz drive of
+/// depth 0.99 at phase π opens to a hundredth of itself: `1 − 0.99`.
+fn chopper_with(shutter: Shutter, rate: f64, front: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    builder.launcher(-0.85, CHOPPER_HZ, 40.0);
+    let opening = TimeDrive::ParametricPump {
+        depth: ScalarField::constant(0.99),
+        frequency_hz: ScalarField::constant(0.0),
+        phase_radians: ScalarField::constant(std::f64::consts::PI),
+    };
+    let law = match shutter {
+        Shutter::Chopping => DampingLaw {
+            drive: opening,
+            gate: Some(PulseTrain {
+                envelope: PulseEnvelope::FlatTop {
+                    duration: CHOPPER_OPEN,
+                    edge: CHOPPER_EDGE,
+                },
+                start: CHOPPER_START,
+                repeat: CHOPPER_PERIOD,
+            }),
+            ..DampingLaw::constant()
+        },
+        Shutter::Open => DampingLaw {
+            drive: opening,
+            ..DampingLaw::constant()
+        },
+        Shutter::Shut => DampingLaw::constant(),
+    };
+    let shutter = Material {
+        id: MaterialId(2),
+        name: "Shutter".into(),
+        electric_loss: Some(LossChannel {
+            base_rate: ScalarField::constant(rate),
+            law,
+        }),
+        color: [139, 92, 66],
+        ..Material::default_medium()
+    };
+    builder.scene.materials.push(shutter);
+    let (divider, span) = builder.divider(front);
+    builder.divider(CHOPPER_BACK);
+    for (material, side) in [
+        (MaterialId(2), CurveTraceSide::Right),
+        (DEFAULT_MATERIAL, CurveTraceSide::Left),
+    ] {
+        let region = RegionId(builder.next_region);
+        builder.next_region += 1;
+        builder.scene.regions.push(Region {
+            id: region,
+            material,
+            frame: MaterialFrame::world(),
+        });
+        // Running upwards, a divider's right is towards +x.
+        builder.scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Curve {
+                curve: divider,
+                span,
+                side,
+                parameter: 0.5,
+            },
+            region: Some(region),
+        });
+    }
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(1),
+        name: "Behind the shutter".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: TopologyProbeTarget::Point(CHOPPER_BEHIND),
+    });
+    // Four chopping periods, so lines half a hertz apart stand clear.
+    document
+        .readouts
+        .set_probe(ProbeId(1), spectrum_readout(4.0 * CHOPPER_PERIOD, 6.0));
     document
 }
 
@@ -4357,7 +4483,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 44);
+        assert_eq!(catalog().len(), 45);
         assert_eq!(catalog()[0].name, "Obstacle over a mirror");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -8105,6 +8231,84 @@ mod tests {
         let pumped_lines = lines(&pumped[1], dt);
         for overtone in &pumped_lines[1..] {
             assert!(pumped_lines[0] > 2.0 * overtone, "{pumped_lines:.4?}");
+        }
+    }
+
+    /// The chopper's claims, at edge 0.08, from the lines over the last 8 s,
+    /// four chopping periods, of 12 s from rest behind the shutter. Held
+    /// shut, it passes under 1% of the field it passes held open (0.6%).
+    /// Chopping, the carrier's first sidebands, half a hertz either side,
+    /// carry the gate's first Fourier coefficient of the open field within
+    /// 10% (0.316 and 0.301 against 0.317, a square wave's `1/π`), and the
+    /// carrier keeps the gate's mean within 15% (0.419 against 0.475): the
+    /// slab refills at the wave's speed after each opening, shortening the
+    /// bursts. The readout, over its own 8 s, shows both first sidebands at
+    /// over half its carrier line.
+    #[test]
+    fn a_shutter_opening_half_the_time_puts_a_third_of_the_wave_in_each_first_sideband() {
+        let window = 4.0 * CHOPPER_PERIOD;
+        let run = |shutter: Shutter| {
+            let (times, mut series) = records(
+                &chopper_with(shutter, CHOPPER_RATE, CHOPPER_FRONT),
+                0.08,
+                12.0,
+                &[CHOPPER_BEHIND],
+            );
+            (series.pop().unwrap(), times[1] - times[0])
+        };
+        let line = |series: &[f64], dt: f64, hz: f64| {
+            let (re, im) = phasor(series, dt, hz, window);
+            re.hypot(im)
+        };
+        let (open, dt) = run(Shutter::Open);
+        let open = line(&open, dt, CHOPPER_HZ);
+        let (shut, dt) = run(Shutter::Shut);
+        let shut = line(&shut, dt, CHOPPER_HZ) / open;
+        assert!(shut < 0.01, "held shut it passes {shut:.4}");
+
+        // The gate's own Fourier coefficients over one period.
+        let gate = PulseTrain {
+            envelope: PulseEnvelope::FlatTop {
+                duration: CHOPPER_OPEN,
+                edge: CHOPPER_EDGE,
+            },
+            start: 0.0,
+            repeat: CHOPPER_PERIOD,
+        };
+        let coefficient = |k: f64| {
+            let samples = 20_000;
+            let (mut re, mut im) = (0.0, 0.0);
+            for index in 0..samples {
+                let time = CHOPPER_PERIOD * (index as f64 + 0.5) / samples as f64;
+                let open = gate.seconds_from_centre(time).map_or(0.0, |from_centre| {
+                    gate.envelope.value_and_rate(from_centre).0
+                });
+                let phase = std::f64::consts::TAU * k * time / CHOPPER_PERIOD;
+                re += open * phase.cos() / samples as f64;
+                im -= open * phase.sin() / samples as f64;
+            }
+            re.hypot(im)
+        };
+        let document = chopper();
+        let (times, series) = records(&document, 0.08, 12.0, &[CHOPPER_BEHIND]);
+        let (series, dt) = (&series[0], times[1] - times[0]);
+        for side in [-1.0, 1.0] {
+            let sideband = line(series, dt, CHOPPER_HZ + side / CHOPPER_PERIOD) / open;
+            assert!(
+                (sideband / coefficient(1.0) - 1.0).abs() < 0.1,
+                "the sideband at {side:+} carries {sideband:.4} against {:.4}",
+                coefficient(1.0)
+            );
+        }
+        let carrier = line(series, dt, CHOPPER_HZ) / open;
+        assert!(
+            (carrier / coefficient(0.0) - 1.0).abs() < 0.15,
+            "the carrier keeps {carrier:.4} against {:.4}",
+            coefficient(0.0)
+        );
+        let lines = Lines::read(&document, ProbeId(1), series, dt, CHOPPER_HZ + 0.5);
+        for side in [-0.5, 0.5] {
+            assert!(lines.at(CHOPPER_HZ + side) > 0.5 * lines.at(CHOPPER_HZ));
         }
     }
 }

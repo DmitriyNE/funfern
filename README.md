@@ -84,7 +84,7 @@ wavelength, grading and element-size constraints.
 
 Scenes support undo/redo, autosave, versioned JSON files and shareable links.
 Geometry, snapshots and viewport recordings can be exported. The built-in
-example gallery holds 44 scenes in seven sections: basics, interfaces and
+example gallery holds 45 scenes in seven sections: basics, interfaces and
 media, lenses and imaging, guides and crystals, resonators, time-varying media,
 and nonlinear and self-organizing media. Each is ready to run with its sources,
 probes and view presets; `examples/` holds the obstacle array as a standalone

@@ -17649,3 +17649,36 @@ two scenes added, 44 in all, and one explored and dropped.
   pulsed-signal and gated-drive entries.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — A chopper
+
+Batch G's last scene (`docs/spikes/funfern-gallery-plan.md`, G4), asked for
+by the user after the batch's report, in Time-varying media after the
+temporal slab: a shutter cutting a continuous wave into bursts, whose
+spectrum is the shutter's Fourier series.
+
+- **Scene.** `chopper_with(shutter, rate, front)`: a lossy slab from
+  `x = −0.2` to −0.05, electric loss 8ω, whose loss channel carries a 0 Hz
+  drive of depth 0.99 at phase π, gated open for 1 s in every 2 s with 50 ms
+  edges; `Shutter` holds it open or shut for the controls. A probe behind it
+  opens on its field and spectrum over 8 s. 45 scenes.
+- **Explored.** Thick and weakly lossy, the slab shuts well but refills at
+  the wave's speed after it opens and empties at its loss rate after it
+  shuts, so the bursts lean: 0.3 at 2ω read the carrier at 0.38 against the
+  gate's mean 0.475, and the second sidebands at 0.10 against 0.025. Thin, it
+  leaks: 0.1 at 6ω passes 5.3% shut. 0.15 at 8ω passes 0.6% and reads the
+  first sidebands at 0.316 and 0.301 against the gate's 0.317.
+- **Measured claim** (`a_shutter_opening_half_the_time_puts_a_third_of_the_wave_in_each_first_sideband`,
+  edge 0.08, 12 s): held shut, 0.6% of the held-open field (under 1%); each
+  first sideband within 10% of the gate's first Fourier coefficient; the
+  carrier within 15% of its mean (0.419); the readout's first sidebands over
+  half its carrier line.
+- **Gallery rows.** Time-varying media now holds eight, and folds into a
+  second row, as the user allowed: `a_gallery_row_holds_its_columns_and_folds_the_rest`
+  checks the columns alone, and `GALLERY_COLUMNS` no longer claims every
+  section fits one row. The grid already broke sections into rows.
+- **Device:** `canonical_gpu_long_run` on "Chopper", temporal, 8,489 dofs,
+  0.484 per half step of loss (held to 1e-4): Q 2.4e-6, b 2.5e-6 at 400
+  steps; Q 4.7e-6, b 4.1e-6 at 1000.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

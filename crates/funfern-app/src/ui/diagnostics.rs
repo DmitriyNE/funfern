@@ -1509,19 +1509,11 @@ mod tests {
         }
     }
 
-    /// A full gallery row holds the largest section, a width one short of a
-    /// tile drops one, and a screen narrowed to nothing still shows one.
+    /// A full gallery row holds `GALLERY_COLUMNS` tiles, a width one short of
+    /// a tile drops one, and a screen narrowed to nothing still shows one. A
+    /// section longer than a row folds into the next.
     #[test]
-    fn a_gallery_row_holds_a_whole_section() {
-        let catalog = funfern_app::topology_examples::catalog();
-        for group in ExampleGroup::ALL {
-            let members = catalog.iter().filter(|e| e.group == group).count();
-            assert!(
-                members <= GALLERY_COLUMNS,
-                "{} needs two rows",
-                group.label()
-            );
-        }
+    fn a_gallery_row_holds_its_columns_and_folds_the_rest() {
         let full = gallery_width(GALLERY_COLUMNS);
         assert_eq!(gallery_columns(full), GALLERY_COLUMNS);
         assert_eq!(gallery_columns(full - 1.0), GALLERY_COLUMNS - 1);

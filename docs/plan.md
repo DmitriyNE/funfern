@@ -954,9 +954,8 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   ungated carrier's and no admission term was needed; the temporal work took
   only the product rule. Run on the device with one window per lane, and set
   from a Timing row in the Advanced drive editor. Batches F and G built the
-  temporal slab and the pump burst, as the pumped drum, on 2026-09-30; the
-  chopper, amplitude modulation, was not recommended
-  (`docs/spikes/funfern-gallery-plan.md`, "Still open").
+  temporal slab, the pump burst, as the pumped drum, and the chopper on
+  2026-09-30 (`docs/spikes/funfern-gallery-plan.md`, G2 and G4).
 
 - [ ] Pulse start marks on the probe time plots, so a time of flight or an
   echo reads straight off a trace. Waiting on a way to draw them that does not

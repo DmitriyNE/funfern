@@ -1708,8 +1708,8 @@ fn face_spans(cycles: &[Vec<Point2>], y: f64) -> Vec<(f64, f64)> {
 /// A gallery tile's width, which is also its thumbnail's side.
 const EXAMPLE_TILE: f32 = 108.0;
 const EXAMPLE_TILE_GAP: f32 = 10.0;
-/// The most tiles a gallery row holds: the largest section, so each section
-/// sits in one row where the screen has room.
+/// The most tiles a gallery row holds. Most sections fit one where the
+/// screen has room; a longer one folds into a second.
 const GALLERY_COLUMNS: usize = 7;
 
 /// Room a scroll bar may take beside the tiles.

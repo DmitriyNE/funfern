@@ -5,7 +5,7 @@
 **Status:** batches A to G done. Every scene of A to E is built, 8b and 25b
 with them, each behind its measured claim and a device run, and the catalogue
 went from 12 entries to 36; batch F, proposed and built on 30 September 2026,
-took it to 42 and revised seven scenes, and batch G to 44 (see their
+took it to 42 and revised seven scenes, and batch G to 45 (see their
 sections). One scene is left, the plasmonic guide, which needs physics
 the solver does not have; it is under "Still open". The scene sections below
 are the proposals the scenes were built from, some with their measured
@@ -1208,7 +1208,8 @@ agreed with the user: an echo comb, a pumped drum, and pulsed Doppler to be
 explored first and built only if a clean claim holds. The chopper, plain
 amplitude modulation, and the plasmonic guide, which needs a Drude law on
 the complementary row, stay out. Built the same day: G1 and G2; G3 was
-explored and dropped.
+explored and dropped; and at the user's word, after the batch's report, the
+chopper as G4.
 
 ### G1. Echo comb
 
@@ -1300,6 +1301,39 @@ judged that a faithful Doppler demonstration needs geometry that moves,
 which the solver does not have (`docs/plan.md`, "Later experiments"), and
 the scene was dropped. The continuous Doppler mirror, whose claims hold at
 its one phase-matched frequency, stays.
+
+### G4. Chopper
+
+Time-varying media, after the temporal slab; the section's eighth scene,
+which folds into a second row. A TM channel lit by a 3 Hz launcher, with a
+lossy slab from `x = −0.2` to −0.05 whose electric loss, 8ω, carries a 0 Hz
+drive of depth 0.99 at phase π under a flat-top gate 1 s long with 50 ms
+edges, every 2 s from 2 s: shut it passes 0.6% of the field, and open, at a
+hundredth of its loss, nearly all. Behind it the wave comes in bursts: the
+carrier with sidebands every 0.5 Hz, at the Fourier coefficients of the
+shutter's opening. A probe behind it opens on its field and spectrum over
+8 s, four chopping periods.
+
+Explored on the CPU, against the gate's own coefficients, 0.475, 0.317,
+0.025, 0.103 and 0.024 for the mean and the first four (a square wave's
+`½`, `1/π`, 0, `1/3π`, 0, with the edges):
+
+- 0.3 thick at 2ω: shut 1.3%, but the carrier 0.38, the second sidebands
+  0.10 and the third 0.04. The slab refills at the wave's speed after it
+  opens and empties at its loss rate after it shuts, so the bursts lean.
+- 0.1 thick at 6ω: closer, first sidebands 0.31 and 0.29, third 0.09 and
+  0.08, but shut it leaks 5.3%; at 12ω, 1.6%.
+- 0.15 thick at 8ω, built: shut 0.6%; carrier 0.419; first sidebands 0.316
+  and 0.301; second 0.08; third 0.09 and 0.075.
+
+Claims at edge 0.08, the lines over the last 8 s of 12 s from rest:
+
+- Held shut, under 1% of the held-open field passes (0.6%).
+- Chopping, each first sideband carries the gate's first coefficient of the
+  open field within 10% (0.316 and 0.301 against 0.317).
+- The carrier keeps the gate's mean within 15% (0.419 against 0.475).
+- The probe's readout, over its own 8 s, shows both first sidebands at over
+  half its carrier line.
 
 ## Order, as built
 
@@ -1399,7 +1433,7 @@ example to the next walks the gallery as it is shown
 - **Time-varying media:** parametric pump, time crystal, travelling
   modulation, Doppler mirror, parametric fiber amplifier. Batch F adds the
   temporal slab after the parametric pump, and batch G the pumped drum before
-  it.
+  it and the chopper after it; eight, the section folds into a second row.
 - **Nonlinear and self-organizing:** Kerr slab, spatial soliton, Josephson
   line, symmetry breaking, pinned domain wall, self-sustained emitter.
 
@@ -1421,9 +1455,8 @@ stopped being where the app starts.
 - **Gated-drive scenes.** Proposed on 29 September, once material drives
   took gates. The temporal slab is built (F7), as a drop in the index, which
   a pump's depth under one allows where a rise to four does not, and the pump
-  burst as the pumped drum (G2). The chopper, a gated loss across a guide
-  cutting pulses out of a continuous wave, is amplitude modulation and was
-  not recommended.
+  burst as the pumped drum (G2), and the chopper (G4), which the user asked
+  for after it had been left out as plain amplitude modulation.
 
 - **Pulses.** Of the five scenes the pulsed signals opened, batch F built the
   time of flight and the group delay as one (F6) and the ellipse (F8), and
