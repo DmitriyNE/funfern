@@ -113,6 +113,17 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 ExampleGroup::InterfacesAndMedia,
+                "Etalon",
+                "A ceramic slab, ε = 9, a sixth thick across the upper of two arms, lit by a \
+                 plane-wave pulse every 16 s flat from 0.5 to 3.5 Hz. Each face reflects half \
+                 the field, yet the slab passes all of it wherever a round trip inside is a \
+                 whole number of periods, at every whole hertz, and 0.6 of it halfway between: \
+                 a Fabry-Pérot etalon. The probe behind it, divided by the one at the same place \
+                 in the empty lower arm, reads the fringes.",
+                etalon(),
+            ),
+            example(
+                ExampleGroup::InterfacesAndMedia,
                 "Skin depth",
                 "A plane wave at 3 Hz meets a slab whose electric loss is twice its angular \
                  frequency: inside, the wave falls by e every 0.068 while its crests stand 0.26 \
@@ -975,6 +986,47 @@ fn transfer_readout(reference: ProbeId, max_hz: f64, segment: f64) -> ProbeReado
         transfer_segment: segment,
         ..field_readout(4.0)
     }
+}
+
+/// A launcher's sinc pulse, flat from `low` to `high` Hz, every `repeat`
+/// seconds or once for zero.
+fn sinc_pulse(low: f64, high: f64, repeat: f64) -> TimeSignal {
+    TimeSignal::pulsed(
+        [0.0, 40.0, 0.5 * (low + high), 0.0],
+        PulseEnvelope::Sinc {
+            bandwidth_hz: 0.5 * (high - low),
+            lobes: 4,
+        },
+        0.1,
+        repeat,
+    )
+}
+
+/// Where a scene in arms (`Builder::arms`) listens: behind its sample in the
+/// upper arm, and at the same place in the empty lower one.
+const ARM_BEHIND: Point2 = Point2::new(0.75, 0.5);
+const ARM_REFERENCE: Point2 = Point2::new(0.75, -0.5);
+
+/// The two probes of a scene in arms: `behind`, which reads its transfer
+/// from the reference up to `max_hz` over `segment`-second segments, and
+/// "Reference".
+fn arm_probes(document: &mut TopologyDocument, behind: &str, max_hz: f64, segment: f64) {
+    for (id, name, color, point) in [
+        (1, behind, [91, 220, 194], ARM_BEHIND),
+        (2, "Reference", [248, 196, 112], ARM_REFERENCE),
+    ] {
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(id),
+            name: name.into(),
+            color,
+            enabled: true,
+            target: TopologyProbeTarget::Point(point),
+        });
+    }
+    document
+        .readouts
+        .set_probe(ProbeId(1), transfer_readout(ProbeId(2), max_hz, segment));
+    document.readouts.set_probe(ProbeId(2), field_readout(4.0));
 }
 
 /// A line or boundary probe: the average energy density along it, the profile
@@ -2554,19 +2606,16 @@ fn photonic_crystal() -> TopologyDocument {
     photonic_crystal_with(CRYSTAL_PULSE_REPEAT, true)
 }
 
-/// The crystal's sinc pulse: flat from 0.8 to 3 Hz, across the gap and
-/// either side of it. It repeats once a segment of the transfer readout: the
-/// crystal rings for seconds at its band edges, so a segment must be long,
-/// and a train that put several pulses in one segment would hand the average
-/// only its harmonics, `k/repeat` Hz, whose phases the ringing turns apart.
-const CRYSTAL_PULSE_HZ: f64 = 1.9;
-const CRYSTAL_PULSE_BANDWIDTH: f64 = 1.1;
+/// The crystal's sinc pulse repeats once a segment of the transfer readout:
+/// the crystal rings for seconds at its band edges, so a segment must be
+/// long, and a train that put several pulses in one segment would hand the
+/// average only its harmonics, `k/repeat` Hz, whose phases the ringing turns
+/// apart.
 const CRYSTAL_PULSE_REPEAT: f64 = CRYSTAL_SEGMENT;
-const CRYSTAL_BEHIND: Point2 = Point2::new(0.75, 0.5);
-const CRYSTAL_REFERENCE: Point2 = Point2::new(0.75, -0.5);
 
 /// A TM channel in two arms (`Builder::arms`) lit from the left by a sinc
-/// pulse every `repeat` seconds, zero for one, with a square lattice of
+/// pulse flat from 0.8 to 3 Hz, across the gap and either side of it, every
+/// `repeat` seconds, zero for one, with a square lattice of
 /// ceramic rods, `ε = 9` and 0.2 of the pitch in radius, five columns deep
 /// and five rows filling the upper arm. The walls either side of that arm
 /// sit on the lattice's mirror planes, so the arm is the infinite crystal at
@@ -2579,19 +2628,7 @@ fn photonic_crystal_with(repeat: f64, rods: bool) -> TopologyDocument {
         polarization: ElectromagneticPolarization::Tm,
     };
     builder.scene.outer_boundaries = channel();
-    builder.arms(
-        -0.85,
-        TimeSignal::pulsed(
-            [0.0, 40.0, CRYSTAL_PULSE_HZ, 0.0],
-            PulseEnvelope::Sinc {
-                bandwidth_hz: CRYSTAL_PULSE_BANDWIDTH,
-                lobes: 4,
-            },
-            0.1,
-            repeat,
-        ),
-        &[],
-    );
+    builder.arms(-0.85, sinc_pulse(0.8, 3.0, repeat), &[]);
     builder.scene.materials.push(Material {
         id: MaterialId(2),
         name: "Ceramic".into(),
@@ -2616,26 +2653,10 @@ fn photonic_crystal_with(repeat: f64, rods: bool) -> TopologyDocument {
     }
     let mut document = builder.document();
     document.model.source.enabled = false;
-    for (id, name, color, point) in [
-        (1, "Behind the crystal", [91, 220, 194], CRYSTAL_BEHIND),
-        (2, "Reference", [248, 196, 112], CRYSTAL_REFERENCE),
-    ] {
-        document.model.probes.push(TopologyProbeDefinition {
-            id: ProbeId(id),
-            name: name.into(),
-            color,
-            enabled: true,
-            target: TopologyProbeTarget::Point(point),
-        });
-    }
+    arm_probes(&mut document, "Behind the crystal", 3.5, CRYSTAL_SEGMENT);
     // Twenty-five rods' control polygons and handles would hide the crystal.
     document.presentation.control_polygons = false;
     document.presentation.handles = false;
-    document.readouts.set_probe(
-        ProbeId(1),
-        transfer_readout(ProbeId(2), 3.5, CRYSTAL_SEGMENT),
-    );
-    document.readouts.set_probe(ProbeId(2), field_readout(4.0));
     document
 }
 
@@ -3616,6 +3637,51 @@ const SKIN_FRONT: f64 = -0.35;
 const SKIN_BACK: f64 = -0.05;
 
 /// The loss rate, `γ = 2ω`.
+fn etalon() -> TopologyDocument {
+    etalon_with(ETALON_PERMITTIVITY, ETALON_REPEAT)
+}
+
+/// The etalon's ceramic and thickness: index 3 over a sixth, so a round trip
+/// inside is one second and the slab passes everything at every whole hertz.
+const ETALON_PERMITTIVITY: f64 = 9.0;
+const ETALON_THICKNESS: f64 = 1.0 / 6.0;
+const ETALON_FRONT: f64 = -0.1;
+/// A pulse a segment, as the photonic crystal's. At 8 s the slab's echoes,
+/// a second apart, read low by the segment's overlap with itself shifted by
+/// them, and the fringes' peaks read 0.93; at 16 s, 0.98.
+const ETALON_REPEAT: f64 = ETALON_SEGMENT;
+const ETALON_SEGMENT: f64 = 16.0;
+
+/// A TM channel in two arms lit by a sinc pulse flat from 0.5 to 3.5 Hz
+/// every `repeat` seconds, zero for one, with a slab of `permittivity`
+/// `ETALON_THICKNESS` thick across the upper arm. Each face reflects
+/// `(n − 1)/(n + 1)` of the field, a half at `n = 3`, and the slab passes
+/// `1/√(cos²δ + ¼(n + 1/n)² sin²δ)` of it, `δ = 2πfnd/c`: everything where
+/// a round trip inside is a whole number of periods, 0.6 halfway between.
+fn etalon_with(permittivity: f64, repeat: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    builder.scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Ceramic".into(),
+        mass_density: ScalarField::constant(permittivity),
+        color: [66, 105, 151],
+        ..Material::default_medium()
+    });
+    builder.arms(
+        -0.85,
+        sinc_pulse(0.5, 3.5, repeat),
+        &[(ETALON_FRONT, ETALON_FRONT + ETALON_THICKNESS, MaterialId(2))],
+    );
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    arm_probes(&mut document, "Behind the etalon", 4.0, ETALON_SEGMENT);
+    document
+}
+
 fn skin_loss() -> f64 {
     2.0 * std::f64::consts::TAU * SKIN_HZ
 }
@@ -3757,7 +3823,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 37);
+        assert_eq!(catalog().len(), 38);
         assert_eq!(catalog()[0].name, "Obstacle over a mirror");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -6171,7 +6237,7 @@ mod tests {
     /// peaks, 0.1 Hz wide at 1.25 and 2.3 Hz, which it reads 14% and 25% low.
     #[test]
     fn a_rod_crystal_turns_back_its_gap_and_passes_either_side() {
-        let points = [CRYSTAL_BEHIND, CRYSTAL_REFERENCE];
+        let points = [ARM_BEHIND, ARM_REFERENCE];
         let whole = |rods: bool| {
             let (times, series) = records(&photonic_crystal_with(0.0, rods), 0.08, 30.0, &points);
             transfer_spectrum(&series[1], &series[0], times[1] - times[0]).unwrap()
@@ -7041,5 +7107,70 @@ mod tests {
                 "{multiple} times the fundamental: {overtone:.3e}"
             );
         }
+    }
+
+    /// The field a plane wave at `hz` keeps through `layers`, `(index,
+    /// thickness)` in order, between vacuum either side at normal incidence:
+    /// the product of the layers' characteristic matrices, for a field and
+    /// its normal derivative that stay continuous across every face.
+    fn layered_transmission(layers: &[(f64, f64)], hz: f64) -> f64 {
+        type Complex = (f64, f64);
+        let mul = |a: Complex, b: Complex| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
+        let add = |a: Complex, b: Complex| (a.0 + b.0, a.1 + b.1);
+        let mut total = [[(1.0, 0.0), (0.0, 0.0)], [(0.0, 0.0), (1.0, 0.0)]];
+        for (index, thickness) in layers {
+            let delta = std::f64::consts::TAU * hz * index * thickness;
+            let (sin, cos) = delta.sin_cos();
+            let layer = [
+                [(cos, 0.0), (0.0, sin / index)],
+                [(0.0, index * sin), (cos, 0.0)],
+            ];
+            let mut next = [[(0.0, 0.0); 2]; 2];
+            for row in 0..2 {
+                for column in 0..2 {
+                    next[row][column] = add(
+                        mul(total[row][0], layer[0][column]),
+                        mul(total[row][1], layer[1][column]),
+                    );
+                }
+            }
+            total = next;
+        }
+        let sum = add(add(total[0][0], total[0][1]), add(total[1][0], total[1][1]));
+        2.0 / sum.0.hypot(sum.1)
+    }
+
+    /// The etalon's claims, at edge 0.04, where the slab's shortest
+    /// wavelength, 0.095 at 3.5 Hz, has over two elements; at 0.08 the 3 Hz
+    /// fringe reads 0.55. One pulse's whole records, 20 s, follow the slab's
+    /// `|t(f)|` within 3% from 0.5 to 3.5 Hz (2.5%): one at 1, 2 and 3 Hz,
+    /// 0.6 at 1.5 and 2.5. The readout, a pulse a segment for two of them,
+    /// reads the whole pulse within 5% from 0.6 to 3.4 Hz (2.0%).
+    #[test]
+    fn an_etalon_passes_every_whole_hertz_and_six_tenths_between() {
+        let layers = [(ETALON_PERMITTIVITY.sqrt(), ETALON_THICKNESS)];
+        let points = [ARM_BEHIND, ARM_REFERENCE];
+        let (times, series) = records(&etalon_with(ETALON_PERMITTIVITY, 0.0), 0.04, 20.0, &points);
+        let truth = transfer_spectrum(&series[1], &series[0], times[1] - times[0]).unwrap();
+        let worst =
+            |transfer: &TransferSpectrum, low: f64, high: f64, against: &dyn Fn(f64) -> f64| {
+                (0..transfer.ratios.len())
+                    .filter(|index| (low..=high).contains(&transfer.frequency_hz(*index)))
+                    .map(|index| {
+                        let hz = transfer.frequency_hz(index);
+                        (transfer.magnitude(index).unwrap() / against(hz) - 1.0).abs()
+                    })
+                    .fold(0.0_f64, f64::max)
+            };
+        let slab = worst(&truth, 0.5, 3.5, &|hz| layered_transmission(&layers, hz));
+        assert!(slab < 0.03, "the whole pulse is {slab:.4} off the slab's");
+
+        let document = etalon();
+        let readout = document.readouts.probe(ProbeId(1));
+        let (times, series) = records(&document, 0.04, 2.0 * ETALON_SEGMENT, &points);
+        let dt = times[1] - times[0];
+        let average = welch(&series[1], &series[0], dt, readout.transfer_segment, 0.25);
+        let read = worst(&average, 0.6, 3.4, &|hz| gain_at(&truth, hz).unwrap());
+        assert!(read < 0.05, "the readout is {read:.4} off the whole pulse");
     }
 }

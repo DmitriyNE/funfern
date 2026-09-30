@@ -17303,3 +17303,35 @@ longer take the choice. The claims read magnitudes and are unchanged.
 
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — An etalon
+
+Batch F's fourth scene (`docs/spikes/funfern-gallery-plan.md`, F4), in
+Interfaces and media after the Brewster angle: a ceramic slab in the upper
+arm whose transfer is a Fabry-Pérot etalon's fringes.
+
+- **Scene.** `etalon_with(permittivity, repeat)`: `ε = 9`, a sixth thick, from
+  `x = −0.1` across the upper arm, lit by a sinc pulse flat from 0.5 to
+  3.5 Hz every 16 s. The slab passes all the field at every whole hertz and
+  0.6 halfway between. "Behind the etalon" reads its transfer from
+  "Reference" over 16 s segments. 38 scenes.
+- **Shared.** `sinc_pulse(low, high, repeat)` and `arm_probes`, the two
+  probes of a scene in arms at `ARM_BEHIND` and `ARM_REFERENCE`, which the
+  photonic crystal now uses too. The test helper `layered_transmission` is
+  the product of a stack's characteristic matrices, for a field and its
+  normal derivative continuous across every face, and the cavity filter
+  will reuse it.
+- **Explored.** At edge 0.08 the slab's 3 Hz fringe reads 0.55, the slab's
+  wavelength there, 0.11, taking under two elements; at 0.05 the fringes are
+  within 2% to 3 Hz; at 0.04 within 2.5% to 3.5 Hz. A pulse every 8 s read
+  over 8 s segments reads the peaks at 0.93, the echoes a second apart read
+  low by the segment's overlap with itself shifted by them; every 16 s over
+  16 s segments, at 0.98.
+- **Measured claim** (`an_etalon_passes_every_whole_hertz_and_six_tenths_between`,
+  edge 0.04): one whole pulse within 3% of the slab's `|t(f)|` from 0.5 to
+  3.5 Hz (2.5%); the readout's own average over two segments within 5% of the
+  whole pulse from 0.6 to 3.4 Hz (2.0%).
+- **Device:** `canonical_gpu_long_run` on "Etalon", 8,544 dofs and 122 trace
+  nodes: Q 1.7e-6, b 1.4e-6 at 400 steps; Q 5.0e-6, b 9.0e-6 at 1000.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

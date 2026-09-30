@@ -1037,6 +1037,35 @@ Claims at edge 0.08:
 
 ### F4. Etalon
 
+Interfaces and media, after the Brewster angle. A ceramic slab, `ε = 9`,
+`d = 1/6`, from `x = −0.1` across the upper arm: `nd = 1/2`, so a round trip
+inside is one second. Each face reflects `(n − 1)/(n + 1)`, half the field,
+and the slab passes `1/√(cos²δ + ¼(n + 1/n)² sin²δ)`, `δ = 2πfnd/c`: one at
+every whole hertz and 0.6 halfway between. (An index of 2 would swing only
+from 1 to 0.8, too little in amplitude, which is what the readout shows.) A
+sinc pulse flat from 0.5 to 3.5 Hz shows three fringes; "Behind the etalon"
+reads its transfer from "Reference", linear to 4 Hz.
+
+Explored on the CPU:
+
+- **Mesh.** The slab's shortest wavelength is 0.095 at 3.5 Hz. At edge 0.08
+  the 3 Hz fringe reads 0.55; at 0.05 the fringes are within 2% to 3 Hz and
+  12% at 3.5 Hz; at 0.04 within 2.5% across the band. The application
+  refines to six elements per wavelength by itself.
+- **Ringing.** Behind the slab 7% of the energy comes more than 4 s after the
+  pulse, 5e-4 after 6 s.
+- **The readout.** A pulse every 8 s read in 8 s segments reads the troughs
+  (0.61) but the peaks at 0.93: the slab's echoes, a second apart, read low
+  by the segment's overlap with itself shifted by them. A pulse every 16 s in
+  16 s segments reads within 2% everywhere, the peaks at 0.98.
+
+Claims at edge 0.04:
+
+- One whole pulse, 20 s, follows the slab's `|t(f)|` within 3% from 0.5 to
+  3.5 Hz (2.5%).
+- The readout, a pulse a segment for two segments, reads the whole pulse
+  within 5% from 0.6 to 3.4 Hz (2.0%).
+
 ### F5. Cavity filter
 
 ### F6. Plasma group delay
@@ -1129,7 +1158,8 @@ example to the next walks the gallery as it is shown
 - **Basics:** obstacle over a mirror, double slit, obstacle array, phased
   array, Talbot carpet.
 - **Interfaces and media:** anisotropic crystal, Brewster angle, skin depth,
-  plasma skin depth, plasma mirror.
+  plasma skin depth, plasma mirror. Batch F adds the etalon after the Brewster
+  angle.
 - **Lenses and imaging:** material lens, GRIN collimator, Luneburg lens,
   Maxwell's fisheye, Fresnel zone plate.
 - **Guides and crystals:** bent fiber, frustrated TIR, photonic crystal,
