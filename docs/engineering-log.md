@@ -17626,3 +17626,26 @@ reads as a departure.
   1.7e-5), Brewster (1.2e-5) and the soliton (1.1e-5); the rest under 1e-5.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — Batch G closed
+
+The gallery's batch G (`docs/spikes/funfern-gallery-plan.md`, "Batch G"):
+two scenes added, 44 in all, and one explored and dropped.
+
+- **Added.** The echo comb (G1) and the pumped drum (G2), each behind a
+  measured claim and device runs.
+- **Dropped: pulsed Doppler (G3).** A Gaussian pulse off the Doppler mirror's
+  grating comes back at 3.006 Hz from 0.994 (σ = 0.5 s) but narrower in
+  frequency, 0.140 Hz of RMS width against the incident's 0.232, and at
+  σ = 1 s 0.100 against 0.119, where a mirror moving at `c/2` would triple the
+  width with the frequency. The grating adds its own 2 Hz to every
+  frequency, and only the phase-matched one lands on the Doppler factor.
+  The user judged that a faithful Doppler needs geometry that moves, which
+  waits in `docs/plan.md`'s "Later experiments", and dropped it.
+- **Gallery rows.** The user is content for a section to fold into a second
+  row when it outgrows the seven columns, rather than moving scenes to
+  keep one; none does yet.
+- **Docs.** The gallery plan's status, G3 and "Still open"; `docs/plan.md`'s
+  pulsed-signal and gated-drive entries.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -2,10 +2,11 @@
 
 **Date:** 25 September 2026, closed 27 September 2026
 
-**Status:** batches A to F done. Every scene of A to E is built, 8b and 25b
+**Status:** batches A to G done. Every scene of A to E is built, 8b and 25b
 with them, each behind its measured claim and a device run, and the catalogue
 went from 12 entries to 36; batch F, proposed and built on 30 September 2026,
-took it to 42 and revised seven scenes (see its section). One scene is left, the plasmonic guide, which needs physics
+took it to 42 and revised seven scenes, and batch G to 44 (see their
+sections). One scene is left, the plasmonic guide, which needs physics
 the solver does not have; it is under "Still open". The scene sections below
 are the proposals the scenes were built from, some with their measured
 claims added; each scene's entry in the engineering log has what was built
@@ -1206,7 +1207,8 @@ Proposed on 30 September 2026 after batch F, from its "Still open" list, and
 agreed with the user: an echo comb, a pumped drum, and pulsed Doppler to be
 explored first and built only if a clean claim holds. The chopper, plain
 amplitude modulation, and the plasmonic guide, which needs a Drude law on
-the complementary row, stay out.
+the complementary row, stay out. Built the same day: G1 and G2; G3 was
+explored and dropped.
 
 ### G1. Echo comb
 
@@ -1276,6 +1278,28 @@ Claims at edge 0.08, 20 s from one knock:
   (0.0500).
 - Over the probe's 20 s its line is over twice every overtone's (2.75 times
   the first), where unpumped it is under the (0,2) mode's (0.56).
+
+### G3. Pulsed Doppler, dropped
+
+The question was whether the Doppler mirror's grating, running toward the
+source at `c/2`, returns a pulse three times shorter at three times the
+frequency, as a mirror moving at that speed would. Explored with the
+launcher's carrier under a Gaussian, the incident and reflected bands read
+apart in frequency at the front probe:
+
+- σ = 0.5 s: incident at 0.994 Hz, RMS width 0.232 Hz; reflected at 3.006 Hz,
+  width 0.140 Hz, 0.6 of the incident's.
+- σ = 1.0 s: incident at 0.998 Hz, width 0.119; reflected at 3.002 Hz, width
+  0.100, 0.84 of it.
+
+A mirror would triple the width with the frequency. The grating does not:
+it adds its own 2 Hz to every frequency, and only the phase-matched 1 Hz
+lands on the Doppler factor, so the pulse comes back as wide in time or
+wider, up to 1.65 times the incident's length, not a third of it. The user
+judged that a faithful Doppler demonstration needs geometry that moves,
+which the solver does not have (`docs/plan.md`, "Later experiments"), and
+the scene was dropped. The continuous Doppler mirror, whose claims hold at
+its one phase-matched frequency, stays.
 
 ## Order, as built
 
@@ -1396,18 +1420,16 @@ stopped being where the app starts.
 
 - **Gated-drive scenes.** Proposed on 29 September, once material drives
   took gates. The temporal slab is built (F7), as a drop in the index, which
-  a pump's depth under one allows where a rise to four does not. Still
-  proposals: a pump burst, a gated pump at twice a mode's frequency that
-  amplifies it for a set time, the gain following the gate's length; and a
-  chopper, a gated loss across a guide cutting pulses out of a continuous
-  wave, which is amplitude modulation and was not recommended in batch F.
+  a pump's depth under one allows where a rise to four does not, and the pump
+  burst as the pumped drum (G2). The chopper, a gated loss across a guide
+  cutting pulses out of a continuous wave, is amplitude modulation and was
+  not recommended.
 
-- **Pulse scenes not built.** Of the five the pulsed signals opened, batch F
-  built the time of flight and the group delay as one scene (F6) and the
-  ellipse (F8). Echoes, a pulse and its echo off a wall, whose spectrum is a
-  comb, and pulsed Doppler, whether the moving grating returns a pulse three
-  times shorter, remain; the grating reflects along its whole length, so the
-  second needs exploring first.
+- **Pulses.** Of the five scenes the pulsed signals opened, batch F built the
+  time of flight and the group delay as one (F6) and the ellipse (F8), and
+  batch G the echoes (G1). Pulsed Doppler was dropped (G3): a moving grating
+  shifts frequencies rather than scaling them, and a faithful Doppler waits
+  on moving geometry.
 
 ## Blocked
 

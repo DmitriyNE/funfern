@@ -937,10 +937,12 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   sinc envelope, a start and a repeat, imposed as authored by point and volume
   sources and Dirichlet and Neumann walls and faces, persisted in version 22,
   run on the device, edited in one signal editor with a shape window, and read
-  by probe spectra. Batch F built three of the scenes on 2026-09-30, the time
-  of flight and the group delay as one, the plasma group delay, and the
-  ellipse flash; echoes and pulsed Doppler remain
-  (`docs/spikes/funfern-gallery-plan.md`, "Still open").
+  by probe spectra. Batches F and G built four of the scenes on 2026-09-30:
+  the time of flight and the group delay as one, the plasma group delay, the
+  ellipse flash and the echo comb. Pulsed Doppler was dropped: the moving
+  grating adds its frequency to every one rather than scaling them, and a
+  faithful Doppler needs moving geometry, above
+  (`docs/spikes/funfern-gallery-plan.md`, G3).
 
 - [x] Pulsed and gated material time drives, straight after the signals: the
   same envelopes on a material's `TimeDrive`. Unlike a signal it enters the
@@ -951,8 +953,9 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   pulse's centre. Every envelope stays within ±1, so the extrema are the
   ungated carrier's and no admission term was needed; the temporal work took
   only the product rule. Run on the device with one window per lane, and set
-  from a Timing row in the Advanced drive editor. Batch F built the temporal
-  slab on 2026-09-30; the pump burst and the chopper remain
+  from a Timing row in the Advanced drive editor. Batches F and G built the
+  temporal slab and the pump burst, as the pumped drum, on 2026-09-30; the
+  chopper, amplitude modulation, was not recommended
   (`docs/spikes/funfern-gallery-plan.md`, "Still open").
 
 - [ ] Pulse start marks on the probe time plots, so a time of flight or an
