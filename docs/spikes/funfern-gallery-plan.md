@@ -1101,6 +1101,33 @@ Claims at edge 0.04:
 
 ### F6. Plasma group delay
 
+Interfaces and media, after the plasma skin depth. The Klein-Gordon plasma,
+cutting off at 2 Hz, from `x = −0.7` to 0.6 across the upper arm; its
+material is `tm_plasma`, shared with the plasma skin depth. A Gaussian pulse
+0.5 s wide at 3 Hz every 8 s: its spectrum is down to 1% by 0.95 Hz either
+side, all of it above the cutoff. There its energy runs at `v_g =
+c√(1 − (f_c/f)²)` = 0.745c and its crests at `v_p = c²/v_g` = 1.342c, so
+behind 1.3 of plasma it arrives `L(1/v_g − 1/c)` = 0.444 s after its twin
+in the vacuum arm. "Behind the plasma" and "Reference" open on their fields
+over 4 s, where the lag shows.
+
+Explored on the CPU: the slab's faces reflect 15% of the field, and its own
+group delay, `−dφ/dω` of its transfer against as much vacuum, ripples about
+`L(1/v_g − 1/c)` by about a tenth of a second (0.63 s at 2.6 Hz against
+0.73, 0.32 at 3.2 against 0.37). The transfer's group delay follows the
+ripple: within 6% at edge 0.08 and 3.2% at 0.05. The energy centroids lag by
+0.454 s at 0.08 and 0.467 s at 0.05. Along 0.9 of the plasma, `x` from −0.5
+to 0.4, the 3 Hz phase of the whole record runs at 1.349c and 1.358c; a fit
+over two wavelengths averages out the standing ripple the back face leaves.
+
+Claims at edge 0.05, 12 s from one pulse:
+
+- The energy behind the plasma trails its twin's by `L(1/v_g − 1/c)` within
+  10% (0.467 s against 0.444).
+- The transfer's group delay follows the slab's within 5% from 2.6 to 3.4 Hz
+  (3.2%).
+- The 3 Hz crests run at `c/√(1 − (f_c/f)²)` within 2% (1.2% fast).
+
 ### F7. Temporal slab
 
 ### F8. Ellipse flash
@@ -1190,7 +1217,7 @@ example to the next walks the gallery as it is shown
   array, Talbot carpet.
 - **Interfaces and media:** anisotropic crystal, Brewster angle, skin depth,
   plasma skin depth, plasma mirror. Batch F adds the etalon after the Brewster
-  angle.
+  angle and the plasma group delay after the plasma skin depth.
 - **Lenses and imaging:** material lens, GRIN collimator, Luneburg lens,
   Maxwell's fisheye, Fresnel zone plate.
 - **Guides and crystals:** bent fiber, frustrated TIR, photonic crystal,

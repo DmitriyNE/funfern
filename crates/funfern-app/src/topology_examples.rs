@@ -143,6 +143,17 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 ExampleGroup::InterfacesAndMedia,
+                "Plasma group delay",
+                "A Gaussian pulse at 3 Hz crosses 1.3 of plasma cutting off at 2 Hz in the upper \
+                 of two arms while its twin crosses vacuum in the lower. The pulse's energy runs \
+                 at the group velocity, c√(1 − (2/3)²) = 0.75c, and arrives 0.45 s after its \
+                 twin, while its crests run through it at the phase velocity, 1.34c, faster \
+                 than light: the two multiply to c², and the crests slide forward through the \
+                 envelope as it crawls.",
+                plasma_delay(),
+            ),
+            example(
+                ExampleGroup::InterfacesAndMedia,
                 "Plasma mirror",
                 "A plane wave climbs a plasma whose cutoff rises along the channel, stands in \
                  front of the point where the cutoff meets its frequency, and never passes it.",
@@ -1018,10 +1029,9 @@ fn sinc_pulse(low: f64, high: f64, repeat: f64) -> TimeSignal {
 const ARM_BEHIND: Point2 = Point2::new(0.75, 0.5);
 const ARM_REFERENCE: Point2 = Point2::new(0.75, -0.5);
 
-/// The two probes of a scene in arms: `behind`, which reads its transfer
-/// from the reference up to `max_hz` over `segment`-second segments, and
-/// "Reference".
-fn arm_probes(document: &mut TopologyDocument, behind: &str, max_hz: f64, segment: f64) {
+/// The two probes of a scene in arms: `behind`, which opens on `readout`,
+/// and "Reference", on its field.
+fn arm_probes(document: &mut TopologyDocument, behind: &str, readout: ProbeReadout) {
     for (id, name, color, point) in [
         (1, behind, [91, 220, 194], ARM_BEHIND),
         (2, "Reference", [248, 196, 112], ARM_REFERENCE),
@@ -1034,9 +1044,7 @@ fn arm_probes(document: &mut TopologyDocument, behind: &str, max_hz: f64, segmen
             target: TopologyProbeTarget::Point(point),
         });
     }
-    document
-        .readouts
-        .set_probe(ProbeId(1), transfer_readout(ProbeId(2), max_hz, segment));
+    document.readouts.set_probe(ProbeId(1), readout);
     document.readouts.set_probe(ProbeId(2), field_readout(4.0));
 }
 
@@ -2664,7 +2672,11 @@ fn photonic_crystal_with(repeat: f64, rods: bool) -> TopologyDocument {
     }
     let mut document = builder.document();
     document.model.source.enabled = false;
-    arm_probes(&mut document, "Behind the crystal", 3.5, CRYSTAL_SEGMENT);
+    arm_probes(
+        &mut document,
+        "Behind the crystal",
+        transfer_readout(ProbeId(2), 3.5, CRYSTAL_SEGMENT),
+    );
     // Twenty-five rods' control polygons and handles would hide the crystal.
     document.presentation.control_polygons = false;
     document.presentation.handles = false;
@@ -3689,7 +3701,11 @@ fn etalon_with(permittivity: f64, repeat: f64) -> TopologyDocument {
     );
     let mut document = builder.document();
     document.model.source.enabled = false;
-    arm_probes(&mut document, "Behind the etalon", 4.0, ETALON_SEGMENT);
+    arm_probes(
+        &mut document,
+        "Behind the etalon",
+        transfer_readout(ProbeId(2), 4.0, ETALON_SEGMENT),
+    );
     document
 }
 
@@ -3739,7 +3755,11 @@ fn cavity_filter_with(repeat: f64) -> TopologyDocument {
     );
     let mut document = builder.document();
     document.model.source.enabled = false;
-    arm_probes(&mut document, "Behind the filter", 3.5, CAVITY_SEGMENT);
+    arm_probes(
+        &mut document,
+        "Behind the filter",
+        transfer_readout(ProbeId(2), 3.5, CAVITY_SEGMENT),
+    );
     document
 }
 
@@ -3852,6 +3872,13 @@ fn plasma_skin_depth() -> TopologyDocument {
 /// power: it all comes back. `c/ω_p`, the depth far below the cutoff, would
 /// put it at 0.040.
 fn plasma_skin_with(cutoff: f64) -> TopologyDocument {
+    slab_channel(tm_plasma(cutoff))
+}
+
+/// The TM skin's Klein-Gordon medium, a collisionless plasma, as material 2,
+/// cutting off at `cutoff` Hz: a wave at `f` runs there with `k =
+/// 2π√(f² − cutoff²)/c`.
+fn tm_plasma(cutoff: f64) -> Material {
     let physics = PhysicsModel::Electromagnetic {
         polarization: ElectromagneticPolarization::Tm,
     };
@@ -3875,7 +3902,54 @@ fn plasma_skin_with(cutoff: f64) -> TopologyDocument {
         .find(|parameter| parameter.name == "omega0")
         .expect("the medium names its cutoff")
         .value = std::f64::consts::TAU * cutoff;
-    slab_channel(plasma)
+    plasma
+}
+
+fn plasma_delay() -> TopologyDocument {
+    plasma_delay_with(PLASMA_DELAY_REPEAT)
+}
+
+/// The plasma's cutoff under the pulse's carrier, and the pulse: a Gaussian
+/// 0.5 s wide, whose spectrum is down to 1% by 0.95 Hz either side of its
+/// carrier, so all of it runs above the cutoff.
+const PLASMA_DELAY_CUTOFF_HZ: f64 = 2.0;
+const PLASMA_DELAY_HZ: f64 = 3.0;
+const PLASMA_DELAY_WIDTH: f64 = 0.5;
+const PLASMA_DELAY_REPEAT: f64 = 8.0;
+const PLASMA_DELAY_FRONT: f64 = -0.7;
+const PLASMA_DELAY_BACK: f64 = 0.6;
+
+/// A TM channel in two arms lit by a Gaussian pulse at 3 Hz every `repeat`
+/// seconds, zero for one, with a plasma cutting off at 2 Hz across the upper
+/// arm from `x = −0.7` to 0.6. There the pulse's energy runs at the group
+/// velocity `c√(1 − (f_c/f)²)` and its crests at the phase velocity
+/// `c/√(1 − (f_c/f)²)`; its twin in the lower arm runs through vacuum.
+fn plasma_delay_with(repeat: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    builder
+        .scene
+        .materials
+        .push(tm_plasma(PLASMA_DELAY_CUTOFF_HZ));
+    builder.arms(
+        -0.85,
+        TimeSignal::pulsed(
+            [0.0, 40.0, PLASMA_DELAY_HZ, 0.0],
+            PulseEnvelope::Gaussian {
+                width: PLASMA_DELAY_WIDTH,
+            },
+            0.1,
+            repeat,
+        ),
+        &[(PLASMA_DELAY_FRONT, PLASMA_DELAY_BACK, MaterialId(2))],
+    );
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    arm_probes(&mut document, "Behind the plasma", field_readout(4.0));
+    document
 }
 
 #[cfg(test)]
@@ -3884,7 +3958,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 39);
+        assert_eq!(catalog().len(), 40);
         assert_eq!(catalog()[0].name, "Obstacle over a mirror");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -7175,6 +7249,12 @@ mod tests {
     /// the product of the layers' characteristic matrices, for a field and
     /// its normal derivative that stay continuous across every face.
     fn layered_transmission(layers: &[(f64, f64)], hz: f64) -> f64 {
+        let (re, im) = layered_transfer(layers, hz);
+        re.hypot(im)
+    }
+
+    /// `layered_transmission` with its phase.
+    fn layered_transfer(layers: &[(f64, f64)], hz: f64) -> (f64, f64) {
         type Complex = (f64, f64);
         let mul = |a: Complex, b: Complex| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
         let add = |a: Complex, b: Complex| (a.0 + b.0, a.1 + b.1);
@@ -7198,7 +7278,8 @@ mod tests {
             total = next;
         }
         let sum = add(add(total[0][0], total[0][1]), add(total[1][0], total[1][1]));
-        2.0 / sum.0.hypot(sum.1)
+        let size = sum.0 * sum.0 + sum.1 * sum.1;
+        (2.0 * sum.0 / size, -2.0 * sum.1 / size)
     }
 
     /// The etalon's claims, at edge 0.04, where the slab's shortest
@@ -7270,5 +7351,105 @@ mod tests {
         let average = welch(&series[1], &series[0], dt, readout.transfer_segment, 0.25);
         let read = worst(&average, 1.1, 2.9, &|hz| gain_at(&truth, hz).unwrap());
         assert!(read < 0.05, "the readout is {read:.4} off the whole pulse");
+    }
+
+    /// The plasma delay's claims, at edge 0.05, from one pulse's records, 12 s
+    /// from rest. The pulse behind the plasma trails its twin's energy by
+    /// `L(1/v_g − 1/c)` at the carrier within 10% (0.467 s against 0.444).
+    /// Frequency by frequency, the transfer's group delay, `−dφ/dω`, follows
+    /// the slab's own within 5% from 2.6 to 3.4 Hz (3.2%), ripple from its
+    /// faces' reflections and all: 0.61 s at 2.6 Hz, 0.31 at 3.2. Along 0.9
+    /// of the plasma the pulse's 3 Hz crests run at `c/√(1 − (f_c/f)²)`,
+    /// 1.34c, within 2% (1.2% fast).
+    #[test]
+    fn a_pulse_through_a_plasma_lags_its_twin_while_its_crests_run_ahead() {
+        let tau = std::f64::consts::TAU;
+        let length = PLASMA_DELAY_BACK - PLASMA_DELAY_FRONT;
+        let index = |hz: f64| (1.0 - (PLASMA_DELAY_CUTOFF_HZ / hz).powi(2)).sqrt();
+        let wrapped = |mut angle: f64| {
+            while angle > std::f64::consts::PI {
+                angle -= tau;
+            }
+            while angle < -std::f64::consts::PI {
+                angle += tau;
+            }
+            angle
+        };
+        // The slab's transfer against the same length of vacuum, and its
+        // group delay by a central difference of its phase.
+        let slab_phase = |hz: f64| {
+            let (a, b) = layered_transfer(&[(index(hz), length)], hz);
+            let (c, d) = layered_transfer(&[(1.0, length)], hz);
+            (b * c - a * d).atan2(a * c + b * d)
+        };
+        let slab_delay =
+            |hz: f64| -wrapped(slab_phase(hz + 1e-3) - slab_phase(hz - 1e-3)) / (2e-3 * tau);
+
+        let inside = (0..=18)
+            .map(|step| Point2::new(-0.5 + 0.05 * step as f64, 0.5))
+            .collect::<Vec<_>>();
+        let mut points = vec![ARM_BEHIND, ARM_REFERENCE];
+        points.extend(&inside);
+        let (times, series) = records(&plasma_delay_with(0.0), 0.05, 12.0, &points);
+        let dt = times[1] - times[0];
+
+        let centroid = |series: &Vec<f64>| {
+            let energy = series.iter().map(|u| u * u).sum::<f64>();
+            series
+                .iter()
+                .zip(&times)
+                .map(|(u, t)| t * u * u)
+                .sum::<f64>()
+                / energy
+        };
+        let lag = centroid(&series[0]) - centroid(&series[1]);
+        let expected = length * (1.0 / index(PLASMA_DELAY_HZ) - 1.0);
+        assert!(
+            (lag / expected - 1.0).abs() < 0.1,
+            "the pulse trails by {lag:.4} s against {expected:.4}"
+        );
+
+        let transfer = transfer_spectrum(&series[1], &series[0], dt).unwrap();
+        let phase = |bin: usize| {
+            let [re, im] = transfer.ratios[bin].unwrap();
+            im.atan2(re)
+        };
+        for hz in [2.6, 2.8, 3.0, 3.2, 3.4] {
+            let bin = (hz / transfer.frequency_step_hz).round() as usize;
+            let delay = -wrapped(phase(bin + 1) - phase(bin - 1))
+                / (2.0 * transfer.frequency_step_hz * tau);
+            let expected = slab_delay(transfer.frequency_hz(bin));
+            assert!(
+                (delay / expected - 1.0).abs() < 0.05,
+                "at {hz} Hz a group delay of {delay:.4} s against {expected:.4}"
+            );
+        }
+
+        let mut phases: Vec<f64> = Vec::new();
+        for series in &series[2..] {
+            let (re, im) = phasor(series, dt, PLASMA_DELAY_HZ, 12.0 - dt);
+            let mut value = im.atan2(re);
+            if let Some(last) = phases.last() {
+                value = last + wrapped(value - last);
+            }
+            phases.push(value);
+        }
+        let xs = inside.iter().map(|point| point.x).collect::<Vec<_>>();
+        let (mean_x, mean_phase) = (
+            xs.iter().sum::<f64>() / xs.len() as f64,
+            phases.iter().sum::<f64>() / phases.len() as f64,
+        );
+        let slope = xs
+            .iter()
+            .zip(&phases)
+            .map(|(x, phase)| (x - mean_x) * (phase - mean_phase))
+            .sum::<f64>()
+            / xs.iter().map(|x| (x - mean_x).powi(2)).sum::<f64>();
+        let crests = tau * PLASMA_DELAY_HZ / slope.abs();
+        let expected = 1.0 / index(PLASMA_DELAY_HZ);
+        assert!(
+            (crests / expected - 1.0).abs() < 0.02,
+            "the crests run at {crests:.4} against {expected:.4}"
+        );
     }
 }

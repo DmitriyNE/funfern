@@ -17370,3 +17370,30 @@ resonator.
   7, a grid 832 wide rather than 714; narrower screens take fewer, as before.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — A plasma group delay
+
+Batch F's sixth scene (`docs/spikes/funfern-gallery-plan.md`, F6), in
+Interfaces and media after the plasma skin depth: a pulse through a plasma
+lags its twin through vacuum while its crests outrun light.
+
+- **Scene.** `plasma_delay_with(repeat)`: a plasma cutting off at 2 Hz from
+  `x = −0.7` to 0.6 across the upper arm, lit by a Gaussian pulse 0.5 s wide
+  at 3 Hz every 8 s, whose spectrum stays above the cutoff. "Behind the
+  plasma" and "Reference" open on their fields over 4 s. `tm_plasma(cutoff)`
+  is the plasma skin depth's material, now shared; `arm_probes` takes the
+  readout its first probe opens on. 40 scenes.
+- **Analytic.** The test helper `layered_transfer` keeps the stack's phase;
+  the slab's own group delay is `−dφ/dω` of its transfer against as much
+  vacuum, and ripples by about 0.1 s about `L(1/v_g − 1/c)` from the faces'
+  15% reflections.
+- **Measured claim** (`a_pulse_through_a_plasma_lags_its_twin_while_its_crests_run_ahead`,
+  edge 0.05, 12 s from one pulse): the energy centroids lag by 0.467 s
+  against `L(1/v_g − 1/c)` = 0.444 s (within 10%); the transfer's group
+  delay follows the slab's within 5% at 2.6 to 3.4 Hz (3.2%); along 0.9 of
+  plasma the 3 Hz phase runs at 1.358c against `c/√(1 − (f_c/f)²)` = 1.342c
+  (within 2%). At edge 0.08 the group delay is within 6%.
+- **Device:** `canonical_gpu_long_run` on "Plasma group delay", temporal,
+  8,438 dofs: Q 2.1e-6, b 2.0e-6 at 400 steps; Q 1.2e-5, b 1.8e-5 at 1000.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
