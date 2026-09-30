@@ -1161,16 +1161,19 @@ glass is vacuum, and its faces reflect nothing.
 Claims at edge 0.08, 4.5 s from rest:
 
 - Upstream the reflected pulse carries 0.5 of the incident's `∫u² dt` within
-  3% (0.497; 0.501 at edge 0.05).
+  3% (0.498).
 - Downstream the pulse running on carries 9 times the reflected one's within
-  3% (9.14; 8.99 at 0.05).
+  3% (9.10).
 - Both come at twice the incident's spectral centroid within 3% (3.03 and
-  3.09 Hz against 2 × 1.546).
+  3.08 Hz against 2 × 1.546).
 - With the permittivity held, under a thousandth comes back (3e-4).
 
-The drive halves the step, 6.8e-3 s to 3.4e-3 s: the driven step ceiling
-takes the weakest factor over the whole domain (`docs/plan.md`, "Worth
-checking sometime").
+As built the drive halved the step, 6.8e-3 s to 3.4e-3 s, the driven ceiling
+lowering the whole domain by the weakest factor anywhere. Since the ceiling
+is taken node by node (`docs/engineering-log.md`, 30 September) the glass,
+never faster than the vacuum beside it, leaves the step to the vacuum. The
+claims were measured again at the new step; before it they read 0.497, 9.14
+and 3.03 and 3.09 Hz.
 
 ### F8. Ellipse flash
 

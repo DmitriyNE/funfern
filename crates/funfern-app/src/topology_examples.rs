@@ -7698,12 +7698,12 @@ mod tests {
     /// The temporal slab's claims, at edge 0.08, 4.5 s from rest, from
     /// `∫u² dt` at the two probes either side of the pulse when the
     /// permittivity drops. Upstream the time-reflected pulse carries
-    /// `E_b² n₂/n₁` = 0.5 of what the incident one did within 3% (0.497): as
+    /// `E_b² n₂/n₁` = 0.5 of what the incident one did within 3% (0.498): as
     /// much field, over half the time. Downstream the pulse running on carries
-    /// `(E_f/E_b)²` = 9 times the reflected one within 3% (9.14). Both come at
-    /// twice the incident's spectral centroid within 3% (3.03 and 3.09 Hz
+    /// `(E_f/E_b)²` = 9 times the reflected one within 3% (9.10). Both come at
+    /// twice the incident's spectral centroid within 3% (3.03 and 3.08 Hz
     /// against 2 × 1.546). With the permittivity held, under a thousandth
-    /// comes back (3e-4). At edge 0.05 the ratios are 0.501 and 8.99.
+    /// comes back (3e-4).
     #[test]
     fn a_sudden_drop_in_permittivity_splits_a_pulse_and_doubles_its_frequency() {
         let points = [TEMPORAL_UPSTREAM, TEMPORAL_DOWNSTREAM];

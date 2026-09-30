@@ -1829,11 +1829,15 @@ pub struct CanonicalNonlinearStrength {
     pub complementary: f64,
 }
 
-/// What sets a time-driven generation's timestep ceiling. `trajectory` is
-/// `fixed · √(primary_floor · complementary_floor)`, each floor the lowest
-/// tangent factor that row reaches over every drive phase, Switch state and
-/// admitted amplitude. A floor of one leaves the fixed medium's ceiling; a
-/// self-focusing field law never lowers it, because it only slows the wave.
+/// What sets a time-driven generation's timestep ceiling. `trajectory` is at
+/// least `fixed · √(primary_floor · complementary_floor)`, each floor the
+/// lowest tangent factor that row reaches over every drive phase, Switch
+/// state and admitted amplitude, and that is where it stays when the weakest
+/// factor falls where the medium is fastest. Taken node by node it is longer
+/// wherever it does not: a driven region that stays slower than its
+/// surroundings leaves the fixed ceiling. A floor of one leaves the fixed
+/// medium's ceiling; a self-focusing field law never lowers it, because it
+/// only slows the wave.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CanonicalTimeStepBound {
     pub fixed: f64,
@@ -2063,6 +2067,19 @@ impl CanonicalTemporalWaveOperator {
         let maximum_time_step = if restoring_curvature > 0.0 {
             1.0 / (1.0 / (maximum_time_step * maximum_time_step) + 0.25 * restoring_curvature)
                 .sqrt()
+        } else {
+            maximum_time_step
+        };
+        // Node by node, the same minima leave a driven region that stays
+        // slower than its surroundings, even at its drive's lowest, out of the
+        // ceiling, where the global form above lowers every node by the
+        // weakest factor anywhere. Both bound every instant, so the step
+        // takes the longer.
+        let maximum_time_step = if has_temporal_laws || has_field_laws || has_restoring {
+            match per_node_eigenvalue_bound(&base, quadratic, &primary, &complementary)? {
+                Some(bound) => maximum_time_step.max(2.0 / bound.sqrt()),
+                None => maximum_time_step,
+            }
         } else {
             maximum_time_step
         };
@@ -4187,31 +4204,18 @@ fn add_restoring_force(
 /// sample is the linear one. A node enters at the least mass its
 /// contributions reach, and a restoring law adds `Σ m₀ V″_max / m_min` to its
 /// row, as the step bound adds the curvature to the ceiling. The step bound
-/// itself uses the same minima, globally.
+/// uses the same minima, node by node (`per_node_eigenvalue_bound`).
 fn trajectory_grid_filter_reach(
     base: &CanonicalWaveOperator,
     primary: &TemporalSites<TemporalPrimarySample>,
     complementary: &TemporalSites<TemporalComplementarySample>,
 ) -> Result<Vec<f64>, WaveError> {
-    let lowest = |law: CoefficientLawValues| {
-        law.tangent_range()
-            .map(|range| range.0)
-            .filter(|low| low.is_finite() && *low > 0.0)
-            .unwrap_or(1.0)
-    };
-    let mut minimum_mass = vec![0.0; base.degrees_of_freedom()];
-    let mut restoring = vec![0.0; base.degrees_of_freedom()];
-    for (contribution, sample) in base.primary_contributions().iter().zip(primary.iter()) {
-        let reference = contribution.geometric_weight * contribution.reference_coefficient;
-        let node = contribution.node as usize;
-        minimum_mass[node] += reference * lowest(sample.coefficient.law);
-        restoring[node] += reference * sample.restoring.curvature_bound();
-    }
-    let curvature = restoring
-        .iter()
-        .zip(&minimum_mass)
-        .map(|(restoring, mass)| restoring / mass)
-        .collect::<Vec<_>>();
+    let lowest = lowest_tangent;
+    let TrajectoryMasses {
+        minimum: minimum_mass,
+        curvature,
+        ..
+    } = trajectory_masses(base, primary);
     let bounds = complementary
         .iter()
         .map(|sample| {
@@ -4237,6 +4241,121 @@ fn trajectory_grid_filter_reach(
         &minimum_mass,
         &curvature,
     )
+}
+
+/// The lowest factor a coefficient law's tangent reaches over its drive, its
+/// switch and its field, or one where it names none.
+fn lowest_tangent(law: CoefficientLawValues) -> f64 {
+    law.tangent_range()
+        .map(|range| range.0)
+        .filter(|low| low.is_finite() && *low > 0.0)
+        .unwrap_or(1.0)
+}
+
+/// Each node's mass as authored, the least its contributions reach over the
+/// trajectory, and its restoring curvature over that least mass.
+struct TrajectoryMasses {
+    reference: Vec<f64>,
+    minimum: Vec<f64>,
+    curvature: Vec<f64>,
+}
+
+fn trajectory_masses(
+    base: &CanonicalWaveOperator,
+    primary: &TemporalSites<TemporalPrimarySample>,
+) -> TrajectoryMasses {
+    let mut reference = vec![0.0; base.degrees_of_freedom()];
+    let mut minimum = vec![0.0; base.degrees_of_freedom()];
+    let mut restoring = vec![0.0; base.degrees_of_freedom()];
+    for (contribution, sample) in base.primary_contributions().iter().zip(primary.iter()) {
+        let authored = contribution.geometric_weight * contribution.reference_coefficient;
+        let node = contribution.node as usize;
+        reference[node] += authored;
+        minimum[node] += authored * lowest_tangent(sample.coefficient.law);
+        restoring[node] += authored * sample.restoring.curvature_bound();
+    }
+    let curvature = restoring
+        .iter()
+        .zip(&minimum)
+        .map(|(restoring, mass)| restoring / mass)
+        .collect();
+    TrajectoryMasses {
+        reference,
+        minimum,
+        curvature,
+    }
+}
+
+/// The largest eigenvalue any instant of the trajectory can give the step,
+/// bounded node by node, or `None` where a row has no finite bound.
+///
+/// At every instant `xᵀM(t)x ≥ Σᵢ mᵢ,min xᵢ²`, each node at the least mass its
+/// contributions reach, and `xᵀK(t)x ≤ xᵀK_S x`, `K_S` the stiffness with every
+/// sample at the largest map it reaches, since each sample's share `w Cᵀ J C`
+/// is positive semidefinite. So the largest `λ` of `M(t)⁻¹K(t)` is at most
+/// that of `(K_S, M_min)`, which Gershgorin bounds row by row: the row's
+/// `Σⱼ |K_S,ij|` over the node's own least mass, plus its restoring curvature.
+/// The assembled rows are the fixed ceiling's own, over its lumped mass,
+/// scaled by the node's authored over least mass; `K_S` is `K` plus each
+/// driven sample's `(S − 1) w Cᵀ J C`, added where it lands. A driven region
+/// that stays slower than what surrounds it, even at its drive's lowest,
+/// then leaves the ceiling to the surroundings.
+fn per_node_eigenvalue_bound(
+    base: &CanonicalWaveOperator,
+    quadratic: &QuadraticWaveOperator,
+    primary: &TemporalSites<TemporalPrimarySample>,
+    complementary: &TemporalSites<TemporalComplementarySample>,
+) -> Result<Option<f64>, WaveError> {
+    if quadratic.degrees_of_freedom() != base.degrees_of_freedom() {
+        return Err(WaveError::InvalidState);
+    }
+    let masses = trajectory_masses(base, primary);
+    let (offsets, columns, lumped) = (
+        quadratic.row_offsets(),
+        quadratic.columns(),
+        quadratic.lumped_mass(),
+    );
+    let mut stiffness = std::borrow::Cow::Borrowed(quadratic.stiffness_values());
+    for (index, (sample, temporal)) in base
+        .constitutive_samples()
+        .iter()
+        .zip(complementary.iter())
+        .enumerate()
+    {
+        let extra = 1.0 / lowest_tangent(temporal.coefficient.law) - 1.0;
+        if extra <= 0.0 {
+            continue;
+        }
+        let values = stiffness.to_mut();
+        let nodes = base.element_nodes()[index / 6];
+        let curls = sample.curls();
+        for (row, row_curl) in nodes.iter().zip(curls) {
+            let row = *row as usize;
+            let entries = offsets[row] as usize..offsets[row + 1] as usize;
+            let mapped = sample.complementary_inverse.apply(*row_curl);
+            for (column, column_curl) in nodes.iter().zip(curls) {
+                let entry = columns[entries.clone()]
+                    .binary_search(column)
+                    .map_err(|_| WaveError::InvalidState)?;
+                values[entries.start + entry] +=
+                    extra * sample.integration_weight * mapped.dot(*column_curl);
+            }
+        }
+    }
+    let mut largest = 0.0_f64;
+    for row in 0..lumped.len() {
+        let sum = stiffness[offsets[row] as usize..offsets[row + 1] as usize]
+            .iter()
+            .map(|value| value.abs())
+            .sum::<f64>();
+        let bound = sum / lumped[row] * (masses.reference[row] / masses.minimum[row])
+            + masses.curvature[row];
+        if !bound.is_finite() || bound < 0.0 {
+            return Ok(None);
+        }
+        largest = largest.max(bound);
+    }
+    Ok((largest > 0.0).then_some(largest))
 }
 
 /// Gate O: a self-oscillating law's short-wave limit.
@@ -10579,6 +10698,186 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The largest eigenvalue of `M(t)⁻¹K(t)` at `time`, by power iteration
+    /// through the operator's own maps: `b = Cu` sample by sample, the force
+    /// of the complementary field there, over the mass at `time`; read as the
+    /// Rayleigh quotient in the mass's inner product.
+    fn stiffness_eigenvalue_at(operator: &CanonicalTemporalWaveOperator, time: f64) -> f64 {
+        let base = operator.base();
+        let runtime = operator.initial_runtime();
+        let mass = operator.primary_mass_at(time, &runtime).unwrap();
+        let apply = |x: &[f64]| {
+            let flux = base
+                .constitutive_samples()
+                .iter()
+                .enumerate()
+                .map(|(index, sample)| {
+                    base.element_nodes()[index / 6]
+                        .iter()
+                        .zip(sample.curls())
+                        .fold(Point2::new(0.0, 0.0), |sum, (node, curl)| {
+                            sum + *curl * x[*node as usize]
+                        })
+                })
+                .collect::<Vec<_>>();
+            operator
+                .force_at(&flux, time, &runtime)
+                .unwrap()
+                .into_iter()
+                .map(|force| force * base.orientation())
+                .collect::<Vec<_>>()
+        };
+        let mut x = (0..mass.len())
+            .map(|index| ((index * 7919) % 1013) as f64 / 1013.0 - 0.5)
+            .collect::<Vec<_>>();
+        let mut eigenvalue = 0.0;
+        for _ in 0..400 {
+            let kx = apply(&x);
+            eigenvalue = x.iter().zip(&kx).map(|(a, b)| a * b).sum::<f64>()
+                / x.iter().zip(&mass).map(|(a, m)| a * a * m).sum::<f64>();
+            let y = kx.iter().zip(&mass).map(|(k, m)| k / m).collect::<Vec<_>>();
+            let norm = y
+                .iter()
+                .zip(&mass)
+                .map(|(value, m)| value * value * m)
+                .sum::<f64>()
+                .sqrt();
+            x = y.into_iter().map(|value| value / norm).collect();
+        }
+        eigenvalue
+    }
+
+    /// The ceiling, taken node by node, holds at every instant: over a
+    /// pump's period the largest eigenvalue of `M(t)⁻¹K(t)` stays under
+    /// `4/h²` at it, for a mass drive and a stiffness drive on the slow disk,
+    /// whose interface rows then mix driven and undriven samples, on the
+    /// medium around it, and for both at once. The disk's drives leave the
+    /// fixed ceiling, the medium's lower it by `√0.8`.
+    #[test]
+    fn the_per_node_step_ceiling_holds_at_every_drive_phase() {
+        // Material, whether the drive is on the mass row, and its depth.
+        type Drive = (usize, bool, f64);
+        let cases: [(&str, &[Drive]); 5] = [
+            ("disk mass", &[(1, true, 0.5)]),
+            ("disk stiffness", &[(1, false, 0.5)]),
+            ("medium mass", &[(0, true, 0.2)]),
+            ("medium stiffness", &[(0, false, 0.2)]),
+            (
+                "medium stiffness, disk mass",
+                &[(0, false, 0.2), (1, true, 0.5)],
+            ),
+        ];
+        for (label, drives) in cases {
+            let mut scene = contrasted_scene();
+            for (material, mass, depth) in drives {
+                let law = if *mass {
+                    &mut scene.materials[*material].mass_law
+                } else {
+                    &mut scene.materials[*material].stiffness_law
+                };
+                law.drive = pump(*depth, 1.1, 0.3);
+            }
+            let operator = compile(&scene).unwrap();
+            let step = operator.maximum_time_step();
+            let limit = 4.0 / (step * step);
+            let largest = (0..16)
+                .map(|phase| stiffness_eigenvalue_at(&operator, phase as f64 / (16.0 * 1.1)))
+                .fold(0.0_f64, f64::max);
+            // 64% of it in every case: the bound is near enough to bite.
+            assert!(
+                largest <= limit * (1.0 + 1e-9) && largest > 0.5 * limit,
+                "{label}: {largest:.4e} against {limit:.4e}"
+            );
+        }
+    }
+
+    /// A driven region slower than the medium around it, even at its drive's
+    /// lowest, leaves the step to that medium: the slow disk pumped down to
+    /// half its mass keeps the fixed ceiling, which the global form halved
+    /// in the square. The medium pumped instead lowers it by its own factor.
+    #[test]
+    fn a_slow_driven_region_leaves_the_step_to_the_medium_around_it() {
+        let mut scene = contrasted_scene();
+        scene.materials[1].mass_law.drive = pump(0.5, 1.1, 0.3);
+        let bound = compile(&scene).unwrap().time_step_bound();
+        assert!((bound.primary_floor - 0.5).abs() < 1e-12, "{bound:?}");
+        assert!(
+            (bound.trajectory / bound.fixed - 1.0).abs() < 1e-12,
+            "{bound:?}"
+        );
+
+        let mut scene = contrasted_scene();
+        scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+        let bound = compile(&scene).unwrap().time_step_bound();
+        assert!(
+            (bound.trajectory / (bound.fixed * 0.8_f64.sqrt()) - 1.0).abs() < 1e-12,
+            "{bound:?}"
+        );
+    }
+
+    /// The per-node ceiling adds a driven sample's share into the assembled
+    /// stiffness where it lands, so the samples must assemble exactly that
+    /// stiffness, entry for entry, and the lumped mass must be the primary
+    /// contributions' mass the ceiling scales it by.
+    #[test]
+    fn the_samples_assemble_the_fixed_stiffness_and_mass() {
+        let scene = contrasted_scene();
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let base = operator.base();
+        let (offsets, columns) = (quadratic.row_offsets(), quadratic.columns());
+        let mut assembled = vec![0.0; quadratic.stiffness_values().len()];
+        for (index, sample) in base.constitutive_samples().iter().enumerate() {
+            let nodes = base.element_nodes()[index / 6];
+            for (row, row_curl) in nodes.iter().zip(sample.curls()) {
+                let row = *row as usize;
+                let entries = offsets[row] as usize..offsets[row + 1] as usize;
+                let mapped = sample.complementary_inverse.apply(*row_curl);
+                for (column, column_curl) in nodes.iter().zip(sample.curls()) {
+                    let entry = columns[entries.clone()].binary_search(column).unwrap();
+                    assembled[entries.start + entry] +=
+                        sample.integration_weight * mapped.dot(*column_curl);
+                }
+            }
+        }
+        let largest = quadratic
+            .stiffness_values()
+            .iter()
+            .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+        for (assembled, fixed) in assembled.iter().zip(quadratic.stiffness_values()) {
+            assert!(
+                (assembled - fixed).abs() < 1e-12 * largest,
+                "{assembled} against {fixed}"
+            );
+        }
+        let mut mass = vec![0.0; base.degrees_of_freedom()];
+        for contribution in base.primary_contributions() {
+            mass[contribution.node as usize] +=
+                contribution.geometric_weight * contribution.reference_coefficient;
+        }
+        for (mass, lumped) in mass.iter().zip(quadratic.lumped_mass()) {
+            assert!(
+                (mass / lumped - 1.0).abs() < 1e-12,
+                "{mass} against {lumped}"
+            );
+        }
     }
 
     /// A pump lowers its row's floor to its lowest factor, and the ceiling

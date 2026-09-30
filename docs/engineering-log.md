@@ -17481,3 +17481,64 @@ The gallery's batch F is built (`docs/spikes/funfern-gallery-plan.md`,
   domain-wide factor is under "Worth checking sometime".
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — The driven step ceiling, node by node
+
+Raised by the temporal slab (`docs/spikes/funfern-gallery-plan.md`, F7), which
+stepped at half its fixed ceiling, and done at the user's request: a driven
+generation's ceiling is now bounded node by node, so a driven region that
+stays slower than its surroundings, even at its drive's lowest, leaves the
+step to them.
+
+- **Before.** The ceiling was the fixed one times `√(min primary factor · min
+  complementary factor)` over every sample, the weakest factor anywhere
+  lowering every node. Rigorous by the Rayleigh quotient, but the temporal
+  slab's glass, `ε = 4` driven to 1, is never faster than the vacuum beside
+  it, and the scene stepped at 3.4e-3 s where its medium allows 6.8e-3 s.
+- **Now** (`per_node_eigenvalue_bound`). At every instant `xᵀM(t)x ≥ Σᵢ mᵢ,min
+  xᵢ²`, each node at the least mass its contributions reach, and `xᵀK(t)x ≤
+  xᵀK_S x`, `K_S` the stiffness with every sample at the largest map it
+  reaches, each sample's share being positive semidefinite. So every
+  instant's largest eigenvalue of `M(t)⁻¹K(t)` is at most that of `(K_S,
+  M_min)`, which Gershgorin bounds row by row: the fixed ceiling's own
+  assembled row sums over its lumped mass, scaled by each node's authored
+  over least mass, plus the node's restoring curvature. A driven stiffness
+  adds its samples' `(S − 1) w Cᵀ J C` into a copy of the rows where it lands.
+  Both forms bound every instant, and the step takes the longer, so no scene
+  steps shorter than before. `trajectory_masses` and `lowest_tangent` are
+  shared with the grid filter's reach, which already took the same minima.
+  The device reads the operator's ceiling and needed nothing.
+- **Preparation.** Measured on the temporal slab: the row pass takes 0.17 ms
+  and the mass pass 0.06 ms at 33k dofs, against a 355 ms preparation
+  (0.07%), and 0.71 and 0.30 ms at 137k dofs against 2.83 s (0.04%). A driven
+  stiffness adds one pass over the driven samples. Nothing changes per step.
+- **The gallery's steps**, at edge 0.08, global form against now: temporal
+  slab 3.78e-3 to 7.32e-3 s (1.94×); parametric fiber amplifier 1.12×, to its
+  fixed ceiling; parametric pump, time crystal and travelling modulation
+  1.035 to 1.038×; the plasma scenes, the soliton and the emitter 1.001 to
+  1.004×; the Doppler mirror, the Kerr slab, the Josephson line, symmetry
+  breaking, the pinned wall and the plasma gallery unchanged. Their driven
+  slabs are the fastest region at their drives' lowest.
+- **Claims** measured again at the new steps, all within their tolerances:
+  temporal slab 0.498, 9.10, 3.03 and 3.08 Hz (0.497, 9.14, 3.03, 3.09
+  before); time crystal readout 0.20, 0.88, 0.20; travelling modulation 1.74
+  and 7.46; pump 2.29 and 1.22; fiber amplifier 8.56×, 8.68× later, 0.12
+  squeezed, 5.97× standing.
+- **Tests** (core): the samples assemble the fixed stiffness entry for entry
+  and the primary contributions its lumped mass
+  (`the_samples_assemble_the_fixed_stiffness_and_mass`); a slow disk pumped
+  to half its mass keeps the fixed ceiling, the medium pumped lowers it by its
+  own `√0.8` (`a_slow_driven_region_leaves_the_step_to_the_medium_around_it`);
+  over a pump's period the largest eigenvalue of `M(t)⁻¹K(t)`, by power
+  iteration through the operator's maps, stays under `4/h²` at the ceiling,
+  at 64% of it, for mass and stiffness drives on the disk, the medium and both
+  (`the_per_node_step_ceiling_holds_at_every_drive_phase`).
+- **Device:** `canonical_gpu_long_run` at 400 and 1000 steps on the ten
+  scenes whose step changed, all exit 0. The temporal slab at 6.59e-3 s: Q
+  9.6e-7, b 8.2e-7 at 400; Q 1.7e-5, b 1.4e-5 at 1000, through the drop and
+  its return. Fiber amplifier Q 2.0e-5, b 2.3e-5 at 1000; the emitter within
+  its 1e-4 (2.4e-5).
+- **Docs.** `docs/plan.md` drops the item from "Worth checking sometime"; the
+  gallery plan's F7 says what changed.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
