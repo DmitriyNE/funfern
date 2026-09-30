@@ -1242,6 +1242,40 @@ domain, the reference's field falls about 200-fold from step 800 to 1000
 `b` throughout, about 1e-6 of the peak. At 800 steps, with the field still
 in the domain, Q 3.2e-6 and b 3.4e-6.
 
+### G2. Pumped drum
+
+The pump burst from "Still open", in a resonator; Time-varying media after
+the parametric pump, since Resonators is full at seven. The struck drum
+whose membrane's density carries a parametric pump at twice the
+fundamental, 1.276 Hz, depth 0.4, gated flat-top for 8 s from 2 s after
+each knock, 0.5 s edges. With `ρ = ρ₀(1 + d cos 2ωt)` the fundamental's two
+quadratures obey `Ȧ = −(dω/4)B` and `Ḃ = −(dω/4)A`, so one grows at `dω/4`
+while the other decays; a pump uniform over the membrane couples round modes
+to round modes only, and at 1.276 Hz only the fundamental pairs with itself.
+The probe beside the centre opens on its field and spectrum over 20 s, and
+a second on the first overtone's still circle, `r = a j₀₁/j₀₂` = 0.261, on
+its field over 20 s: there the fundamental swells without the (0,2) mode.
+
+Explored on the CPU: a two-period rectangular phasor at the fundamental
+takes in the stronger (0,2) mode 0.82 Hz away, and read 0.12/s of growth; a
+Hann-weighted one over three periods lags by 4.7 s. On the still circle, over
+two periods, the fundamental rings down unpumped at 0.050/s and pumped grows
+at 0.242/s at depth 0.3 and 0.361/s at 0.4, against `dω/4 − γ/2` = 0.251
+and 0.351. At 0.3 its line in the probe's spectrum only draws level with
+the first overtone's (0.027 against 0.025); at 0.4 it is 2.75 times it.
+After the knock the fundamental first dips: the knock's phase favours the
+quadrature the pump squeezes.
+
+Claims at edge 0.08, 20 s from one knock:
+
+- Unpumped, the fundamental rings down at `γ/2` = 0.05/s within 5%
+  (0.0500).
+- Pumped, over the gate's second half it grows at `dω/4 − γ/2` within 10%
+  (0.3506 against 0.3508), and after the gate rings down at `γ/2` within 5%
+  (0.0500).
+- Over the probe's 20 s its line is over twice every overtone's (2.75 times
+  the first), where unpumped it is under the (0,2) mode's (0.56).
+
 ## Order, as built
 
 Built from 25 to 26 September in batch order, A to E, groundwork first.
@@ -1339,7 +1373,8 @@ example to the next walks the gallery as it is shown
   modes and the cavity filter before the ring resonator.
 - **Time-varying media:** parametric pump, time crystal, travelling
   modulation, Doppler mirror, parametric fiber amplifier. Batch F adds the
-  temporal slab after the parametric pump.
+  temporal slab after the parametric pump, and batch G the pumped drum before
+  it.
 - **Nonlinear and self-organizing:** Kerr slab, spatial soliton, Josephson
   line, symmetry breaking, pinned domain wall, self-sustained emitter.
 

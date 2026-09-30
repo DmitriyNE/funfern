@@ -17572,3 +17572,38 @@ mirror behind the probe comb the transfer.
   the field the run carried.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — A pumped drum
+
+Batch G's second scene (`docs/spikes/funfern-gallery-plan.md`, G2), in
+Time-varying media after the parametric pump: the struck drum with its
+density pumped at twice its fundamental, which grows alone.
+
+- **Scene.** `pumped_drum_with(depth, pump_hz)`: `membrane_driven(drive,
+  gate)` gives the membrane a gated parametric pump on its density, and
+  `struck` knocks any membrane at a point with the probe beside the centre;
+  the struck drum is `struck(membrane(), centre)`. Depth 0.4 at 1.276 Hz,
+  gated for 8 s from 2 s after each knock. A second probe on the first
+  overtone's still circle, `r` = 0.261, opens on its field. 44 scenes.
+- **Theory.** With `ρ = ρ₀(1 + d cos 2ωt)` the fundamental's quadratures obey
+  `Ȧ = −(dω/4)B`, `Ḃ = −(dω/4)A`: one grows at `dω/4`, less the loss's
+  `γ/2`.
+- **Explored.** A short rectangular phasor at the fundamental takes in the
+  (0,2) mode 0.82 Hz away (0.12/s read for 0.25); on the still circle a
+  two-period Hann phasor reads 0.242 and 0.361/s at depths 0.3 and 0.4
+  against 0.251 and 0.351, and 0.050/s of ring-down unpumped. At 0.3 the
+  fundamental's line only draws level with the first overtone's.
+- **Measured claim** (`a_pump_at_twice_a_drums_fundamental_grows_it_alone`,
+  edge 0.08, 20 s from one knock): unpumped ring-down at 0.0500 against
+  `γ/2` = 0.05; pumped growth over the gate's second half 0.3506 against
+  0.3508 (within 10%), ring-down after it 0.0500; the probe's line 2.75
+  times the first overtone's, where unpumped it is 0.56 of it.
+- **Also.** Resonators would have held eight, past the gallery's seven
+  columns, so the scene is in Time-varying media, which is what it is.
+  `every_driven_gallery_scene_runs_with_a_side_pinned_beside_an_outgoing_wall`
+  now skips a driven scene with no outgoing trace: the pumped drum is cut
+  away from the domain's walls and has no corner to pin.
+- **Device:** `canonical_gpu_long_run` on "Pumped drum", temporal, 2,623
+  dofs: Q 9.8e-7, b 1.5e-6 at 400 steps; Q 2.6e-6, b 1.5e-6 at 1000.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

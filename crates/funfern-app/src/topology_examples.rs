@@ -348,6 +348,16 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 ExampleGroup::TimeVaryingMedia,
+                "Pumped drum",
+                "The struck drum with its membrane's density pumped by 40% at twice its \
+                 fundamental, 1.28 Hz, for 8 s after each knock. The pump feeds the fundamental \
+                 alone: it grows at dω/4 less its loss, 0.35 per second, where unpumped it rings \
+                 down at 0.05, and its line comes to stand over twice any overtone's. A probe \
+                 on the first overtone's still circle hears the fundamental swell without it.",
+                pumped_drum(),
+            ),
+            example(
+                ExampleGroup::TimeVaryingMedia,
                 "Temporal slab",
                 "A 1.5 Hz pulse runs into glass, ε = 4, and slows to half the wave speed. Once it \
                  is inside, the glass's permittivity drops to 1 at once, for 2 s, every 6 s. \
@@ -3782,12 +3792,71 @@ fn struck_drum() -> TopologyDocument {
     struck_drum_with(Point2::default())
 }
 
+fn pumped_drum() -> TopologyDocument {
+    pumped_drum_with(DRUM_PUMP_DEPTH, 2.0 * drum_fundamental())
+}
+
+/// The first zero of `J₀`, where the drum's fundamental stands.
+const BESSEL_J01: f64 = 2.404_826;
+/// The pump: the membrane's density swinging by 40% for 8 s from 2 s after
+/// each knock, at twice the fundamental. At 30% the fundamental's line only
+/// draws level with the first overtone's.
+const DRUM_PUMP_DEPTH: f64 = 0.4;
+/// The first overtone's still circle, `r = a j₀₁/j₀₂`, where a probe hears
+/// the fundamental without it.
+const DRUM_STILL_CIRCLE: Point2 = Point2::new(0.0, 0.6 * 2.404_826 / 5.520_078);
+const DRUM_PUMP_START: f64 = 2.0;
+const DRUM_PUMP_HOLD: f64 = 8.0;
+
+/// The drum's fundamental, `j₀₁/(2πa)` = 0.638 Hz.
+fn drum_fundamental() -> f64 {
+    BESSEL_J01 / (std::f64::consts::TAU * DRUM_RADIUS)
+}
+
+/// The struck drum whose membrane's density is pumped by `depth` at
+/// `pump_hz` for `DRUM_PUMP_HOLD` seconds after each knock: a parametric
+/// pump, gated, on the mass row. At twice a mode's frequency `ω` it grows
+/// that mode at `dω/4`, and a pump uniform over the membrane couples round
+/// modes to round modes only, so at twice the fundamental only the
+/// fundamental pairs with itself.
+fn pumped_drum_with(depth: f64, pump_hz: f64) -> TopologyDocument {
+    let drive = TimeDrive::ParametricPump {
+        depth: ScalarField::constant(depth),
+        frequency_hz: ScalarField::constant(pump_hz),
+        phase_radians: ScalarField::constant(0.0),
+    };
+    let gate = PulseTrain {
+        envelope: PulseEnvelope::FlatTop {
+            duration: DRUM_PUMP_HOLD,
+            edge: 0.5,
+        },
+        start: DRUM_PUMP_START,
+        repeat: DRUM_KNOCK_REPEAT,
+    };
+    let mut document = struck(membrane_driven(drive, Some(gate)), Point2::default());
+    document.model.probes.push(TopologyProbeDefinition {
+        id: ProbeId(2),
+        name: "On the overtone's still circle".into(),
+        color: [248, 196, 112],
+        enabled: true,
+        target: TopologyProbeTarget::Point(DRUM_STILL_CIRCLE),
+    });
+    document
+        .readouts
+        .set_probe(ProbeId(2), field_readout(DRUM_SPAN));
+    document
+}
+
 /// The drum struck at `at` every 20 s: a point source whose rate is a
 /// Gaussian 0.05 s wide, a velocity impulse whose spectrum is still 60% of
 /// its peak at 3 Hz. A probe sits just beside the centre, where every round
 /// mode moves nearly as much as at the centre itself.
 fn struck_drum_with(at: Point2) -> TopologyDocument {
-    let mut document = membrane();
+    struck(membrane(), at)
+}
+
+/// `membrane` knocked at `at` every 20 s, with the probe beside the centre.
+fn struck(mut document: TopologyDocument, at: Point2) -> TopologyDocument {
     document.model.source = PointSource {
         enabled: true,
         position: at,
@@ -3822,8 +3891,15 @@ const DRUM_LISTENER: Point2 = Point2::new(0.0, 0.08);
 
 /// The clamped drum's membrane, radius 0.6, with nothing driving it.
 fn membrane() -> TopologyDocument {
+    membrane_driven(TimeDrive::None, None)
+}
+
+/// The membrane with `drive` on its density, in `gate`'s pulses if given.
+fn membrane_driven(drive: TimeDrive, gate: Option<PulseTrain>) -> TopologyDocument {
     let mut builder = Builder::new();
     builder.scene.materials[0].name = "Membrane".into();
+    builder.scene.materials[0].mass_law.drive = drive;
+    builder.scene.materials[0].mass_law.gate = gate;
     builder.scene.materials[0].magnetic_loss = Some(LossChannel {
         base_rate: ScalarField::constant(DRUM_LOSS),
         law: DampingLaw::constant(),
@@ -4281,7 +4357,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 43);
+        assert_eq!(catalog().len(), 44);
         assert_eq!(catalog()[0].name, "Obstacle over a mirror");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -5268,7 +5344,11 @@ mod tests {
             let Some(operator) = prepared.canonical_temporal_operator.clone() else {
                 continue;
             };
-            let boundary = operator.base().outgoing_boundary().unwrap();
+            // A scene cut away from the domain's walls, as the pumped drum
+            // is, has no outgoing trace and no such corner.
+            let Some(boundary) = operator.base().outgoing_boundary() else {
+                continue;
+            };
             assert!(
                 boundary
                     .trace_nodes()
@@ -7934,6 +8014,97 @@ mod tests {
         for gap in [1.5, 2.5] {
             let gain = gain_at(&average, gap).unwrap();
             assert!(gain < 0.1, "the gap at {gap} Hz reads {gain:.4}");
+        }
+    }
+
+    /// The pumped drum's claims, at edge 0.08, 20 s from one knock, from the
+    /// fundamental's amplitude by a Hann-weighted phasor over two of its
+    /// periods, on the first overtone's still circle, where no (0,2) mode
+    /// leaks in. Unpumped it rings down at `γ/2`, 0.050 per second (0.0502).
+    /// Pumped, over windows inside the gate's second half it grows at `dω/4 −
+    /// γ/2` within 10% (0.3506 against 0.3508), and once the pump stops it
+    /// rings down at `γ/2` again within 5% (0.0500). The probe beside the
+    /// centre reads its line, over its 20 s, at over twice every overtone's
+    /// (2.75 times the first), where unpumped it is under the (0,2) mode's
+    /// (0.56).
+    #[test]
+    fn a_pump_at_twice_a_drums_fundamental_grows_it_alone() {
+        let fundamental = drum_fundamental();
+        let period = 1.0 / fundamental;
+        let points = [DRUM_STILL_CIRCLE, DRUM_LISTENER];
+        let run = |document: &TopologyDocument| {
+            let (times, series) = records(document, 0.08, DRUM_SPAN, &points);
+            (times[1] - times[0], series)
+        };
+        let amplitude = |series: &[f64], dt: f64, end: f64| {
+            let count = (2.0 * period / dt) as usize;
+            let last = (end / dt) as usize;
+            let (mut re, mut im, mut weight) = (0.0, 0.0, 0.0);
+            for (index, value) in series[last - count..last].iter().enumerate() {
+                let taper = (std::f64::consts::PI * (index as f64 + 0.5) / count as f64)
+                    .sin()
+                    .powi(2);
+                let phase = std::f64::consts::TAU * fundamental * index as f64 * dt;
+                re += taper * value * phase.cos();
+                im -= taper * value * phase.sin();
+                weight += taper;
+            }
+            2.0 * re.hypot(im) / weight
+        };
+        // The slope of the amplitude's logarithm over windows ending from
+        // `from` to `to`, by least squares.
+        let rate = |series: &[f64], dt: f64, from: f64, to: f64| {
+            let ends = (0..)
+                .map(|step| from + 0.25 * step as f64)
+                .take_while(|end| *end <= to)
+                .collect::<Vec<_>>();
+            let logs = ends
+                .iter()
+                .map(|end| amplitude(series, dt, *end).ln())
+                .collect::<Vec<_>>();
+            let n = ends.len() as f64;
+            let (mean_end, mean_log) = (ends.iter().sum::<f64>() / n, logs.iter().sum::<f64>() / n);
+            ends.iter()
+                .zip(&logs)
+                .map(|(end, log)| (end - mean_end) * (log - mean_log))
+                .sum::<f64>()
+                / ends.iter().map(|end| (end - mean_end).powi(2)).sum::<f64>()
+        };
+        let lines = |series: &[f64], dt: f64| {
+            let spectrum = amplitude_spectrum(series, dt).unwrap();
+            let at = |hz: f64| {
+                (0..spectrum.magnitudes.len())
+                    .filter(|index| (spectrum.frequency_hz(*index) - hz).abs() < 0.05)
+                    .map(|index| spectrum.magnitudes[index])
+                    .fold(0.0, f64::max)
+            };
+            BESSEL_J0.map(|zero| at(zero / (std::f64::consts::TAU * DRUM_RADIUS)))
+        };
+
+        let (dt, control) = run(&struck_drum());
+        let loss = -rate(&control[0], dt, 5.0, DRUM_SPAN);
+        assert!(
+            (loss / (0.5 * DRUM_LOSS) - 1.0).abs() < 0.05,
+            "unpumped it rings down at {loss:.4}"
+        );
+        let control_lines = lines(&control[1], dt);
+        assert!(control_lines[0] < control_lines[1], "{control_lines:.4?}");
+
+        let (dt, pumped) = run(&pumped_drum());
+        let expected = DRUM_PUMP_DEPTH * std::f64::consts::TAU * fundamental / 4.0 - loss;
+        let growth = rate(&pumped[0], dt, 7.0, 9.5);
+        assert!(
+            (growth / expected - 1.0).abs() < 0.1,
+            "pumped it grows at {growth:.4} against {expected:.4}"
+        );
+        let after = -rate(&pumped[0], dt, 13.5, DRUM_SPAN);
+        assert!(
+            (after / loss - 1.0).abs() < 0.05,
+            "after the pump it rings down at {after:.4}"
+        );
+        let pumped_lines = lines(&pumped[1], dt);
+        for overtone in &pumped_lines[1..] {
+            assert!(pumped_lines[0] > 2.0 * overtone, "{pumped_lines:.4?}");
         }
     }
 }
