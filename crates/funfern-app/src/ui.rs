@@ -1710,7 +1710,7 @@ const EXAMPLE_TILE: f32 = 108.0;
 const EXAMPLE_TILE_GAP: f32 = 10.0;
 /// The most tiles a gallery row holds: the largest section, so each section
 /// sits in one row where the screen has room.
-const GALLERY_COLUMNS: usize = 6;
+const GALLERY_COLUMNS: usize = 7;
 
 /// Room a scroll bar may take beside the tiles.
 const EXAMPLE_SCROLL_BAR: f32 = 16.0;

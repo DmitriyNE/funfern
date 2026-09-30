@@ -1068,6 +1068,37 @@ Claims at edge 0.04:
 
 ### F5. Cavity filter
 
+Asked for by the user on 30 September, when the plan was agreed. Resonators,
+before the ring resonator. Two ceramic plates, `ε = 9`, each a quarter wave
+thick at 2 Hz (`1/24`) and half a wave apart (`1/4`), across the upper arm
+from `x = −0.15`: a Fabry-Pérot cavity whose mirrors are the plates. A
+quarter-wave plate of index `n` reflects `(n² − 1)/(n² + 1)`, 0.8, of the
+field, and between two of them the cavity passes all of it at 2 Hz, over a
+half-power band 0.22 Hz wide, and 0.29 at 1.5 and 2.5 Hz. A sinc pulse flat
+from 1 to 3 Hz, every 24 s; "Behind the filter" reads its transfer from
+"Reference", linear to 3.5 Hz.
+
+Designed with the transfer matrices first. Mirrors of three quarter-wave
+layers (ceramic, vacuum, ceramic) stop far more either side, 0.05 at
+`ε = 9`, but narrow the passband to 0.02 Hz, which rings for 16 s and which
+no segment the readout can take resolves; at `ε = 4` they pass 0.2 to 0.3
+either side over 0.09 Hz, still too narrow, and bring the next orders in at
+1 and 3 Hz. Single plates keep one passband in the band and ring for about
+1.4 s.
+
+Explored on the CPU: at edge 0.04 one whole pulse is within 0.5% of the
+plates' `|t(f)|` from 1 to 3 Hz. Behind the plates 2.7% of the energy comes
+more than 6 s after the pulse starts, 0.17% after 8 s. The readout reads
+the peak at 0.93 over 16 s segments and 0.965 over 24 s, the window's main
+lobe smoothing a band 0.22 Hz wide.
+
+Claims at edge 0.04:
+
+- One whole pulse, 20 s, follows the plates' `|t(f)|` within 2% from 1 to
+  3 Hz (0.5%).
+- The readout, a pulse a segment for two segments, reads the whole pulse
+  within 5% from 1.1 to 2.9 Hz (3.5%, at the peak).
+
 ### F6. Plasma group delay
 
 ### F7. Temporal slab
@@ -1166,7 +1197,7 @@ example to the next walks the gallery as it is shown
   crystal bend, disordered crystal.
 - **Resonators:** drum modes, the acoustic, dielectric and plasma whispering
   galleries, ring resonator. Batch F adds the struck drum after the drum
-  modes.
+  modes and the cavity filter before the ring resonator.
 - **Time-varying media:** parametric pump, time crystal, travelling
   modulation, Doppler mirror, parametric fiber amplifier.
 - **Nonlinear and self-organizing:** Kerr slab, spatial soliton, Josephson

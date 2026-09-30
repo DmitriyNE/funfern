@@ -286,6 +286,17 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 ExampleGroup::Resonators,
+                "Cavity filter",
+                "Two ceramic plates, ε = 9, each a quarter wave thick at 2 Hz and half a wave \
+                 apart, across the upper of two arms, lit by a plane-wave pulse every 24 s flat \
+                 from 1 to 3 Hz. Each plate alone reflects 0.8 of the field, yet together they \
+                 pass all of it at 2 Hz, where the space between them resonates, over a band \
+                 0.22 Hz wide, and 0.29 of it at 1.5 and 2.5 Hz. The probe behind them, divided \
+                 by the one in the empty lower arm, reads the filter.",
+                cavity_filter(),
+            ),
+            example(
+                ExampleGroup::Resonators,
                 "Ring resonator",
                 "A glass ring beside a glass fiber, driven at 3.975 Hz, one of the ring's \
                  resonances: over half a minute the ring fills to ten times its field between \
@@ -3682,6 +3693,56 @@ fn etalon_with(permittivity: f64, repeat: f64) -> TopologyDocument {
     document
 }
 
+fn cavity_filter() -> TopologyDocument {
+    cavity_filter_with(CAVITY_REPEAT)
+}
+
+/// The cavity filter's design frequency, and its two ceramic plates, each a
+/// quarter wave thick there, half a wave apart.
+const CAVITY_HZ: f64 = 2.0;
+const CAVITY_PERMITTIVITY: f64 = 9.0;
+const CAVITY_PLATE: f64 = 1.0 / (4.0 * 3.0 * CAVITY_HZ);
+const CAVITY_GAP: f64 = 1.0 / (2.0 * CAVITY_HZ);
+const CAVITY_FRONT: f64 = -0.15;
+/// A pulse a segment. The passband is 0.22 Hz wide, and a Hann window's
+/// main lobe smooths it: 16 s segments read its peak at 0.93, 24 s at 0.965.
+const CAVITY_REPEAT: f64 = CAVITY_SEGMENT;
+const CAVITY_SEGMENT: f64 = 24.0;
+
+/// A TM channel in two arms lit by a sinc pulse flat from 1 to 3 Hz every
+/// `repeat` seconds, zero for one, with two ceramic plates, `ε = 9`, across
+/// the upper arm. At `CAVITY_HZ` each plate is a quarter wave thick and
+/// reflects `(n² − 1)/(n² + 1)`, 0.8, of the field, and the vacuum between
+/// them is half a wave: a cavity whose two mirrors pass everything at its
+/// resonance and little either side of it.
+fn cavity_filter_with(repeat: f64) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    builder.scene.materials.push(Material {
+        id: MaterialId(2),
+        name: "Ceramic".into(),
+        mass_density: ScalarField::constant(CAVITY_PERMITTIVITY),
+        color: [66, 105, 151],
+        ..Material::default_medium()
+    });
+    let back = CAVITY_FRONT + CAVITY_PLATE + CAVITY_GAP;
+    builder.arms(
+        -0.85,
+        sinc_pulse(1.0, 3.0, repeat),
+        &[
+            (CAVITY_FRONT, CAVITY_FRONT + CAVITY_PLATE, MaterialId(2)),
+            (back, back + CAVITY_PLATE, MaterialId(2)),
+        ],
+    );
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    arm_probes(&mut document, "Behind the filter", 3.5, CAVITY_SEGMENT);
+    document
+}
+
 fn skin_loss() -> f64 {
     2.0 * std::f64::consts::TAU * SKIN_HZ
 }
@@ -3823,7 +3884,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 38);
+        assert_eq!(catalog().len(), 39);
         assert_eq!(catalog()[0].name, "Obstacle over a mirror");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -7171,6 +7232,43 @@ mod tests {
         let dt = times[1] - times[0];
         let average = welch(&series[1], &series[0], dt, readout.transfer_segment, 0.25);
         let read = worst(&average, 0.6, 3.4, &|hz| gain_at(&truth, hz).unwrap());
+        assert!(read < 0.05, "the readout is {read:.4} off the whole pulse");
+    }
+
+    /// The cavity filter's claims, at edge 0.04. One pulse's whole records,
+    /// 20 s, follow the two plates' `|t(f)|` within 2% from 1 to 3 Hz (0.5%):
+    /// one at 2 Hz, over a half-power band 0.22 Hz wide, and 0.29 at 1.5 and
+    /// 2.5 Hz. The readout, a pulse a segment for two of them, reads the whole
+    /// pulse within 5% from 1.1 to 2.9 Hz (3.5%, at the peak).
+    #[test]
+    fn a_cavity_between_two_plates_passes_only_its_resonance() {
+        let n = CAVITY_PERMITTIVITY.sqrt();
+        let layers = [(n, CAVITY_PLATE), (1.0, CAVITY_GAP), (n, CAVITY_PLATE)];
+        let points = [ARM_BEHIND, ARM_REFERENCE];
+        let (times, series) = records(&cavity_filter_with(0.0), 0.04, 20.0, &points);
+        let truth = transfer_spectrum(&series[1], &series[0], times[1] - times[0]).unwrap();
+        let worst =
+            |transfer: &TransferSpectrum, low: f64, high: f64, against: &dyn Fn(f64) -> f64| {
+                (0..transfer.ratios.len())
+                    .filter(|index| (low..=high).contains(&transfer.frequency_hz(*index)))
+                    .map(|index| {
+                        let hz = transfer.frequency_hz(index);
+                        (transfer.magnitude(index).unwrap() / against(hz) - 1.0).abs()
+                    })
+                    .fold(0.0_f64, f64::max)
+            };
+        let plates = worst(&truth, 1.0, 3.0, &|hz| layered_transmission(&layers, hz));
+        assert!(
+            plates < 0.02,
+            "the whole pulse is {plates:.4} off the plates'"
+        );
+
+        let document = cavity_filter();
+        let readout = document.readouts.probe(ProbeId(1));
+        let (times, series) = records(&document, 0.04, 2.0 * CAVITY_SEGMENT, &points);
+        let dt = times[1] - times[0];
+        let average = welch(&series[1], &series[0], dt, readout.transfer_segment, 0.25);
+        let read = worst(&average, 1.1, 2.9, &|hz| gain_at(&truth, hz).unwrap());
         assert!(read < 0.05, "the readout is {read:.4} off the whole pulse");
     }
 }

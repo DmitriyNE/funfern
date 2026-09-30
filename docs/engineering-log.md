@@ -17335,3 +17335,38 @@ arm whose transfer is a Fabry-Pérot etalon's fringes.
   nodes: Q 1.7e-6, b 1.4e-6 at 400 steps; Q 5.0e-6, b 9.0e-6 at 1000.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — A cavity filter
+
+Batch F's fifth scene (`docs/spikes/funfern-gallery-plan.md`, F5), which the
+user asked for when the plan was agreed; in Resonators, before the ring
+resonator.
+
+- **Scene.** `cavity_filter_with(repeat)`: two ceramic plates, `ε = 9`, each a
+  quarter wave thick at 2 Hz and half a wave apart, across the upper arm.
+  Each reflects 0.8 of the field; together they pass all of it at 2 Hz, over
+  a half-power band 0.22 Hz wide, and 0.29 at 1.5 and 2.5 Hz. A sinc pulse
+  flat from 1 to 3 Hz every 24 s; "Behind the filter" reads its transfer
+  from "Reference" over 24 s segments. 39 scenes.
+- **Designed** with the transfer matrices of the test's
+  `layered_transmission`, first in a scratch script. Three-layer quarter-wave mirrors stop
+  more either side but narrow the band to 0.02 Hz at `ε = 9`, ringing 16 s,
+  or 0.09 Hz at `ε = 4`: narrower than any segment the readout can take
+  resolves. Single plates ring for about 1.4 s.
+- **Explored.** At edge 0.04 one whole pulse is within 0.5% of the plates'
+  `|t(f)|` from 1 to 3 Hz (edge 0.03 stops at the mesher's insertion cap).
+  The readout reads the peak at 0.93 over 16 s segments and 0.965 over 24 s.
+- **Measured claim** (`a_cavity_between_two_plates_passes_only_its_resonance`,
+  edge 0.04): one whole pulse within 2% of the plates' `|t(f)|` from 1 to
+  3 Hz (0.5%); the readout's own average over two segments within 5% of the
+  whole pulse from 1.1 to 2.9 Hz (3.5%).
+- **Device:** `canonical_gpu_long_run` on "Cavity filter", 8,588 dofs and 118
+  trace nodes: Q 1.7e-6, b 1.5e-6 at 400 steps; Q 8.6e-6, b 2.6e-5 at 1000,
+  inside the 3e-5 bound but closer to it than the etalon's 9.0e-6, the
+  plates' elements being the smallest.
+- **Seven gallery columns.** Resonators now holds seven scenes, and
+  `a_gallery_row_holds_a_whole_section` failed: `GALLERY_COLUMNS` is the
+  largest section, so each sits in one row where the screen has room. It is
+  7, a grid 832 wide rather than 714; narrower screens take fewer, as before.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
