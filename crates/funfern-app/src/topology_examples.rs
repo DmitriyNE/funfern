@@ -325,6 +325,17 @@ pub fn catalog() -> &'static [TopologyExample] {
             ),
             example(
                 ExampleGroup::TimeVaryingMedia,
+                "Temporal slab",
+                "A 1.5 Hz pulse runs into glass, ε = 4, and slows to half the wave speed. Once it \
+                 is inside, the glass's permittivity drops to 1 at once, for 2 s, every 6 s. \
+                 Across a sudden change in time the fields D and B carry over, so the pulse \
+                 keeps its wavelength and doubles its frequency, and it splits: one pulse runs \
+                 on with three times its field, and one, time-reflected, runs back with as much \
+                 field as it had, over half the time. With the glass held, nothing comes back.",
+                temporal_slab(),
+            ),
+            example(
+                ExampleGroup::TimeVaryingMedia,
                 "Time crystal",
                 "A slab whose permittivity steps up and down once a second splits the wave into \
                  sidebands; its sharp edges reach three steps out.",
@@ -1847,6 +1858,132 @@ fn doppler_mirror_with(pump_hz: f64) -> TopologyDocument {
 
 const DOPPLER_FRONT: Point2 = Point2::new(-0.7, 0.3);
 const DOPPLER_BEHIND: Point2 = Point2::new(0.9, 0.3);
+
+fn temporal_slab() -> TopologyDocument {
+    temporal_slab_with(true)
+}
+
+/// The temporal slab's glass, `ε = 4` from `x = −0.6` to 0.9, and its
+/// pulse: a Gaussian 0.2 s wide at 1.5 Hz, which inside the slab runs at
+/// half the wave speed and is 0.8 long. It leaves the launcher at 0.9 s,
+/// enters the slab at 1.15 s and is centred at `x = 0.1` at 2.55 s, when the
+/// permittivity drops to 1 for 2 s. Pulse and drop repeat every 6 s.
+const TEMPORAL_PERMITTIVITY: f64 = 4.0;
+const TEMPORAL_FRONT: f64 = -0.6;
+const TEMPORAL_BACK: f64 = 0.9;
+const TEMPORAL_HZ: f64 = 1.5;
+const TEMPORAL_WIDTH: f64 = 0.2;
+const TEMPORAL_DROP: f64 = 2.55;
+const TEMPORAL_HOLD: f64 = 2.0;
+const TEMPORAL_REPEAT: f64 = 6.0;
+/// Probes either side of where the pulse is when the permittivity drops.
+const TEMPORAL_UPSTREAM: Point2 = Point2::new(-0.45, 0.0);
+const TEMPORAL_DOWNSTREAM: Point2 = Point2::new(0.65, 0.0);
+
+/// A TM channel lit by a Gaussian pulse from `x = −0.85`, with a glass slab
+/// wall to wall whose permittivity, with `drop`, falls from 4 to 1 at once
+/// while the pulse is inside it: a gated 0 Hz pump of depth 0.75 at phase π,
+/// `1 − 0.75`, on the mass row. Across a change in time the canonical state
+/// carries over, `D` and `B`, so the wavenumber stays and the frequency
+/// doubles, and the pulse splits into `E_f = ½(n₁/n₂)(1 + n₁/n₂)` running on
+/// and `E_b = ½(n₁/n₂)(n₁/n₂ − 1)` running back: 3 and 1 of its field. While
+/// the permittivity is down the slab is vacuum, and its faces reflect
+/// nothing.
+fn temporal_slab_with(drop: bool) -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    builder.scene.outer_boundaries = channel();
+    let pulse = TimeSignal::pulsed(
+        [0.0, 40.0, TEMPORAL_HZ, 0.0],
+        PulseEnvelope::Gaussian {
+            width: TEMPORAL_WIDTH,
+        },
+        0.1,
+        TEMPORAL_REPEAT,
+    );
+    let region = builder.launcher(-0.85, TEMPORAL_HZ, 40.0);
+    builder
+        .scene
+        .volume_sources
+        .iter_mut()
+        .find(|source| source.region == region)
+        .unwrap()
+        .signal = pulse;
+    // The background's floor anchor moves beyond the slab, which crosses
+    // the centre where it sat.
+    builder.scene.face_assignments[0].anchor = FaceAnchor::Outer {
+        side: OuterSide::Bottom,
+        fraction: 0.975,
+    };
+    let mut glass = preset_material(
+        2,
+        "Temporal slab",
+        [120, 92, 178],
+        "Parametric pump",
+        LawPresetRow::Mass,
+        &[
+            ("depth", 0.75),
+            ("pump_hz", 0.0),
+            ("pump_phase", std::f64::consts::PI),
+        ],
+    );
+    glass.mass_density = ScalarField::constant(TEMPORAL_PERMITTIVITY);
+    if drop {
+        glass.mass_law.gate = Some(PulseTrain {
+            envelope: PulseEnvelope::FlatTop {
+                duration: TEMPORAL_HOLD,
+                edge: 1e-3,
+            },
+            start: TEMPORAL_DROP,
+            repeat: TEMPORAL_REPEAT,
+        });
+    } else {
+        glass.mass_law.drive = TimeDrive::None;
+    }
+    builder.scene.materials.push(glass);
+    let (front, span) = builder.divider(TEMPORAL_FRONT);
+    builder.divider(TEMPORAL_BACK);
+    for (material, side) in [
+        (MaterialId(2), CurveTraceSide::Right),
+        (DEFAULT_MATERIAL, CurveTraceSide::Left),
+    ] {
+        let region = RegionId(builder.next_region);
+        builder.next_region += 1;
+        builder.scene.regions.push(Region {
+            id: region,
+            material,
+            frame: MaterialFrame::world(),
+        });
+        // Running upwards, a divider's right is towards +x.
+        builder.scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Curve {
+                curve: front,
+                span,
+                side,
+                parameter: 0.5,
+            },
+            region: Some(region),
+        });
+    }
+    let mut document = builder.document();
+    document.model.source.enabled = false;
+    for (id, name, color, point) in [
+        (1, "Upstream", [91, 220, 194], TEMPORAL_UPSTREAM),
+        (2, "Downstream", [248, 196, 112], TEMPORAL_DOWNSTREAM),
+    ] {
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(id),
+            name: name.into(),
+            color,
+            enabled: true,
+            target: TopologyProbeTarget::Point(point),
+        });
+        document.readouts.set_probe(ProbeId(id), field_readout(4.0));
+    }
+    document
+}
 
 fn kerr_slab() -> TopologyDocument {
     kerr_slab_with(40.0, 60.0)
@@ -3958,7 +4095,7 @@ mod tests {
 
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
-        assert_eq!(catalog().len(), 40);
+        assert_eq!(catalog().len(), 41);
         assert_eq!(catalog()[0].name, "Obstacle over a mirror");
         for example in catalog() {
             example.document.model.accepted.compile(1).unwrap();
@@ -5673,7 +5810,7 @@ mod tests {
 
     impl Session {
         fn start(document: TopologyDocument, edge: f64) -> Self {
-            let editor = TopologyEditor::from_document(document).unwrap();
+            let editor = crate::topology_editor::TopologyEditor::from_document(document).unwrap();
             let meshing = MeshingOptions {
                 target_edge_length: edge,
                 ..MeshingOptions::default()
@@ -7451,5 +7588,71 @@ mod tests {
             (crests / expected - 1.0).abs() < 0.02,
             "the crests run at {crests:.4} against {expected:.4}"
         );
+    }
+
+    /// The temporal slab's claims, at edge 0.08, 4.5 s from rest, from
+    /// `∫u² dt` at the two probes either side of the pulse when the
+    /// permittivity drops. Upstream the time-reflected pulse carries
+    /// `E_b² n₂/n₁` = 0.5 of what the incident one did within 3% (0.497): as
+    /// much field, over half the time. Downstream the pulse running on carries
+    /// `(E_f/E_b)²` = 9 times the reflected one within 3% (9.14). Both come at
+    /// twice the incident's spectral centroid within 3% (3.03 and 3.09 Hz
+    /// against 2 × 1.546). With the permittivity held, under a thousandth
+    /// comes back (3e-4). At edge 0.05 the ratios are 0.501 and 8.99.
+    #[test]
+    fn a_sudden_drop_in_permittivity_splits_a_pulse_and_doubles_its_frequency() {
+        let points = [TEMPORAL_UPSTREAM, TEMPORAL_DOWNSTREAM];
+        let run = |drop: bool| records(&temporal_slab_with(drop), 0.08, 4.5, &points);
+        let (times, series) = run(true);
+        let dt = times[1] - times[0];
+        let window = |series: &Vec<f64>, from: f64, to: f64| {
+            series
+                .iter()
+                .zip(&times)
+                .filter(|(_, time)| (from..to).contains(*time))
+                .map(|(value, _)| *value)
+                .collect::<Vec<_>>()
+        };
+        let energy = |values: &[f64]| values.iter().map(|value| value * value * dt).sum::<f64>();
+        let centroid = |values: &[f64]| {
+            let spectrum = amplitude_spectrum(values, dt).unwrap();
+            let (weighted, total) = spectrum.magnitudes.iter().enumerate().fold(
+                (0.0, 0.0),
+                |(weighted, total), (index, magnitude)| {
+                    let power = magnitude * magnitude;
+                    (
+                        weighted + spectrum.frequency_hz(index) * power,
+                        total + power,
+                    )
+                },
+            );
+            weighted / total
+        };
+        let (before, after) = (TEMPORAL_DROP - 0.1, TEMPORAL_DROP + 0.05);
+        let incident = window(&series[0], 0.0, before);
+        let back = window(&series[0], after, 4.5);
+        let forward = window(&series[1], after, 4.5);
+        let reflected = energy(&back) / energy(&incident);
+        assert!(
+            (reflected / 0.5 - 1.0).abs() < 0.03,
+            "the reflection carries {reflected:.4}"
+        );
+        let onward = energy(&forward) / energy(&back);
+        assert!(
+            (onward / 9.0 - 1.0).abs() < 0.03,
+            "the pulse running on carries {onward:.4} times the reflection"
+        );
+        let doubled = 2.0 * centroid(&incident);
+        for (name, pulse) in [("reflected", &back), ("onward", &forward)] {
+            let frequency = centroid(pulse);
+            assert!(
+                (frequency / doubled - 1.0).abs() < 0.03,
+                "the {name} pulse at {frequency:.4} Hz against {doubled:.4}"
+            );
+        }
+
+        let (_, held) = run(false);
+        let returned = energy(&window(&held[0], after, 4.5)) / energy(&incident);
+        assert!(returned < 1e-3, "held, {returned:.3e} comes back");
     }
 }

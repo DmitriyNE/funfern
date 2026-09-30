@@ -1130,6 +1130,42 @@ Claims at edge 0.05, 12 s from one pulse:
 
 ### F7. Temporal slab
 
+Time-varying media, after the parametric pump. Glass, `ε = 4`, wall to wall
+from `x = −0.6` to 0.9, carrying the "Parametric pump" preset on its mass row
+at 0 Hz, depth 0.75, phase π, under a flat-top gate 2 s long with a 1 ms edge,
+shorter than a step: `1 − 0.75`, so the permittivity drops from 4 to 1 at
+once and comes back 2 s later. The planned direction, 1 to 4, cannot be
+authored: a pump's depth stays under one. A Gaussian pulse 0.2 s wide at
+1.5 Hz from the launcher at −0.85 enters the glass at 1.15 s, runs at half
+the wave speed, 0.8 long, and is centred at `x = 0.1` when the drop comes at
+2.55 s. Pulse and drop repeat every 6 s. Probes "Upstream" at −0.45 and
+"Downstream" at 0.65, either side of the pulse then, open on their fields
+over 4 s.
+
+Across a change in time the step keeps the canonical state, `Q = D` and
+`b = B`, so the wavenumber stays and the frequency doubles. With `n₁ = 2` and
+`n₂ = 1` the pulse splits into `E_f = ½(n₁/n₂)(1 + n₁/n₂)` = 3 of its field
+running on and `E_b = ½(n₁/n₂)(n₁/n₂ − 1)` = 1 running back. Each discrete
+mode splits the same way, so the mesh's dispersion does not enter a ratio of
+`∫u² dt` at a probe: the reflected pulse carries `E_b² n₂/n₁` = 0.5 of the
+incident's, as much field over half the time, and the pulse running on
+`(E_f/E_b)²` = 9 times the reflected one. While the permittivity is down the
+glass is vacuum, and its faces reflect nothing.
+
+Claims at edge 0.08, 4.5 s from rest:
+
+- Upstream the reflected pulse carries 0.5 of the incident's `∫u² dt` within
+  3% (0.497; 0.501 at edge 0.05).
+- Downstream the pulse running on carries 9 times the reflected one's within
+  3% (9.14; 8.99 at 0.05).
+- Both come at twice the incident's spectral centroid within 3% (3.03 and
+  3.09 Hz against 2 × 1.546).
+- With the permittivity held, under a thousandth comes back (3e-4).
+
+The drive halves the step, 6.8e-3 s to 3.4e-3 s: the driven step ceiling
+takes the weakest factor over the whole domain (`docs/plan.md`, "Worth
+checking sometime").
+
 ### F8. Ellipse flash
 
 ## Order, as built
@@ -1226,7 +1262,8 @@ example to the next walks the gallery as it is shown
   galleries, ring resonator. Batch F adds the struck drum after the drum
   modes and the cavity filter before the ring resonator.
 - **Time-varying media:** parametric pump, time crystal, travelling
-  modulation, Doppler mirror, parametric fiber amplifier.
+  modulation, Doppler mirror, parametric fiber amplifier. Batch F adds the
+  temporal slab after the parametric pump.
 - **Nonlinear and self-organizing:** Kerr slab, spatial soliton, Josephson
   line, symmetry breaking, pinned domain wall, self-sustained emitter.
 

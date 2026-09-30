@@ -17397,3 +17397,37 @@ lags its twin through vacuum while its crests outrun light.
   8,438 dofs: Q 2.1e-6, b 2.0e-6 at 400 steps; Q 1.2e-5, b 1.8e-5 at 1000.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — A temporal slab
+
+Batch F's seventh scene (`docs/spikes/funfern-gallery-plan.md`, F7), in
+Time-varying media after the parametric pump: a pulse inside glass whose
+permittivity drops at once splits into a pulse running on and a
+time-reflected one, both at twice its frequency.
+
+- **Scene.** `temporal_slab_with(drop)`: glass, `ε = 4`, from `x = −0.6` to
+  0.9, whose mass row carries a 0 Hz pump of depth 0.75 at phase π under a
+  flat-top gate 2 s long with a 1 ms edge, so the permittivity falls to 1
+  within a step at 2.55 s and returns 2 s later; every 6 s. A Gaussian pulse
+  0.2 s wide at 1.5 Hz is centred at `x = 0.1` inside the glass then.
+  "Upstream" at −0.45 and "Downstream" at 0.65 open on their fields. The
+  planned rise from 1 to 4 cannot be authored, a pump's depth staying under
+  one, and the drop is the stronger case: `E_f = 3`, `E_b = 1`. 41 scenes.
+- **Continuity.** The step keeps `Q = D` and `b = B` across the drop, the
+  time boundary's own conditions, and every discrete mode splits alike, so a
+  ratio of `∫u² dt` is free of the mesh's dispersion.
+- **Measured claim** (`a_sudden_drop_in_permittivity_splits_a_pulse_and_doubles_its_frequency`,
+  edge 0.08, 4.5 s): the reflected pulse carries 0.497 of the incident's
+  `∫u² dt` upstream against `E_b² n₂/n₁` = 0.5; the pulse running on 9.14
+  times the reflected one against 9; both spectral centroids at 3.03 and
+  3.09 Hz against 2 × 1.546; held, 3e-4 comes back. At edge 0.05, 0.501 and
+  8.99.
+- **The step.** The drive halves it, 6.8e-3 s to 3.4e-3 s: the driven ceiling
+  multiplies the whole domain's bound by the square root of the weakest
+  factors anywhere, though the glass driven to 1 is never faster than the
+  vacuum beside it. Listed in `docs/plan.md` under "Worth checking sometime".
+- **Device:** `canonical_gpu_long_run` on "Temporal slab", temporal, 8,381
+  dofs: Q 7.1e-7, b 8.4e-7 at 400 steps; Q 1.6e-5, b 1.5e-5 at 1000, through
+  the drop at 2.55 s.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -1095,6 +1095,15 @@ Known inaccuracies judged not worth fixing now. Nothing on screen shows them,
 but each is a real departure from the reference, worth a look when its area
 is next touched.
 
+- A driven generation's step ceiling is the base bound times
+  `√(min primary factor · min complementary factor)` over every sample
+  (`canonical_temporal.rs`), so one driven region slows the whole domain even
+  where its own elements never reach the vacuum's speed limit. The temporal
+  slab's glass, `ε = 4` driven down to 1, is never faster than the vacuum
+  beside it, yet the scene steps at 3.4e-3 s instead of 6.8e-3 s, and runs at
+  half the simulated speed a per-element bound would allow. Nothing is
+  inaccurate; a bound taken element by element, each with its own factors,
+  would give the time back.
 - The device's `exp_minus_one` (`crates/funfern-app/src/canonical_wave.wgsl`)
   runs its series below |z| = 0.02 and `exp(z) − 1` above, which is off by up
   to half an f32 unit of one with the same sign every stage. A loss or gain
