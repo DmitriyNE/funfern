@@ -17291,3 +17291,15 @@ transfer, the sample arm over the empty one.
   1000 steps, through the whole pulse.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-09-30 — Gallery spectra and transfers read linearly
+
+After the user's look at batch F's first three steps, merged as 6edce8f: the
+spectra and the transfer read better linearly than in decibels. The Kerr
+slab's, the time crystal's and the travelling modulation's spectra and the
+photonic crystal's transfer, the four that opened in decibels, are linear
+now, as the others were; `spectrum_readout` and `transfer_readout` no
+longer take the choice. The claims read magnitudes and are unchanged.
+
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

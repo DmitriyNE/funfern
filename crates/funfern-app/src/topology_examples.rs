@@ -956,22 +956,20 @@ fn field_readout(span: f64) -> ProbeReadout {
 }
 
 /// A point probe whose claim is about lines: its field over `span` seconds,
-/// with the spectrum of that span under it up to `max_hz`.
-fn spectrum_readout(span: f64, max_hz: f64, decibels: bool) -> ProbeReadout {
+/// with the spectrum of that span under it, linear, up to `max_hz`.
+fn spectrum_readout(span: f64, max_hz: f64) -> ProbeReadout {
     ProbeReadout {
         field_spectrum: true,
-        spectrum_decibels: decibels,
         spectrum_max_hz: max_hz,
         ..field_readout(span)
     }
 }
 
 /// A point probe whose claim is a frequency response: its field, with its
-/// transfer from the probe `reference` in decibels up to `max_hz`, averaged
+/// transfer from the probe `reference`, linear up to `max_hz`, averaged
 /// over segments `segment` seconds long.
 fn transfer_readout(reference: ProbeId, max_hz: f64, segment: f64) -> ProbeReadout {
     ProbeReadout {
-        spectrum_decibels: true,
         spectrum_max_hz: max_hz,
         transfer_from: Some(TransferReference::Probe(reference)),
         transfer_segment: segment,
@@ -1479,7 +1477,7 @@ fn kerr_slab_with(chi: f64, amplitude: f64) -> TopologyDocument {
     });
     document
         .readouts
-        .set_probe(ProbeId(1), spectrum_readout(2.0, 10.0, true));
+        .set_probe(ProbeId(1), spectrum_readout(2.0, 10.0));
     document
 }
 
@@ -1575,7 +1573,7 @@ fn modulated_slab(
     // Four seconds, so lines a hertz apart stand clear of each other.
     document
         .readouts
-        .set_probe(ProbeId(1), spectrum_readout(4.0, 8.0, true));
+        .set_probe(ProbeId(1), spectrum_readout(4.0, 8.0));
     document
 }
 
@@ -1771,7 +1769,7 @@ fn doppler_mirror_with(pump_hz: f64) -> TopologyDocument {
     });
     document
         .readouts
-        .set_probe(ProbeId(1), spectrum_readout(4.0, 5.0, false));
+        .set_probe(ProbeId(1), spectrum_readout(4.0, 5.0));
     document.readouts.set_probe(ProbeId(2), field_readout(2.0));
     document
 }
@@ -1888,7 +1886,7 @@ fn josephson_line_with(restoring: &str, bias: f64) -> TopologyDocument {
     document.presentation.integrated_field = true;
     document
         .readouts
-        .set_probe(ProbeId(1), spectrum_readout(WHOLE_HISTORY, 3.0, false));
+        .set_probe(ProbeId(1), spectrum_readout(WHOLE_HISTORY, 3.0));
     document
 }
 
@@ -2103,7 +2101,7 @@ fn emitter_with(plasma_hz: f64) -> TopologyDocument {
     });
     document
         .readouts
-        .set_probe(ProbeId(1), spectrum_readout(4.0, 5.0, false));
+        .set_probe(ProbeId(1), spectrum_readout(4.0, 5.0));
     document
 }
 
@@ -3484,7 +3482,7 @@ fn struck_drum_with(at: Point2) -> TopologyDocument {
     });
     document
         .readouts
-        .set_probe(ProbeId(1), spectrum_readout(DRUM_SPAN, 4.0, false));
+        .set_probe(ProbeId(1), spectrum_readout(DRUM_SPAN, 4.0));
     document
 }
 

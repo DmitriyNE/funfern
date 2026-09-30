@@ -941,11 +941,12 @@ scenes (`docs/engineering-log.md`, 30 September):
 ### F1. Scenes open on their spectra
 
 The scenes whose claims are lines open with the spectrum under the probe's
-trace: the Kerr slab (in decibels, to 10 Hz), the time crystal and the
-travelling modulation (in decibels, over 4 s, so lines a hertz apart stand
-clear), and the Doppler mirror's front probe (linear, to 5 Hz). The
-self-sustained emitter gains a probe in the plasma at the point its claim
-reads, and the Josephson line one down the line, both linear. Each claim test
+trace: the Kerr slab (to 10 Hz), the time crystal and the travelling
+modulation (over 4 s, so lines a hertz apart stand clear), and the Doppler
+mirror's front probe (to 5 Hz). The self-sustained emitter gains a probe in
+the plasma at the point its claim reads, and the Josephson line one down the
+line. Every gallery spectrum and transfer is linear: the first three opened
+in decibels, and the user found them all read better linearly. Each claim test
 now also reads the spectrum the readout draws, over its own span, and finds
 the lines there (measured at the claims' own meshes):
 
@@ -994,7 +995,7 @@ one signal. Every face is named from the floor or the ceiling. The crystal
 keeps its pitch, rods and columns and fills the upper arm with five rows,
 whose walls still sit on the lattice's mirror planes. A sinc pulse flat from
 0.8 to 3 Hz lights both arms; "Behind the crystal" at (0.75, 0.5) opens on
-its field and its transfer from "Reference" at (0.75, −0.5), in decibels to
+its field and its transfer from "Reference" at (0.75, −0.5), linear to
 3.5 Hz. The continuous-wave text, "tune the launcher to 1 Hz or 2.5 Hz", is
 what one pulse now shows at once.
 
