@@ -188,6 +188,7 @@ impl Playground {
                         .map(|region| region.material)
                 });
                 egui::ComboBox::from_id_salt(("face", index))
+                    .height(combo_list_height(ui, materials.len() + 1))
                     .selected_text(match chosen {
                         Some(material) => materials
                             .iter()
@@ -246,6 +247,7 @@ impl Playground {
                 }
                 let mut material = region.material;
                 egui::ComboBox::from_id_salt(("region", region.id.0))
+                    .height(combo_list_height(ui, materials.len()))
                     .selected_text(
                         materials
                             .iter()
@@ -517,6 +519,7 @@ impl Playground {
                 ui.horizontal(|ui| {
                     ui.label("Response");
                     egui::ComboBox::from_id_salt(("material-response", material.id.0))
+                        .height(combo_list_height(ui, law_presets().len()))
                         .selected_text(matched.as_ref().map_or_else(
                             || "Custom".to_owned(),
                             |found| law_preset_label(found.preset, physics),
@@ -1131,6 +1134,7 @@ impl Playground {
         ui.horizontal(|ui| {
             ui.label("Response");
             egui::ComboBox::from_id_salt(("material-medium", material.id.0))
+                .height(combo_list_height(ui, medium_presets().len()))
                 .selected_text(matched.as_ref().map_or_else(
                     || "Custom".to_owned(),
                     |found| medium_label(found.preset, physics),

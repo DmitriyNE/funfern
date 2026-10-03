@@ -18,6 +18,10 @@ pub(super) fn apply(ctx: &egui::Context) {
     ctx.style_mut_of(egui::Theme::Dark, |style| {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(8.0, 4.0);
+        // A thin scroll bar that is always there, rather than egui's floating
+        // one, which is invisible until the pointer is over the list: a combo
+        // or a panel that scrolls should say so before it is hovered.
+        style.spacing.scroll = egui::style::ScrollStyle::thin();
         style.visuals.selection.bg_fill = Color32::from_rgb(38, 94, 135);
     });
 }
@@ -298,4 +302,94 @@ pub(super) fn amr_target_color(fraction: f32, alpha: u8) -> Color32 {
         egui::lerp(fine[2]..=coarse[2], fraction) as u8,
         alpha,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+
+    /// The heights of the first `count` selectable entries laid out under the
+    /// app's theme, as a combo list lays them out, top to each one's bottom.
+    fn laid_out(ui: &mut egui::Ui, count: usize) -> Vec<f32> {
+        let rects: Vec<egui::Rect> = (0..count)
+            .map(|index| ui.selectable_label(false, format!("Entry {index}")).rect)
+            .collect();
+        rects
+            .iter()
+            .map(|rect| rect.bottom() - rects[0].top())
+            .collect()
+    }
+
+    /// A combo's list shows every entry when they fit in its share of the
+    /// window, or when only half of one would be left out; otherwise it ends
+    /// halfway through an entry, so the cut shows there is more. Measured
+    /// against entries laid out under the theme, which is what the boundary
+    /// list's old rule was not: it counted 18 px rows against the theme's
+    /// 29 and showed four of six.
+    #[test]
+    fn a_combo_list_shows_whole_or_ends_halfway_through_an_entry() {
+        for window in [800.0, 400.0] {
+            let context = egui::Context::default();
+            apply(&context);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, window),
+                )),
+                ..egui::RawInput::default()
+            };
+            let _ = context.run_ui(input, |ui| {
+                let tall = laid_out(ui, 24);
+                let pitch = tall[1] - tall[0];
+                let room = COMBO_LIST_SHARE * window;
+                let mut cut = 0;
+                for rows in 1..=24 {
+                    let height = combo_list_height(ui, rows);
+                    let whole = tall[rows - 1];
+                    if (height - whole).abs() < 0.01 {
+                        // Whole, and only where it fits or half an entry
+                        // more would have been all it hid.
+                        assert!(
+                            whole <= room + 0.5 * pitch + 0.01,
+                            "{rows} rows shown whole at {whole} in a {window} window"
+                        );
+                        continue;
+                    }
+                    cut += 1;
+                    assert!(height < whole && height <= room + 0.01, "{rows}: {height}");
+                    // Halfway through an entry: past the last whole one by
+                    // the gap and half a row.
+                    let shown = tall
+                        .iter()
+                        .filter(|bottom| **bottom <= height + 0.01)
+                        .count();
+                    let half = height - tall[shown - 1];
+                    let row = tall[0];
+                    assert!(
+                        (half - (pitch - row) - 0.5 * row).abs() < 0.01,
+                        "{rows} rows end {half} past entry {shown} in a {window} window"
+                    );
+                    assert!(rows > shown + 1, "{rows} rows cut to hide only half of one");
+                }
+                // Every list the app has fits whole in an ordinary window:
+                // 480 px holds 16.8 entries, so up to 17 show whole.
+                if window == 800.0 {
+                    assert_eq!(cut, 24 - 17, "the 800 px window cut {cut} of 24");
+                    for physics in [
+                        PhysicsModel::Mechanical,
+                        PhysicsModel::Electromagnetic {
+                            polarization: ElectromagneticPolarization::Tm,
+                        },
+                    ] {
+                        let rows = BoundaryKind::choices(physics).len();
+                        assert_eq!(combo_list_height(ui, rows), tall[rows - 1]);
+                    }
+                    let media = medium_presets().len();
+                    assert_eq!(combo_list_height(ui, media), tall[media - 1]);
+                } else {
+                    assert!(cut > 0);
+                }
+            });
+        }
+    }
 }

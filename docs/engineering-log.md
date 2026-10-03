@@ -17824,3 +17824,33 @@ The user saw the parametric fiber refine on while its error read 2% against a
   quiet-field pattern test moved to the new API.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — Combo lists show whole or end halfway through an entry
+
+The user saw the boundary-condition list show four of its entries with a
+scroll bar barely there, so the rest were easy to miss; the material lists, cut
+partway through a row, read as longer.
+
+- **Cause.** `boundary_combo_height` (20 September) counted rows at
+  `interact_size.y`, 18 px. Under the theme's padding and spacing (11
+  September) an entry is 23 px and the pitch 29 px, measured headlessly, so the
+  list had 108 px for five entries in Mechanical (3.7 shown) and 126 px for six
+  in the EM skins (4.3). egui's default 200 px would have shown them all. And
+  egui's floating scroll bar is invisible until the pointer is over the list.
+- **Survey.** Of 21 combos, the others that scroll at the default height:
+  Overlay (11 entries), the simple view's media (16), Advanced Response (12),
+  and the material pickers past six materials. The rest hold two to four.
+- **Fix.** `combo_list_height` measures an entry from the style, a laid-out
+  line (rounded to whole pixels as the layout does) plus its padding, and
+  shows a list whole within 60% of the window, or when only half an entry
+  would be hidden; otherwise it ends halfway through an entry, as the user
+  asked, so the cut says there is more. The boundary lists, Overlay, both
+  Response lists and the three material pickers use it; at 800 px every list
+  the app has shows whole. Scroll bars are egui's thin style app-wide: always
+  shown, wider on hover. The gallery window counts its bar's 6 px beside the
+  grid.
+- **Test.** `a_combo_list_shows_whole_or_ends_halfway_through_an_entry` lays
+  out 24 entries under the theme in 800 and 400 px windows and checks every
+  length from 1 to 24 against them.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

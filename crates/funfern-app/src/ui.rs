@@ -1224,7 +1224,7 @@ fn edit_face_condition(
         FaceBoundaryCondition::Dirichlet { .. } => BoundaryKind::Dirichlet,
     }
     .presented(physics);
-    let menu_height = boundary_combo_height(ui, physics);
+    let menu_height = combo_list_height(ui, BoundaryKind::choices(physics).len());
     egui::ComboBox::from_id_salt("span-condition")
         .height(menu_height)
         .selected_text(kind.label_for(physics))
@@ -1275,7 +1275,7 @@ fn edit_outer_condition(
 ) -> bool {
     let before = *condition;
     let mut kind = outer_kind(*condition).presented(physics);
-    let menu_height = boundary_combo_height(ui, physics);
+    let menu_height = combo_list_height(ui, BoundaryKind::choices(physics).len());
     egui::ComboBox::from_id_salt("outer-condition")
         .height(menu_height)
         .selected_text(kind.label_for(physics))
@@ -1337,11 +1337,42 @@ fn boundary_kind_choices(ui: &mut egui::Ui, physics: PhysicsModel, kind: &mut Bo
     }
 }
 
-fn boundary_combo_height(ui: &egui::Ui, physics: PhysicsModel) -> f32 {
-    // egui's default combo height fits about five ordinary rows. Leave one
-    // row of headroom so the six-entry EM picker never acquires an unobvious
-    // scrollbar through rounding, font scaling, or popup padding.
-    ui.spacing().interact_size.y * (BoundaryKind::choices(physics).len() as f32 + 1.0)
+/// The share of the window a combo's list may take before it scrolls.
+const COMBO_LIST_SHARE: f32 = 0.6;
+
+/// How tall a combo's list of `rows` entries is drawn: whole when it fits in
+/// [`COMBO_LIST_SHARE`] of the window, or when only half an entry would be
+/// left out, and otherwise cut through the middle of an entry, so the half
+/// showing says there is more. A list cut at an entry's edge looked complete:
+/// the boundary list showed four of its six that way.
+///
+/// The row is measured from the style, as a selectable entry lays itself out:
+/// its text, its padding above and below, and the spacing to the next. A
+/// rule counting `interact_size` rows ran 18 px against the theme's 29.
+fn combo_list_height(ui: &egui::Ui, rows: usize) -> f32 {
+    let spacing = ui.spacing();
+    // A laid-out line, which the text layout rounds to whole pixels, rather
+    // than the font's own height: 14.97 px of font is a 15 px entry.
+    let text = ui
+        .painter()
+        .layout_no_wrap(
+            "Ag".to_owned(),
+            egui::TextStyle::Button.resolve(ui.style()),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .y;
+    let row = (text + 2.0 * spacing.button_padding.y).max(spacing.interact_size.y);
+    let gap = spacing.item_spacing.y;
+    let rows_tall = |count: f32| count * row + (count - 1.0).max(0.0) * gap;
+    let room = COMBO_LIST_SHARE * ui.ctx().content_rect().height();
+    // How many entries the room holds, fractionally.
+    let capacity = (room + gap) / (row + gap);
+    if rows as f32 <= capacity + 0.5 {
+        return rows_tall(rows as f32);
+    }
+    let whole = (capacity - 0.5).floor().max(1.0);
+    rows_tall(whole) + gap + 0.5 * row
 }
 
 /// Average of the triangle centroids carrying one region, used to anchor a

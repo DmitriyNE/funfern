@@ -235,13 +235,15 @@ impl Playground {
         // would sit in blank space with its scroll bar beside the tiles, in
         // the middle of the window.
         let frame = egui::Frame::window(&ctx.global_style());
+        // The grid's scroll bar takes its own width beside the tiles.
+        let bar = ctx.global_style().spacing.scroll.allocated_width();
         egui::Window::new("Examples")
             .id(egui::Id::new("examples"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .frame(frame)
-            .max_width(gallery_width(columns) + frame.total_margin().sum().x)
+            .max_width(gallery_width(columns) + bar + frame.total_margin().sum().x)
             .constrain_to(between_bars)
             .default_pos(between_bars.left_top() + egui::vec2(16.0, 8.0))
             .show(ctx, |ui| {
@@ -1520,7 +1522,7 @@ mod tests {
         assert_eq!(gallery_columns(0.0), 1);
     }
 
-    /// The gallery's window is as wide as its grid, so the grid's scroll
+    /// The gallery's window is as wide as its grid and its scroll bar, so the
     /// bar is at the window's edge, on a phone held upright as on a desktop,
     /// and after the screen narrows as well as widens.
     #[test]
@@ -1534,7 +1536,8 @@ mod tests {
         let margin = egui::Frame::window(&context.global_style())
             .total_margin()
             .sum()
-            .x;
+            .x
+            + context.global_style().spacing.scroll.allocated_width();
         let narrowing = (320..=1600).rev().step_by(8).collect::<Vec<_>>();
         for &width in narrowing.iter().chain(narrowing.iter().rev()) {
             let width = width as f32;

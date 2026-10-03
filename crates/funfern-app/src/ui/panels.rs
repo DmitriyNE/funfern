@@ -127,29 +127,32 @@ impl Playground {
         }
         ui.separator();
         ui.label("Overlay");
+        const LAYERS: [MaterialOverlay; 3] = [
+            MaterialOverlay::Regions,
+            MaterialOverlay::Subdomains,
+            MaterialOverlay::AdaptationTarget,
+        ];
+        const PROPERTIES: [MaterialProperty; 7] = [
+            MaterialProperty::Density,
+            MaterialProperty::Stiffness,
+            MaterialProperty::Damping,
+            MaterialProperty::WaveSpeed,
+            MaterialProperty::Impedance,
+            MaterialProperty::Anisotropy,
+            MaterialProperty::VolumeSource,
+        ];
         egui::ComboBox::from_id_salt("overlay")
+            .height(combo_list_height(ui, 1 + LAYERS.len() + PROPERTIES.len()))
             .selected_text(
                 p.material_overlay
                     .label_for(self.editor.document.model.draft.physics),
             )
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut p.material_overlay, MaterialOverlay::Off, "Off");
-                for overlay in [
-                    MaterialOverlay::Regions,
-                    MaterialOverlay::Subdomains,
-                    MaterialOverlay::AdaptationTarget,
-                ] {
+                for overlay in LAYERS {
                     ui.selectable_value(&mut p.material_overlay, overlay, overlay.label());
                 }
-                for property in [
-                    MaterialProperty::Density,
-                    MaterialProperty::Stiffness,
-                    MaterialProperty::Damping,
-                    MaterialProperty::WaveSpeed,
-                    MaterialProperty::Impedance,
-                    MaterialProperty::Anisotropy,
-                    MaterialProperty::VolumeSource,
-                ] {
+                for property in PROPERTIES {
                     ui.selectable_value(
                         &mut p.material_overlay,
                         MaterialOverlay::Property(property),
