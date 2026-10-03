@@ -18275,3 +18275,63 @@ rewrite of an active link, while the user guide still described it.
   a device request to raise them.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — IGA feasibility spikes 1 and 2: mass treatment and quadrature
+
+- **What.** The first two of six feasibility spikes for single-patch IGA
+  (plan §10), chosen because they are the user's concerns and the cheapest:
+  can a spline discretization keep the triangle solver's live-reassembly
+  philosophy, above all a diagonal or matrix-free mass and one shared point
+  set for `b`? Report: `docs/spikes/funfern-iga-feasibility-spike.md`. Code:
+  `crates/funfern-core/src/spline_patch.rs` (spike grade, nothing reaches the
+  application) and the examples `iga_dispersion` and `iga_box_mode`.
+- **How.** Uniform B-spline bases of degree 1 to 3, clamped, unclamped and
+  periodic; Gauss rules; the circulant symbols of a periodic basis under a
+  rule, from which a tensor patch's dispersion and stable step are
+  arithmetic; an affine box patch stepped by the same kick-drift `(Q, b)`
+  leapfrog as the triangle solver, `Q` on the coefficients, `b` at the
+  samples, divergence the exact transpose of gradient. The field map `u = P Q`
+  is the row-sum lumped diagonal, that diagonal followed by `K` Jacobi sweeps
+  toward the consistent mass through the sample tables, or the consistent
+  mass by conjugate gradients as the reference. `D⁻¹M` is row-stochastic for
+  B-splines, so the sweeps converge and `P_K` is symmetric positive definite;
+  the staggered energy is held to 1e-13. The time-domain protocol is
+  `wave_convergence`'s box mode, rerun today for the baseline (P2e at parent
+  h 0.08: 9,215 dofs, spatial phase −9.1e-3 rad over 157 rad at t = 10).
+- **Mass.** Row-sum lumping is second order with a constant that grows with
+  the degree: lumped cubics are four times worse than lumped bilinears at the
+  same spacing and 280 times worse than the triangle at equal dofs. Each
+  sweep buys two orders in the wavenumber. Two sweeps on quadratics are nine
+  times more accurate than the triangle at equal dofs, on cubics 1.4 to 2.4
+  times, three sweeps on cubics 60 times. The stable step stays between the
+  lumped and the consistent one, 1.3 `h/c` for cubics with two sweeps against
+  1.92 lumped and 0.45 consistent, as the Voet-Sande-Buffa monotonicity says.
+- **Quadrature.** One Gauss point per span has spurious zero-energy modes at
+  every degree. Two points have none and under-integrate the stiffness by 17%
+  only at the band edge; their mass error caps the accuracy near −1e-5
+  relative at 20 spans per wavelength, invisible under two sweeps. Three
+  points equal four to two digits. Weighted quadrature and Petrov-Galerkin
+  dual lumping are ruled out by the transpose structure; the Galerkin reading
+  of the approximate-dual mass (a banded SPD `S`, the user's reference via
+  Anitescu et al.) fits the slot and was not measured.
+- **The box.** Every measured drift on the clamped 96 × 96 patch is within
+  1.2e-3 rad of the periodic prediction over 157 rad, so the symbol tables
+  are the spatial accuracy with walls. Two findings beyond the symbols: the
+  leapfrog's temporal error dominates at the stable step (0.16 rad against a
+  spatial 1e-3 for quadratics with two sweeps; the triangle at its own step
+  is at +0.064 against −0.009), so a larger stable step is a speed lever only
+  until a fourth-order composition integrator exists; and the open knot
+  vector's corner function is an outlier that halves the step for quadratics
+  and cuts it to a third for cubics. An unclamped basis of the same space
+  (uniform knots past the walls, no repeated knots) takes the ratio from 0.53
+  to 0.80 and from 0.33 to about 0.75 with the spatial drift unchanged.
+- **Cost.** Measured CPU throughput matches a multiply-add model to 10%. At
+  equal dofs quadratics with two sweeps and Gauss 2 × 2 run three times
+  slower than the triangle per simulated second; at equal spatial accuracy
+  about half its time. Cubics with two sweeps are 3 to 6 times slower at
+  equal accuracy.
+- **Verdict.** Gate 1 passed on quadratic splines, two sweeps, Gauss 2 × 2,
+  unclamped. Spikes 3 to 6 and the time integrator are next.
+- **Also.** Background shell commands here are not bash: `set -- $cfg` did not
+  word-split, which silently fed `--degree "2 2"` to the example and lost two
+  batches; scripts now run through `bash file.sh`.

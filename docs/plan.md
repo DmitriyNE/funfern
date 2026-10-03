@@ -916,7 +916,18 @@ predictable on representative dense scenes.
 - Implement an untrimmed spline patch and spline solution basis, quadrature,
   operators, field evaluation, and state transfer.
 - Investigate mass treatment and timestep restrictions rather than assuming the
-  triangle solver's diagonal mass treatment transfers unchanged.
+  triangle solver's diagonal mass treatment transfers unchanged. Spikes 1 and 2
+  measured on 2026-10-03 (`docs/spikes/funfern-iga-feasibility-spike.md`):
+  row-sum lumping alone is 280 times worse than the seven-node triangle at
+  equal dofs; the lumped diagonal followed by two Jacobi sweeps toward the
+  consistent mass, applied through the sample tables, is symmetric
+  positive-definite, matrix-free, nine times more accurate than the triangle
+  at equal dofs on quadratic splines, and about half its CPU time at equal
+  spatial accuracy. Gauss 2 × 2 has no spurious modes; one point per span
+  does. The clamped corner function is an outlier that costs a factor of two
+  to three in the step; an unclamped basis of the same space takes most of it
+  back. Spikes 3 to 6, and a fourth-order time integrator (leapfrog's temporal
+  error dominates at the larger stable step), are next.
 - Reuse the UI and transaction lifecycle, with discretization-specific numerical
   kernels where appropriate.
 - Compare propagation, editing behavior, and cost against the triangular solver.
