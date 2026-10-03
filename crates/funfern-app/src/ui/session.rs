@@ -177,6 +177,48 @@ impl Playground {
             }
         }
     }
+    /// What launch opens: a shared link first, then the last session's
+    /// autosave, then a random example. A link or an autosave that does not
+    /// open, an older version's among them, says why once and leaves the
+    /// next in line to open: a broken link does not cost the last session,
+    /// and an autosave this version cannot read is replaced at the next
+    /// autosave rather than quietly.
+    pub(super) fn open_startup_scene(
+        &mut self,
+        link: Option<Result<Vec<u8>, String>>,
+        autosave: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
+    ) {
+        let mut notices = vec![];
+        if let Some(link) = link {
+            match link.and_then(|bytes| self.open_scene_bytes(&bytes)) {
+                Ok(()) => return,
+                Err(error) => notices.push(format!("Shared link not opened: {error}")),
+            }
+        }
+        match autosave()
+            .and_then(|bytes| bytes.map(|bytes| self.open_scene_bytes(&bytes)).transpose())
+        {
+            Ok(Some(())) => {}
+            // A first run. A random example rather than the same one every
+            // time, so the app opens on something worth looking at.
+            Ok(None) => self.open_random_example(),
+            Err(error) => {
+                notices.push(format!("Previous session not restored: {error}"));
+                self.open_random_example();
+            }
+        }
+        if !notices.is_empty() {
+            self.notify(notices.join(". "));
+        }
+    }
+
+    /// Opens a scene file's bytes in place of the document, or leaves the
+    /// document as it was.
+    fn open_scene_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let document = persistence::parse_document(bytes)?;
+        TopologyEditor::from_document(document.clone())?;
+        self.set_document(document, false, true)
+    }
     pub(super) fn autosave(&mut self) {
         if self.editor.document != self.autosave_observed {
             self.autosave_observed = self.editor.document.clone();
@@ -637,5 +679,126 @@ mod tests {
         assert!(starts_from_zero(true, true, false));
         assert!(starts_from_zero(false, false, false));
         assert!(!starts_from_zero(true, false, false));
+    }
+
+    /// A scene file as version 21 wrote it, as far as this version can tell:
+    /// the header is what turns it away.
+    fn version_21_bytes() -> Vec<u8> {
+        let saved = persistence::save(&funfern_app::topology_examples::catalog()[1].document);
+        let mut value: serde_json::Value = serde_json::from_str(&saved.unwrap()).unwrap();
+        value["version"] = 21.into();
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    fn example_bytes(index: usize) -> Vec<u8> {
+        let document = &funfern_app::topology_examples::catalog()[index].document;
+        persistence::save(document).unwrap().into_bytes()
+    }
+
+    #[test]
+    fn an_autosave_that_does_not_open_says_so_once_and_opens_an_example() {
+        for (autosave, reason) in [
+            (Ok(Some(version_21_bytes())), "version 21"),
+            (Ok(Some(b"{\"version\": 22, \"model\"".to_vec())), "EOF"),
+            (Err("Autosave exceeds 2 MiB".to_string()), "2 MiB"),
+        ] {
+            let mut state = Playground::default();
+            state.open_startup_scene(None, || autosave);
+            assert!(
+                state.example_opened.is_some(),
+                "{reason}: no example opened"
+            );
+            assert!(
+                state.message.starts_with("Previous session not restored: ")
+                    && state.message.contains(reason),
+                "{reason}: {}",
+                state.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_first_run_opens_an_example_quietly_and_an_autosave_restores() {
+        let mut state = Playground::default();
+        state.open_startup_scene(None, || Ok(None));
+        assert!(state.example_opened.is_some());
+        assert_eq!(state.message, "");
+
+        let mut state = Playground::default();
+        state.open_startup_scene(None, || Ok(Some(example_bytes(2))));
+        let expected = &funfern_app::topology_examples::catalog()[2].document;
+        assert_eq!(&state.editor.document, expected);
+        assert_eq!(state.example_opened, None);
+        assert_eq!(state.message, "");
+        assert_eq!(state.editor.history_len(), (0, 0));
+    }
+
+    /// A link that does not open, an older version's among them, still
+    /// restores the last session rather than leaving it to be autosaved over.
+    #[test]
+    fn a_link_that_does_not_open_leaves_the_last_session_to_restore() {
+        let expected = &funfern_app::topology_examples::catalog()[2].document;
+        for (link, reason) in [
+            (Ok(version_21_bytes()), "version 21"),
+            (Err("Shared scene data is damaged".to_string()), "damaged"),
+        ] {
+            let mut state = Playground::default();
+            state.open_startup_scene(Some(link), || Ok(Some(example_bytes(2))));
+            assert_eq!(&state.editor.document, expected, "{reason}");
+            assert!(
+                state.message.starts_with("Shared link not opened: ")
+                    && state.message.contains(reason),
+                "{reason}: {}",
+                state.message
+            );
+        }
+
+        let mut state = Playground::default();
+        state.open_startup_scene(Some(Ok(version_21_bytes())), || Ok(Some(b"[]".to_vec())));
+        assert!(state.example_opened.is_some());
+        assert!(
+            state.message.contains("Shared link not opened")
+                && state.message.contains("Previous session not restored"),
+            "{}",
+            state.message
+        );
+    }
+
+    #[test]
+    fn a_link_that_opens_leaves_the_autosave_unread() {
+        let mut state = Playground::default();
+        state.open_startup_scene(Some(Ok(example_bytes(3))), || {
+            panic!("the autosave was read under a link that opened")
+        });
+        let expected = &funfern_app::topology_examples::catalog()[3].document;
+        assert_eq!(&state.editor.document, expected);
+    }
+
+    /// An older or damaged file leaves the document, its history and its run
+    /// as they were, and says why.
+    #[test]
+    fn a_file_that_does_not_open_leaves_the_document_untouched() {
+        for (bytes, reason) in [
+            (version_21_bytes(), "requires version 22"),
+            (b"not a scene".to_vec(), "expected"),
+        ] {
+            let mut state = Playground::default();
+            state.open_example(2);
+            state.fresh_requested = false;
+            let document = state.editor.document.clone();
+            let history = state.editor.history_len();
+            state.sender.send(FileEvent::Loaded(bytes)).unwrap();
+            state.update_files();
+            assert_eq!(state.editor.document, document, "{reason}");
+            assert_eq!(state.editor.history_len(), history, "{reason}");
+            assert_eq!(state.example_opened, Some(2), "{reason}");
+            assert!(!state.fresh_requested, "{reason}: the run was restarted");
+            assert!(!state.file_busy, "{reason}");
+            assert!(
+                state.message.contains(reason),
+                "{reason}: {}",
+                state.message
+            );
+        }
     }
 }

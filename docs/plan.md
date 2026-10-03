@@ -578,9 +578,13 @@ exterior is never assignable.
 - [x] Add scene-file version 22 as a deliberate compatibility break with no
   versions 1 through 21 decoder. Rewrite the built-in examples directly in the
   version-22 model.
-- [ ] Switch shared-link and recovery payloads to version 22 during the atomic live
+- [x] Switch shared-link and recovery payloads to version 22 during the atomic live
   cut. Ignore obsolete local storage with one clear notice; loading an obsolete or
-  malformed file must leave the current document untouched.
+  malformed file must leave the current document untouched. The payloads moved
+  with the Stage 6 switch on 2026-09-14 (the link's `scene=v1.` names its packing,
+  not the scene); the notices followed on 2026-10-03: an autosave that does not
+  open says "Previous session not restored" and is replaced at the next autosave,
+  and a link that does not open says why and still restores the autosave.
 - [x] Keep one complete topology edit as one `DocumentModel` history entry. Loading
   clears history as it does now. Invalid drafts, including unresolved anchors and
   incomplete transmitting dividers, remain serializable and undoable.

@@ -168,6 +168,25 @@ mod tests {
         assert_eq!(candidate.advance(100_000).unwrap().unwrap(), document);
     }
 
+    /// The `v1` names the link's packing, not the scene inside it: a link
+    /// made by a build before version 22 unpacks, and the scene it carries
+    /// is then turned away by its own version.
+    #[test]
+    fn a_link_to_an_older_scene_version_is_turned_away_by_that_version() {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&persistence::save_compact(&Document::default()).unwrap())
+                .unwrap();
+        value["version"] = 21.into();
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder
+            .write_all(&serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        let fragment = format!("{PREFIX}{}", base64_encode(&encoder.finish().unwrap()));
+        let bytes = decode(&fragment).unwrap();
+        let issue = persistence::parse(&bytes).err().unwrap();
+        assert!(issue.contains("version 21") && issue.contains("requires version 22"));
+    }
+
     #[test]
     fn damaged_fragments_are_rejected() {
         for fragment in ["scene=v2.abc", "scene=v1.a", "scene=v1.%%%%"] {

@@ -4,6 +4,12 @@
 //! 22, and there is no legacy geometry adapter behind it. The whole schema
 //! lives here, value codecs included, so a field that changes shape changes in
 //! one file.
+//!
+//! Version 22 is the last break. Files, links and autosaves written from here
+//! on are users' work and must keep opening: a new key arrives with a serde
+//! default that means what files without it meant, and a change of meaning or
+//! shape takes a new version with a migration from every version before it,
+//! never a reinterpreted field or a dropped decoder.
 
 use crate::document::{
     AdaptationSettings, DEFAULT_TRANSFER_SEGMENT, LineProbeQuantity, LineProbeRepresentation,

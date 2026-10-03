@@ -21,7 +21,6 @@ use bevy_egui::{
 };
 use funfern_app::document::{ProbeId, ProbeSamplingPreset};
 use funfern_app::topology_examples::ExampleGroup;
-use funfern_app::topology_persistence::{self as persistence};
 use funfern_app::topology_runtime::{PreparedTopology, TopologyPreparationTiming, TopologyToken};
 use funfern_app::topology_viewport::{
     SampledTopologyGeometry, ScreenPoint, TopologySelection, ViewportTransform,
@@ -2322,30 +2321,7 @@ pub fn frame(
     if !state.startup_done {
         state.startup_done = true;
         state.fit_inspector_to_screen(ctx.content_rect().width());
-        if let Some(bytes) = crate::sharing::initial_fragment() {
-            match bytes.and_then(|bytes| persistence::parse(&bytes)) {
-                Ok(candidate) => {
-                    state.load = Some(candidate);
-                    state.file_busy = true;
-                }
-                Err(error) => state.message = error,
-            }
-        } else {
-            match crate::recovery::load()
-                .ok()
-                .flatten()
-                .and_then(|bytes| persistence::parse(&bytes).ok())
-            {
-                Some(candidate) => {
-                    state.load = Some(candidate);
-                    state.file_busy = true;
-                }
-                // A first run, or an autosave that went away or stopped
-                // parsing. Open a random example rather than the same one
-                // every time, so the app opens on something worth looking at.
-                None => state.open_random_example(),
-            }
-        }
+        state.open_startup_scene(crate::sharing::initial_fragment(), crate::recovery::load);
     }
     state.editor.validate_frame(12000);
     state.refresh_runtime(

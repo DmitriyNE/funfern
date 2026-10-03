@@ -18171,3 +18171,34 @@ the user found ugly.
   row in each state and finds the block gone with adaptation off.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — Older or damaged autosaves and links say so
+
+The plan's last Stage 3 item, switching shared-link and recovery payloads to
+version 22, had landed with the Stage 6 switch on 2026-09-14: links pack
+`save_compact` and recovery writes `save`, both version 22, and the link's
+`scene=v1.` names its zlib/base64url packing, not the scene. What was missing
+was the notice. Startup read the autosave with `.ok().flatten()` and
+`.ok()`, so an unreadable autosave, one from an older version and a damaged one
+all looked like a first run: a random example opened, nothing was said, and
+the next autosave overwrote the old one. A link that did not open said why but
+left example 0 up instead of the last session, which the next edit then
+autosaved over.
+
+- **Fix.** `open_startup_scene` opens a link, then the autosave, then a random
+  example, each straight through `parse_document`, `from_document` and
+  `set_document`. A link that does not open says "Shared link not opened: …"
+  and still restores the autosave; an autosave that does not open says
+  "Previous session not restored: …" (an older one's reason names both
+  versions) and is replaced at the next autosave. A link that opens leaves the
+  autosave unread.
+- **Tests.** The startup cases in `ui::session` (older, damaged and unreadable
+  autosaves; a first run; a restore; older and damaged links with and without
+  an autosave behind them; a link that opens), a file event with older or
+  damaged bytes leaving the document, history, example and run as they were,
+  and `a_link_to_an_older_scene_version_is_turned_away_by_that_version`.
+- **Migrations.** Version 22 is the last break: the persistence module doc now
+  says new keys take a serde default meaning what files without them meant, and
+  a change of meaning or shape takes a new version with a migration.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -522,7 +522,11 @@ names or with every expression evaluated at the material frame's origin. Each ro
   and material-overlay settings travel through files, links, recovery, and examples.
   Camera, selection, open panels, and floating-window layout are not saved. With no
   shared scene or autosave to restore, startup opens a bundled example at
-  random.
+  random. An autosave or link from an older scene version, or one that is
+  damaged, is not opened: the status line says why, a broken link still
+  restores the autosave, and an autosave that could not be read is replaced at
+  the next autosave. A scene file that does not open leaves the current
+  document, its history and its run as they were.
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
   constrained mesh and its labeled outer, hole, interface, closed-wall, and baffle
   edges. Elements below 15° are
