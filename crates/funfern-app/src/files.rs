@@ -1,12 +1,15 @@
-use funfern_app::topology_persistence::MAX_FILE_BYTES;
+use funfern_app::topology_persistence::{MAX_FILE_BYTES, MAX_FILE_MIB};
 use std::sync::mpsc::Sender;
 pub enum FileEvent {
     Loaded(Vec<u8>),
     SnapshotCaptured(Vec<u8>),
     Saved(&'static str),
     Cancelled,
-    Error(String),
+    /// What did not happen, as a notice's title, and why.
+    Error(&'static str, String),
 }
+
+const NOT_OPENED: &str = "Scene not opened";
 
 #[derive(Clone, Copy)]
 pub enum SaveKind {
@@ -33,6 +36,14 @@ impl SaveKind {
         }
     }
 
+    fn failure(self) -> &'static str {
+        match self {
+            Self::Scene => "Scene not saved",
+            Self::SceneSvg => "Scene SVG not exported",
+            Self::SnapshotPng => "Snapshot not exported",
+        }
+    }
+
     fn success(self) -> &'static str {
         match self {
             Self::Scene => "Scene saved",
@@ -51,10 +62,10 @@ pub fn load(sender: Sender<FileEvent>) {
             match std::fs::metadata(&path) {
                 Ok(meta) if meta.len() <= MAX_FILE_BYTES as u64 => match std::fs::read(path) {
                     Ok(bytes) => FileEvent::Loaded(bytes),
-                    Err(e) => FileEvent::Error(e.to_string()),
+                    Err(e) => FileEvent::Error(NOT_OPENED, e.to_string()),
                 },
-                Ok(_) => FileEvent::Error("File exceeds 2 MiB".into()),
-                Err(e) => FileEvent::Error(e.to_string()),
+                Ok(_) => FileEvent::Error(NOT_OPENED, format!("File exceeds {MAX_FILE_MIB} MiB")),
+                Err(e) => FileEvent::Error(NOT_OPENED, e.to_string()),
             }
         } else {
             FileEvent::Cancelled
@@ -73,7 +84,7 @@ pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>, kind: SaveKind) {
         {
             match std::fs::write(path, bytes) {
                 Ok(()) => FileEvent::Saved(kind.success()),
-                Err(e) => FileEvent::Error(e.to_string()),
+                Err(e) => FileEvent::Error(kind.failure(), e.to_string()),
             }
         } else {
             FileEvent::Cancelled
@@ -90,7 +101,7 @@ pub fn load(sender: Sender<FileEvent>) {
             .await
         {
             if file.inner().size() > MAX_FILE_BYTES as f64 {
-                FileEvent::Error("File exceeds 2 MiB".into())
+                FileEvent::Error(NOT_OPENED, format!("File exceeds {MAX_FILE_MIB} MiB"))
             } else {
                 FileEvent::Loaded(file.read().await)
             }
@@ -106,7 +117,7 @@ pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>, kind: SaveKind) {
         let result = download(&bytes, kind.file_name())
             .map(|()| FileEvent::Saved(kind.success()))
             .unwrap_or_else(|error| {
-                FileEvent::Error(format!("Could not download snapshot: {error:?}"))
+                FileEvent::Error(kind.failure(), format!("Could not download: {error:?}"))
             });
         let _ = sender.send(result);
         return;
@@ -119,7 +130,7 @@ pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>, kind: SaveKind) {
         {
             match file.write(&bytes).await {
                 Ok(()) => FileEvent::Saved(kind.success()),
-                Err(e) => FileEvent::Error(e.to_string()),
+                Err(e) => FileEvent::Error(kind.failure(), e.to_string()),
             }
         } else {
             FileEvent::Cancelled

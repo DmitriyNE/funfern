@@ -223,6 +223,8 @@ pub struct Playground {
     /// The address carries a scene link, opened or copied, which autosave
     /// keeps up with the document.
     pub(super) link_in_address: bool,
+    /// The last autosave failed, and said so.
+    pub(super) autosave_failing: bool,
     pub(super) probe_upload: Option<ProbeUpload>,
     /// The upload before it, kept because the readback it issued is still in
     /// flight when the next one is made, and the samples in it are the last of
@@ -473,6 +475,7 @@ impl Default for Playground {
             autosave_observed: document,
             autosave_due: None,
             link_in_address: false,
+            autosave_failing: false,
             probe_upload: None,
             probe_upload_previous: None,
             probe_clock_restarted: true,

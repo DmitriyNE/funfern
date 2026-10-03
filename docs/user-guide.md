@@ -529,7 +529,10 @@ names or with every expression evaluated at the material frame's origin. Each ro
   damaged, is not opened: a notice window says why until closed, a broken link
   still restores the autosave, and an autosave that could not be read is
   replaced at the next autosave. A scene file that does not open leaves the current
-  document, its history and its run as they were.
+  document, its history and its run as they were. Notice windows also say when
+  an autosave fails (once, until one succeeds), when a scene file is not saved
+  or opened, when a snapshot or recording fails, and when the simulation pauses
+  itself on a fault. Replies to an edit stay on the status line.
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
   constrained mesh and its labeled outer, hole, interface, closed-wall, and baffle
   edges. Elements below 15° are
@@ -675,8 +678,12 @@ span and topology-vertex identities, oriented region anchors, editable draft and
 accepted scenes, boundary laws, constant/formula materials, directional axis ratios,
 orthonormal region frames, sources, probes, far-field settings, and presentation
 settings. Version 22 is a deliberate hard cut and older schemas are rejected; the
-built-in examples are authored directly in the new model. JSON files are capped at
-2 MiB and require finite coordinates. The editor
+built-in examples are authored directly in the new model. It is also the last cut:
+later versions open version 22 files, links and autosaves, which
+`crates/funfern-app/tests/fixtures/scenes-v22` holds frozen and the tests open.
+JSON files, autosaves and unpacked links are capped at 16 MiB, checked on saving as
+well as opening (a scene at the topology limits writes about 3 MiB), and require
+finite coordinates. The editor
 uses a world-space validation clearance of `1e-4` times the larger domain extent,
 independent of zoom. The editor
 validator is deliberately conservative; final mesh topology uses adaptive exact

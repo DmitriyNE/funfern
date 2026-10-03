@@ -25,7 +25,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const TOPOLOGY_FILE_VERSION: u32 = 22;
-pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
+/// What a scene file, autosave or unpacked link may hold. A scene at the
+/// topology limits takes about 3 MiB written out, so the room is ample; it
+/// was 2 MiB, which such a scene could pass on saving and then not open.
+pub const MAX_FILE_MIB: usize = 16;
+pub const MAX_FILE_BYTES: usize = MAX_FILE_MIB * 1024 * 1024;
+
+/// A written scene that would open again, or why it would not.
+fn within_the_limit<T: AsRef<[u8]>>(written: T) -> Result<T, String> {
+    if written.as_ref().len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "Scene is larger than the {MAX_FILE_MIB} MiB a scene file may hold"
+        ));
+    }
+    Ok(written)
+}
 
 #[derive(Deserialize)]
 struct Header {
@@ -432,17 +446,21 @@ struct StoredProbeReadoutEntry {
 
 pub fn save(document: &TopologyDocument) -> Result<String, String> {
     validate_document(document)?;
-    serde_json::to_string_pretty(&encode_document(document)).map_err(|error| error.to_string())
+    serde_json::to_string_pretty(&encode_document(document))
+        .map_err(|error| error.to_string())
+        .and_then(within_the_limit)
 }
 
 pub fn save_compact(document: &TopologyDocument) -> Result<Vec<u8>, String> {
     validate_document(document)?;
-    serde_json::to_vec(&encode_document(document)).map_err(|error| error.to_string())
+    serde_json::to_vec(&encode_document(document))
+        .map_err(|error| error.to_string())
+        .and_then(within_the_limit)
 }
 
 pub fn parse_document(bytes: &[u8]) -> Result<TopologyDocument, String> {
     if bytes.len() > MAX_FILE_BYTES {
-        return Err(format!("Scene file exceeds {MAX_FILE_BYTES} bytes"));
+        return Err(format!("Scene file exceeds {MAX_FILE_MIB} MiB"));
     }
     let header: Header = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     if header.version != TOPOLOGY_FILE_VERSION {

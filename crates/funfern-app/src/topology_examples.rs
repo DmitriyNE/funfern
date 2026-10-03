@@ -4508,6 +4508,54 @@ fn plasma_delay_with(repeat: f64) -> TopologyDocument {
 mod tests {
     use super::*;
 
+    /// A scene near the topology limits: 63 rods of 42 corners, 126 controls
+    /// each against a curve's 128 and 63 curves against 64.
+    fn scene_at_the_limits() -> TopologyDocument {
+        let mut builder = Builder::new();
+        builder.scene.materials.push(Material {
+            id: MaterialId(2),
+            name: "Rod".into(),
+            mass_density: ScalarField::constant(2.0),
+            ..Material::default_medium()
+        });
+        for index in 0..63 {
+            let center = Point2::new(
+                -0.84 + 0.24 * (index % 8) as f64,
+                -0.84 + 0.24 * (index / 8) as f64,
+            );
+            let corners = (0..42)
+                .map(|corner| {
+                    center + direction(corner as f64 * std::f64::consts::TAU / 42.0) * 0.08
+                })
+                .collect();
+            builder.subdomain(
+                PeriodicCubicSpline::polygon(corners).unwrap(),
+                MaterialId(2),
+                MaterialFrame::world(),
+            );
+        }
+        builder.document()
+    }
+
+    /// Opening refused a scene file past 2 MiB, which this one passes at
+    /// about 2.7 MiB: it saved, and then neither the file nor the autosave
+    /// opened. The limit has room for the topology limits now.
+    #[test]
+    fn a_scene_at_the_topology_limits_saves_and_opens() {
+        let document = scene_at_the_limits();
+        let saved = crate::topology_persistence::save(&document).unwrap();
+        assert!(saved.len() > 2 * 1024 * 1024, "{} bytes", saved.len());
+        assert!(
+            saved.len() < crate::topology_persistence::MAX_FILE_BYTES / 4,
+            "{} bytes",
+            saved.len()
+        );
+        assert_eq!(
+            crate::topology_persistence::parse_document(saved.as_bytes()),
+            Ok(document)
+        );
+    }
+
     #[test]
     fn topology_catalog_is_valid_version_22_data_with_complete_semantics() {
         assert_eq!(catalog().len(), 45);

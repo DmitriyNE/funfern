@@ -43,7 +43,10 @@ pub fn decode(fragment: &str) -> Result<Vec<u8>, String> {
         .read_to_end(&mut json)
         .map_err(|_| "Shared scene data is damaged".to_string())?;
     if json.len() > persistence::MAX_FILE_BYTES {
-        return Err("Shared scene expands beyond 2 MiB".into());
+        return Err(format!(
+            "Shared scene expands beyond {} MiB",
+            persistence::MAX_FILE_MIB
+        ));
     }
     Ok(json)
 }
@@ -198,6 +201,17 @@ mod tests {
         let bytes = decode(&fragment).unwrap();
         let mut candidate = persistence::parse(&bytes).unwrap();
         assert_eq!(candidate.advance(100_000).unwrap().unwrap(), document);
+    }
+
+    /// A link as version 22 made it on 2026-10-03, frozen beside the scenes
+    /// in `tests/fixtures/scenes-v22`: the packing and the scene inside it
+    /// must both keep opening.
+    #[test]
+    fn a_frozen_version_22_link_opens_the_scene_it_was_made_from() {
+        let fragment = include_str!("../tests/fixtures/scenes-v22/brewster-angle.link");
+        let frozen = include_bytes!("../tests/fixtures/scenes-v22/brewster-angle.json");
+        let linked = persistence::parse_document(&decode(fragment.trim_end()).unwrap()).unwrap();
+        assert_eq!(linked, persistence::parse_document(frozen).unwrap());
     }
 
     /// The `v1` names the link's packing, not the scene inside it: a link

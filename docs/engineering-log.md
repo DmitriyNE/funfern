@@ -18237,3 +18237,41 @@ rewrite of an active link, while the user guide still described it.
   status message until its OK is clicked (through the AccessKit harness).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — Frozen version 22 scenes, a 16 MiB cap checked on saving, more notices
+
+- **Frozen scenes.** Version 22 is the last break (the persistence module doc
+  says so since the previous change), but `examples/` follows the catalog
+  (`FUNFERN_BLESS_EXAMPLES`), so nothing held an old file still. Now
+  `crates/funfern-app/tests/fixtures/scenes-v22` holds the 45 gallery scenes as
+  version 22 wrote them today, compact (893 KiB of text), and one shared-link
+  fragment; a README says never to regenerate them. `tests/frozen_scenes.rs`
+  opens each and requires every value it held to read back unchanged (a key a
+  later version adds is not counted), and
+  `a_frozen_version_22_link_opens_the_scene_it_was_made_from` opens the link. A
+  key whose meaning changes under the same name still reads back unchanged, so
+  that rule rests on the module doc alone.
+- **The size cap.** Reproduced: a scene near the topology limits (63 rods of 42
+  corners, 126 controls each) saves to 2,809 KiB, and opening refused anything
+  over 2 MiB, so the file and the autosave would not open again. The cap is now
+  16 MiB (`MAX_FILE_MIB`) and is checked on saving too, so nothing is written
+  that will not open; the size messages name it. The browser autosave is now
+  compact JSON, about a third of the pretty form, since browser storage is a
+  few megabytes an origin, and a full storage reads "Browser storage for this
+  site is full" rather than "Browser storage operation failed".
+- **Notices.** The status-line audit: of 109 writes, the replies to an edit stay
+  (the user is looking, and a refused edit changes nothing, so no commit
+  message follows to overwrite it), and preparation errors keep the ⚠ marker
+  and the diagnostics log. Moved to notices: a failed autosave, which was
+  discarded (`let _ =`), now raised once per run of failures; a scene file not
+  opened or not saved, and a snapshot or SVG not exported (`FileEvent::Error`
+  now carries the notice title); a recording stopped by an error; and the
+  solver pausing itself on a fault, which also keeps its status line and ⚠.
+- **Tests.** `a_scene_at_the_topology_limits_saves_and_opens` (failed before the
+  cap moved), the frozen-scene and frozen-link tests, the comparison's own
+  test, `a_failing_autosave_says_so_once_until_one_succeeds` and
+  `a_file_that_fails_raises_a_notice_for_what_did_not_happen`. The recording
+  and solver-fault notices have no test of their own: both need a recorder or
+  a device request to raise them.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -147,7 +147,7 @@ impl Playground {
                     }
                     Err(error) => {
                         self.file_busy = false;
-                        self.notify(error);
+                        self.raise_notice("Scene not opened", error);
                     }
                 },
                 FileEvent::SnapshotCaptured(bytes) => {
@@ -164,10 +164,10 @@ impl Playground {
                     self.file_busy = false;
                     self.snapshot_state = SnapshotState::Idle;
                 }
-                FileEvent::Error(error) => {
+                FileEvent::Error(title, error) => {
                     self.file_busy = false;
                     self.snapshot_state = SnapshotState::Idle;
-                    self.notify(error);
+                    self.raise_notice(title, error);
                 }
             }
         }
@@ -179,7 +179,7 @@ impl Playground {
                 self.set_document(document, false, true)
             }) {
                 Ok(()) => self.notify("Scene loaded; history cleared"),
-                Err(error) => self.notify(error),
+                Err(error) => self.raise_notice("Scene not opened", error),
             }
         }
     }
@@ -297,8 +297,27 @@ impl Playground {
             .is_some_and(|at| at.elapsed().as_secs_f32() > 0.8)
         {
             self.autosave_due = None;
-            let _ = crate::recovery::save(&self.editor.document);
+            let written = crate::recovery::save(&self.editor.document);
+            self.autosave_written(written);
             self.refresh_link();
+        }
+    }
+
+    /// An autosave that fails says so once, until one succeeds: the session
+    /// it should have kept would otherwise be lost to a reload unannounced.
+    fn autosave_written(&mut self, written: Result<(), String>) {
+        match written {
+            Ok(()) => self.autosave_failing = false,
+            Err(_) if self.autosave_failing => {}
+            Err(error) => {
+                self.autosave_failing = true;
+                self.raise_notice(
+                    "Autosave failed",
+                    format!(
+                        "{error}.\n\nUntil an autosave succeeds, a reload or relaunch will not bring this session back. Save it as a file to keep it."
+                    ),
+                );
+            }
         }
     }
 
@@ -334,7 +353,7 @@ impl Playground {
                 self.file_busy = true;
                 files::save(self.sender.clone(), json.into_bytes(), SaveKind::Scene);
             }
-            Err(error) => self.notify(error),
+            Err(error) => self.raise_notice("Scene not saved", error),
         }
     }
     pub(super) fn export_viewport_png(&mut self) {
@@ -425,7 +444,7 @@ impl Playground {
                     #[cfg(not(target_arch = "wasm32"))]
                     self.recording_readback_in_flight
                         .store(0, Ordering::Release);
-                    self.notify(error);
+                    self.raise_notice("Recording stopped", error);
                 }
             }
         }
@@ -806,7 +825,7 @@ mod tests {
         for (autosave, reason) in [
             (Ok(Some(version_21_bytes())), "version 21"),
             (Ok(Some(b"{\"version\": 22, \"model\"".to_vec())), "EOF"),
-            (Err("Autosave exceeds 2 MiB".to_string()), "2 MiB"),
+            (Err("Autosave exceeds 16 MiB".to_string()), "16 MiB"),
         ] {
             let mut state = Playground::default();
             state.open_startup_scene(None, || autosave);
@@ -945,12 +964,57 @@ mod tests {
             assert_eq!(state.example_opened, Some(2), "{reason}");
             assert!(!state.fresh_requested, "{reason}: the run was restarted");
             assert!(!state.file_busy, "{reason}");
+            let notices = notices(&state);
             assert!(
-                state.message.contains(reason),
-                "{reason}: {}",
-                state.message
+                matches!(&notices[..], [("Scene not opened", text)] if text.contains(reason)),
+                "{reason}: {notices:?}"
             );
         }
+    }
+
+    /// A file that was not written, or not read, is said in a notice titled
+    /// for what did not happen.
+    #[test]
+    fn a_file_that_fails_raises_a_notice_for_what_did_not_happen() {
+        let mut state = Playground {
+            file_busy: true,
+            ..Playground::default()
+        };
+        state
+            .sender
+            .send(FileEvent::Error(
+                "Scene not saved",
+                "Permission denied (os error 13)".into(),
+            ))
+            .unwrap();
+        state.update_files();
+        assert!(!state.file_busy);
+        assert_eq!(
+            notices(&state),
+            [(
+                "Scene not saved",
+                "Permission denied (os error 13)".to_string()
+            )]
+        );
+    }
+
+    /// One notice for a run of failed autosaves, and another for a failure
+    /// after one succeeded.
+    #[test]
+    fn a_failing_autosave_says_so_once_until_one_succeeds() {
+        let mut state = Playground::default();
+        let full = || Err("Browser storage for this site is full".to_string());
+        state.autosave_written(full());
+        state.autosave_written(full());
+        let notices_now = notices(&state);
+        assert!(
+            matches!(&notices_now[..], [("Autosave failed", text)]
+                if text.contains("storage for this site is full")),
+            "{notices_now:?}"
+        );
+        state.autosave_written(Ok(()));
+        state.autosave_written(full());
+        assert_eq!(state.notices.len(), 2);
     }
 
     fn address() -> Option<String> {

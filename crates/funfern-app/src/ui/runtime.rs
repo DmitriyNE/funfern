@@ -1030,6 +1030,18 @@ impl Playground {
                  or press Run to retry from that step",
                 canonical_failure_description(failure)
             );
+            // The run stopped on its own, and the status line keeps the
+            // reason only until the next message.
+            let description = canonical_failure_description(failure);
+            let mut reason = description[..1].to_uppercase();
+            reason.push_str(&description[1..]);
+            self.raise_notice(
+                "Simulation paused",
+                format!(
+                    "{reason} (failure code {failure}).\n\nThe field is held at the last accepted step. \
+                     Edit the scene, or press Run to retry from that step."
+                ),
+            );
             self.unseen_error = true;
             return;
         }

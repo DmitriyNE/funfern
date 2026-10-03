@@ -2365,7 +2365,7 @@ pub fn frame(
                     logical_viewport,
                 ) {
                     Ok(bytes) => FileEvent::SnapshotCaptured(bytes),
-                    Err(error) => FileEvent::Error(error),
+                    Err(error) => FileEvent::Error("Snapshot not exported", error),
                 };
                 let _ = sender.send(event);
             },

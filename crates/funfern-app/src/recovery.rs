@@ -20,7 +20,10 @@ pub fn load() -> Result<Option<Vec<u8>>, String> {
 
 #[cfg(target_arch = "wasm32")]
 pub fn save(document: &Document) -> Result<(), String> {
-    let json = persistence::save(document)?;
+    // Compact, since browser storage is a few megabytes an origin; the
+    // reader takes either form.
+    let json = String::from_utf8(persistence::save_compact(document)?)
+        .map_err(|error| error.to_string())?;
     let storage = web_sys::window()
         .ok_or("Browser window is unavailable")?
         .local_storage()
@@ -31,8 +34,17 @@ pub fn save(document: &Document) -> Result<(), String> {
 
 #[cfg(target_arch = "wasm32")]
 fn js_error(value: wasm_bindgen::JsValue) -> String {
+    let field = |name: &str| {
+        js_sys::Reflect::get(&value, &name.into())
+            .ok()
+            .and_then(|field| field.as_string())
+    };
+    if field("name").as_deref() == Some("QuotaExceededError") {
+        return "Browser storage for this site is full".into();
+    }
     value
         .as_string()
+        .or_else(|| field("message"))
         .unwrap_or_else(|| "Browser storage operation failed".into())
 }
 
@@ -40,9 +52,10 @@ fn js_error(value: wasm_bindgen::JsValue) -> String {
 pub fn load() -> Result<Option<Vec<u8>>, String> {
     let path = recovery_path()?;
     match std::fs::metadata(&path) {
-        Ok(metadata) if metadata.len() > persistence::MAX_FILE_BYTES as u64 => {
-            Err("Autosave exceeds 2 MiB".into())
-        }
+        Ok(metadata) if metadata.len() > persistence::MAX_FILE_BYTES as u64 => Err(format!(
+            "Autosave exceeds {} MiB",
+            persistence::MAX_FILE_MIB
+        )),
         Ok(_) => std::fs::read(path)
             .map(Some)
             .map_err(|error| format!("Could not read autosave: {error}")),
