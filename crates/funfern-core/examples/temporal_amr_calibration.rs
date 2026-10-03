@@ -819,7 +819,7 @@ fn estimate(
     walls: OuterBoundaryConditions,
 ) -> Option<funfern_core::SolutionIndicatorReport> {
     let count = operator.base().degrees_of_freedom();
-    let demand = operator.resolution_demand();
+    let patterns = operator.resolution_demand_by_material();
     let snapshot = CanonicalIndicatorSnapshot {
         mesh_revision: mesh.mesh_revision,
         primary_flux: state.primary_flux().to_vec(),
@@ -913,11 +913,11 @@ fn estimate(
             elements_per_wavelength: ELEMENTS_PER_WAVELENGTH,
             // No sources here, so the field's own scale is zero.
             forcing_frequency_hz: 0.0,
-            coefficient_wavelength: demand.coefficient_wavelength,
             ..Default::default()
         },
     )
-    .with_canonical_supplement(supplement);
+    .with_canonical_supplement(supplement)
+    .with_coefficient_patterns(patterns);
     if !static_path {
         job = job.with_instantaneous_materials(state.runtime().clone());
     }

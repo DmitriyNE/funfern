@@ -537,7 +537,7 @@ impl Playground {
             time,
             time_step: dt,
         };
-        let demand = scene_resolution_demand(&active.bundle.authored);
+        let patterns = scene_resolution_demand(&active.bundle.authored);
         let job = SolutionIndicatorJob::new_topology(
             active.mesh.clone(),
             active.operator.clone(),
@@ -568,12 +568,12 @@ impl Playground {
                     active.point_source,
                     TimeSignal::frequency_ceiling_hz,
                 ),
-                coefficient_wavelength: demand.coefficient_wavelength,
                 coarsen_ratio: AMR_COARSEN_EDGE_RATIO,
                 dormant_below_energy: self.amr_energy_peak * DORMANT_ENERGY_RATIO,
                 ..Default::default()
             },
-        );
+        )
+        .with_coefficient_patterns(patterns);
         let job = AmrIndicatorJob::with_canonical(
             job,
             active.mesh.clone(),
@@ -750,6 +750,26 @@ mod tests {
             adaptation_decision(&report(2000, 0, 2000, 0.2), 0.12),
             AmrDecision::Refine
         );
+    }
+
+    /// The estimate line names the size rule when it is what refines, so an
+    /// error under target beside a mesh still refining explains itself: the
+    /// parametric fiber read 2% against 12% while its pattern floor refined.
+    /// An error refinement, or a hold, is not the size rule's.
+    #[test]
+    fn the_size_rule_is_told_apart_from_the_accuracy_target() {
+        let report = |error, limit, global| SolutionIndicatorReport {
+            refine_candidates: error + limit,
+            error_refine_candidates: error,
+            limit_refine_candidates: limit,
+            global_indicator: global,
+            ..Default::default()
+        };
+        assert!(size_rule_refines(&report(0, 2000, 0.02), 0.12));
+        assert!(size_rule_refines(&report(2000, 2000, 0.05), 0.12));
+        assert!(!size_rule_refines(&report(2000, 2000, 0.2), 0.12));
+        assert!(!size_rule_refines(&report(2000, 0, 0.2), 0.12));
+        assert!(!size_rule_refines(&report(0, 3, 0.02), 0.12));
     }
 
     /// An estimate owns a copied solution snapshot. Accepted-state maintenance

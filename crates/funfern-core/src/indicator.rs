@@ -6,8 +6,8 @@ use crate::wave::TimedDirectionalWaveCoefficients;
 use crate::{
     BoundaryLabel, BoundarySide, CanonicalForcing, CanonicalMaterialRuntimeState,
     CanonicalRateDrive, CanonicalWaveOperator, DirectionalWaveCoefficients, FaceBoundaryCondition,
-    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField,
-    OuterBoundaryCondition, OwnedTopologyWaveModel, PlannedBoundarySource, Point2,
+    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, LoopRole, MaterialId,
+    MeshSizeField, OuterBoundaryCondition, OwnedTopologyWaveModel, PlannedBoundarySource, Point2,
     QuadraticWaveOperator, RegionId, SOURCE_ANCHOR_TIME, Scene, SpanBehavior, TopologyMeshPlan,
     TopologyWaveModel, TriMesh, WaveError, enriched_quadratic_basis,
     enriched_quadratic_basis_gradients, enriched_quadratic_basis_hessians,
@@ -703,14 +703,6 @@ pub struct SolutionIndicatorOptions {
     /// Unlike the forcing frequency it does not scale the estimate: the field
     /// spends most of its energy nearer the carrier.
     pub band_edge_hz: f64,
-    /// Shortest spatial period the operator's own coefficients carry, from a
-    /// travelling modulation. Infinity where none does.
-    ///
-    /// This is a property of the operator rather than of the field, so it
-    /// binds even where nothing is propagating: a mesh that cannot resolve
-    /// the pattern written into the coefficients is assembling the wrong
-    /// operator, and no error estimate on the field would say so.
-    pub coefficient_wavelength: f64,
     pub grading_ratio: f64,
     pub minimum_scale: f64,
     pub maximum_scale: f64,
@@ -733,7 +725,6 @@ impl Default for SolutionIndicatorOptions {
             elements_per_wavelength: 5.0,
             forcing_frequency_hz: 0.0,
             band_edge_hz: 0.0,
-            coefficient_wavelength: f64::INFINITY,
             grading_ratio: 1.5,
             minimum_scale: 0.6,
             maximum_scale: 2.2,
@@ -1059,6 +1050,9 @@ struct ElementMaterialSamples {
     /// The highest odd harmonic of the carrier the element's field law makes
     /// at the field's envelope, zero where it makes none worth resolving.
     harmonic_frequency_hz: f64,
+    /// The shortest coefficient pattern the element's material carries,
+    /// infinity where it carries none.
+    pattern_wavelength: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1126,6 +1120,9 @@ pub struct SolutionIndicatorJob {
     report: SolutionIndicatorReport,
     canonical: Option<CanonicalIndicatorSupplement>,
     runtime: Option<CanonicalMaterialRuntimeState>,
+    /// Each material's shortest coefficient pattern; see
+    /// [`SolutionIndicatorJob::with_coefficient_patterns`].
+    coefficient_patterns: BTreeMap<MaterialId, f64>,
 }
 
 enum IndicatorInput {
@@ -1205,7 +1202,25 @@ impl SolutionIndicatorJob {
             report: SolutionIndicatorReport::default(),
             canonical: None,
             runtime: None,
+            coefficient_patterns: BTreeMap::new(),
         }
+    }
+
+    /// The shortest spatial period each material's own coefficients carry,
+    /// from a travelling modulation; a material not named carries none.
+    ///
+    /// This is a property of the operator rather than of the field, so it
+    /// binds even where nothing is propagating: a mesh that cannot resolve
+    /// the pattern written into the coefficients is assembling the wrong
+    /// operator, and no error estimate on the field would say so. It binds
+    /// only on the elements of the material that carries it. Held to the
+    /// shortest pattern anywhere, a pumped fiber held the vacuum around it
+    /// to the fiber's own floor, and refined it whatever the error read. The
+    /// caller supplies it because the model a driven generation hands over
+    /// has its laws stripped.
+    pub fn with_coefficient_patterns(mut self, patterns: BTreeMap<MaterialId, f64>) -> Self {
+        self.coefficient_patterns = patterns;
+        self
     }
 
     /// Adds direct-state consistency terms to the scalar-equivalent spatial
@@ -1236,8 +1251,8 @@ impl SolutionIndicatorJob {
     /// The wavelength limit deliberately keeps the authored wave speed. A
     /// limit that breathed with the drive would retarget the same element
     /// every cycle. What a drive writes into the operator in space belongs to
-    /// `coefficient_wavelength`, which the caller supplies for it; the
-    /// sidebands it mixes into the field are measured, not predicted.
+    /// [`Self::with_coefficient_patterns`], which the caller supplies for it;
+    /// the sidebands it mixes into the field are measured, not predicted.
     pub fn with_instantaneous_materials(mut self, runtime: CanonicalMaterialRuntimeState) -> Self {
         self.runtime = Some(runtime);
         self
@@ -1341,8 +1356,6 @@ impl SolutionIndicatorJob {
             || options.forcing_frequency_hz < 0.0
             || !options.band_edge_hz.is_finite()
             || options.band_edge_hz < 0.0
-            || options.coefficient_wavelength.is_nan()
-            || options.coefficient_wavelength <= 0.0
             || !options.grading_ratio.is_finite()
             || options.grading_ratio <= 1.0
             || !options.minimum_scale.is_finite()
@@ -1823,12 +1836,18 @@ impl SolutionIndicatorJob {
         } else {
             0.0
         };
+        let pattern_wavelength = self
+            .region_material(triangle.region)
+            .and_then(|material| self.coefficient_patterns.get(&material))
+            .copied()
+            .unwrap_or(f64::INFINITY);
         self.material_samples[index] = Some(ElementMaterialSamples {
             vertex_stiffness,
             quadrature: samples,
             stiffness_divergence,
             minimum_wave_speed,
             harmonic_frequency_hz,
+            pattern_wavelength,
         });
         self.phase = IndicatorPhase::SampleMaterials(index + 1);
         Ok(())
@@ -1951,6 +1970,18 @@ impl SolutionIndicatorJob {
     ) -> Result<DirectionalWaveCoefficients, SolutionIndicatorError> {
         self.timed_material_at(region, point)
             .map(|timed| timed.instantaneous)
+    }
+
+    /// The material a region is assigned, from whichever model the job holds.
+    fn region_material(&self, region: RegionId) -> Option<MaterialId> {
+        let regions = match &self.input {
+            IndicatorInput::Scene(scene) => &scene.regions,
+            IndicatorInput::Topology { model, .. } => &model.regions,
+        };
+        regions
+            .iter()
+            .find(|candidate| candidate.id == region)
+            .map(|candidate| candidate.material)
     }
 
     fn timed_material_at(
@@ -2382,10 +2413,9 @@ impl SolutionIndicatorJob {
         });
         // A travelling modulation patterns the coefficients themselves, so
         // the same elements-per-wavelength rule applies to that pattern
-        // whether or not a wave is riding on it.
-        let wavelength_target = if self.options.coefficient_wavelength.is_finite() {
-            let pattern =
-                self.options.coefficient_wavelength / self.options.elements_per_wavelength;
+        // whether or not a wave is riding on it, in the material carrying it.
+        let wavelength_target = if material.pattern_wavelength.is_finite() {
+            let pattern = material.pattern_wavelength / self.options.elements_per_wavelength;
             Some(wavelength_target.map_or(pattern, |wave: f64| wave.min(pattern)))
         } else {
             wavelength_target

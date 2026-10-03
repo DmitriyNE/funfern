@@ -1067,7 +1067,7 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   field that is not moving. Reproduce against the autosave first, then decide
   what a pause holds: estimates, an adaptation in flight, or both.
 
-- [ ] A travelling drive's pattern floor binds the whole domain. Found on
+- [x] A travelling drive's pattern floor binds the whole domain. Found on
   2026-10-03 from the user's report on the parametric fiber (error 2%
   against a 12% target, refining on). `CanonicalTemporalResolution::of_materials`
   takes the shortest pattern over every material and the estimator applies
@@ -1077,6 +1077,9 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   limit rule refines whatever the error reads. The fix is a per-element
   floor from the element's own material, as the harmonic frequency already
   is, and an AMR status that names the size rule when it is what refines.
+  Fixed on 2026-10-03 (`docs/engineering-log.md`): the estimator takes a
+  pattern per material (`with_coefficient_patterns`), and the estimate line
+  adds "refining to resolve wavelengths" when the size rule refines.
 
 - Test a larger wasm memory cap on iOS Safari before shipping one. The
   threaded web build caps its shared memory at 1 GiB (`--max-memory` in

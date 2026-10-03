@@ -1550,9 +1550,57 @@ impl CanonicalTemporalResolution {
         }
         Ok(Self::of_drives(drives))
     }
+
+    /// Each authored material's own pattern wavelength, naming only the
+    /// materials that carry one: the size rule applies a pattern only where
+    /// its material is.
+    pub fn of_each_material<'a>(
+        materials: impl IntoIterator<Item = &'a Material>,
+    ) -> Result<BTreeMap<MaterialId, f64>, MaterialError> {
+        let mut patterns = BTreeMap::new();
+        for material in materials {
+            let wavelength = Self::of_materials([material])?.coefficient_wavelength;
+            if wavelength.is_finite() {
+                patterns.insert(material.id, wavelength);
+            }
+        }
+        Ok(patterns)
+    }
 }
 
 impl CanonicalTemporalWaveOperator {
+    /// [`Self::resolution_demand`] material by material, naming only the
+    /// materials whose drives write a pattern.
+    pub fn resolution_demand_by_material(&self) -> BTreeMap<MaterialId, f64> {
+        let mut patterns = BTreeMap::new();
+        if !self.has_temporal_laws {
+            return patterns;
+        }
+        let drives = self
+            .primary
+            .iter()
+            .flat_map(|sample| {
+                [
+                    (sample.material(), sample.coefficient.law.drive),
+                    (sample.material(), sample.loss.law.drive),
+                ]
+            })
+            .chain(self.complementary.iter().flat_map(|sample| {
+                [
+                    (sample.material(), sample.coefficient.law.drive),
+                    (sample.material(), sample.loss.law.drive),
+                ]
+            }));
+        for (material, drive) in drives {
+            let wavelength = CanonicalTemporalResolution::of_drives([drive]).coefficient_wavelength;
+            if wavelength.is_finite() {
+                let entry = patterns.entry(material).or_insert(f64::INFINITY);
+                *entry = f64::min(*entry, wavelength);
+            }
+        }
+        patterns
+    }
+
     /// What this operator's drives demand of the mesh whatever the field: the
     /// spatial pattern a travelling drive writes into the coefficients.
     pub fn resolution_demand(&self) -> CanonicalTemporalResolution {
@@ -7485,10 +7533,10 @@ mod tests {
                 minimum_edge_length: 0.005,
                 maximum_edge_length: 0.25,
                 elements_per_wavelength,
-                coefficient_wavelength: demand.coefficient_wavelength,
                 ..Default::default()
             },
-        );
+        )
+        .with_coefficient_patterns(operator.resolution_demand_by_material());
         let result = loop {
             if let Some(result) = job.advance(4_096) {
                 break result.unwrap();
@@ -7515,6 +7563,105 @@ mod tests {
                 "an element was left at {target}, above the pattern limit {pattern_limit}"
             );
         }
+    }
+
+    /// The pattern binds only the material that carries it. A travelling
+    /// drive in an inclusion holds the inclusion's elements to its floor and
+    /// leaves the background, which carries no pattern and no wave here, to
+    /// its own limits; grading spreads the floor a little way out and no
+    /// further. Held to the shortest pattern anywhere, the background was
+    /// refined to the inclusion's floor whatever the error read.
+    #[test]
+    fn a_travelling_modulation_sizes_only_its_own_material() {
+        let mut scene = Scene::initial();
+        let interior = RegionId(2);
+        scene.obstacles[0].role = LoopRole::MaterialInterface {
+            exterior: BACKGROUND_REGION,
+            interior,
+        };
+        let wavenumber = 24.0;
+        scene.materials.push(Material {
+            id: crate::MaterialId(2),
+            name: "pumped".into(),
+            stiffness_law: CoefficientLaw {
+                drive: TimeDrive::TravellingModulation {
+                    depth: ScalarField::constant(0.25),
+                    frequency_hz: ScalarField::constant(0.4),
+                    phase_radians: ScalarField::constant(0.0),
+                    wavenumber: ScalarField::constant(wavenumber),
+                    angle_radians: ScalarField::constant(0.2),
+                },
+                ..CoefficientLaw::linear()
+            },
+            ..Material::default_medium()
+        });
+        scene.regions.push(Region {
+            id: interior,
+            material: crate::MaterialId(2),
+            frame: MaterialFrame::world(),
+        });
+        let (mesh, quadratic, operator) = generation(&scene, 0.25, 1);
+        let patterns = operator.resolution_demand_by_material();
+        assert_eq!(
+            patterns.keys().copied().collect::<Vec<_>>(),
+            [crate::MaterialId(2)]
+        );
+        assert_eq!(
+            CanonicalTemporalResolution::of_each_material(&scene.materials).unwrap(),
+            patterns
+        );
+        let elements_per_wavelength = 5.0;
+        let pattern_limit = std::f64::consts::TAU / wavenumber / elements_per_wavelength;
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let count = quadratic.degrees_of_freedom();
+        let mesh = std::sync::Arc::new(mesh);
+        let snapshot = crate::QuadraticSolutionSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            displacement: vec![1.0e-9; count],
+            velocity: vec![0.0; count],
+            acceleration: vec![0.0; count],
+            volume_acceleration: vec![0.0; count],
+            auxiliary: vec![0.0; count],
+            time: 0.0,
+            time_step: 0.4 * operator.maximum_time_step(),
+        };
+        let mut job = crate::SolutionIndicatorJob::new(
+            mesh.clone(),
+            std::sync::Arc::new(quadratic),
+            base_scene,
+            snapshot,
+            crate::SolutionIndicatorOptions {
+                minimum_edge_length: 0.005,
+                maximum_edge_length: 0.25,
+                elements_per_wavelength,
+                ..Default::default()
+            },
+        )
+        .with_coefficient_patterns(patterns);
+        let result = loop {
+            if let Some(result) = job.advance(4_096) {
+                break result.unwrap();
+            }
+        };
+        let (mut inside, mut outside, mut outside_free) = (0, 0, 0);
+        for (triangle, target) in mesh.triangles.iter().zip(&result.element_targets) {
+            if triangle.region == interior {
+                inside += 1;
+                assert!(
+                    *target <= pattern_limit * (1.0 + 1.0e-9),
+                    "an inclusion element was left at {target}, above {pattern_limit}"
+                );
+            } else {
+                outside += 1;
+                outside_free += usize::from(*target > 2.0 * pattern_limit);
+            }
+        }
+        assert!(inside > 0 && result.report.limit_refine_candidates > 0);
+        assert!(
+            2 * outside_free > outside,
+            "{outside_free} of {outside} background elements kept clear of the pattern floor"
+        );
     }
 
     /// A drive's sidebands are field content, which the error estimate reads

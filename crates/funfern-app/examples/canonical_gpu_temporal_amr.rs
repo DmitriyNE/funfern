@@ -540,7 +540,7 @@ fn estimate(
         time,
         time_step,
     };
-    let demand = operator.resolution_demand();
+    let patterns = operator.resolution_demand_by_material();
     let mut job = SolutionIndicatorJob::new(
         mesh.clone(),
         quadratic.clone(),
@@ -549,11 +549,11 @@ fn estimate(
         SolutionIndicatorOptions {
             minimum_edge_length: MINIMUM_EDGE,
             maximum_edge_length: MAXIMUM_EDGE,
-            coefficient_wavelength: demand.coefficient_wavelength,
             ..SolutionIndicatorOptions::default()
         },
     )
     .with_canonical_supplement(supplement)
+    .with_coefficient_patterns(patterns)
     .with_instantaneous_materials(runtime.clone());
     loop {
         if let Some(result) = job.advance(8_192) {

@@ -1911,19 +1911,25 @@ fn resident_filter_boundary(enabled: bool, completed_steps: u64) -> bool {
     enabled && completed_steps > 0 && completed_steps.is_multiple_of(GRID_SCALE_FILTER_CADENCE)
 }
 
-/// What the medium's own drives demand of the mesh beyond the sources.
+/// Whether a refinement is the size rule's rather than the accuracy
+/// target's: elements past their wavelength floor, with the error itself
+/// under target or too sparse to refine for. The estimate line says so, or
+/// an error well under its target beside a mesh still refining reads as a
+/// contradiction.
+fn size_rule_refines(report: &SolutionIndicatorReport, target_accuracy: f64) -> bool {
+    adaptation_decision(report, target_accuracy) == AmrDecision::Refine
+        && !(report.error_refine_candidates >= 4 && report.global_indicator > target_accuracy)
+}
+
+/// What each material's own drives demand of the mesh beyond the sources.
 ///
 /// A travelling drive patterns the coefficients in space whether or not a
-/// wave is present; the sidebands any drive mixes into the field are left to
-/// the error estimate. The scene is authored, so this holds for materials
-/// whose drives are not yet executable: it is the mesh rule, not the solver
-/// path.
-fn scene_resolution_demand(scene: &TopologyScene) -> CanonicalTemporalResolution {
-    CanonicalTemporalResolution::of_materials(&scene.materials).unwrap_or(
-        CanonicalTemporalResolution {
-            coefficient_wavelength: f64::INFINITY,
-        },
-    )
+/// wave is present, and only where its material is; the sidebands any drive
+/// mixes into the field are left to the error estimate. The scene is
+/// authored, so this holds for materials whose drives are not yet
+/// executable: it is the mesh rule, not the solver path.
+fn scene_resolution_demand(scene: &TopologyScene) -> BTreeMap<MaterialId, f64> {
+    CanonicalTemporalResolution::of_each_material(&scene.materials).unwrap_or_default()
 }
 
 /// The most `measure` gives of any signal the scene drives with: the point

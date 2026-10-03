@@ -17793,3 +17793,34 @@ viscosity, authored on any material (catalogue row D4).
   floor. Both under "Maintenance" in `docs/plan.md`.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — A travelling drive's pattern floor binds only its material
+
+The user saw the parametric fiber refine on while its error read 2% against a
+12% target.
+
+- **Cause.** The estimator took one `coefficient_wavelength`, the shortest
+  pattern over every material (`CanonicalTemporalResolution::of_materials`),
+  and held every element to it. The fiber's pump, `2π/36.2` at six elements a
+  wavelength, sets 0.029, and the vacuum around it, whose 2.5 Hz wave asks for
+  0.067, was held there too. The size rule refines whatever the error reads, by
+  design, so the whole domain went towards 0.029. On the user's autosave at
+  edge 0.08 all 2,861 elements were limit-bound, 2,448 of them in the vacuum.
+- **Fix.** The option is gone; `SolutionIndicatorJob::with_coefficient_patterns`
+  takes a pattern per material, and each element reads its own material's, as
+  it reads its field law's harmonic. The caller supplies it because a driven
+  generation's estimator model has its laws stripped:
+  `CanonicalTemporalResolution::of_each_material` from authored materials (the
+  app), `CanonicalTemporalWaveOperator::resolution_demand_by_material` from an
+  operator (the calibration and device AMR examples).
+- **Status.** The estimate line adds "refining to resolve wavelengths" when the
+  size rule, not the accuracy target, is what refines (`size_rule_refines`).
+- **Tests.** `a_travelling_modulation_sizes_only_its_own_material` (a driven
+  inclusion holds its elements to the floor and most of the background clear
+  of it); `the_fibers_pump_pattern_sizes_only_the_fiber` on the gallery scene:
+  every fiber element at the floor, 0 of 2,448 vacuum elements under 0.035,
+  where the old global floor held all 2,448 (checked by restoring it in the
+  test); `the_size_rule_is_told_apart_from_the_accuracy_target`. The existing
+  quiet-field pattern test moved to the new API.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

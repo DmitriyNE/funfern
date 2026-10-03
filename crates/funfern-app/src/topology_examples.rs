@@ -6840,6 +6840,89 @@ mod tests {
         );
     }
 
+    /// The pump's travelling pattern sizes the fiber and nothing else. The
+    /// estimate at the scene's own settings, edge 0.08, on a quiet field holds
+    /// every fiber element to the pattern's floor, `2π/36.2` over six
+    /// elements, 0.029, and leaves the vacuum to the 2.5 Hz wave, 0.067. Held
+    /// to the shortest pattern anywhere, every one of the 2,448 vacuum
+    /// elements of the user's run targeted under 0.035 and the whole domain
+    /// refined towards the fiber's floor while the error read 2% of a 12%
+    /// target.
+    #[test]
+    fn the_fibers_pump_pattern_sizes_only_the_fiber() {
+        let document = fiber_amplifier();
+        let settings = document.presentation.adaptation;
+        let prepared = prepare(&document, document.presentation.mesh_edge);
+        let patterns = funfern_core::CanonicalTemporalResolution::of_each_material(
+            &prepared.bundle.authored.materials,
+        )
+        .unwrap();
+        assert_eq!(patterns.len(), 1);
+        let floor =
+            std::f64::consts::TAU / FIBER_PUMP_WAVENUMBER / settings.elements_per_wavelength;
+        let count = prepared.operator.degrees_of_freedom();
+        let mut job = SolutionIndicatorJob::new_topology(
+            prepared.mesh.clone(),
+            prepared.operator.clone(),
+            &prepared.bundle.plan,
+            prepared.bundle.model(),
+            QuadraticSolutionSnapshot {
+                mesh_revision: prepared.mesh.mesh_revision,
+                displacement: vec![0.0; count],
+                velocity: vec![0.0; count],
+                acceleration: vec![0.0; count],
+                auxiliary: vec![0.0; count],
+                volume_acceleration: vec![0.0; count],
+                time: 0.0,
+                time_step: prepared.recommended_time_step(),
+            },
+            SolutionIndicatorOptions {
+                minimum_edge_length: settings.minimum_edge,
+                maximum_edge_length: settings.maximum_edge,
+                relative_tolerance: settings.accuracy_percent / 100.0,
+                elements_per_wavelength: settings.elements_per_wavelength,
+                forcing_frequency_hz: FIBER_SIGNAL_HZ,
+                band_edge_hz: FIBER_SIGNAL_HZ,
+                ..Default::default()
+            },
+        )
+        .with_instantaneous_materials(
+            prepared
+                .canonical_temporal_operator
+                .as_ref()
+                .expect("the pump prepares a temporal operator")
+                .initial_runtime(),
+        )
+        .with_coefficient_patterns(patterns);
+        let result = loop {
+            if let Some(result) = job.advance(1 << 16) {
+                break result.unwrap();
+            }
+        };
+        let (mut vacuum, mut held) = (0, 0);
+        for (triangle, target) in prepared.mesh.triangles.iter().zip(&result.element_targets) {
+            let centroid = triangle
+                .vertices
+                .iter()
+                .fold(Point2::default(), |sum, vertex| {
+                    sum + prepared.mesh.vertices[*vertex].point * (1.0 / 3.0)
+                });
+            if centroid.y.abs() < FIBER_H {
+                assert!(
+                    *target <= floor * (1.0 + 1.0e-9),
+                    "a fiber element was left at {target:.4}, above the pattern's {floor:.4}"
+                );
+            } else {
+                vacuum += 1;
+                held += usize::from(*target < 0.035);
+            }
+        }
+        assert!(
+            held * 5 < vacuum,
+            "{held} of {vacuum} vacuum elements are held near the fiber's floor"
+        );
+    }
+
     /// The fundamental mode of the glass core as a slab, `cos(uy/a)` inside
     /// and `cos(u)·e^{−w(|y|−a)/a}` outside, at `offset` from its axis, with
     /// `u tan u = w` and `u² + w² = V²`.

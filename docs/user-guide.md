@@ -580,9 +580,12 @@ names or with every expression evaluated at the material frame's origin. Each ro
   that is comfortably inside the target is the trade one number for the whole
   field makes.
   Carrying a forced wavelength and staying under the largest element allowed are
-  floors rather than judgements about error, so they refine regardless. The
+  floors rather than judgements about error, so they refine regardless, and the
+  estimate line then adds "refining to resolve wavelengths" so an error under
+  target beside a mesh still refining does not read as a contradiction. The
   forced wavelength is the shortest the field is expected to carry: the
-  sources', the pattern a travelling drive writes into its medium, and, where
+  sources', the pattern a travelling drive writes into its own medium (and
+  only there), and, where
   a Kerr or saturable medium's field is strong, the odd harmonics it makes
   there, which relax as the field fades. The sidebands a driven medium mixes
   into the wave are left to the estimate, which sees them where they are.

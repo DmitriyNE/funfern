@@ -523,13 +523,18 @@ impl Playground {
                     .accuracy_percent
             ),
             Some(result) => format!(
-                "Estimated error {:.1}% · target {:.0}%",
+                "Estimated error {:.1}% · target {:.0}%{}",
                 100.0 * result.report.global_indicator,
                 self.editor
                     .document
                     .presentation
                     .adaptation
                     .accuracy_percent,
+                if size_rule_refines(&result.report, self.amr_target_accuracy()) {
+                    " · refining to resolve wavelengths"
+                } else {
+                    ""
+                },
             ),
             None => format!(
                 "Estimated error — · target {:.0}%",
