@@ -176,6 +176,15 @@ impl Playground {
             self.amr_status = "adaptation discarded: the mesh changed underneath it".into();
             return;
         }
+        // A pause holds adaptation where it is: no estimate starts, no job
+        // advances and no mesh is handed off, and whatever finished in the
+        // background waits for Run. Each handoff clears the step cadence, so
+        // without this a paused field was estimated, adapted and handed off
+        // again and again, 14 times in 39 s on the parametric fiber.
+        if !self.wave_running {
+            self.amr_status = "paused".into();
+            return;
+        }
         if self.uploading.is_some() || self.preparation_in_progress() || self.editor.editing() {
             self.amr_status = if adaptation_in_progress {
                 "adapting mesh"
@@ -400,6 +409,14 @@ impl Playground {
             return;
         }
         let step = display.snapshot_completed_steps;
+        // A mesh that has not stepped since its handoff has no step behind
+        // its state: the other state slot is not the field a step earlier on
+        // this mesh, and estimates of that pair read 24.7% on every mesh of a
+        // paused run, flagging nearly every element.
+        if !stepped_since_handoff(&mut self.amr_generation_start, request.generation(), step) {
+            self.amr_status = "waiting for the new mesh to step".into();
+            return;
+        }
         if resident_filter_boundary(self.grid_filter_running(), step) {
             // The resident filter is accepted at this same solver step and
             // flips the state lanes once more. At that instant the other lane
@@ -593,6 +610,20 @@ impl Playground {
     }
 }
 
+/// Whether `generation` has taken a step since the estimator first saw it at
+/// some step, recording that first sighting. The step count runs on across
+/// handoffs, so a new generation shows the step its predecessor reached until
+/// it takes one of its own.
+fn stepped_since_handoff(start: &mut Option<(u64, u64)>, generation: u64, step: u64) -> bool {
+    match start {
+        Some((seen, first)) if *seen == generation => step > *first,
+        _ => {
+            *start = Some((generation, step));
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +675,83 @@ mod tests {
             "status was {:?}",
             state.amr_status
         );
+    }
+
+    /// A pause holds an adaptation where it is: the job does not advance and
+    /// nothing is handed off, however many frames pass, and Run picks it up
+    /// where it stopped. Paused on the parametric fiber, adaptation used to
+    /// run on, 14 handoffs in 39 s.
+    #[test]
+    fn a_pause_holds_adaptation_until_run() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let active = activate(&mut state);
+        state.editor.document.presentation.adaptation.enabled = true;
+        state.amr_adaptation_job = Some(MeshAdaptationJob::new_topology(
+            active.mesh.clone(),
+            &active.bundle.plan,
+            MeshAdaptationState::from_mesh(&active.mesh),
+            state.runtime.reserve_mesh_revision(),
+            Arc::new(|_, _| 0.1),
+            MeshAdaptationOptions {
+                minimum_target_edge_length: 0.01,
+                maximum_target_edge_length: 1.0,
+                max_refinement_changes: 0,
+                max_coarsening_changes: 0,
+                ..Default::default()
+            },
+        ));
+        state.amr_adaptation_source = Some(active.mesh.mesh_revision);
+        let refresh = |state: &mut Playground| {
+            state.refresh_amr(
+                &CanonicalGpuRequest::default(),
+                &CanonicalGpuDisplay::default(),
+                &WaveDisplay::default(),
+            )
+        };
+
+        state.wave_running = false;
+        for _ in 0..1_000 {
+            refresh(&mut state);
+        }
+        assert!(state.amr_adaptation_job.is_some(), "a paused job advanced");
+        assert!(state.amr_report.is_none());
+        assert_eq!(state.amr_status, "paused");
+
+        state.wave_running = true;
+        for _ in 0..10_000 {
+            refresh(&mut state);
+            if state.amr_adaptation_job.is_none() {
+                break;
+            }
+        }
+        assert!(
+            state.amr_adaptation_job.is_none(),
+            "Run did not resume the job"
+        );
+        assert!(state.amr_report.is_some());
+    }
+
+    /// A generation is estimated only once it has stepped: the step count
+    /// runs on across a handoff, so the new mesh first shows its
+    /// predecessor's step, and an estimate there pairs its state with a slot
+    /// that is not the step before it.
+    #[test]
+    fn a_new_mesh_is_estimated_only_once_it_has_stepped() {
+        let mut start = None;
+        assert!(!stepped_since_handoff(&mut start, 1, 0));
+        assert!(!stepped_since_handoff(&mut start, 1, 0));
+        assert!(stepped_since_handoff(&mut start, 1, 8));
+        // A handoff at step 687; paused, it stays there.
+        assert!(!stepped_since_handoff(&mut start, 2, 687));
+        for _ in 0..10 {
+            assert!(!stepped_since_handoff(&mut start, 2, 687));
+        }
+        assert!(stepped_since_handoff(&mut start, 2, 688));
+        // And the next handoff waits again.
+        assert!(!stepped_since_handoff(&mut start, 3, 700));
     }
 
     #[test]

@@ -1059,13 +1059,15 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   Whether this was the 25.7 s "constitutive compile" of 2026-09-26 is not
   checked.
 
-- [ ] Adaptation keeps running while the simulation is paused. Reported by
+- [x] Adaptation keeps running while the simulation is paused. Reported by
   the user on 2026-10-03, not yet reproduced. `refresh_amr`
   (`crates/funfern-app/src/ui/amr.rs`) stops for adaptation being off, a
   background failure, a mesh changed under a job and an edit in progress,
   but not for the pause, so it presumably keeps estimating and adapting a
   field that is not moving. Reproduce against the autosave first, then decide
-  what a pause holds: estimates, an adaptation in flight, or both.
+  what a pause holds: estimates, an adaptation in flight, or both. Fixed on
+  2026-10-03 (`docs/engineering-log.md`): a pause holds both, and a mesh is
+  estimated only once it has stepped since its handoff.
 
 - [x] A travelling drive's pattern floor binds the whole domain. Found on
   2026-10-03 from the user's report on the parametric fiber (error 2%

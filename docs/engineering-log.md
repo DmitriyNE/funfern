@@ -17854,3 +17854,35 @@ partway through a row, read as longer.
   length from 1 to 24 against them.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — A pause holds adaptation
+
+The user saw adaptation run on while the simulation was paused.
+
+- **Reproduced** in an instrumented run on the user's autosave (the parametric
+  fiber), paused at 6 s: 14 adaptations in the next 39 s, from 7,763 triangles
+  to 19,992, every estimate at the paused step 687. From the second on, each
+  read 24.7% whatever the mesh and flagged nearly every element (6,726 of
+  8,775 up to 17,113 of 19,992), so the loop would have run to the vertex cap.
+- **Causes.** `refresh_amr` never looked at the pause. Estimates are spaced
+  eight steps apart, which a pause freezes, but every handoff clears
+  `amr_last_analyzed_step`, so each new mesh was estimated at once. And a mesh
+  that has not stepped since its handoff has no step behind its state: the
+  other state slot is not the field a step earlier on this mesh, which is what
+  the constant 24.7% was reading.
+- **Fix.** Paused, `refresh_amr` starts no estimate, advances no job and hands
+  off nothing; its status reads "paused", and what finished in the background
+  waits for Run. Separately, a generation is estimated only once the step
+  count has moved past where the estimator first saw it
+  (`stepped_since_handoff`; the count runs on across handoffs).
+- **Checked** in the same instrumented run, paused at 6 s and run at 25 s:
+  nothing between, save one handoff requested before the pause; on Run the
+  first estimate came at step 709, after the mesh had stepped, at 3.0%.
+- **Tests.** `a_pause_holds_adaptation_until_run` (a job holds over 1,000
+  paused frames and finishes on Run); `a_new_mesh_is_estimated_only_once_it_has_stepped`.
+- **Seen, not changed:** after Run the fiber went on refining, 16,931
+  triangles by 50 s at 2-3% against 12%. While four or more elements are past
+  their wavelength floor the decision is Refine, and the adaptation then takes
+  the estimate's local error targets everywhere with it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

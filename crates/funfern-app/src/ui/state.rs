@@ -276,6 +276,9 @@ pub struct Playground {
     pub(super) amr_error: Option<String>,
     pub(super) amr_last_started: Option<Instant>,
     pub(super) amr_last_analyzed_step: Option<u64>,
+    /// The GPU generation the estimator last saw and the solver step it
+    /// first showed, so a mesh is estimated only once it has stepped.
+    pub(super) amr_generation_start: Option<(u64, u64)>,
     pub(super) amr_coarsen_streak: u8,
     pub(super) amr_indicator_job: Option<AmrIndicatorJob>,
     pub(super) amr_indicator_completed: Option<Result<SolutionIndicatorResult, AmrIndicatorError>>,
@@ -485,6 +488,7 @@ impl Default for Playground {
             amr_error: None,
             amr_last_started: None,
             amr_last_analyzed_step: None,
+            amr_generation_start: None,
             amr_coarsen_streak: 0,
             amr_indicator_job: None,
             amr_indicator_completed: None,
