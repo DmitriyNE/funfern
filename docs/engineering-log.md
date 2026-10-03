@@ -18430,3 +18430,27 @@ rewrite of an active link, while the user guide still described it.
   `funfern-app`'s test build; renamed to `CoonsSide`. The first gate of the
   day's spike 3 code ran while the file was still being edited and reported
   that break; the gate is rerun on the settled tree.
+
+## 2026-10-03 — IGA spike 5: edits without a mesher
+
+- **What.** `SplinePatch::with_moved_control` rebuilds only the samples a
+  surface control point touches and reports the count; `carry_flux` keeps
+  the flux's covariant components across the move; `flux_potential` recovers
+  the spline whose gradient the flux is (conjugate gradients on `K`), and
+  `refined`, `refine_field`, `refine_flux` carry a state to the dyadic
+  refinement exactly through that potential; `PatchStepper::with_state` now
+  takes the flux at the field's instant and `centered_flux` gives it, so a
+  handoff is right whatever the steps on either side (the half-step stagger
+  cost 3% when the step halved before this). `iga_patch_edits` measures it.
+- **Found.** A move touches 3% of samples and 4% of dofs; far from the pulse
+  it changes nothing (field 4e-10 from a run on the edited box); under the
+  pulse the energy changes linearly with the move. Refinement is exact (flux
+  a gradient to 6e-15, energy 4e-6 in the fine quadrature's view) and the
+  refined run lands 3.9e-3 from a fine run, the fourth-order scheme's
+  step-dependent modified field being the only handoff inconsistency. The
+  deformed box steps at the flat box's cost per step and at 0.65 of its
+  step for a strong bulge. Gate 5 passed; spike 6 folded in. The slab
+  example's readout now uses the centered flux too; its figures reproduce
+  the table within the readout's tolerance.
+- **State.** Uncommitted; the full gate was not rerun after this change
+  (clippy and the module's 21 tests pass). Run the gate, then commit.

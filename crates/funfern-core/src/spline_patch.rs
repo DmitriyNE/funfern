@@ -172,6 +172,11 @@ impl UniformBasis {
         self.periodic
     }
 
+    /// Whether the end knots are repeated (an open knot vector).
+    pub fn is_clamped(&self) -> bool {
+        !self.periodic && self.knots[0] == self.knots[self.degree]
+    }
+
     pub fn functions(&self) -> usize {
         if self.periodic {
             self.spans
@@ -680,8 +685,53 @@ impl GeometryMap {
 /// row-major, and the determinant.
 #[derive(Clone, Copy, Debug)]
 struct SampleJacobian {
+    /// `∂S/∂ξ` then `∂S/∂η`, each `(x, y)`.
+    forward: [f64; 4],
     inverse_transpose: [f64; 4],
     determinant: f64,
+}
+
+impl SampleJacobian {
+    fn new(d_xi: Point2, d_eta: Point2) -> Option<Self> {
+        let determinant = d_xi.cross(d_eta);
+        if !determinant.is_finite() || determinant <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            forward: [d_xi.x, d_xi.y, d_eta.x, d_eta.y],
+            inverse_transpose: [
+                d_eta.y / determinant,
+                -d_xi.y / determinant,
+                -d_eta.x / determinant,
+                d_xi.x / determinant,
+            ],
+            determinant,
+        })
+    }
+
+    /// The covariant (parametric) components `Jᵀ b` of a physical vector.
+    fn covariant(&self, b: Point2) -> Point2 {
+        let f = self.forward;
+        Point2::new(f[0] * b.x + f[1] * b.y, f[2] * b.x + f[3] * b.y)
+    }
+
+    /// The physical vector `J⁻ᵀ b̂` of covariant components.
+    fn physical(&self, covariant: Point2) -> Point2 {
+        let m = self.inverse_transpose;
+        Point2::new(
+            m[0] * covariant.x + m[1] * covariant.y,
+            m[2] * covariant.x + m[3] * covariant.y,
+        )
+    }
+}
+
+/// What a control-point move touched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EditReport {
+    pub affected_samples: usize,
+    pub samples: usize,
+    pub affected_dofs: usize,
+    pub degrees_of_freedom: usize,
 }
 
 /// A tensor-product spline patch over a parametric box mapped by a
@@ -851,21 +901,9 @@ impl SplinePatch {
                 let (point, d_xi, d_eta) = patch.geometry.evaluate(parameter, size);
                 points.push(point);
                 if !affine {
-                    let determinant = d_xi.cross(d_eta);
-                    if !determinant.is_finite() || determinant <= 0.0 {
-                        return Err(());
-                    }
-                    jacobians.push(SampleJacobian {
-                        inverse_transpose: [
-                            d_eta.y / determinant,
-                            -d_xi.y / determinant,
-                            -d_eta.x / determinant,
-                            d_xi.x / determinant,
-                        ],
-                        determinant,
-                    });
+                    jacobians.push(SampleJacobian::new(d_xi, d_eta).ok_or(())?);
                 }
-                Ok(())
+                Ok::<(), ()>(())
             })
             .ok()?;
         patch.points = points;
@@ -1086,6 +1124,217 @@ impl SplinePatch {
     /// Every sample's physical point, in sample order.
     pub fn sample_points(&self) -> &[Point2] {
         &self.points
+    }
+
+    /// The parametric box's size.
+    pub fn parametric_size(&self) -> Point2 {
+        Point2::new(self.basis_x.length(), self.basis_y.length())
+    }
+
+    /// The field's value at a parametric point.
+    pub fn evaluate_field(&self, u: &[f64], parameter: Point2) -> f64 {
+        let sx = self.basis_x.span_of(parameter.x);
+        let sy = self.basis_y.span_of(parameter.y);
+        let (nx, _) = self.basis_x.evaluate(sx, parameter.x);
+        let (ny, _) = self.basis_y.evaluate(sy, parameter.y);
+        let p = self.degree();
+        let mut value = 0.0;
+        for (a, nx) in nx.iter().enumerate().take(p + 1) {
+            let ix = self.basis_x.function(sx, a);
+            for (b, ny) in ny.iter().enumerate().take(p + 1) {
+                let iy = self.basis_y.function(sy, b);
+                value += u[self.node(ix, iy)] * nx * ny;
+            }
+        }
+        value
+    }
+
+    /// Every sample's parametric point, in sample order.
+    pub fn parametric_points(&self) -> Vec<Point2> {
+        let mut out = Vec::with_capacity(self.samples());
+        let _ = self.for_each_parametric_sample(|parameter| {
+            out.push(parameter);
+            Ok::<(), ()>(())
+        });
+        out
+    }
+
+    /// The same patch with one control point of its surface map moved by
+    /// `delta`, rebuilding only the samples in the spans that point
+    /// touches, and the count of what it touched. `None` for a map without
+    /// a control net, or if the move folds the map.
+    pub fn with_moved_control(
+        &self,
+        ix: usize,
+        iy: usize,
+        delta: Point2,
+    ) -> Option<(Self, EditReport)> {
+        let mut patch = self.clone();
+        let GeometryMap::Surface {
+            basis_x,
+            basis_y,
+            controls,
+        } = &mut patch.geometry
+        else {
+            return None;
+        };
+        let degree = basis_x.degree();
+        let control = ix * basis_y.functions() + iy;
+        controls[control] = controls[control] + delta;
+        // The control point's support: spans `ix - degree ..= ix`, clipped.
+        let low = |index: usize| index.saturating_sub(degree) as f64;
+        let high = |index: usize, spans: usize| (index.min(spans - 1) + 1) as f64;
+        let touched_x = low(ix) * basis_x.spacing()..=high(ix, basis_x.spans()) * basis_x.spacing();
+        let touched_y = low(iy) * basis_y.spacing()..=high(iy, basis_y.spans()) * basis_y.spacing();
+        let size = patch.parametric_size();
+        let geometry = patch.geometry.clone();
+        let mut affected = Vec::new();
+        let mut index = 0;
+        let rebuilt = patch.for_each_parametric_sample(|parameter| {
+            if touched_x.contains(&parameter.x) && touched_y.contains(&parameter.y) {
+                let (point, d_xi, d_eta) = geometry.evaluate(parameter, size);
+                affected.push((index, point, SampleJacobian::new(d_xi, d_eta).ok_or(())?));
+            }
+            index += 1;
+            Ok::<(), ()>(())
+        });
+        rebuilt.ok()?;
+        for (index, point, jacobian) in &affected {
+            patch.points[*index] = *point;
+            patch.jacobians[*index] = *jacobian;
+        }
+        let affected_set: std::collections::HashSet<usize> =
+            affected.iter().map(|(index, _, _)| *index).collect();
+        let mut touched_dofs = vec![false; patch.degrees_of_freedom()];
+        patch.for_each_sample(|index, stencil| {
+            if affected_set.contains(&index) {
+                for node in stencil.nodes() {
+                    touched_dofs[*node] = true;
+                }
+            }
+        });
+        patch.accumulate_lumped();
+        let report = EditReport {
+            affected_samples: affected.len(),
+            samples: patch.samples(),
+            affected_dofs: touched_dofs.iter().filter(|t| **t).count(),
+            degrees_of_freedom: patch.degrees_of_freedom(),
+        };
+        Some((patch, report))
+    }
+
+    /// The flux `b` carried from this patch to `target`, which has the same
+    /// samples at the same parametric points but a different map: the
+    /// covariant components `Jᵀ b` are kept, as the gradient of a field that
+    /// moves with the geometry.
+    pub fn carry_flux(&self, target: &Self, b: &[Point2]) -> Vec<Point2> {
+        assert_eq!(self.samples(), target.samples());
+        (0..self.samples())
+            .map(|index| {
+                let covariant = match self.jacobians.get(index) {
+                    Some(j) => j.covariant(b[index]),
+                    None => b[index],
+                };
+                match target.jacobians.get(index) {
+                    Some(j) => j.physical(covariant),
+                    None => covariant,
+                }
+            })
+            .collect()
+    }
+
+    /// The same patch with every span split in two per direction, on the
+    /// same map, with unit material.
+    pub fn refined(&self) -> Option<Self> {
+        let refine = |basis: &UniformBasis| {
+            let spans = 2 * basis.spans();
+            let spacing = 0.5 * basis.spacing();
+            if basis.is_periodic() {
+                UniformBasis::periodic(basis.degree(), spans, spacing)
+            } else if basis.is_clamped() {
+                UniformBasis::open(basis.degree(), spans, spacing)
+            } else {
+                UniformBasis::unclamped(basis.degree(), spans, spacing)
+            }
+        };
+        Self::from_bases(
+            refine(&self.basis_x),
+            refine(&self.basis_y),
+            self.geometry.clone(),
+            self.rule.len(),
+        )
+    }
+
+    /// The coefficients whose spline is the L2 projection over the patch of
+    /// a function of the parametric point.
+    pub fn project_parametric(&self, f: impl Fn(Point2) -> f64) -> Vec<f64> {
+        let parameters = self.parametric_points();
+        let mut right = vec![0.0; self.degrees_of_freedom()];
+        self.for_each_sample(|index, stencil| {
+            let value = f(parameters[index]) * stencil.weight * self.density[index];
+            for (node, basis) in stencil.nodes().iter().zip(stencil.values()) {
+                right[*node] += value * basis;
+            }
+        });
+        self.conjugate_gradients(
+            |v| self.apply_mass(v),
+            &right,
+            &self.lumped.iter().map(|d| 1.0 / d).collect::<Vec<_>>(),
+        )
+    }
+
+    /// The field `u` of this patch as coefficients of `fine`, a refinement
+    /// of it: exact up to the projection's tolerance, since the coarse
+    /// space lies in the fine one.
+    pub fn refine_field(&self, fine: &Self, u: &[f64]) -> Vec<f64> {
+        fine.project_parametric(|parameter| self.evaluate_field(u, parameter))
+    }
+
+    /// The spline `w` whose gradient the flux is: `b` evolves only by
+    /// gradients of fields, so with a gradient start it stays one, and
+    /// `K w = Gᵀ W κ b` recovers `w` up to a constant, here with zero
+    /// weighted mean. The residual says how far `b` is from a gradient.
+    pub fn flux_potential(&self, b: &[Point2]) -> (Vec<f64>, f64) {
+        let right = self.divergence(b);
+        let diagonal: Vec<f64> = {
+            let mut k = vec![0.0; self.degrees_of_freedom()];
+            self.for_each_sample(|index, stencil| {
+                let weight = stencil.weight * self.stiffness[index];
+                for (node, g) in stencil.nodes().iter().zip(stencil.gradients()) {
+                    k[*node] += weight * g.dot(*g);
+                }
+            });
+            k.iter().map(|k| 1.0 / k.max(f64::MIN_POSITIVE)).collect()
+        };
+        let mut w =
+            self.conjugate_gradients(|v| self.divergence(&self.gradient(v)), &right, &diagonal);
+        let total: f64 = self.lumped.iter().sum();
+        let mean = dot(&w, &self.lumped) / total;
+        for value in &mut w {
+            *value -= mean;
+        }
+        let gradient = self.gradient(&w);
+        let residual: f64 = gradient
+            .iter()
+            .zip(b)
+            .zip(self.sample_weights())
+            .map(|((g, b), weight)| weight * (*g - *b).dot(*g - *b))
+            .sum();
+        let norm: f64 = b
+            .iter()
+            .zip(self.sample_weights())
+            .map(|(b, weight)| weight * b.dot(*b))
+            .sum();
+        (w, (residual / norm.max(f64::MIN_POSITIVE)).sqrt())
+    }
+
+    /// The flux `b` of this patch at the samples of `fine`, a refinement of
+    /// it: the flux potential is carried as a field, exactly, and
+    /// differentiated on the fine patch, so a flux that is a gradient is
+    /// carried exactly.
+    pub fn refine_flux(&self, fine: &Self, b: &[Point2]) -> Vec<Point2> {
+        let (potential, _) = self.flux_potential(b);
+        fine.gradient(&self.refine_field(fine, &potential))
     }
 
     /// Every sample's Jacobian determinant, one under the affine map.
@@ -1613,15 +1862,17 @@ impl<'a> PatchStepper<'a> {
         Self::with_state(patch, treatment, integrator, dt, u, None)
     }
 
-    /// Starts from the field `u` and, if given, the flux `b` half a step
-    /// ahead of it; at rest otherwise.
+    /// Starts from the field `u` and, if given, the flux `b` at the field's
+    /// own instant, which the stepper staggers half a step ahead itself; at
+    /// rest otherwise. A handoff between steppers passes
+    /// [`Self::centered_flux`] here, whatever the steps on either side.
     pub fn with_state(
         patch: &'a SplinePatch,
         treatment: MassTreatment,
         integrator: Integrator,
         dt: f64,
         u: Vec<f64>,
-        b_half_ahead: Option<Vec<Point2>>,
+        b_centered: Option<Vec<Point2>>,
     ) -> Self {
         let q = patch.flux_of_field(&u, treatment);
         let u = patch.field(&q, treatment);
@@ -1640,14 +1891,15 @@ impl<'a> PatchStepper<'a> {
             steps: 0,
         };
         let drift_field = stepper.drift_field();
-        stepper.b = b_half_ahead.unwrap_or_else(|| {
-            stepper
-                .patch
-                .gradient(&drift_field)
+        let half_kick = stepper.patch.gradient(&drift_field);
+        stepper.b = match b_centered {
+            Some(centered) => centered
                 .into_iter()
-                .map(|g| g * (0.5 * dt))
-                .collect()
-        });
+                .zip(&half_kick)
+                .map(|(b, g)| b + *g * (0.5 * dt))
+                .collect(),
+            None => half_kick.iter().map(|g| *g * (0.5 * dt)).collect(),
+        };
         stepper.drift_field_previous = drift_field.clone();
         stepper.drift_field = drift_field;
         stepper
@@ -1715,6 +1967,16 @@ impl<'a> PatchStepper<'a> {
     /// The flux half a step ahead of the field.
     pub fn flux(&self) -> &[Point2] {
         &self.b
+    }
+
+    /// The flux at the field's own instant, `b⁺ − dt/2 · G ũ`, the mean of
+    /// the two half-step fluxes around it: what a handoff carries.
+    pub fn centered_flux(&self) -> Vec<Point2> {
+        self.b
+            .iter()
+            .zip(self.patch.gradient(&self.drift_field))
+            .map(|(b, g)| *b - g * (0.5 * self.dt))
+            .collect()
     }
 
     /// The staggered energy `½ Qᵀ P Q + ½ b⁻ · W b⁺`, which leapfrog
@@ -2198,6 +2460,106 @@ mod tests {
         }
         let values = patch.sample_values(&ones);
         assert!(values.iter().all(|v| (v - 1.0).abs() < 1.0e-13));
+    }
+
+    #[test]
+    fn a_moved_control_point_rebuilds_locally_and_carries_the_flux_back_and_forth() {
+        let size = Point2::new(2.0, 2.0);
+        let patch = SplinePatch::curved(
+            2,
+            GeometryMap::flat_surface(Point2::new(-1.0, -1.0), size, [8, 8]),
+            size,
+            [24, 24],
+            2,
+            true,
+        )
+        .unwrap();
+        let (moved, report) = patch
+            .with_moved_control(5, 4, Point2::new(0.07, -0.05))
+            .unwrap();
+        // Control point 5 of a cubic net on 8 spans touches spans 2..=5:
+        // half the width, so a quarter of the samples.
+        assert_eq!(report.affected_samples, report.samples / 4);
+        assert!(report.affected_dofs < report.degrees_of_freedom / 2);
+        let (back, _) = moved
+            .with_moved_control(5, 4, Point2::new(-0.07, 0.05))
+            .unwrap();
+        for (a, b) in patch.sample_points().iter().zip(back.sample_points()) {
+            assert!((*a - *b).norm() < 1.0e-12);
+        }
+        let b: Vec<Point2> = (0..patch.samples())
+            .map(|i| Point2::new(((i * 31) % 17) as f64 / 17.0, ((i * 13) % 23) as f64 / 23.0))
+            .collect();
+        let carried = patch.carry_flux(&moved, &b);
+        let returned = moved.carry_flux(&back, &carried);
+        for (a, b) in b.iter().zip(&returned) {
+            assert!((*a - *b).norm() < 1.0e-12);
+        }
+        // A sample the move did not touch keeps its flux.
+        let far = patch
+            .sample_points()
+            .iter()
+            .position(|p| p.x < -0.6)
+            .unwrap();
+        assert!((carried[far] - b[far]).norm() < 1.0e-14);
+        // The gradient of a field moves as its covariant components say.
+        let u = patch.project_parametric(|p| (p.x * 1.3).sin() + p.y * p.y);
+        let moved_gradient = moved.gradient(&u);
+        let carried_gradient = patch.carry_flux(&moved, &patch.gradient(&u));
+        for (a, b) in moved_gradient.iter().zip(&carried_gradient) {
+            assert!((*a - *b).norm() < 1.0e-10);
+        }
+    }
+
+    #[test]
+    fn refinement_carries_the_field_exactly_and_the_flux_closely() {
+        let size = Point2::new(2.0, 2.0);
+        let coarse = SplinePatch::curved(
+            2,
+            GeometryMap::flat_surface(Point2::new(-1.0, -1.0), size, [6, 6]),
+            size,
+            [12, 12],
+            2,
+            true,
+        )
+        .unwrap();
+        let fine = coarse.refined().unwrap();
+        assert_eq!(fine.samples(), 4 * coarse.samples());
+        let u = coarse.project_parametric(|p| (p.x * 1.7).cos() * (p.y - 0.4));
+        let u_fine = coarse.refine_field(&fine, &u);
+        for step in 0..40 {
+            let parameter = Point2::new(
+                2.0 * (step as f64 + 0.3) / 40.0,
+                2.0 * ((step * 7 % 40) as f64 + 0.6) / 40.0,
+            );
+            let a = coarse.evaluate_field(&u, parameter);
+            let b = fine.evaluate_field(&u_fine, parameter);
+            assert!((a - b).abs() < 1.0e-9, "{a} {b}");
+        }
+        // A flux that is a gradient is recovered as one and carried exactly.
+        let (potential, residual) = coarse.flux_potential(&coarse.gradient(&u));
+        assert!(residual < 1.0e-9, "{residual}");
+        let mean: f64 = u
+            .iter()
+            .zip(coarse.lumped())
+            .map(|(u, m)| u * m)
+            .sum::<f64>()
+            / coarse.lumped().iter().sum::<f64>();
+        for (w, u) in potential.iter().zip(&u) {
+            assert!((w - (u - mean)).abs() < 1.0e-8, "{w} {}", u - mean);
+        }
+        let b_fine = coarse.refine_flux(&fine, &coarse.gradient(&u));
+        for (a, b) in fine.gradient(&u_fine).iter().zip(&b_fine) {
+            assert!((*a - *b).norm() < 1.0e-8, "{a:?} {b:?}");
+        }
+        // A flux that is not a gradient shows in the residual.
+        let twisted: Vec<Point2> = coarse
+            .sample_points()
+            .iter()
+            .map(|p| Point2::new(-p.y, p.x))
+            .collect();
+        let (_, residual) = coarse.flux_potential(&twisted);
+        assert!(residual > 0.5, "{residual}");
     }
 
     #[test]

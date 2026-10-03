@@ -945,7 +945,11 @@ predictable on representative dense scenes.
   at 6 spans per pulse width. An IGA scene is therefore a box patch whose
   material regions are parametric rectangles, curved through the control
   net; free curves inside it are immersed and below the conforming
-  triangle. Spikes 5 and 6 are next.
+  triangle. Spike 5 (same day): a control-point move rebuilds 3% of the
+  samples with no artifact, knot refinement carries field and flux exactly
+  through the flux's potential, and a deformed box costs only its smaller
+  step. The spikes are complete; the single-patch IGA scene is feasible as
+  a deformed box with knot-aligned regions.
 - Reuse the UI and transaction lifecycle, with discretization-specific numerical
   kernels where appropriate.
 - Compare propagation, editing behavior, and cost against the triangular solver.

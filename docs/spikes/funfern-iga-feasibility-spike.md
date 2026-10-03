@@ -1,9 +1,8 @@
 # IGA feasibility spikes — 3 October 2026
 
-**Status: spikes 1, 2, T, 3 and 4 measured.** Gate 1 passed; gate 3 failed
-for smooth boundaries and passed for a deformed box; gate 4 passed for
-knot-aligned regions and failed for free curves. Spikes 5 and 6 are planned,
-not started. Everything here is CPU f64 in
+**Status: all spikes measured.** Gate 1 passed; gate 3 failed for smooth
+boundaries and passed for a deformed box; gate 4 passed for knot-aligned
+regions and failed for free curves; gate 5 passed, with spike 6 folded in. Everything here is CPU f64 in
 `crates/funfern-core/src/spline_patch.rs` and the two examples
 `iga_dispersion` and `iga_box_mode`; nothing is reached by the application.
 
@@ -582,6 +581,47 @@ their boundaries while they stay knot lines. The present scene model, free
 curves in a box, maps onto a single patch only by immersion. Trimming, local
 refinement or an enriched basis at the interface are the ways past that,
 none of them a single untrimmed patch.
+
+## Spike 5: edits without a mesher, and the deformed box's cost
+
+On the deformed box (right side bulged by 0.3 through a bicubic net on 16 ×
+16 spans, Jacobian 1.00 to 1.73), quadratics on 62 × 62 spans, Gauss 2 × 2,
+two sweeps, unclamped, the fourth-order integrator at 0.8 of its step
+(`iga_patch_edits`). A handoff carries the field's coefficients, which move
+with the geometry, and the flux at the field's own instant
+(`PatchStepper::centered_flux`), which the new stepper staggers itself,
+whatever its step.
+
+- **A control-point move rebuilds 3% of the samples and touches 4% of the
+  dofs** (`with_moved_control`: the cubic net point's 4 × 4 spans), and left
+  the stable step unchanged. The flux is carried by its covariant
+  components, `Jᵀ b` kept (`carry_flux`); the field at a sample moves with
+  the geometry. With the pulse 1.9 away from the moved point the energy
+  changed by 0 and the field at `t = 1` differed from a run on the edited
+  box from the start by 4e-10: no artifact. Under the pulse the energy
+  changes linearly with the move, 1.7e-3, 3.5e-3, 6.9e-3 for 0.004, 0.008,
+  0.016, as stretching the medium should.
+- **Knot refinement carries the state exactly.** The field is in the fine
+  space and is projected onto it to 1e-9. The flux is a gradient to 6e-15
+  throughout a run (`flux_potential`: `b` evolves only by gradients, so
+  `K w = Gᵀ W κ b` recovers its potential), and the potential is carried as
+  a field and differentiated on the fine patch (`refine_flux`), so the flux
+  is exact too; the energy as the fine quadrature reads it differs by 4e-6.
+  Refining 62 × 62 to 124 × 124 at `t = 0.29` and running to `t = 1` lands
+  3.9e-3 from a fine run from the start, where the coarse run lands 6e-4:
+  the handoff's own cost is the fourth-order scheme's step-dependent
+  modified field, an `O(dt²)` inconsistency when the step changes, not the
+  transfer.
+- **The deformed box costs its step only.** Flat and deformed boxes of
+  4,096 dofs step at 2.8 and 3.0 ms a step; the deformed one's stable step
+  is 0.65 of the flat one's for this strong bulge (0.82 to 0.87 for spike
+  3's milder one), so it runs at 8.2 against 14.0 simulated seconds per
+  wall second. That folds spike 6 in: the cost tables of spike 1 scale by
+  the Jacobian's effect on the step and by nothing else.
+
+**Gate 5 verdict: passed.** Edits and refinement are local, exact and
+artifact-free, with the one caveat that a handoff that changes the step
+under the fourth-order integrator carries an `O(dt²)` inconsistency.
 
 ## What the spikes do not settle
 

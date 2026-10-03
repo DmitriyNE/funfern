@@ -164,12 +164,12 @@ fn run(
     let (lambda, _) = patch.largest_eigenvalue(treatment, 1500);
     let dt = fraction * integrator.stability_factor() * 2.0 / lambda.sqrt();
     let pulse = |x: f64| (-((x - PULSE_CENTER) / sigma).powi(2)).exp();
-    // A right-moving pulse at unit speed: `b_x = -u / c`, half a step ahead.
+    // A right-moving pulse at unit speed: `b_x = -u / c` at the same instant.
     let u0 = patch.project(|p| pulse(p.x));
-    let b_half: Vec<Point2> = patch
+    let b0: Vec<Point2> = patch
         .sample_points()
         .iter()
-        .map(|p| Point2::new(-pulse(p.x - 0.5 * dt), 0.0))
+        .map(|p| Point2::new(-pulse(p.x), 0.0))
         .collect();
     let energy_left = |u: &[f64], b: &[Point2]| -> (f64, f64) {
         let values = patch.sample_values(u);
@@ -196,15 +196,16 @@ fn run(
         }
         (left, total)
     };
-    let (_, initial) = energy_left(&u0, &b_half);
-    let mut stepper = PatchStepper::with_state(&patch, treatment, integrator, dt, u0, Some(b_half));
+    let (_, initial) = energy_left(&u0, &b0);
+    let mut stepper = PatchStepper::with_state(&patch, treatment, integrator, dt, u0, Some(b0));
     let steps = (MEASURE_TIME / dt).round() as u64;
     let start = Instant::now();
     while stepper.steps() < steps {
         stepper.step();
     }
     let wall = start.elapsed().as_secs_f64();
-    let (left, total) = energy_left(stepper.field(), stepper.flux());
+    let centered = stepper.centered_flux();
+    let (left, total) = energy_left(stepper.field(), &centered);
     let reflected = left / initial;
     println!(
         "  side {side:>3} ({:>5} DOFs, h {:.4}, {:.1} spans per σ): R {:.6}, error {:+.2e} ({:+.2e} relative), energy {:+.1e}, {} steps, dt {:.2e}, {:.1} s",
