@@ -995,7 +995,10 @@ fn gathered_force(node: u32, second: bool) -> f32 {
 }
 
 // The node's force and, with `short_wave`, the gather of the short-wave
-// stresses the drift left, through the same entries and the same map.
+// stresses the drift left, through the same entries. The stress reads the
+// complementary map with its drive and without a field law's secant, as the
+// reference's `short_wave_force` does: it is a viscosity, not the medium's
+// own response.
 fn gathered_forces(node: u32, second: bool, short_wave: bool) -> vec2<f32> {
     let range = nodes[node].ranges.xy;
     let driven = temporal_enabled();
@@ -1016,15 +1019,19 @@ fn gathered_forces(node: u32, second: bool, short_wave: bool) -> vec2<f32> {
             let flux = select(
                 accepted_b(index), candidate_b(index), second || has_loss_stages());
             var inverse_factor = 1.0;
+            var drive_factor = 1.0;
+            if driven {
+                drive_factor = 1.0 / temporal_complementary_factor(index, force_time);
+            }
             if field_laws() {
                 inverse_factor = scratch[sample_secant_offset() + index].values.x;
-            } else if driven {
-                inverse_factor = 1.0 / temporal_complementary_factor(index, force_time);
+            } else {
+                inverse_factor = drive_factor;
             }
             let coefficient = vec2<f32>(coefficient_x, table_float(entry, 3u));
             result += inverse_factor * dot(coefficient, flux);
             if short_wave {
-                stress += inverse_factor
+                stress += drive_factor
                     * dot(coefficient, scratch[complementary_offset() + index].values.zw);
             }
         }
@@ -2247,7 +2254,8 @@ fn kick_node(node: u32, second: bool) {
     let old = select(
         accepted_q(node), candidate_q(node), second || has_loss_stages());
     if temporal_enabled() && node_is_nonlinear(node) {
-        kick_nonlinear_node(node, old, net, source, held_force, duration, target_time);
+        kick_nonlinear_node(
+            node, old, net, source, held_force, duration, target_time, short_wave, viscous);
         if second { inject_at(node); }
         return;
     }
@@ -2302,10 +2310,13 @@ fn kick_node(node: u32, second: bool) {
 // written through the forward map, `Q = P(g)`. The energy lanes charge source and force work at the field of
 // the kick's mean flux, a second-order stand-in for the reference's exact
 // discrete gradient: these lanes are diagnostics, and an f32 energy quotient
-// would lose more to cancellation than the midpoint rule does.
+// would lose more to cancellation than the midpoint rule does. The
+// short-wave viscosity follows the kick as on a linear node, and its loss is
+// charged the same way, at the field of the mean of the two fluxes; the
+// reference takes the exact store difference.
 fn kick_nonlinear_node(
     node: u32, old: f32, net: f32, source: f32, held_force: f32,
-    duration: f32, target_time: f32,
+    duration: f32, target_time: f32, short_wave: bool, viscous: f32,
 ) {
     let pinned = nodes[node].boundary.z != 0u;
     let damping = nodes[node].damping_support.x;
@@ -2345,7 +2356,6 @@ fn kick_nonlinear_node(
     }
     let source_work = duration * field * source;
     let force_work = duration * field * held_force;
-    set_candidate_q(node, next);
     scratch[node].values.x += source_work;
     scratch[node].values.w += duration * damping * field * field;
     if pinned {
@@ -2353,7 +2363,13 @@ fn kick_nonlinear_node(
             - temporal_primary_energy(node, old, target_time);
         scratch[node].values.y += energy_change - source_work + force_work
             + duration * damping * field * field;
+    } else if short_wave && viscous != 0.0 {
+        let damped = next - control.clock_f32.x * viscous;
+        let middle = temporal_primary_field(node, 0.5 * (next + damped), target_time);
+        scratch[node].values.z += middle * (next - damped);
+        next = damped;
     }
+    set_candidate_q(node, next);
     if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
 }
 

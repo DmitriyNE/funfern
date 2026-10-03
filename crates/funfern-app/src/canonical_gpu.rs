@@ -1442,7 +1442,8 @@ impl CanonicalGpuPlan {
             }
         }
         // Gate O: each sample's short-wave viscosity `τ`, four to a word, where
-        // a self-oscillating law acts. The drift reads it; offset 0 means none.
+        // a self-oscillating law or a short-wave loss acts. The drift reads it;
+        // offset 0 means none.
         let short_wave = operator.short_wave_viscosity();
         let short_wave_offset = if short_wave.is_empty() {
             0

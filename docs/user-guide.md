@@ -270,8 +270,9 @@ names or with every expression evaluated at the material frame's origin. Each ro
   Mesh-scale trim (α = 0.05) or α by hand up to 1. It damps waves near the
   mesh's own resolution, about α/(2h) at its ceiling with h the largest step,
   and spares resolved ones, so it trims mesh-scale residue from a pumped or
-  mixing medium for a few percent of the signal. It runs beside a linear
-  response only; the simple view names it when it is on. A drive's **Timing** is Continuous, or Pulsed
+  mixing medium for a few percent of the signal. It runs beside any
+  response, Kerr and saturable included; the simple view names it when it
+  is on. A drive's **Timing** is Continuous, or Pulsed
   under a flat-top, Gaussian or sinc envelope with a start, Fire now and a
   repeat, as a pulsed source has. Pulsed, the drive runs only in its pulses,
   its carrier counted from each pulse's centre, and Shape draws the

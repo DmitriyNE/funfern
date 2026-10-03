@@ -17989,3 +17989,66 @@ move every control below them, which makes those controls hard to click.
   it fails with the status line left to wrap).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — The short-wave loss composes with field laws
+
+A short-wave loss was refused beside a field law, so the Kerr slab, whose
+odd harmonics run up into what the mesh can carry, could not take it. It now
+composes with every field law, Kerr and saturable in either row. Van der Pol
+beside a field law stays refused (filed in `docs/plan.md`).
+
+- **Why it carries over.** The stress removes energy at first order because
+  the field is the primary store's derivative in the flux, which a field law
+  keeps. Only the counting and the cap assumed `u = Q/m`.
+- **Reference.** `apply_short_wave` counts the lane as the primary store
+  before less after when the generation has field laws, as `decay` does
+  there. The viscosity's `G` beside a field law is the row the step's own
+  bound uses, now `trajectory_stiffness_rows` (split out of
+  `per_node_eigenvalue_bound`, whose result is unchanged): each sample at its
+  largest map and each node at its least mass, so a law that lightens the
+  mass or stiffens the kick's slot lowers `τ`. Without field laws `G` is the
+  assembled row as before, so linear scenes are bit for bit what they were.
+- **Device.** `kick_nonlinear_node` applies the gathered stress after its
+  kick, as the linear kick does, pins excepted, and charges the lane at the
+  field of the mean of the two fluxes. The gather reads the stress through
+  the complementary map's drive alone; it had used the field law's secant
+  for it, which the reference's `short_wave_force` does not.
+- **Measured (reference).** `a_short_wave_loss_composes_with_every_field_law`,
+  α = 0.25 at edge 0.5 from a ceiling field at a peak of 0.5: the ceiling's
+  energy decays at 0.36-0.70 of α/h (0.36 under the defocusing saturable
+  law, whose cap sees its lighter mass), a smooth mode at 0.3-0.5% of that,
+  a uniform field not at all; the lane takes 94-98% of what was there. At
+  the recommended step the damped ceiling falls under 1e-4 of its start in
+  10 s under all five laws; undamped it ends at 0.6-3 times its start.
+- **Measured (device).** `canonical_gpu_nonlinear` with
+  `NONLINEAR_SHORT_WAVE` (Kerr in the mass row, saturable in the other, 200
+  steps): α = 0.3 Q 4.5e-7, b 5.0e-7, loss lane 5.6e-7; pumped 4.4e-7 /
+  5.0e-7 / 2.0e-7; with source, pins and loss 5.3e-7 / 5.8e-7 / 4.4e-8;
+  first-order wall 5.9e-7 / 5.0e-7 / 1.7e-8; second-order wall 7.5e-7 /
+  5.8e-7 / 3.1e-7; thin gap 3.7e-7 / 6.2e-7 / 3.2e-7; with the filter 4.6e-7
+  / 5.0e-7 / 6.0e-7; α = 1 3.2e-7 / 3.9e-7 / 4.5e-6; the driven linear
+  medium 3.4e-7 / 3.7e-7 / 1.6e-7. `OSCILLATOR_SHORT_WAVE=0.3` unchanged:
+  Q 3.0e-7, loss lane 3.6e-6.
+- **The Kerr slab** (gallery scene, receiver at x = 0.55, 4 s, fixed mesh,
+  no adaptation), amplitude at each line relative to α = 0:
+
+  | edge | α | 2.5 Hz | 7.5 Hz | 12.5 Hz | 17.5 Hz | 22.5 Hz |
+  |---|---|---|---|---|---|---|
+  | 0.08 | 0.25 | 0.93 | 0.65 | 0.13 | 1.5 | 0.73 |
+  | 0.08 | 0.5 | 0.87 | 0.41 | 0.05 | 1.5 | 0.71 |
+  | 0.04 | 0.25 | 0.97 | 0.80 | 0.81 | 0.44 | 0.16 |
+  | 0.04 | 0.5 | 0.95 | 0.65 | 0.56 | 0.18 | 0.13 |
+
+  At 0.08 the bare 12.5 Hz line is above the third harmonic (9.1e-3 against
+  6.7e-3), at 0.04 half of it, so most of it at 0.08 is the mesh's; the 17.5
+  Hz line there is 2.5e-4, at the floor of the readout. The gallery scene
+  carries no α: that is a call on looks.
+- **Editor.** The response presets and the Advanced short-wave group no
+  longer exclude each other; only van der Pol keeps a field-dependent
+  response out (`SELF_OSCILLATING_RESPONSE` as it was before the loss).
+- **Tests.** `a_short_wave_loss_composes_with_every_field_law`; the van der
+  Pol test now checks that van der Pol beside a field law is refused, loss
+  or no loss; `a_short_wave_loss_prepares_and_reaches_the_solver` runs beside
+  a Kerr response too.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

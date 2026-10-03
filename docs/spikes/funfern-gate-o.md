@@ -237,6 +237,18 @@ formed on the midpoint field and applied after the kick, so a single step of
 the ceiling mode can read a little the wrong way while the run loses it at
 `α/(2h)` in amplitude.
 
+It composes with a field law as well. The loss removes energy at first order
+because the field is the store's derivative in the flux, which a Kerr or
+saturable map keeps; only the counting and the cap changed. Beside a field law
+the lane is the primary store before less after, as the dissipation stage
+measures it there, and the device charges it at the field of the mean of the
+two fluxes. `G` is then the row the step's own bound uses
+(`trajectory_stiffness_rows`): every sample at the largest map and every node
+at the least mass its laws reach, so a law that lightens the mass or stiffens
+the kick's slot lowers `τ` with it. The stress keeps the complementary map's
+drive and not the field law's secant, on both sides. Van der Pol still does
+not compose with a field law: its node map is exact only for a linear one.
+
 ## Skins and names
 
 The equation is the same in every skin; only what `u`, and therefore `r`,

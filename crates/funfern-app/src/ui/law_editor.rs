@@ -22,8 +22,8 @@ const ELECTRIC_LOSS: u8 = 48;
 const MAGNETIC_LOSS: u8 = 64;
 pub(super) const RECIPROCAL_STIFFNESS: u8 = 80;
 const RESTORING: u8 = 96;
-pub(super) const SELF_OSCILLATING_RESPONSE: &str = "Not beside a self-oscillating loss or a short-wave loss: both assume a linear \
-     response. Make the loss constant and the short-wave loss Off first.";
+pub(super) const SELF_OSCILLATING_RESPONSE: &str = "Not beside a self-oscillating loss: van der Pol's node map assumes a linear response. \
+     Make the loss constant first.";
 /// The short-wave loss the editor offers by name: on the parametric fiber at
 /// edge 0.04 it took 4% of the far-end signal, where the signal has about
 /// seven nodes a wavelength.
@@ -138,7 +138,7 @@ pub(super) fn law_slots_editor(
 ) {
     let id = material.id.0;
     let parameters = material.parameters.clone();
-    let field_laws = !needs_linear_response(material);
+    let field_laws = !self_oscillating(material);
     let (base, law) = match row {
         LawPresetRow::Stiffness => (STIFFNESS_ROW, &mut material.stiffness_law),
         _ => (MASS_ROW, &mut material.mass_law),
@@ -168,19 +168,10 @@ pub(super) fn self_oscillating(material: &Material) -> bool {
         .any(|channel| matches!(channel.law.rate, RateLaw::VanDerPol { .. }))
 }
 
-/// Whether a law on the material assumes a linear response, so a
-/// field-dependent one is not offered beside it: van der Pol's node map and
-/// the short-wave loss's energy both take the field as the flux over the
-/// mass.
-pub(super) fn needs_linear_response(material: &Material) -> bool {
-    self_oscillating(material) || material.short_wave_loss > 0.0
-}
-
 /// The short-wave loss, in Advanced: off, the named trim, or α by hand. It is
-/// not a coefficient or a row's channel, so it has a group of its own.
+/// not a coefficient or a row's channel, so it has a group of its own. It
+/// runs beside any response, a field-dependent one included.
 pub(super) fn short_wave_editor(ui: &mut egui::Ui, material: &mut Material) {
-    let linear_response = material.mass_law.field == FieldLaw::Linear
-        && material.stiffness_law.field == FieldLaw::Linear;
     ui.small("A viscosity on the field's gradient, τ = α / (h G) on each element")
         .on_hover_text(
             "A viscous stress τ η C u on the field's gradient, with G the element's own \
@@ -196,38 +187,31 @@ pub(super) fn short_wave_editor(ui: &mut egui::Ui, material: &mut Material) {
     } else {
         "Custom"
     };
-    let disabled = "A short-wave loss runs only beside a linear response; its energy \
-                    assumes the field is the flux over the mass.";
-    ui.add_enabled_ui(linear_response || material.short_wave_loss > 0.0, |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Loss");
-            egui::ComboBox::from_id_salt(("short-wave-loss", material.id.0))
-                .selected_text(named)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut material.short_wave_loss, 0.0, "Off");
-                    ui.selectable_value(
-                        &mut material.short_wave_loss,
-                        SHORT_WAVE_TRIM,
-                        "Mesh-scale trim",
-                    )
-                    .on_hover_text(
-                        "α = 0.05: trims what the mesh cannot carry for a few percent of a \
-                         wave at seven nodes a wavelength.",
-                    );
-                })
-                .response
-                .on_disabled_hover_text(disabled);
-        });
-        ui.horizontal(|ui| {
-            ui.label("α");
-            ui.add(
-                egui::DragValue::new(&mut material.short_wave_loss)
-                    .speed(0.005)
-                    .range(0.0..=MAX_SHORT_WAVE_LOSS)
-                    .update_while_editing(false),
-            )
-            .on_disabled_hover_text(disabled);
-        });
+    ui.horizontal(|ui| {
+        ui.label("Loss");
+        egui::ComboBox::from_id_salt(("short-wave-loss", material.id.0))
+            .selected_text(named)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut material.short_wave_loss, 0.0, "Off");
+                ui.selectable_value(
+                    &mut material.short_wave_loss,
+                    SHORT_WAVE_TRIM,
+                    "Mesh-scale trim",
+                )
+                .on_hover_text(
+                    "α = 0.05: trims what the mesh cannot carry for a few percent of a \
+                     wave at seven nodes a wavelength.",
+                );
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("α");
+        ui.add(
+            egui::DragValue::new(&mut material.short_wave_loss)
+                .speed(0.005)
+                .range(0.0..=MAX_SHORT_WAVE_LOSS)
+                .update_while_editing(false),
+        );
     });
 }
 

@@ -526,8 +526,8 @@ impl Playground {
                         ))
                         .show_ui(ui, |ui| {
                             // A field-dependent response does not run beside van der
-                            // Pol or a short-wave loss, so it is not offered there.
-                            let self_oscillating = law_editor::needs_linear_response(&material);
+                            // Pol, so it is not offered there.
+                            let self_oscillating = law_editor::self_oscillating(&material);
                             for preset in law_presets() {
                                 let current =
                                     matched.as_ref().is_some_and(|found| found.preset == preset);
@@ -1408,25 +1408,33 @@ mod tests {
     }
 
     /// A short-wave loss takes the time-driven path and reaches its operator
-    /// as a viscosity on every element of the material, and while it is on a
-    /// field-dependent response is not offered beside it.
+    /// as a viscosity on every element of the material, on a linear response
+    /// and beside a Kerr one alike.
     #[test]
     fn a_short_wave_loss_prepares_and_reaches_the_solver() {
         let mut state = Playground::default();
         assert!(activate(&mut state).canonical_temporal_operator.is_none());
         let mut material = state.editor.document.model.draft.materials[0].clone();
-        assert!(!law_editor::needs_linear_response(&material));
         material.short_wave_loss = law_editor::SHORT_WAVE_TRIM;
-        assert!(law_editor::needs_linear_response(&material));
-        state.editor.update_material(material).unwrap();
-        settle(&mut state.editor);
-        let prepared = activate(&mut state);
-        let temporal = prepared
-            .canonical_temporal_operator
-            .as_ref()
-            .expect("a short-wave loss takes the time-driven path");
-        let viscosity = temporal.short_wave_viscosity();
-        assert!(!viscosity.is_empty() && viscosity.iter().all(|tau| *tau > 0.0));
+        for kerr in [false, true] {
+            if kerr {
+                material.mass_law.field = FieldLaw::Polynomial {
+                    chi1: ScalarField::constant(0.0),
+                    chi2: ScalarField::constant(0.8),
+                    amplitude_bound: None,
+                };
+            }
+            state.editor.update_material(material.clone()).unwrap();
+            settle(&mut state.editor);
+            let prepared = activate(&mut state);
+            let temporal = prepared
+                .canonical_temporal_operator
+                .as_ref()
+                .expect("a short-wave loss takes the time-driven path");
+            assert_eq!(temporal.has_field_laws(), kerr);
+            let viscosity = temporal.short_wave_viscosity();
+            assert!(!viscosity.is_empty() && viscosity.iter().all(|tau| *tau > 0.0));
+        }
     }
 
     /// Editing a legacy material's loss moves it to its named channel in one

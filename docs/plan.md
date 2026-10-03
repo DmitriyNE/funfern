@@ -993,10 +993,19 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   Done on 2026-10-03 (`docs/engineering-log.md`): `Material::short_wave_loss`,
   α in [0, 1], catalogue row D4, saved only when on; its own CPU energy lane,
   the device's primary-loss lane; an Advanced group with the Mesh-scale trim
-  preset at α = 0.05. It does not compose with a field law yet, as van der
-  Pol does not, so the Kerr slab cannot take it; that waits on the
-  nonlinear kick applying the stress and charging its energy through the
-  node's own map. No gallery scene carries it.
+  preset at α = 0.05. The parametric fiber carries α = 0.5. Since a later
+  change on 2026-10-03 it composes with every field law, Kerr and saturable
+  in either row: the nonlinear kick applies the stress, the lane is counted
+  through the law's own store, and the cap sees the law's effective mass and
+  stiffness.
+
+- [ ] Van der Pol beside a field law. Its loss stage solves
+  `Q̇ = −(β + αu²)Q` exactly because `u = Q/m`; under a Kerr or saturable
+  map there is no closed form, and the node's rate, a mass-weighted mean of
+  its contributions, is not defined when each one's mass follows the field.
+  Needs a design note in `docs/spikes/funfern-gate-o.md` first: what the
+  stage integrates and how it weighs a node, then an implicit per-node solve
+  on the map, the store's own energy for the lane, and the device.
 
 ## Maintenance
 

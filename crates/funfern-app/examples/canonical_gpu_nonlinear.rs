@@ -24,6 +24,10 @@
 //! `apply_grid_filter_with_forcing`. `NONLINEAR_LINEAR=1` drops the field
 //! laws and keeps the pump, which is the driven linear filter beside the same
 //! compositions. `NONLINEAR_AMPLITUDE` scales the initial field (default 1).
+//!
+//! `NONLINEAR_SHORT_WAVE=α` gives the medium a short-wave loss, so the
+//! viscous stress is applied through the field law's own map, and the primary
+//! loss lane, which carries what it takes, is held to the reference's sum.
 
 use std::time::{Duration, Instant};
 
@@ -54,6 +58,9 @@ struct Pending {
 struct Expected {
     primary: Vec<f64>,
     complementary: Vec<Point2>,
+    /// The reference's summed primary and short-wave loss lanes, which the
+    /// device books together, when a short-wave loss is authored.
+    lost: Option<f64>,
     started: Instant,
     deadline: Instant,
     finished: bool,
@@ -72,7 +79,13 @@ fn main() -> AppExit {
         Ok("2") => OuterBoundaryCondition::SecondOrderOutgoing,
         _ => OuterBoundaryCondition::Reflecting,
     };
+    let short_wave = std::env::var("NONLINEAR_SHORT_WAVE")
+        .ok()
+        .map(|alpha| alpha.parse::<f64>().expect("a short-wave loss α"));
     let mut scene = Scene::default();
+    if let Some(alpha) = short_wave {
+        scene.materials[0].short_wave_loss = alpha;
+    }
     if forced {
         let channel = |rate: f64| LossChannel {
             base_rate: ScalarField::constant(rate),
@@ -195,10 +208,12 @@ fn main() -> AppExit {
     let mut oracle = state.clone();
     let initial = oracle.energy(&operator).expect("initial energy");
     let (mut filters, mut skipped, mut removed) = (0, 0, 0.0);
+    let mut lost = 0.0;
     for step in 1..=TOTAL_STEPS {
-        oracle
+        let accounting = oracle
             .step_with_forcing(&operator, &forcing)
             .expect("f64 nonlinear step");
+        lost += accounting.primary_loss + accounting.short_wave_loss;
         if filter && step.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
             filters += 1;
             // A candidate that gains energy is not taken, on either side.
@@ -235,7 +250,7 @@ fn main() -> AppExit {
     let plan = CanonicalGpuPlan::compile_temporal(&operator, &state, &forcing, clock)
         .expect("nonlinear GPU plan");
     println!(
-        "{} gate{}{}{}: {} Q, {} b, {TOTAL_STEPS} steps; energy {initial:.4e}; the field sits \
+        "{} gate{}{}{}{}: {} Q, {} b, {TOTAL_STEPS} steps; energy {initial:.4e}; the field sits \
          up to {:.0}% from its linear read",
         if linear_medium {
             "driven linear"
@@ -244,6 +259,7 @@ fn main() -> AppExit {
         },
         if pumped { " (pumped)" } else { "" },
         if forced { " + source, pins, loss" } else { "" },
+        short_wave.map_or(String::new(), |alpha| format!(" + short-wave loss {alpha}")),
         match wall {
             OuterBoundaryCondition::FirstOrderOutgoing => " + first-order wall",
             OuterBoundaryCondition::SecondOrderOutgoing => " + second-order wall",
@@ -278,6 +294,7 @@ fn main() -> AppExit {
     .insert_resource(Expected {
         primary: oracle.primary_flux().to_vec(),
         complementary: oracle.complementary_flux().to_vec(),
+        lost: short_wave.map(|_| lost),
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(120),
         finished: false,
@@ -363,6 +380,20 @@ fn drive(
     // departure printed above, which is tens of percent.
     if primary > 3.0e-5 || complementary > 3.0e-5 {
         expected.failed = true;
+    }
+    // The device charges the viscosity at the field of the mean flux, the
+    // reference by the store's exact difference, and an f32 lane accumulates
+    // every step's rounding: held to 1e-3 of the sum, as the oscillator gate
+    // holds its lanes.
+    if let Some(lost) = expected.lost {
+        let error = (f64::from(display.accounting[2]) - lost).abs() / lost.abs().max(1.0e-12);
+        println!(
+            "nonlinear loss lane: {:.6e} against {lost:.6e} ({error:.2e})",
+            display.accounting[2]
+        );
+        if error > 1.0e-3 {
+            expected.failed = true;
+        }
     }
 }
 
