@@ -23,6 +23,12 @@ pub(super) const REDO_SHORTCUT: egui::KeyboardShortcut = egui::KeyboardShortcut:
     egui::Key::Z,
 );
 
+/// A notice held in its window until closed.
+pub(super) struct Notice {
+    pub(super) title: &'static str,
+    pub(super) text: String,
+}
+
 impl Playground {
     pub(super) fn set_document(
         &mut self,
@@ -179,36 +185,98 @@ impl Playground {
     }
     /// What launch opens: a shared link first, then the last session's
     /// autosave, then a random example. A link or an autosave that does not
-    /// open, an older version's among them, says why once and leaves the
+    /// open, an older version's among them, raises a notice and leaves the
     /// next in line to open: a broken link does not cost the last session,
     /// and an autosave this version cannot read is replaced at the next
-    /// autosave rather than quietly.
+    /// autosave, but not quietly.
     pub(super) fn open_startup_scene(
         &mut self,
         link: Option<Result<Vec<u8>, String>>,
         autosave: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
     ) {
-        let mut notices = vec![];
-        if let Some(link) = link {
-            match link.and_then(|bytes| self.open_scene_bytes(&bytes)) {
-                Ok(()) => return,
-                Err(error) => notices.push(format!("Shared link not opened: {error}")),
-            }
-        }
-        match autosave()
+        // A link that does not open is still in the address, and is replaced
+        // by the scene that opens in its place.
+        self.link_in_address = link.is_some();
+        let link_error = match link.map(|link| link.and_then(|bytes| self.open_scene_bytes(&bytes)))
+        {
+            Some(Ok(())) => return,
+            Some(Err(error)) => Some(error),
+            None => None,
+        };
+        let restored = match autosave()
             .and_then(|bytes| bytes.map(|bytes| self.open_scene_bytes(&bytes)).transpose())
         {
-            Ok(Some(())) => {}
+            Ok(Some(())) => true,
             // A first run. A random example rather than the same one every
             // time, so the app opens on something worth looking at.
-            Ok(None) => self.open_random_example(),
-            Err(error) => {
-                notices.push(format!("Previous session not restored: {error}"));
+            Ok(None) => {
                 self.open_random_example();
+                false
             }
+            Err(error) => {
+                self.open_random_example();
+                self.raise_notice(
+                    "Previous session not restored",
+                    format!(
+                        "{error}.\n\nAn example opened instead, and the next autosave replaces the old one."
+                    ),
+                );
+                false
+            }
+        };
+        if let Some(error) = link_error {
+            let instead = if restored {
+                "Your last session was restored instead."
+            } else {
+                "An example opened instead."
+            };
+            self.notices.insert(
+                0,
+                Notice {
+                    title: "Shared link not opened",
+                    text: format!("{error}.\n\n{instead}"),
+                },
+            );
         }
-        if !notices.is_empty() {
-            self.notify(notices.join(". "));
+    }
+
+    /// What the user should know and the status line would lose to the next
+    /// message: anything given up on their behalf. It is held in a window
+    /// until they close it.
+    pub(super) fn raise_notice(&mut self, title: &'static str, text: String) {
+        self.notices.push(Notice { title, text });
+    }
+
+    pub(super) fn notice_window(&mut self, ctx: &egui::Context) {
+        let Some(first) = self.notices.first() else {
+            return;
+        };
+        let mut close = false;
+        egui::Window::new(first.title)
+            .id(egui::Id::new("notice"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                for (index, notice) in self.notices.iter().enumerate() {
+                    if index > 0 {
+                        ui.separator();
+                        ui.strong(notice.title);
+                    }
+                    ui.label(&notice.text);
+                }
+                ui.add_space(4.0);
+                // In a row, so the right-to-left layout takes one line's
+                // height rather than the rest of the screen's.
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close = ui.button("OK").clicked();
+                    });
+                });
+            });
+        if close {
+            self.notices.clear();
         }
     }
 
@@ -230,6 +298,34 @@ impl Playground {
         {
             self.autosave_due = None;
             let _ = crate::recovery::save(&self.editor.document);
+            self.refresh_link();
+        }
+    }
+
+    /// While the address carries a scene link, opened or copied, it follows
+    /// the document: a reload opens the link ahead of the autosave, and a
+    /// link left behind would drop every edit since.
+    fn refresh_link(&mut self) {
+        if self.link_in_address {
+            self.follow_link(
+                crate::sharing::encode(&self.editor.document)
+                    .and_then(|fragment| crate::sharing::replace_fragment(&fragment)),
+            );
+        }
+    }
+
+    /// A scene the link can no longer carry, grown past its size, takes the
+    /// link out of the address, so a reload restores the autosave instead.
+    fn follow_link(&mut self, written: Result<(), String>) {
+        if let Err(error) = written {
+            self.link_in_address = false;
+            let _ = crate::sharing::clear_fragment();
+            self.raise_notice(
+                "Scene link taken out of the address",
+                format!(
+                    "{error}.\n\nThe address no longer follows the scene, and a reload restores the autosave."
+                ),
+            );
         }
     }
     pub(super) fn save_scene(&mut self) {
@@ -339,6 +435,7 @@ impl Playground {
             .and_then(|fragment| crate::sharing::link(&fragment))
         {
             Ok(link) => {
+                self.link_in_address = true;
                 context.copy_text(link.clone());
                 let _ = &link;
                 #[cfg(target_arch = "wasm32")]
@@ -695,8 +792,17 @@ mod tests {
         persistence::save(document).unwrap().into_bytes()
     }
 
+    /// Each held notice as its title and text.
+    fn notices(state: &Playground) -> Vec<(&'static str, String)> {
+        state
+            .notices
+            .iter()
+            .map(|notice| (notice.title, notice.text.clone()))
+            .collect()
+    }
+
     #[test]
-    fn an_autosave_that_does_not_open_says_so_once_and_opens_an_example() {
+    fn an_autosave_that_does_not_open_raises_a_notice_and_opens_an_example() {
         for (autosave, reason) in [
             (Ok(Some(version_21_bytes())), "version 21"),
             (Ok(Some(b"{\"version\": 22, \"model\"".to_vec())), "EOF"),
@@ -708,11 +814,11 @@ mod tests {
                 state.example_opened.is_some(),
                 "{reason}: no example opened"
             );
+            let notices = notices(&state);
             assert!(
-                state.message.starts_with("Previous session not restored: ")
-                    && state.message.contains(reason),
-                "{reason}: {}",
-                state.message
+                matches!(&notices[..], [("Previous session not restored", text)]
+                    if text.contains(reason) && text.contains("An example opened instead")),
+                "{reason}: {notices:?}"
             );
         }
     }
@@ -722,14 +828,14 @@ mod tests {
         let mut state = Playground::default();
         state.open_startup_scene(None, || Ok(None));
         assert!(state.example_opened.is_some());
-        assert_eq!(state.message, "");
+        assert!(state.notices.is_empty());
 
         let mut state = Playground::default();
         state.open_startup_scene(None, || Ok(Some(example_bytes(2))));
         let expected = &funfern_app::topology_examples::catalog()[2].document;
         assert_eq!(&state.editor.document, expected);
         assert_eq!(state.example_opened, None);
-        assert_eq!(state.message, "");
+        assert!(state.notices.is_empty());
         assert_eq!(state.editor.history_len(), (0, 0));
     }
 
@@ -745,23 +851,68 @@ mod tests {
             let mut state = Playground::default();
             state.open_startup_scene(Some(link), || Ok(Some(example_bytes(2))));
             assert_eq!(&state.editor.document, expected, "{reason}");
+            let notices = notices(&state);
             assert!(
-                state.message.starts_with("Shared link not opened: ")
-                    && state.message.contains(reason),
-                "{reason}: {}",
-                state.message
+                matches!(&notices[..], [("Shared link not opened", text)]
+                    if text.contains(reason) && text.contains("last session was restored")),
+                "{reason}: {notices:?}"
             );
         }
 
         let mut state = Playground::default();
         state.open_startup_scene(Some(Ok(version_21_bytes())), || Ok(Some(b"[]".to_vec())));
         assert!(state.example_opened.is_some());
+        let notices = notices(&state);
         assert!(
-            state.message.contains("Shared link not opened")
-                && state.message.contains("Previous session not restored"),
-            "{}",
-            state.message
+            matches!(&notices[..], [("Shared link not opened", link), ("Previous session not restored", _)]
+                if link.contains("An example opened instead")),
+            "{notices:?}"
         );
+    }
+
+    /// The status line is one slot, and the mesh the opened scene sends to
+    /// the device writes "Simulation topology committed" over it within the
+    /// first seconds: a startup notice there was gone before it could be
+    /// read. The window holds it, past any message, until OK.
+    #[test]
+    fn a_notice_is_held_past_the_status_line_until_closed() {
+        let mut state = Playground::default();
+        state.open_startup_scene(Some(Err("Shared scene data is damaged".into())), || {
+            Ok(None)
+        });
+        state.notify("Simulation topology committed");
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.enable_accesskit();
+        let pass = |state: &mut Playground, events| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                events,
+                ..egui::RawInput::default()
+            };
+            laid_out(&context.run_ui(input, |ui| state.notice_window(ui.ctx())))
+        };
+        for _ in 0..2 {
+            pass(&mut state, vec![]);
+        }
+        let widgets = pass(&mut state, vec![]);
+        assert!(
+            widgets
+                .iter()
+                .any(|widget| widget.label.contains("Shared scene data is damaged")),
+            "{:?}",
+            widgets
+                .iter()
+                .map(|widget| &widget.label)
+                .collect::<Vec<_>>()
+        );
+        let ok = widgets.iter().find(|widget| widget.label == "OK").unwrap();
+        pass(&mut state, click(ok));
+        assert!(state.notices.is_empty());
+        assert!(pass(&mut state, vec![]).is_empty());
     }
 
     #[test]
@@ -800,5 +951,79 @@ mod tests {
                 state.message
             );
         }
+    }
+
+    fn address() -> Option<String> {
+        crate::sharing::ADDRESS.with(|address| address.borrow().clone())
+    }
+
+    fn scene_in(fragment: &str) -> TopologyDocument {
+        persistence::parse_document(&crate::sharing::decode(fragment).unwrap()).unwrap()
+    }
+
+    /// The live site, before: open a link, choose New, reload, and the link's
+    /// scene came back over the new one the autosave held. Since the switch
+    /// to version 22 nothing rewrote the link after it opened.
+    #[test]
+    fn an_opened_link_follows_the_document() {
+        let mut state = Playground::default();
+        state.open_startup_scene(Some(Ok(example_bytes(3))), || Ok(None));
+        state.open_example(2);
+        state.refresh_link();
+        let expected = &funfern_app::topology_examples::catalog()[2].document;
+        assert_eq!(&scene_in(&address().unwrap()), expected);
+    }
+
+    /// A link that did not open gives way to the scene that opened instead,
+    /// so the address stops failing on every reload.
+    #[test]
+    fn a_link_that_did_not_open_is_replaced_by_the_scene_that_did() {
+        let mut state = Playground::default();
+        state.open_startup_scene(Some(Ok(version_21_bytes())), || Ok(Some(example_bytes(2))));
+        state.refresh_link();
+        let expected = &funfern_app::topology_examples::catalog()[2].document;
+        assert_eq!(&scene_in(&address().unwrap()), expected);
+    }
+
+    #[test]
+    fn without_a_link_the_address_is_left_alone() {
+        let mut state = Playground::default();
+        state.open_startup_scene(None, || Ok(None));
+        state.open_example(2);
+        state.refresh_link();
+        assert_eq!(address(), None);
+    }
+
+    #[test]
+    fn a_copied_link_follows_the_document() {
+        let mut state = Playground::default();
+        state.open_startup_scene(None, || Ok(None));
+        state.copy_link(&egui::Context::default());
+        assert_eq!(state.message, "Scene link copied");
+        state.open_example(4);
+        state.refresh_link();
+        let expected = &funfern_app::topology_examples::catalog()[4].document;
+        assert_eq!(&scene_in(&address().unwrap()), expected);
+    }
+
+    #[test]
+    fn a_scene_past_the_links_size_takes_the_link_out_of_the_address() {
+        let mut state = Playground::default();
+        state.open_startup_scene(Some(Ok(example_bytes(3))), || Ok(None));
+        state.follow_link(Err(
+            "Scene is too large for a shareable link; save it as a file instead".into(),
+        ));
+        assert_eq!(address(), Some(String::new()));
+        assert!(
+            matches!(&notices(&state)[..], [("Scene link taken out of the address", text)]
+                if text.contains("too large")),
+            "{:?}",
+            notices(&state)
+        );
+        // Said once: the address no longer carries a link to keep up.
+        state.notices.clear();
+        state.refresh_link();
+        assert_eq!(address(), Some(String::new()));
+        assert!(state.notices.is_empty());
     }
 }

@@ -824,6 +824,7 @@ impl Playground {
             self.pulse_shape_window(root.ctx());
             self.diagnostics_window(root.ctx());
             self.formula_help_window(root.ctx());
+            self.notice_window(root.ctx());
             self.scene_card(root.ctx(), viewport);
             self.examples_window(root.ctx());
         }

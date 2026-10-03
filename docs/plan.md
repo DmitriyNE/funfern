@@ -582,9 +582,11 @@ exterior is never assignable.
   cut. Ignore obsolete local storage with one clear notice; loading an obsolete or
   malformed file must leave the current document untouched. The payloads moved
   with the Stage 6 switch on 2026-09-14 (the link's `scene=v1.` names its packing,
-  not the scene); the notices followed on 2026-10-03: an autosave that does not
-  open says "Previous session not restored" and is replaced at the next autosave,
-  and a link that does not open says why and still restores the autosave.
+  not the scene); the notices followed on 2026-10-03, in a window held until
+  closed: an autosave that does not open says "Previous session not restored"
+  and is replaced at the next autosave, and a link that does not open says why
+  and still restores the autosave. The same day the address's link again
+  follows the document, which the switch had dropped.
 - [x] Keep one complete topology edit as one `DocumentModel` history entry. Loading
   clears history as it does now. Invalid drafts, including unresolved anchors and
   incomplete transmitting dividers, remain serializable and undoable.

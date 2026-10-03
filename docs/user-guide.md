@@ -516,16 +516,19 @@ names or with every expression evaluated at the material frame's origin. Each ro
   status strip counts frames the encoder could not keep up with. Documents autosave after edits and restore on
   startup from browser local storage or the native per-user recovery file. Copy
   scene link embeds compressed, validated scene data in a `#scene=v1.…` URL
-  fragment; while that fragment is active, later autosaves keep it current.
+  fragment; while that fragment is active, opened or copied, later autosaves
+  keep it current, so a reload opens the scene as it now is. A scene grown past
+  what a link can carry has the link taken out of the address, with a notice,
+  and a reload then restores the autosave.
   The catalog includes ready-to-run GRIN collimator and circular Luneburg profiles with
   their drivers, probes, and wave-speed view presets. View toggles, field intensity,
   and material-overlay settings travel through files, links, recovery, and examples.
   Camera, selection, open panels, and floating-window layout are not saved. With no
   shared scene or autosave to restore, startup opens a bundled example at
   random. An autosave or link from an older scene version, or one that is
-  damaged, is not opened: the status line says why, a broken link still
-  restores the autosave, and an autosave that could not be read is replaced at
-  the next autosave. A scene file that does not open leaves the current
+  damaged, is not opened: a notice window says why until closed, a broken link
+  still restores the autosave, and an autosave that could not be read is
+  replaced at the next autosave. A scene file that does not open leaves the current
   document, its history and its run as they were.
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
   constrained mesh and its labeled outer, hole, interface, closed-wall, and baffle

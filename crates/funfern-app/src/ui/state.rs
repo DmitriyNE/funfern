@@ -202,6 +202,8 @@ pub struct Playground {
     pub(super) far_field_trace: FarFieldTrace,
     pub(super) logo_texture: Option<egui::TextureHandle>,
     pub(super) message: String,
+    /// What the status line would lose, held in a window until closed.
+    pub(super) notices: Vec<super::session::Notice>,
     pub(super) file_busy: bool,
     pub(super) load: Option<TopologyLoadCandidate>,
     pub(super) sender: Sender<FileEvent>,
@@ -218,6 +220,9 @@ pub struct Playground {
     pub(super) startup_done: bool,
     pub(super) autosave_observed: TopologyDocument,
     pub(super) autosave_due: Option<Instant>,
+    /// The address carries a scene link, opened or copied, which autosave
+    /// keeps up with the document.
+    pub(super) link_in_address: bool,
     pub(super) probe_upload: Option<ProbeUpload>,
     /// The upload before it, kept because the readback it issued is still in
     /// flight when the next one is made, and the samples in it are the last of
@@ -450,6 +455,7 @@ impl Default for Playground {
             far_field_trace: FarFieldTrace::default(),
             logo_texture: None,
             message: String::new(),
+            notices: vec![],
             file_busy: false,
             load: None,
             sender,
@@ -466,6 +472,7 @@ impl Default for Playground {
             startup_done: false,
             autosave_observed: document,
             autosave_due: None,
+            link_in_address: false,
             probe_upload: None,
             probe_upload_previous: None,
             probe_clock_restarted: true,

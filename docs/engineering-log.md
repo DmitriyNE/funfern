@@ -18202,3 +18202,38 @@ autosaved over.
   a change of meaning or shape takes a new version with a migration.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — The address's scene link follows the document again; notices in a window
+
+Reproduced on the live site with a fresh browser profile: open a link to the
+Brewster scene, choose File → New, wait for the autosave, reload. The autosave
+held the new scene, the address still held the original link, and the reload
+opened Brewster: startup opens a link ahead of the autosave, so every edit
+since the link opened was dropped. The Stage 6 switch (`eddad77`, 2026-09-14)
+had removed the only call to `sharing::replace_fragment`, the autosave's
+rewrite of an active link, while the user guide still described it.
+
+- **Fix.** `link_in_address` is set when a link is in the address at launch,
+  whether it opened or not, and when Copy scene link puts one there. Each
+  autosave then rewrites it (`refresh_link`, `history.replaceState`, so Back
+  is untouched). A link that did not open is thereby replaced by the scene that
+  opened in its place. A scene grown past the link's 128 Ki characters has the
+  link taken out of the address (`clear_fragment`), so a reload restores the
+  autosave rather than an outdated link, and a notice says so once.
+- **Notices.** The previous entry's startup notices went to the status line,
+  which the opened scene's "Simulation topology committed" overwrote within
+  three seconds: in a local build an older link's notice was gone by the first
+  screenshot. The unit tests had read `message` before any runtime ran. At the
+  user's direction, errors the user must read now go to a window held until
+  OK (`raise_notice`, `notice_window`): "Shared link not opened", "Previous
+  session not restored" and "Scene link taken out of the address", each saying
+  what opened instead.
+- **Checked in a local release web build** (Chrome, fresh profile): File → New
+  then reload keeps the new scene and the address carries it; an older link and
+  an older autosave each show their notice over the example opened instead.
+- **Tests.** In `ui::session`: an opened link and a copied link follow the
+  document, a link that did not open is replaced, no link leaves the address
+  alone, an outgrown link is taken out once, and a notice outlives a later
+  status message until its OK is clicked (through the AccessKit harness).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

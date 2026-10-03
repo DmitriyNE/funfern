@@ -94,8 +94,40 @@ pub fn link(fragment: &str) -> Result<String, String> {
     Ok(format!("https://dmitriyne.github.io/funfern/#{fragment}"))
 }
 
+/// Takes the scene out of the address, leaving the page's own path.
+#[cfg(target_arch = "wasm32")]
+pub fn clear_fragment() -> Result<(), String> {
+    let window = web_sys::window().ok_or("Browser window is unavailable")?;
+    let location = window.location();
+    let address = location
+        .pathname()
+        .and_then(|path| Ok(path + &location.search()?))
+        .map_err(|_| "Could not read the browser address".to_string())?;
+    window
+        .history()
+        .map_err(|_| "Browser history is unavailable".to_string())?
+        .replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&address))
+        .map_err(|_| "Could not update the shared scene address".to_string())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a native test's address carries after the last replace or clear,
+    /// `None` until either.
+    pub static ADDRESS: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn replace_fragment(_fragment: &str) -> Result<(), String> {
+    #[cfg(test)]
+    ADDRESS.with(|address| *address.borrow_mut() = Some(_fragment.into()));
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn clear_fragment() -> Result<(), String> {
+    #[cfg(test)]
+    ADDRESS.with(|address| *address.borrow_mut() = Some(String::new()));
     Ok(())
 }
 
