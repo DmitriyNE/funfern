@@ -54,6 +54,7 @@ impl Playground {
         self.amr_adaptation_source = None;
         self.amr_pending_state = None;
         self.amr_indicator_result = None;
+        self.amr_shown_report = None;
         self.amr_coarsen_streak = 0;
     }
 
@@ -308,6 +309,7 @@ impl Playground {
             } else {
                 0
             };
+            self.amr_shown_report = Some(result.report.clone());
             self.amr_indicator_result = Some(result.clone());
             if decision == AmrDecision::Hold {
                 self.amr_status = "mesh matches solution".into();

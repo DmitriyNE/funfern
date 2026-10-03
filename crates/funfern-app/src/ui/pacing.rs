@@ -318,6 +318,12 @@ pub(super) fn steps_with_gpu_backpressure(retired: u64, requested: u64, proposed
 /// shortfall is worth mentioning.
 pub(super) const SPEED_SHORTFALL_MARGIN: f64 = 0.8;
 
+/// How close a rate reported short has to come back before it stops being.
+/// A scene that runs at about the margin wanders across it - 0.056-0.086 of
+/// 0.09 at edge 0.04 on the parametric fiber - and with one threshold the row
+/// changed eight times in 37 s.
+pub(super) const SPEED_RECOVERED_MARGIN: f64 = 0.9;
+
 /// How fast the held rate gives up a better reading, as a factor per second.
 ///
 /// The windowed measurement dips to about three quarters of the rate asked for
@@ -335,17 +341,22 @@ pub(super) fn hold_rate(held: f64, measured: f64, elapsed: f64) -> f64 {
     measured.max(held * SPEED_HOLD_PER_SECOND.powf(-elapsed.clamp(0.0, 1.0)))
 }
 
-/// The rate actually being reached, when it falls meaningfully short of `target`
-/// and the solver is genuinely trying.
+/// Whether the rate reached falls meaningfully short of `target`, both in
+/// simulated seconds per wall second, given whether it read short before.
 ///
-/// Both are simulated seconds per wall second. Nothing is said while the solver
-/// is paused or before any steps have been measured — neither is the solver
-/// failing to keep up.
-pub(super) fn speed_shortfall(measured: f64, target: f64, stepping: bool) -> Option<f64> {
-    if !stepping || !measured.is_finite() || measured <= 0.0 {
-        return None;
+/// A rate goes short under [`SPEED_SHORTFALL_MARGIN`] of the target and stays
+/// short until it is back over [`SPEED_RECOVERED_MARGIN`]. Before any steps
+/// have been measured nothing is short.
+pub(super) fn speed_short(measured: f64, target: f64, was_short: bool) -> bool {
+    if !measured.is_finite() || measured <= 0.0 {
+        return false;
     }
-    (measured < target * SPEED_SHORTFALL_MARGIN).then_some(measured)
+    let margin = if was_short {
+        SPEED_RECOVERED_MARGIN
+    } else {
+        SPEED_SHORTFALL_MARGIN
+    };
+    measured < target * margin
 }
 
 #[cfg(test)]
@@ -981,7 +992,7 @@ mod tests {
             dipped = hold_rate(dipped, 0.74, frame);
         }
         assert!(
-            speed_shortfall(dipped, 1.0, true).is_none(),
+            !speed_short(dipped, 1.0, false),
             "a dip was reported as a shortfall: {dipped}"
         );
 
@@ -990,7 +1001,7 @@ mod tests {
         for _ in 0..120 {
             slow = hold_rate(slow, 0.5, frame);
         }
-        assert_eq!(speed_shortfall(slow, 1.0, true), Some(slow));
+        assert!(speed_short(slow, 1.0, false));
 
         // A better reading is taken at once, and nonsense is ignored.
         assert_eq!(hold_rate(0.5, 2.0, frame), 2.0);
@@ -998,21 +1009,37 @@ mod tests {
         assert_eq!(hold_rate(0.5, -1.0, frame), 0.5);
     }
 
-    /// A rate below the one asked for is worth saying, but only when the solver
-    /// is actually trying to reach it.
+    /// A rate well below the one asked for is short; jitter is not, and
+    /// nothing is short before anything has been measured.
     #[test]
-    fn a_shortfall_is_only_reported_while_the_solver_is_trying() {
-        assert_eq!(speed_shortfall(0.34, 1.0, true), Some(0.34));
-        assert_eq!(
-            speed_shortfall(0.98, 1.0, true),
-            None,
-            "jitter is not a shortfall"
-        );
-        assert_eq!(speed_shortfall(0.19, 0.2, true), None);
-        assert_eq!(speed_shortfall(0.09, 0.2, true), Some(0.09));
-        // Paused, mid-handoff, or before anything has been measured.
-        assert_eq!(speed_shortfall(0.34, 1.0, false), None);
-        assert_eq!(speed_shortfall(0.0, 1.0, true), None);
-        assert_eq!(speed_shortfall(f64::NAN, 1.0, true), None);
+    fn a_shortfall_is_a_rate_well_below_the_one_asked_for() {
+        assert!(speed_short(0.34, 1.0, false));
+        assert!(!speed_short(0.98, 1.0, false), "jitter is not a shortfall");
+        assert!(!speed_short(0.19, 0.2, false));
+        assert!(speed_short(0.09, 0.2, false));
+        assert!(!speed_short(0.0, 1.0, false));
+        assert!(!speed_short(f64::NAN, 1.0, true));
+    }
+
+    /// A rate that has gone short stays short until it is clearly back, so
+    /// one wandering about the margin is not reported on and off: the
+    /// parametric fiber at edge 0.04 ran 0.056-0.086 of 0.09, across the
+    /// 0.072 margin eight times in 37 s.
+    #[test]
+    fn a_shortfall_holds_until_the_rate_is_clearly_back() {
+        let target = 0.09;
+        let mut short = false;
+        let mut changes = 0;
+        for measured in [
+            0.086, 0.071, 0.078, 0.065, 0.080, 0.0719, 0.079, 0.082, 0.085,
+        ] {
+            let now = speed_short(measured, target, short);
+            changes += usize::from(now != short);
+            short = now;
+        }
+        assert_eq!(changes, 2, "short at 0.071, clear again at 0.082");
+        assert!(!short);
+        assert!(speed_short(0.079, target, true));
+        assert!(!speed_short(0.079, target, false));
     }
 }

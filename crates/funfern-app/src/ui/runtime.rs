@@ -770,6 +770,11 @@ impl Playground {
                 }
                 self.speed_reached =
                     hold_rate(self.speed_reached, self.steps_per_second * dt, delta);
+                self.speed_short = speed_short(
+                    self.speed_reached,
+                    self.editor.document.presentation.simulation_speed,
+                    self.speed_short,
+                );
             }
         }
         self.completed_steps = request.stats().completed_steps();

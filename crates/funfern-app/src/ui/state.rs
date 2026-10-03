@@ -146,6 +146,9 @@ pub struct Playground {
     /// shortfall note reads. The raw measurement dips whenever a handoff
     /// withholds stepping inside its window.
     pub(super) speed_reached: f64,
+    /// Whether the speed row reads short, which takes a clear recovery to
+    /// undo; see [`super::pacing::speed_short`].
+    pub(super) speed_short: bool,
     /// The step the GPU was last uploaded with. Not the active operator's
     /// recommendation: the speed ceiling can ask for a smaller one, and between
     /// a speed change and the republish that carries it the two differ.
@@ -284,6 +287,12 @@ pub struct Playground {
     pub(super) amr_indicator_completed: Option<Result<SolutionIndicatorResult, AmrIndicatorError>>,
     pub(super) amr_indicator_source: Option<AmrIndicatorSource>,
     pub(super) amr_indicator_result: Option<SolutionIndicatorResult>,
+    /// The last estimate's report as the panel states it. A handoff drops the
+    /// estimate, whose targets belong to the mesh it left, but what the panel
+    /// says of it - the error, the size rule, a forcing under the floor - holds
+    /// until the next estimate replaces it, rather than leaving the panel for
+    /// the half second between them and shifting everything below.
+    pub(super) amr_shown_report: Option<SolutionIndicatorReport>,
     pub(super) amr_energy_peak: f64,
     pub(super) amr_adaptation_job: Option<MeshAdaptationJob>,
     pub(super) amr_adaptation_completed: Option<Result<MeshAdaptationResult, MeshAdaptationError>>,
@@ -403,6 +412,7 @@ impl Default for Playground {
             completed_steps: 0,
             steps_per_second: 0.0,
             speed_reached: 0.0,
+            speed_short: false,
             uploaded_time_step: 0.0,
             rate_steps: 0,
             rate_generation: 0,
@@ -494,6 +504,7 @@ impl Default for Playground {
             amr_indicator_completed: None,
             amr_indicator_source: None,
             amr_indicator_result: None,
+            amr_shown_report: None,
             amr_energy_peak: 0.0,
             amr_adaptation_job: None,
             amr_adaptation_completed: None,

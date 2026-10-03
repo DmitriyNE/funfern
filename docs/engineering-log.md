@@ -17949,3 +17949,43 @@ that follow collapse nothing. Investigated, and closed without a change.
   status line shows its phase for those 50 ms; decision statuses last a frame
   before "monitoring solution" returns, on every scene.
 - **Gate:** documentation only.
+
+## 2026-10-03 — The simulation panel holds still while the solver runs
+
+The user reported that the speed note ("Reaching …×") and the note on a
+forcing under the smallest element come and go in the simulation panel and
+move every control below them, which makes those controls hard to click.
+
+- **Reproduced** in instrumented runs. On the user's scene (the parametric
+  fiber at edge 0.04, speed 0.09, adaptation off) the held rate wandered over
+  0.056-0.086 across the single 0.072 margin, and the speed note came and went
+  eight times in 37 s, some appearances 0.2 s long. On the fiber with
+  adaptation on and the smallest element raised to 0.04, under its pattern's
+  0.029, the forcing note went five times in 6 s: every adaptive handoff drops
+  the estimate, and the note went with it until the next estimate half a
+  second later. The condition itself never changed.
+- **Fix.** The speed row is always there: "Paused", "Running at 0.09×" in
+  weak text, or "Reaching 0.07×" in gold. It goes short under 0.8 of the rate
+  asked for and back only over 0.9 (`speed_short`, `SPEED_RECOVERED_MARGIN`).
+  The panel keeps the last estimate's report (`amr_shown_report`), which a
+  handoff leaves in place and the next estimate replaces; turning adaptation
+  off or a new scene forgets it. The forcing note and the estimate line read
+  it, so the line no longer drops to "Estimated error —" between estimates
+  either. The overlay and the decisions still use the estimate itself, whose
+  targets belong to the mesh it measured. The adaptation status and estimate
+  are cut to one row each, the whole on hover. Neither wraps today in either
+  inspector, docked or floating (the floating one widens to fit), so that is
+  a guarantee for longer text rather than a fix.
+- **Measured** with the same probes: the forcing note came on at 0.7 s on the
+  fiber and stayed through every handoff; on the user's scene the speed row
+  read short only in the first half second, then held for the rest of 40 s.
+  The fiber at 0.27× still turns the row gold and back about every 6 s, a
+  colour change in place.
+- **Tests.** `a_shortfall_holds_until_the_rate_is_clearly_back`,
+  `a_shortfall_is_a_rate_well_below_the_one_asked_for` (pacing), and
+  `what_changes_while_running_keeps_the_panel_still` (panels: the controls
+  below the speed row and the adaptation lines keep their place across every
+  state, docked and floating, and the forcing note reads the shown report;
+  it fails with the status line left to wrap).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

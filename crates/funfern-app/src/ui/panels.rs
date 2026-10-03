@@ -218,19 +218,28 @@ impl Playground {
         ui.checkbox(&mut p.far_field_contour, "Far field");
         ui.checkbox(&mut p.probe_labels, "Probe names");
     }
-    /// The rate the solver is actually reaching, when it is short of the one
-    /// asked for and is genuinely trying to reach it.
-    pub(super) fn simulation_speed_shortfall(&self) -> Option<f64> {
-        // Not suppressed while a handoff is pending. Adaptation keeps one
-        // pending much of the time on exactly the scenes heavy enough to fall
-        // short, which silenced the note when it mattered most; the held rate
-        // already rides over the few frames a handoff withholds.
-        let stepping = self.runtime.active().is_some() && self.wave_running;
-        speed_shortfall(
-            self.speed_reached,
-            self.editor.document.presentation.simulation_speed,
-            stepping,
-        )
+    /// What the speed row says, and whether it says the solver is short of
+    /// the rate asked for.
+    ///
+    /// The row is always there, so the panel below it stays put: a note that
+    /// came and went as the rate wandered about the margin moved every
+    /// control under it, eight times in 37 s on the parametric fiber. It is
+    /// not silenced while a handoff is pending either. Adaptation keeps one
+    /// pending much of the time on exactly the scenes heavy enough to fall
+    /// short; the held rate already rides over the few frames a handoff
+    /// withholds.
+    pub(super) fn simulation_speed_line(&self) -> (String, bool) {
+        let asked = self.editor.document.presentation.simulation_speed;
+        let reached = self.speed_reached;
+        if !self.wave_running {
+            ("Paused".into(), false)
+        } else if !reached.is_finite() || reached <= 0.0 {
+            ("Running at —".into(), false)
+        } else if self.speed_short {
+            (format!("Reaching {reached:.2}×"), true)
+        } else {
+            (format!("Running at {:.2}×", reached.min(asked)), false)
+        }
     }
 
     pub(super) fn simulation_panel(&mut self, ui: &mut egui::Ui) {
@@ -283,12 +292,14 @@ impl Playground {
             "A ceiling on how fast simulated time runs against the clock. The solver falls \
              short of it when a step costs more than a frame can afford.",
         );
-        if let Some(reached) = self.simulation_speed_shortfall() {
-            ui.colored_label(GOLD, format!("Reaching {reached:.2}×"))
-                .on_hover_text(
-                    "The scene costs more per step than the frame budget allows, so simulated \
-                     time runs slower than asked. A coarser mesh buys it back.",
-                );
+        let (speed, short) = self.simulation_speed_line();
+        if short {
+            ui.colored_label(GOLD, speed).on_hover_text(
+                "The scene costs more per step than the frame budget allows, so simulated \
+                 time runs slower than asked. A coarser mesh buys it back.",
+            );
+        } else {
+            ui.weak(speed);
         }
         ui.separator();
         ui.label("Mesh resolution");
@@ -423,13 +434,20 @@ impl Playground {
                  this; carrying a forced wavelength and staying under the largest \
                  element allowed are floors, and go on regardless.",
             );
-            ui.small(&self.amr_status);
-            ui.small(self.amr_estimate_line());
+            // One row each whatever they say, cut short with the whole on
+            // hover: they change several times a second, and a line that
+            // wrapped for some of it moved the controls below.
+            ui.add(egui::Label::new(egui::RichText::new(&self.amr_status).small()).truncate());
+            ui.add(
+                egui::Label::new(egui::RichText::new(self.amr_estimate_line()).small()).truncate(),
+            );
             // Nothing else in the panel explains a mesh pinned at its floor
             // while the accuracy target reads satisfied. It is a standing
-            // condition rather than a passing one, so it may take its own line.
-            if let Some(result) = &self.amr_indicator_result
-                && result.report.smallest_wavelength_target
+            // condition rather than a passing one, so it may take its own line,
+            // read from the shown report so that a handoff, which drops the
+            // estimate, does not take the line away until the next one.
+            if let Some(report) = &self.amr_shown_report
+                && report.smallest_wavelength_target
                     < self.editor.document.presentation.adaptation.minimum_edge
             {
                 ui.colored_label(
@@ -437,7 +455,7 @@ impl Playground {
                     format!(
                         "The forcing wants elements of {:.3}, under the smallest allowed \
                          of {:.3}, so the mesh sits at its floor whatever the accuracy asks",
-                        result.report.smallest_wavelength_target,
+                        report.smallest_wavelength_target,
                         self.editor.document.presentation.adaptation.minimum_edge,
                     ),
                 );
@@ -513,11 +531,11 @@ impl Playground {
     /// What the panel says about the estimate, whether or not one is in hand.
     /// Committing a mesh drops the estimate it was measured against, so a line
     /// that exists only while there is one comes and goes with every adaptation
-    /// and shifts the panel out from under the pointer. It holds its place and
-    /// says it has nothing instead.
+    /// and shifts the panel out from under the pointer. It holds its place, and
+    /// reads the last estimate's report until the next replaces it.
     pub(super) fn amr_estimate_line(&self) -> String {
-        match &self.amr_indicator_result {
-            Some(result) if result.report.dormant => format!(
+        match &self.amr_shown_report {
+            Some(report) if report.dormant => format!(
                 "Estimated error dormant · target {:.0}%",
                 self.editor
                     .document
@@ -525,15 +543,15 @@ impl Playground {
                     .adaptation
                     .accuracy_percent
             ),
-            Some(result) => format!(
+            Some(report) => format!(
                 "Estimated error {:.1}% · target {:.0}%{}",
-                100.0 * result.report.global_indicator,
+                100.0 * report.global_indicator,
                 self.editor
                     .document
                     .presentation
                     .adaptation
                     .accuracy_percent,
-                if size_rule_refines(&result.report, self.amr_target_accuracy()) {
+                if size_rule_refines(report, self.amr_target_accuracy()) {
                     " · refining to resolve wavelengths"
                 } else {
                     ""
@@ -736,5 +754,107 @@ mod tests {
         assert_eq!(compact_count(9_216.0), "9.2k");
         assert_eq!(compact_count(40_945.0), "41k");
         assert_eq!(compact_count(1_234_567.0), "1.2M");
+    }
+
+    /// Where `label` sits in the simulation panel, in the inspector as a
+    /// screen `width` wide shows it - docked on a desktop, floating on a
+    /// phone - for `state`.
+    fn simulation_panel_row(
+        state: &mut Playground,
+        context: &egui::Context,
+        width: f32,
+        label: &str,
+    ) -> Option<egui::Rect> {
+        state.inspector = Some(InspectorPanel::Simulation);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 4000.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let output = context.run_ui(input, |ui| state.side_panel(ui));
+        super::super::test_support::laid_out(&output)
+            .into_iter()
+            .find(|widget| widget.label.starts_with(label))
+            .map(|widget| widget.rect)
+    }
+
+    /// Nothing in the simulation panel that changes while the solver runs
+    /// moves the controls under it, docked on a desktop or floating on a
+    /// phone. The speed row reads paused, keeping up or short in one row; the
+    /// adaptation status and estimate hold one row each however long they
+    /// get; and the note on a forcing under the floor reads the last
+    /// estimate's report, which a handoff does not drop. On the parametric
+    /// fiber the speed note came and went eight times in 37 s, the forcing
+    /// note five times in 6 s. No status says as much as the one below
+    /// today, and both inspectors fit the longest that do; the row holds
+    /// whatever one does say.
+    #[test]
+    fn what_changes_while_running_keeps_the_panel_still() {
+        for width in [1400.0, 390.0] {
+            let mut state = Playground::default();
+            state.editor.document.presentation.adaptation.enabled = true;
+            state.editor.document.presentation.simulation_speed = 0.09;
+            let context = egui::Context::default();
+            theme::apply(&context);
+            context.enable_accesskit();
+            let row = |state: &mut Playground, label| {
+                simulation_panel_row(state, &context, width, label)
+                    .unwrap_or_else(|| panic!("no {label:?} at width {width}"))
+                    .min
+                    .y
+            };
+            row(&mut state, "Mesh resolution");
+            let paused = row(&mut state, "Mesh resolution");
+            state.wave_running = true;
+            let starting = row(&mut state, "Mesh resolution");
+            state.speed_reached = 0.086;
+            let keeping_up = row(&mut state, "Mesh resolution");
+            state.speed_short = true;
+            state.speed_reached = 0.071;
+            let short = row(&mut state, "Mesh resolution");
+            assert_eq!(
+                state.simulation_speed_line(),
+                ("Reaching 0.07×".into(), true)
+            );
+            assert_eq!(
+                [starting, keeping_up, short],
+                [paused; 3],
+                "at width {width}"
+            );
+
+            let quiet = row(&mut state, "Point source");
+            state.amr_status = "adaptation discarded: the mesh changed underneath it, \
+                                and the estimate it was measured against with it"
+                .into();
+            let report = SolutionIndicatorReport {
+                limit_refine_candidates: 2000,
+                refine_candidates: 2000,
+                global_indicator: 0.0262,
+                ..Default::default()
+            };
+            state.amr_shown_report = Some(report.clone());
+            assert!(
+                state
+                    .amr_estimate_line()
+                    .ends_with("refining to resolve wavelengths"),
+                "{}",
+                state.amr_estimate_line()
+            );
+            assert_eq!(row(&mut state, "Point source"), quiet, "at width {width}");
+
+            // A forcing under the floor is told from the shown report, with no
+            // estimate in hand, as just after a handoff.
+            state.amr_shown_report = Some(SolutionIndicatorReport {
+                smallest_wavelength_target: 0.01,
+                ..report
+            });
+            assert!(state.amr_indicator_result.is_none());
+            row(&mut state, "The forcing wants");
+            // Turning adaptation off forgets it.
+            state.stop_adaptation_work();
+            assert!(state.amr_shown_report.is_none());
+        }
     }
 }

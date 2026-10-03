@@ -1091,6 +1091,14 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   returns the limits' graded field beside it, and a size-rule refinement
   applies that; the fiber settles at 7,348 triangles within 5 s.
 
+- [x] The simulation panel jumps under the pointer. Reported on 2026-10-03:
+  the speed note and the note on a forcing under the floor come and go and
+  move every control below them. Fixed on 2026-10-03
+  (`docs/engineering-log.md`): the speed row is always there and takes a
+  clear recovery to stop reading short, the forcing note and the estimate
+  line read the last estimate's report across handoffs, and the adaptation
+  status and estimate hold one row each.
+
 - [x] Coarsen decisions that change nothing. Found on 2026-10-03: the
   settled parametric fiber decides Coarsen on every estimate, about 520
   candidates, and the transactions it starts collapse nothing. Closed on
