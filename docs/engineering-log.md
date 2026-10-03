@@ -17916,3 +17916,36 @@ error read 2-3% against its 12% target (seen in the pause entry above).
   nothing: an empty transaction about once a second.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — Empty coarsening transactions are left as they are
+
+Once the parametric fiber settles at about 7,350 triangles, every estimate
+counts some 520 coarsen candidates and decides Coarsen, and the transactions
+that follow collapse nothing. Investigated, and closed without a change.
+
+- **Why nothing collapses.** Measured in instrumented runs on the user's
+  autosave: each scan finds about 280 edges under the collapse ratio (nearly
+  all interior, 11 touching a boundary) and about 158 collapse candidates,
+  and `collapse_plan` refuses every one because a replacement triangle's
+  longest edge would pass its target, mostly by 1.0-1.3 times. None is
+  refused for angle, inversion or the link condition. The estimator counts an
+  element whose shortest edge is under 0.45 of its target; elements left by
+  bisection have one such edge beside edges at full size, so a mesh at size
+  still reads as candidates.
+- **No estimator test predicts it.** Even an element whose longest edge is
+  under half its target (about 75 of them here) could not be collapsed:
+  whether a collapse fits depends on the triangles round the removed vertex
+  and the field's least target over them, which only the transaction sees.
+- **No cheap detector beats the transaction.** On an unchanged mesh the
+  collapse rules are monotone in the target, so a retry can only succeed if
+  some target has grown since the empty one. Between estimates 390-850 of the
+  fiber's element targets grow, by up to 2.6 times, as the error follows the
+  wave, so that exact rule never skips; any rule that skips more often is a
+  guess that can miss a collapse that became possible. One retry here did
+  collapse (7,348 to 7,346 triangles).
+- **Cost.** An empty transaction takes about 50 ms on the background worker,
+  one every 2 s (the coarsen streak resets after each), creates no mesh
+  revision and no handoff, and the estimates kept their 0.8 s spacing. The
+  status line shows its phase for those 50 ms; decision statuses last a frame
+  before "monitoring solution" returns, on every scene.
+- **Gate:** documentation only.

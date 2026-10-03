@@ -1091,11 +1091,13 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   returns the limits' graded field beside it, and a size-rule refinement
   applies that; the fiber settles at 7,348 triangles within 5 s.
 
-- [ ] Coarsen decisions that change nothing. Found on 2026-10-03: the
+- [x] Coarsen decisions that change nothing. Found on 2026-10-03: the
   settled parametric fiber decides Coarsen on every estimate, about 520
-  candidates, and each adaptation it starts collapses nothing, so an empty
-  transaction runs about once a second. Why those candidates cannot collapse
-  is not yet known.
+  candidates, and the transactions it starts collapse nothing. Closed on
+  2026-10-03 as correct, no change (`docs/engineering-log.md`): every
+  collapse is refused for leaving an edge past its target, which only the
+  transaction can judge, and the transaction is the cheapest exact check,
+  50 ms on the worker every 2 s with no mesh revision or handoff.
 
 - Test a larger wasm memory cap on iOS Safari before shipping one. The
   threaded web build caps its shared memory at 1 GiB (`--max-memory` in
