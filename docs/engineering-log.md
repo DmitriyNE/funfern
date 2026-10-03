@@ -18052,3 +18052,31 @@ beside a field law stays refused (filed in `docs/plan.md`).
   a Kerr response too.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — The Kerr slab takes a short-wave loss
+
+The user chose α = 0.25 for the Kerr slab, on looks, from the table in the
+entry above (`KERR_SLAB_SHORT_WAVE`), and the card says what it does.
+
+- **Claims restated.** The third-harmonic test ran at edge 0.15 so the suite
+  could afford it. There the 2.5 Hz fundamental has under three elements a
+  wavelength and sits near the ceiling the loss acts on: α = 0.25 took 13% of
+  it, the third harmonic fell from 0.31 to 0.13 of it, the coefficient's
+  swing from 0.247 to 0.155 against the bound of 0.2, and the linear
+  control's ratio went from 9.7e-3 to 1.03e-2 against 0.01, a readout floor
+  of about 2.8e-4 the bare run already grazed. The test now runs at the
+  gallery's edge, 0.08 (about 7 s a run): with the loss the third harmonic is
+  0.159 of the fundamental (0.214 bare), the readout 0.164 (0.232) and 28
+  times the 5 Hz level (47), the linear control 4.2e-4 (7.1e-4), and the
+  swing 0.149 (0.232). The swing loses more than the fundamental's 7% because
+  the harmonics the loss trims added to the field's peaks. Its bound is now
+  0.1, "about 15%" where the comment said "tens of percent"; the others hold
+  as they were.
+- **New test.** `the_kerr_slabs_short_wave_loss_trims_what_the_mesh_makes`:
+  at edge 0.08 the 12.5 Hz line, which stands above the third harmonic bare
+  and so is mostly the mesh's, falls under a quarter of itself (measured
+  0.13) while the signal keeps 0.9 (0.93).
+- `examples/kerr-slab.json` regenerated; the gallery plan's readout note
+  updated.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -993,7 +993,8 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   Done on 2026-10-03 (`docs/engineering-log.md`): `Material::short_wave_loss`,
   α in [0, 1], catalogue row D4, saved only when on; its own CPU energy lane,
   the device's primary-loss lane; an Advanced group with the Mesh-scale trim
-  preset at α = 0.05. The parametric fiber carries α = 0.5. Since a later
+  preset at α = 0.05. The parametric fiber carries α = 0.5 and the Kerr
+  slab α = 0.25. Since a later
   change on 2026-10-03 it composes with every field law, Kerr and saturable
   in either row: the nonlinear kick applies the stress, the lane is counted
   through the law's own store, and the cap sees the law's effective mass and

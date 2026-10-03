@@ -129,7 +129,8 @@
           "restoring": {
             "kind": "none"
           },
-          "switch_ramp": 0.0
+          "switch_ramp": 0.0,
+          "short_wave_loss": 0.25
         }
       ],
       "regions": [
@@ -425,7 +426,8 @@
           "restoring": {
             "kind": "none"
           },
-          "switch_ramp": 0.0
+          "switch_ramp": 0.0,
+          "short_wave_loss": 0.25
         }
       ],
       "regions": [

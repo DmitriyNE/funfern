@@ -420,7 +420,9 @@ pub fn catalog() -> &'static [TopologyExample] {
                 ExampleGroup::NonlinearAndSelfOrganizing,
                 "Kerr slab",
                 "A strong source drives a Kerr slab: the wave slows where it is strong, and the \
-                 receiver hears the source's third harmonic.",
+                 receiver hears the source's third harmonic. A short-wave loss, a weak viscosity \
+                 on the field's gradient, damps the higher harmonics the mesh is too coarse to \
+                 carry.",
                 kerr_slab(),
             ),
             example(
@@ -1603,6 +1605,16 @@ fn slab(x0: f64, x1: f64, half_height: f64) -> PeriodicCubicSpline {
     .unwrap()
 }
 
+/// The Kerr slab's short-wave loss α, a viscosity on the field's gradient
+/// that damps the odd harmonics the mesh cannot carry. Measured on 3 October
+/// 2026 at the receiver over 4 s on a fixed mesh, against α = 0: at edge
+/// 0.08, where the bare 12.5 Hz line (9.1e-3) stands above the third
+/// harmonic (6.7e-3) and so is mostly the mesh's, it takes 12.5 Hz to 0.13
+/// and keeps 0.93 of the 2.5 Hz signal and 0.65 of the third harmonic; at
+/// 0.04 it keeps 0.97 of the signal and 0.80 of the third harmonic and takes
+/// 17.5 Hz to 0.44 and 22.5 Hz to 0.16. Chosen on how the scene looks.
+const KERR_SLAB_SHORT_WAVE: f64 = 0.25;
+
 fn kerr_slab_with(chi: f64, amplitude: f64) -> TopologyDocument {
     let mut builder = Builder::new();
     builder.scene.physics = PhysicsModel::Electromagnetic {
@@ -1610,14 +1622,16 @@ fn kerr_slab_with(chi: f64, amplitude: f64) -> TopologyDocument {
     };
     builder.scene.outer_boundaries =
         OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
-    builder.scene.materials.push(preset_material(
+    let mut medium = preset_material(
         2,
         "Kerr slab",
         [178, 102, 62],
         "Kerr medium",
         LawPresetRow::Mass,
         &[("kerr_chi", chi)],
-    ));
+    );
+    medium.short_wave_loss = KERR_SLAB_SHORT_WAVE;
+    builder.scene.materials.push(medium);
     builder.subdomain(
         slab(-0.3, 0.3, 0.55),
         MaterialId(2),
@@ -5252,14 +5266,19 @@ mod tests {
 
     /// The Kerr gallery claim: behind the slab, the receiver hears the
     /// source's third harmonic, which a medium with the same geometry and no
-    /// response does not make; and the slab's coefficient moves by tens of
-    /// percent, which is what the material readout will show. Measured at a
-    /// coarse mesh so the suite can afford it; the gallery's own mesh is finer.
+    /// response does not make; and the slab's coefficient moves by about 15%,
+    /// which is what the material readout will show. At the gallery's edge,
+    /// 0.08, with its short-wave loss: the third harmonic at 0.16 of the
+    /// fundamental (0.21 without the loss), the linear slab at 4e-4, and the
+    /// coefficient's swing 0.149 (0.232 without it, the harmonics the loss
+    /// trims having added to the field's peaks). At edge 0.15 the
+    /// fundamental itself, at under three elements a wavelength, sits near
+    /// the ceiling the loss acts on, and lost 13% to it.
     #[test]
     fn the_kerr_slab_generates_its_third_harmonic() {
         let receiver = Point2::new(0.55, 0.0);
         let run = |chi: f64| {
-            let (series, dt, strongest) = trace(&kerr_slab_with(chi, 60.0), 0.15, 4.0, receiver);
+            let (series, dt, strongest) = trace(&kerr_slab_with(chi, 60.0), 0.08, 4.0, receiver);
             let ratio = amplitude_at(&series, dt, 7.5, 9.0) / amplitude_at(&series, dt, 2.5, 3.0);
             (ratio, strongest, series, dt)
         };
@@ -5267,12 +5286,44 @@ mod tests {
         let (linear, ..) = run(0.0);
         assert!(kerr > 0.1, "third harmonic {kerr:.3e} of the fundamental");
         assert!(linear < 0.01, "a linear slab made {linear:.3e}");
-        assert!(strongest > 0.2, "the slab moved only {strongest:.3}");
-        // The receiver's readout shows it at 0.29 of the fundamental, and
-        // no second harmonic: 15 times the level at 5 Hz.
+        assert!(strongest > 0.1, "the slab moved only {strongest:.3}");
+        // The receiver's readout shows it at 0.16 of the fundamental, and
+        // no second harmonic: 28 times the level at 5 Hz.
         let lines = Lines::read(&kerr_slab(), ProbeId(1), &series, dt, 7.5);
         assert!(lines.at(7.5) > 0.1 * lines.at(2.5));
         assert!(lines.at(7.5) > 5.0 * lines.at(5.0));
+    }
+
+    /// The slab's short-wave loss trims what the mesh makes of its harmonics
+    /// and keeps the signal. At the gallery's edge, 0.08, the bare 12.5 Hz
+    /// line stands above the third harmonic, so it is mostly the mesh's; the
+    /// loss takes it to 0.13 of itself and keeps 0.93 of the 2.5 Hz signal.
+    #[test]
+    fn the_kerr_slabs_short_wave_loss_trims_what_the_mesh_makes() {
+        let receiver = Point2::new(0.55, 0.0);
+        let read = |document: &TopologyDocument| {
+            let (series, dt, _) = trace(document, 0.08, 4.0, receiver);
+            let at = |hz: f64| amplitude_at(&series, dt, hz, 1.5 * hz);
+            (at(2.5), at(12.5))
+        };
+        let trimmed = kerr_slab();
+        let mut bare = trimmed.clone();
+        for scene in [&mut bare.model.draft, &mut bare.model.accepted] {
+            scene
+                .materials
+                .iter_mut()
+                .for_each(|material| material.short_wave_loss = 0.0);
+        }
+        let ((signal, rung), (bare_signal, bare_rung)) = (read(&trimmed), read(&bare));
+        assert!(
+            rung < 0.25 * bare_rung,
+            "the 12.5 Hz line reads {rung:.3e} against {bare_rung:.3e} without the loss"
+        );
+        assert!(
+            signal > 0.9 * bare_signal,
+            "the signal keeps {:.3} of itself",
+            signal / bare_signal
+        );
     }
 
     /// The size rule's report on `document` after `seconds` from rest at

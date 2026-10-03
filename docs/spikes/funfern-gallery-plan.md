@@ -971,7 +971,10 @@ now also reads the spectrum the readout draws, over its own span, and finds
 the lines there (measured at the claims' own meshes):
 
 - Kerr slab: the third harmonic at 0.29 of the fundamental, 15 times the
-  level at 5 Hz.
+  level at 5 Hz. Since 3 October 2026 the slab carries a short-wave loss,
+  α = 0.25, and the claim is read at the gallery's edge 0.08: 0.16 of the
+  fundamental, 28 times the level at 5 Hz, with the coefficient's swing at
+  0.149.
 - Time crystal: the sidebands at 1.5, 3.5 and 5.5 Hz at 0.20, 0.88 and 0.20
   of the carrier.
 - Travelling modulation: 3.5 Hz at 1.7 times the carrier, 5.5 Hz at 7.5.
