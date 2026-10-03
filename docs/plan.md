@@ -977,7 +977,7 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   magnitude of its analytic signal), for group delay. Waiting on the same kind
   of readout design.
 
-- [ ] An authored viscous loss channel: the Gate O short-wave viscosity
+- [x] An authored viscous loss channel: the Gate O short-wave viscosity
   (`docs/spikes/funfern-gate-o.md`, "The short-wave limit") as a named,
   persisted loss channel on any material, off by default, its rate `α/h`
   scaled to each element's own ceiling. It damps a mode by the square of
@@ -990,6 +990,13 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   Kerr slab α = 0.25 halves its 17.5 Hz residue for 1.5% of the signal.
   The device already applies the stress for van der Pol. The work is the
   authoring, persistence, its own loss lane, the law summary and a preset.
+  Done on 2026-10-03 (`docs/engineering-log.md`): `Material::short_wave_loss`,
+  α in [0, 1], catalogue row D4, saved only when on; its own CPU energy lane,
+  the device's primary-loss lane; an Advanced group with the Mesh-scale trim
+  preset at α = 0.05. It does not compose with a field law yet, as van der
+  Pol does not, so the Kerr slab cannot take it; that waits on the
+  nonlinear kick applying the stress and charging its energy through the
+  node's own map. No gallery scene carries it.
 
 ## Maintenance
 
@@ -1127,7 +1134,8 @@ is next touched.
   van der Pol state with a gradient closes on its trajectory at order one while
   a uniform one closes at order two. The term damps mesh-scale patterns and
   vanishes as the mesh refines; splitting it half before the drift and half
-  after would make it symmetric.
+  after would make it symmetric. The authored short-wave loss is the same
+  stress, applied the same way, so it is first order too.
 - The fixed estimator's outgoing-trace defect does not take out the primary
   loss the step applies at trace nodes, a defect of order `γh` in the trace
   flux. Measured on a static box behind second-order walls with a primary loss

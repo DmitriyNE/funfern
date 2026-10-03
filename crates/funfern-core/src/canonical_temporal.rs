@@ -1882,11 +1882,16 @@ pub struct CanonicalTemporalWaveOperator {
     /// rate follows the field and is stepped by its exact node map.
     has_active_loss: bool,
     /// The short-wave viscosity `τ` of each complementary sample, zero off
-    /// the self-oscillating elements and empty without one; see
-    /// [`short_wave_viscosity`].
+    /// the self-oscillating elements and those with an authored short-wave
+    /// loss, and empty without either; see [`short_wave_viscosity`].
     short_wave: Vec<f64>,
     /// The samples whose `τ` is not zero, so the step visits only those.
     short_wave_samples: Vec<u32>,
+    /// The nodes a van der Pol channel makes active, where the short-wave
+    /// force's energy is the gain lane's; empty unless an authored short-wave
+    /// loss shares the generation with one, since otherwise every node it
+    /// reaches is one or the other.
+    active_nodes: Vec<bool>,
     /// The grid filter's reach at each node over the whole trajectory; see
     /// [`trajectory_grid_filter_reach`].
     grid_filter_reach: Vec<f64>,
@@ -1983,6 +1988,8 @@ impl CanonicalTemporalWaveOperator {
             )?;
         }
         last_record.clear();
+        // Each element's authored short-wave loss α, read from its material.
+        let mut element_short_wave = vec![0.0_f64; base.element_nodes().len()];
         for sample in base.constitutive_samples() {
             let triangle = mesh
                 .triangles
@@ -1990,6 +1997,9 @@ impl CanonicalTemporalWaveOperator {
                 .ok_or(WaveError::InvalidMesh("a canonical sample has no element"))?;
             let temporal =
                 temporal_material_sample(authored, triangle.region, sample.point, false)?;
+            if let Some(material) = authored.material(temporal.coefficient.material) {
+                element_short_wave[sample.element as usize] = material.short_wave_loss;
+            }
             has_temporal_laws |= temporal.coefficient.law.drive != TimeDriveValues::None
                 || temporal.coefficient.law.alternate.is_some()
                 || temporal.loss.law.drive != TimeDriveValues::None;
@@ -2057,6 +2067,13 @@ impl CanonicalTemporalWaveOperator {
             return Err(WaveError::Unsupported(
                 "van der Pol's node map assumes a linear primary map; it does not compose \
                  with a field law yet",
+            ));
+        }
+        let has_short_wave_loss = element_short_wave.iter().any(|alpha| *alpha > 0.0);
+        if has_short_wave_loss && has_field_laws {
+            return Err(WaveError::Unsupported(
+                "a short-wave loss assumes a linear primary map; it does not compose with a \
+                 field law yet",
             ));
         }
         let restoring_curvature = primary
@@ -2129,8 +2146,19 @@ impl CanonicalTemporalWaveOperator {
                 .all(|load| load.normalized_weight == 0.0);
         let conservative_bulk_supported =
             !open && ungapped && undamped_boundary && !has_loss && undriven_boundary;
-        let short_wave = if has_active_loss {
-            short_wave_viscosity(&base, quadratic, &primary, maximum_time_step)?
+        let short_wave = if has_active_loss || has_short_wave_loss {
+            short_wave_viscosity(
+                &base,
+                quadratic,
+                &primary,
+                &element_short_wave,
+                maximum_time_step,
+            )?
+        } else {
+            Vec::new()
+        };
+        let active_nodes = if has_active_loss && has_short_wave_loss {
+            active_nodes(&base, &primary)
         } else {
             Vec::new()
         };
@@ -2164,20 +2192,21 @@ impl CanonicalTemporalWaveOperator {
             restoring_curvature,
             short_wave,
             short_wave_samples,
+            active_nodes,
             grid_filter_reach,
         })
     }
 
     /// Each complementary sample's short-wave viscosity `τ`, in sample order;
-    /// empty when no self-oscillating law acts.
+    /// empty when no self-oscillating law or short-wave loss acts.
     pub fn short_wave_viscosity(&self) -> &[f64] {
         &self.short_wave
     }
 
     /// The short-wave force `Cᵀ W v(τ η C u)` of a primary field, over the
-    /// self-oscillating samples alone: a viscous stress on the field's
+    /// samples with a viscosity alone: a viscous stress on the field's
     /// gradient, with `v` the complementary map in force at `time`. `None`
-    /// when no self-oscillating law acts.
+    /// when no self-oscillating law or short-wave loss acts.
     fn short_wave_force(
         &self,
         primary_field: &[f64],
@@ -3263,9 +3292,16 @@ pub struct CanonicalTemporalStepAccounting {
     /// same node's other materials are counted here with it, because one map
     /// acts on the node.
     pub active_gain: f64,
+    /// Energy an authored short-wave loss removed. It removes energy over a
+    /// run, but one step can read a little either side of zero: the stress is
+    /// formed on the drift's midpoint field and applied to the field after
+    /// the kick, so a step's change is a quadrature of the dissipation rather
+    /// than the dissipation itself. Where it acts on a van der Pol node it is
+    /// counted in `active_gain` instead, as the passive channels there are.
+    pub short_wave_loss: f64,
     pub energy_change: f64,
-    /// What the three lanes above fail to account for. The splitting's own
-    /// error and nothing else.
+    /// What the lanes above fail to account for. The splitting's own error
+    /// and nothing else.
     pub splitting_residual: f64,
 }
 
@@ -4031,9 +4067,10 @@ impl CanonicalTemporalWaveState {
         validate_finite(&integrated)?;
         let (_, complementary_rate_end) =
             operator.complementary_energy_and_rate(&complementary, end_time, &self.runtime)?;
-        // A self-oscillating medium's short-wave viscosity, on the drift's
-        // midpoint field and over the whole step: the midpoint rule. It is
-        // applied after the second kick, as the device does.
+        // The short-wave viscosity of a self-oscillating medium or a
+        // short-wave loss, on the drift's midpoint field and over the whole
+        // step: the midpoint rule. It is applied after the second kick, as the
+        // device does.
         let short_wave_force =
             operator.short_wave_force(&midpoint_field, end_time, &self.runtime)?;
 
@@ -4056,7 +4093,7 @@ impl CanonicalTemporalWaveState {
         prescribed_exchange += exchange;
         boundary_loss += escaped;
         validate_finite(&primary)?;
-        let short_wave_gain = match &short_wave_force {
+        let (short_wave_gain, short_wave_loss) = match &short_wave_force {
             Some(force) => apply_short_wave(
                 operator,
                 &mut primary,
@@ -4066,7 +4103,7 @@ impl CanonicalTemporalWaveState {
                 end_time,
                 &self.runtime,
             )?,
-            None => 0.0,
+            None => (0.0, 0.0),
         };
 
         let (second_primary_loss, second_complementary_loss, second_gain) = decay(
@@ -4097,6 +4134,7 @@ impl CanonicalTemporalWaveState {
             boundary_loss,
             prescribed_exchange,
             active_gain,
+            short_wave_loss,
             energy_change,
             splitting_residual: energy_change
                 - temporal_work
@@ -4105,7 +4143,8 @@ impl CanonicalTemporalWaveState {
                 - active_gain
                 + primary_loss
                 + complementary_loss
-                + boundary_loss,
+                + boundary_loss
+                + short_wave_loss,
         };
         if !accounting.temporal_work.is_finite()
             || !accounting.source_work.is_finite()
@@ -4114,6 +4153,7 @@ impl CanonicalTemporalWaveState {
             || !accounting.boundary_loss.is_finite()
             || !accounting.prescribed_exchange.is_finite()
             || !accounting.active_gain.is_finite()
+            || !accounting.short_wave_loss.is_finite()
             || !accounting.energy_change.is_finite()
             || !accounting.splitting_residual.is_finite()
         {
@@ -4375,10 +4415,15 @@ fn per_node_eigenvalue_bound(
 /// it. The step is explicit, so `τ G` is capped at `1/h_max`, the largest
 /// step; past a gain of `1/(κ h_max)` the suppression is partial. Not every such pattern is a
 /// defect in the continuum, only the ones the mesh cannot carry.
+///
+/// A material's authored short-wave loss α is the same stress at
+/// `τ G = α/h_max`, added to the van der Pol term under the same cap: a mode
+/// at the element's ceiling decays at about `α/(2 h_max)`.
 fn short_wave_viscosity(
     base: &CanonicalWaveOperator,
     quadratic: &QuadraticWaveOperator,
     primary: &TemporalSites<TemporalPrimarySample>,
+    element_short_wave: &[f64],
     maximum_time_step: f64,
 ) -> Result<Vec<f64>, WaveError> {
     if quadratic.degrees_of_freedom() != base.degrees_of_freedom() {
@@ -4406,7 +4451,8 @@ fn short_wave_viscosity(
     let mut viscosity = vec![0.0; base.constitutive_samples().len()];
     for (index, value) in viscosity.iter_mut().enumerate() {
         let element = index / 6;
-        if gain[element] <= 0.0 {
+        let authored = element_short_wave.get(element).copied().unwrap_or(0.0);
+        if gain[element] <= 0.0 && authored <= 0.0 {
             continue;
         }
         let bound = base.element_nodes()[element]
@@ -4414,18 +4460,39 @@ fn short_wave_viscosity(
             .map(|node| gershgorin(*node as usize))
             .fold(0.0_f64, f64::max);
         if bound > 0.0 {
-            *value = (SHORT_WAVE_VISCOSITY * gain[element]).min(ceiling) / bound;
+            let reach = SHORT_WAVE_VISCOSITY * gain[element] + authored * ceiling;
+            *value = reach.min(ceiling) / bound;
         }
     }
     validate_finite(&viscosity)?;
     Ok(viscosity)
 }
 
-/// Applies the short-wave force over `duration` and returns the energy it
-/// put in, which is never positive. It is part of the self-oscillating
-/// law's own exchange, so it is charged with that law's gain. A prescribed
-/// node holds its pin and an outgoing trace node is the wall's, as on the
-/// device, where both are stepped outside the bulk kick.
+/// The nodes a van der Pol channel makes active, as the device marks them: a
+/// contribution carrying the law at a positive rate.
+fn active_nodes(
+    base: &CanonicalWaveOperator,
+    primary: &TemporalSites<TemporalPrimarySample>,
+) -> Vec<bool> {
+    let mut active = vec![false; base.degrees_of_freedom()];
+    for (contribution, sample) in base.primary_contributions().iter().zip(primary.iter()) {
+        if matches!(sample.loss.law.rate, RateLawValues::VanDerPol { .. })
+            && sample.loss.base_rate > 0.0
+        {
+            active[contribution.node as usize] = true;
+        }
+    }
+    active
+}
+
+/// Applies the short-wave force over `duration` and returns the energy it put
+/// in at active nodes and the energy it took out elsewhere; see
+/// [`CanonicalTemporalStepAccounting::short_wave_loss`] for their sign. At an
+/// active node it is part of the self-oscillating law's
+/// own exchange, so it is charged with that law's gain; elsewhere it is an
+/// authored short-wave loss with a lane of its own. A prescribed node holds
+/// its pin and an outgoing trace node is the wall's, as on the device, where
+/// both are stepped outside the bulk kick.
 fn apply_short_wave(
     operator: &CanonicalTemporalWaveOperator,
     primary: &mut [f64],
@@ -4434,7 +4501,7 @@ fn apply_short_wave(
     forcing: &CanonicalForcing,
     time: f64,
     runtime: &CanonicalMaterialRuntimeState,
-) -> Result<f64, WaveError> {
+) -> Result<(f64, f64), WaveError> {
     let mass = operator.primary_mass_at(time, runtime)?;
     let mut trace = vec![false; primary.len()];
     if let Some(boundary) = operator.base().outgoing_boundary() {
@@ -4442,18 +4509,27 @@ fn apply_short_wave(
             trace[*node as usize] = true;
         }
     }
-    let mut gained = 0.0;
+    let active = |node: usize| match operator.active_nodes.get(node) {
+        Some(active) => *active,
+        None => operator.has_active_loss,
+    };
+    let (mut gained, mut lost) = (0.0, 0.0);
     for (node, value) in force.iter().enumerate() {
         if *value == 0.0 || forcing.prescribed()[node].is_some() || trace[node] {
             continue;
         }
         let old = primary[node];
         let next = old - duration * value;
-        gained += 0.5 * (next * next - old * old) / mass[node];
+        let change = 0.5 * (next * next - old * old) / mass[node];
+        if active(node) {
+            gained += change;
+        } else {
+            lost -= change;
+        }
         primary[node] = next;
     }
     validate_finite(primary)?;
-    Ok(gained)
+    Ok((gained, lost))
 }
 
 /// One half of the Strang dissipation map, and the energy it removed.
@@ -4794,6 +4870,7 @@ pub(crate) fn strip_temporal_laws(materials: &mut [Material]) {
             loss.law = DampingLaw::constant();
         }
         material.restoring = RestoringLaw::None;
+        material.short_wave_loss = 0.0;
     }
 }
 
@@ -4824,6 +4901,14 @@ fn temporal_material_sample(
             "Switch ramp",
             point,
             "duration must be finite and nonnegative",
+        );
+    }
+    if !(0.0..=crate::MAX_SHORT_WAVE_LOSS).contains(&material.short_wave_loss) {
+        return material_error(
+            material,
+            "Short-wave loss",
+            point,
+            "α must lie between 0 and 1",
         );
     }
     let coordinates = region.frame.coordinates(point);
@@ -11589,6 +11674,218 @@ mod tests {
             bare_uniform.complementary_flux(),
             damped_uniform.complementary_flux()
         );
+    }
+
+    /// The power-iterated ceiling of `M⁻¹K`, a smooth mode and a uniform
+    /// field, each normalized, for the short-wave checks.
+    fn short_wave_fields(operator: &CanonicalTemporalWaveOperator) -> [Vec<f64>; 3] {
+        let base = operator.base();
+        let mass = base.primary_mass().to_vec();
+        let stiffness = |field: &[f64]| {
+            let mut flux = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+            operator.drift_on(&mut flux, field, 1.0).unwrap();
+            base.force(&flux).unwrap()
+        };
+        let normalized = |mut field: Vec<f64>| {
+            let norm = field.iter().map(|value| value * value).sum::<f64>().sqrt();
+            field.iter_mut().for_each(|value| *value /= norm);
+            field
+        };
+        let mut ceiling = normalized(
+            (0..mass.len())
+                .map(|node| ((node * 7919) % 13) as f64 - 6.0)
+                .collect(),
+        );
+        for _ in 0..400 {
+            let next = stiffness(&ceiling)
+                .iter()
+                .zip(&mass)
+                .map(|(force, mass)| force / mass)
+                .collect();
+            ceiling = normalized(next);
+        }
+        let smooth = normalized(
+            base.node_points()
+                .iter()
+                .map(|point| (0.5 * std::f64::consts::PI * point.x).sin())
+                .collect(),
+        );
+        [ceiling, smooth, vec![1.0; mass.len()]]
+    }
+
+    /// Steps a field from rest in its flux for `seconds` and returns the
+    /// state and the summed accounting.
+    fn short_wave_run(
+        operator: &CanonicalTemporalWaveOperator,
+        field: &[f64],
+        dt: f64,
+        seconds: f64,
+    ) -> (CanonicalTemporalWaveState, CanonicalTemporalStepAccounting) {
+        let base = operator.base();
+        let primary = field
+            .iter()
+            .zip(base.primary_mass())
+            .map(|(value, mass)| 1.0e-3 * value * mass)
+            .collect();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let mut state =
+            CanonicalTemporalWaveState::new(operator, dt, primary, complementary).unwrap();
+        let forcing = CanonicalForcing::none(base);
+        let mut total = CanonicalTemporalStepAccounting::default();
+        for _ in 0..(seconds / dt).round() as usize {
+            let step = state.step_with_forcing(operator, &forcing).unwrap();
+            total.primary_loss += step.primary_loss;
+            total.active_gain += step.active_gain;
+            total.short_wave_loss += step.short_wave_loss;
+            total.energy_change += step.energy_change;
+            total.splitting_residual += step.splitting_residual;
+        }
+        (state, total)
+    }
+
+    /// An authored short-wave loss α damps the mesh's ceiling at about
+    /// `α/(2h)` in amplitude, `α/h` in energy, where `G` bounds the element's
+    /// eigenvalues from above; it costs a smooth mode little, leaves a
+    /// uniform field bit for bit alone, and charges what it takes to a lane
+    /// of its own that closes the balance.
+    #[test]
+    fn an_authored_short_wave_loss_damps_the_ceiling_and_spares_long_waves() {
+        let alpha = 0.25;
+        let mut scene = Scene::default();
+        scene.materials[0].short_wave_loss = alpha;
+        assert!(scene.materials[0].valid());
+        assert!(!scene.materials[0].time_invariant());
+        let (_, _, operator) = generation(&scene, 0.5, 1);
+        assert!(operator.short_wave_viscosity().iter().all(|tau| *tau > 0.0));
+        let mut bare = operator.clone();
+        bare.short_wave.clear();
+        bare.short_wave_samples.clear();
+        let h = operator.maximum_time_step();
+        let dt = 0.2 * h;
+        let [ceiling, smooth, uniform] = short_wave_fields(&operator);
+        let rate = |operator: &CanonicalTemporalWaveOperator, field: &[f64]| {
+            let start = short_wave_run(operator, field, dt, 0.0).0;
+            let (state, total) = short_wave_run(operator, field, dt, 1.0);
+            let start = start.energy(operator).unwrap();
+            let end = state.energy(operator).unwrap();
+            ((end / start).ln(), total, start)
+        };
+        let (bare_ceiling, ..) = rate(&bare, &ceiling);
+        let (damped_ceiling, total, start) = rate(&operator, &ceiling);
+        let full = alpha / h;
+        // The bare step only breathes about its shadow energy.
+        assert!(bare_ceiling.abs() < 1.0e-2, "{bare_ceiling}");
+        assert!(
+            damped_ceiling < -0.25 * full && damped_ceiling > -1.05 * full,
+            "the ceiling's energy decays at {:.3}/s against α/h = {full:.3}/s",
+            -damped_ceiling
+        );
+        // The lane holds what left the field, and the balance closes on it.
+        assert_eq!(total.active_gain, 0.0);
+        assert_eq!(total.primary_loss, 0.0);
+        assert!(
+            (total.short_wave_loss + total.energy_change).abs() < 1.0e-6 * start,
+            "{total:?}"
+        );
+        assert!(total.splitting_residual.abs() < 1.0e-6 * start, "{total:?}");
+        // At edge 0.5 the smooth mode has about eight elements a wavelength,
+        // and loses 0.3% of what the ceiling does: the ratio of their
+        // eigenvalues.
+        let (damped_smooth, ..) = rate(&operator, &smooth);
+        assert!(
+            damped_smooth > 0.01 * damped_ceiling,
+            "a smooth mode decays at {:.4}/s against the ceiling's {:.3}/s",
+            -damped_smooth,
+            -damped_ceiling
+        );
+        let (bare_uniform, _) = short_wave_run(&bare, &uniform, dt, 1.0);
+        let (damped_uniform, _) = short_wave_run(&operator, &uniform, dt, 1.0);
+        assert_eq!(bare_uniform.primary_flux(), damped_uniform.primary_flux());
+        assert_eq!(
+            bare_uniform.complementary_flux(),
+            damped_uniform.complementary_flux()
+        );
+    }
+
+    /// Beside van der Pol, the authored loss's energy is the gain lane's at
+    /// active nodes and its own lane's elsewhere, and the balance closes over
+    /// both; past α = 1 the material is refused, and a field law does not
+    /// compose with it yet.
+    #[test]
+    fn a_short_wave_loss_beside_van_der_pol_splits_its_energy_by_node() {
+        let mut scene = Scene::initial();
+        scene.materials[0].restoring = klein_gordon(3.0);
+        scene.materials[0].magnetic_loss = Some(crate::LossChannel {
+            base_rate: ScalarField::constant(1.0),
+            law: DampingLaw {
+                rate: crate::RateLaw::VanDerPol {
+                    threshold: ScalarField::constant(100.0),
+                    amplitude_bound: ScalarField::constant(1000.0),
+                },
+                drive: TimeDrive::None,
+                gate: None,
+            },
+        });
+        let interior = RegionId(2);
+        scene.obstacles[0].role = LoopRole::MaterialInterface {
+            exterior: BACKGROUND_REGION,
+            interior,
+        };
+        scene.materials.push(Material {
+            id: crate::MaterialId(2),
+            name: "interior".into(),
+            short_wave_loss: 0.5,
+            ..Material::default_medium()
+        });
+        scene.regions.push(Region {
+            id: interior,
+            material: crate::MaterialId(2),
+            frame: MaterialFrame::world(),
+        });
+        let (_, _, operator) = generation(&scene, 0.3, 1);
+        assert!(operator.active_nodes.iter().any(|active| *active));
+        assert!(!operator.active_nodes.iter().all(|active| *active));
+        let [ceiling, ..] = short_wave_fields(&operator);
+        let dt = 0.2 * operator.maximum_time_step();
+        let (_, total) = short_wave_run(&operator, &ceiling, dt, 0.5);
+        assert!(
+            total.short_wave_loss > 0.1 * total.energy_change.abs(),
+            "{total:?}"
+        );
+        assert!(total.active_gain < 0.0, "{total:?}");
+        // The splitting's own second-order defect, as with van der Pol alone.
+        assert!(
+            total.splitting_residual.abs() < 1.0e-2 * total.energy_change.abs(),
+            "{total:?}"
+        );
+
+        let mut past = Scene::default();
+        past.materials[0].short_wave_loss = 1.5;
+        assert!(!past.materials[0].valid());
+        let mut kerr_scene = Scene::default();
+        kerr_scene.materials[0].short_wave_loss = 0.1;
+        kerr_scene.materials[0].mass_law.field = kerr(0.8);
+        let mut base_scene = kerr_scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.5,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        assert!(matches!(
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &kerr_scene, 1),
+            Err(WaveError::Unsupported(_))
+        ));
     }
 
     /// Every oscillator medium beside every composition balances at second

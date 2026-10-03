@@ -107,6 +107,10 @@ pub struct RegionId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MaterialId(pub u64);
 
+/// The largest short-wave loss: past it the explicit viscous step would
+/// overshoot at the mesh's ceiling.
+pub const MAX_SHORT_WAVE_LOSS: f64 = 1.0;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Material {
     pub id: MaterialId,
@@ -131,18 +135,27 @@ pub struct Material {
     /// Seconds a Switch takes to cross from the base factor to the alternate;
     /// zero is a hard temporal interface.
     pub switch_ramp: f64,
+    /// The short-wave loss α, from 0 (off) to 1: a viscous stress on the
+    /// field's gradient, `τ η C u` with `τ = α/(h G)` on each element, `G` the
+    /// element's own ceiling and `h` the generation's largest step. A mode at
+    /// that ceiling decays at about `α/(2h)` and a resolved wave by the square
+    /// of its share of it, so it trims mesh-scale residue and spares the waves
+    /// the mesh carries. Gate O's van der Pol limit is the same stress.
+    pub short_wave_loss: f64,
 }
 
 impl Material {
     /// Whether this material is a plain linear, time-invariant wave medium:
     /// no field law, no drive and no Switch alternate on either constitutive
-    /// row, no drive and no field-dependent rate on either loss channel, and
-    /// no restoring law. Consumers whose derivation assumes such a medium
-    /// (the fixed solver path, the far field's free-space projection) test
-    /// this rather than inspecting each slot. A restoring law is time
-    /// invariant, but it is not this medium: its integrated field is state
-    /// the fixed path does not carry, and Klein-Gordon has no wave-equation
-    /// Green's function.
+    /// row, no drive and no field-dependent rate on either loss channel, no
+    /// restoring law and no short-wave loss. Consumers whose derivation
+    /// assumes such a medium (the fixed solver path, the far field's
+    /// free-space projection) test this rather than inspecting each slot. A
+    /// restoring law is time invariant, but it is not this medium: its
+    /// integrated field is state the fixed path does not carry, and
+    /// Klein-Gordon has no wave-equation Green's function. Nor is a short-wave
+    /// loss, which only the time-driven step carries and which damps each
+    /// wavelength by its own rate.
     pub fn time_invariant(&self) -> bool {
         let channel_is_fixed = |channel: &Option<LossChannel>| {
             channel.as_ref().is_none_or(|channel| {
@@ -154,6 +167,7 @@ impl Material {
             && channel_is_fixed(&self.electric_loss)
             && channel_is_fixed(&self.magnetic_loss)
             && self.restoring.is_none()
+            && self.short_wave_loss == 0.0
     }
 }
 
@@ -256,6 +270,7 @@ impl Material {
             magnetic_loss: None,
             restoring: RestoringLaw::None,
             switch_ramp: 0.0,
+            short_wave_loss: 0.0,
         }
     }
 
@@ -328,6 +343,7 @@ impl Material {
             && self.restoring.valid(&self.parameters)
             && self.switch_ramp.is_finite()
             && self.switch_ramp >= 0.0
+            && (0.0..=MAX_SHORT_WAVE_LOSS).contains(&self.short_wave_loss)
             && self
                 .mass_density
                 .constant_value()

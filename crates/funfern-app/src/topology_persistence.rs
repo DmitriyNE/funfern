@@ -81,6 +81,10 @@ struct StoredMaterial {
     restoring: StoredRestoringLaw,
     #[serde(default)]
     switch_ramp: f64,
+    /// Written only when on, so a file without one reads in a build that
+    /// predates it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    short_wave_loss: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -713,6 +717,10 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
 fn decode_document(mut file: FileV22) -> Result<TopologyDocument, String> {
     let every_material_advanced = file.presentation.advanced_materials;
     let mut readouts = ProbeReadouts {
@@ -803,6 +811,7 @@ fn encode_scene(scene: &TopologyScene) -> StoredTopologyScene {
                 magnetic_loss: material.magnetic_loss.as_ref().map(encode_loss_channel),
                 restoring: encode_restoring_law(&material.restoring),
                 switch_ramp: material.switch_ramp,
+                short_wave_loss: material.short_wave_loss,
             })
             .collect(),
         regions: scene
@@ -927,6 +936,7 @@ fn decode_scene(stored: StoredTopologyScene) -> Result<TopologyScene, String> {
                         .transpose()?,
                     restoring: decode_restoring_law(material.restoring)?,
                     switch_ramp: material.switch_ramp,
+                    short_wave_loss: material.short_wave_loss,
                 })
             })
             .collect::<Result<_, String>>()?,
@@ -2639,6 +2649,7 @@ mod tests {
                 amplitude_bound: ScalarField::constant(2.0),
             };
             material.switch_ramp = 0.25;
+            material.short_wave_loss = 0.05;
         }
 
         let encoded = save(&document).unwrap();
@@ -2654,9 +2665,10 @@ mod tests {
     fn earlier_version_22_materials_receive_inert_law_defaults() {
         let document = TopologyDocument::default();
         let encoded = save(&document).unwrap();
-        // An ungated law writes no gate, so the file reads in a build that
-        // predates gates.
+        // An ungated law writes no gate, and a material without a short-wave
+        // loss no α, so the file reads in a build that predates either.
         assert!(!encoded.contains("\"gate\""), "{encoded}");
+        assert!(!encoded.contains("\"short_wave_loss\""), "{encoded}");
         let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         for scene_name in ["draft", "accepted"] {
             let materials = value["model"][scene_name]["materials"]

@@ -561,9 +561,9 @@ fn sample_loss_rate(sample: u32, local_time: f32) -> f32 {
 fn node_is_active(node: u32) -> bool { return nodes[node].boundary.w != 0u; }
 
 // Gate O: where each sample's short-wave viscosity `τ` sits, four to a word,
-// or 0 when no self-oscillating law acts. The drift leaves `τ η C u` in the
-// sample's scratch `zw`, and an active node's second kick gathers it; see
-// `short_wave_viscosity` on the reference.
+// or 0 when no self-oscillating law or short-wave loss acts. The drift leaves
+// `τ η C u` in the sample's scratch `zw`, and every node's second kick
+// gathers it; see `short_wave_viscosity` on the reference.
 fn short_wave_offset() -> u32 {
     if !temporal_enabled() { return 0u; }
     return tables[control.runtime_slots.z + 2u].data.w;
@@ -2227,10 +2227,10 @@ fn kick_node(node: u32, second: bool) {
     let target_time = control.clock_f32.y
         + select(select(duration, 0.0, temporal_enabled()), control.clock_f32.x, second);
     let source = source_rate(node, source_time);
-    // Gate O: an active node's second kick also gathers the short-wave
-    // stresses; a law-carrying generation keeps no force cache, so the
-    // gather is the one the force needs anyway.
-    let short_wave = second && node_is_active(node) && short_wave_offset() != 0u;
+    // Gate O: the second kick also gathers the short-wave stresses; a
+    // law-carrying generation keeps no force cache, so the gather is the one
+    // the force needs anyway.
+    let short_wave = second && short_wave_offset() != 0u;
     var held_force: f32;
     var viscous = 0.0;
     if short_wave {
@@ -2285,8 +2285,8 @@ fn kick_node(node: u32, second: bool) {
     }
     // The short-wave viscosity over the whole step, on the drift's midpoint
     // gradient, after the kick as the reference applies it. What it takes is
-    // the self-oscillating law's, charged to the loss lane an active node's
-    // reduction books as gain. A pin holds.
+    // charged to the loss lane, which an active node's reduction books as
+    // gain and a passive one's as primary loss. A pin holds.
     if short_wave && nodes[node].boundary.z == 0u {
         let damped = next - control.clock_f32.x * viscous;
         scratch[node].values.z += 0.5 * (next * next - damped * damped) * inverse_mass;
@@ -3010,17 +3010,16 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
         let old = select(accepted_b(i), candidate_b(i), has_loss_stages());
         let next = old + control.evolution.y * control.clock_f32.x * curl;
         set_candidate_b(i, next);
-        // Gate O: a self-oscillating sample's viscous stress `τ η C u` on the
-        // same midpoint gradient, for the second kick to gather. The loss
-        // stage zeroed the lanes, so a sample without it gathers nothing.
+        // Gate O: a sample's viscous stress `τ η C u` on the same midpoint
+        // gradient, for the second kick to gather. Written for every sample,
+        // zero where `τ` is: a generation with only a short-wave loss runs no
+        // loss stage to clear the lanes, and the grid filter shares them.
         let short_wave = short_wave_offset();
         if short_wave != 0u {
             let viscosity = table_float(short_wave + i / 4u, i % 4u);
-            if viscosity != 0.0 {
-                let stress = viscosity * control.evolution.y * curl;
-                scratch[complementary_offset() + i].values.z = stress.x;
-                scratch[complementary_offset() + i].values.w = stress.y;
-            }
+            let stress = viscosity * control.evolution.y * curl;
+            scratch[complementary_offset() + i].values.z = stress.x;
+            scratch[complementary_offset() + i].values.w = stress.y;
         }
         if !finite_vec2(next) {
             reject(STATUS_NON_FINITE);

@@ -523,8 +523,8 @@ impl Playground {
                         ))
                         .show_ui(ui, |ui| {
                             // A field-dependent response does not run beside van der
-                            // Pol, so it is not offered there.
-                            let self_oscillating = law_editor::self_oscillating(&material);
+                            // Pol or a short-wave loss, so it is not offered there.
+                            let self_oscillating = law_editor::needs_linear_response(&material);
                             for preset in law_presets() {
                                 let current =
                                     matched.as_ref().is_some_and(|found| found.preset == preset);
@@ -754,6 +754,16 @@ impl Playground {
                             self.notify(error);
                         }
                     });
+                egui::CollapsingHeader::new("Short-wave loss")
+                    .id_salt(("material-short-wave", material.id.0))
+                    .default_open(material.short_wave_loss > 0.0)
+                    .show(ui, |ui| law_editor::short_wave_editor(ui, &mut material));
+            } else if material.short_wave_loss > 0.0 {
+                // Simple shows it rather than hiding a law the material runs.
+                ui.small(format!(
+                    "Short-wave loss α = {}, edited in Advanced",
+                    material.short_wave_loss
+                ));
             }
             egui::CollapsingHeader::new("Anisotropy")
                 .id_salt(("material-anisotropy", material.id.0))
@@ -1391,6 +1401,28 @@ mod tests {
                 .any(|rate| *rate > 0.0)
         );
         assert!(rates.primary_loss_rate().iter().all(|rate| *rate == 0.0));
+    }
+
+    /// A short-wave loss takes the time-driven path and reaches its operator
+    /// as a viscosity on every element of the material, and while it is on a
+    /// field-dependent response is not offered beside it.
+    #[test]
+    fn a_short_wave_loss_prepares_and_reaches_the_solver() {
+        let mut state = Playground::default();
+        assert!(activate(&mut state).canonical_temporal_operator.is_none());
+        let mut material = state.editor.document.model.draft.materials[0].clone();
+        assert!(!law_editor::needs_linear_response(&material));
+        material.short_wave_loss = law_editor::SHORT_WAVE_TRIM;
+        assert!(law_editor::needs_linear_response(&material));
+        state.editor.update_material(material).unwrap();
+        settle(&mut state.editor);
+        let prepared = activate(&mut state);
+        let temporal = prepared
+            .canonical_temporal_operator
+            .as_ref()
+            .expect("a short-wave loss takes the time-driven path");
+        let viscosity = temporal.short_wave_viscosity();
+        assert!(!viscosity.is_empty() && viscosity.iter().all(|tau| *tau > 0.0));
     }
 
     /// Editing a legacy material's loss moves it to its named channel in one

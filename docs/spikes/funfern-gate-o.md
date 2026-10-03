@@ -226,6 +226,17 @@ On the device the drift writes the stress into the sample's scratch lanes and
 an active node's second kick gathers it in the loop the force already runs,
 with `τ` packed four to a word after the restoring records.
 
+Since 3 October 2026 the same stress is a loss any material can author, its
+short-wave loss α in [0, 1] at `τ G = α/h_max`, added to the van der Pol term
+under the same cap. Where it acts away from an active node its energy has a
+lane of its own (`short_wave_loss`), which the device books as primary loss;
+every node's second kick gathers the stress, and the drift writes the lanes for
+every sample, since a generation with no other loss runs no loss stage to
+clear them. The step's energy change is exact but not signed: the stress is
+formed on the midpoint field and applied after the kick, so a single step of
+the ceiling mode can read a little the wrong way while the run loses it at
+`α/(2h)` in amplitude.
+
 ## Skins and names
 
 The equation is the same in every skin; only what `u`, and therefore `r`,

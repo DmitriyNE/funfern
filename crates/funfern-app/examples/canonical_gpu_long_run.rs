@@ -26,7 +26,8 @@
 //! failed before the device read its loss records: the constant one because a
 //! node on the slab's edge weighs the two materials' rates by masses the pump
 //! moves (3.2e-4 at 200 steps), the driven one because its drive was dropped
-//! (2.3e-2). The Stage 0 bound is
+//! (2.3e-2). `LONG_RUN_SHORT_WAVE` puts a short-wave loss α on every
+//! material. The Stage 0 bound is
 //! asserted at up to 1000 steps. Past that, a driven or field-dependent
 //! scene's own sensitivity lets the f32 trajectory part from the f64 one
 //! faster than roundoff alone, and the figure is printed, not judged.
@@ -101,6 +102,14 @@ fn main() -> AppExit {
                     gate: None,
                 },
             });
+        }
+    }
+    if let Ok(alpha) = std::env::var("LONG_RUN_SHORT_WAVE") {
+        let alpha: f64 = alpha.parse().expect("a short-wave loss α");
+        for scene in [&mut document.model.draft, &mut document.model.accepted] {
+            for material in &mut scene.materials {
+                material.short_wave_loss = alpha;
+            }
         }
     }
     if let Ok(edge) = std::env::var("LONG_RUN_EDGE") {

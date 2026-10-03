@@ -17702,3 +17702,54 @@ array alone, and nothing caught the catalog and the files disagreeing.
   builders stay the source, since the claim tests build their variants.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — The short-wave loss is a material channel
+
+The "Later experiments" item from `docs/plan.md`: Gate O's short-wave
+viscosity, authored on any material (catalogue row D4).
+
+- **Model.** `Material::short_wave_loss`, α in [0, 1]. On each element
+  `τ = min(κγ₀ + α/h_max, 1/h_max)/G`, van der Pol's term plus α's under the
+  existing explicit-step cap, so a mode at the element's ceiling decays at
+  about `α/(2h)`. Nonzero α makes a material not `time_invariant`, so it takes
+  the time-driven path; the stripped model zeroes it. Beside a field law it is
+  refused at compile, as van der Pol is: both assume the field is the flux over
+  the mass.
+- **Energy.** A `short_wave_loss` lane in `CanonicalTemporalStepAccounting`;
+  at a van der Pol node the energy stays in `active_gain`. It is exact per step
+  but not signed per step: the stress is formed on the drift's midpoint field
+  and applied after the kick, so one step of the ceiling mode read −1.2e-12
+  against a 3.8e-12 change. Over a run it removes energy.
+- **Device.** Every node's second kick gathers the stress where a `τ` table
+  exists, not only active ones, and the drift writes the stress lanes for every
+  sample, since a short-wave-only generation runs no loss stage to clear them.
+  Found by the oscillator gate: such a generation also ran no accounting pass,
+  so its primary-loss lane read 0 against the reference's 3.3e-2. The temporal
+  packing now turns accounting on with a `τ` table. Passive energy is booked as
+  primary loss.
+- **Saved** as `short_wave_loss`, written only when on, so version 22 files,
+  links and the 45 examples are unchanged.
+- **Editor.** Advanced has a Short-wave loss group: Off, Mesh-scale trim
+  (α = 0.05, 4% of the parametric fiber's far-end signal at edge 0.04) or α by
+  hand. Field responses are not offered while it is on; the simple view names it
+  when it is on.
+- **Tests.** `an_authored_short_wave_loss_damps_the_ceiling_and_spares_long_waves`
+  (α = 0.25, edge 0.5: the ceiling's energy decays at 3.70/s against
+  α/h = 5.07/s, a smooth mode at 0.3% of that, a uniform field bit for bit
+  untouched, the lane closing the balance);
+  `a_short_wave_loss_beside_van_der_pol_splits_its_energy_by_node` (with the
+  past-1 and Kerr refusals); `a_short_wave_loss_prepares_and_reaches_the_solver`;
+  persistence round trip and the unwritten zero.
+- **Device runs** (α = 0.3; Q, b, r and lanes against the reference, 200 steps):
+  plain Klein-Gordon Q 3.0e-7, b 2.0e-6, loss lane 3.6e-6; van der Pol
+  Q 1.7e-7, gain 8.1e-8; van der Pol junction with α in the interior (both
+  lanes) Q 4.3e-7, gain 7.5e-8, loss 6.9e-10; pumped Q 2.8e-7, loss 2.9e-6;
+  second-order walls Q 3.9e-7; pins with the filter Q 3.2e-7, loss 6.5e-6.
+  `canonical_gpu_long_run` with α = 0.25 on every material, 1000 steps:
+  Parametric pump Q 2.1e-6; Self-sustained emitter 2.0e-5 (held to 1e-4,
+  0.057 per half step); Struck drum 6.0e-7; Chopper 4.8e-6; Phased array,
+  now time-driven, 2.1e-6.
+- **Not done:** the Kerr slab cannot take it until the nonlinear kick applies
+  the stress; no gallery scene carries it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

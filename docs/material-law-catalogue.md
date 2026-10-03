@@ -124,6 +124,7 @@ whose `DampingLaw` carries a rate law and its own time drive.
 | D1 | time-modulated loss | loss-driven parametric effects, PT-symmetry-flavoured pairs with gain | `DampingLaw::drive` over `RateLaw::Constant` | runs (Advanced view; no preset) |
 | D2 | saturable absorption `1/(1 + u²/u_s²)` | self-limiting, passive mode-locking flavour | `RateLaw::SaturableAbsorption` | gated (C) |
 | D3 | van der Pol `γ₀(u²/a² − 1)` | self-oscillation, spontaneous pattern formation | `RateLaw::VanDerPol` | runs (primary row, undriven, beside a linear response) |
+| D4 | short-wave loss, a viscous stress `τ η C u` with `τ = α/(h G)` | trims what the mesh cannot carry and spares what it can; a gain that band-limits itself | `Material::short_wave_loss`, α in [0, 1] | runs (Advanced view, preset Mesh-scale trim α = 0.05; beside a linear response) |
 
 A constant loss channel runs on the fixed path. D1 runs on the time-driven one:
 the CPU reference since Stage 7, and the device since 24 September 2026. The
@@ -138,6 +139,18 @@ D3 is a deliberate instability, so it is explicit: its own loss kind on the
 primary row, with its energy in an active-gain lane of either sign rather than
 in loss. Its half map is the exact Bernoulli solution, on the CPU and the
 device.
+
+D4 is Gate O's short-wave limit for van der Pol, authored on any material: a
+viscous stress on the field's gradient, element by element, with `G` the
+element's own Gershgorin ceiling and `h` the generation's largest step. A mode
+at that ceiling decays at about `α/(2h)`, a resolved wave by the square of its
+share of the ceiling, and a uniform field not at all. It is not a row's
+channel but one number on the material, takes the time-driven path, and has
+its own energy lane (`short_wave_loss`), which the device books as primary
+loss; on a van der Pol node it is that law's gain lane's, as passive channels
+there are. Its energy is exact per step but not signed per step (the stress
+is formed on the drift's midpoint field); over a run it removes energy. Beside
+a field law it is refused, for the same reason D3 is.
 
 ## Where the refusals live
 

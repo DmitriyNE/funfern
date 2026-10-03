@@ -1470,6 +1470,14 @@ impl CanonicalGpuPlan {
         if operator.has_loss() {
             self.control.boundary_offsets.w |= LOSS_RECORDS_FLAG;
         }
+        // A short-wave loss takes energy in the kick's loss lane with no loss
+        // stage of its own, so the step must reduce its lanes even where the
+        // fixed operator asked for no accounting.
+        if !short_wave.is_empty() && !self.needs_accounting {
+            self.needs_accounting = true;
+            self.control.boundary_offsets.w |= 2;
+            self.manifest.dispatches_per_step += 1;
+        }
 
         self.tables[header_offset] = GpuCanonicalTableWord {
             data: UVec4::new(

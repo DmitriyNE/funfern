@@ -27,7 +27,11 @@
 //! `canonical_gpu_long_run`, the Stage 0 bound is asserted up to 1000 steps
 //! and past that the figures are printed, not judged. And
 //! `OSCILLATOR_AMPLITUDE` scales the smooth initial field (default 1): at 0.05
-//! van der Pol sits below its threshold and grows.
+//! van der Pol sits below its threshold and grows. `OSCILLATOR_SHORT_WAVE`
+//! puts a short-wave loss α on the last material: the medium itself, or the
+//! junction's interior, where beside van der Pol its energy is the gain
+//! lane's at active nodes and the primary-loss lane's elsewhere; the device
+//! books the reference's short-wave lane as primary loss.
 
 use std::time::{Duration, Instant};
 
@@ -170,6 +174,10 @@ fn main() -> AppExit {
                 gate: None,
             },
         });
+    }
+    if let Ok(alpha) = std::env::var("OSCILLATOR_SHORT_WAVE") {
+        let last = scene.materials.len() - 1;
+        scene.materials[last].short_wave_loss = alpha.parse().expect("a short-wave loss α");
     }
     if compose == "gap" {
         scene.internal_boundaries.push(InternalBoundary {
@@ -329,7 +337,7 @@ fn main() -> AppExit {
             .step_with_forcing(&operator, &forcing)
             .expect("f64 oscillator step");
         gained += accounting.active_gain;
-        lost += accounting.primary_loss;
+        lost += accounting.primary_loss + accounting.short_wave_loss;
         if filter && step.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
             filters += 1;
             // A candidate that gains energy is not taken, on either side.
