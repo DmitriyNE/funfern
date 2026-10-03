@@ -441,27 +441,18 @@ impl Playground {
             ui.add(
                 egui::Label::new(egui::RichText::new(self.amr_estimate_line()).small()).truncate(),
             );
-            // Nothing else in the panel explains a mesh pinned at its floor
-            // while the accuracy target reads satisfied. It is a standing
-            // condition rather than a passing one, so it may take its own line,
-            // read from the shown report so that a handoff, which drops the
-            // estimate, does not take the line away until the next one.
-            if let Some(report) = &self.amr_shown_report
-                && report.smallest_wavelength_target
-                    < self.editor.document.presentation.adaptation.minimum_edge
-            {
-                ui.colored_label(
-                    GOLD,
-                    format!(
-                        "The forcing wants elements of {:.3}, under the smallest allowed \
-                         of {:.3}, so the mesh sits at its floor whatever the accuracy asks",
-                        report.smallest_wavelength_target,
-                        self.editor.document.presentation.adaptation.minimum_edge,
-                    ),
-                );
-            }
-            if let Some(error) = &self.amr_error {
-                ui.colored_label(RED, error);
+            // One notice row, held whether or not it has anything to say, so
+            // a notice that comes or goes - a slider crossing the forcing's
+            // floor, an adaptation that fails - moves nothing below it.
+            let notice = egui::RichText::new(match self.amr_notice() {
+                Some((short, _)) => short,
+                None => " ".into(),
+            })
+            .small()
+            .color(GOLD);
+            let response = ui.add(egui::Label::new(notice).truncate());
+            if let Some((_, full)) = self.amr_notice() {
+                response.on_hover_text(full);
             }
         });
         ui.separator();
@@ -526,6 +517,30 @@ impl Playground {
             self.amr_coarsen_streak = 0;
             self.amr_error = None;
         }
+    }
+
+    /// The adaptation block's one notice, short and in full: an adaptation
+    /// error first, since it is rarer and matters more; else a forcing that
+    /// wants elements under the smallest allowed. Nothing else in the panel
+    /// explains a mesh pinned at its floor while the accuracy target reads
+    /// satisfied. It reads the shown report, so a handoff, which drops the
+    /// estimate, does not take the notice away until the next one.
+    pub(super) fn amr_notice(&self) -> Option<(String, String)> {
+        if let Some(error) = &self.amr_error {
+            return Some((error.clone(), error.clone()));
+        }
+        let floor = self.editor.document.presentation.adaptation.minimum_edge;
+        let report = self.amr_shown_report.as_ref()?;
+        (report.smallest_wavelength_target < floor).then(|| {
+            let wanted = report.smallest_wavelength_target;
+            (
+                format!("Forcing wants {wanted:.3} < smallest {floor:.3}: mesh at its floor"),
+                format!(
+                    "The forcing wants elements of {wanted:.3}, under the smallest allowed of \
+                     {floor:.3}, so the mesh sits at its floor whatever the accuracy asks"
+                ),
+            )
+        })
     }
 
     /// What the panel says about the estimate, whether or not one is in hand.
@@ -789,7 +804,8 @@ mod tests {
     /// fiber the speed note came and went eight times in 37 s, the forcing
     /// note five times in 6 s. No status says as much as the one below
     /// today, and both inspectors fit the longest that do; the row holds
-    /// whatever one does say.
+    /// whatever one does say. The forcing note and an adaptation error share
+    /// one notice row, held empty when neither applies.
     #[test]
     fn what_changes_while_running_keeps_the_panel_still() {
         for width in [1400.0, 390.0] {
@@ -845,13 +861,27 @@ mod tests {
             assert_eq!(row(&mut state, "Point source"), quiet, "at width {width}");
 
             // A forcing under the floor is told from the shown report, with no
-            // estimate in hand, as just after a handoff.
-            state.amr_shown_report = Some(SolutionIndicatorReport {
+            // estimate in hand, as just after a handoff; it and an error share
+            // the one notice row, the error first.
+            let floored = SolutionIndicatorReport {
                 smallest_wavelength_target: 0.01,
-                ..report
-            });
+                ..report.clone()
+            };
+            state.amr_shown_report = Some(floored.clone());
             assert!(state.amr_indicator_result.is_none());
-            row(&mut state, "The forcing wants");
+            row(&mut state, "Forcing wants");
+            assert_eq!(row(&mut state, "Point source"), quiet, "at width {width}");
+            state.amr_error = Some(
+                "adaptation failed: the adapted mesh does not match the active topology, \
+                 and the estimate it was measured against went with it"
+                    .into(),
+            );
+            row(&mut state, "adaptation failed");
+            assert_eq!(row(&mut state, "Point source"), quiet, "at width {width}");
+            state.amr_shown_report = Some(report);
+            assert_eq!(row(&mut state, "Point source"), quiet, "at width {width}");
+            state.amr_error = None;
+            state.amr_shown_report = Some(floored);
             // Turning adaptation off forgets it.
             state.stop_adaptation_work();
             assert!(state.amr_shown_report.is_none());

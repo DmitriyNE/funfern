@@ -18131,3 +18131,23 @@ both, in either row, under the design in `docs/spikes/funfern-gate-o.md`
   test runs beside Kerr where it checked the refusal.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — The adaptation block holds one notice row
+
+The note on a forcing under the smallest element and the adaptation error
+each took a line of their own when they applied, so the block still changed
+height, if no longer on a timer (the panel entry above); the user found it
+an acceptable compromise and then asked for it gone.
+
+- **Fix.** One notice row, held empty when there is nothing to say
+  (`amr_notice`): the error when there is one, since it is rarer and matters
+  more, else the forcing note in a short form, "Forcing wants 0.018 <
+  smallest 0.020: mesh at its floor" (216 px of the inspector's ~288), with
+  the full sentence on hover. Cut to one row like the status and estimate
+  lines. Both in gold, the user's choice: the error was red; its wording
+  ("failed", "discarded") still says what it is.
+- **Test.** `what_changes_while_running_keeps_the_panel_still` now also holds
+  "Point source" in place, docked and floating, with no notice, the forcing
+  note, an error longer than the panel, and both.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
