@@ -926,8 +926,26 @@ predictable on representative dense scenes.
   spatial accuracy. Gauss 2 × 2 has no spurious modes; one point per span
   does. The clamped corner function is an outlier that costs a factor of two
   to three in the step; an unclamped basis of the same space takes most of it
-  back. Spikes 3 to 6, and a fourth-order time integrator (leapfrog's temporal
-  error dominates at the larger stable step), are next.
+  back. Leapfrog's temporal error dominates at the larger stable step; the
+  modified-equation Störmer scheme (spike T, same day) is fourth order in
+  time for one extra pass a step and a √3 larger step, 13% of the throughput,
+  and cuts that error 50 to 60 times; it fits the triangle solver the same
+  way. Spike 3 (same day): a Coons patch over a smooth closed boundary keeps
+  its accuracy (a disk's J3 mode to 3e-6) but loses the step, 1 to 2% of an
+  equal-area box's, because a single bijective patch of a smooth domain has
+  singular corners; condensing or mass-scaling the corner functions buys the
+  step back only at the same rate it costs accuracy. A deformed box keeps
+  0.82 to 0.87 of the step. So the single patch is the scene's own box, with
+  the curves inside it as materials; a curved outer wall, and the
+  curved-span outgoing item above, need multipatch. Spike 4 (same day): a
+  material interface on a knot line with the right continuity (plain basis
+  for a density jump, a C⁰ knot for a stiffness jump) reflects a pulse to
+  Fresnel's value at high order; an interface between knot lines, or a kink
+  the basis cannot make, is second order, about 1% of the reflected energy
+  at 6 spans per pulse width. An IGA scene is therefore a box patch whose
+  material regions are parametric rectangles, curved through the control
+  net; free curves inside it are immersed and below the conforming
+  triangle. Spikes 5 and 6 are next.
 - Reuse the UI and transaction lifecycle, with discretization-specific numerical
   kernels where appropriate.
 - Compare propagation, editing behavior, and cost against the triangular solver.

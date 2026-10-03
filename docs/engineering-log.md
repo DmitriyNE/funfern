@@ -18335,3 +18335,98 @@ rewrite of an active link, while the user guide still described it.
 - **Also.** Background shell commands here are not bash: `set -- $cfg` did not
   word-split, which silently fed `--degree "2 2"` to the example and lost two
   batches; scripts now run through `bash file.sh`.
+
+## 2026-10-03 — IGA spike T: a fourth-order time integrator
+
+- **Why.** Every box run of spikes 1 and 2 was limited by the leapfrog's
+  temporal error at the stable step, the triangle solver's included (+0.064
+  rad against −0.009 spatial at `t = 10`), so the spline's larger stable step
+  was a speed lever and nothing more.
+- **What.** The modified-equation Störmer scheme (Dablain 1986) in the
+  kick-drift form: `b` drifts on `ũ = P (Q − dt²/12 · K u)` instead of `u`,
+  one extra gradient, divergence and field pass through the same tables; the
+  kick is unchanged. It is Störmer under the symmetric positive-definite
+  `K̃ = K (I − dt²/12 · PK)`, fourth order in time, stable while `ω dt < 2√3`,
+  and conserves `½ ΔQ·PΔQ/dt² + ½ (G uⁿ⁺¹)·W(G ũⁿ)` exactly.
+  `Integrator::{Leapfrog, FourthOrder}` in `spline_patch.rs`, with
+  `stepped_frequency` and its inverse `spatial_frequency`, which the box
+  example now uses to separate the spatial part of a measured drift;
+  `--integrator fourth` on `iga_box_mode`.
+- **Measured** (unclamped 96 × 96, two sweeps, Gauss 2 × 2, 0.8 of each
+  integrator's step): quadratics' temporal error +0.334 → −0.0052 rad at
+  t = 10, cubics' +0.452 → −0.0095, 192² quadratics +0.0815 → −0.0003;
+  throughput 5.2 → 4.6 simulated s per wall s, the predicted `2/√3`. Halving
+  the step divides the temporal part by 16, twice. Energy held to 1e-13 at
+  95% of the stable step for both integrators. Every row within 3% of the
+  symbol's prediction.
+- **For the triangle solver** the same scheme would take its temporal error
+  from +0.064 to about 2e-4 rad for 15% of throughput; not implemented, it is
+  outside the spike.
+- **Open.** A nonlinear constitutive law needs the tangent in the dt⁴ term
+  (Chin's force-gradient integrators); a time-driven mass is read where it
+  stands by the modified field. Neither measured.
+
+## 2026-10-03 — IGA spike 3: a curved single patch
+
+- **What.** `SplinePatch` (renamed from `BoxPatch`) now takes a
+  `GeometryMap`: affine, a bicubic B-spline surface with a control net, or a
+  Coons patch between four `Arc`s (segments, exact elliptic arcs, pieces of a
+  gallery `PeriodicCubicSpline`). Jacobians at every sample go into the
+  weights and gradients. `project` does an L2 projection of any function by
+  conjugate gradients. `iga_curved_patch` measures seven geometries; exact
+  Bessel Neumann modes on the disk (zeros of `J_m'` by Newton on a series)
+  give a frequency reference.
+- **Found.** The map costs nothing in accuracy (the disk's J3 mode at 17
+  spans per wavelength: 3e-6 relative, the box mode at 19: 7e-6) and almost
+  everything in the step: a Coons patch over a disk, an ellipse, the
+  gallery's rounded circle or a blob keeps 1 to 2% of an equal-area box's
+  stable step, because the square's corners land on a smooth boundary where
+  the Jacobian vanishes and the corner functions (mass 5e-7 against a median
+  8e-4) ring at outlier frequencies. A bulged box with real corners keeps
+  0.82 to 0.87.
+- **Tried, both architecture-preserving, both insufficient.** Condensing the
+  `r × r` functions at each corner into one (`with_condensed_corners`):
+  step 0.07 → 0.31 of the box's for r = 2 → 6 while the J3 error goes
+  2.5e-5 → 1.5e-3. Selective mass scaling (`with_mass_scaling`, cap each
+  function's `K_ii/D_i` at a multiple of the median, mass added to the
+  lumped and consistent diagonals alike): step 0.28 → 0.78 for caps 16 → 2
+  while the error goes 2e-3 → 9e-3 (J1: 6e-2). The small-Jacobian region
+  reaches many spans in, so neither repair is local.
+- **Verdict.** Gate 3 fails for a smooth closed boundary as one patch and
+  passes for a deformed box. For the product the single patch is the scene's
+  rectangle with the curves inside as materials (spike 4); curved outer
+  walls need multipatch. Report: the spike document's "Spike 3".
+
+## 2026-10-03 — IGA spike 4: materials inside the box patch
+
+- **What.** `SplinePatch::with_material` samples a density and a stiffness
+  at every quadrature point; the density weights mass and lumped diagonal,
+  the stiffness weights `b` in the kick and the energies, so `K = Gᵀ W κ G`
+  and the sweeps keep their structure. `UniformBasis::with_c0_knot` repeats
+  an interior knot to the degree (the basis now carries each span's knot
+  interval), `SplinePatch::from_bases_public` builds a patch on such bases,
+  `PatchStepper::with_state` starts from a given field and flux, and
+  `sample_values` reads the field at the samples. `iga_slab_reflection`
+  measures the energy a Gaussian pulse reflects from a planar step against
+  Fresnel's 1/9, for a density step (field C¹) and a stiffness step (field
+  kinks), on a knot line or mid-span, with or without a C⁰ knot.
+- **Found** (relative error of `R` at 3.1 / 6.3 / 12.7 spans per σ):
+  density step on a knot line, plain basis: 2e-2 / −8e-5 / 1e-5, at the
+  1e-6 energy floor from 6 spans; immersed mid-span: 3.4e-2 / 7.4e-3 /
+  1.9e-3, second order; stiffness step on a knot line, plain basis: 6.9e-2 /
+  6.4e-3 / 1.5e-3, second order, as bad as immersed; with the C⁰ knot:
+  3.9e-2 / 1.3e-3 / 6.2e-5, about fourth order. A σ = 0.2 series at a
+  quarter step agrees in magnitude but has an unexplained −2e-4 to −5e-4
+  floor in every row, probably the reflected tail at the wall under the
+  half-step energy readout; not pursued.
+- **Verdict.** Gate 4 passes for regions bounded by knot lines with C⁰ knots
+  where the stiffness jumps (TE's index step is a density step and needs
+  none; TM's needs them; Mechanical has both), and fails for free curves,
+  which are immersed and second order, below the conforming triangle. An
+  IGA scene is a box patch with parametric-rectangle regions, curved through
+  the control net; the current scene model maps onto it only by immersion.
+- **Also.** `Arc` as a public name in `funfern-core` collided with
+  `std::sync::Arc` through the crate's glob re-export and broke
+  `funfern-app`'s test build; renamed to `CoonsSide`. The first gate of the
+  day's spike 3 code ran while the file was still being edited and reported
+  that break; the gate is rerun on the settled tree.

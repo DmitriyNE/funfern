@@ -12,7 +12,7 @@
 //! the consistent mass, and the consistent mass itself as the reference.
 //! Nothing here is reached by the application.
 
-use crate::Point2;
+use crate::{PeriodicCubicSpline, Point2};
 
 /// Highest spline degree the fixed-size local arrays hold.
 pub const MAX_DEGREE: usize = 3;
@@ -61,6 +61,9 @@ pub struct UniformBasis {
     spacing: f64,
     periodic: bool,
     knots: Vec<f64>,
+    /// The knot interval each nonempty span is: `span + degree` unless an
+    /// interior knot is repeated.
+    intervals: Vec<usize>,
 }
 
 impl UniformBasis {
@@ -75,6 +78,43 @@ impl UniformBasis {
             spacing,
             periodic: false,
             knots,
+            intervals: (0..spans).map(|span| span + degree).collect(),
+        }
+    }
+
+    /// A clamped or unclamped uniform basis whose knot at the start of span
+    /// `at_span` is repeated to multiplicity `degree`, so the splines are
+    /// only continuous there: a line a field may kink along. Adds
+    /// `degree - 1` functions.
+    pub fn with_c0_knot(
+        degree: usize,
+        spans: usize,
+        spacing: f64,
+        at_span: usize,
+        unclamped: bool,
+    ) -> Self {
+        assert!((1..=MAX_DEGREE).contains(&degree) && at_span >= 1 && at_span < spans);
+        let base = if unclamped {
+            Self::unclamped(degree, spans, spacing)
+        } else {
+            Self::open(degree, spans, spacing)
+        };
+        let knot = at_span as f64 * spacing;
+        let position = base.intervals[at_span];
+        let mut knots = base.knots.clone();
+        for _ in 1..degree {
+            knots.insert(position, knot);
+        }
+        let intervals = (0..spans)
+            .map(|span| span + degree + if span >= at_span { degree - 1 } else { 0 })
+            .collect();
+        Self {
+            degree,
+            spans,
+            spacing,
+            periodic: false,
+            knots,
+            intervals,
         }
     }
 
@@ -89,6 +129,7 @@ impl UniformBasis {
             spacing,
             periodic: true,
             knots,
+            intervals: (0..spans).map(|span| span + degree).collect(),
         }
     }
 
@@ -107,6 +148,7 @@ impl UniformBasis {
             spacing,
             periodic: false,
             knots,
+            intervals: (0..spans).map(|span| span + degree).collect(),
         }
     }
 
@@ -134,13 +176,13 @@ impl UniformBasis {
         if self.periodic {
             self.spans
         } else {
-            self.spans + self.degree
+            self.knots.len() - self.degree - 1
         }
     }
 
     /// The global index of local function `local` on span `span`.
     pub fn function(&self, span: usize, local: usize) -> usize {
-        (span + local) % self.functions()
+        (self.intervals[span] - self.degree + local) % self.functions()
     }
 
     /// The span holding `parameter`, the last one at the right end.
@@ -153,7 +195,7 @@ impl UniformBasis {
     /// filled up to `degree`.
     pub fn evaluate(&self, span: usize, parameter: f64) -> ([f64; MAX_LOCAL], [f64; MAX_LOCAL]) {
         let p = self.degree;
-        let k = span + p;
+        let k = self.intervals[span];
         let values = self.cox_de_boor(k, p, parameter);
         let mut derivatives = [0.0; MAX_LOCAL];
         // The lower-degree functions live on `k - p + 1 ..= k`.
@@ -341,10 +383,59 @@ impl PeriodicSymbols {
     }
 }
 
+/// The time integrator a patch is stepped with. Both are Störmer schemes on
+/// `Q̈ = -K P Q` written as a kick on `Q` and a drift on `b`, and both
+/// conserve a quadratic energy exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Integrator {
+    /// Second order: `b` drifts on the field `u = P Q`. Stable while
+    /// `ω dt < 2`.
+    Leapfrog,
+    /// Fourth order by the modified equation (Dablain 1986): `b` drifts on
+    /// `ũ = P (Q − dt²/12 · K u)`, so the kick applies the modified stiffness
+    /// `K̃ = K (I − dt²/12 · P K)`, whose Taylor series matches
+    /// `2 (I − cos(dt √(KP))) / dt²` through `dt⁴`. One extra gradient,
+    /// divergence and field pass a step. Stable, and `K̃` positive definite,
+    /// while `ω dt < 2√3`.
+    FourthOrder,
+}
+
+impl Integrator {
+    /// The stable `ω dt` over leapfrog's two.
+    pub fn stability_factor(self) -> f64 {
+        match self {
+            Self::Leapfrog => 1.0,
+            Self::FourthOrder => 3.0_f64.sqrt(),
+        }
+    }
+
+    /// The frequency this integrator with step `dt` advances a mode of
+    /// discrete frequency `omega` at.
+    pub fn stepped_frequency(self, omega: f64, dt: f64) -> f64 {
+        let x = (omega * dt).powi(2);
+        let cosine = match self {
+            Self::Leapfrog => 1.0 - 0.5 * x,
+            Self::FourthOrder => 1.0 - 0.5 * x + x * x / 24.0,
+        };
+        cosine.clamp(-1.0, 1.0).acos() / dt
+    }
+
+    /// The inverse of [`Self::stepped_frequency`]: the discrete spatial
+    /// frequency of a mode seen advancing at `stepped`.
+    pub fn spatial_frequency(self, stepped: f64, dt: f64) -> f64 {
+        let cosine = (stepped * dt).cos();
+        let x = match self {
+            Self::Leapfrog => 2.0 - 2.0 * cosine,
+            Self::FourthOrder => 6.0 - (12.0 + 24.0 * cosine).max(0.0).sqrt(),
+        };
+        x.max(0.0).sqrt() / dt
+    }
+}
+
 /// The frequency leapfrog with step `dt` advances a mode of discrete
 /// frequency `omega` at.
 pub fn leapfrog_frequency(omega: f64, dt: f64) -> f64 {
-    (2.0 / dt) * (0.5 * omega * dt).min(1.0).asin()
+    Integrator::Leapfrog.stepped_frequency(omega, dt)
 }
 
 /// How `Q` is turned into the field `u` on a patch.
@@ -367,17 +458,258 @@ impl MassTreatment {
     }
 }
 
-/// An affine tensor-product patch over a box, with the quadrature samples
-/// the `(Q, b)` scheme keeps `b` at.
+/// One side of a Coons patch: a curve from the parametric side's start to
+/// its end, as a function of the normalized position `s` in `[0, 1]`.
 #[derive(Clone, Debug)]
-pub struct BoxPatch {
+pub enum CoonsSide {
+    /// A straight segment.
+    Line { from: Point2, to: Point2 },
+    /// An exact elliptic arc, `center + (a cos φ, b sin φ)` for `φ` from
+    /// `from_angle` to `to_angle`.
+    Ellipse {
+        center: Point2,
+        radii: Point2,
+        from_angle: f64,
+        to_angle: f64,
+    },
+    /// A piece of a closed spline from parameter `from` to `to`, taken
+    /// forward in the parameter (`to` may pass the period).
+    Spline {
+        curve: PeriodicCubicSpline,
+        from: f64,
+        to: f64,
+    },
+}
+
+impl CoonsSide {
+    /// The point and its derivative with respect to `s`.
+    pub fn evaluate(&self, s: f64) -> (Point2, Point2) {
+        match self {
+            Self::Line { from, to } => (from.lerp(*to, s), *to - *from),
+            Self::Ellipse {
+                center,
+                radii,
+                from_angle,
+                to_angle,
+            } => {
+                let angle = from_angle + (to_angle - from_angle) * s;
+                let (sin, cos) = angle.sin_cos();
+                (
+                    *center + Point2::new(radii.x * cos, radii.y * sin),
+                    Point2::new(-radii.x * sin, radii.y * cos) * (to_angle - from_angle),
+                )
+            }
+            Self::Spline { curve, from, to } => {
+                let t = (from + (to - from) * s).rem_euclid(curve.period());
+                (curve.evaluate(t), curve.derivative(t, 1) * (to - from))
+            }
+        }
+    }
+
+    /// The arc traversed the other way.
+    pub fn reversed(self) -> Self {
+        match self {
+            Self::Line { from, to } => Self::Line { from: to, to: from },
+            Self::Ellipse {
+                center,
+                radii,
+                from_angle,
+                to_angle,
+            } => Self::Ellipse {
+                center,
+                radii,
+                from_angle: to_angle,
+                to_angle: from_angle,
+            },
+            Self::Spline { curve, from, to } => Self::Spline {
+                curve,
+                from: to,
+                to: from,
+            },
+        }
+    }
+}
+
+/// How the parametric box `[0, Lx] × [0, Ly]` maps onto the physical patch.
+#[derive(Clone, Debug)]
+pub enum GeometryMap {
+    /// `x = origin + (ξ, η)`.
+    Affine { origin: Point2 },
+    /// A tensor-product B-spline surface on clamped uniform knots over the
+    /// parametric box, with its control net in `node` order of its bases.
+    Surface {
+        basis_x: UniformBasis,
+        basis_y: UniformBasis,
+        controls: Vec<Point2>,
+    },
+    /// A bilinearly blended Coons patch between four sides: `bottom` and
+    /// `top` run with `ξ`, `left` and `right` run with `η`.
+    Coons {
+        bottom: Box<CoonsSide>,
+        right: Box<CoonsSide>,
+        top: Box<CoonsSide>,
+        left: Box<CoonsSide>,
+    },
+}
+
+impl GeometryMap {
+    /// The surface whose control net is the Greville points of its bases
+    /// shifted to `origin`: the identity map, to be deformed.
+    pub fn flat_surface(origin: Point2, size: Point2, spans: [usize; 2]) -> Self {
+        let basis_x = UniformBasis::open(3, spans[0], size.x / spans[0] as f64);
+        let basis_y = UniformBasis::open(3, spans[1], size.y / spans[1] as f64);
+        let gx = basis_x.greville();
+        let gy = basis_y.greville();
+        let mut controls = Vec::with_capacity(gx.len() * gy.len());
+        for x in &gx {
+            for y in &gy {
+                controls.push(origin + Point2::new(*x, *y));
+            }
+        }
+        Self::Surface {
+            basis_x,
+            basis_y,
+            controls,
+        }
+    }
+
+    /// A Coons patch over the inside of a closed spline, with its corners at
+    /// the four parameters, taken counterclockwise along the curve.
+    pub fn coons_from_curve(curve: &PeriodicCubicSpline, corners: [f64; 4]) -> Self {
+        let period = curve.period();
+        let [t0, t1, t2, t3] = corners;
+        let arc = |from: f64, to: f64| {
+            let to = if to <= from { to + period } else { to };
+            CoonsSide::Spline {
+                curve: curve.clone(),
+                from,
+                to,
+            }
+        };
+        Self::Coons {
+            bottom: Box::new(arc(t0, t1)),
+            right: Box::new(arc(t1, t2)),
+            top: Box::new(arc(t2, t3).reversed()),
+            left: Box::new(arc(t3, t0).reversed()),
+        }
+    }
+
+    /// A Coons patch over an exact ellipse with its corners on the
+    /// diagonals.
+    pub fn coons_ellipse(center: Point2, radii: Point2) -> Self {
+        let quarter = std::f64::consts::FRAC_PI_4;
+        let arc = |from: f64, to: f64| CoonsSide::Ellipse {
+            center,
+            radii,
+            from_angle: from,
+            to_angle: to,
+        };
+        Self::Coons {
+            bottom: Box::new(arc(-3.0 * quarter, -quarter)),
+            right: Box::new(arc(-quarter, quarter)),
+            top: Box::new(arc(3.0 * quarter, quarter)),
+            left: Box::new(arc(5.0 * quarter, 3.0 * quarter)),
+        }
+    }
+
+    /// The physical point and the two parametric tangents `∂S/∂ξ`, `∂S/∂η`
+    /// at a parametric point of a box of the given size.
+    pub fn evaluate(&self, parameter: Point2, size: Point2) -> (Point2, Point2, Point2) {
+        match self {
+            Self::Affine { origin } => (
+                *origin + parameter,
+                Point2::new(1.0, 0.0),
+                Point2::new(0.0, 1.0),
+            ),
+            Self::Surface {
+                basis_x,
+                basis_y,
+                controls,
+            } => {
+                let sx = basis_x.span_of(parameter.x);
+                let sy = basis_y.span_of(parameter.y);
+                let (nx, dnx) = basis_x.evaluate(sx, parameter.x);
+                let (ny, dny) = basis_y.evaluate(sy, parameter.y);
+                let mut point = Point2::default();
+                let mut d_xi = Point2::default();
+                let mut d_eta = Point2::default();
+                for a in 0..=basis_x.degree() {
+                    let ix = basis_x.function(sx, a);
+                    for b in 0..=basis_y.degree() {
+                        let iy = basis_y.function(sy, b);
+                        let control = controls[ix * basis_y.functions() + iy];
+                        point = point + control * (nx[a] * ny[b]);
+                        d_xi = d_xi + control * (dnx[a] * ny[b]);
+                        d_eta = d_eta + control * (nx[a] * dny[b]);
+                    }
+                }
+                (point, d_xi, d_eta)
+            }
+            Self::Coons {
+                bottom,
+                right,
+                top,
+                left,
+            } => {
+                let s = parameter.x / size.x;
+                let r = parameter.y / size.y;
+                let (cb, dcb) = bottom.evaluate(s);
+                let (ct, dct) = top.evaluate(s);
+                let (cl, dcl) = left.evaluate(r);
+                let (cr, dcr) = right.evaluate(r);
+                let (p00, _) = bottom.evaluate(0.0);
+                let (p10, _) = bottom.evaluate(1.0);
+                let (p01, _) = top.evaluate(0.0);
+                let (p11, _) = top.evaluate(1.0);
+                let bilinear = p00 * ((1.0 - s) * (1.0 - r))
+                    + p10 * (s * (1.0 - r))
+                    + p01 * ((1.0 - s) * r)
+                    + p11 * (s * r);
+                let point = cb * (1.0 - r) + ct * r + cl * (1.0 - s) + cr * s - bilinear;
+                let d_s =
+                    dcb * (1.0 - r) + dct * r - cl + cr - (p10 - p00) * (1.0 - r) - (p11 - p01) * r;
+                let d_r =
+                    ct - cb + dcl * (1.0 - s) + dcr * s - (p01 - p00) * (1.0 - s) - (p11 - p10) * s;
+                (point, d_s / size.x, d_r / size.y)
+            }
+        }
+    }
+}
+
+/// One sample's Jacobian data on a curved patch: the inverse transpose,
+/// row-major, and the determinant.
+#[derive(Clone, Copy, Debug)]
+struct SampleJacobian {
+    inverse_transpose: [f64; 4],
+    determinant: f64,
+}
+
+/// A tensor-product spline patch over a parametric box mapped by a
+/// [`GeometryMap`], with the quadrature samples the `(Q, b)` scheme keeps
+/// `b` at. `b` and gradients are in physical components.
+#[derive(Clone, Debug)]
+pub struct SplinePatch {
     basis_x: UniformBasis,
     basis_y: UniformBasis,
     rule: Vec<(f64, f64)>,
-    origin: Point2,
+    geometry: GeometryMap,
     /// Per `(span, point)` in each direction: values and derivatives.
     table_x: Vec<([f64; MAX_LOCAL], [f64; MAX_LOCAL])>,
     table_y: Vec<([f64; MAX_LOCAL], [f64; MAX_LOCAL])>,
+    /// Per sample, in sample order; empty under the affine map.
+    jacobians: Vec<SampleJacobian>,
+    points: Vec<Point2>,
+    /// Each tensor-product function's degree of freedom, when functions
+    /// around the corners are condensed into one each; identity otherwise.
+    condensation: Option<Vec<usize>>,
+    degrees_of_freedom: usize,
+    /// Mass added to each degree of freedom's lumped diagonal and to the
+    /// consistent mass's diagonal alike; zeros when none.
+    mass_scaling: Vec<f64>,
+    /// Per sample: the density, which weights the mass, and the stiffness,
+    /// which weights `b` in the kick and the energy; ones by default.
+    density: Vec<f64>,
+    stiffness: Vec<f64>,
     lumped: Vec<f64>,
     weights: Vec<f64>,
 }
@@ -405,7 +737,7 @@ impl SampleStencil {
     }
 }
 
-impl BoxPatch {
+impl SplinePatch {
     /// A patch of `degree` over the box from `origin` with the given side
     /// lengths, `spans` spans per direction and `points` Gauss points per
     /// span per direction, on clamped bases.
@@ -418,7 +750,32 @@ impl BoxPatch {
     ) -> Option<Self> {
         let basis_x = UniformBasis::open(degree, spans[0], size.x / spans[0] as f64);
         let basis_y = UniformBasis::open(degree, spans[1], size.y / spans[1] as f64);
-        Self::from_bases(basis_x, basis_y, origin, points)
+        Self::from_bases(basis_x, basis_y, GeometryMap::Affine { origin }, points)
+    }
+
+    /// A patch of `degree` over the parametric box of the given size mapped
+    /// by `geometry`, clamped or unclamped.
+    pub fn curved(
+        degree: usize,
+        geometry: GeometryMap,
+        size: Point2,
+        spans: [usize; 2],
+        points: usize,
+        unclamped: bool,
+    ) -> Option<Self> {
+        let basis = |spans: usize, length: f64| {
+            if unclamped {
+                UniformBasis::unclamped(degree, spans, length / spans as f64)
+            } else {
+                UniformBasis::open(degree, spans, length / spans as f64)
+            }
+        };
+        Self::from_bases(
+            basis(spans[0], size.x),
+            basis(spans[1], size.y),
+            geometry,
+            points,
+        )
     }
 
     /// The same patch on unclamped bases: the same space, with end
@@ -433,13 +790,23 @@ impl BoxPatch {
     ) -> Option<Self> {
         let basis_x = UniformBasis::unclamped(degree, spans[0], size.x / spans[0] as f64);
         let basis_y = UniformBasis::unclamped(degree, spans[1], size.y / spans[1] as f64);
-        Self::from_bases(basis_x, basis_y, origin, points)
+        Self::from_bases(basis_x, basis_y, GeometryMap::Affine { origin }, points)
+    }
+
+    /// A patch from two bases of its own, such as one with a C⁰ knot.
+    pub fn from_bases_public(
+        basis_x: UniformBasis,
+        basis_y: UniformBasis,
+        geometry: GeometryMap,
+        points: usize,
+    ) -> Option<Self> {
+        Self::from_bases(basis_x, basis_y, geometry, points)
     }
 
     fn from_bases(
         basis_x: UniformBasis,
         basis_y: UniformBasis,
-        origin: Point2,
+        geometry: GeometryMap,
         points: usize,
     ) -> Option<Self> {
         let rule = gauss_rule(points)?;
@@ -459,23 +826,214 @@ impl BoxPatch {
             basis_x,
             basis_y,
             rule,
-            origin,
+            geometry,
             table_x,
             table_y,
+            jacobians: Vec::new(),
+            points: Vec::new(),
+            condensation: None,
+            degrees_of_freedom: 0,
+            mass_scaling: Vec::new(),
+            density: Vec::new(),
+            stiffness: Vec::new(),
             lumped: Vec::new(),
             weights: Vec::new(),
         };
-        let mut lumped = vec![0.0; patch.degrees_of_freedom()];
-        let mut weights = Vec::with_capacity(patch.samples());
-        patch.for_each_sample(|_, stencil| {
+        patch.degrees_of_freedom = patch.basis_x.functions() * patch.basis_y.functions();
+        // The Jacobian at every sample, in sample order; the identity is
+        // left implicit under the affine map.
+        let size = Point2::new(patch.basis_x.length(), patch.basis_y.length());
+        let affine = matches!(patch.geometry, GeometryMap::Affine { .. });
+        let mut points = Vec::with_capacity(patch.samples());
+        let mut jacobians = Vec::with_capacity(if affine { 0 } else { patch.samples() });
+        patch
+            .for_each_parametric_sample(|parameter| {
+                let (point, d_xi, d_eta) = patch.geometry.evaluate(parameter, size);
+                points.push(point);
+                if !affine {
+                    let determinant = d_xi.cross(d_eta);
+                    if !determinant.is_finite() || determinant <= 0.0 {
+                        return Err(());
+                    }
+                    jacobians.push(SampleJacobian {
+                        inverse_transpose: [
+                            d_eta.y / determinant,
+                            -d_xi.y / determinant,
+                            -d_eta.x / determinant,
+                            d_xi.x / determinant,
+                        ],
+                        determinant,
+                    });
+                }
+                Ok(())
+            })
+            .ok()?;
+        patch.points = points;
+        patch.jacobians = jacobians;
+        patch.density = vec![1.0; patch.samples()];
+        patch.stiffness = vec![1.0; patch.samples()];
+        patch.accumulate_lumped();
+        Some(patch)
+    }
+
+    /// The same patch with the density and stiffness sampled at every
+    /// quadrature point: an immersed material, with the interface wherever
+    /// the samples put it.
+    pub fn with_material(
+        mut self,
+        density: impl Fn(Point2) -> f64,
+        stiffness: impl Fn(Point2) -> f64,
+    ) -> Self {
+        self.density = self.points.iter().map(|p| density(*p)).collect();
+        self.stiffness = self.points.iter().map(|p| stiffness(*p)).collect();
+        assert!(self.density.iter().chain(&self.stiffness).all(|v| *v > 0.0));
+        self.accumulate_lumped();
+        self
+    }
+
+    /// Every sample's stiffness, in sample order.
+    pub fn sample_stiffness(&self) -> &[f64] {
+        &self.stiffness
+    }
+
+    /// Every sample's density, in sample order.
+    pub fn sample_density(&self) -> &[f64] {
+        &self.density
+    }
+
+    fn accumulate_lumped(&mut self) {
+        let mut lumped = vec![0.0; self.degrees_of_freedom()];
+        let mut weights = Vec::with_capacity(self.samples());
+        self.for_each_sample(|index, stencil| {
             weights.push(stencil.weight);
+            let mass = stencil.weight * self.density[index];
             for (node, value) in stencil.nodes().iter().zip(stencil.values()) {
-                lumped[*node] += stencil.weight * value;
+                lumped[*node] += mass * value;
             }
         });
-        patch.lumped = lumped;
-        patch.weights = weights;
-        Some(patch)
+        self.lumped = lumped;
+        self.weights = weights;
+        self.mass_scaling = vec![0.0; self.degrees_of_freedom()];
+    }
+
+    /// The diagonal of the stiffness, `Σ_q w_q |∇N_i(q)|²`, over the lumped
+    /// mass: a bound on each degree of freedom's own frequency squared.
+    pub fn frequency_bounds(&self) -> Vec<f64> {
+        let mut stiffness = vec![0.0; self.degrees_of_freedom()];
+        self.for_each_sample(|index, stencil| {
+            let weight = stencil.weight * self.stiffness[index];
+            for (node, g) in stencil.nodes().iter().zip(stencil.gradients()) {
+                stiffness[*node] += weight * g.dot(*g);
+            }
+        });
+        stiffness
+            .iter()
+            .zip(&self.lumped)
+            .map(|(k, d)| k / d)
+            .collect()
+    }
+
+    /// Selective mass scaling: every degree of freedom whose own frequency
+    /// bound exceeds `cap` times the median gets mass added to its lumped
+    /// diagonal, and to the consistent mass's diagonal, until it meets the
+    /// cap. The added mass sits on the functions at a singular corner,
+    /// whose physical footprint is small, and nowhere else. The field map
+    /// stays symmetric positive definite and the sweeps still converge,
+    /// since the scaled mass keeps its row sums equal to the scaled
+    /// diagonal.
+    pub fn with_mass_scaling(mut self, cap: f64) -> Self {
+        let bounds = self.frequency_bounds();
+        let mut sorted = bounds.clone();
+        sorted.sort_by(f64::total_cmp);
+        let limit = cap * sorted[sorted.len() / 2];
+        let mut scaled = 0;
+        for ((bound, lumped), scaling) in bounds
+            .iter()
+            .zip(self.lumped.iter_mut())
+            .zip(self.mass_scaling.iter_mut())
+        {
+            if *bound > limit {
+                let added = *lumped * (bound / limit - 1.0);
+                *lumped += added;
+                *scaling += added;
+                scaled += 1;
+            }
+        }
+        let _ = scaled;
+        self
+    }
+
+    /// The degrees of freedom that carry added mass.
+    pub fn scaled_count(&self) -> usize {
+        self.mass_scaling.iter().filter(|m| **m > 0.0).count()
+    }
+
+    /// The added mass over the lumped mass it joined, at the most scaled
+    /// degree of freedom.
+    pub fn largest_scaling_factor(&self) -> f64 {
+        self.mass_scaling
+            .iter()
+            .zip(&self.lumped)
+            .map(|(added, total)| total / (total - added))
+            .fold(1.0, f64::max)
+    }
+
+    /// The same patch with the `reach × reach` functions nearest each
+    /// corner condensed into one function per corner, their sum. On a
+    /// Coons patch of a smooth domain the corners are singular, the
+    /// functions there have almost no mass and ring at outlier
+    /// frequencies, and their parametric neighbourhood is a tiny physical
+    /// region, so the condensed space loses nothing visible. `reach` of
+    /// zero or one leaves the patch as it is.
+    pub fn with_condensed_corners(mut self, reach: usize) -> Self {
+        let nx = self.basis_x.functions();
+        let ny = self.basis_y.functions();
+        if reach < 2 || 2 * reach > nx.min(ny) {
+            return self;
+        }
+        let corner = |ix: usize, iy: usize| -> Option<usize> {
+            let left = ix < reach;
+            let right = ix >= nx - reach;
+            let bottom = iy < reach;
+            let top = iy >= ny - reach;
+            match (left, right, bottom, top) {
+                (true, _, true, _) => Some(0),
+                (_, true, true, _) => Some(1),
+                (true, _, _, true) => Some(2),
+                (_, true, _, true) => Some(3),
+                _ => None,
+            }
+        };
+        let mut map = vec![usize::MAX; nx * ny];
+        let mut next = 0;
+        let mut corners = [usize::MAX; 4];
+        for ix in 0..nx {
+            for iy in 0..ny {
+                let full = ix * ny + iy;
+                map[full] = match corner(ix, iy) {
+                    Some(c) => {
+                        if corners[c] == usize::MAX {
+                            corners[c] = next;
+                            next += 1;
+                        }
+                        corners[c]
+                    }
+                    None => {
+                        next += 1;
+                        next - 1
+                    }
+                };
+            }
+        }
+        self.condensation = Some(map);
+        self.degrees_of_freedom = next;
+        self.accumulate_lumped();
+        self
+    }
+
+    /// Whether the corners are condensed.
+    pub fn is_condensed(&self) -> bool {
+        self.condensation.is_some()
     }
 
     pub fn degree(&self) -> usize {
@@ -491,7 +1049,7 @@ impl BoxPatch {
     }
 
     pub fn degrees_of_freedom(&self) -> usize {
-        self.basis_x.functions() * self.basis_y.functions()
+        self.degrees_of_freedom
     }
 
     pub fn samples(&self) -> usize {
@@ -512,11 +1070,56 @@ impl BoxPatch {
         &self.weights
     }
 
+    /// The degree of freedom of tensor-product function `(ix, iy)`.
     pub fn node(&self, ix: usize, iy: usize) -> usize {
-        ix * self.basis_y.functions() + iy
+        let full = ix * self.basis_y.functions() + iy;
+        match &self.condensation {
+            Some(map) => map[full],
+            None => full,
+        }
     }
 
-    /// Visits every sample in index order with its stencil.
+    pub fn geometry(&self) -> &GeometryMap {
+        &self.geometry
+    }
+
+    /// Every sample's physical point, in sample order.
+    pub fn sample_points(&self) -> &[Point2] {
+        &self.points
+    }
+
+    /// Every sample's Jacobian determinant, one under the affine map.
+    pub fn sample_determinants(&self) -> Vec<f64> {
+        if self.jacobians.is_empty() {
+            vec![1.0; self.samples()]
+        } else {
+            self.jacobians.iter().map(|j| j.determinant).collect()
+        }
+    }
+
+    /// Visits every sample's parametric point in sample order, stopping at
+    /// the first error.
+    fn for_each_parametric_sample<E>(
+        &self,
+        mut visit: impl FnMut(Point2) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let q = self.rule.len();
+        for sx in 0..self.basis_x.spans() {
+            for gx in 0..q {
+                let xi = (sx as f64 + self.rule[gx].0) * self.basis_x.spacing();
+                for sy in 0..self.basis_y.spans() {
+                    for gy in 0..q {
+                        let eta = (sy as f64 + self.rule[gy].0) * self.basis_y.spacing();
+                        visit(Point2::new(xi, eta))?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Visits every sample in index order with its stencil, in physical
+    /// components.
     pub fn for_each_sample(&self, mut visit: impl FnMut(usize, &SampleStencil)) {
         let p = self.degree();
         let q = self.rule.len();
@@ -535,7 +1138,11 @@ impl BoxPatch {
                 for sy in 0..self.basis_y.spans() {
                     for gy in 0..q {
                         let (ny, dny) = &self.table_y[sy * q + gy];
-                        stencil.weight = self.rule[gx].1 * self.rule[gy].1 * area;
+                        let jacobian = self.jacobians.get(index).copied();
+                        stencil.weight = self.rule[gx].1
+                            * self.rule[gy].1
+                            * area
+                            * jacobian.map_or(1.0, |j| j.determinant);
                         let mut local = 0;
                         for a in 0..=p {
                             let ix = self.basis_x.function(sx, a);
@@ -543,8 +1150,17 @@ impl BoxPatch {
                                 let iy = self.basis_y.function(sy, b);
                                 stencil.nodes[local] = self.node(ix, iy);
                                 stencil.values[local] = nx[a] * ny[b];
-                                stencil.gradients[local] =
-                                    Point2::new(dnx[a] * ny[b], nx[a] * dny[b]);
+                                let parametric = Point2::new(dnx[a] * ny[b], nx[a] * dny[b]);
+                                stencil.gradients[local] = match jacobian {
+                                    None => parametric,
+                                    Some(j) => {
+                                        let m = j.inverse_transpose;
+                                        Point2::new(
+                                            m[0] * parametric.x + m[1] * parametric.y,
+                                            m[2] * parametric.x + m[3] * parametric.y,
+                                        )
+                                    }
+                                };
                                 local += 1;
                             }
                         }
@@ -556,20 +1172,41 @@ impl BoxPatch {
         }
     }
 
-    /// `M u` with unit density, through the samples.
+    /// `M u` with the sampled density, through the samples, plus any mass
+    /// scaling.
     pub fn apply_mass(&self, u: &[f64]) -> Vec<f64> {
-        let mut out = vec![0.0; u.len()];
-        self.for_each_sample(|_, stencil| {
+        let mut out: Vec<f64> = self
+            .mass_scaling
+            .iter()
+            .zip(u)
+            .map(|(m, u)| m * u)
+            .collect();
+        self.for_each_sample(|index, stencil| {
             let value = stencil
                 .nodes()
                 .iter()
                 .zip(stencil.values())
                 .map(|(node, value)| value * u[*node])
                 .sum::<f64>()
-                * stencil.weight;
+                * stencil.weight
+                * self.density[index];
             for (node, basis) in stencil.nodes().iter().zip(stencil.values()) {
                 out[*node] += value * basis;
             }
+        });
+        out
+    }
+
+    /// The field's value at every sample.
+    pub fn sample_values(&self, u: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0; self.samples()];
+        self.for_each_sample(|index, stencil| {
+            out[index] = stencil
+                .nodes()
+                .iter()
+                .zip(stencil.values())
+                .map(|(node, value)| value * u[*node])
+                .sum();
         });
         out
     }
@@ -587,12 +1224,13 @@ impl BoxPatch {
         out
     }
 
-    /// `Gᵀ W b`: the weighted gather of sample fluxes to the coefficients,
-    /// the exact transpose of [`Self::gradient`].
+    /// `Gᵀ W κ b`: the weighted gather of sample fluxes to the
+    /// coefficients, each through its sample's stiffness; with unit
+    /// stiffness the exact transpose of [`Self::gradient`].
     pub fn divergence(&self, b: &[Point2]) -> Vec<f64> {
         let mut out = vec![0.0; self.degrees_of_freedom()];
         self.for_each_sample(|index, stencil| {
-            let flux = b[index] * stencil.weight;
+            let flux = b[index] * (stencil.weight * self.stiffness[index]);
             for (node, basis) in stencil.nodes().iter().zip(stencil.gradients()) {
                 out[*node] += basis.dot(flux);
             }
@@ -682,11 +1320,36 @@ impl BoxPatch {
     }
 
     /// The coefficients whose spline is the L2 projection of
-    /// `f(x) g(y)`, one one-dimensional projection per direction.
+    /// `f(x) g(y)`, one one-dimensional projection per direction; on the
+    /// affine map only, where `x` and `y` follow `ξ` and `η`.
     pub fn project_separable(&self, f: impl Fn(f64) -> f64, g: impl Fn(f64) -> f64) -> Vec<f64> {
-        let cx = project_1d(&self.basis_x, |t| f(self.origin.x + t));
-        let cy = project_1d(&self.basis_y, |t| g(self.origin.y + t));
+        let GeometryMap::Affine { origin } = self.geometry else {
+            panic!("a separable projection needs the affine map");
+        };
+        assert!(
+            !self.is_condensed(),
+            "a separable projection needs the full space"
+        );
+        let cx = project_1d(&self.basis_x, |t| f(origin.x + t));
+        let cy = project_1d(&self.basis_y, |t| g(origin.y + t));
         self.separable(&cx, &cy)
+    }
+
+    /// The coefficients whose spline is the L2 projection of `f` over the
+    /// patch, by conjugate gradients on the consistent mass.
+    pub fn project(&self, f: impl Fn(Point2) -> f64) -> Vec<f64> {
+        let mut right = vec![0.0; self.degrees_of_freedom()];
+        self.for_each_sample(|index, stencil| {
+            let value = f(self.points[index]) * stencil.weight;
+            for (node, basis) in stencil.nodes().iter().zip(stencil.values()) {
+                right[*node] += value * basis;
+            }
+        });
+        self.conjugate_gradients(
+            |v| self.apply_mass(v),
+            &right,
+            &self.lumped.iter().map(|d| 1.0 / d).collect::<Vec<_>>(),
+        )
     }
 
     /// The coefficients that read `f(x) g(y)` at the Greville points: nodal
@@ -696,17 +1359,24 @@ impl BoxPatch {
         f: impl Fn(f64) -> f64,
         g: impl Fn(f64) -> f64,
     ) -> Vec<f64> {
+        let GeometryMap::Affine { origin } = self.geometry else {
+            panic!("a separable interpolation needs the affine map");
+        };
+        assert!(
+            !self.is_condensed(),
+            "a separable interpolation needs the full space"
+        );
         let cx: Vec<f64> = self
             .basis_x
             .greville()
             .into_iter()
-            .map(|t| f(self.origin.x + t))
+            .map(|t| f(origin.x + t))
             .collect();
         let cy: Vec<f64> = self
             .basis_y
             .greville()
             .into_iter()
-            .map(|t| g(self.origin.y + t))
+            .map(|t| g(origin.y + t))
             .collect();
         self.separable(&cx, &cy)
     }
@@ -792,7 +1462,7 @@ pub struct ModeClock {
 /// Measures a mode from the field at `clock.time` and the field one step
 /// earlier, projecting with the consistent mass.
 pub fn measure_mode(
-    patch: &BoxPatch,
+    patch: &SplinePatch,
     mode: &[f64],
     current: &[f64],
     previous: &[f64],
@@ -906,50 +1576,120 @@ fn cholesky_solve(matrix: &[f64], right: &[f64]) -> Vec<f64> {
     x
 }
 
-/// Leapfrog on a patch with unit material and natural reflecting walls:
-/// `Q̇ = -Gᵀ W b`, `ḃ = G u`, `u = P Q`, with `b` half a step ahead of `Q`.
+/// A Störmer step on a patch with unit material and natural reflecting
+/// walls: `Q̇ = -Gᵀ W b`, `ḃ = G ũ`, `u = P Q`, with `b` half a step ahead of
+/// `Q`; `ũ` is `u` under leapfrog and the modified field under fourth order.
 pub struct PatchStepper<'a> {
-    patch: &'a BoxPatch,
+    patch: &'a SplinePatch,
     treatment: MassTreatment,
+    integrator: Integrator,
     dt: f64,
     q: Vec<f64>,
+    q_previous: Vec<f64>,
     b: Vec<Point2>,
     u: Vec<f64>,
     u_previous: Vec<f64>,
+    /// The field the last drift used.
+    drift_field: Vec<f64>,
+    /// The field the drift before that used.
+    drift_field_previous: Vec<f64>,
     steps: u64,
 }
 
 impl<'a> PatchStepper<'a> {
-    /// Starts from the field `u` at rest.
-    pub fn new(patch: &'a BoxPatch, treatment: MassTreatment, dt: f64, u: Vec<f64>) -> Self {
+    /// Leapfrog from the field `u` at rest.
+    pub fn new(patch: &'a SplinePatch, treatment: MassTreatment, dt: f64, u: Vec<f64>) -> Self {
+        Self::with_integrator(patch, treatment, Integrator::Leapfrog, dt, u)
+    }
+
+    /// Starts from the field `u` at rest under the given integrator.
+    pub fn with_integrator(
+        patch: &'a SplinePatch,
+        treatment: MassTreatment,
+        integrator: Integrator,
+        dt: f64,
+        u: Vec<f64>,
+    ) -> Self {
+        Self::with_state(patch, treatment, integrator, dt, u, None)
+    }
+
+    /// Starts from the field `u` and, if given, the flux `b` half a step
+    /// ahead of it; at rest otherwise.
+    pub fn with_state(
+        patch: &'a SplinePatch,
+        treatment: MassTreatment,
+        integrator: Integrator,
+        dt: f64,
+        u: Vec<f64>,
+        b_half_ahead: Option<Vec<Point2>>,
+    ) -> Self {
         let q = patch.flux_of_field(&u, treatment);
         let u = patch.field(&q, treatment);
-        let gradient = patch.gradient(&u);
-        let b = gradient.into_iter().map(|g| g * (0.5 * dt)).collect();
-        Self {
+        let mut stepper = Self {
             patch,
             treatment,
+            integrator,
             dt,
+            q_previous: q.clone(),
             q,
+            b: Vec::new(),
             u_previous: u.clone(),
             u,
-            b,
+            drift_field: Vec::new(),
+            drift_field_previous: Vec::new(),
             steps: 0,
+        };
+        let drift_field = stepper.drift_field();
+        stepper.b = b_half_ahead.unwrap_or_else(|| {
+            stepper
+                .patch
+                .gradient(&drift_field)
+                .into_iter()
+                .map(|g| g * (0.5 * dt))
+                .collect()
+        });
+        stepper.drift_field_previous = drift_field.clone();
+        stepper.drift_field = drift_field;
+        stepper
+    }
+
+    /// The field `b` drifts on at the current level.
+    fn drift_field(&self) -> Vec<f64> {
+        match self.integrator {
+            Integrator::Leapfrog => self.u.clone(),
+            Integrator::FourthOrder => {
+                let force = self.patch.divergence(&self.patch.gradient(&self.u));
+                let modified: Vec<f64> = self
+                    .q
+                    .iter()
+                    .zip(&force)
+                    .map(|(q, f)| q - self.dt * self.dt / 12.0 * f)
+                    .collect();
+                self.patch.field(&modified, self.treatment)
+            }
         }
     }
 
     pub fn step(&mut self) {
         let force = self.patch.divergence(&self.b);
-        for (q, f) in self.q.iter_mut().zip(&force) {
-            *q -= self.dt * f;
+        std::mem::swap(&mut self.q, &mut self.q_previous);
+        for ((q, previous), f) in self.q.iter_mut().zip(&self.q_previous).zip(&force) {
+            *q = previous - self.dt * f;
         }
         std::mem::swap(&mut self.u, &mut self.u_previous);
         self.u = self.patch.field(&self.q, self.treatment);
-        let gradient = self.patch.gradient(&self.u);
+        let drift_field = self.drift_field();
+        let gradient = self.patch.gradient(&drift_field);
         for (b, g) in self.b.iter_mut().zip(&gradient) {
             *b = *b + *g * self.dt;
         }
+        std::mem::swap(&mut self.drift_field, &mut self.drift_field_previous);
+        self.drift_field = drift_field;
         self.steps += 1;
+    }
+
+    pub fn integrator(&self) -> Integrator {
+        self.integrator
     }
 
     pub fn time(&self) -> f64 {
@@ -972,22 +1712,63 @@ impl<'a> PatchStepper<'a> {
         &self.u_previous
     }
 
+    /// The flux half a step ahead of the field.
+    pub fn flux(&self) -> &[Point2] {
+        &self.b
+    }
+
     /// The staggered energy `½ Qᵀ P Q + ½ b⁻ · W b⁺`, which leapfrog
     /// conserves exactly: `b⁻` is the flux half a step before the current
-    /// `Q` and `b⁺` the one half a step after.
+    /// `Q` and `b⁺` the one half a step after. Fourth order conserves
+    /// [`Self::conserved_energy`] instead.
     pub fn staggered_energy(&self) -> f64 {
         let kinetic = 0.5 * dot(&self.q, &self.u);
-        // `b` holds `b⁺`; `b⁻ = b⁺ - dt G u`.
-        let gradient = self.patch.gradient(&self.u);
+        // `b` holds `b⁺`; `b⁻ = b⁺ - dt G ũ`.
+        let gradient = self.patch.gradient(&self.drift_field);
         let potential = self
             .b
             .iter()
             .zip(&gradient)
-            .zip(self.patch.sample_weights())
-            .map(|((plus, g), weight)| {
+            .zip(
+                self.patch
+                    .sample_weights()
+                    .iter()
+                    .zip(self.patch.sample_stiffness()),
+            )
+            .map(|((plus, g), (weight, stiffness))| {
                 let minus = *plus - *g * self.dt;
-                0.5 * weight * plus.dot(minus)
+                0.5 * weight * stiffness * plus.dot(minus)
             })
+            .sum::<f64>();
+        kinetic + potential
+    }
+
+    /// The energy a Störmer scheme conserves exactly, across the last step:
+    /// `½ ΔQ · P ΔQ / dt² + ½ (G uⁿ⁺¹) · W (G ũⁿ)`, where `ũⁿ` is the field the
+    /// previous level's drift used, so the potential term carries the
+    /// modified stiffness under fourth order. Needs one step taken.
+    pub fn conserved_energy(&self) -> f64 {
+        let kinetic = self
+            .q
+            .iter()
+            .zip(&self.q_previous)
+            .zip(self.u.iter().zip(&self.u_previous))
+            .map(|((q, q0), (u, u0))| (q - q0) * (u - u0))
+            .sum::<f64>()
+            * 0.5
+            / (self.dt * self.dt);
+        let current = self.patch.gradient(&self.u);
+        let previous = self.patch.gradient(&self.drift_field_previous);
+        let potential = current
+            .iter()
+            .zip(&previous)
+            .zip(
+                self.patch
+                    .sample_weights()
+                    .iter()
+                    .zip(self.patch.sample_stiffness()),
+            )
+            .map(|((a, b), (w, stiffness))| 0.5 * w * stiffness * a.dot(*b))
             .sum::<f64>();
         kinetic + potential
     }
@@ -1127,8 +1908,8 @@ mod tests {
         }
     }
 
-    fn small_patch(degree: usize, points: usize) -> BoxPatch {
-        BoxPatch::new(
+    fn small_patch(degree: usize, points: usize) -> SplinePatch {
+        SplinePatch::new(
             degree,
             Point2::new(-1.0, -0.5),
             Point2::new(2.0, 1.0),
@@ -1158,7 +1939,7 @@ mod tests {
     fn the_unclamped_basis_spans_the_clamped_space() {
         for degree in 1..=3 {
             let clamped = small_patch(degree, 3);
-            let unclamped = BoxPatch::unclamped(
+            let unclamped = SplinePatch::unclamped(
                 degree,
                 Point2::new(-1.0, -0.5),
                 Point2::new(2.0, 1.0),
@@ -1181,6 +1962,242 @@ mod tests {
                 assert!((g.x - 3.0).abs() < 1.0e-9 && g.y.abs() < 1.0e-9, "{g:?}");
             }
         }
+    }
+
+    fn curved_small(geometry: GeometryMap, size: Point2) -> SplinePatch {
+        SplinePatch::curved(2, geometry, size, [9, 6], 3, false).unwrap()
+    }
+
+    /// The flat surface and a Coons patch of straight sides are the affine
+    /// box in other clothes: same samples, weights and lumped mass.
+    #[test]
+    fn a_flat_surface_and_a_square_coons_patch_are_the_affine_box() {
+        let origin = Point2::new(-1.0, -0.5);
+        let size = Point2::new(2.0, 1.0);
+        let affine =
+            SplinePatch::curved(2, GeometryMap::Affine { origin }, size, [9, 6], 3, false).unwrap();
+        let corner = |x: f64, y: f64| origin + Point2::new(x, y);
+        let line = |a: Point2, b: Point2| Box::new(CoonsSide::Line { from: a, to: b });
+        let others = [
+            curved_small(GeometryMap::flat_surface(origin, size, [4, 3]), size),
+            curved_small(
+                GeometryMap::Coons {
+                    bottom: line(corner(0.0, 0.0), corner(2.0, 0.0)),
+                    right: line(corner(2.0, 0.0), corner(2.0, 1.0)),
+                    top: line(corner(0.0, 1.0), corner(2.0, 1.0)),
+                    left: line(corner(0.0, 0.0), corner(0.0, 1.0)),
+                },
+                size,
+            ),
+        ];
+        for other in &others {
+            for (a, b) in affine.sample_points().iter().zip(other.sample_points()) {
+                assert!((*a - *b).norm() < 1.0e-12);
+            }
+            for (a, b) in affine.sample_weights().iter().zip(other.sample_weights()) {
+                assert!((a - b).abs() < 1.0e-12);
+            }
+            for (a, b) in affine.lumped().iter().zip(other.lumped()) {
+                assert!((a - b).abs() < 1.0e-12);
+            }
+            let u: Vec<f64> = (0..affine.degrees_of_freedom())
+                .map(|i| ((i * 13) % 7) as f64)
+                .collect();
+            for (a, b) in affine.gradient(&u).iter().zip(other.gradient(&u)) {
+                assert!((*a - b).norm() < 1.0e-10);
+            }
+        }
+    }
+
+    /// A Coons disk has the disk's area, a positive Jacobian at every sample
+    /// that vanishes toward the corners, and keeps the transpose structure.
+    #[test]
+    fn a_coons_disk_has_the_right_area_and_singular_corners() {
+        let size = Point2::new(1.0, 1.0);
+        let disk = SplinePatch::curved(
+            2,
+            GeometryMap::coons_ellipse(Point2::new(0.3, -0.2), Point2::new(1.0, 1.0)),
+            size,
+            [12, 12],
+            3,
+            false,
+        )
+        .unwrap();
+        let area: f64 = disk.sample_weights().iter().sum();
+        assert!((area - std::f64::consts::PI).abs() < 2.0e-4, "{area}");
+        let total: f64 = disk.lumped().iter().sum();
+        assert!((total - area).abs() < 1.0e-12);
+        let determinants = disk.sample_determinants();
+        let least = determinants.iter().cloned().fold(f64::INFINITY, f64::min);
+        let most = determinants.iter().cloned().fold(0.0, f64::max);
+        assert!(least > 0.0 && least < 0.2 * most, "{least} {most}");
+        for p in disk.sample_points() {
+            assert!((*p - Point2::new(0.3, -0.2)).norm() < 1.0 + 1.0e-12);
+        }
+        // Transpose, with the Jacobians in the weights and gradients.
+        let n = disk.degrees_of_freedom();
+        let u: Vec<f64> = (0..n).map(|i| ((i * 7919) % 101) as f64 / 101.0).collect();
+        let b: Vec<Point2> = (0..disk.samples())
+            .map(|i| Point2::new(((i * 31) % 17) as f64 / 17.0, ((i * 13) % 23) as f64 / 23.0))
+            .collect();
+        let left: f64 = disk
+            .gradient(&u)
+            .iter()
+            .zip(&b)
+            .zip(disk.sample_weights())
+            .map(|((g, b), w)| w * g.dot(*b))
+            .sum();
+        let right = dot(&u, &disk.divergence(&b));
+        assert!((left - right).abs() < 1.0e-12 * left.abs().max(1.0));
+        // A projected linear function has the linear function's gradient up
+        // to the projection's own error, which the mapped space makes small
+        // but not zero.
+        let u = disk.project(|p| 3.0 * p.x + 1.0);
+        let worst = disk
+            .gradient(&u)
+            .iter()
+            .map(|g| (*g - Point2::new(3.0, 0.0)).norm())
+            .fold(0.0, f64::max);
+        assert!(worst < 0.3, "{worst}");
+    }
+
+    #[test]
+    fn condensed_corners_keep_the_area_and_the_structure() {
+        let size = Point2::new(1.0, 1.0);
+        let full = SplinePatch::curved(
+            2,
+            GeometryMap::coons_ellipse(Point2::default(), Point2::new(1.0, 1.0)),
+            size,
+            [12, 12],
+            3,
+            false,
+        )
+        .unwrap();
+        let condensed = full.clone().with_condensed_corners(3);
+        assert_eq!(
+            condensed.degrees_of_freedom(),
+            full.degrees_of_freedom() - 4 * (9 - 1)
+        );
+        let total: f64 = condensed.lumped().iter().sum();
+        assert!((total - std::f64::consts::PI).abs() < 2.0e-4);
+        // A constant is still in the space and its gradient is still zero.
+        let ones = condensed.project(|_| 1.0);
+        assert!(ones.iter().all(|c| (c - 1.0).abs() < 1.0e-8));
+        assert!(condensed.gradient(&ones).iter().all(|g| g.norm() < 1.0e-9));
+        // The lumped mass of a corner's function is the sum of its parts.
+        let least_full = full.lumped().iter().cloned().fold(f64::INFINITY, f64::min);
+        let least_condensed = condensed
+            .lumped()
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            least_condensed > 5.0 * least_full,
+            "{least_full} {least_condensed}"
+        );
+        let n = condensed.degrees_of_freedom();
+        let u: Vec<f64> = (0..n).map(|i| ((i * 7919) % 101) as f64 / 101.0).collect();
+        let b: Vec<Point2> = (0..condensed.samples())
+            .map(|i| Point2::new(((i * 31) % 17) as f64 / 17.0, ((i * 13) % 23) as f64 / 23.0))
+            .collect();
+        let left: f64 = condensed
+            .gradient(&u)
+            .iter()
+            .zip(&b)
+            .zip(condensed.sample_weights())
+            .map(|((g, b), w)| w * g.dot(*b))
+            .sum();
+        let right = dot(&u, &condensed.divergence(&b));
+        assert!((left - right).abs() < 1.0e-12 * left.abs().max(1.0));
+    }
+
+    #[test]
+    fn mass_scaling_caps_the_corner_frequencies_and_keeps_the_row_sums() {
+        let size = Point2::new(1.0, 1.0);
+        let disk = SplinePatch::curved(
+            2,
+            GeometryMap::coons_ellipse(Point2::default(), Point2::new(1.0, 1.0)),
+            size,
+            [12, 12],
+            3,
+            true,
+        )
+        .unwrap();
+        let before = disk.frequency_bounds();
+        let scaled = disk.clone().with_mass_scaling(2.0);
+        let after = scaled.frequency_bounds();
+        let median = {
+            let mut sorted = before.clone();
+            sorted.sort_by(f64::total_cmp);
+            sorted[sorted.len() / 2]
+        };
+        assert!(before.iter().cloned().fold(0.0, f64::max) > 4.0 * median);
+        assert!(after.iter().all(|b| *b <= 2.0 * median * (1.0 + 1.0e-9)));
+        let count = scaled.scaled_count();
+        assert!(
+            count > 0 && count < scaled.degrees_of_freedom() / 2,
+            "{count}"
+        );
+        let ones = vec![1.0; scaled.degrees_of_freedom()];
+        for (row, lumped) in scaled.apply_mass(&ones).iter().zip(scaled.lumped()) {
+            assert!((row - lumped).abs() < 1.0e-12);
+        }
+        let (plain, _) = disk.largest_eigenvalue(MassTreatment::Lumped { sweeps: 2 }, 3000);
+        let (capped, _) = scaled.largest_eigenvalue(MassTreatment::Lumped { sweeps: 2 }, 3000);
+        assert!(capped < 0.25 * plain, "{plain} {capped}");
+    }
+
+    #[test]
+    fn a_c0_knot_adds_functions_and_lets_a_kink_through() {
+        for unclamped in [false, true] {
+            let smooth = if unclamped {
+                UniformBasis::unclamped(2, 8, 0.25)
+            } else {
+                UniformBasis::open(2, 8, 0.25)
+            };
+            let kinked = UniformBasis::with_c0_knot(2, 8, 0.25, 4, unclamped);
+            assert_eq!(kinked.functions(), smooth.functions() + 1);
+            for step in 0..100 {
+                let t = 2.0 * (step as f64 + 0.5) / 100.0;
+                let span = kinked.span_of(t);
+                let (values, derivatives) = kinked.evaluate(span, t);
+                assert!((values[..3].iter().sum::<f64>() - 1.0).abs() < 1.0e-13);
+                assert!(derivatives[..3].iter().sum::<f64>().abs() < 1.0e-11);
+            }
+            // The Greville coefficients of |t - 1| reproduce it: a kink at
+            // the repeated knot is in the space.
+            let greville = kinked.greville();
+            for step in 0..100 {
+                let t = 2.0 * (step as f64 + 0.5) / 100.0;
+                let span = kinked.span_of(t);
+                let (values, _) = kinked.evaluate(span, t);
+                let value: f64 = (0..3)
+                    .map(|a| values[a] * (greville[kinked.function(span, a)] - 1.0).abs())
+                    .sum();
+                assert!((value - (t - 1.0).abs()).abs() < 1.0e-12, "{t}: {value}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_sampled_material_weights_the_mass_and_the_kick() {
+        let patch = small_patch(2, 2).with_material(|p| if p.x < 0.0 { 1.0 } else { 4.0 }, |_| 0.5);
+        let total: f64 = patch.lumped().iter().sum();
+        // Half the box at density one, half at four: 2.5 times the area 2.
+        assert!((total - 5.0).abs() < 1.0e-12, "{total}");
+        let ones = vec![1.0; patch.degrees_of_freedom()];
+        for (row, lumped) in patch.apply_mass(&ones).iter().zip(patch.lumped()) {
+            assert!((row - lumped).abs() < 1.0e-13);
+        }
+        let b: Vec<Point2> = (0..patch.samples())
+            .map(|i| Point2::new(((i * 31) % 17) as f64 / 17.0, 0.3))
+            .collect();
+        let plain = small_patch(2, 2).divergence(&b);
+        for (half, full) in patch.divergence(&b).iter().zip(&plain) {
+            assert!((2.0 * half - full).abs() < 1.0e-12);
+        }
+        let values = patch.sample_values(&ones);
+        assert!(values.iter().all(|v| (v - 1.0).abs() < 1.0e-13));
     }
 
     #[test]
@@ -1260,31 +2277,72 @@ mod tests {
     }
 
     #[test]
-    fn leapfrog_conserves_the_staggered_energy() {
+    fn both_integrators_conserve_their_energies_at_their_stable_steps() {
         for treatment in TREATMENTS {
-            let patch = small_patch(3, 4);
-            let (lambda, _) = patch.largest_eigenvalue(treatment, 2000);
-            let dt = 0.8 * 2.0 / lambda.sqrt();
-            let u = patch.project_separable(
-                |x| (std::f64::consts::PI * x).cos(),
-                |y| (2.0 * std::f64::consts::PI * y).cos(),
-            );
-            let mut stepper = PatchStepper::new(&patch, treatment, dt, u);
-            let initial = stepper.staggered_energy();
-            for _ in 0..200 {
+            for integrator in [Integrator::Leapfrog, Integrator::FourthOrder] {
+                let patch = small_patch(3, 4);
+                let (lambda, _) = patch.largest_eigenvalue(treatment, 2000);
+                let dt = 0.95 * integrator.stability_factor() * 2.0 / lambda.sqrt();
+                let u = patch.project_separable(
+                    |x| (std::f64::consts::PI * x).cos(),
+                    |y| (2.0 * std::f64::consts::PI * y).cos(),
+                );
+                let mut stepper =
+                    PatchStepper::with_integrator(&patch, treatment, integrator, dt, u);
+                let staggered = stepper.staggered_energy();
                 stepper.step();
+                let conserved = stepper.conserved_energy();
+                for _ in 0..400 {
+                    stepper.step();
+                }
+                let drift = (stepper.conserved_energy() - conserved).abs() / conserved;
+                assert!(drift < 1.0e-10, "{treatment:?} {integrator:?}: {drift}");
+                if integrator == Integrator::Leapfrog {
+                    let drift = (stepper.staggered_energy() - staggered).abs() / staggered;
+                    assert!(drift < 1.0e-10, "{treatment:?}: staggered {drift}");
+                }
+                assert!(
+                    stepper.field().iter().all(|v| v.abs() < 10.0),
+                    "{integrator:?}"
+                );
             }
-            let drift = (stepper.staggered_energy() - initial).abs() / initial;
-            assert!(drift < 1.0e-11, "{treatment:?}: {drift}");
         }
+    }
+
+    #[test]
+    fn the_stepped_frequency_inverts_and_is_fourth_order_under_the_modified_equation() {
+        let omega = 7.3;
+        for integrator in [Integrator::Leapfrog, Integrator::FourthOrder] {
+            for dt in [0.01, 0.05, 0.2] {
+                let stepped = integrator.stepped_frequency(omega, dt);
+                let back = integrator.spatial_frequency(stepped, dt);
+                assert!(
+                    (back - omega).abs() < 1.0e-9,
+                    "{integrator:?} dt {dt}: {back}"
+                );
+            }
+        }
+        let error = |integrator: Integrator, dt: f64| {
+            (integrator.stepped_frequency(omega, dt) - omega).abs()
+        };
+        let leapfrog =
+            (error(Integrator::Leapfrog, 0.04) / error(Integrator::Leapfrog, 0.02)).log2();
+        let fourth =
+            (error(Integrator::FourthOrder, 0.04) / error(Integrator::FourthOrder, 0.02)).log2();
+        assert!((leapfrog - 2.0).abs() < 0.05, "leapfrog order {leapfrog}");
+        assert!((fourth - 4.0).abs() < 0.05, "fourth order {fourth}");
+        // At leapfrog's stable step the fourth-order scheme's temporal error
+        // is below leapfrog's by (ω dt)²/30 and change.
+        let dt = 1.6 / omega;
+        assert!(error(Integrator::FourthOrder, dt) < 0.1 * error(Integrator::Leapfrog, dt));
     }
 
     /// On a linear basis the nodal cosine is an exact Neumann eigenvector of
     /// every treatment, with the periodic symbol's eigenvalue, so the
-    /// stepped phase must be the leapfrog frequency's to roundoff.
+    /// stepped phase must be the integrator's frequency to roundoff.
     #[test]
     fn a_linear_box_mode_drifts_exactly_as_the_symbol_predicts() {
-        let patch = BoxPatch::new(
+        let patch = SplinePatch::new(
             1,
             Point2::new(-1.0, -1.0),
             Point2::new(2.0, 2.0),
@@ -1295,14 +2353,19 @@ mod tests {
         let k = 2.0 * std::f64::consts::PI / 0.8;
         let theta = k * patch.basis_x().spacing();
         let symbols = PeriodicSymbols::new(1, patch.basis_x().spacing(), &gauss_rule(2).unwrap());
-        for treatment in TREATMENTS {
+        for (treatment, integrator) in TREATMENTS.into_iter().flat_map(|treatment| {
+            [Integrator::Leapfrog, Integrator::FourthOrder]
+                .into_iter()
+                .map(move |integrator| (treatment, integrator))
+        }) {
             let omega = symbols
                 .frequency_squared(theta, 0.0, treatment.sweeps())
                 .sqrt();
             let dt = 0.02;
-            let predicted = leapfrog_frequency(omega, dt);
+            let predicted = integrator.stepped_frequency(omega, dt);
             let mode = patch.interpolate_separable(|x| (k * (x + 1.0)).cos(), |_| 1.0);
-            let mut stepper = PatchStepper::new(&patch, treatment, dt, mode.clone());
+            let mut stepper =
+                PatchStepper::with_integrator(&patch, treatment, integrator, dt, mode.clone());
             for _ in 0..150 {
                 stepper.step();
             }
@@ -1320,9 +2383,12 @@ mod tests {
             );
             assert!(
                 measured.phase_error.abs() < 1.0e-9,
-                "{treatment:?}: {measured:?}"
+                "{treatment:?} {integrator:?}: {measured:?}"
             );
-            assert!(measured.amplitude_error.abs() < 1.0e-9, "{treatment:?}");
+            assert!(
+                measured.amplitude_error.abs() < 1.0e-9,
+                "{treatment:?} {integrator:?}"
+            );
             // Against the exact frequency the drift is what dispersion says.
             let against_exact = measure_mode(
                 &patch,

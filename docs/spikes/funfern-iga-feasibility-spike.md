@@ -1,7 +1,9 @@
 # IGA feasibility spikes — 3 October 2026
 
-**Status: spikes 1 and 2 measured; gate 1 passed, see the verdict.** Spikes 3
-to 6 are planned, not started. Everything here is CPU f64 in
+**Status: spikes 1, 2, T, 3 and 4 measured.** Gate 1 passed; gate 3 failed
+for smooth boundaries and passed for a deformed box; gate 4 passed for
+knot-aligned regions and failed for free curves. Spikes 5 and 6 are planned,
+not started. Everything here is CPU f64 in
 `crates/funfern-core/src/spline_patch.rs` and the two examples
 `iga_dispersion` and `iga_box_mode`; nothing is reached by the application.
 
@@ -23,6 +25,8 @@ answered first and cheapest, and the rest only if they pass:
 4. Materials inside a patch: immersed sampling against knot-aligned regions.
 5. Edits without remeshing: local rebuild, mass rescale, Piola map of `b`.
 6. Cost at equal phase error against the triangle solver.
+7. (T, added after spike 1) A fourth-order time integrator, since
+   leapfrog's temporal error dominates at the stable step.
 
 ## What the triangle solver fixes for any IGA variant
 
@@ -93,7 +97,7 @@ as the reference only.
   one `h²`, and the sweep symbol follows from them, so a whole dispersion
   study is arithmetic. The cubic symbols are checked against the closed
   forms `151/315, 397/1680, 1/42, 1/5040` and `2/3, −1/8, −1/5, −1/120`.
-- `BoxPatch`: an affine tensor-product patch over the 2 × 2 box with
+- `SplinePatch`: an affine tensor-product patch over the 2 × 2 box with
   clamped walls, Gauss samples per span, sum-factorized 1D tables, `apply_mass`,
   `gradient`, `divergence`, `field`, L2 projection, and the top eigenvalue of
   `P K` by power iteration.
@@ -365,10 +369,219 @@ space than the seven-node triangle and three times slower per simulated
 second on the CPU; at equal spatial accuracy it takes about half the
 triangle's time. Two levers remain untouched: the last 20% of the corner
 outlier, and the time integrator, which both solvers need before any of this
-spatial accuracy reaches the screen.
+spatial accuracy reaches the screen. Spike T below measures the integrator:
+fourth order in time for 13% of the throughput, and the runs become
+spatial-error-limited.
 
 The spikes continue: 3 (parameterization), 4 (materials), 5 (edits) and 6
-(cost on a curved patch), plus the time integrator as a new item.
+(cost on a curved patch).
+
+## Spike T: a fourth-order time integrator
+
+The box runs showed the leapfrog's temporal error dominating at the stable
+step for both solvers. The remedy measured here is the modified-equation
+Störmer scheme (Dablain 1986). The semi-discrete system is `Q̈ = −K P Q`;
+leapfrog's two-step form is `Qⁿ⁺¹ − 2Qⁿ + Qⁿ⁻¹ = −dt² K P Qⁿ`, and the exact
+propagator's is `2(cos(dt√(KP)) − I) Qⁿ = (−dt² KP + dt⁴ (KP)²/12 − …) Qⁿ`.
+Keeping the next term gives a Störmer step under the modified stiffness
+`K̃ = K (I − dt²/12 · P K)`, fourth order in time. In the kick-drift form
+nothing moves but the field `b` drifts on:
+
+```text
+u  = P Q
+ũ  = P (Q − dt²/12 · K u)        K u = Gᵀ W (G u), one more gradient, divergence and field pass
+b  += dt G ũ                      the drift
+Q  −= dt Gᵀ W b                   the kick, unchanged
+```
+
+So a step costs two gradient, two divergence and two field passes against
+leapfrog's one each, through the same tables, and the sweeps double with
+the field passes. For a mode of discrete frequency `ω` the amplification
+has `cos(ω_num dt) = 1 − x/2 + x²/24`, `x = (ω dt)²`, so the scheme is
+stable, and `K̃` positive definite, while `x < 12`: the stable step grows by
+√3. The relative frequency error is `(ω dt)⁴/720` against leapfrog's
+`(ω dt)²/24`. The scheme stays symplectic, since it is Störmer under a
+symmetric positive-definite operator, and conserves
+`½ ΔQ · P ΔQ / dt² + ½ (G uⁿ⁺¹) · W (G ũⁿ)` exactly
+(`PatchStepper::conserved_energy`, held to 1e-13 in the tests). On a linear
+basis the stepped phase matches the formula to 1e-9.
+
+For a nonlinear constitutive law `K` is not fixed, and the dt⁴ term would
+need the law's tangent at the current state; Chin's force-gradient
+integrators are the systematic route. For a time-driven mass `P` moves with
+the drive and the modified field reads it where it stands. Neither was
+measured.
+
+### Measured
+
+`iga_box_mode` on the unclamped 96 × 96 patch, two sweeps, Gauss 2 × 2, each
+integrator at 0.8 of its own stable step; the spatial part is read by
+inverting each integrator's own relation, the temporal part is the rest.
+
+| basis | integrator | dt | steps to t=10 | phase at t=10 | temporal part | spatial part | sim s / wall s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| p=2 | leapfrog | 1.43e-2 | 697 | +0.335 | +0.334 | +1.0e-3 | 5.2 |
+| p=2 | fourth order | 2.49e-2 | 402 | −4.2e-3 | −5.2e-3 | +1.0e-3 | 4.6 |
+| p=2 | fourth order at 0.4 | 1.24e-2 | 805 | +6.8e-4 | −3.2e-4 | +1.0e-3 | 2.3 |
+| p=2 | fourth order at 0.2 | 6.21e-3 | 1,610 | +9.8e-4 | −2.0e-5 | +1.0e-3 | 1.1 |
+| p=2 | leapfrog at 0.46 | 8.25e-3 | 1,212 | +0.111 | +0.110 | +1.0e-3 | 3.0 |
+| p=3 | leapfrog | 1.67e-2 | 599 | +0.446 | +0.452 | −6.3e-3 | 3.7 |
+| p=3 | fourth order | 2.89e-2 | 346 | −1.58e-2 | −9.5e-3 | −6.3e-3 | 3.2 |
+| p=2, 192² | leapfrog | 7.10e-3 | 1,409 | +8.16e-2 | +8.15e-2 | +1.35e-4 | 0.63 |
+| p=2, 192² | fourth order | 1.23e-2 | 813 | −1.70e-4 | −3.05e-4 | +1.35e-4 | 0.55 |
+
+- **The temporal error falls 50 to 60 times** at the stable step, from
+  +0.33 to −0.005 rad on quadratics and from +0.45 to −0.0095 on cubics, and
+  the runs are now limited by their spatial error. Halving the step halves
+  the temporal part sixteen times over, twice: fourth order as built.
+- **It costs 13% of the throughput**, two passes a step against √3 fewer
+  steps, `2/√3 = 1.15`; leapfrog at the same cost (fraction 0.46) is still
+  twenty times worse in time. The symbol predicts every row to 3%.
+- **Energy is conserved** to 1e-13 under both integrators at 95% of their
+  stable steps (the test), and no amplitude is lost.
+- **The same lever fits the triangle solver.** At 0.9 of its Gershgorin step
+  times √3, the seven-node triangle's temporal error at `t = 10` would fall
+  from +0.064 to about 2e-4 rad for the same 15% of throughput, leaving its
+  spatial −9.1e-3 as the whole error. The extra pass is one more gather,
+  scatter and field recovery before the drift, through the existing tables.
+
+## Spike 3: a single untrimmed patch over a curved domain
+
+The patch now carries a geometry map: affine, a bicubic B-spline surface
+with a control net, or a bilinearly blended Coons patch between four sides
+(straight segments, exact elliptic arcs, or pieces of a closed gallery
+spline). The Jacobian is evaluated at every sample; its determinant goes
+into the weight and its inverse transpose onto the gradients, so `b` and the
+gradients are in physical components and nothing else changes. Checks: the
+flat surface and a Coons patch of straight sides reproduce the affine box to
+1e-12; a Coons disk has the disk's area to 2e-4 and keeps the transpose
+structure. `iga_curved_patch` measures each geometry at 62 × 62 spans
+(4,096 dofs), quadratics, Gauss 2 × 2, two sweeps.
+
+| geometry | det J min / median / max | lumped min / median | dt_max over an equal-area box's, clamped | unclamped |
+| --- | --- | --- | --- | --- |
+| affine 2 × 2 box | 1 / 1 / 1 | 7.2e-6 / 2.6e-4 | 1.00 | 1.00 |
+| bulged box, right side pushed out 0.4 | 1.00 / 1.07 / 1.15 | 7.2e-6 / 2.8e-4 | 0.82 | 0.87 |
+| exact unit disk, Coons, corners on the diagonals | 0.060 / 3.2 / 4.7 | 5.1e-7 / 8.2e-4 | 0.017 | 0.021 |
+| exact 2:1 ellipse, Coons | 0.030 / 1.6 / 2.3 | 2.6e-7 / 4.1e-4 | 0.016 | 0.019 |
+| gallery `rounded` circle (8 controls), Coons | 0.050 / 2.6 / 3.8 | 4.3e-7 / 6.6e-4 | 0.018 | 0.021 |
+| gallery-like blob (smoothed hexagon), Coons | 0.032 / 3.5 / 4.4 | 2.7e-7 / 9.0e-4 | 0.009 | 0.010 |
+
+On the exact disk two Neumann modes with known frequencies, `J_m(kr) cos mθ`
+at a zero of `J_m'`, stepped by the fourth-order integrator at 0.8 of the
+stable step to `t = 10`:
+
+| mode | kR | spans per wavelength | relative frequency error, clamped | unclamped |
+| --- | --- | --- | --- | --- |
+| J1, first | 1.8412 | 106 | −3.4e-8 | −1.1e-7 |
+| J3, third | 11.3459 | 17.2 | −2.7e-6 | −2.9e-6 |
+
+**The accuracy is untouched by the curved map**: the J3 mode at 17 spans
+per wavelength lands within 3e-6, where the box mode at 19 spans sits at
+7e-6. **The stable step is destroyed**: one to two percent of an equal-area
+box's on every smooth domain, fifty to a hundred times too small. A
+deformed box with its four corners kept is fine at 0.82 to 0.87.
+
+The cause is the map, not the domain. A single bijective patch of a smooth
+domain must put the square's four corners on a boundary without corners, so
+the two parametric tangents turn parallel there and the Jacobian vanishes:
+the functions at the corners have almost no mass (5e-7 against a median of
+8e-4) and ring at an outlier frequency. Two repairs that keep the
+architecture were measured on the unclamped disk; both buy the step back
+only in proportion to what they take from the accuracy.
+
+| repair | dofs touched | dt_max over the box's | J3 error |
+| --- | --- | --- | --- |
+| none | 0 | 0.021 | −2.9e-6 |
+| condense the 2 × 2 functions at each corner into one | 12 | 0.073 | +2.5e-5 |
+| condense 3 × 3 | 32 | 0.159 | +1.4e-4 |
+| condense 4 × 4 | 60 | 0.214 | +3.4e-4 |
+| condense 6 × 6 | 140 | 0.314 | +1.5e-3 |
+| cap each function's `K_ii / D_i` at 16 × the median, by added mass | 96 | 0.28 | −2.0e-3 |
+| cap at 8 × | 172 | 0.39 | −7.4e-3 |
+| cap at 4 × | 320 | 0.55 | +2.2e-2 |
+| cap at 2 × | 684 | 0.78 | +9.2e-3 (J1: −6.1e-2) |
+
+Condensation merges the functions around a corner into one (their
+parametric neighbourhood maps to a small physical region); selective mass
+scaling adds mass to each function whose own frequency bound exceeds a cap,
+to the lumped diagonal and the consistent mass alike, so the sweeps still
+converge. Neither is local enough: the region where the Jacobian is small
+reaches many spans into the patch along the corner, so the step recovers
+linearly with the reach while the mode, which is large at the ±45° corners,
+loses accuracy at the same rate. Deflation (Voet, Sande, Buffa 2024) would
+face the same count of outlier modes, since the elevated frequencies are
+not a handful.
+
+**Gate 3 verdict: failed for a smooth closed boundary as one untrimmed
+patch; passed for a deformed box.** This matters less for the product than
+it sounds, because the scene's own domain is a rectangle: the natural
+single patch is the scene's box, and the curves inside it are materials,
+which spike 4 is about. A curved outer wall, and the plan's wish to revisit
+second-order outgoing conditions on curved spans with the patch's exact
+curvature, would need a multipatch layout (a square surrounded by four
+curved quadrilaterals is the standard disk), which is where that item now
+sits.
+
+## Spike 4: materials inside the box patch
+
+The patch now samples a density and a stiffness at every quadrature point
+(`with_material`): the density weights the mass and the lumped diagonal,
+the stiffness weights `b` in the kick and in the energy, so `K = Gᵀ W κ G`
+stays symmetric and the sweeps still converge. A basis may carry a C⁰ knot
+(an interior knot repeated to the degree, `with_c0_knot`), which adds one
+function per direction and lets the field kink along that line.
+`iga_slab_reflection` sends a Gaussian pulse at unit speed against a planar
+step at normal incidence and reads the energy left of the step at `t = 1.2`
+against the initial energy, which Fresnel puts at `R = 1/9` for an impedance
+of two either way: a density step 1 → 4 at unit stiffness, across which the
+field stays C¹, and a stiffness step 1 → ¼ at unit density, across which it
+kinks. Quadratics, Gauss 2 × 2, two sweeps, unclamped, fourth-order
+integrator at 0.8 of its step, pulse width σ = 0.1.
+
+Relative error of `R` by resolution, spans per σ in the header:
+
+| variant | 3.1 | 6.3 | 12.7 | order |
+| --- | --- | --- | --- | --- |
+| density step on a knot line, C¹ basis | +2.0e-2 | −7.7e-5 | +1.0e-5 | at the floor |
+| density step mid-span (immersed), C¹ basis | +3.4e-2 | +7.4e-3 | +1.9e-3 | 2 |
+| density step on a knot line, C⁰ knot there | +9.9e-3 | −1.2e-3 | −4.9e-5 | ≥ 4 |
+| stiffness step on a knot line, C¹ basis | +6.9e-2 | +6.4e-3 | +1.5e-3 | 2 |
+| stiffness step mid-span (immersed), C¹ basis | +5.3e-2 | +4.2e-3 | +9.5e-4 | 2 |
+| stiffness step on a knot line, C⁰ knot there | +3.9e-2 | +1.3e-3 | +6.2e-5 | ≈ 4 |
+
+The total energy is accounted to 1e-6 at the finest resolution, which is
+the floor the first and last rows sit at. A second series with σ = 0.2 and
+a quarter of the step gives the same magnitudes at 6 and 13 spans per σ
+(immersed density 7.2e-3 and 1.6e-3, C¹ stiffness 5.8e-3 and 1.1e-3, C⁰
+stiffness 4.9e-4 and then the floor), with an unexplained floor of −2e-4 to
+−5e-4 in every row, probably the reflected pulse's tail at the wall under
+the half-step readout; not pursued.
+
+- **An interface on a knot line with the right continuity is high order.**
+  A density jump leaves the field C¹, which the plain basis holds, and the
+  error is at the floor from 6 spans per σ. A stiffness jump kinks the
+  field, and with a C⁰ knot on the line the error falls about sixteenfold
+  per halving.
+- **Anything else is second order.** An interface between knot lines, or a
+  kink the basis cannot make, costs about 1% of `R` at 6 spans per σ and 0.2%
+  at 13, and halving the span halves it four times. On a knot line without
+  the C⁰ knot a stiffness jump is as bad as an immersed one.
+- **Which jump is which depends on the skin.** TE puts ε in the mass, so an
+  index step is a density step and the plain basis is right; TM puts ε in
+  the stiffness and needs the C⁰ knot; Mechanical has both. The triangle
+  solver conforms to every curve, so it has none of this.
+
+**Gate 4 verdict: passed for material regions bounded by knot lines, with
+C⁰ knots where the stiffness jumps; a free curve inside the patch is an
+immersed, second-order interface and a downgrade from the conforming
+triangle.** An IGA scene is therefore its own kind of document: a box
+patch, deformed through its control net where the user wants curvature,
+whose material regions are parametric rectangles; the geometry map curves
+their boundaries while they stay knot lines. The present scene model, free
+curves in a box, maps onto a single patch only by immersion. Trimming, local
+refinement or an enriched basis at the interface are the ways past that,
+none of them a single untrimmed patch.
 
 ## What the spikes do not settle
 
@@ -383,8 +596,11 @@ The spikes continue: 3 (parameterization), 4 (materials), 5 (edits) and 6
 - The mass application needs the basis values at each sample beside the
   curls: another `(p+1)²` floats per sample, or a recomputation from the 1D
   tables that the sum-factorized layout allows.
-- Curved patches, outliers from a non-affine map, and the Jacobian's effect
-  on the lumped diagonal are spike 3.
+- Reflecting or outgoing obstacles inside the patch: a free curve as a
+  material is immersed (spike 4); a free curve as a wall has no single-patch
+  treatment at all without trimming.
+- A comparison of the slab reflection against the triangle solver on the
+  same step; the Fresnel value stood in for it.
 
 ## References
 

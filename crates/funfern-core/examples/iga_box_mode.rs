@@ -5,13 +5,14 @@
 //! See `docs/spikes/funfern-iga-feasibility-spike.md`.
 //!
 //! Flags: `--degree 3 --points 4 --treatment lumped|sweeps:1|consistent
-//! --side 96 --fraction 0.8 --targets 2,10 --basis clamped|unclamped`. Without flags it runs the matrix.
+//! --side 96 --fraction 0.8 --targets 2,10 --basis clamped|unclamped
+//! --integrator leapfrog|fourth`. Without flags it runs the matrix.
 
 use std::time::Instant;
 
 use funfern_core::{
-    BoxPatch, MassTreatment, ModeClock, PatchStepper, PeriodicSymbols, Point2, gauss_rule,
-    leapfrog_frequency, measure_mode, wrap_angle,
+    Integrator, MassTreatment, ModeClock, PatchStepper, PeriodicSymbols, Point2, SplinePatch,
+    gauss_rule, measure_mode, wrap_angle,
 };
 
 const WAVELENGTH: f64 = 0.4;
@@ -25,6 +26,7 @@ struct Case {
     fraction: f64,
     targets: Vec<f64>,
     unclamped: bool,
+    integrator: Integrator,
 }
 
 fn treatment_name(treatment: MassTreatment) -> String {
@@ -69,6 +71,7 @@ fn cases() -> Vec<Case> {
                         fraction: 0.8,
                         targets: vec![2.0, 10.0],
                         unclamped: false,
+                        integrator: Integrator::Leapfrog,
                     });
                 }
             }
@@ -92,6 +95,11 @@ fn cases() -> Vec<Case> {
             v.split(',').map(|t| t.parse().unwrap()).collect()
         }),
         unclamped: value("--basis").is_some_and(|v| v == "unclamped"),
+        integrator: if value("--integrator").is_some_and(|v| v == "fourth") {
+            Integrator::FourthOrder
+        } else {
+            Integrator::Leapfrog
+        },
     }]
 }
 
@@ -109,12 +117,12 @@ fn main() {
 
 fn run(case: &Case) {
     let spans = case.side - case.degree;
-    let build: fn(usize, Point2, Point2, [usize; 2], usize) -> Option<BoxPatch> = if case.unclamped
-    {
-        BoxPatch::unclamped
-    } else {
-        BoxPatch::new
-    };
+    let build: fn(usize, Point2, Point2, [usize; 2], usize) -> Option<SplinePatch> =
+        if case.unclamped {
+            SplinePatch::unclamped
+        } else {
+            SplinePatch::new
+        };
     let patch = build(
         case.degree,
         Point2::new(-1.0, -1.0),
@@ -134,15 +142,15 @@ fn run(case: &Case) {
     // unconverged estimate overstates the stable step. The periodic band
     // bounds it unless the walls add outliers, and an isolated outlier is
     // what a power iteration finds fastest.
-    let dt = case.fraction * dt_max.min(periodic_dt_max);
+    let dt = case.fraction * case.integrator.stability_factor() * dt_max.min(periodic_dt_max);
     let theta = WAVE_NUMBER * h;
     let omega_h = symbols
         .frequency_squared(theta, 0.0, case.treatment.sweeps())
         .sqrt();
-    let predicted = leapfrog_frequency(omega_h, dt);
+    let predicted = case.integrator.stepped_frequency(omega_h, dt);
     let predicted_rate = predicted - WAVE_NUMBER;
     println!(
-        "p={} q={} {} {}: {} DOFs, {} samples, {:.1} spans/λ, dt_max {:.4e} ({}; periodic band {:.4e}, ratio {:.3}), eigen {:.1} s",
+        "p={} q={} {} {} {}: {} DOFs, {} samples, {:.1} spans/λ, leapfrog dt_max {:.4e} ({}; periodic band {:.4e}, ratio {:.3}), eigen {:.1} s",
         case.degree,
         case.points,
         treatment_name(case.treatment),
@@ -150,6 +158,10 @@ fn run(case: &Case) {
             "unclamped"
         } else {
             "clamped"
+        },
+        match case.integrator {
+            Integrator::Leapfrog => "leapfrog",
+            Integrator::FourthOrder => "fourth-order",
         },
         patch.degrees_of_freedom(),
         patch.samples(),
@@ -165,8 +177,10 @@ fn run(case: &Case) {
         eigen_seconds,
     );
     let mode = patch.project_separable(|x| (WAVE_NUMBER * (x + 1.0)).cos(), |_| 1.0);
-    let mut stepper = PatchStepper::new(&patch, case.treatment, dt, mode.clone());
-    let initial_energy = stepper.staggered_energy();
+    let mut stepper =
+        PatchStepper::with_integrator(&patch, case.treatment, case.integrator, dt, mode.clone());
+    stepper.step();
+    let initial_energy = stepper.conserved_energy();
     let mut targets = case.targets.clone();
     targets.sort_by(f64::total_cmp);
     let mut wall = 0.0;
@@ -192,16 +206,17 @@ fn run(case: &Case) {
                 time: stepper.time(),
             },
         );
-        let energy_drift = (stepper.staggered_energy() - initial_energy).abs() / initial_energy;
-        // The measured drift is the leapfrog frequency of the mode less the
-        // exact one. Inverting the leapfrog relation takes the temporal part
-        // out and leaves the spatial frequency error, walls included.
+        let energy_drift = (stepper.conserved_energy() - initial_energy).abs() / initial_energy;
+        // The measured drift is the integrator's frequency of the mode less
+        // the exact one. Inverting the integrator's relation takes the
+        // temporal part out and leaves the spatial frequency error, walls
+        // included.
         let omega_numerical = WAVE_NUMBER + measured.phase_error / stepper.time();
-        let omega_spatial = (2.0 / dt) * (0.5 * omega_numerical * dt).sin();
+        let omega_spatial = case.integrator.spatial_frequency(omega_numerical, dt);
         let spatial = (omega_spatial - WAVE_NUMBER) * stepper.time();
         let spatial_predicted = (omega_h - WAVE_NUMBER) * stepper.time();
         println!(
-            "  dt={:.3} dt_max ({:.4e}), target {:>4.1}, reached {:.5}: phase {:+.4e} rad (symbol predicts {:+.4e}); spatial part {:+.4e} rad (symbol {:+.4e}); amplitude {:+.4e}, energy drift {:.1e}, {} steps, {:.2} simulated s/wall s",
+            "  dt={:.3} of the integrator's limit ({:.4e}), target {:>4.1}, reached {:.5}: phase {:+.4e} rad (symbol predicts {:+.4e}); spatial part {:+.4e} rad (symbol {:+.4e}); amplitude {:+.4e}, energy drift {:.1e}, {} steps, {:.2} simulated s/wall s",
             case.fraction,
             dt,
             target,
