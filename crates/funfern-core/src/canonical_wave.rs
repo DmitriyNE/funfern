@@ -1510,6 +1510,29 @@ pub struct CanonicalOutgoingEliminationExport {
     pub solved_column_coefficient: [f64; 3],
 }
 
+/// How a step's drift reads the primary field.
+///
+/// Both are the same kick-drift-kick composition; they differ in the field
+/// the drift, and everything that drifts beside `b`, moves on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CanonicalIntegrator {
+    /// Störmer-Verlet: the drift reads the midpoint field `u`. Second order.
+    #[default]
+    Leapfrog,
+    /// The modified-equation Störmer step (Dablain 1986): the drift reads
+    /// `ũ = u + dt²/12 · ü` with `M ü = −L u + ṡ`, `L` the stiffness of
+    /// everything that drifts (the bulk and the gap springs) and `ṡ` the
+    /// source rate's derivative. Fourth order on the linear conservative bulk,
+    /// stable while `ω dt < 2√3`; a prescribed node reads its signal at the
+    /// drift's instant. Boundary damping and losses keep their second-order
+    /// places in the step.
+    FourthOrder,
+    /// Stage A prototype: the same fourth-order step with the correction in
+    /// the kicks, `F̃ = F + dt²/12 · L_b u̇`, exact for a stiffness-side or
+    /// restoring law over a linear mass. Driven path only.
+    FourthOrderKick,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalWaveState {
     primary_flux: Vec<f64>,
@@ -1519,6 +1542,7 @@ pub struct CanonicalWaveState {
     boundary_prescribed_cache: Option<(Vec<bool>, Arc<CanonicalOutgoingFactorExport>)>,
     time_step: f64,
     steps: u64,
+    integrator: CanonicalIntegrator,
 }
 
 impl CanonicalWaveState {
@@ -1611,6 +1635,7 @@ impl CanonicalWaveState {
             boundary_prescribed_cache: None,
             time_step,
             steps: 0,
+            integrator: CanonicalIntegrator::default(),
         })
     }
 
@@ -1678,6 +1703,15 @@ impl CanonicalWaveState {
 
     pub fn time_step(&self) -> f64 {
         self.time_step
+    }
+
+    pub fn integrator(&self) -> CanonicalIntegrator {
+        self.integrator
+    }
+
+    pub fn with_integrator(mut self, integrator: CanonicalIntegrator) -> Self {
+        self.integrator = integrator;
+        self
     }
 
     pub fn steps(&self) -> u64 {
@@ -1903,7 +1937,16 @@ impl CanonicalWaveState {
         accounting.source_work += source_work;
         accounting.boundary_loss += boundary_loss;
         accounting.prescribed_exchange += prescribed_exchange;
-        let primary = operator.primary_field(&self.primary_flux)?;
+        let mut primary = operator.primary_field(&self.primary_flux)?;
+        if self.integrator == CanonicalIntegrator::FourthOrder {
+            primary = fourth_order_field(
+                operator,
+                forcing,
+                &primary,
+                start_time + half_step,
+                self.time_step,
+            )?;
+        }
         operator.drift(&mut self.complementary_flux, &primary, self.time_step)?;
         self.drift_thin_gaps(operator, &primary, self.time_step)?;
         let mut second_force = operator.force(&self.complementary_flux)?;
@@ -2393,6 +2436,47 @@ impl CanonicalWaveState {
         }
         Ok(())
     }
+}
+
+/// The field the fourth-order drift reads: `ũ = u − dt²/12 · M⁻¹ (L u − ṡ)`
+/// at a free node, the signal at the drift's instant at a prescribed one.
+/// `L` is the bulk stiffness and the gap springs, the stiffness of
+/// everything the drift moves; `ṡ` is the central difference of the source
+/// rate over the step, the two instants the kicks integrate it at.
+fn fourth_order_field(
+    operator: &CanonicalWaveOperator,
+    forcing: &CanonicalForcing,
+    field: &[f64],
+    middle_time: f64,
+    duration: f64,
+) -> Result<Vec<f64>, WaveError> {
+    let mut stiffness = operator.compatible_stiffness(field)?;
+    for sample in operator.thin_gap_samples() {
+        let (left, right) = (sample.left_node as usize, sample.right_node as usize);
+        let value = sample.stiffness * (field[left] - field[right]);
+        stiffness[left] += value;
+        stiffness[right] -= value;
+    }
+    if !forcing.sources.is_empty() {
+        let later = forcing.integrated_rate(middle_time + 0.5 * duration)?;
+        let earlier = forcing.integrated_rate(middle_time - 0.5 * duration)?;
+        for ((value, later), earlier) in stiffness.iter_mut().zip(later).zip(earlier) {
+            *value -= (later - earlier) / duration;
+        }
+    }
+    let scale = duration * duration / 12.0;
+    let corrected = field
+        .iter()
+        .zip(&stiffness)
+        .zip(operator.primary_mass())
+        .zip(&forcing.prescribed)
+        .map(|(((field, stiffness), mass), signal)| match signal {
+            Some(signal) => signal.value(middle_time),
+            None => field - scale * stiffness / mass,
+        })
+        .collect::<Vec<_>>();
+    finite_values(&corrected)?;
+    Ok(corrected)
 }
 
 /// The field a pinned trace node holds through an outgoing kick, where it

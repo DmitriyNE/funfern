@@ -949,7 +949,24 @@ predictable on representative dense scenes.
   samples with no artifact, knot refinement carries field and flux exactly
   through the flux's potential, and a deformed box costs only its smaller
   step. The spikes are complete; the single-patch IGA scene is feasible as
-  a deformed box with knot-aligned regions.
+  a deformed box with knot-aligned regions. The design note
+  `docs/spikes/funfern-iga-scene-design.md` (2026-10-03) lays out that
+  document kind, what it reuses and what is new, and proposes milestones:
+  M0 the fourth-order integrator for the triangle solver (regardless), M1
+  the CPU patch path as the decision checkpoint, M2 the device, M3 the
+  editor and a patch gallery. **Postponed on 2026-10-04** by the user's
+  decision. The bar for any IGA in this product: it does everything the
+  triangle solver does and most of it better, or it is not incorporated; and
+  it is automatic, building its own spline space from today's documents with
+  usage roughly as now, patch editing exposed only in an advanced mode. The
+  box-patch document kind fails both: today's scenes do not transfer, and net
+  and knot editing is its main way of working. Automatic routes exist only
+  on paper (automatic multipatch, immersed curves, smooth splines on the
+  triangle mesh; see Later experiments), and every one degrades from the
+  flat box the spikes measured at about twice the triangle's speed at equal
+  accuracy. The fourth-order integrator, the spikes' largest transferable
+  gain, goes ahead on the triangle solver (Later experiments). The spike
+  module and examples stay as reference.
 - Reuse the UI and transaction lifecycle, with discretization-specific numerical
   kernels where appropriate.
 - Compare propagation, editing behavior, and cost against the triangular solver.
@@ -1048,6 +1065,36 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   stage's midpoint flux in two passes, second order; the weighting is the
   one passive losses already used beside a field law. It also fixed van der
   Pol beside a pumped mass, which failed on its first step.
+
+- [ ] Smooth splines on the triangle mesh, the one IGA route that meets the
+  bar of §10 on paper: a C¹ quadratic space such as Powell–Sabin splines
+  built on the mesher's own triangulation, so documents, the editor and live
+  edits stay as they are. Unmeasured: lumping and sweeps on such a basis,
+  dispersion per dof against P2e, stencil width on the device, walls, and
+  where the continuity must break at material interfaces. A spike series of
+  its own before any design, measured against the box-patch numbers in
+  `docs/spikes/funfern-iga-feasibility-spike.md`.
+
+- [ ] A fourth-order time integrator for the triangle solver: the
+  modified-equation Störmer step, `b` drifting on `P (Q − dt²/12 · K u)`,
+  one extra gather, scatter and field pass before the drift and a √3 larger
+  stable step. On the spline patch it cut the temporal error 50 to 60 times
+  for 13% of the throughput (`docs/spikes/funfern-iga-feasibility-spike.md`,
+  "Spike T"); the app runs P2e where its temporal error, about +0.064 rad at
+  t = 10, is seven times its spatial error. Needs a design check first: the
+  production step holds implicit boundary kicks, loss stages and nonlinear
+  maps, and the dt⁴ correction is exact for the linear part only. Stage A,
+  the design check, done on 2026-10-04 (`docs/spikes/funfern-fourth-order-step.md`):
+  on the production CPU path the box mode's temporal error at the app's step
+  is 2.1e-5 rad against 6.4e-2, so the step is spatial-error limited; every
+  composition of the step is 5 to 19 times more accurate at that step, the
+  short-wave rows excepted (first order under any integrator). Two forms: the
+  correction in the drift for most generations, in the kicks where a
+  stiffness-side field law is present, because each is symplectic only when
+  the other side is quadratic (the drift form leaks 38% of a stiffness-side
+  Kerr medium's energy by t = 160). Sources need a fourth-order kick
+  quadrature; prescribed nodes need nothing. Stages B (CPU), C (device) and
+  D (gate) next.
 
 ## Maintenance
 
@@ -1226,6 +1273,14 @@ is next touched.
   rebuilds `b` about the new `r` carries that rounding amplified through the
   gradient: 5.4e-5 in `canonical_gpu_oscillator_handoff`'s opened mode
   against 3e-5, with the check there relaxed to 1e-4 for rebuilt handoffs.
+- A step that alternates between two values every few steps pumps the
+  grid-scale modes parametrically: on the box mode at the app's mesh, the
+  step switched between 0.9 and 0.675 of the bound every 4 steps grows the
+  leapfrog's energy 1e9 times by t = 10 (the fourth-order step's about 4
+  times), and every 25 steps no growth shows. The app's pacing changes the
+  step only when a new generation's stiffest row moves it, so nothing on
+  screen should reach this; worth a look if a drag ever re-steps quickly
+  (`docs/spikes/funfern-fourth-order-step.md`, "Handoffs").
 - A self-oscillating medium's short-wave viscosity is first order in the step,
   on CPU and device alike: it is applied on the drift's midpoint field, which
   does not contain the viscosity's own increment, so within that subflow the

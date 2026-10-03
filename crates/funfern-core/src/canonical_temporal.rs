@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::canonical_wave::{FilterSampleBound, grid_filter_reach};
+use crate::canonical_wave::{CanonicalIntegrator, FilterSampleBound, grid_filter_reach};
 use crate::{
     CanonicalAreaContribution, CanonicalAreaSample, CanonicalForcing, CanonicalIndicatorSnapshot,
     CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil,
@@ -3383,6 +3383,7 @@ pub struct CanonicalTemporalWaveState {
     runtime: CanonicalMaterialRuntimeState,
     time_step: f64,
     time: f64,
+    integrator: CanonicalIntegrator,
 }
 
 impl CanonicalTemporalWaveState {
@@ -3472,6 +3473,7 @@ impl CanonicalTemporalWaveState {
             runtime: operator.initial_runtime(),
             time_step,
             time,
+            integrator: CanonicalIntegrator::default(),
         })
     }
 
@@ -3505,6 +3507,15 @@ impl CanonicalTemporalWaveState {
 
     pub fn time_step(&self) -> f64 {
         self.time_step
+    }
+
+    pub fn integrator(&self) -> CanonicalIntegrator {
+        self.integrator
+    }
+
+    pub fn with_integrator(mut self, integrator: CanonicalIntegrator) -> Self {
+        self.integrator = integrator;
+        self
     }
 
     pub fn time(&self) -> f64 {
@@ -4062,7 +4073,27 @@ impl CanonicalTemporalWaveState {
         let mut first_force = operator.force_at(&complementary, start_time, &self.runtime)?;
         add_gap_force(operator, &self.thin_gap_jump, &mut first_force)?;
         add_restoring_force(operator, &self.integrated_field, &mut first_force)?;
-        let first_source = forcing.integrated_rate(start_time)?;
+        let mut first_source = forcing.integrated_rate(start_time)?;
+        if self.integrator != CanonicalIntegrator::Leapfrog && !forcing.sources().is_empty() {
+            let later = forcing.integrated_rate(start_time + duration)?;
+            let earlier = forcing.integrated_rate(start_time - duration)?;
+            for ((value, later), earlier) in first_source.iter_mut().zip(later).zip(earlier) {
+                *value -= (later - 2.0 * *value + earlier) / 12.0;
+            }
+        }
+        if self.integrator == CanonicalIntegrator::FourthOrderKick {
+            first_force = fourth_order_kick_force(
+                operator,
+                forcing,
+                &first_force,
+                &first_source,
+                &complementary,
+                &self.integrated_field,
+                start_time,
+                duration,
+                &self.runtime,
+            )?;
+        }
         let (work, exchange, escaped) = forced_kick(
             operator,
             &mut primary,
@@ -4103,20 +4134,37 @@ impl CanonicalTemporalWaveState {
             }
             field
         };
+        // Everything that drifts reads the integrator's field; the
+        // short-wave viscosity below, a loss, keeps the plain midpoint one.
+        let drift_field = match self.integrator {
+            CanonicalIntegrator::Leapfrog | CanonicalIntegrator::FourthOrderKick => {
+                midpoint_field.clone()
+            }
+            CanonicalIntegrator::FourthOrder => fourth_order_temporal_field(
+                operator,
+                forcing,
+                &midpoint_field,
+                &complementary,
+                &self.integrated_field,
+                middle_time,
+                duration,
+                &self.runtime,
+            )?,
+        };
         let mut gap_jump = self.thin_gap_jump.clone();
         if !gap_jump.is_empty() {
             for (sample, jump) in operator.base().thin_gap_samples().iter().zip(&mut gap_jump) {
                 *jump += duration
-                    * (midpoint_field[sample.left_node as usize]
-                        - midpoint_field[sample.right_node as usize]);
+                    * (drift_field[sample.left_node as usize]
+                        - drift_field[sample.right_node as usize]);
             }
             validate_finite(&gap_jump)?;
         }
-        operator.drift_on(&mut complementary, &midpoint_field, duration)?;
+        operator.drift_on(&mut complementary, &drift_field, duration)?;
         // The integrated field drifts with `b`, on the same midpoint field and
         // over the same interval: `ṙ = u` is the same subflow as `ḃ = ηCu`.
         let mut integrated = self.integrated_field.clone();
-        for (value, field) in integrated.iter_mut().zip(&midpoint_field) {
+        for (value, field) in integrated.iter_mut().zip(&drift_field) {
             *value += duration * field;
         }
         validate_finite(&integrated)?;
@@ -4132,7 +4180,27 @@ impl CanonicalTemporalWaveState {
         let mut second_force = operator.force_at(&complementary, end_time, &self.runtime)?;
         add_gap_force(operator, &gap_jump, &mut second_force)?;
         add_restoring_force(operator, &integrated, &mut second_force)?;
-        let second_source = forcing.integrated_rate(end_time)?;
+        let mut second_source = forcing.integrated_rate(end_time)?;
+        if self.integrator != CanonicalIntegrator::Leapfrog && !forcing.sources().is_empty() {
+            let later = forcing.integrated_rate(end_time + duration)?;
+            let earlier = forcing.integrated_rate(end_time - duration)?;
+            for ((value, later), earlier) in second_source.iter_mut().zip(later).zip(earlier) {
+                *value -= (later - 2.0 * *value + earlier) / 12.0;
+            }
+        }
+        if self.integrator == CanonicalIntegrator::FourthOrderKick {
+            second_force = fourth_order_kick_force(
+                operator,
+                forcing,
+                &second_force,
+                &second_source,
+                &complementary,
+                &integrated,
+                end_time,
+                duration,
+                &self.runtime,
+            )?;
+        }
         let (work, exchange, escaped) = forced_kick(
             operator,
             &mut primary,
@@ -4222,6 +4290,167 @@ impl CanonicalTemporalWaveState {
         self.time = end_time;
         Ok(accounting)
     }
+}
+
+/// Stage A prototype: the fourth-order kick force
+/// `F̃ = F + dt²/12 · L_b u̇` at the kick's own instant, `u̇ = M⁻¹(s − F)` at
+/// a free node and the signal's central difference at a prescribed one, `L_b`
+/// the stiffness of everything that drifts at the kick's `b` and `r`. Over a
+/// linear mass it is the gradient of `U − dt²/24 · Fᵀ M⁻¹ F`, so a
+/// stiffness-side or restoring law keeps the step symplectic.
+#[allow(clippy::too_many_arguments)]
+fn fourth_order_kick_force(
+    operator: &CanonicalTemporalWaveOperator,
+    forcing: &CanonicalForcing,
+    force: &[f64],
+    source: &[f64],
+    complementary: &[Point2],
+    integrated: &[f64],
+    time: f64,
+    duration: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<Vec<f64>, WaveError> {
+    let base = operator.base();
+    let mass = operator.primary_mass_at(time, runtime)?;
+    let rate = force
+        .iter()
+        .zip(source)
+        .zip(&mass)
+        .zip(forcing.prescribed())
+        .map(|(((force, source), mass), signal)| match signal {
+            Some(signal) => {
+                (signal.value(time + duration) - signal.value(time - duration)) / (2.0 * duration)
+            }
+            None => (source - force) / mass,
+        })
+        .collect::<Vec<_>>();
+    let tangents = operator.complementary_tangents_at(complementary, time, runtime)?;
+    let flux = base.compatible_flux(&rate)?;
+    let fields = flux
+        .iter()
+        .zip(&tangents)
+        .map(|(flux, tangent)| tangent.apply(*flux))
+        .collect::<Vec<_>>();
+    let mut stiffness = operator.gather_force(&fields)?;
+    for sample in base.thin_gap_samples() {
+        let (left, right) = (sample.left_node as usize, sample.right_node as usize);
+        let value = sample.stiffness * (rate[left] - rate[right]);
+        stiffness[left] += value;
+        stiffness[right] -= value;
+    }
+    if operator.has_restoring() {
+        for (contribution, sample) in base
+            .primary_contributions()
+            .iter()
+            .zip(operator.primary.iter())
+        {
+            if sample.restoring.is_none() {
+                continue;
+            }
+            let node = contribution.node as usize;
+            stiffness[node] += contribution.geometric_weight
+                * contribution.reference_coefficient
+                * sample.restoring.curvature(integrated[node])
+                * rate[node];
+        }
+    }
+    let scale = duration * duration / 12.0;
+    let corrected = force
+        .iter()
+        .zip(&stiffness)
+        .map(|(force, stiffness)| force + scale * stiffness)
+        .collect::<Vec<_>>();
+    validate_finite(&corrected)?;
+    Ok(corrected)
+}
+
+/// The fourth-order drift field on a time-driven or field-dependent
+/// generation: `ũ = u − dt²/12 · A (L u − ṡ)` at a free node, where `A` is
+/// `∂u/∂Q` at the midpoint (the inverse mass, or a field law's inverse
+/// tangent) and `L` the stiffness of everything that drifts: the bulk through
+/// each sample's tangent `J_b` at the current flux and the midpoint instant,
+/// the gap springs, and the restoring law's `m₀ V″(r)` at the step's `r`. A
+/// prescribed node reads its signal at the drift's instant.
+///
+/// With `L` independent of what the drift moves (a linear bulk, linear gaps,
+/// Klein-Gordon) this is the gradient of the modified store
+/// `E_Q − dt²/24 · uᵀ L u`, so the step stays symplectic under any
+/// mass-side law. A stiffness-side law or a nonlinear restoring law freezes
+/// its tangent at the step's start.
+#[allow(clippy::too_many_arguments)]
+fn fourth_order_temporal_field(
+    operator: &CanonicalTemporalWaveOperator,
+    forcing: &CanonicalForcing,
+    field: &[f64],
+    complementary: &[Point2],
+    integrated: &[f64],
+    middle_time: f64,
+    duration: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<Vec<f64>, WaveError> {
+    let base = operator.base();
+    let tangents = operator.complementary_tangents_at(complementary, middle_time, runtime)?;
+    let flux = base.compatible_flux(field)?;
+    let fields = flux
+        .iter()
+        .zip(&tangents)
+        .map(|(flux, tangent)| tangent.apply(*flux))
+        .collect::<Vec<_>>();
+    let mut stiffness = operator.gather_force(&fields)?;
+    for sample in base.thin_gap_samples() {
+        let (left, right) = (sample.left_node as usize, sample.right_node as usize);
+        let value = sample.stiffness * (field[left] - field[right]);
+        stiffness[left] += value;
+        stiffness[right] -= value;
+    }
+    if operator.has_restoring() {
+        for (contribution, sample) in base
+            .primary_contributions()
+            .iter()
+            .zip(operator.primary.iter())
+        {
+            if sample.restoring.is_none() {
+                continue;
+            }
+            let node = contribution.node as usize;
+            stiffness[node] += contribution.geometric_weight
+                * contribution.reference_coefficient
+                * sample.restoring.curvature(integrated[node])
+                * field[node];
+        }
+    }
+    if !forcing.sources().is_empty() {
+        let later = forcing.integrated_rate(middle_time + 0.5 * duration)?;
+        let earlier = forcing.integrated_rate(middle_time - 0.5 * duration)?;
+        for ((value, later), earlier) in stiffness.iter_mut().zip(later).zip(earlier) {
+            *value -= (later - earlier) / duration;
+        }
+    }
+    let inverse = if operator.has_field_laws() {
+        operator.primary_tangent_inverse_at(field, middle_time, runtime)?
+    } else {
+        operator
+            .primary_mass_at(middle_time, runtime)?
+            .into_iter()
+            .map(|mass| 1.0 / mass)
+            .collect()
+    };
+    let scale = duration * duration / 12.0;
+    let corrected = field
+        .iter()
+        .zip(&stiffness)
+        .zip(&inverse)
+        .zip(forcing.prescribed())
+        .map(|(((field, stiffness), inverse), signal)| match signal {
+            // A pinned node reads its signal at the drift's instant: measured
+            // against an `h²/12` or `h²/24` second-difference term, the plain
+            // value was the most accurate of the three.
+            Some(signal) => signal.value(middle_time),
+            None => field - scale * stiffness * inverse,
+        })
+        .collect::<Vec<_>>();
+    validate_finite(&corrected)?;
+    Ok(corrected)
 }
 
 /// The stores the bulk fields do not hold: the gap springs, the outgoing pole
@@ -13616,6 +13845,466 @@ mod tests {
                         "{physics:?}: {value} against {expected} at {middle:?}"
                     );
                 }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // M0 stage A: the fourth-order drift against every composition
+    // -----------------------------------------------------------------------
+
+    struct FourthOrderCase {
+        label: &'static str,
+        scene: Scene,
+        condition: OuterBoundaryCondition,
+        prescribed: bool,
+        source: bool,
+        amplitude: f64,
+        integrated: f64,
+    }
+
+    fn fourth_order_cases() -> Vec<FourthOrderCase> {
+        let case = |label, scene, condition| FourthOrderCase {
+            label,
+            scene,
+            condition,
+            prescribed: false,
+            source: false,
+            amplitude: 1.0,
+            integrated: 0.0,
+        };
+        let reflecting = OuterBoundaryCondition::Reflecting;
+        let with = |f: &dyn Fn(&mut Scene)| {
+            let mut scene = Scene::default();
+            f(&mut scene);
+            scene
+        };
+        let gapped = filter_compositions()
+            .into_iter()
+            .find(|(label, ..)| *label == "thin gap")
+            .unwrap()
+            .1;
+        vec![
+            case("bulk", Scene::default(), reflecting),
+            case(
+                "first-order wall",
+                Scene::default(),
+                OuterBoundaryCondition::FirstOrderOutgoing,
+            ),
+            case(
+                "second-order wall",
+                Scene::default(),
+                OuterBoundaryCondition::SecondOrderOutgoing,
+            ),
+            FourthOrderCase {
+                prescribed: true,
+                ..case("prescribed wall", Scene::default(), reflecting)
+            },
+            FourthOrderCase {
+                prescribed: true,
+                ..case(
+                    "pinned trace",
+                    Scene::default(),
+                    OuterBoundaryCondition::SecondOrderOutgoing,
+                )
+            },
+            case("thin gap", gapped, reflecting),
+            case(
+                "loss",
+                with(&|scene| scene.materials[0].damping = ScalarField::constant(0.45)),
+                reflecting,
+            ),
+            FourthOrderCase {
+                source: true,
+                ..case("source", Scene::default(), reflecting)
+            },
+            case(
+                "pumped mass",
+                with(&|scene| scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3)),
+                reflecting,
+            ),
+            case(
+                "pumped stiffness",
+                with(&|scene| scene.materials[0].stiffness_law.drive = pump(0.2, 1.3, 0.1)),
+                reflecting,
+            ),
+            FourthOrderCase {
+                amplitude: 0.6,
+                ..case(
+                    "Kerr mass",
+                    with(&|scene| scene.materials[0].mass_law.field = kerr(0.8)),
+                    reflecting,
+                )
+            },
+            FourthOrderCase {
+                amplitude: 0.6,
+                ..case(
+                    "Kerr stiffness",
+                    with(&|scene| scene.materials[0].stiffness_law.field = kerr(0.8)),
+                    reflecting,
+                )
+            },
+            FourthOrderCase {
+                amplitude: 0.6,
+                ..case(
+                    "saturable stiffness",
+                    with(&|scene| scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3)),
+                    reflecting,
+                )
+            },
+            FourthOrderCase {
+                integrated: 0.4,
+                ..case(
+                    "Klein-Gordon",
+                    with(&|scene| scene.materials[0].restoring = klein_gordon(3.0)),
+                    reflecting,
+                )
+            },
+            FourthOrderCase {
+                integrated: 1.5,
+                ..case(
+                    "sine-Gordon",
+                    with(&|scene| scene.materials[0].restoring = sine_gordon(3.0)),
+                    reflecting,
+                )
+            },
+            FourthOrderCase {
+                integrated: 0.8,
+                ..case(
+                    "phi4",
+                    with(&|scene| scene.materials[0].restoring = phi4(4.0, 3.0)),
+                    reflecting,
+                )
+            },
+            FourthOrderCase {
+                integrated: 0.4,
+                ..case(
+                    "van der Pol",
+                    with(&|scene| {
+                        scene.materials[0].restoring = klein_gordon(3.0);
+                        scene.materials[0].magnetic_loss = Some(crate::LossChannel {
+                            base_rate: ScalarField::constant(0.6),
+                            law: DampingLaw {
+                                rate: crate::RateLaw::VanDerPol {
+                                    threshold: ScalarField::constant(0.5),
+                                    amplitude_bound: ScalarField::constant(10.0),
+                                },
+                                drive: TimeDrive::None,
+                                gate: None,
+                            },
+                        });
+                    }),
+                    reflecting,
+                )
+            },
+            FourthOrderCase {
+                source: true,
+                amplitude: 0.0,
+                ..case("source only", Scene::default(), reflecting)
+            },
+            FourthOrderCase {
+                prescribed: true,
+                amplitude: 0.0,
+                ..case("prescribed only", Scene::default(), reflecting)
+            },
+            FourthOrderCase {
+                amplitude: 0.6,
+                ..case(
+                    "Kerr mass and saturable stiffness",
+                    with(&|scene| {
+                        scene.materials[0].mass_law.field = kerr(0.8);
+                        scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+                    }),
+                    reflecting,
+                )
+            },
+            case(
+                "short-wave loss",
+                with(&|scene| scene.materials[0].short_wave_loss = 0.5),
+                reflecting,
+            ),
+        ]
+    }
+
+    struct FourthOrderRun {
+        field: Vec<f64>,
+        flux: Vec<Point2>,
+        residual: f64,
+        energy: f64,
+    }
+
+    fn fourth_order_run(
+        operator: &CanonicalTemporalWaveOperator,
+        case: &FourthOrderCase,
+        time_step: f64,
+        steps: usize,
+        integrator: CanonicalIntegrator,
+        smooth: bool,
+    ) -> FourthOrderRun {
+        let base = operator.base();
+        let mut prescribed = vec![None; base.degrees_of_freedom()];
+        if case.prescribed {
+            for (node, point) in base.node_points().iter().enumerate() {
+                if point.x < -0.999 {
+                    prescribed[node] = Some(if case.amplitude == 0.0 {
+                        TimeSignal::harmonic(0.0, 0.2, 1.3, 0.0)
+                    } else {
+                        TimeSignal::harmonic(0.3, 0.2, 1.3, 0.2)
+                    });
+                }
+            }
+        }
+        let mut forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+        if case.source {
+            let weights = base
+                .node_points()
+                .iter()
+                .zip(base.primary_mass())
+                .map(|(point, mass)| {
+                    mass * (-6.0 * (point.x - 0.2).powi(2) - 6.0 * point.y.powi(2)).exp()
+                })
+                .collect();
+            forcing
+                .push_source(
+                    CanonicalSource::direct(
+                        base,
+                        weights,
+                        TimeSignal::harmonic(0.0, 0.9, 1.7, 0.4),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let primary = base
+            .node_points()
+            .iter()
+            .zip(base.primary_mass())
+            .map(|(point, mass)| {
+                let shape = if smooth {
+                    // Cosine modes of the box: no Neumann mismatch at the
+                    // walls, so no content near the grid scale.
+                    let half = std::f64::consts::FRAC_PI_2;
+                    (half * (point.x + 1.0)).cos() * (half * (point.y + 1.0)).cos()
+                        + 0.5 * (2.0 * half * (point.x + 1.0)).cos()
+                } else {
+                    (1.4 * point.x - 0.9 * point.y).sin() + 0.5 * (2.1 * point.y).cos()
+                };
+                case.amplitude * mass * shape
+            })
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| {
+                let shape = if smooth {
+                    (std::f64::consts::PI * (point.y + 1.0)).cos()
+                } else {
+                    (0.8 * point.x + 1.2 * point.y).cos()
+                };
+                0.6 * case.amplitude * shape
+            })
+            .collect::<Vec<_>>();
+        let complementary = base.compatible_flux(&potential).unwrap();
+        let mut state =
+            CanonicalTemporalWaveState::new(operator, time_step, primary, complementary)
+                .unwrap()
+                .pinned(operator, &forcing)
+                .unwrap()
+                .with_integrator(integrator);
+        if case.integrated != 0.0 {
+            let r = base
+                .node_points()
+                .iter()
+                .map(|point| {
+                    case.integrated * (-2.0 * (point.x * point.x + point.y * point.y)).exp()
+                })
+                .collect();
+            state = state.with_integrated_field(operator, r).unwrap();
+        }
+        let mut residual = 0.0;
+        for _ in 0..steps {
+            residual += state
+                .step_with_forcing(operator, &forcing)
+                .unwrap()
+                .splitting_residual;
+        }
+        FourthOrderRun {
+            field: operator
+                .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                .unwrap(),
+            flux: state.complementary_flux().to_vec(),
+            residual,
+            energy: state.energy(operator).unwrap(),
+        }
+    }
+
+    fn fourth_order_distance(
+        operator: &CanonicalTemporalWaveOperator,
+        run: &FourthOrderRun,
+        reference: (&[f64], &[Point2]),
+    ) -> f64 {
+        let base = operator.base();
+        let mut difference = 0.0;
+        let mut norm = 0.0;
+        for ((u, r), m) in run.field.iter().zip(reference.0).zip(base.primary_mass()) {
+            difference += m * (u - r) * (u - r);
+            norm += m * r * r;
+        }
+        // The field alone: the fourth-order step carries a bounded
+        // `O(dt²)` offset in the flux's amplitude, a processing error that
+        // does not grow, and would mask the order of the phase.
+        let _ = reference.1;
+        (difference / norm).sqrt()
+    }
+
+    /// Stage A of M0: each composition's temporal error at the app's step
+    /// and two halvings, for both integrators, against a Richardson
+    /// extrapolation of the leapfrog at 1/64 and 1/128 of the step, which
+    /// does not depend on the scheme under test. Run with `--ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_fourth_order_against_each_composition() {
+        let fractions = [0.9, 0.45, 0.225];
+        let smooth_only = std::env::var("FOURTH_ORDER_SMOOTH").is_ok();
+        let only = std::env::var("FOURTH_ORDER_CASES").ok();
+        for case in fourth_order_cases().into_iter().filter(|case| {
+            only.as_ref()
+                .is_none_or(|only| only.split(',').any(|label| label == case.label))
+        }) {
+            for smooth in [false, true] {
+                if smooth_only && !smooth {
+                    continue;
+                }
+                let operator = filter_operator(&case.scene, case.condition);
+                let coarse = 0.9 * operator.maximum_time_step();
+                let steps = (1.0 / coarse).ceil() as usize;
+                let fine = fourth_order_run(
+                    &operator,
+                    &case,
+                    coarse / 128.0,
+                    steps * 128,
+                    CanonicalIntegrator::Leapfrog,
+                    smooth,
+                );
+                let half = fourth_order_run(
+                    &operator,
+                    &case,
+                    coarse / 64.0,
+                    steps * 64,
+                    CanonicalIntegrator::Leapfrog,
+                    smooth,
+                );
+                let field = fine
+                    .field
+                    .iter()
+                    .zip(&half.field)
+                    .map(|(f, h)| (4.0 * f - h) / 3.0)
+                    .collect::<Vec<_>>();
+                let flux = fine
+                    .flux
+                    .iter()
+                    .zip(&half.flux)
+                    .map(|(f, h)| (*f * 4.0 - *h) * (1.0 / 3.0))
+                    .collect::<Vec<_>>();
+                println!(
+                    "{} ({}): {} dofs, dt_max {:.4e}, t = {:.3}, extrapolation spread {:.1e}",
+                    case.label,
+                    if smooth { "smooth" } else { "rough" },
+                    operator.base().degrees_of_freedom(),
+                    operator.maximum_time_step(),
+                    steps as f64 * coarse,
+                    fourth_order_distance(&operator, &fine, (&field, &flux)),
+                );
+                for integrator in [
+                    CanonicalIntegrator::Leapfrog,
+                    CanonicalIntegrator::FourthOrder,
+                    CanonicalIntegrator::FourthOrderKick,
+                ] {
+                    let mut line = format!("  {integrator:?}:");
+                    let mut previous: Option<f64> = None;
+                    for (index, fraction) in fractions.iter().enumerate() {
+                        let refinement = 1usize << index;
+                        let run = fourth_order_run(
+                            &operator,
+                            &case,
+                            coarse / refinement as f64,
+                            steps * refinement,
+                            integrator,
+                            smooth,
+                        );
+                        let error = fourth_order_distance(&operator, &run, (&field, &flux));
+                        line += &format!(" {fraction}: {error:.2e}");
+                        if let Some(previous) = previous {
+                            line += &format!(" (order {:.2})", (previous / error).log2());
+                        }
+                        if index == 0 {
+                            line += &format!(
+                                " [residual {:+.1e} of energy {:.3e}]",
+                                run.residual, run.energy
+                            );
+                        }
+                        line += ";";
+                        previous = Some(error);
+                    }
+                    println!("{line}");
+                }
+            }
+        }
+    }
+
+    /// Stage A of M0: the energy of the conservative nonlinear compositions
+    /// over a long run at the app's step. A stiffness-side or restoring law
+    /// freezes its tangent in the fourth-order field, which is no longer an
+    /// exact gradient; a secular drift would show here.
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_fourth_order_long_run_energy() {
+        let labels = [
+            "bulk",
+            "Kerr mass",
+            "Kerr stiffness",
+            "saturable stiffness",
+            "sine-Gordon",
+            "phi4",
+            "pumped mass",
+            "Kerr mass and saturable stiffness",
+        ];
+        let only = std::env::var("FOURTH_ORDER_CASES").ok();
+        let labels = labels
+            .into_iter()
+            .filter(|label| {
+                only.as_ref()
+                    .is_none_or(|only| only.split(',').any(|wanted| wanted == *label))
+            })
+            .collect::<Vec<_>>();
+        for case in fourth_order_cases()
+            .into_iter()
+            .filter(|case| labels.contains(&case.label))
+        {
+            let operator = filter_operator(&case.scene, case.condition);
+            let time_step = 0.9 * operator.maximum_time_step();
+            for integrator in [
+                CanonicalIntegrator::Leapfrog,
+                CanonicalIntegrator::FourthOrder,
+                CanonicalIntegrator::FourthOrderKick,
+            ] {
+                let mut line = format!("{} {integrator:?}:", case.label);
+                let initial =
+                    fourth_order_run(&operator, &case, time_step, 0, integrator, false).energy;
+                let mut previous = 0usize;
+                let mut worst = 0.0_f64;
+                for target in [10.0, 40.0, 160.0] {
+                    let steps = (target / time_step).round() as usize;
+                    let run =
+                        fourth_order_run(&operator, &case, time_step, steps, integrator, false);
+                    let drift = (run.energy - initial) / initial;
+                    worst = worst.max(drift.abs());
+                    line += &format!(" t={target}: {drift:+.2e};");
+                    previous = steps;
+                }
+                let _ = previous;
+                println!("{line} worst {worst:.1e}");
             }
         }
     }

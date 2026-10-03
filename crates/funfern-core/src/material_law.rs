@@ -2047,6 +2047,16 @@ impl RestoringLawValues {
         }
     }
 
+    /// `V″(r)`, the restoring law's stiffness on the integrated field.
+    pub fn curvature(self, r: f64) -> f64 {
+        match self {
+            Self::None => 0.0,
+            Self::KleinGordon { omega0 } => omega0 * omega0,
+            Self::SineGordon { omega0 } => omega0 * omega0 * r.cos(),
+            Self::Phi4 { lambda, .. } => lambda * (3.0 * r * r - 1.0),
+        }
+    }
+
     /// The largest `|V″|` over the amplitudes the law admits: the restoring
     /// law's contribution to the step bound.
     pub fn curvature_bound(self) -> f64 {

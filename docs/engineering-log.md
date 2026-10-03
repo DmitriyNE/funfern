@@ -18502,3 +18502,61 @@ while the document named region 1.
   20 s. Not driven by hand.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+## 2026-10-03 — The IGA scene design note
+
+- **What.** `docs/spikes/funfern-iga-scene-design.md`: the decision document
+  the spikes called for. It fixes the numerics the spikes settled (quadratic
+  unclamped splines, C⁰ knot lines at stiffness jumps, Gauss 2 × 2, lumped
+  plus two sweeps, the fourth-order step, a bicubic control net, parametric
+  rectangle regions, local edits, exact refinement, centered-flux handoffs)
+  and lays out the document (`PatchScene`, an additive `patch` key under
+  version 22), the editor (`PatchEditor` beside `TopologyEditor`, net and
+  grid handles, block materials, a display lattice), the runtime
+  (`PreparedPatch`, parallel types since nothing in the triangle chain has
+  an interface boundary) and the device (a compact span-and-Gauss sample
+  encoding with derived stencils, a mass pass through the lane the drift
+  already reads, node stride 96 → 112, the eight-binding limit), with
+  milestones M0 to M4 and the open points (field laws under sweeps, the
+  step-change handoff inconsistency, Dirichlet on unclamped edges, outgoing
+  walls on patch edges).
+- **Recommendation.** M0, the fourth-order integrator for the triangle
+  solver, regardless; then M1, the CPU patch path, as the checkpoint before
+  the device and editor are paid for. Filed the integrator as its own
+  plan.md item under Later experiments.
+- **Method.** Two read-only surveys of the document, UI, runtime and device
+  layers fed the integration sections; their findings are in the note, not
+  repeated here.
+
+## 2026-10-04 — IGA postponed; M0 stage A, the fourth-order step's design check
+
+- **IGA.** Postponed by the user's decision. The bar: IGA either does
+  everything the triangle solver does and most of it better, or it is not
+  incorporated, and it must be automatic, with patch editing only in an
+  advanced mode. The box-patch document kind fails both. The design note now
+  opens with the decision, plan.md §10 records it, and smooth splines on the
+  triangle mesh (Powell–Sabin and kin), the one route that meets the bar on
+  paper, are filed under Later experiments as an unmeasured spike series.
+- **M0 stage A.** `docs/spikes/funfern-fourth-order-step.md`. A
+  `CanonicalIntegrator` on both CPU states (`Leapfrog` the default for now,
+  `FourthOrder` the drift form, `FourthOrderKick` the stage A prototype of the
+  kick form, driven path only). The box mode on the production fixed path:
+  phase at t = 10 from +5.47e-2 to −9.15e-3 rad, the temporal part 2.1e-5 as
+  `(ω dt)⁴/720` predicts, for 1.47× CPU time. Every composition (walls, pins,
+  sources, gaps, loss, pumps, Kerr and saturable on either side, the three
+  restoring laws, van der Pol) improves 5 to 19 times at the app's step,
+  except the short-wave rows, which are first order under any integrator.
+- **Found.** The drift form leaks energy under a stiffness-side law (−38% by
+  t = 160) and the kick form holds, as the modified-store argument says; so
+  two forms, picked by where the field laws sit. Sources need
+  `s − (s⁺ − 2s + s⁻)/12` in the kicks plus `ṡ` in `ũ` (13× better than the
+  leapfrog together, 1.2× and 4× apart); a prescribed node is best with no
+  correction. Handoffs need no processing. Pre-existing: a step alternating
+  every 4 steps pumps the grid-scale modes parametrically (leapfrog energy
+  ×1e9 by t = 10), filed under "Worth checking sometime".
+- **Method.** Ignored measurement tests in `canonical_temporal.rs` against a
+  Richardson-extrapolated leapfrog reference; `examples/canonical_fourth_order.rs`
+  with a least-squares phase fit and a `--handoffs` mode. A label with a
+  comma broke the case filter once, and a scripted edit missed both loops
+  after `cargo fmt` once; both rerun.
+- **State.** Uncommitted. Stage B next on the user's word.
+
