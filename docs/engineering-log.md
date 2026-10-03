@@ -18151,3 +18151,23 @@ an acceptable compromise and then asked for it gone.
   note, an error longer than the panel, and both.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — The notice row says the element sizes when it has no notice
+
+The held notice row left an empty gap whenever neither notice applied, which
+the user found ugly.
+
+- **Fix.** The row always says something (`amr_size_line`): the element
+  sizes the last estimate asks for against the sizes allowed, in weak text,
+  "Elements wanted 0.031–0.144 · allowed 0.020–0.160", or "Elements wanted —"
+  before an estimate. An adaptation error, then a forcing under the smallest
+  element, takes the row over in gold as before. It reads the shown report,
+  so a handoff changes nothing until the next estimate.
+- **Adaptation off.** The block under "Adapt mesh to the wave" (the accuracy
+  presets and slider, the status, the estimate and this row) is hidden while
+  adaptation is off, at the user's suggestion: what it shifts sits below the
+  checkbox that did it, never under the pointer.
+- **Test.** `what_changes_while_running_keeps_the_panel_still` reads the size
+  row in each state and finds the block gone with adaptation off.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

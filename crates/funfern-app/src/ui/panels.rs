@@ -382,7 +382,9 @@ impl Playground {
             &mut self.editor.document.presentation.adaptation.enabled,
             "Adapt mesh to the wave",
         );
-        ui.add_enabled_ui(self.editor.document.presentation.adaptation.enabled, |ui| {
+        // Shown only while adaptation is on. What it shifts when it comes or
+        // goes sits below the checkbox that did it, never under the pointer.
+        if self.editor.document.presentation.adaptation.enabled {
             let preset = amr_accuracy_preset_name(
                 self.editor
                     .document
@@ -441,20 +443,20 @@ impl Playground {
             ui.add(
                 egui::Label::new(egui::RichText::new(self.amr_estimate_line()).small()).truncate(),
             );
-            // One notice row, held whether or not it has anything to say, so
-            // a notice that comes or goes - a slider crossing the forcing's
-            // floor, an adaptation that fails - moves nothing below it.
-            let notice = egui::RichText::new(match self.amr_notice() {
-                Some((short, _)) => short,
-                None => " ".into(),
-            })
-            .small()
-            .color(GOLD);
-            let response = ui.add(egui::Label::new(notice).truncate());
-            if let Some((_, full)) = self.amr_notice() {
-                response.on_hover_text(full);
-            }
-        });
+            // The element sizes the estimate asks for, one row that a notice
+            // takes over in gold, so a notice that comes or goes - a slider
+            // crossing the forcing's floor, an adaptation that fails - moves
+            // nothing below it and leaves no gap when there is none.
+            let (line, hover, notice) = self.amr_size_line();
+            let text = egui::RichText::new(line).small();
+            let text = if notice {
+                text.color(GOLD)
+            } else {
+                text.color(ui.visuals().weak_text_color())
+            };
+            ui.add(egui::Label::new(text).truncate())
+                .on_hover_text(hover);
+        }
         ui.separator();
         ui.label("Point source");
         let mut source = self.editor.document.model.source;
@@ -519,28 +521,46 @@ impl Playground {
         }
     }
 
-    /// The adaptation block's one notice, short and in full: an adaptation
-    /// error first, since it is rarer and matters more; else a forcing that
-    /// wants elements under the smallest allowed. Nothing else in the panel
-    /// explains a mesh pinned at its floor while the accuracy target reads
-    /// satisfied. It reads the shown report, so a handoff, which drops the
-    /// estimate, does not take the notice away until the next one.
-    pub(super) fn amr_notice(&self) -> Option<(String, String)> {
+    /// The adaptation block's size row: what it says, its hover, and whether
+    /// it is a notice. An adaptation error takes it first, since it is rarer
+    /// and matters more; then a forcing that wants elements under the
+    /// smallest allowed, which nothing else in the panel explains while the
+    /// accuracy target reads satisfied; otherwise the element sizes the
+    /// estimate asks for against the sizes allowed. It reads the shown
+    /// report, so a handoff, which drops the estimate, changes nothing here
+    /// until the next one.
+    pub(super) fn amr_size_line(&self) -> (String, String, bool) {
         if let Some(error) = &self.amr_error {
-            return Some((error.clone(), error.clone()));
+            return (error.clone(), error.clone(), true);
         }
-        let floor = self.editor.document.presentation.adaptation.minimum_edge;
-        let report = self.amr_shown_report.as_ref()?;
-        (report.smallest_wavelength_target < floor).then(|| {
+        let settings = self.editor.document.presentation.adaptation;
+        let (floor, ceiling) = (settings.minimum_edge, settings.maximum_edge);
+        let report = self.amr_shown_report.as_ref();
+        if let Some(report) = report
+            && report.smallest_wavelength_target < floor
+        {
             let wanted = report.smallest_wavelength_target;
-            (
+            return (
                 format!("Forcing wants {wanted:.3} < smallest {floor:.3}: mesh at its floor"),
                 format!(
                     "The forcing wants elements of {wanted:.3}, under the smallest allowed of \
                      {floor:.3}, so the mesh sits at its floor whatever the accuracy asks"
                 ),
-            )
-        })
+                true,
+            );
+        }
+        let wanted = report
+            .filter(|report| report.minimum_target.is_finite() && report.maximum_target > 0.0)
+            .map_or("—".to_owned(), |report| {
+                format!("{:.3}–{:.3}", report.minimum_target, report.maximum_target)
+            });
+        (
+            format!("Elements wanted {wanted} · allowed {floor:.3}–{ceiling:.3}"),
+            "The element sizes the last estimate asks for, between the smallest and largest \
+             allowed"
+                .into(),
+            false,
+        )
     }
 
     /// What the panel says about the estimate, whether or not one is in hand.
@@ -804,8 +824,10 @@ mod tests {
     /// fiber the speed note came and went eight times in 37 s, the forcing
     /// note five times in 6 s. No status says as much as the one below
     /// today, and both inspectors fit the longest that do; the row holds
-    /// whatever one does say. The forcing note and an adaptation error share
-    /// one notice row, held empty when neither applies.
+    /// whatever one does say. The forcing note and an adaptation error take
+    /// over the row of element sizes the estimate asks for, which is there
+    /// whatever the state. With adaptation off the block under its checkbox
+    /// is hidden: what that shifts sits below the checkbox that did it.
     #[test]
     fn what_changes_while_running_keeps_the_panel_still() {
         for width in [1400.0, 390.0] {
@@ -841,6 +863,7 @@ mod tests {
             );
 
             let quiet = row(&mut state, "Point source");
+            row(&mut state, "Elements wanted —");
             state.amr_status = "adaptation discarded: the mesh changed underneath it, \
                                 and the estimate it was measured against with it"
                 .into();
@@ -848,9 +871,15 @@ mod tests {
                 limit_refine_candidates: 2000,
                 refine_candidates: 2000,
                 global_indicator: 0.0262,
+                minimum_target: 0.031,
+                maximum_target: 0.144,
                 ..Default::default()
             };
             state.amr_shown_report = Some(report.clone());
+            assert_eq!(
+                state.amr_size_line().0,
+                "Elements wanted 0.031–0.144 · allowed 0.020–0.160"
+            );
             assert!(
                 state
                     .amr_estimate_line()
@@ -861,8 +890,8 @@ mod tests {
             assert_eq!(row(&mut state, "Point source"), quiet, "at width {width}");
 
             // A forcing under the floor is told from the shown report, with no
-            // estimate in hand, as just after a handoff; it and an error share
-            // the one notice row, the error first.
+            // estimate in hand, as just after a handoff; it and an error take
+            // over the size row, the error first.
             let floored = SolutionIndicatorReport {
                 smallest_wavelength_target: 0.01,
                 ..report.clone()
@@ -882,9 +911,13 @@ mod tests {
             assert_eq!(row(&mut state, "Point source"), quiet, "at width {width}");
             state.amr_error = None;
             state.amr_shown_report = Some(floored);
-            // Turning adaptation off forgets it.
+            // Turning adaptation off forgets it, and the block under the
+            // checkbox goes with it.
             state.stop_adaptation_work();
             assert!(state.amr_shown_report.is_none());
+            state.editor.document.presentation.adaptation.enabled = false;
+            assert!(simulation_panel_row(&mut state, &context, width, "Elements wanted").is_none());
+            assert!(simulation_panel_row(&mut state, &context, width, "Adapt mesh").is_some());
         }
     }
 }
