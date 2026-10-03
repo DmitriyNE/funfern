@@ -1,7 +1,8 @@
 # A fourth-order step for the triangle solver (M0), 4 October 2026
 
-**Status: stage A done, the design check on CPU. Stages B to D are not
-started.** M0 comes out of the IGA spikes ("Spike T" in
+**Status: stages A (the design check) and B (both CPU paths, with tests)
+done; the CPU default is still the leapfrog, so the device suite compares like
+with like until stage C. Stages C (device) and D (gate, default) next.** M0 comes out of the IGA spikes ("Spike T" in
 [the feasibility report](funfern-iga-feasibility-spike.md)): the
 modified-equation Störmer step cut the spline patch's temporal error 50 to
 60 times, and the triangle solver at its own operating point is in the same
@@ -124,9 +125,28 @@ Three things the table does not show directly:
   every integrator at second order with the leapfrog's constant. Applying
   `s − (s⁺ − 2s + s⁻)/12` at each kick and keeping `ṡ` in `ũ` takes the
   source-only error from 2.65e-3 to 2.4e-4; either alone gives 7.8e-4 or
-  2.4e-3. A prescribed node is best left reading its signal at the drift's
-  instant: a second-difference term of `h²/12` measured 2.4e-3 and one of
-  `h²/24` 1.8e-3, against 1.2e-3 with none.
+  2.4e-3.
+- **A prescribed node reads its signal expanded as a free node's field is.**
+  A free node's `ũ` is the predictor `u(t½) − h²/8 · ü` plus the correction
+  `h²/12 · ü`, so it stands `h²/24 · ü` below the midpoint field; under the
+  kick form the drift reads the predictor itself, `h²/8 · ü` below. A pin
+  reading `g − h²/24 · g″` (drift form) or `g − h²/8 · g″` (kick form), the
+  second derivative as the second difference over the step, is consistent
+  with its neighbours. Stage A tried the opposite signs, `+h²/12` and
+  `+h²/24`, which were worse than the plain `g`, and kept the plain value;
+  stage B derived the sign and measured it on the test mesh (edge 0.3):
+
+  | pinned node reads | drift form | kick form |
+  | --- | --- | --- |
+  | `g` | 2.5e-3 | 6.2e-3 |
+  | `g − h²/24 · g″` | **1.9e-3** | |
+  | `g − h²/8 · g″` | | **3.6e-3** |
+  | `g + h²/24 · g″` | 3.9e-3 | |
+  | `g + h²/8 · g″` | | 1.1e-2 |
+
+  against the leapfrog's 1.8e-2: 9.5 and 5 times better. Still second order:
+  a continuously generated wave carries the bounded offset. The leapfrog's
+  own pin has the same `h²/8` mismatch, and would gain from it too.
 
 ### Long runs
 
@@ -177,19 +197,35 @@ when the stiffest row does. Filed under "Worth checking sometime".
 - **Sources.** The fourth-order kick quadrature
   `s − (s⁺ − 2s + s⁻)/12` in both forms, and `ṡ` in the drift form's `ũ`
   (the kick form's `u̇` carries `s` already).
-- **Prescribed nodes.** The drift reads the signal at its instant, as now;
-  the kick form's `u̇` there is the signal's central difference.
+- **Prescribed nodes.** The drift reads `g − h²/24 · g″` in the drift form
+  and `g − h²/8 · g″` in the kick form; the kick form's `u̇` there is the
+  signal's central difference.
 - **Unchanged.** Loss halves, wall kicks (the kick form passes `F̃` where
   they take `F`), short-wave viscosity on the plain midpoint field, the step
   size, handoffs, the energy ledger's terms.
 - **No switch.** The fourth-order step replaces the leapfrog in production
   on every generation; `CanonicalIntegrator::Leapfrog` stays for tests and
   comparison only. Nothing in the document or the UI changes.
-- **Stage B.** Both CPU paths, the fixed one taking the source quadrature
-  too so an inert driven generation still equals the fixed path exactly;
-  the kick form promoted from the stage A prototype; the measurements
-  turned into tests (phase order on the box mode, reversibility, the ledger,
-  the long-run energy of a stiffness-side law).
+- **Stage B, done.** `CanonicalIntegrator::{Leapfrog, FourthOrder}` on both
+  CPU states; `FourthOrderForm::{Drift, Kick}`, picked by
+  `CanonicalTemporalWaveOperator::fourth_order_form` from whether any
+  complementary sample carries a field law (the fixed path has none, so it
+  is always the drift form). Tests:
+  - every composition test that checks its energy ledger converges at
+    second order now checks it under both integrators (the helper behind
+    ten of them, and the temporal-work residual);
+  - an inert driven generation steps exactly as the fixed path does under
+    both integrators, with walls, a pinned wall and a source;
+  - the signed step is the exact inverse under both forms;
+  - from rest, both forms converge at order 4.2 then 4.0, 25 times below the
+    leapfrog at the app's step, and on a linear generation they are the same
+    step to 1e-9 relative;
+  - a source and a prescribed signal from rest: at least 8 and 7 times below
+    the leapfrog under the drift form, 5 and 4 under the kick form;
+  - the form follows the field laws in every skin (a TE electric law sits on
+    the complementary row and takes the kick form);
+  - a stiffness-side Kerr medium over t = 40 at the app's step: the kick form
+    keeps its energy to 7e-4, the drift form loses 3.5e-2.
 - **Stage C.** The device: the drift form writes `ũ` into the node-field
   lane field laws already use, and the drift reads that lane always; on a
   force-cache generation `L u` is one pass over the assembled stiffness row

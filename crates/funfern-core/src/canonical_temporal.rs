@@ -13,7 +13,9 @@ use std::collections::BTreeSet;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::canonical_wave::{CanonicalIntegrator, FilterSampleBound, grid_filter_reach};
+use crate::canonical_wave::{
+    CanonicalIntegrator, FilterSampleBound, FourthOrderForm, fourth_order_source, grid_filter_reach,
+};
 use crate::{
     CanonicalAreaContribution, CanonicalAreaSample, CanonicalForcing, CanonicalIndicatorSnapshot,
     CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil,
@@ -1911,6 +1913,9 @@ pub struct CanonicalTemporalWaveOperator {
     /// generation inverts its constitutive maps by the bracketed solve at
     /// every stage; without one, every map is the linear division it was.
     has_field_laws: bool,
+    /// Whether any complementary sample follows its own field: a field law on
+    /// the stiffness side, which picks the fourth-order step's kick form.
+    has_complementary_field_laws: bool,
     /// Primary contributions grouped by node, in contribution order, so each
     /// node's assembled nonlinear map is one contiguous run of terms. Empty
     /// when no law follows the field.
@@ -2065,6 +2070,9 @@ impl CanonicalTemporalWaveOperator {
             .map(|sample| sample.coefficient)
             .chain(complementary.iter().map(|sample| sample.coefficient))
             .any(|coefficient| coefficient.law.field != FieldLawValues::Linear);
+        let has_complementary_field_laws = complementary
+            .iter()
+            .any(|sample| sample.coefficient.law.field != FieldLawValues::Linear);
         let (node_contribution_offsets, node_contributions) = if has_field_laws {
             nonlinear_admission(&base, &primary, &complementary, authored)?;
             group_by_node(base.primary_contributions(), base.degrees_of_freedom())
@@ -2228,6 +2236,7 @@ impl CanonicalTemporalWaveOperator {
             initial_runtime,
             has_temporal_laws,
             has_field_laws,
+            has_complementary_field_laws,
             node_contribution_offsets,
             node_contributions,
             has_loss,
@@ -2481,6 +2490,16 @@ impl CanonicalTemporalWaveOperator {
     /// generation yet.
     pub fn has_field_laws(&self) -> bool {
         self.has_field_laws
+    }
+
+    /// Where this generation's fourth-order step puts its correction: in the
+    /// kicks beside a stiffness-side field law, in the drift otherwise.
+    pub fn fourth_order_form(&self) -> FourthOrderForm {
+        if self.has_complementary_field_laws {
+            FourthOrderForm::Kick
+        } else {
+            FourthOrderForm::Drift
+        }
     }
 
     /// Whether the exact kick/drift bulk split can run without composing any
@@ -3384,6 +3403,9 @@ pub struct CanonicalTemporalWaveState {
     time_step: f64,
     time: f64,
     integrator: CanonicalIntegrator,
+    /// A form forced over the operator's choice, for the tests that compare
+    /// the two.
+    form_override: Option<FourthOrderForm>,
 }
 
 impl CanonicalTemporalWaveState {
@@ -3474,6 +3496,7 @@ impl CanonicalTemporalWaveState {
             time_step,
             time,
             integrator: CanonicalIntegrator::default(),
+            form_override: None,
         })
     }
 
@@ -3516,6 +3539,27 @@ impl CanonicalTemporalWaveState {
     pub fn with_integrator(mut self, integrator: CanonicalIntegrator) -> Self {
         self.integrator = integrator;
         self
+    }
+
+    #[cfg(test)]
+    fn with_fourth_order_form(mut self, form: FourthOrderForm) -> Self {
+        self.integrator = CanonicalIntegrator::FourthOrder;
+        self.form_override = Some(form);
+        self
+    }
+
+    /// The fourth-order form this state steps with, `None` under the
+    /// leapfrog.
+    fn fourth_order_form(
+        &self,
+        operator: &CanonicalTemporalWaveOperator,
+    ) -> Option<FourthOrderForm> {
+        match self.integrator {
+            CanonicalIntegrator::Leapfrog => None,
+            CanonicalIntegrator::FourthOrder => {
+                Some(self.form_override.unwrap_or(operator.fourth_order_form()))
+            }
+        }
     }
 
     pub fn time(&self) -> f64 {
@@ -4039,6 +4083,7 @@ impl CanonicalTemporalWaveState {
             &self.runtime,
         )?;
 
+        let form = self.fourth_order_form(operator);
         let mut primary = self.primary_flux.clone();
         let mut complementary = self.complementary_flux.clone();
         let mut outgoing_z = self.outgoing_z.clone();
@@ -4074,14 +4119,10 @@ impl CanonicalTemporalWaveState {
         add_gap_force(operator, &self.thin_gap_jump, &mut first_force)?;
         add_restoring_force(operator, &self.integrated_field, &mut first_force)?;
         let mut first_source = forcing.integrated_rate(start_time)?;
-        if self.integrator != CanonicalIntegrator::Leapfrog && !forcing.sources().is_empty() {
-            let later = forcing.integrated_rate(start_time + duration)?;
-            let earlier = forcing.integrated_rate(start_time - duration)?;
-            for ((value, later), earlier) in first_source.iter_mut().zip(later).zip(earlier) {
-                *value -= (later - 2.0 * *value + earlier) / 12.0;
-            }
+        if form.is_some() {
+            fourth_order_source(forcing, start_time, duration, &mut first_source)?;
         }
-        if self.integrator == CanonicalIntegrator::FourthOrderKick {
+        if form == Some(FourthOrderForm::Kick) {
             first_force = fourth_order_kick_force(
                 operator,
                 forcing,
@@ -4136,11 +4177,8 @@ impl CanonicalTemporalWaveState {
         };
         // Everything that drifts reads the integrator's field; the
         // short-wave viscosity below, a loss, keeps the plain midpoint one.
-        let drift_field = match self.integrator {
-            CanonicalIntegrator::Leapfrog | CanonicalIntegrator::FourthOrderKick => {
-                midpoint_field.clone()
-            }
-            CanonicalIntegrator::FourthOrder => fourth_order_temporal_field(
+        let drift_field = if form == Some(FourthOrderForm::Drift) {
+            fourth_order_temporal_field(
                 operator,
                 forcing,
                 &midpoint_field,
@@ -4149,7 +4187,22 @@ impl CanonicalTemporalWaveState {
                 middle_time,
                 duration,
                 &self.runtime,
-            )?,
+            )?
+        } else {
+            let mut field = midpoint_field.clone();
+            if form == Some(FourthOrderForm::Kick) {
+                // The kick form's drift reads the leapfrog's predictor, which
+                // stands `h²/8 · ü` below the midpoint field; a pinned node
+                // reads its signal expanded the same way.
+                for (value, signal) in field.iter_mut().zip(forcing.prescribed()) {
+                    if let Some(signal) = signal {
+                        *value -= (signal.value(middle_time + duration) - 2.0 * *value
+                            + signal.value(middle_time - duration))
+                            / 8.0;
+                    }
+                }
+            }
+            field
         };
         let mut gap_jump = self.thin_gap_jump.clone();
         if !gap_jump.is_empty() {
@@ -4181,14 +4234,10 @@ impl CanonicalTemporalWaveState {
         add_gap_force(operator, &gap_jump, &mut second_force)?;
         add_restoring_force(operator, &integrated, &mut second_force)?;
         let mut second_source = forcing.integrated_rate(end_time)?;
-        if self.integrator != CanonicalIntegrator::Leapfrog && !forcing.sources().is_empty() {
-            let later = forcing.integrated_rate(end_time + duration)?;
-            let earlier = forcing.integrated_rate(end_time - duration)?;
-            for ((value, later), earlier) in second_source.iter_mut().zip(later).zip(earlier) {
-                *value -= (later - 2.0 * *value + earlier) / 12.0;
-            }
+        if form.is_some() {
+            fourth_order_source(forcing, end_time, duration, &mut second_source)?;
         }
-        if self.integrator == CanonicalIntegrator::FourthOrderKick {
+        if form == Some(FourthOrderForm::Kick) {
             second_force = fourth_order_kick_force(
                 operator,
                 forcing,
@@ -4292,8 +4341,8 @@ impl CanonicalTemporalWaveState {
     }
 }
 
-/// Stage A prototype: the fourth-order kick force
-/// `F̃ = F + dt²/12 · L_b u̇` at the kick's own instant, `u̇ = M⁻¹(s − F)` at
+/// The fourth-order kick force `F̃ = F + dt²/12 · L_b u̇` at the kick's own
+/// instant, `u̇ = M⁻¹(s − F)` at
 /// a free node and the signal's central difference at a prescribed one, `L_b`
 /// the stiffness of everything that drifts at the kick's `b` and `r`. Over a
 /// linear mass it is the gradient of `U − dt²/24 · Fᵀ M⁻¹ F`, so a
@@ -4370,7 +4419,8 @@ fn fourth_order_kick_force(
 /// tangent) and `L` the stiffness of everything that drifts: the bulk through
 /// each sample's tangent `J_b` at the current flux and the midpoint instant,
 /// the gap springs, and the restoring law's `m₀ V″(r)` at the step's `r`. A
-/// prescribed node reads its signal at the drift's instant.
+/// prescribed node reads its signal less `h²/24` of its second difference,
+/// the offset the free nodes' `ũ` carries.
 ///
 /// With `L` independent of what the drift moves (a linear bulk, linear gaps,
 /// Klein-Gordon) this is the gradient of the modified store
@@ -4442,10 +4492,16 @@ fn fourth_order_temporal_field(
         .zip(&inverse)
         .zip(forcing.prescribed())
         .map(|(((field, stiffness), inverse), signal)| match signal {
-            // A pinned node reads its signal at the drift's instant: measured
-            // against an `h²/12` or `h²/24` second-difference term, the plain
-            // value was the most accurate of the three.
-            Some(signal) => signal.value(middle_time),
+            // A free node's `ũ` stands `h²/24 · ü` below its midpoint field,
+            // the predictor's `−h²/8` and the correction's `+h²/12`; a pinned
+            // node reads its signal expanded the same way.
+            Some(signal) => {
+                let value = signal.value(middle_time);
+                value
+                    - (signal.value(middle_time + duration) - 2.0 * value
+                        + signal.value(middle_time - duration))
+                        / 24.0
+            }
             None => field - scale * stiffness * inverse,
         })
         .collect::<Vec<_>>();
@@ -6691,11 +6747,19 @@ mod tests {
             OuterBoundaryCondition::Reflecting,
             OuterBoundaryCondition::SecondOrderOutgoing,
         ] {
-            inert_forcing_matches_the_fixed_path(condition);
+            for integrator in [
+                CanonicalIntegrator::Leapfrog,
+                CanonicalIntegrator::FourthOrder,
+            ] {
+                inert_forcing_matches_the_fixed_path(condition, integrator);
+            }
         }
     }
 
-    fn inert_forcing_matches_the_fixed_path(condition: OuterBoundaryCondition) {
+    fn inert_forcing_matches_the_fixed_path(
+        condition: OuterBoundaryCondition,
+        integrator: CanonicalIntegrator,
+    ) {
         let scene = Scene::default();
         let operator = walled(condition, &scene);
         let base = operator.base();
@@ -6749,14 +6813,18 @@ mod tests {
         let temporal =
             CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary.clone())
                 .unwrap();
-        let mut temporal = temporal.pinned(&operator, &forcing).unwrap();
+        let mut temporal = temporal
+            .pinned(&operator, &forcing)
+            .unwrap()
+            .with_integrator(integrator);
         let mut fixed = CanonicalWaveState::new(
             base,
             time_step,
             temporal.primary_flux().to_vec(),
             complementary,
         )
-        .unwrap();
+        .unwrap()
+        .with_integrator(integrator);
 
         for _ in 0..24 {
             let temporal_accounting = temporal.step_with_forcing(&operator, &forcing).unwrap();
@@ -8781,22 +8849,33 @@ mod tests {
         let operator = compile(&scene).unwrap();
         let time_step = 0.35 * operator.maximum_time_step();
         let (primary, complementary) = reference_fluxes(&operator);
-        let mut state = CanonicalTemporalWaveState::new(
-            &operator,
-            time_step,
-            primary.clone(),
-            complementary.clone(),
-        )
-        .unwrap();
-        state.step_by(&operator, time_step).unwrap();
-        state.step_by(&operator, -time_step).unwrap();
-        assert!(state.time().abs() < 1.0e-15);
-        for (actual, expected) in state.primary_flux().iter().zip(primary) {
-            assert!((actual - expected).abs() < 2.0e-14);
-        }
-        for (actual, expected) in state.complementary_flux().iter().zip(complementary) {
-            assert!((actual.x - expected.x).abs() < 2.0e-14);
-            assert!((actual.y - expected.y).abs() < 2.0e-14);
+        // Each fourth-order correction is even in the step, so the signed step
+        // is the exact inverse under either form too.
+        for form in [
+            None,
+            Some(FourthOrderForm::Drift),
+            Some(FourthOrderForm::Kick),
+        ] {
+            let mut state = CanonicalTemporalWaveState::new(
+                &operator,
+                time_step,
+                primary.clone(),
+                complementary.clone(),
+            )
+            .unwrap();
+            if let Some(form) = form {
+                state = state.with_fourth_order_form(form);
+            }
+            state.step_by(&operator, time_step).unwrap();
+            state.step_by(&operator, -time_step).unwrap();
+            assert!(state.time().abs() < 1.0e-15);
+            for (actual, expected) in state.primary_flux().iter().zip(&primary) {
+                assert!((actual - expected).abs() < 2.0e-14, "{form:?}");
+            }
+            for (actual, expected) in state.complementary_flux().iter().zip(&complementary) {
+                assert!((actual.x - expected.x).abs() < 2.0e-14, "{form:?}");
+                assert!((actual.y - expected.y).abs() < 2.0e-14, "{form:?}");
+            }
         }
     }
 
@@ -8831,22 +8910,31 @@ mod tests {
         let operator = compile(&scene).unwrap();
         let coarse_step = 0.6 * operator.maximum_time_step();
         let (primary, complementary) = reference_fluxes(&operator);
-        let accumulated_residual = |time_step: f64, steps: usize| {
-            let mut state = CanonicalTemporalWaveState::new(
-                &operator,
-                time_step,
-                primary.clone(),
-                complementary.clone(),
-            )
-            .unwrap();
-            (0..steps)
-                .map(|_| state.step(&operator).unwrap().splitting_residual)
-                .sum::<f64>()
-        };
-        let coarse = accumulated_residual(coarse_step, 16).abs();
-        let fine = accumulated_residual(0.5 * coarse_step, 32).abs();
-        assert!(coarse > 1.0e-12);
-        assert!(fine < 0.35 * coarse, "coarse={coarse:e}, fine={fine:e}");
+        for integrator in [
+            CanonicalIntegrator::Leapfrog,
+            CanonicalIntegrator::FourthOrder,
+        ] {
+            let accumulated_residual = |time_step: f64, steps: usize| {
+                let mut state = CanonicalTemporalWaveState::new(
+                    &operator,
+                    time_step,
+                    primary.clone(),
+                    complementary.clone(),
+                )
+                .unwrap()
+                .with_integrator(integrator);
+                (0..steps)
+                    .map(|_| state.step(&operator).unwrap().splitting_residual)
+                    .sum::<f64>()
+            };
+            let coarse = accumulated_residual(coarse_step, 16).abs();
+            let fine = accumulated_residual(0.5 * coarse_step, 32).abs();
+            assert!(coarse > 1.0e-12);
+            assert!(
+                fine < 0.35 * coarse,
+                "{integrator:?}: coarse={coarse:e}, fine={fine:e}"
+            );
+        }
     }
 
     /// A gated pump on each row: a flat top on the mass, a Gaussian on the
@@ -10353,6 +10441,31 @@ mod tests {
         target: f64,
         amplitude: f64,
     ) -> (CanonicalTemporalStepAccounting, f64) {
+        // The fourth-order step keeps the same ledger: its lanes account for
+        // the same exchanges, and what they leave is still the splitting.
+        balance_is_second_order_with(
+            operator,
+            forcing,
+            target,
+            amplitude,
+            CanonicalIntegrator::FourthOrder,
+        );
+        balance_is_second_order_with(
+            operator,
+            forcing,
+            target,
+            amplitude,
+            CanonicalIntegrator::Leapfrog,
+        )
+    }
+
+    fn balance_is_second_order_with(
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+        target: f64,
+        amplitude: f64,
+        integrator: CanonicalIntegrator,
+    ) -> (CanonicalTemporalStepAccounting, f64) {
         let base = operator.base();
         let ceiling = 0.4 * operator.maximum_time_step();
         let mut previous: Option<(f64, f64)> = None;
@@ -10377,7 +10490,8 @@ mod tests {
                 CanonicalTemporalWaveState::new(operator, time_step, primary, complementary)
                     .unwrap()
                     .pinned(operator, forcing)
-                    .unwrap();
+                    .unwrap()
+                    .with_integrator(integrator);
             if operator.has_restoring() {
                 // Far enough from zero that sine-Gordon is not its tangent.
                 let integrated = base
@@ -10416,7 +10530,7 @@ mod tests {
                     (coarse.abs() / unaccounted.abs()).log2() / (coarse_step / time_step).log2();
                 assert!(
                     order > 1.7,
-                    "measured order {order:.2} between dt {coarse_step:.3e} and {time_step:.3e}"
+                    "{integrator:?}: measured order {order:.2} between dt {coarse_step:.3e} and {time_step:.3e}"
                 );
             }
             previous = Some((time_step, unaccounted));
@@ -14026,6 +14140,15 @@ mod tests {
         ]
     }
 
+    /// The schemes the measurements compare: the leapfrog and each
+    /// fourth-order form, forced whatever the generation would pick.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Scheme {
+        Leapfrog,
+        Drift,
+        Kick,
+    }
+
     struct FourthOrderRun {
         field: Vec<f64>,
         flux: Vec<Point2>,
@@ -14038,7 +14161,7 @@ mod tests {
         case: &FourthOrderCase,
         time_step: f64,
         steps: usize,
-        integrator: CanonicalIntegrator,
+        scheme: Scheme,
         smooth: bool,
     ) -> FourthOrderRun {
         let base = operator.base();
@@ -14109,8 +14232,12 @@ mod tests {
             CanonicalTemporalWaveState::new(operator, time_step, primary, complementary)
                 .unwrap()
                 .pinned(operator, &forcing)
-                .unwrap()
-                .with_integrator(integrator);
+                .unwrap();
+        state = match scheme {
+            Scheme::Leapfrog => state,
+            Scheme::Drift => state.with_fourth_order_form(FourthOrderForm::Drift),
+            Scheme::Kick => state.with_fourth_order_form(FourthOrderForm::Kick),
+        };
         if case.integrated != 0.0 {
             let r = base
                 .node_points()
@@ -14184,7 +14311,7 @@ mod tests {
                     &case,
                     coarse / 128.0,
                     steps * 128,
-                    CanonicalIntegrator::Leapfrog,
+                    Scheme::Leapfrog,
                     smooth,
                 );
                 let half = fourth_order_run(
@@ -14192,7 +14319,7 @@ mod tests {
                     &case,
                     coarse / 64.0,
                     steps * 64,
-                    CanonicalIntegrator::Leapfrog,
+                    Scheme::Leapfrog,
                     smooth,
                 );
                 let field = fine
@@ -14216,12 +14343,8 @@ mod tests {
                     steps as f64 * coarse,
                     fourth_order_distance(&operator, &fine, (&field, &flux)),
                 );
-                for integrator in [
-                    CanonicalIntegrator::Leapfrog,
-                    CanonicalIntegrator::FourthOrder,
-                    CanonicalIntegrator::FourthOrderKick,
-                ] {
-                    let mut line = format!("  {integrator:?}:");
+                for scheme in [Scheme::Leapfrog, Scheme::Drift, Scheme::Kick] {
+                    let mut line = format!("  {scheme:?}:");
                     let mut previous: Option<f64> = None;
                     for (index, fraction) in fractions.iter().enumerate() {
                         let refinement = 1usize << index;
@@ -14230,7 +14353,7 @@ mod tests {
                             &case,
                             coarse / refinement as f64,
                             steps * refinement,
-                            integrator,
+                            scheme,
                             smooth,
                         );
                         let error = fourth_order_distance(&operator, &run, (&field, &flux));
@@ -14284,20 +14407,15 @@ mod tests {
         {
             let operator = filter_operator(&case.scene, case.condition);
             let time_step = 0.9 * operator.maximum_time_step();
-            for integrator in [
-                CanonicalIntegrator::Leapfrog,
-                CanonicalIntegrator::FourthOrder,
-                CanonicalIntegrator::FourthOrderKick,
-            ] {
-                let mut line = format!("{} {integrator:?}:", case.label);
+            for scheme in [Scheme::Leapfrog, Scheme::Drift, Scheme::Kick] {
+                let mut line = format!("{} {scheme:?}:", case.label);
                 let initial =
-                    fourth_order_run(&operator, &case, time_step, 0, integrator, false).energy;
+                    fourth_order_run(&operator, &case, time_step, 0, scheme, false).energy;
                 let mut previous = 0usize;
                 let mut worst = 0.0_f64;
                 for target in [10.0, 40.0, 160.0] {
                     let steps = (target / time_step).round() as usize;
-                    let run =
-                        fourth_order_run(&operator, &case, time_step, steps, integrator, false);
+                    let run = fourth_order_run(&operator, &case, time_step, steps, scheme, false);
                     let drift = (run.energy - initial) / initial;
                     worst = worst.max(drift.abs());
                     line += &format!(" t={target}: {drift:+.2e};");
@@ -14307,5 +14425,299 @@ mod tests {
                 println!("{line} worst {worst:.1e}");
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // M0: the fourth-order step
+    // -----------------------------------------------------------------------
+
+    /// Steps a smooth field from rest (`b = 0`) on the default box to
+    /// `steps · time_step` and returns the field, under `form` or the
+    /// leapfrog, with `forcing`.
+    fn fourth_order_field_from_rest(
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+        amplitude: f64,
+        time_step: f64,
+        steps: usize,
+        form: Option<FourthOrderForm>,
+    ) -> Vec<f64> {
+        let base = operator.base();
+        let half = std::f64::consts::FRAC_PI_2;
+        let primary = base
+            .node_points()
+            .iter()
+            .zip(base.primary_mass())
+            .map(|(point, mass)| {
+                amplitude
+                    * mass
+                    * ((half * (point.x + 1.0)).cos() * (half * (point.y + 1.0)).cos()
+                        + 0.5 * (2.0 * half * (point.x + 1.0)).cos())
+            })
+            .collect::<Vec<_>>();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let mut state =
+            CanonicalTemporalWaveState::new(operator, time_step, primary, complementary)
+                .unwrap()
+                .pinned(operator, forcing)
+                .unwrap();
+        if let Some(form) = form {
+            state = state.with_fourth_order_form(form);
+        }
+        for _ in 0..steps {
+            state.step_with_forcing(operator, forcing).unwrap();
+        }
+        operator
+            .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+            .unwrap()
+    }
+
+    fn mass_weighted_distance(
+        base: &CanonicalWaveOperator,
+        field: &[f64],
+        reference: &[f64],
+    ) -> f64 {
+        let (mut difference, mut norm) = (0.0, 0.0);
+        for ((u, r), m) in field.iter().zip(reference).zip(base.primary_mass()) {
+            difference += m * (u - r) * (u - r);
+            norm += m * r * r;
+        }
+        (difference / norm).sqrt()
+    }
+
+    /// The fourth-order step's field errors at the app's step, its half and
+    /// its quarter, for each form, beside the leapfrog's, against a
+    /// Richardson extrapolation of the leapfrog at 1/64 and 1/128 of the
+    /// step: a reference that does not depend on the scheme under test.
+    fn fourth_order_errors(
+        operator: &CanonicalTemporalWaveOperator,
+        forcing: &CanonicalForcing,
+        amplitude: f64,
+    ) -> [(Option<FourthOrderForm>, [f64; 3]); 3] {
+        let coarse = 0.9 * operator.maximum_time_step();
+        let steps = (1.0 / coarse).ceil() as usize;
+        let run = |refinement: usize, form| {
+            fourth_order_field_from_rest(
+                operator,
+                forcing,
+                amplitude,
+                coarse / refinement as f64,
+                steps * refinement,
+                form,
+            )
+        };
+        let fine = run(128, None);
+        let half = run(64, None);
+        let reference = fine
+            .iter()
+            .zip(&half)
+            .map(|(f, h)| (4.0 * f - h) / 3.0)
+            .collect::<Vec<_>>();
+        [
+            None,
+            Some(FourthOrderForm::Drift),
+            Some(FourthOrderForm::Kick),
+        ]
+        .map(|form| {
+            (
+                form,
+                [1, 2, 4].map(|refinement| {
+                    mass_weighted_distance(operator.base(), &run(refinement, form), &reference)
+                }),
+            )
+        })
+    }
+
+    /// From rest every mode starts at its turning point, so the bounded
+    /// processing offset any kick-drift-kick step carries does not enter the
+    /// field and its error is the phase alone: fourth order under both forms,
+    /// which on a linear generation are the same step.
+    #[test]
+    fn the_fourth_order_step_is_fourth_order_from_rest() {
+        let operator = compile(&Scene::default()).unwrap();
+        let forcing = CanonicalForcing::none(operator.base());
+        let [(_, leapfrog), drift, kick] = fourth_order_errors(&operator, &forcing, 1.0);
+        for (form, errors) in [drift, kick] {
+            for pair in errors.windows(2) {
+                let order = (pair[0] / pair[1]).log2();
+                assert!(order > 3.7, "{form:?}: order {order:.2} in {errors:?}");
+            }
+            assert!(
+                errors[0] < 0.1 * leapfrog[0],
+                "{form:?}: {errors:?} {leapfrog:?}"
+            );
+        }
+        for (drift, kick) in drift.1.iter().zip(kick.1) {
+            assert!(
+                (drift - kick).abs() < 1.0e-9 * drift.max(1.0e-12),
+                "{drift} {kick}"
+            );
+        }
+    }
+
+    /// A source or a prescribed signal driving the box from rest. Both stay
+    /// second order through the bounded offset a continuously generated wave
+    /// carries, but at the app's step the fourth-order kick quadrature takes
+    /// a source's error down an order of magnitude, and a pin read with the
+    /// free nodes' own offset (`h²/24` in the drift form, `h²/8` in the kick
+    /// form) takes a signal's down five to ten times.
+    #[test]
+    fn the_fourth_order_step_carries_sources_and_prescribed_signals() {
+        let operator = compile(&Scene::default()).unwrap();
+        let base = operator.base();
+        let mut sourced = CanonicalForcing::none(base);
+        let weights = base
+            .node_points()
+            .iter()
+            .zip(base.primary_mass())
+            .map(|(point, mass)| {
+                mass * (-6.0 * (point.x - 0.2).powi(2) - 6.0 * point.y.powi(2)).exp()
+            })
+            .collect();
+        sourced
+            .push_source(
+                CanonicalSource::direct(base, weights, TimeSignal::harmonic(0.0, 0.9, 1.7, 0.4))
+                    .unwrap(),
+            )
+            .unwrap();
+        let prescribed = base
+            .node_points()
+            .iter()
+            .map(|point| (point.x < -0.999).then(|| TimeSignal::harmonic(0.0, 0.2, 1.3, 0.0)))
+            .collect::<Vec<_>>();
+        let pinned = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+        for (label, forcing, drift_gain, kick_gain) in [
+            ("source", sourced, 8.0, 4.0),
+            ("prescribed", pinned, 5.0, 3.0),
+        ] {
+            let [(_, leapfrog), (_, drift), (_, kick)] =
+                fourth_order_errors(&operator, &forcing, 0.0);
+            assert!(
+                drift[0] * drift_gain < leapfrog[0],
+                "{label}: {drift:?} {leapfrog:?}"
+            );
+            assert!(
+                kick[0] * kick_gain < leapfrog[0],
+                "{label}: {kick:?} {leapfrog:?}"
+            );
+            for errors in [drift, kick] {
+                let order = (errors[1] / errors[2]).log2();
+                assert!(order > 1.8, "{label}: {errors:?}");
+            }
+        }
+    }
+
+    /// The field laws pick the form: a law on the complementary row, whatever
+    /// the skin calls it, takes the kick form; anything else the drift form.
+    #[test]
+    fn the_field_laws_pick_the_fourth_order_form() {
+        let skin = |physics: PhysicsModel, mass: bool, stiffness: bool| {
+            let mut scene = Scene::initial();
+            scene.physics = physics;
+            if mass {
+                scene.materials[0].mass_law.field = kerr(0.8);
+            }
+            if stiffness {
+                scene.materials[0].stiffness_law.field = kerr(0.8);
+            }
+            compile(&scene).unwrap()
+        };
+        let mechanical = PhysicsModel::Mechanical;
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        for (physics, mass, stiffness) in [
+            (mechanical, false, false),
+            (mechanical, true, false),
+            (mechanical, false, true),
+            (mechanical, true, true),
+            (tm, true, false),
+            (tm, false, true),
+            (te, true, false),
+            (te, false, true),
+        ] {
+            let operator = skin(physics, mass, stiffness);
+            let complementary = operator
+                .complementary
+                .iter()
+                .any(|sample| sample.coefficient.law.field != FieldLawValues::Linear);
+            let expected = if complementary {
+                FourthOrderForm::Kick
+            } else {
+                FourthOrderForm::Drift
+            };
+            assert_eq!(
+                operator.fourth_order_form(),
+                expected,
+                "{physics:?} {mass} {stiffness}"
+            );
+        }
+        assert_eq!(
+            skin(mechanical, false, true).fourth_order_form(),
+            FourthOrderForm::Kick
+        );
+        assert_eq!(
+            skin(mechanical, true, false).fourth_order_form(),
+            FourthOrderForm::Drift
+        );
+        assert_eq!(
+            skin(te, false, true).fourth_order_form(),
+            FourthOrderForm::Drift
+        );
+        assert_eq!(
+            skin(te, true, false).fourth_order_form(),
+            FourthOrderForm::Kick
+        );
+    }
+
+    /// A stiffness-side law over a long run: the drift form freezes the
+    /// law's tangent inside the drift and leaks energy steadily; the kick
+    /// form, which the generation picks, is the gradient of a modified store
+    /// and holds it.
+    #[test]
+    fn a_stiffness_side_law_keeps_its_energy_in_the_kick_form() {
+        let mut scene = Scene::default();
+        scene.materials[0].stiffness_law.field = kerr(0.8);
+        let operator = compile(&scene).unwrap();
+        assert_eq!(operator.fourth_order_form(), FourthOrderForm::Kick);
+        let base = operator.base();
+        let time_step = 0.9 * operator.maximum_time_step();
+        // Rough data, so the mesh's short waves are in play.
+        let primary = base
+            .node_points()
+            .iter()
+            .zip(base.primary_mass())
+            .map(|(point, mass)| {
+                0.6 * mass * ((1.4 * point.x - 0.9 * point.y).sin() + 0.5 * (2.1 * point.y).cos())
+            })
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.36 * (0.8 * point.x + 1.2 * point.y).cos())
+            .collect::<Vec<_>>();
+        let complementary = base.compatible_flux(&potential).unwrap();
+        let drift = |form: FourthOrderForm| {
+            let mut state = CanonicalTemporalWaveState::new(
+                &operator,
+                time_step,
+                primary.clone(),
+                complementary.clone(),
+            )
+            .unwrap()
+            .with_fourth_order_form(form);
+            let initial = state.energy(&operator).unwrap();
+            for _ in 0..(40.0 / time_step) as usize {
+                state.step(&operator).unwrap();
+            }
+            (state.energy(&operator).unwrap() - initial) / initial
+        };
+        let kick = drift(FourthOrderForm::Kick);
+        let frozen = drift(FourthOrderForm::Drift);
+        assert!(kick.abs() < 3.0e-3, "{kick}");
+        assert!(frozen.abs() > 5.0 * kick.abs(), "{frozen} {kick}");
     }
 }

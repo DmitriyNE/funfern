@@ -18560,3 +18560,28 @@ while the document named region 1.
   after `cargo fmt` once; both rerun.
 - **State.** Uncommitted. Stage B next on the user's word.
 
+## 2026-10-04 — M0 stage B: the fourth-order step on both CPU paths
+
+- **What.** `CanonicalIntegrator::{Leapfrog, FourthOrder}` with
+  `FourthOrderForm::{Drift, Kick}`, the form picked by
+  `CanonicalTemporalWaveOperator::fourth_order_form`: the kick form where any
+  complementary sample carries a field law, the drift form elsewhere and
+  always on the fixed path. The stage A prototype variant is gone. Both paths
+  integrate sources by `s − (s⁺ − 2s + s⁻)/12` at each kick. The CPU default
+  stays the leapfrog until the device follows in stage C.
+- **Corrected from stage A.** Pinned nodes: stage A kept the plain signal
+  because the two terms it tried were worse. Their sign was wrong. A free
+  node's `ũ` stands `h²/24 · ü` below the midpoint field (the predictor's
+  `−h²/8` plus the correction's `+h²/12`), and under the kick form the drift
+  reads the predictor itself; a pin reading `g − h²/24 · g″` or
+  `g − h²/8 · g″` matches its neighbours and measures 9.5 and 5 times below
+  the leapfrog, against 7 and 3 with the plain value.
+- **Tests.** The ledger-order helper behind ten composition tests and the
+  temporal-work residual now check both integrators; inert-equals-fixed runs
+  under both; reversibility under both forms; new: fourth order from rest
+  (orders 4.2 and 4.0, the two forms equal on a linear generation), sources
+  and pins from rest, the form following the field laws in every skin, and a
+  stiffness-side Kerr medium's energy over t = 40 (kick form 7e-4, drift form
+  3.5e-2). funfern-core: 500 pass.
+- **State.** Branch `fourth-order-step`, uncommitted until the gate passes.
+

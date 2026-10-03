@@ -1510,27 +1510,65 @@ pub struct CanonicalOutgoingEliminationExport {
     pub solved_column_coefficient: [f64; 3],
 }
 
-/// How a step's drift reads the primary field.
+/// The time integrator a state steps with.
 ///
-/// Both are the same kick-drift-kick composition; they differ in the field
-/// the drift, and everything that drifts beside `b`, moves on.
+/// Both are the same kick-drift-kick composition with the same Strang loss
+/// halves around it; see `docs/spikes/funfern-fourth-order-step.md`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CanonicalIntegrator {
-    /// Störmer-Verlet: the drift reads the midpoint field `u`. Second order.
+    /// Störmer-Verlet: the kicks use the force at the step's ends and the
+    /// drift reads the midpoint field `u`. Second order.
     #[default]
     Leapfrog,
-    /// The modified-equation Störmer step (Dablain 1986): the drift reads
-    /// `ũ = u + dt²/12 · ü` with `M ü = −L u + ṡ`, `L` the stiffness of
-    /// everything that drifts (the bulk and the gap springs) and `ṡ` the
-    /// source rate's derivative. Fourth order on the linear conservative bulk,
-    /// stable while `ω dt < 2√3`; a prescribed node reads its signal at the
-    /// drift's instant. Boundary damping and losses keep their second-order
-    /// places in the step.
+    /// The modified-equation Störmer step (Dablain 1986), fourth order on the
+    /// linear conservative bulk and stable while `ω dt < 2√3`. Its `dt²/12`
+    /// correction sits where the generation's laws leave it symplectic; see
+    /// [`FourthOrderForm`]. The kicks integrate a source rate to fourth order,
+    /// `s − (s⁺ − 2s + s⁻)/12` at each end. Boundary damping, losses and the
+    /// short-wave viscosity keep their second-order places in the step, and a
+    /// prescribed node's drift reads its signal expanded as the free nodes'
+    /// field is.
     FourthOrder,
-    /// Stage A prototype: the same fourth-order step with the correction in
-    /// the kicks, `F̃ = F + dt²/12 · L_b u̇`, exact for a stiffness-side or
-    /// restoring law over a linear mass. Driven path only.
-    FourthOrderKick,
+}
+
+/// Where the fourth-order step puts its correction.
+///
+/// Each form is the exact gradient of a modified store while the other side
+/// of the system is quadratic, and so keeps the step symplectic there. A
+/// generation with a field law on the stiffness side takes the kick form;
+/// every other generation, linear ones included, takes the drift form, the
+/// more accurate of the two where both apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FourthOrderForm {
+    /// The drift and everything that drifts beside `b` read
+    /// `ũ = u − dt²/12 · A (L u − ṡ)`: `A` is `∂u/∂Q`, `L` the stiffness of
+    /// everything that drifts and `ṡ` the source rate's derivative. The
+    /// gradient of `E_Q − dt²/24 · uᵀ L u`, exact under any mass-side law.
+    Drift,
+    /// Each kick uses `F̃ = F + dt²/12 · L_b u̇` with `u̇ = M⁻¹ (s − F)`. The
+    /// gradient of `U − dt²/24 · Fᵀ M⁻¹ F`, exact under any stiffness-side or
+    /// restoring law over a linear mass.
+    Kick,
+}
+
+/// The fourth-order step's source rate at a kick: the rate at the kick's
+/// instant less a twelfth of its second difference over the step, so the
+/// two kicks of a step integrate the source as Simpson's rule does.
+pub(crate) fn fourth_order_source(
+    forcing: &CanonicalForcing,
+    time: f64,
+    duration: f64,
+    rate: &mut [f64],
+) -> Result<(), WaveError> {
+    if forcing.sources.is_empty() {
+        return Ok(());
+    }
+    let later = forcing.integrated_rate(time + duration)?;
+    let earlier = forcing.integrated_rate(time - duration)?;
+    for ((value, later), earlier) in rate.iter_mut().zip(later).zip(earlier) {
+        *value -= (later - 2.0 * *value + earlier) / 12.0;
+    }
+    finite_values(rate)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1923,7 +1961,10 @@ impl CanonicalWaveState {
         accounting.primary_loss += primary_loss;
         accounting.complementary_loss += complementary_loss;
 
-        let first_source = forcing.integrated_rate(start_time)?;
+        let mut first_source = forcing.integrated_rate(start_time)?;
+        if self.integrator == CanonicalIntegrator::FourthOrder {
+            fourth_order_source(forcing, start_time, self.time_step, &mut first_source)?;
+        }
         let mut first_force = operator.force(&self.complementary_flux)?;
         self.add_thin_gap_force(operator, &mut first_force)?;
         let (source_work, boundary_loss, prescribed_exchange) = self.force_coupled_kick(
@@ -1952,7 +1993,10 @@ impl CanonicalWaveState {
         let mut second_force = operator.force(&self.complementary_flux)?;
         self.add_thin_gap_force(operator, &mut second_force)?;
         let end_time = start_time + self.time_step;
-        let second_source = forcing.integrated_rate(end_time)?;
+        let mut second_source = forcing.integrated_rate(end_time)?;
+        if self.integrator == CanonicalIntegrator::FourthOrder {
+            fourth_order_source(forcing, end_time, self.time_step, &mut second_source)?;
+        }
         let (source_work, boundary_loss, prescribed_exchange) = self.force_coupled_kick(
             operator,
             &second_force,
@@ -2439,8 +2483,8 @@ impl CanonicalWaveState {
 }
 
 /// The field the fourth-order drift reads: `ũ = u − dt²/12 · M⁻¹ (L u − ṡ)`
-/// at a free node, the signal at the drift's instant at a prescribed one.
-/// `L` is the bulk stiffness and the gap springs, the stiffness of
+/// at a free node; a prescribed one reads its signal less `h²/24` of its
+/// second difference, the offset a free node's `ũ` carries. `L` is the bulk stiffness and the gap springs, the stiffness of
 /// everything the drift moves; `ṡ` is the central difference of the source
 /// rate over the step, the two instants the kicks integrate it at.
 fn fourth_order_field(
@@ -2471,7 +2515,13 @@ fn fourth_order_field(
         .zip(operator.primary_mass())
         .zip(&forcing.prescribed)
         .map(|(((field, stiffness), mass), signal)| match signal {
-            Some(signal) => signal.value(middle_time),
+            Some(signal) => {
+                let value = signal.value(middle_time);
+                value
+                    - (signal.value(middle_time + duration) - 2.0 * value
+                        + signal.value(middle_time - duration))
+                        / 24.0
+            }
             None => field - scale * stiffness / mass,
         })
         .collect::<Vec<_>>();

@@ -1093,8 +1093,9 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   stiffness-side field law is present, because each is symplectic only when
   the other side is quadratic (the drift form leaks 38% of a stiffness-side
   Kerr medium's energy by t = 160). Sources need a fourth-order kick
-  quadrature; prescribed nodes need nothing. Stages B (CPU), C (device) and
-  D (gate) next.
+  quadrature; a prescribed node reads its signal expanded as the free
+  nodes' field is. Stage B, both CPU paths with tests, done the same day;
+  stages C (device) and D (gate, the fourth-order step as the default) next.
 
 ## Maintenance
 
