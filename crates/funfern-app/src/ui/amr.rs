@@ -368,7 +368,8 @@ impl Playground {
                 cooldown_generations: AMR_TOPOLOGY_COOLDOWN_GENERATIONS,
                 ..Default::default()
             };
-            let field: Arc<dyn MeshSizeField> = result.field;
+            let field: Arc<dyn MeshSizeField> =
+                adaptation_field(&result, self.amr_target_accuracy());
             let job = MeshAdaptationJob::new_topology(
                 active.mesh.clone(),
                 &active.bundle.plan,
@@ -878,6 +879,68 @@ mod tests {
         assert!(!size_rule_refines(&report(2000, 2000, 0.2), 0.12));
         assert!(!size_rule_refines(&report(2000, 0, 0.2), 0.12));
         assert!(!size_rule_refines(&report(0, 3, 0.02), 0.12));
+    }
+
+    /// A refinement the size rule asks for alone applies the limits' field,
+    /// so nothing the estimate would merely like finer rides along with it;
+    /// one the accuracy target asks for applies the whole field, limits and
+    /// estimate together. A quiet field reads no error, and a largest element
+    /// under the mesh's edges binds every element as a limit.
+    #[test]
+    fn a_size_rule_refinement_applies_only_the_limits() {
+        let scene = Scene::initial();
+        let mesh = Arc::new(
+            mesh_scene(
+                &scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.2,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &scene,
+                OuterBoundaryCondition::Reflecting,
+            )
+            .unwrap(),
+        );
+        let dofs = operator.degrees_of_freedom();
+        let mut job = SolutionIndicatorJob::new(
+            mesh,
+            operator,
+            scene,
+            QuadraticSolutionSnapshot {
+                mesh_revision: 1,
+                displacement: vec![0.0; dofs],
+                velocity: vec![0.0; dofs],
+                acceleration: vec![0.0; dofs],
+                auxiliary: vec![0.0; dofs],
+                volume_acceleration: vec![0.0; dofs],
+                time: 0.01,
+                time_step: 0.01,
+            },
+            SolutionIndicatorOptions {
+                maximum_edge_length: 0.1,
+                ..Default::default()
+            },
+        );
+        let mut result = loop {
+            if let Some(result) = job.advance(1 << 16) {
+                break result.unwrap();
+            }
+        };
+        assert!(result.report.limit_refine_candidates >= 4);
+        assert!(Arc::ptr_eq(
+            &adaptation_field(&result, 0.12),
+            &result.limit_field
+        ));
+        result.report.error_refine_candidates = 2000;
+        result.report.global_indicator = 0.2;
+        assert!(Arc::ptr_eq(&adaptation_field(&result, 0.12), &result.field));
     }
 
     /// An estimate owns a copied solution snapshot. Accepted-state maintenance

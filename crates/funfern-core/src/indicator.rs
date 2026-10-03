@@ -834,6 +834,11 @@ impl Default for SolutionIndicatorReport {
 #[derive(Clone, Debug)]
 pub struct SolutionIndicatorResult {
     pub field: Arc<AdaptiveSizeField>,
+    /// The size rule's targets alone, graded the same way: what a refinement
+    /// the limits ask for should apply when the error estimate is inside its
+    /// target. Handed `field`, such a refinement splits whatever the estimate
+    /// would like finer too, an accuracy the target did not ask for.
+    pub limit_field: Arc<AdaptiveSizeField>,
     pub element_indicators: Vec<f64>,
     pub element_targets: Vec<f64>,
     pub report: SolutionIndicatorReport,
@@ -1115,6 +1120,8 @@ pub struct SolutionIndicatorJob {
     /// and a limit can bind at once; the limit must win that classification or
     /// a satisfied global accuracy target can suppress a mandatory refinement.
     limit_bound: Vec<bool>,
+    /// The limits' targets without the estimate's, graded beside `targets`.
+    limit_targets: Vec<f64>,
     total_energy: f64,
     total_area: f64,
     report: SolutionIndicatorReport,
@@ -1197,6 +1204,7 @@ impl SolutionIndicatorJob {
             indicators: vec![0.0; count],
             targets: vec![0.0; count],
             limit_bound: vec![false; count],
+            limit_targets: vec![0.0; count],
             total_energy: 0.0,
             total_area: 0.0,
             report: SolutionIndicatorReport::default(),
@@ -2438,6 +2446,7 @@ impl SolutionIndicatorJob {
         let target = error_target.min(limit_target);
         self.indicators[index] = indicator;
         self.targets[index] = target;
+        self.limit_targets[index] = limit_target;
         self.report.minimum_indicator = self.report.minimum_indicator.min(indicator);
         self.report.maximum_indicator = self.report.maximum_indicator.max(indicator);
         self.phase = IndicatorPhase::Target(index + 1);
@@ -2458,16 +2467,9 @@ impl SolutionIndicatorJob {
         }
         let sides = &self.edge_list[edge].1;
         if sides.len() == 2 {
-            let [a, b] = [sides[0], sides[1]];
-            let low = self.targets[a].min(self.targets[b]);
-            let high = self.targets[a].max(self.targets[b]);
-            if high > low * self.options.grading_ratio {
-                if self.targets[a] > self.targets[b] {
-                    self.targets[a] = low * self.options.grading_ratio;
-                } else {
-                    self.targets[b] = low * self.options.grading_ratio;
-                }
-            }
+            let ratio = self.options.grading_ratio;
+            grade_across(&mut self.targets, [sides[0], sides[1]], ratio);
+            grade_across(&mut self.limit_targets, [sides[0], sides[1]], ratio);
         }
         self.phase = IndicatorPhase::Grade {
             pass,
@@ -2484,11 +2486,14 @@ impl SolutionIndicatorJob {
             self.report.interior_jump_contribution += estimate.interior_jump;
             self.report.boundary_residual_contribution += estimate.boundary_residual;
         }
-        let triangle_targets = self
-            .targets
-            .iter()
-            .map(|target| [*target; 3])
-            .collect::<Vec<_>>();
+        let per_triangle = |targets: &[f64]| {
+            targets
+                .iter()
+                .map(|target| [*target; 3])
+                .collect::<Vec<_>>()
+        };
+        let triangle_targets = per_triangle(&self.targets);
+        let limit_targets = per_triangle(&self.limit_targets);
         self.report.minimum_target = self.targets.iter().copied().fold(f64::INFINITY, f64::min);
         self.report.maximum_target = self.targets.iter().copied().fold(0.0, f64::max);
         self.report.total_energy = self.total_energy;
@@ -2543,14 +2548,17 @@ impl SolutionIndicatorJob {
                 self.report.coarsen_candidates += 1;
             }
         }
-        let field = Arc::new(AdaptiveSizeField::new(
-            self.mesh.clone(),
-            triangle_targets,
-            self.options.minimum_edge_length,
-            self.options.maximum_edge_length,
-        ));
+        let field = |targets| {
+            Arc::new(AdaptiveSizeField::new(
+                self.mesh.clone(),
+                targets,
+                self.options.minimum_edge_length,
+                self.options.maximum_edge_length,
+            ))
+        };
         SolutionIndicatorResult {
-            field,
+            field: field(triangle_targets),
+            limit_field: field(limit_targets),
             element_indicators: self.indicators.clone(),
             element_targets: self.targets.clone(),
             report: self.report.clone(),
@@ -2564,6 +2572,19 @@ struct ElementGeometry {
     gradients: [Point2; 3],
     area: f64,
     maximum_edge: f64,
+}
+
+/// Holds two neighbouring targets within `ratio` of each other by shrinking
+/// the larger.
+fn grade_across(targets: &mut [f64], [a, b]: [usize; 2], ratio: f64) {
+    let low = targets[a].min(targets[b]);
+    if targets[a].max(targets[b]) > low * ratio {
+        if targets[a] > targets[b] {
+            targets[a] = low * ratio;
+        } else {
+            targets[b] = low * ratio;
+        }
+    }
 }
 
 fn element_geometry(
@@ -3900,6 +3921,47 @@ mod tests {
             result.report.error_refine_candidates,
             result.report.refine_candidates
         );
+    }
+
+    /// The size rule's own field carries the limits and nothing the estimate
+    /// asked for. Here the largest element allowed binds everywhere and a
+    /// steep bump binds the estimate near it: the full field holds the bump
+    /// finer than the limit, the limits' field holds every element to the
+    /// limit, so a refinement the error target did not ask for can apply the
+    /// limit alone.
+    #[test]
+    fn the_limits_field_leaves_out_the_estimates_targets() {
+        let (mesh, operator, scene) = meshed_setup(Scene::default(), 1);
+        let state = snapshot(&mesh, &operator, |point| {
+            (-((point.x - 0.6).powi(2) + (point.y - 0.6).powi(2)) / 0.01).exp()
+        });
+        let count = mesh.triangles.len();
+        let largest = 0.15;
+        let result = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions {
+                    minimum_edge_length: 0.005,
+                    maximum_edge_length: largest,
+                    relative_tolerance: 1.0e-3,
+                    ..Default::default()
+                },
+            ),
+            100,
+        )
+        .unwrap();
+        assert!(result.report.limit_refine_candidates > 0);
+        let limits = (0..count)
+            .map(|index| result.limit_field.element_target(index).unwrap())
+            .collect::<Vec<_>>();
+        assert!(limits.iter().all(|target| *target == largest));
+        let finer = (0..count)
+            .filter(|index| result.field.element_target(*index).unwrap() < 0.9 * largest)
+            .count();
+        assert!(finer > 0, "the bump asked for nothing finer than the limit");
     }
 
     /// A wavelength remains an unconditional resolution floor when the error

@@ -1083,6 +1083,20 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   pattern per material (`with_coefficient_patterns`), and the estimate line
   adds "refining to resolve wavelengths" when the size rule refines.
 
+- [x] A refinement the size rule asks for applies the error targets too.
+  Found on 2026-10-03 on the parametric fiber: 18,968 triangles by 53 s at
+  2-3% of a 12% target, then coarsening back. The adaptation took the
+  estimate's full field, the smaller of the limit and the error target per
+  element. Fixed on 2026-10-03 (`docs/engineering-log.md`): the estimator
+  returns the limits' graded field beside it, and a size-rule refinement
+  applies that; the fiber settles at 7,348 triangles within 5 s.
+
+- [ ] Coarsen decisions that change nothing. Found on 2026-10-03: the
+  settled parametric fiber decides Coarsen on every estimate, about 520
+  candidates, and each adaptation it starts collapses nothing, so an empty
+  transaction runs about once a second. Why those candidates cannot collapse
+  is not yet known.
+
 - Test a larger wasm memory cap on iOS Safari before shipping one. The
   threaded web build caps its shared memory at 1 GiB (`--max-memory` in
   `scripts/trunk`). After the memory fixes of 2026-09-28, Parametric pump at

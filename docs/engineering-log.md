@@ -17886,3 +17886,33 @@ The user saw adaptation run on while the simulation was paused.
   the estimate's local error targets everywhere with it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — A size-rule refinement applies the size rule alone
+
+After Run the parametric fiber refined to 16,931 triangles by 50 s while the
+error read 2-3% against its 12% target (seen in the pause entry above).
+
+- **Reproduced** in an instrumented run on the user's autosave: 2,861
+  triangles to 18,968 in 16 refinements over 53 s, then coarsening back 512
+  changes at a time. The size rule did ask for each refinement (1,553 limit
+  candidates at the start, the fiber at 0.08 against its pattern's 0.029),
+  but the adaptation was handed the estimate's full field, whose target is
+  the smaller of the limit's and the error's, so up to 1,387 elements a pass
+  split for an error the accuracy target was satisfied with. They took the
+  pass's 512-change budget from the fiber and left the vacuum over-refined.
+- **Fix.** The estimator keeps the limits' targets apart and grades them
+  beside the full ones, and returns them as `limit_field`. A refinement the
+  size rule asks for alone (`size_rule_refines`) applies that field
+  (`adaptation_field` in `crates/funfern-app/src/ui.rs`); one the accuracy
+  target asks for applies the full field as before, and coarsening is
+  unchanged.
+- **Measured** on the same run: the fiber reaches its floor in five
+  refinements, 7,404 triangles at 4.7 s, and the mesh holds at 7,348 to the
+  end of the 90 s run with the error at 2.4-2.7%.
+- **Tests.** `the_limits_field_leaves_out_the_estimates_targets` (core);
+  `a_size_rule_refinement_applies_only_the_limits` (app).
+- **Seen, not changed:** once settled, every estimate on the fiber decides
+  Coarsen with about 520 candidates, and the adaptation it starts changes
+  nothing: an empty transaction about once a second.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

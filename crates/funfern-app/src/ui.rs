@@ -1952,6 +1952,22 @@ fn size_rule_refines(report: &SolutionIndicatorReport, target_accuracy: f64) -> 
         && !(report.error_refine_candidates >= 4 && report.global_indicator > target_accuracy)
 }
 
+/// The size field a refinement applies. One the size rule asks for alone
+/// applies the limits alone: handed the full field it also splits whatever
+/// the estimate would like finer, which the accuracy target has just said is
+/// not needed, and the parametric fiber climbed to 19,000 triangles at 2% of
+/// a 12% target before coarsening back what the floor never asked for.
+fn adaptation_field(
+    result: &SolutionIndicatorResult,
+    target_accuracy: f64,
+) -> Arc<AdaptiveSizeField> {
+    if size_rule_refines(&result.report, target_accuracy) {
+        result.limit_field.clone()
+    } else {
+        result.field.clone()
+    }
+}
+
 /// What each material's own drives demand of the mesh beyond the sources.
 ///
 /// A travelling drive patterns the coefficients in space whether or not a
