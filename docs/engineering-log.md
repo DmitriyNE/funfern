@@ -18502,6 +18502,7 @@ while the document named region 1.
   20 s. Not driven by hand.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
 ## 2026-10-03 — The IGA scene design note
 
 - **What.** `docs/spikes/funfern-iga-scene-design.md`: the decision document
@@ -18584,4 +18585,45 @@ while the document named region 1.
   stiffness-side Kerr medium's energy over t = 40 (kick form 7e-4, drift form
   3.5e-2). funfern-core: 500 pass.
 - **State.** Branch `fourth-order-step`, uncommitted until the gate passes.
+
+## 2026-10-04 — M0 stages C and D: the fourth-order step on the device, and as the default
+
+- **What.** `canonical_wave.wgsl` and `canonical_gpu.rs`: the device plan takes
+  the integrator of the CPU state it is compiled from (the form from the
+  driven state), so device and reference always step alike. Flags 256 (the
+  fourth-order step) and 512 (its kick form); one scratch word per node and
+  per sample after the secant words. The drift form: a node pass caching the
+  midpoint field, a sample pass `J η C u`, a node pass `ũ` (gap springs,
+  restoring curvature, `ṡ`, the pin's `h²/24` expansion); a fixed
+  generation with a force cache takes `K u` from its assembled row. The kick
+  form: before each kick a node pass (force and `u̇`) and a sample pass
+  (`J_b η C u̇` from the cached secant). Every kick, the walls' included,
+  reads `kick_force` and `step_source`. `CanonicalIntegrator::FourthOrder` is
+  the default on both CPU states.
+- **Found on the way.** A linear-loss patch's event resets the control flags
+  to bits 1 to 8; it now keeps 256 and 512, or a patched generation would
+  have fallen back to the leapfrog against a fourth-order reference.
+- **Measured.** Every canonical GPU example at its default (23) and across
+  its modes (107) within its gate, typically 1e-6, worst 1.2e-5 on the
+  remeshing oscillator handoff. Forced to the leapfrog against the
+  fourth-order reference the same examples fail at 1e-3 to 6e-2. Throughput
+  at 15,264 dofs: fixed 400 → 426 µs a step, driven 395 → 425, sine-Gordon
+  about 1.08×, Kerr and saturable under the kick form 1007 → 1194. The first
+  cut cost 1.37 to 1.46×: a driven mass evaluated at every sample of a node,
+  a scan of every force entry for gaps on the force-cache path, a plain
+  gradient always formed in the drift, and each sample's radius solved twice.
+- **Tests that named the leapfrog.** The scalar-recurrence parities and
+  velocity Verlet on the Klein-Gordon uniform mode now say so; the latter has
+  a fourth-order twin exact to 1e-11 against `ω̃² = (1 − (ω₀h)²/12) ω₀²`. The
+  Kerr bulk's energy bound moved from 2e-4 to 2.5e-4 (2.3e-4 against the
+  leapfrog's 1.9e-4, both second order), and the short-wave loss's closure is
+  held to the bare step's own breathing (1.7e-5 of the start against 2.6e-7):
+  both are the step's bounded breathing about its conserved store.- **Device unit tests.** The packed-table mirror steps the leapfrog, so its
+  parity test now names the leapfrog on the reference side; the dispatch
+  counts gain the drift form's three passes.
+- **Gate.** fmt, clippy, the workspace's release tests (app 265, core 501),
+  release build, wasm32 check and Chrome's WebGPU shader compile all pass.
+- **Not checked by me.** The app driven by hand in the browser; the device
+  examples run the app's runtime types, not its UI.
+- **State.** Branch `fourth-order-step`, not merged or pushed.
 

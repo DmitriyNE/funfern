@@ -189,6 +189,14 @@ fn field_laws() -> bool { return (control.boundary_offsets.w & 32u) != 0u; }
 // frozen maps at the event instant.
 fn node_field_offset() -> u32 { return nonlinear_trace_offset() + control.counts_b.y; }
 fn sample_secant_offset() -> u32 { return node_field_offset() + control.counts_a.x; }
+// The fourth-order step's words, after the secants: one per node (`ũ` in x,
+// the kick form's `u̇` in y and its force in w, the drift form's midpoint
+// field `u` in z) and one per sample (the drift form's `J η C u` in xy, the
+// kick form's `J_b η C u̇` in zw).
+fn fourth_order_node_offset() -> u32 { return sample_secant_offset() + control.counts_a.y; }
+fn fourth_order_sample_offset() -> u32 {
+    return fourth_order_node_offset() + control.counts_a.x;
+}
 fn has_loss_stages() -> bool { return (control.boundary_offsets.w & 1u) != 0u; }
 // A time-driven generation carrying loss reads its rates from loss records.
 fn loss_records() -> bool { return (control.boundary_offsets.w & 64u) != 0u; }
@@ -199,6 +207,10 @@ fn integrated_index(node: u32) -> u32 {
     return control.counts_a.z - control.counts_a.x + node;
 }
 fn use_force_cache() -> bool { return (control.boundary_offsets.w & 4u) != 0u; }
+// M0's fourth-order step (`docs/spikes/funfern-fourth-order-step.md`) and,
+// beside a stiffness-side field law, its kick form.
+fn fourth_order() -> bool { return (control.boundary_offsets.w & 256u) != 0u; }
+fn fourth_order_kick_form() -> bool { return (control.boundary_offsets.w & 512u) != 0u; }
 fn has_prescribed_trace() -> bool { return (control.boundary_offsets.w & 8u) != 0u; }
 fn accepted_slot() -> u32 { return control.event.z & 1u; }
 fn event_operation() -> u32 { return control.event.z >> 8u; }
@@ -1135,6 +1147,88 @@ fn restoring_force(node: u32, second: bool) -> f32 {
         second || has_loss_stages()));
 }
 
+// `Σ m₀ V″(r)`, the restoring law's stiffness on the integrated field, read at
+// the `r` the kick at `second` holds.
+fn restoring_curvature(node: u32, second: bool) -> f32 {
+    if !restoring() { return 0.0; }
+    let index = integrated_index(node);
+    let r = select(
+        accepted_auxiliary(index), candidate_auxiliary(index),
+        second || has_loss_stages());
+    let range = nodes[node].stiffness.zw;
+    var result = 0.0;
+    for (var record = 0u; record < range.y; record += 1u) {
+        let entry = restoring_record(range.x + record * TEMPORAL_COEFFICIENT_WORDS);
+        let mass = bitcast<f32>(entry.y);
+        let coefficient = bitcast<f32>(entry.z);
+        if entry.x == RESTORING_KLEIN_GORDON {
+            result += mass * coefficient;
+        } else if entry.x == RESTORING_SINE_GORDON {
+            result += mass * coefficient * cos(r);
+        } else if entry.x == RESTORING_PHI4 {
+            result += mass * coefficient * (3.0 * r * r - 1.0);
+        }
+    }
+    return result;
+}
+
+// The source rate a kick integrates. The fourth-order step takes a twelfth
+// of the rate's second difference over the step off each end, so a step's
+// two kicks integrate it as Simpson's rule does.
+fn step_source(node: u32, time: f32) -> f32 {
+    let rate = source_rate(node, time);
+    if !fourth_order() { return rate; }
+    let h = control.clock_f32.x;
+    return rate
+        - (source_rate(node, time + h) - 2.0 * rate + source_rate(node, time - h)) / 12.0;
+}
+
+// A pinned node's signal less `1/divisor` of its second difference over the
+// step: the offset a free node's drift field carries, `h²/24 · ü` in the
+// drift form and the predictor's `h²/8 · ü` in the kick form.
+fn expanded_signal(node: u32, time: f32, divisor: f32) -> f32 {
+    let h = control.clock_f32.x;
+    let value = prescribed_value(node, time);
+    return value
+        - (prescribed_value(node, time + h) - 2.0 * value + prescribed_value(node, time - h))
+            / divisor;
+}
+
+// The kick form's force correction `h²/12 · L_b u̇` at a node, gathered from
+// the tangent pass's sample words, the gap springs and the restoring law.
+fn fourth_order_kick_correction(node: u32, second: bool) -> f32 {
+    let range = nodes[node].ranges.xy;
+    var result = 0.0;
+    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+        let coefficient = vec2<f32>(table_float(entry, 2u), table_float(entry, 3u));
+        if tables[entry].data.y == FORCE_KIND_GAP {
+            let gap = tables[control.table_offsets.x
+                + tables[entry].data.x - auxiliary_offset()].data;
+            result += coefficient.x * (
+                scratch[fourth_order_node_offset() + gap.x].values.y
+                - scratch[fourth_order_node_offset() + gap.y].values.y);
+        } else {
+            let sample = tables[entry].data.x;
+            result += dot(coefficient, scratch[fourth_order_sample_offset() + sample].values.zw);
+        }
+    }
+    result += restoring_curvature(node, second)
+        * scratch[fourth_order_node_offset() + node].values.y;
+    let h = control.clock_f32.x;
+    return h * h / 12.0 * result;
+}
+
+// The force a kick holds: the medium's, and under the fourth-order kick form
+// its `h²/12 · L_b u̇` correction.
+fn kick_force(node: u32, second: bool) -> f32 {
+    if fourth_order() && fourth_order_kick_form() {
+        // The rate pass gathered this kick's force already.
+        return scratch[fourth_order_node_offset() + node].values.w
+            + fourth_order_kick_correction(node, second);
+    }
+    return force(node, second);
+}
+
 fn force(node: u32, second: bool) -> f32 {
     if use_force_cache() {
         let cached = select(accepted_force(node), candidate_force(node), second);
@@ -1937,7 +2031,7 @@ fn commit_event() {
     control.accepted_accounting_b = control.candidate_accounting_b;
     control.accepted_accounting_c = control.candidate_accounting_c;
     if operation == 3u {
-        var flags = control.boundary_offsets.w & 8u;
+        var flags = control.boundary_offsets.w & (8u | 256u | 512u);
         flags |= control.event.w & 1u;
         flags |= 2u;
         flags |= control.event.w & 4u;
@@ -2253,7 +2347,7 @@ fn kick_node(node: u32, second: bool) {
     // the mass is constant and is not free when it moves.
     let target_time = control.clock_f32.y
         + select(select(duration, 0.0, temporal_enabled()), control.clock_f32.x, second);
-    let source = source_rate(node, source_time);
+    let source = step_source(node, source_time);
     // Gate O: the second kick also gathers the short-wave stresses; a
     // law-carrying generation keeps no force cache, so the gather is the one
     // the force needs anyway.
@@ -2263,9 +2357,12 @@ fn kick_node(node: u32, second: bool) {
     if short_wave {
         let forces = gathered_forces(node, second, true);
         held_force = forces.x + restoring_force(node, second);
+        if fourth_order() && fourth_order_kick_form() {
+            held_force += fourth_order_kick_correction(node, second);
+        }
         viscous = forces.y;
     } else {
-        held_force = force(node, second);
+        held_force = kick_force(node, second);
     }
     let net = source - held_force;
     if nodes[node].boundary.x != NO_INDEX {
@@ -2618,8 +2715,8 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
     let derivative = -damping * old_field - coupling.x;
     let source_time = control.clock_f32.y
         + select(0.0, control.clock_f32.x, second);
-    let source = source_rate(node, source_time);
-    let held_force = force(node, second);
+    let source = step_source(node, source_time);
+    let held_force = kick_force(node, second);
     var reduced = old + control.evolution.w * derivative
         + control.evolution.z * (source - held_force);
     if nodes[node].boundary.z != 0u {
@@ -2762,8 +2859,8 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
         let next = scratch[trace_solution_offset() + trace].values.x;
         let source_time = control.clock_f32.y
             + select(0.0, control.clock_f32.x, second);
-        let source = source_rate(node, source_time);
-        let held_force = force(node, second);
+        let source = step_source(node, source_time);
+        let held_force = kick_force(node, second);
         var midpoint = 0.5 * (entry + next) * inverse_mass;
         if nonlinear_trace() {
             // The last Newton step must have settled: a solve still moving
@@ -2972,6 +3069,227 @@ fn temporal_drift_field(node: u32, middle_time: f32) -> f32 {
     return candidate_q(node) * temporal_inverse_primary_mass(node, middle_time);
 }
 
+// The field the leapfrog's drift reads at its midpoint, on either path.
+fn plain_drift_field(node: u32, middle_time: f32) -> f32 {
+    if temporal_enabled() { return temporal_drift_field(node, middle_time); }
+    return candidate_q(node) * nodes[node].mass_loss.y;
+}
+
+// The field the drift, and everything that drifts beside `b`, reads: the
+// leapfrog's, the drift form's `ũ`, or under the kick form the leapfrog's
+// with a pin expanded by the predictor's offset.
+fn drift_field(node: u32, middle_time: f32) -> f32 {
+    if fourth_order() {
+        if !fourth_order_kick_form() {
+            return scratch[fourth_order_node_offset() + node].values.x;
+        }
+        if nodes[node].boundary.z != 0u {
+            return expanded_signal(node, middle_time, 8.0);
+        }
+    }
+    return plain_drift_field(node, middle_time);
+}
+
+// `K x` of the drift field through the assembled stiffness row, for the force
+// cache's drift.
+fn stiffness_of_drift_field(node: u32, middle_time: f32) -> f32 {
+    let range = nodes[node].stiffness.xy;
+    let row_field = drift_field(node, middle_time);
+    var result = 0.0;
+    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+        let column = tables[entry].data.x;
+        result += table_float(entry, 2u) * (drift_field(column, middle_time) - row_field);
+    }
+    return result;
+}
+
+// A fixed generation with a force cache takes the drift form's `K u` from its
+// assembled row and the field from its flux, so the two passes that build
+// them on the samples are skipped there.
+fn fourth_order_rows() -> bool { return use_force_cache() && !temporal_enabled(); }
+
+// The drift form's midpoint field `u`, cached once a node: a driven medium's
+// mass, or a field law's inverse, is evaluated here and not at each of the
+// node's samples.
+fn fourth_order_field(node: u32) -> f32 {
+    return scratch[fourth_order_node_offset() + node].values.z;
+}
+
+// The drift form, first pass: each node's leapfrog midpoint field.
+@compute @workgroup_size(128)
+fn fourth_order_fields(@builtin(global_invocation_id) id: vec3<u32>) {
+    let node = id.x;
+    if stopped() || !fourth_order() || fourth_order_rows() || node >= control.counts_a.x {
+        return;
+    }
+    scratch[fourth_order_node_offset() + node].values.z = plain_drift_field(
+        node, control.clock_f32.y + 0.5 * control.clock_f32.x);
+}
+
+// The drift form, second pass: each sample's `J η C u` on that field, the
+// drive's factor at the midpoint divided out.
+@compute @workgroup_size(128)
+fn fourth_order_samples(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if stopped() || !fourth_order() || fourth_order_rows() || i >= control.counts_a.y {
+        return;
+    }
+    let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
+    let sample = samples[i];
+    let reference = fourth_order_field(sample.nodes_a.x);
+    var curl = vec2<f32>(0.0);
+    for (var local = 1u; local < 7u; local += 1u) {
+        curl += sample_curl(sample, local)
+            * (fourth_order_field(sample_node(sample, local)) - reference);
+    }
+    var value = control.evolution.y * curl;
+    if temporal_enabled() {
+        value = value / temporal_complementary_factor(i, middle_time);
+    }
+    scratch[fourth_order_sample_offset() + i].values.x = value.x;
+    scratch[fourth_order_sample_offset() + i].values.y = value.y;
+}
+
+// The drift form, second pass: `ũ = u − h²/12 · A (L u − ṡ)` at a free node,
+// `L` the bulk, the gap springs and the restoring law at the step's `r`, `A`
+// the inverse mass or a field law's inverse tangent, `ṡ` the source rate's
+// difference over the step; a pin reads its signal less `h²/24` of its second
+// difference.
+@compute @workgroup_size(128)
+fn fourth_order_nodes(@builtin(global_invocation_id) id: vec3<u32>) {
+    let node = id.x;
+    if stopped() || !fourth_order() || node >= control.counts_a.x { return; }
+    let start = control.clock_f32.y;
+    let h = control.clock_f32.x;
+    let middle_time = start + 0.5 * h;
+    var value: f32;
+    if nodes[node].boundary.z != 0u {
+        value = expanded_signal(node, middle_time, 24.0);
+    } else {
+        let rows = fourth_order_rows();
+        var field: f32;
+        var stiffness = 0.0;
+        if rows {
+            field = plain_drift_field(node, middle_time);
+            stiffness = stiffness_force(node, middle_time);
+        } else {
+            field = fourth_order_field(node);
+        }
+        // On the rows the entries are visited only for the gap springs.
+        let range = nodes[node].ranges.xy;
+        if !rows || control.counts_b.x != 0u {
+            for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+                let coefficient = vec2<f32>(table_float(entry, 2u), table_float(entry, 3u));
+                if tables[entry].data.y == FORCE_KIND_GAP {
+                    let gap = tables[control.table_offsets.x
+                        + tables[entry].data.x - auxiliary_offset()].data;
+                    if rows {
+                        stiffness += coefficient.x * (
+                            plain_drift_field(gap.x, middle_time)
+                            - plain_drift_field(gap.y, middle_time));
+                    } else {
+                        stiffness += coefficient.x
+                            * (fourth_order_field(gap.x) - fourth_order_field(gap.y));
+                    }
+                } else if !rows {
+                    let sample = tables[entry].data.x;
+                    stiffness += dot(
+                        coefficient, scratch[fourth_order_sample_offset() + sample].values.xy);
+                }
+            }
+        }
+        stiffness += restoring_curvature(node, false) * field;
+        stiffness -= (source_rate(node, start + h) - source_rate(node, start)) / h;
+        var inverse = nodes[node].mass_loss.y;
+        if temporal_enabled() {
+            if node_is_nonlinear(node) {
+                inverse = 1.0 / primary_site(node, middle_time, abs(field)).y;
+            } else {
+                inverse = temporal_inverse_primary_mass(node, middle_time);
+            }
+        }
+        value = field - h * h / 12.0 * inverse * stiffness;
+    }
+    scratch[fourth_order_node_offset() + node].values.x = value;
+    if !finite_scalar(value) { reject(STATUS_NON_FINITE); }
+}
+
+// The kick form, first pass at a kick: `u̇ = M⁻¹ (s − F)` at the kick's
+// instant, a pin's signal's central difference.
+fn fourth_order_rate(node: u32, second: bool) {
+    if stopped() || !fourth_order() || !fourth_order_kick_form()
+        || node >= control.counts_a.x { return; }
+    let h = control.clock_f32.x;
+    let time = control.clock_f32.y + select(0.0, h, second);
+    let held = force(node, second);
+    var rate: f32;
+    if nodes[node].boundary.z != 0u {
+        rate = (prescribed_value(node, time + h) - prescribed_value(node, time - h)) / (2.0 * h);
+    } else {
+        rate = (step_source(node, time) - held) * temporal_inverse_primary_mass(node, time);
+    }
+    scratch[fourth_order_node_offset() + node].values.y = rate;
+    scratch[fourth_order_node_offset() + node].values.w = held;
+    if !finite_scalar(rate) { reject(STATUS_NON_FINITE); }
+}
+
+@compute @workgroup_size(128)
+fn fourth_order_rates_first(@builtin(global_invocation_id) id: vec3<u32>) {
+    fourth_order_rate(id.x, false);
+}
+
+@compute @workgroup_size(128)
+fn fourth_order_rates_second(@builtin(global_invocation_id) id: vec3<u32>) {
+    fourth_order_rate(id.x, true);
+}
+
+// The kick form, second pass: `J_b η C u̇` at each sample, the tangent taken
+// at the kick's flux and instant as the grid filter's site pass takes it.
+fn fourth_order_tangent(i: u32, second: bool) {
+    if stopped() || !fourth_order() || !fourth_order_kick_form()
+        || i >= control.counts_a.y { return; }
+    let time = control.clock_f32.y + select(0.0, control.clock_f32.x, second);
+    let flux = select(accepted_b(i), candidate_b(i), second || has_loss_stages());
+    let sample = samples[i];
+    let rates = fourth_order_node_offset();
+    let reference = scratch[rates + sample.nodes_a.x].values.y;
+    var curl = vec2<f32>(0.0);
+    for (var local = 1u; local < 7u; local += 1u) {
+        curl += sample_curl(sample, local)
+            * (scratch[rates + sample_node(sample, local)].values.y - reference);
+    }
+    let x = control.evolution.y * curl;
+    let word = sample.nodes_b.w;
+    let factor = temporal_factor(word, time);
+    var secant = 1.0 / factor;
+    var tangent = secant;
+    let magnitude = length(flux);
+    if field_kind(word) != 0u && magnitude > 0.0 {
+        // The kick's secant pass solved this flux's radius at this instant;
+        // its secant `r/(j|b|)` gives it back without a second solve.
+        secant = scratch[sample_secant_offset() + i].values.x;
+        let r = secant * sample.constitutive.x * magnitude;
+        tangent = 1.0 / (factor * field_response(word, r).y);
+    }
+    var value = secant * x;
+    if magnitude > 0.0 {
+        let n = flux / magnitude;
+        value += (tangent - secant) * dot(n, x) * n;
+    }
+    scratch[fourth_order_sample_offset() + i].values.z = value.x;
+    scratch[fourth_order_sample_offset() + i].values.w = value.y;
+}
+
+@compute @workgroup_size(128)
+fn fourth_order_tangents_first(@builtin(global_invocation_id) id: vec3<u32>) {
+    fourth_order_tangent(id.x, false);
+}
+
+@compute @workgroup_size(128)
+fn fourth_order_tangents_second(@builtin(global_invocation_id) id: vec3<u32>) {
+    fourth_order_tangent(id.x, true);
+}
+
 @compute @workgroup_size(128)
 fn nonlinear_node_fields(@builtin(global_invocation_id) id: vec3<u32>) {
     let node = id.x;
@@ -3008,15 +3326,20 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
         let index = integrated_index(i);
         let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
         let next = accepted_auxiliary(index)
-            + control.clock_f32.x * temporal_drift_field(i, middle_time);
+            + control.clock_f32.x * drift_field(i, middle_time);
         set_candidate_auxiliary(index, next);
         if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
         inject_at(auxiliary_offset() + index);
     }
     if i < control.counts_a.x && use_force_cache() {
-        let next_force = accepted_force(i)
-            + control.clock_f32.x
-                * stiffness_force(i, control.clock_f32.y + 0.5 * control.clock_f32.x);
+        let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
+        var rate = 0.0;
+        if fourth_order() {
+            rate = stiffness_of_drift_field(i, middle_time);
+        } else {
+            rate = stiffness_force(i, middle_time);
+        }
+        let next_force = accepted_force(i) + control.clock_f32.x * rate;
         set_candidate_force(i, next_force);
         if !finite_scalar(next_force) { reject(STATUS_NON_FINITE); }
     }
@@ -3026,7 +3349,26 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let sample = samples[i];
         var curl = vec2<f32>(0.0);
-        if temporal_enabled() {
+        // The stress below is a viscosity on the plain midpoint gradient,
+        // whatever the drift itself reads.
+        var plain_curl = vec2<f32>(0.0);
+        if fourth_order() {
+            let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
+            let reference = drift_field(sample.nodes_a.x, middle_time);
+            for (var local = 1u; local < 7u; local += 1u) {
+                let node = sample_node(sample, local);
+                curl += sample_curl(sample, local)
+                    * (drift_field(node, middle_time) - reference);
+            }
+            if short_wave_offset() != 0u {
+                let plain_reference = plain_drift_field(sample.nodes_a.x, middle_time);
+                for (var local = 1u; local < 7u; local += 1u) {
+                    let node = sample_node(sample, local);
+                    plain_curl += sample_curl(sample, local)
+                        * (plain_drift_field(node, middle_time) - plain_reference);
+                }
+            }
+        } else if temporal_enabled() {
             let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
             let reference = temporal_drift_field(sample.nodes_a.x, middle_time);
             for (var local = 1u; local < 7u; local += 1u) {
@@ -3034,6 +3376,7 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
                 let field = temporal_drift_field(node, middle_time);
                 curl += sample_curl(sample, local) * (field - reference);
             }
+            plain_curl = curl;
         } else {
             let reference = candidate_q(sample.nodes_a.x)
                 * nodes[sample.nodes_a.x].mass_loss.y;
@@ -3042,6 +3385,7 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
                 let field = candidate_q(node) * nodes[node].mass_loss.y;
                 curl += sample_curl(sample, local) * (field - reference);
             }
+            plain_curl = curl;
         }
         let old = select(accepted_b(i), candidate_b(i), has_loss_stages());
         let next = old + control.evolution.y * control.clock_f32.x * curl;
@@ -3053,7 +3397,7 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
         let short_wave = short_wave_offset();
         if short_wave != 0u {
             let viscosity = table_float(short_wave + i / 4u, i % 4u);
-            let stress = viscosity * control.evolution.y * curl;
+            let stress = viscosity * control.evolution.y * plain_curl;
             scratch[complementary_offset() + i].values.z = stress.x;
             scratch[complementary_offset() + i].values.w = stress.y;
         }
@@ -3072,7 +3416,10 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
         // by the authored mass under a pump misses by the modulation depth.
         var difference = candidate_q(left) * nodes[left].mass_loss.y
             - candidate_q(right) * nodes[right].mass_loss.y;
-        if temporal_enabled() {
+        if fourth_order() {
+            let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
+            difference = drift_field(left, middle_time) - drift_field(right, middle_time);
+        } else if temporal_enabled() {
             let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
             difference = temporal_drift_field(left, middle_time)
                 - temporal_drift_field(right, middle_time);

@@ -32,16 +32,16 @@ use bevy::{
     },
 };
 use funfern_core::{
-    CANONICAL_GRID_FILTER_STRENGTH, CanonicalAuxiliaryState, CanonicalForcing,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalAuxiliaryState, CanonicalForcing, CanonicalIntegrator,
     CanonicalMaterialDrive, CanonicalMaterialRuntimeState, CanonicalOutgoingHistoryTransferMap,
     CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
     CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalTemporalCoefficientSample,
     CanonicalTemporalLossSample, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
     CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWaveOperator,
-    CanonicalWaveState, CoefficientLawValues, FieldLawValues, GRID_SCALE_FILTER_CADENCE,
-    GRID_SCALE_FILTER_LIMIT, LinearPrimaryContribution, MaterialId, MaterialSwitchRuntime, Point2,
-    PulseEnvelope, PulseTrain, QuadraticWaveOperator, RateLawValues, RestoringLawValues,
-    TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
+    CanonicalWaveState, CoefficientLawValues, FieldLawValues, FourthOrderForm,
+    GRID_SCALE_FILTER_CADENCE, GRID_SCALE_FILTER_LIMIT, LinearPrimaryContribution, MaterialId,
+    MaterialSwitchRuntime, Point2, PulseEnvelope, PulseTrain, QuadraticWaveOperator, RateLawValues,
+    RestoringLawValues, TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
 };
 
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
@@ -151,6 +151,13 @@ const LOSS_RECORDS_FLAG: u32 = 64;
 /// word per node after the gap and outgoing lanes, and one restoring record
 /// per primary coefficient record.
 const RESTORING_FLAG: u32 = 128;
+/// M0: the generation steps the fourth-order scheme
+/// (`docs/spikes/funfern-fourth-order-step.md`), with one word per node and
+/// one per sample after the secant words for its passes.
+const FOURTH_ORDER_FLAG: u32 = 256;
+/// The fourth-order correction sits in the kicks, beside a stiffness-side
+/// field law, rather than in the drift.
+const KICK_FORM_FLAG: u32 = 512;
 /// A loss record whose rate is van der Pol's, `β(u²/a² − 1)`.
 const TEMPORAL_LOSS_VAN_DER_POL: u32 = 16;
 /// A record whose drive runs under its lane's gate window, with the
@@ -1063,7 +1070,9 @@ impl CanonicalGpuPlan {
         forcing: &CanonicalForcing,
         clock: CanonicalGpuClock,
     ) -> Result<Self, CanonicalGpuBuildError> {
-        Self::compile_inner(operator, None, state, forcing, clock)
+        let mut plan = Self::compile_inner(operator, None, state, forcing, clock)?;
+        plan.apply_integrator(state.integrator(), FourthOrderForm::Drift);
+        Ok(plan)
     }
 
     /// Production compilation reuses the already assembled scalar CSR for the
@@ -1084,7 +1093,40 @@ impl CanonicalGpuPlan {
                 "the scalar and canonical operators do not share a CSR layout",
             ));
         }
-        Self::compile_inner(operator, Some(quadratic), state, forcing, clock)
+        let mut plan = Self::compile_inner(operator, Some(quadratic), state, forcing, clock)?;
+        plan.apply_integrator(state.integrator(), FourthOrderForm::Drift);
+        Ok(plan)
+    }
+
+    /// Sets the time integrator the device steps with, the state's own, so
+    /// the device and the CPU reference it is compiled from step alike. The
+    /// fourth-order step's words follow every offset the shader derives from
+    /// the counts, so they are placed after the last of them.
+    fn apply_integrator(&mut self, integrator: CanonicalIntegrator, form: FourthOrderForm) {
+        let flags = self.control.boundary_offsets.w;
+        if flags & FOURTH_ORDER_FLAG != 0 {
+            self.manifest.dispatches_per_step -= fourth_order_dispatches(flags);
+        }
+        let mut flags = flags & !(FOURTH_ORDER_FLAG | KICK_FORM_FLAG);
+        if integrator == CanonicalIntegrator::FourthOrder {
+            flags |= FOURTH_ORDER_FLAG;
+            if form == FourthOrderForm::Kick {
+                flags |= KICK_FORM_FLAG;
+            }
+            let control = &self.control;
+            let (nodes, samples) = (control.counts_a.x as usize, control.counts_a.y as usize);
+            let (traces, modes) = (control.counts_b.y as usize, control.counts_b.z as usize);
+            let work = control.counts_a.w as usize + 3 * modes + traces;
+            let accounting = nodes + samples + modes;
+            let end = work + 2 * accounting + traces + 2 * (nodes + samples);
+            if self.scratch.len() < end {
+                self.scratch.resize(end, GpuCanonicalScratchWord::default());
+                self.manifest.bytes.scratch =
+                    self.scratch.len() * size_of::<GpuCanonicalScratchWord>();
+            }
+            self.manifest.dispatches_per_step += fourth_order_dispatches(flags);
+        }
+        self.control.boundary_offsets.w = flags;
     }
 
     /// Packs the dormant Stage 7 conservative-bulk plan into the production
@@ -1152,6 +1194,12 @@ impl CanonicalGpuPlan {
         )?;
         let mut plan = Self::compile(operator.base(), &fixed_state, forcing, clock)?;
         plan.attach_temporal_bulk(operator, state, clock)?;
+        plan.apply_integrator(
+            state.integrator(),
+            state
+                .fourth_order_form(operator)
+                .unwrap_or(FourthOrderForm::Drift),
+        );
         Ok(plan)
     }
 
@@ -2138,6 +2186,7 @@ impl CanonicalGpuPlan {
         flags |= u32::from(complementary_rates.iter().all(|rate| *rate == 0.0)) << 2;
         self.control.boundary_offsets.w = flags;
         self.manifest.dispatches_per_step = 4
+            + fourth_order_dispatches(flags)
             + usize::from(self.needs_loss_stages) * 2
             + usize::from(self.needs_accounting)
             + 3 * usize::from(self.field_laws)
@@ -3032,6 +3081,19 @@ struct CompiledBoundary {
 /// Boundary dispatches a step encodes: prepare, reduce and finalize at each of
 /// the two kicks, and between them either one inverse pass or two passes a
 /// sweep.
+/// The fourth-order step's passes a step: the drift form's three, two of
+/// which return at once on a fixed generation's assembled rows, or the kick
+/// form's two before each kick.
+fn fourth_order_dispatches(flags: u32) -> usize {
+    if flags & FOURTH_ORDER_FLAG == 0 {
+        0
+    } else if flags & KICK_FORM_FLAG != 0 {
+        4
+    } else {
+        3
+    }
+}
+
 fn trace_dispatches(trace_count: usize, sweeps: usize, direct: bool) -> usize {
     if trace_count == 0 {
         return 0;
@@ -3923,6 +3985,8 @@ pub(crate) struct CanonicalGpuBufferHandles {
     field_laws: bool,
     integrated_count: u32,
     nonlinear_trace: bool,
+    fourth_order: bool,
+    fourth_order_kick_form: bool,
     drive_count: u32,
     material_runtime_count: u32,
     source_count: u32,
@@ -4150,6 +4214,8 @@ fn add_canonical_buffers(
         field_laws: plan.field_laws,
         integrated_count: plan.integrated_count as u32,
         nonlinear_trace: plan.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0,
+        fourth_order: plan.control.boundary_offsets.w & FOURTH_ORDER_FLAG != 0,
+        fourth_order_kick_form: plan.control.boundary_offsets.w & KICK_FORM_FLAG != 0,
         drive_count,
         material_runtime_count,
         source_count,
@@ -5739,6 +5805,13 @@ struct CanonicalPipeline {
     nonlinear_sample_secants_second: CachedComputePipelineId,
     nonlinear_node_fields: CachedComputePipelineId,
     filter_temporal_sites: CachedComputePipelineId,
+    fourth_order_samples: CachedComputePipelineId,
+    fourth_order_nodes: CachedComputePipelineId,
+    fourth_order_rates_first: CachedComputePipelineId,
+    fourth_order_rates_second: CachedComputePipelineId,
+    fourth_order_tangents_first: CachedComputePipelineId,
+    fourth_order_tangents_second: CachedComputePipelineId,
+    fourth_order_fields: CachedComputePipelineId,
 }
 
 #[derive(Resource)]
@@ -5837,6 +5910,13 @@ fn init_canonical_pipeline(
     let nonlinear_sample_secants_second = queue("nonlinear_sample_secants_second");
     let nonlinear_node_fields = queue("nonlinear_node_fields");
     let filter_temporal_sites = queue("filter_temporal_sites");
+    let fourth_order_samples = queue("fourth_order_samples");
+    let fourth_order_nodes = queue("fourth_order_nodes");
+    let fourth_order_rates_first = queue("fourth_order_rates_first");
+    let fourth_order_rates_second = queue("fourth_order_rates_second");
+    let fourth_order_tangents_first = queue("fourth_order_tangents_first");
+    let fourth_order_tangents_second = queue("fourth_order_tangents_second");
+    let fourth_order_fields = queue("fourth_order_fields");
     commands.insert_resource(CanonicalPipeline {
         layout,
         start_loss,
@@ -5883,6 +5963,13 @@ fn init_canonical_pipeline(
         nonlinear_sample_secants_second,
         nonlinear_node_fields,
         filter_temporal_sites,
+        fourth_order_samples,
+        fourth_order_nodes,
+        fourth_order_rates_first,
+        fourth_order_rates_second,
+        fourth_order_tangents_first,
+        fourth_order_tangents_second,
+        fourth_order_fields,
     });
 
     let map_layout = BindGroupLayoutDescriptor::new(
@@ -6553,6 +6640,13 @@ fn compute_canonical_wave(
         pipeline.nonlinear_sample_secants_second,
         pipeline.nonlinear_node_fields,
         pipeline.filter_temporal_sites,
+        pipeline.fourth_order_samples,
+        pipeline.fourth_order_nodes,
+        pipeline.fourth_order_rates_first,
+        pipeline.fourth_order_rates_second,
+        pipeline.fourth_order_tangents_first,
+        pipeline.fourth_order_tangents_second,
+        pipeline.fourth_order_fields,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -6807,6 +6901,14 @@ fn compute_canonical_wave(
             pass.set_pipeline(pipelines[36]);
             pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
         }
+        // The fourth-order kick form's `u̇` and `J_b η C u̇` before each kick,
+        // after the secants the force reads.
+        if handles.fourth_order_kick_form {
+            pass.set_pipeline(pipelines[42]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.set_pipeline(pipelines[44]);
+            pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+        }
         pass.set_pipeline(pipelines[1]);
         pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         if handles.trace_count > 0 {
@@ -6814,6 +6916,16 @@ fn compute_canonical_wave(
         }
         if handles.field_laws {
             pass.set_pipeline(pipelines[38]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+        }
+        // The fourth-order drift form's `ũ`, on the midpoint fields the
+        // nodal pass above just cached.
+        if handles.fourth_order && !handles.fourth_order_kick_form {
+            pass.set_pipeline(pipelines[46]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.set_pipeline(pipelines[40]);
+            pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+            pass.set_pipeline(pipelines[41]);
             pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         }
         pass.set_pipeline(pipelines[6]);
@@ -6824,6 +6936,12 @@ fn compute_canonical_wave(
         );
         if handles.field_laws {
             pass.set_pipeline(pipelines[37]);
+            pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+        }
+        if handles.fourth_order_kick_form {
+            pass.set_pipeline(pipelines[43]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.set_pipeline(pipelines[45]);
             pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
         }
         pass.set_pipeline(pipelines[7]);
@@ -8015,7 +8133,11 @@ mod tests {
 
     #[test]
     fn packed_f32_temporal_kdk_matches_the_f64_bulk_reference() {
-        let (_, _, _, operator, mut state, plan) = temporal_plan();
+        let (_, _, _, operator, state, plan) = temporal_plan();
+        // The packed mirror steps the leapfrog: it checks what the tables
+        // hold, not the integrator, whose fourth-order passes the canonical
+        // GPU examples hold to the reference.
+        let mut state = state.with_integrator(CanonicalIntegrator::Leapfrog);
         let (actual_primary, actual_complementary) = packed_temporal_step(&plan);
         state.step(&operator).unwrap();
         for (actual, expected) in actual_primary.iter().zip(state.primary_flux()) {
@@ -8372,7 +8494,8 @@ mod tests {
         // A fixed generation applies its packed inverse in one pass a stage,
         // and the inverse follows the transposed trace matrix in full.
         assert!(plan.trace_direct);
-        assert_eq!(plan.manifest.dispatches_per_step, 5 + 6 + 2);
+        // And the fourth-order drift form's three passes.
+        assert_eq!(plan.manifest.dispatches_per_step, 5 + 6 + 2 + 3);
         let square = plan.trace_count * plan.trace_count;
         let swept = plan_with_trace_lane(OuterBoundaryCondition::SecondOrderOutgoing, false);
         assert_eq!(
@@ -8386,7 +8509,7 @@ mod tests {
         assert!(swept.trace_sweeps > 0);
         assert_eq!(
             swept.manifest.dispatches_per_step,
-            5 + 6 + 4 * swept.trace_sweeps
+            5 + 6 + 4 * swept.trace_sweeps + 3
         );
     }
 

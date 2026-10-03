@@ -1,8 +1,8 @@
 # A fourth-order step for the triangle solver (M0), 4 October 2026
 
-**Status: stages A (the design check) and B (both CPU paths, with tests)
-done; the CPU default is still the leapfrog, so the device suite compares like
-with like until stage C. Stages C (device) and D (gate, default) next.** M0 comes out of the IGA spikes ("Spike T" in
+**Status: done, 4 October 2026.** Stages A (the design check), B (both CPU
+paths, with tests) and C (the device) are in, and the fourth-order step is the
+production integrator on CPU and device alike. M0 comes out of the IGA spikes ("Spike T" in
 [the feasibility report](funfern-iga-feasibility-spike.md)): the
 modified-equation Störmer step cut the spline patch's temporal error 50 to
 60 times, and the triangle solver at its own operating point is in the same
@@ -226,10 +226,53 @@ when the stiffest row does. Filed under "Worth checking sometime".
     the complementary row and takes the kick form);
   - a stiffness-side Kerr medium over t = 40 at the app's step: the kick form
     keeps its energy to 7e-4, the drift form loses 3.5e-2.
-- **Stage C.** The device: the drift form writes `ũ` into the node-field
-  lane field laws already use, and the drift reads that lane always; on a
-  force-cache generation `L u` is one pass over the assembled stiffness row
-  and the cache drifts by `L ũ`. The kick form adds a sample pass and a
-  gather to each kick on the nonlinear path it already runs. Device against
-  CPU in the suite; throughput measured.
-- **Stage D.** Gate, log, plan.
+- **Stage C, done.** `canonical_wave.wgsl` and `canonical_gpu.rs`. The device
+  plan takes its integrator from the CPU state it is compiled from, and its
+  form from the driven state, so a device and its reference always step
+  alike. Two control flags (256 the fourth-order step, 512 its kick form)
+  and one scratch word per node and per sample after the secant words, which
+  a linear-loss patch's flag reset now keeps.
+  - The drift form is three passes before the drift: each node's midpoint
+    field, cached once so a drive's mass or a field law's inverse is not
+    evaluated at every sample; each sample's `J η C u`; each node's `ũ`, with
+    the gap springs, the restoring curvature at the step's `r`, `ṡ` and the
+    pin's `h²/24` expansion. A fixed generation with a force cache takes
+    `K u` from its assembled row and returns from the first two at once. The
+    drift, `r`, the gap jumps and the force cache read `ũ`; the short-wave
+    stress keeps the plain gradient.
+  - The kick form is two passes before each kick, after the secants: each
+    node's force and `u̇`, each sample's `J_b η C u̇` from the cached secant,
+    whose `r/(j|b|)` gives the radius back without a second solve. Every
+    kick, the walls' included, reads the force through `kick_force` and the
+    source through `step_source`, which carries the Simpson correction in
+    both forms.
+  - The suite: every canonical GPU example at its default (23 runs) and
+    across its modes (107 runs: the nonlinear gate's nine, the oscillator's
+    seven media under nine compositions and the filter, the long run, the
+    driven document, both handoffs, the failure gate, the consumers, the
+    forced compositions), all within their gates, worst Q 1.2e-5 and b
+    1.5e-5 on the remeshing oscillator handoff, typically 1e-6. With the
+    device forced to the leapfrog against the fourth-order reference the
+    same examples fail at 1e-3 to 6e-2, so the gates see the integrator.
+  - Throughput (`canonical_gpu_temporal_timing`, 15,264 dofs, M1 Max, 2,000
+    steps):
+
+    | generation | leapfrog | fourth order | cost |
+    | --- | --- | --- | --- |
+    | fixed | 400 µs | 426 µs | 1.07× |
+    | driven | 395 µs | 425 µs | 1.08× |
+    | sine-Gordon | 400 to 426 µs | 443 to 450 µs | 1.05 to 1.11× |
+    | Kerr and saturable, kick form | 1007 µs | 1194 µs | 1.19× |
+
+    A first cut cost 1.37 to 1.46×: it evaluated a driven mass at each of a
+    node's samples, scanned every force entry for gaps on the force-cache
+    path, always formed the drift's plain gradient, and solved each sample's
+    radius twice.
+- **Stage D.** The fourth-order step is the default on both CPU states. Tests
+  that are about the leapfrog's own recurrence (the scalar-recurrence
+  parities, velocity Verlet on the Klein-Gordon uniform mode) name it; the
+  Klein-Gordon one has a fourth-order twin, exact to 1e-11 against the
+  modified oscillator `ω̃² = (1 − (ω₀h)²/12) ω₀²`. Two magnitude bounds moved
+  with the step's breathing about its conserved store: the Kerr bulk's
+  energy, 2.3e-4 against the leapfrog's 1.9e-4 at the same second order, and
+  the short-wave loss's closure, now held to the bare step's own breathing.

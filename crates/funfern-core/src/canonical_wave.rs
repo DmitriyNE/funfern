@@ -1517,8 +1517,8 @@ pub struct CanonicalOutgoingEliminationExport {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CanonicalIntegrator {
     /// Störmer-Verlet: the kicks use the force at the step's ends and the
-    /// drift reads the midpoint field `u`. Second order.
-    #[default]
+    /// drift reads the midpoint field `u`. Second order; kept for tests and
+    /// comparison.
     Leapfrog,
     /// The modified-equation Störmer step (Dablain 1986), fourth order on the
     /// linear conservative bulk and stable while `ω dt < 2√3`. Its `dt²/12`
@@ -1527,7 +1527,8 @@ pub enum CanonicalIntegrator {
     /// `s − (s⁺ − 2s + s⁻)/12` at each end. Boundary damping, losses and the
     /// short-wave viscosity keep their second-order places in the step, and a
     /// prescribed node's drift reads its signal expanded as the free nodes'
-    /// field is.
+    /// field is. The production step.
+    #[default]
     FourthOrder,
 }
 
@@ -6942,8 +6943,11 @@ mod tests {
             .map(|point| (2.0 * point.x).sin() + 0.3 * point.y)
             .collect::<Vec<_>>();
         let velocity = vec![0.0; operator.degrees_of_freedom()];
+        // The scalar recurrence is the leapfrog's.
         let mut direct =
-            CanonicalWaveState::from_primary_velocity(&operator, dt, &primary, &velocity).unwrap();
+            CanonicalWaveState::from_primary_velocity(&operator, dt, &primary, &velocity)
+                .unwrap()
+                .with_integrator(CanonicalIntegrator::Leapfrog);
         let mut scalar =
             QuadraticWaveState::new(&quadratic, dt, primary.clone(), velocity).unwrap();
         for _ in 0..80 {

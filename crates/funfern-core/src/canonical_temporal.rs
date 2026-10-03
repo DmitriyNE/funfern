@@ -3550,7 +3550,7 @@ impl CanonicalTemporalWaveState {
 
     /// The fourth-order form this state steps with, `None` under the
     /// leapfrog.
-    fn fourth_order_form(
+    pub fn fourth_order_form(
         &self,
         operator: &CanonicalTemporalWaveOperator,
     ) -> Option<FourthOrderForm> {
@@ -8863,9 +8863,10 @@ mod tests {
                 complementary.clone(),
             )
             .unwrap();
-            if let Some(form) = form {
-                state = state.with_fourth_order_form(form);
-            }
+            state = match form {
+                None => state.with_integrator(CanonicalIntegrator::Leapfrog),
+                Some(form) => state.with_fourth_order_form(form),
+            };
             state.step_by(&operator, time_step).unwrap();
             state.step_by(&operator, -time_step).unwrap();
             assert!(state.time().abs() < 1.0e-15);
@@ -10021,28 +10022,42 @@ mod tests {
         let linear = compile(&Scene::initial()).unwrap();
         let time_step = 0.4 * linear.maximum_time_step();
         let (primary, complementary) = strong_fluxes(&linear, 6.0);
-        let mut left = CanonicalTemporalWaveState::new(
-            &linear,
-            time_step,
-            primary.clone(),
-            complementary.clone(),
-        )
-        .unwrap();
-        let mut right =
-            CanonicalTemporalWaveState::new(&nonlinear, time_step, primary, complementary).unwrap();
-        for _ in 0..20 {
-            left.step(&linear).unwrap();
-            right.step(&nonlinear).unwrap();
+        // The stiffness-side law puts the nonlinear generation's fourth-order
+        // correction in the kicks, so the linear one is held to the same form.
+        for form in [None, Some(FourthOrderForm::Kick)] {
+            let start = |operator: &CanonicalTemporalWaveOperator| {
+                let state = CanonicalTemporalWaveState::new(
+                    operator,
+                    time_step,
+                    primary.clone(),
+                    complementary.clone(),
+                )
+                .unwrap();
+                match form {
+                    None => state.with_integrator(CanonicalIntegrator::Leapfrog),
+                    Some(form) => state.with_fourth_order_form(form),
+                }
+            };
+            assert_eq!(nonlinear.fourth_order_form(), FourthOrderForm::Kick);
+            let mut left = start(&linear);
+            let mut right = start(&nonlinear);
+            for _ in 0..20 {
+                left.step(&linear).unwrap();
+                right.step(&nonlinear).unwrap();
+            }
+            let scale = left
+                .primary_flux()
+                .iter()
+                .fold(0.0_f64, |a, b| a.max(b.abs()));
+            for (a, b) in left.primary_flux().iter().zip(right.primary_flux()) {
+                assert!((a - b).abs() <= 1e-13 * scale, "{form:?}");
+            }
+            let energy = left.energy(&linear).unwrap();
+            assert!(
+                (energy - right.energy(&nonlinear).unwrap()).abs() <= 1e-13 * energy,
+                "{form:?}"
+            );
         }
-        let scale = left
-            .primary_flux()
-            .iter()
-            .fold(0.0_f64, |a, b| a.max(b.abs()));
-        for (a, b) in left.primary_flux().iter().zip(right.primary_flux()) {
-            assert!((a - b).abs() <= 1e-13 * scale);
-        }
-        let energy = left.energy(&linear).unwrap();
-        assert!((energy - right.energy(&nonlinear).unwrap()).abs() <= 1e-13 * energy);
     }
 
     #[test]
@@ -10114,7 +10129,10 @@ mod tests {
         };
         let coarse = deviation(0.5, 200);
         let fine = deviation(0.25, 400);
-        assert!(coarse < 2e-4, "{coarse:e}");
+        // The fourth-order step's energy breathes a little more than the
+        // leapfrog's about the store it conserves, 2.3e-4 against 1.9e-4
+        // here, at the same second order.
+        assert!(coarse < 2.5e-4, "{coarse:e}");
         assert!(fine < 0.35 * coarse, "coarse {coarse:e}, fine {fine:e}");
     }
 
@@ -11738,8 +11756,9 @@ mod tests {
         let h = 0.4 * operator.maximum_time_step();
         let primary = base.primary_mass().to_vec();
         let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
-        let mut state =
-            CanonicalTemporalWaveState::new(&operator, h, primary, complementary).unwrap();
+        let mut state = CanonicalTemporalWaveState::new(&operator, h, primary, complementary)
+            .unwrap()
+            .with_integrator(CanonicalIntegrator::Leapfrog);
         let theta = (1.0 - 0.5 * (omega0 * h).powi(2)).acos();
         for n in 1..=200 {
             state.step(&operator).unwrap();
@@ -11751,6 +11770,42 @@ mod tests {
             );
             assert!(
                 (r - h * (n as f64 * theta).sin() / theta.sin()).abs() < 1.0e-11,
+                "step {n}: r {r}"
+            );
+        }
+    }
+
+    /// The fourth-order step's drift reads `ũ = c u`, `c = 1 − (ω₀h)²/12`,
+    /// on the uniform mode, so `(u, r/c)` is velocity Verlet at
+    /// `ω̃² = c ω₀²`: `u_n = cos(nθ̃)`, `r_n = c h sin(nθ̃)/sin θ̃`, with
+    /// `θ̃` within `(ω₀h)⁵/480` of `ω₀h` where the leapfrog's `θ` is
+    /// `(ω₀h)³/24` off.
+    #[test]
+    fn a_klein_gordon_uniform_mode_is_the_modified_oscillator_exactly() {
+        let omega0 = 3.0;
+        let operator = restoring_operator(klein_gordon(omega0), 0.4);
+        let base = operator.base();
+        let h = 0.4 * operator.maximum_time_step();
+        let primary = base.primary_mass().to_vec();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, h, primary, complementary).unwrap();
+        assert_eq!(state.integrator(), CanonicalIntegrator::FourthOrder);
+        let c = 1.0 - (omega0 * h).powi(2) / 12.0;
+        let theta = (1.0 - 0.5 * c * (omega0 * h).powi(2)).acos();
+        let leapfrog = (1.0 - 0.5 * (omega0 * h).powi(2)).acos();
+        assert!((theta - omega0 * h).abs() < (omega0 * h).powi(5) / 400.0);
+        assert!((leapfrog - omega0 * h).abs() > 50.0 * (theta - omega0 * h).abs());
+        for n in 1..=200 {
+            state.step(&operator).unwrap();
+            let u = state.primary_flux()[0] / base.primary_mass()[0];
+            let r = state.integrated_field()[0];
+            assert!(
+                (u - (n as f64 * theta).cos()).abs() < 1.0e-11,
+                "step {n}: u {u}"
+            );
+            assert!(
+                (r - c * h * (n as f64 * theta).sin() / theta.sin()).abs() < 1.0e-11,
                 "step {n}: r {r}"
             );
         }
@@ -12665,14 +12720,17 @@ mod tests {
             "the ceiling's energy decays at {:.3}/s against α/h = {full:.3}/s",
             -damped_ceiling
         );
-        // The lane holds what left the field, and the balance closes on it.
+        // The lane holds what left the field, and the balance closes on it to
+        // the step's own breathing about its conserved store, which the bare
+        // run shows.
+        let breathing = (bare_ceiling.abs() + 1.0e-6) * start;
         assert_eq!(total.active_gain, 0.0);
         assert_eq!(total.primary_loss, 0.0);
         assert!(
-            (total.short_wave_loss + total.energy_change).abs() < 1.0e-6 * start,
+            (total.short_wave_loss + total.energy_change).abs() < breathing,
             "{total:?}"
         );
-        assert!(total.splitting_residual.abs() < 1.0e-6 * start, "{total:?}");
+        assert!(total.splitting_residual.abs() < breathing, "{total:?}");
         // At edge 0.5 the smooth mode has about eight elements a wavelength,
         // and loses 0.3% of what the ceiling does: the ratio of their
         // eigenvalues.
@@ -14234,7 +14292,7 @@ mod tests {
                 .pinned(operator, &forcing)
                 .unwrap();
         state = match scheme {
-            Scheme::Leapfrog => state,
+            Scheme::Leapfrog => state.with_integrator(CanonicalIntegrator::Leapfrog),
             Scheme::Drift => state.with_fourth_order_form(FourthOrderForm::Drift),
             Scheme::Kick => state.with_fourth_order_form(FourthOrderForm::Kick),
         };
@@ -14461,9 +14519,10 @@ mod tests {
                 .unwrap()
                 .pinned(operator, forcing)
                 .unwrap();
-        if let Some(form) = form {
-            state = state.with_fourth_order_form(form);
-        }
+        state = match form {
+            None => state.with_integrator(CanonicalIntegrator::Leapfrog),
+            Some(form) => state.with_fourth_order_form(form),
+        };
         for _ in 0..steps {
             state.step_with_forcing(operator, forcing).unwrap();
         }

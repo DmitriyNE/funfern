@@ -3802,13 +3802,15 @@ mod tests {
             .map(|point| (1.7 * point.x).sin() + 0.2 * point.y)
             .collect::<Vec<_>>();
         let dt = 0.2 * canonical.maximum_time_step();
+        // The scalar recurrence is the leapfrog's.
         let mut direct = CanonicalWaveState::from_primary_velocity(
             &canonical,
             dt,
             &initial,
             &vec![0.0; canonical.degrees_of_freedom()],
         )
-        .unwrap();
+        .unwrap()
+        .with_integrator(crate::CanonicalIntegrator::Leapfrog);
         let mut scalar =
             QuadraticWaveState::new(&gap, dt, initial, vec![0.0; canonical.degrees_of_freedom()])
                 .unwrap();

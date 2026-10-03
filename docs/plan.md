@@ -1075,7 +1075,7 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   its own before any design, measured against the box-patch numbers in
   `docs/spikes/funfern-iga-feasibility-spike.md`.
 
-- [ ] A fourth-order time integrator for the triangle solver: the
+- [x] A fourth-order time integrator for the triangle solver: the
   modified-equation Störmer step, `b` drifting on `P (Q − dt²/12 · K u)`,
   one extra gather, scatter and field pass before the drift and a √3 larger
   stable step. On the spline patch it cut the temporal error 50 to 60 times
@@ -1094,8 +1094,14 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   the other side is quadratic (the drift form leaks 38% of a stiffness-side
   Kerr medium's energy by t = 160). Sources need a fourth-order kick
   quadrature; a prescribed node reads its signal expanded as the free
-  nodes' field is. Stage B, both CPU paths with tests, done the same day;
-  stages C (device) and D (gate, the fourth-order step as the default) next.
+  nodes' field is. Stage B, both CPU paths with tests, done the same day.
+  Stages C and D, done the same day: the device takes its integrator from the
+  CPU state it is compiled from; the drift form is three passes before the
+  drift, the kick form two before each kick; every canonical GPU example and
+  its modes (130 runs) agree with the fourth-order reference to their gates,
+  and fail at 1e-3 to 6e-2 against a leapfrog device. It costs 1.07 to 1.08×
+  a step on fixed and driven generations and 1.19× under the kick form. The
+  fourth-order step is the production integrator.
 
 ## Maintenance
 
