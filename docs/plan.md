@@ -1000,13 +1000,15 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   through the law's own store, and the cap sees the law's effective mass and
   stiffness.
 
-- [ ] Van der Pol beside a field law. Its loss stage solves
+- [x] Van der Pol beside a field law. Its loss stage solves
   `Q̇ = −(β + αu²)Q` exactly because `u = Q/m`; under a Kerr or saturable
-  map there is no closed form, and the node's rate, a mass-weighted mean of
-  its contributions, is not defined when each one's mass follows the field.
-  Needs a design note in `docs/spikes/funfern-gate-o.md` first: what the
-  stage integrates and how it weighs a node, then an implicit per-node solve
-  on the map, the store's own energy for the lane, and the device.
+  map there is no closed form. Done on 2026-10-03
+  (`docs/spikes/funfern-gate-o.md`, "Van der Pol beside a field law";
+  `docs/engineering-log.md`): the stage reads the node's field through its
+  own map, the exact Bernoulli map at the secant `α(u/Q)²` taken at the
+  stage's midpoint flux in two passes, second order; the weighting is the
+  one passive losses already used beside a field law. It also fixed van der
+  Pol beside a pumped mass, which failed on its first step.
 
 ## Maintenance
 

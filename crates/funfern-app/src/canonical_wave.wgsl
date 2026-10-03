@@ -581,7 +581,9 @@ fn one_minus_exp_neg_over(x: f32) -> f32 {
 // A van der Pol node over one half step, exactly: `Q̇ = −(β + kQ²)Q` is the
 // Bernoulli equation `ẏ = −2(β + ky)y` in `y = Q²`, whose solution keeps
 // `Q`'s sign. `β` and `k = α/M²` weigh the node's materials by the masses in
-// force at the half interval's midpoint, as the reference does.
+// force at the half interval's midpoint, as the reference does. A node whose
+// map follows its field takes `k = α (u/Q)²`, its secant, at the stage's
+// midpoint flux in two passes, as the reference's `active_node_map` does.
 fn active_loss_map(node: u32, flux: f32, second: bool) -> f32 {
     let header = tables[control.runtime_slots.z].data;
     let losses = tables[control.runtime_slots.z + 2u].data;
@@ -605,7 +607,25 @@ fn active_loss_map(node: u32, flux: f32, second: bool) -> f32 {
         }
     }
     beta /= mass;
-    let k = alpha / (mass * mass * mass);
+    if !(temporal_enabled() && node_is_nonlinear(node)) {
+        return bernoulli_step(flux, beta, alpha / (mass * mass * mass), duration);
+    }
+    let rate = alpha / mass;
+    let predictor = bernoulli_step(
+        flux, beta, active_secant(node, flux, rate, rate_time), duration);
+    return bernoulli_step(
+        flux, beta, active_secant(node, 0.5 * (flux + predictor), rate, rate_time), duration);
+}
+
+// `α (u/Q)²` at `flux`, through the node's own map at `local_time`.
+fn active_secant(node: u32, flux: f32, alpha: f32, local_time: f32) -> f32 {
+    if flux == 0.0 { return 0.0; }
+    let ratio = temporal_primary_field(node, flux, local_time) / flux;
+    return alpha * ratio * ratio;
+}
+
+// The exact Bernoulli map at a fixed `k` over `duration`.
+fn bernoulli_step(flux: f32, beta: f32, k: f32, duration: f32) -> f32 {
     let x = 2.0 * beta * duration;
     let s = k * flux * flux * 2.0 * duration * one_minus_exp_neg_over(x);
     // `Q·e^{−x/2}/√(1 + s)` as `Q + Q·(d₁ + d₂ + d₁d₂)`: the multiplier sits

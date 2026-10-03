@@ -22,8 +22,6 @@ const ELECTRIC_LOSS: u8 = 48;
 const MAGNETIC_LOSS: u8 = 64;
 pub(super) const RECIPROCAL_STIFFNESS: u8 = 80;
 const RESTORING: u8 = 96;
-pub(super) const SELF_OSCILLATING_RESPONSE: &str = "Not beside a self-oscillating loss: van der Pol's node map assumes a linear response. \
-     Make the loss constant first.";
 /// The short-wave loss the editor offers by name: on the parametric fiber at
 /// edge 0.04 it took 4% of the far-end signal, where the signal has about
 /// seven nodes a wavelength.
@@ -138,34 +136,13 @@ pub(super) fn law_slots_editor(
 ) {
     let id = material.id.0;
     let parameters = material.parameters.clone();
-    let field_laws = !self_oscillating(material);
     let (base, law) = match row {
         LawPresetRow::Stiffness => (STIFFNESS_ROW, &mut material.stiffness_law),
         _ => (MASS_ROW, &mut material.mass_law),
     };
-    if coefficient_law_editor(
-        ui,
-        id,
-        base,
-        law,
-        &parameters,
-        sources,
-        field_laws,
-        formulas,
-        timing,
-    ) {
+    if coefficient_law_editor(ui, id, base, law, &parameters, sources, formulas, timing) {
         timing.fired = Some(FiredDrive::Coefficient(row));
     }
-}
-
-/// Whether a material's loss self-oscillates. Van der Pol's node map assumes
-/// the field is the flux over the mass, so a field-dependent response is not
-/// offered beside it.
-pub(super) fn self_oscillating(material: &Material) -> bool {
-    [&material.electric_loss, &material.magnetic_loss]
-        .into_iter()
-        .flatten()
-        .any(|channel| matches!(channel.law.rate, RateLaw::VanDerPol { .. }))
 }
 
 /// The short-wave loss, in Advanced: off, the named trim, or α by hand. It is
@@ -421,7 +398,7 @@ pub(super) fn loss_rate_editor(
 
 /// The primary row's loss kind: a constant rate, or van der Pol's
 /// self-oscillating one (catalogue D3). It is offered only where the solver
-/// runs it: beside a linear response, with no drive on the channel.
+/// runs it: with no drive on the channel.
 fn loss_kind_editor(
     ui: &mut egui::Ui,
     material: &mut Material,
@@ -430,8 +407,6 @@ fn loss_kind_editor(
     active: bool,
     formulas: &mut FormulaEdits,
 ) {
-    let linear_response = material.mass_law.field == FieldLaw::Linear
-        && material.stiffness_law.field == FieldLaw::Linear;
     let undriven = row_channel(material, physics, row)
         .as_ref()
         .is_none_or(|channel| channel.law.drive == TimeDrive::None);
@@ -439,15 +414,12 @@ fn loss_kind_editor(
     ui.horizontal(|ui| {
         ui.label("Loss kind");
         ui.selectable_value(&mut chosen, false, "Constant");
-        ui.add_enabled_ui(active || (linear_response && undriven), |ui| {
+        ui.add_enabled_ui(active || undriven, |ui| {
             ui.selectable_value(&mut chosen, true, "Self-oscillating")
                 .on_hover_text(van_der_pol_text(physics))
-                .on_disabled_hover_text(if linear_response {
-                    "Van der Pol runs on an undriven loss; remove this row's loss drive first."
-                } else {
-                    "Van der Pol runs only beside a linear response; its node map assumes the \
-                     field is the flux over the mass."
-                });
+                .on_disabled_hover_text(
+                    "Van der Pol runs on an undriven loss; remove this row's loss drive first.",
+                );
         });
     });
     if chosen == active {
@@ -790,7 +762,6 @@ fn coefficient_law_editor(
     law: &mut CoefficientLaw,
     parameters: &[MaterialParameter],
     sources: &[(String, f64)],
-    field_laws: bool,
     formulas: &mut FormulaEdits,
     timing: &mut DriveTiming,
 ) -> bool {
@@ -807,14 +778,10 @@ fn coefficient_law_editor(
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut chosen, ResponseKind::Linear, "Linear");
-                ui.add_enabled_ui(field_laws, |ui| {
-                    ui.selectable_value(&mut chosen, ResponseKind::Kerr, "Kerr")
-                        .on_hover_text("ḡ = 1 + χ|u|²")
-                        .on_disabled_hover_text(SELF_OSCILLATING_RESPONSE);
-                    ui.selectable_value(&mut chosen, ResponseKind::Saturable, "Saturable")
-                        .on_hover_text("ḡ = 1 + χ|u|² / (1 + |u|²/σ²)")
-                        .on_disabled_hover_text(SELF_OSCILLATING_RESPONSE);
-                });
+                ui.selectable_value(&mut chosen, ResponseKind::Kerr, "Kerr")
+                    .on_hover_text("ḡ = 1 + χ|u|²");
+                ui.selectable_value(&mut chosen, ResponseKind::Saturable, "Saturable")
+                    .on_hover_text("ḡ = 1 + χ|u|² / (1 + |u|²/σ²)");
             });
     });
     if chosen != kind {

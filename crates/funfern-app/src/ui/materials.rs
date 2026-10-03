@@ -525,24 +525,15 @@ impl Playground {
                             |found| law_preset_label(found.preset, physics),
                         ))
                         .show_ui(ui, |ui| {
-                            // A field-dependent response does not run beside van der
-                            // Pol, so it is not offered there.
-                            let self_oscillating = law_editor::self_oscillating(&material);
                             for preset in law_presets() {
                                 let current =
                                     matched.as_ref().is_some_and(|found| found.preset == preset);
-                                let offered =
-                                    !(self_oscillating && preset.id.starts_with("M-F")) || current;
                                 if ui
-                                    .add_enabled(
-                                        offered,
-                                        egui::Button::selectable(
-                                            current,
-                                            law_preset_label(preset, physics),
-                                        ),
-                                    )
+                                    .add(egui::Button::selectable(
+                                        current,
+                                        law_preset_label(preset, physics),
+                                    ))
                                     .on_hover_text(preset.phenomenon)
-                                    .on_disabled_hover_text(law_editor::SELF_OSCILLATING_RESPONSE)
                                     .clicked()
                                 {
                                     chosen = Some(preset);

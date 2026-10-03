@@ -26,6 +26,7 @@ DRIVEN_LAW=van-der-pol cargo run -p funfern-app --release --locked --example can
 OSCILLATOR_MEDIUM=kink OSCILLATOR_FILTER=1 cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator
 OSCILLATOR_MEDIUM=van-der-pol OSCILLATOR_COMPOSE=junction OSCILLATOR_SHORT_WAVE=0.3 cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator
 NONLINEAR_FORCED=1 NONLINEAR_SHORT_WAVE=0.3 cargo run -p funfern-app --release --locked --example canonical_gpu_nonlinear
+OSCILLATOR_MEDIUM=van-der-pol OSCILLATOR_FIELD_LAW=kerr OSCILLATOR_COMPOSE=junction OSCILLATOR_SHORT_WAVE=0.3 cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator
 LONG_RUN_SCENE="Self-sustained emitter" LONG_RUN_SHORT_WAVE=0.25 LONG_RUN_STEPS=1000 cargo run -p funfern-app --release --locked --example canonical_gpu_long_run
 OSCILLATOR_HANDOFF=remesh cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator_handoff
 FAILURE_LAW=phi4 cargo run -p funfern-app --release --locked --example canonical_gpu_nonlinear_failure

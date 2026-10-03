@@ -32,6 +32,10 @@
 //! junction's interior, where beside van der Pol its energy is the gain
 //! lane's at active nodes and the primary-loss lane's elsewhere; the device
 //! books the reference's short-wave lane as primary loss.
+//! `OSCILLATOR_FIELD_LAW=kerr` or `saturable` puts that field law on the
+//! medium's mass row, whatever the medium: beside `van-der-pol` the stage
+//! reads the node's field through its own map, in two secant passes on both
+//! sides.
 
 use std::time::{Duration, Instant};
 
@@ -174,6 +178,23 @@ fn main() -> AppExit {
                 gate: None,
             },
         });
+    }
+    match std::env::var("OSCILLATOR_FIELD_LAW").as_deref() {
+        Ok("kerr") => {
+            scene.materials[0].mass_law.field = FieldLaw::Polynomial {
+                chi1: ScalarField::constant(0.0),
+                chi2: ScalarField::constant(0.8),
+                amplitude_bound: None,
+            };
+        }
+        Ok("saturable") => {
+            scene.materials[0].mass_law.field = FieldLaw::Saturable {
+                chi: ScalarField::constant(6.0),
+                saturation: ScalarField::constant(0.3),
+            };
+        }
+        Ok(other) => panic!("unknown OSCILLATOR_FIELD_LAW {other}"),
+        Err(_) => {}
     }
     if let Ok(alpha) = std::env::var("OSCILLATOR_SHORT_WAVE") {
         let last = scene.materials.len() - 1;

@@ -246,8 +246,52 @@ two fluxes. `G` is then the row the step's own bound uses
 (`trajectory_stiffness_rows`): every sample at the largest map and every node
 at the least mass its laws reach, so a law that lightens the mass or stiffens
 the kick's slot lowers `τ` with it. The stress keeps the complementary map's
-drive and not the field law's secant, on both sides. Van der Pol still does
-not compose with a field law: its node map is exact only for a linear one.
+drive and not the field law's secant, on both sides.
+
+## Van der Pol beside a field law
+
+Since 3 October 2026 van der Pol runs beside a Kerr or saturable response.
+
+**What the stage integrates.** The same equation, `Q̇ = −(β + α u²) Q`, with
+`u` the node's own field through its map rather than `Q/m`: the gain
+saturates on the field's intensity, so the cycle sits at a field amplitude
+the threshold sets, whatever the medium's response. A node's `β` and `α` stay
+the mean of its contributions weighed by authored mass times drive, which
+does not depend on the field; that is how `loss_rates_at` already weighs a
+passive loss beside a field law.
+
+**The map.** There is no closed form. Writing `α u² = k Q²` with
+`k = α (u/Q)²`, the node's secant, the stage takes the exact Bernoulli map at
+that `k`, read at the stage's midpoint flux in exactly two passes: `k(Q₀)`
+gives a predictor `Q*`, then `k(½(Q₀ + Q*))` gives `Q₁`
+(`active_node_map`; the device's `active_loss_map` takes the same two).
+- On a linear map `u/Q` is the node's mass, so both passes are the linear
+  map; a generation without field laws keeps the old path bit for bit.
+- It keeps `Q`'s sign and stays bounded at any step, as the Bernoulli map does
+  at any fixed `k > 0`.
+- A node on its cycle, `β + α u² = 0`, is a fixed point of both passes.
+- It is second order in the stage, so the Strang splitting stays second
+  order: against a fine Runge-Kutta flow through the map, each halving of a
+  0.02-0.005 stage takes the error down 7.7-8.5 times under Kerr and
+  saturable laws, and 6.2 then 7.0 from far above the cycle under a
+  defocusing one.
+
+**Energy.** At active nodes the gain lane is each node's store before less
+after, through its own map; `decay` and `apply_short_wave` read the store
+node by node there. Passive nodes are unchanged.
+
+**Measured.** A uniform field under Klein-Gordon with gain 1 and threshold
+0.5 settles where harmonic balance on the field puts it,
+`⟨(1 − u²/a²) u P(u)⟩ = 0`: Kerr (χ₂ = 0.8) at a peak field of 0.564 against
+0.572, saturable (χ = 6, s = 0.3) at 0.572 against 0.573; a gain read on
+`Q/m` would have settled at 0.493 and 0.429. The splitting residual falls
+4.0 times when the step halves.
+
+Reading every contribution's passive rate, as a drive or a field law makes
+`loss_rates_at` do, used to evaluate van der Pol's at rest, its negative gain,
+and fail the step; such a contribution now adds its mass and no passive rate.
+That also let van der Pol run beside a pumped mass, which failed on its first
+step before.
 
 ## Skins and names
 

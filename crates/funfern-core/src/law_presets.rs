@@ -656,8 +656,8 @@ pub fn van_der_pol_text(physics: PhysicsModel) -> String {
         "Self-oscillating (van der Pol): a rate γ₀(|{u}|²/a² − 1) that gives energy below the \
          threshold a and takes it above, so a small field grows and saturates; beside \
          Klein-Gordon it is a lattice of oscillators whose rate amplitude settles near 2a/√3. \
-         Its energy is counted as active gain, of either sign, not as loss. It runs only beside \
-         a linear response."
+         Its energy is counted as active gain, of either sign, not as loss. Beside a Kerr or \
+         saturable response the gain saturates on the field itself."
     )
 }
 

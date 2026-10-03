@@ -2111,12 +2111,6 @@ impl CanonicalTemporalWaveOperator {
         let has_active_loss = primary
             .iter()
             .any(|sample| matches!(sample.loss.law.rate, RateLawValues::VanDerPol { .. }));
-        if has_active_loss && has_field_laws {
-            return Err(WaveError::Unsupported(
-                "van der Pol's node map assumes a linear primary map; it does not compose \
-                 with a field law yet",
-            ));
-        }
         let has_short_wave_loss = element_short_wave.iter().any(|alpha| *alpha > 0.0);
         let restoring_curvature = primary
             .iter()
@@ -3092,7 +3086,14 @@ impl CanonicalTemporalWaveOperator {
             let coefficient = coefficient_factor(temporal.coefficient, time, runtime)?;
             let share =
                 contribution.geometric_weight * contribution.reference_coefficient * coefficient;
-            let rate = loss_rate(temporal.loss, time, runtime)?;
+            // A van der Pol contribution's rate follows the field and is the
+            // active stage's (`active_loss_coefficients`); read at rest it
+            // would be the negative gain, which no passive rate may be.
+            let rate = if matches!(temporal.loss.law.rate, RateLawValues::VanDerPol { .. }) {
+                0.0
+            } else {
+                loss_rate(temporal.loss, time, runtime)?
+            };
             mass[contribution.node as usize] += share;
             weighted_loss[contribution.node as usize] += share * rate;
         }
@@ -4579,10 +4580,8 @@ fn active_nodes(
 /// its pin and an outgoing trace node is the wall's, as on the device, where
 /// both are stepped outside the bulk kick.
 ///
-/// Beside a field law a node's energy is its law's, not `½Q²/m`, so the
-/// loss is the primary energy before less after, as the dissipation stage
-/// measures it there. No node is active then: van der Pol does not compose
-/// with a field law.
+/// Beside a field law a node's energy is its law's store, not `½Q²/m`, read
+/// through the node's own map before and after.
 fn apply_short_wave(
     operator: &CanonicalTemporalWaveOperator,
     primary: &mut [f64],
@@ -4603,10 +4602,10 @@ fn apply_short_wave(
         Some(active) => *active,
         None => operator.has_active_loss,
     };
-    let before = if operator.has_field_laws {
-        operator.primary_energy_and_rate(primary, time, runtime)?.0
+    let terms = if operator.has_field_laws {
+        Some(operator.primary_terms_at(time, runtime)?.0)
     } else {
-        0.0
+        None
     };
     let (mut gained, mut lost) = (0.0, 0.0);
     for (node, value) in force.iter().enumerate() {
@@ -4615,7 +4614,13 @@ fn apply_short_wave(
         }
         let old = primary[node];
         let next = old - duration * value;
-        let change = 0.5 * (next * next - old * old) / mass[node];
+        let change = match &terms {
+            Some(terms) => {
+                operator.primary_node_energy(terms, node, next, runtime)?
+                    - operator.primary_node_energy(terms, node, old, runtime)?
+            }
+            None => 0.5 * (next * next - old * old) / mass[node],
+        };
         if active(node) {
             gained += change;
         } else {
@@ -4624,10 +4629,6 @@ fn apply_short_wave(
         primary[node] = next;
     }
     validate_finite(primary)?;
-    if operator.has_field_laws {
-        let after = operator.primary_energy_and_rate(primary, time, runtime)?.0;
-        return Ok((0.0, before - after));
-    }
     Ok((gained, lost))
 }
 
@@ -4637,6 +4638,10 @@ fn apply_short_wave(
 /// against; `rate_time` is the midpoint of the half interval it stands for,
 /// which is what the decay rate is read at. On a fixed rate the two choices
 /// coincide and this reduces to the fixed path's exponential exactly.
+///
+/// Beside a field law a node's energy is its law's store, read node by node
+/// through its own map, and a van der Pol node's map follows its field; see
+/// [`active_node_map`].
 fn decay(
     operator: &CanonicalTemporalWaveOperator,
     primary: &mut [f64],
@@ -4662,7 +4667,21 @@ fn decay(
         .complementary_energy_and_rate(complementary, stage_time, runtime)?
         .0;
     let primary_mass = operator.primary_mass_at(stage_time, runtime)?;
+    // A store per node only matters where an active node's change has to be
+    // told from a passive one's.
+    let stage_terms = if operator.has_field_laws && active.is_some() {
+        Some(operator.primary_terms_at(stage_time, runtime)?.0)
+    } else {
+        None
+    };
     let node_energy = |flux: &[f64]| -> Result<Vec<f64>, WaveError> {
+        if let Some(terms) = &stage_terms {
+            return flux
+                .iter()
+                .enumerate()
+                .map(|(node, flux)| operator.primary_node_energy(terms, node, *flux, runtime))
+                .collect();
+        }
         if operator.has_field_laws {
             return Ok(Vec::new());
         }
@@ -4675,13 +4694,25 @@ fn decay(
     let before_nodes = node_energy(primary)?;
     match &active {
         Some((beta, alpha, mass)) => {
+            let rate_terms = if operator.has_field_laws {
+                Some(operator.primary_terms_at(rate_time, runtime)?.0)
+            } else {
+                None
+            };
             for (node, flux) in primary.iter_mut().enumerate() {
-                *flux = bernoulli_map(
-                    *flux,
-                    beta[node],
-                    alpha[node] / (mass[node] * mass[node]),
-                    duration,
-                );
+                *flux = match &rate_terms {
+                    Some(terms) if alpha[node] != 0.0 => {
+                        active_node_map(*flux, beta[node], alpha[node], duration, |flux| {
+                            operator.primary_inverse(terms, node, flux, runtime)
+                        })?
+                    }
+                    _ => bernoulli_map(
+                        *flux,
+                        beta[node],
+                        alpha[node] / (mass[node] * mass[node]),
+                        duration,
+                    ),
+                };
             }
         }
         None => {
@@ -4732,6 +4763,39 @@ fn decay(
         removed_primary.max(0.0),
         removed_complementary.max(0.0),
         gained,
+    ))
+}
+
+/// A van der Pol node beside a field law over `duration`:
+/// `Q̇ = −(β + α u²) Q` with `u = field(Q)` the node's own map. There is no
+/// closed form, so the stage writes `α u² = k Q²` with `k = α (u/Q)²`, the
+/// node's secant, and takes the exact Bernoulli map at that `k`, read at the
+/// stage's midpoint flux: once from `Q₀` to a predictor, then from the mean of
+/// `Q₀` and the predictor. That is second order in the stage, keeps `Q`'s sign
+/// and stays bounded at any step, as the map does at any fixed `k`; a node
+/// on its limit cycle, `β + α u² = 0`, is a fixed point of both passes; and on
+/// a linear map `u/Q` is the node's mass and both passes are the linear map.
+/// Exactly two passes, so the device can take the same two.
+fn active_node_map(
+    flux: f64,
+    beta: f64,
+    alpha: f64,
+    duration: f64,
+    field: impl Fn(f64) -> Result<f64, WaveError>,
+) -> Result<f64, WaveError> {
+    let secant = |at: f64| -> Result<f64, WaveError> {
+        if at == 0.0 {
+            return Ok(0.0);
+        }
+        let ratio = field(at)? / at;
+        Ok(alpha * ratio * ratio)
+    };
+    let predictor = bernoulli_map(flux, beta, secant(flux)?, duration);
+    Ok(bernoulli_map(
+        flux,
+        beta,
+        secant(0.5 * (flux + predictor))?,
+        duration,
     ))
 }
 
@@ -11695,12 +11759,108 @@ mod tests {
         }
     }
 
+    /// Beside a field law the van der Pol stage is second order in its
+    /// length against a fine Runge-Kutta flow of `Q̇ = −(β + α u(Q)²) Q`
+    /// through the node's own map, Kerr and saturable, below and above the
+    /// limit cycle; a node on the cycle is a fixed point; and a linear map
+    /// gives the linear stage. Over stages of 0.02, 0.01 and 0.005 each
+    /// halving takes the error down 7.7-8.5 times, the local third order,
+    /// except from far above the cycle under the defocusing law (a field of
+    /// 1.4 against a cycle at 0.5, a rate of 8/s), where it is 6.2 then 7.0
+    /// on its way there: 4e-6 of the flux at 0.005. At 0.2 the same start
+    /// read 6.0 then 6.7 under Kerr: the secant moves within the stage.
+    #[test]
+    fn the_van_der_pol_stage_follows_a_field_law_at_second_order() {
+        let laws = [
+            FieldLawValues::Polynomial {
+                chi1: 0.0,
+                chi2: 0.8,
+                amplitude_bound: None,
+            },
+            FieldLawValues::Saturable {
+                chi: 6.0,
+                saturation: 0.3,
+            },
+            FieldLawValues::Saturable {
+                chi: -2.0,
+                saturation: 0.5,
+            },
+        ];
+        let (mass, beta, alpha) = (1.3, -1.2, 4.8);
+        for law in laws {
+            let terms = [ConstitutiveTerm {
+                coefficient: mass,
+                law,
+            }];
+            let field = |flux: f64| {
+                signed_inverse(ConstitutiveSite::new(&terms), flux)
+                    .map_err(|_| WaveError::InvalidState)
+            };
+            let flow = |flux: f64, duration: f64| {
+                let steps = 20_000;
+                let h = duration / steps as f64;
+                let rate = |q: f64| {
+                    let u = field(q).unwrap();
+                    -(beta + alpha * u * u) * q
+                };
+                let mut q = flux;
+                for _ in 0..steps {
+                    let a = rate(q);
+                    let b = rate(q + 0.5 * h * a);
+                    let c = rate(q + 0.5 * h * b);
+                    let d = rate(q + h * c);
+                    q += h * (a + 2.0 * b + 2.0 * c + d) / 6.0;
+                }
+                q
+            };
+            for flux in [0.15, -0.9] {
+                let errors = [0.02, 0.01, 0.005].map(|duration| {
+                    (active_node_map(flux, beta, alpha, duration, field).unwrap()
+                        - flow(flux, duration))
+                    .abs()
+                });
+                // Second order in the stage: a local error of third.
+                assert!(
+                    errors[0] > 6.0 * errors[1] && errors[1] > 6.0 * errors[2],
+                    "{law:?} from {flux}: {errors:?}"
+                );
+                assert!(errors[2] < 1.0e-5 * flux.abs(), "{law:?}: {errors:?}");
+            }
+            // The cycle: `u² = −β/α`, held by its forward map.
+            let cycle = (-beta / alpha).sqrt();
+            let site = ConstitutiveSite::new(&terms);
+            let held = site.value(cycle);
+            let mapped = active_node_map(held, beta, alpha, 0.2, field).unwrap();
+            assert!(
+                (mapped - held).abs() < 1.0e-13 * held,
+                "{law:?}: {mapped} against {held}"
+            );
+        }
+        let linear = |flux: f64| Ok(flux / mass);
+        for flux in [0.15, -0.9] {
+            let mapped = active_node_map(flux, beta, alpha, 0.2, linear).unwrap();
+            let exact = bernoulli_map(flux, beta, alpha / (mass * mass), 0.2);
+            assert!((mapped - exact).abs() < 1.0e-14, "{mapped} against {exact}");
+        }
+    }
+
     fn van_der_pol_operator(
         gain: f64,
         threshold: f64,
         omega0: f64,
     ) -> CanonicalTemporalWaveOperator {
+        van_der_pol_operator_with(gain, threshold, omega0, FieldLaw::Linear)
+    }
+
+    /// [`van_der_pol_operator`] with `law` on the mass row.
+    fn van_der_pol_operator_with(
+        gain: f64,
+        threshold: f64,
+        omega0: f64,
+        law: FieldLaw,
+    ) -> CanonicalTemporalWaveOperator {
         let mut scene = Scene::default();
+        scene.materials[0].mass_law.field = law;
         scene.materials[0].restoring = klein_gordon(omega0);
         scene.materials[0].magnetic_loss = Some(crate::LossChannel {
             base_rate: ScalarField::constant(gain),
@@ -11777,6 +11937,178 @@ mod tests {
         assert!(
             (change - gained).abs() < 1.0e-3 * change.abs(),
             "the gain lane holds {gained} of {change}"
+        );
+    }
+
+    /// Beside a field law the gain saturates on the field itself. For a
+    /// uniform field under Klein-Gordon, a weak gain settles where it does no
+    /// work over a cycle, `⟨(1 − u²/a²) u P(u)⟩ = 0` for `u = U cos θ` with
+    /// `P` the node's map: harmonic balance on the field. Reading the gain on
+    /// `Q/m` instead would saturate it early, at the field where
+    /// `P(u)/m = a·√(4/3)`-ish; both laws here put the measured cycle near the
+    /// first prediction and well away from the second. The gain lane holds the
+    /// energy it put in, and the splitting residual over the run falls about
+    /// four times when the step halves.
+    #[test]
+    fn van_der_pol_beside_a_field_law_saturates_on_its_field() {
+        let (gain, threshold, omega0) = (1.0, 0.5, 3.0);
+        let laws = [
+            (
+                "kerr",
+                FieldLaw::Polynomial {
+                    chi1: ScalarField::constant(0.0),
+                    chi2: ScalarField::constant(0.8),
+                    amplitude_bound: None,
+                },
+                FieldLawValues::Polynomial {
+                    chi1: 0.0,
+                    chi2: 0.8,
+                    amplitude_bound: None,
+                },
+            ),
+            (
+                "saturable",
+                saturable_law(6.0, 0.3),
+                FieldLawValues::Saturable {
+                    chi: 6.0,
+                    saturation: 0.3,
+                },
+            ),
+        ];
+        for (name, law, values) in laws {
+            let operator = van_der_pol_operator_with(gain, threshold, omega0, law);
+            assert!(operator.has_field_laws(), "{name}");
+            let base = operator.base();
+            let forcing = CanonicalForcing::none(base);
+            let terms = [ConstitutiveTerm {
+                coefficient: 1.0,
+                law: values,
+            }];
+            let site = ConstitutiveSite::new(&terms);
+            // `⟨(1 − u²/a²) u P(u)⟩` over a cycle of `u = U cos θ`, and its
+            // root in `U`; `P` per unit mass. `on_flux` reads the gain on
+            // `P(u)` rather than `u`.
+            let balance = |amplitude: f64, on_flux: bool| {
+                let samples = 720;
+                (0..samples)
+                    .map(|index| {
+                        let u = amplitude
+                            * (std::f64::consts::TAU * index as f64 / samples as f64).cos();
+                        let p = site.value(u.abs()).copysign(u);
+                        let seen = if on_flux { p } else { u };
+                        (1.0 - seen * seen / (threshold * threshold)) * u * p
+                    })
+                    .sum::<f64>()
+            };
+            let root = |on_flux: bool| {
+                let (mut low, mut high) = (1.0e-3, 3.0 * threshold);
+                for _ in 0..80 {
+                    let middle = 0.5 * (low + high);
+                    if balance(middle, on_flux) > 0.0 {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
+                }
+                0.5 * (low + high)
+            };
+            let (predicted, on_flux) = (root(false), root(true));
+            let run = |dt: f64, seconds: f64| {
+                let primary = base
+                    .primary_mass()
+                    .iter()
+                    .map(|mass| 1.0e-3 * mass)
+                    .collect();
+                let complementary =
+                    vec![Point2::default(); base.complementary_degrees_of_freedom()];
+                let mut state =
+                    CanonicalTemporalWaveState::new(&operator, dt, primary, complementary).unwrap();
+                let start = state.energy(&operator).unwrap();
+                let (mut gained, mut residual, mut peak) = (0.0, 0.0, 0.0_f64);
+                let steps = (seconds / dt).round() as usize;
+                for step in 0..steps {
+                    let accounting = state.step_with_forcing(&operator, &forcing).unwrap();
+                    gained += accounting.active_gain;
+                    residual += accounting.splitting_residual.abs();
+                    if step > steps - (4.0 / dt) as usize {
+                        let field = operator
+                            .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                            .unwrap();
+                        peak = peak.max(field[0].abs());
+                    }
+                }
+                let change = state.energy(&operator).unwrap() - start;
+                (peak, gained, change, residual)
+            };
+            let dt = 0.2 * operator.maximum_time_step();
+            let (peak, gained, change, _) = run(dt, 30.0);
+            eprintln!("{name}: peak {peak:.4} predicted {predicted:.4} on flux {on_flux:.4}");
+            assert!(
+                (peak - predicted).abs() < 0.05 * predicted,
+                "{name}: limit cycle at {peak} against {predicted}"
+            );
+            assert!(
+                (peak - on_flux).abs() > 0.1 * predicted,
+                "{name}: {peak} cannot tell the field's cycle {predicted} from {on_flux}"
+            );
+            assert!(
+                (change - gained).abs() < 1.0e-3 * change.abs(),
+                "{name}: the gain lane holds {gained} of {change}"
+            );
+            let (.., coarse) = run(dt, 6.0);
+            let (.., fine) = run(0.5 * dt, 6.0);
+            eprintln!("{name}: residual {coarse:.3e} -> {fine:.3e}");
+            assert!(
+                coarse > 3.0 * fine,
+                "{name}: residual {coarse:.3e} then {fine:.3e}"
+            );
+        }
+    }
+
+    /// Van der Pol beside a pumped mass steps, its gain lane closing the
+    /// balance with the pump's work. Any drive sends the passive rates
+    /// through every contribution, and read at rest van der Pol's rate is
+    /// its negative gain: until 3 October 2026 the first step failed with
+    /// "formula produced an invalid value".
+    #[test]
+    fn van_der_pol_beside_a_pumped_mass_steps() {
+        let mut scene = Scene::default();
+        scene.materials[0].restoring = klein_gordon(3.0);
+        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(1.1),
+            phase_radians: ScalarField::constant(0.3),
+        };
+        scene.materials[0].magnetic_loss = Some(crate::LossChannel {
+            base_rate: ScalarField::constant(1.0),
+            law: DampingLaw {
+                rate: crate::RateLaw::VanDerPol {
+                    threshold: ScalarField::constant(0.5),
+                    amplitude_bound: ScalarField::constant(10.0),
+                },
+                drive: TimeDrive::None,
+                gate: None,
+            },
+        });
+        let (_, _, operator) = generation(&scene, 0.5, 1);
+        let base = operator.base();
+        let primary = base.primary_mass().iter().map(|mass| 0.1 * mass).collect();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let dt = 0.2 * operator.maximum_time_step();
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, dt, primary, complementary).unwrap();
+        let forcing = CanonicalForcing::none(base);
+        let (mut gained, mut change, mut residual) = (0.0, 0.0, 0.0);
+        for _ in 0..(2.0 / dt).round() as usize {
+            let step = state.step_with_forcing(&operator, &forcing).unwrap();
+            gained += step.active_gain;
+            change += step.energy_change;
+            residual += step.splitting_residual;
+        }
+        assert!(gained > 0.0, "{gained}");
+        assert!(
+            residual.abs() < 1.0e-3 * change.abs(),
+            "{residual} of {change}"
         );
     }
 
@@ -12117,9 +12449,8 @@ mod tests {
 
     /// Beside van der Pol, the authored loss's energy is the gain lane's at
     /// active nodes and its own lane's elsewhere, and the balance closes over
-    /// both; past α = 1 the material is refused. A field law composes with the
-    /// loss now (`a_short_wave_loss_composes_with_every_field_law`) but not
-    /// with van der Pol, loss or no loss.
+    /// both, on a linear response and beside Kerr; past α = 1 the material is
+    /// refused.
     #[test]
     fn a_short_wave_loss_beside_van_der_pol_splits_its_energy_by_node() {
         let mut scene = Scene::initial();
@@ -12151,49 +12482,35 @@ mod tests {
             material: crate::MaterialId(2),
             frame: MaterialFrame::world(),
         });
-        let (_, _, operator) = generation(&scene, 0.3, 1);
-        assert!(operator.active_nodes.iter().any(|active| *active));
-        assert!(!operator.active_nodes.iter().all(|active| *active));
-        let [ceiling, ..] = short_wave_fields(&operator);
-        let dt = 0.2 * operator.maximum_time_step();
-        let (_, total) = short_wave_run(&operator, &ceiling, dt, 0.5);
-        assert!(
-            total.short_wave_loss > 0.1 * total.energy_change.abs(),
-            "{total:?}"
-        );
-        assert!(total.active_gain < 0.0, "{total:?}");
-        // The splitting's own second-order defect, as with van der Pol alone.
-        assert!(
-            total.splitting_residual.abs() < 1.0e-2 * total.energy_change.abs(),
-            "{total:?}"
-        );
+        // Beside Kerr on the van der Pol medium too, where both lanes read
+        // each node's change through its own map.
+        let mut kerr_scene = scene.clone();
+        kerr_scene.materials[0].mass_law.field = kerr(0.8);
+        for (name, scene) in [("linear", scene), ("kerr", kerr_scene)] {
+            let (_, _, operator) = generation(&scene, 0.3, 1);
+            assert!(operator.active_nodes.iter().any(|active| *active), "{name}");
+            assert!(
+                !operator.active_nodes.iter().all(|active| *active),
+                "{name}"
+            );
+            let [ceiling, ..] = short_wave_fields(&operator);
+            let dt = 0.2 * operator.maximum_time_step();
+            let (_, total) = short_wave_run(&operator, &ceiling, dt, 0.5);
+            assert!(
+                total.short_wave_loss > 0.1 * total.energy_change.abs(),
+                "{name}: {total:?}"
+            );
+            assert!(total.active_gain < 0.0, "{name}: {total:?}");
+            // The splitting's own second-order defect, as with van der Pol alone.
+            assert!(
+                total.splitting_residual.abs() < 1.0e-2 * total.energy_change.abs(),
+                "{name}: {total:?}"
+            );
+        }
 
         let mut past = Scene::default();
         past.materials[0].short_wave_loss = 1.5;
         assert!(!past.materials[0].valid());
-        let mut kerr_scene = scene.clone();
-        kerr_scene.materials[0].mass_law.field = kerr(0.8);
-        let mut base_scene = kerr_scene.clone();
-        strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
-            &base_scene,
-            1,
-            MeshingOptions {
-                target_edge_length: 0.5,
-                ..MeshingOptions::default()
-            },
-        )
-        .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        assert!(matches!(
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &kerr_scene, 1),
-            Err(WaveError::Unsupported(_))
-        ));
     }
 
     /// Every oscillator medium beside every composition balances at second

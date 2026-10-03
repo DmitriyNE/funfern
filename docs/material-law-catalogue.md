@@ -123,7 +123,7 @@ whose `DampingLaw` carries a rate law and its own time drive.
 | --- | --- | --- | --- | --- |
 | D1 | time-modulated loss | loss-driven parametric effects, PT-symmetry-flavoured pairs with gain | `DampingLaw::drive` over `RateLaw::Constant` | runs (Advanced view; no preset) |
 | D2 | saturable absorption `1/(1 + u²/u_s²)` | self-limiting, passive mode-locking flavour | `RateLaw::SaturableAbsorption` | gated (C) |
-| D3 | van der Pol `γ₀(u²/a² − 1)` | self-oscillation, spontaneous pattern formation | `RateLaw::VanDerPol` | runs (primary row, undriven, beside a linear response) |
+| D3 | van der Pol `γ₀(u²/a² − 1)` | self-oscillation, spontaneous pattern formation | `RateLaw::VanDerPol` | runs (primary row, undriven; beside a Kerr or saturable response the gain saturates on the field) |
 | D4 | short-wave loss, a viscous stress `τ η C u` with `τ = α/(h G)` | trims what the mesh cannot carry and spares what it can; a gain that band-limits itself | `Material::short_wave_loss`, α in [0, 1] | runs (Advanced view, preset Mesh-scale trim α = 0.05; beside any response, Kerr and saturable included) |
 
 A constant loss channel runs on the fixed path. D1 runs on the time-driven one:

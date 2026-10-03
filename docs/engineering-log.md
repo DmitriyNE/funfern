@@ -18080,3 +18080,54 @@ entry above (`KERR_SLAB_SHORT_WAVE`), and the card says what it does.
   updated.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — Van der Pol beside a field law
+
+Van der Pol was refused beside a Kerr or saturable response: its stage map
+is exact because the field is the flux over the mass. It now composes with
+both, in either row, under the design in `docs/spikes/funfern-gate-o.md`
+("Van der Pol beside a field law").
+
+- **Stage.** `Q̇ = −(β + α u²) Q` with `u` through the node's own map, as
+  the exact Bernoulli map at the secant `k = α(u/Q)²` read at the stage's
+  midpoint flux in two passes (`active_node_map`; the device's
+  `active_loss_map` and `active_secant`). Linear generations keep the old
+  path; the weighting is `loss_rates_at`'s, authored mass times drive.
+- **Energy.** `decay` and `apply_short_wave` read each node's store through
+  its map where active and passive nodes have to be told apart.
+- **A latent failure fixed.** With field laws or any drive, `loss_rates_at`
+  evaluates every contribution's passive rate, and van der Pol's at rest is
+  its negative gain: the step failed with "formula produced an invalid
+  value". Van der Pol beside a pumped mass, which the editor allows, failed
+  on its first step that way before today. Such a contribution now adds its
+  mass and no passive rate (`van_der_pol_beside_a_pumped_mass_steps`).
+- **Measured (reference).** The stage against a fine RK4 flow through the
+  map: each halving of a 0.02-0.005 stage cuts the error 7.7-8.5 times under
+  Kerr and saturable laws, and 6.2 then 7.0 from far above the cycle under a
+  defocusing one (4e-6 of the flux at 0.005); the cycle is a fixed point to
+  1e-13. A uniform Klein-Gordon field, gain 1, threshold 0.5, settles where
+  harmonic balance on the field predicts: Kerr 0.564 against 0.572,
+  saturable 0.572 against 0.573, where a gain on `Q/m` would give 0.493 and
+  0.429; the gain lane holds the energy change to 1e-3, and the splitting
+  residual falls 4.0 times when the step halves.
+- **Measured (device).** `canonical_gpu_oscillator` with
+  `OSCILLATOR_MEDIUM=van-der-pol` and the new `OSCILLATOR_FIELD_LAW`, 200
+  steps (Q, b, r; gain lane): Kerr 3.1e-7, 1.4e-6, 6.8e-7; 9.5e-10;
+  saturable 2.3e-7, 1.5e-6, 7.3e-7; 4.9e-8; Kerr from below threshold
+  (amplitude 0.05) 5.3e-7, 3.7e-6, 2.5e-7; 9.4e-8; Kerr junction with a
+  short-wave loss 7.0e-7, 1.3e-6, 4.3e-7; gain 1.6e-7, loss 3.3e-9;
+  saturable first-order wall 2.6e-7, 8.6e-7, 6.6e-7; Kerr second-order wall
+  3.5e-7, 9.6e-7, 6.5e-7; saturable pins 2.5e-7, 4.2e-7, 6.3e-7; Kerr gap
+  3.9e-7, 1.4e-6, 4.6e-7; Kerr source 3.1e-7, 1.4e-6, 6.7e-7; saturable with
+  the filter 2.2e-7, 1.4e-6, 7.5e-7; Kerr 1000 steps 6.6e-7, 7.9e-6, 4.2e-6;
+  2.2e-9. Linear van der Pol unchanged: 2.0e-7, 1.4e-6, 8.7e-7; 1.1e-7.
+- **Editor.** Nothing keeps a field-dependent response and van der Pol apart
+  any more: response presets, the Advanced field response and the loss kind
+  are all offered; `SELF_OSCILLATING_RESPONSE` and `self_oscillating` are
+  gone, and van der Pol's help says the gain saturates on the field.
+- **Tests.** `the_van_der_pol_stage_follows_a_field_law_at_second_order`,
+  `van_der_pol_beside_a_field_law_saturates_on_its_field`,
+  `van_der_pol_beside_a_pumped_mass_steps`; the short-wave and van der Pol
+  test runs beside Kerr where it checked the refusal.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
