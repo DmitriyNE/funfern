@@ -177,7 +177,7 @@ plain `trunk` builds the cooperative static-host variant.
   a single-loop scene should take a fraction of a second, not seconds.
 - [ ] Disable WebGPU or use an unsupported browser and reload. Readable startup
   guidance must remain visible. Also check an adapter/device initialization failure.
-- [ ] Load `examples/eight-obstacles.json`, or Obstacle array from the gallery,
+- [ ] Load `examples/obstacle-array.json`, or Obstacle array from the gallery,
   which is the same scene. Observe idle and dragging frame times, validation
   latency, smoothness, and browser console errors. Try 32 obstacles.
 - [ ] Enable View > Mesh over a running field and confirm the wireframe is visible

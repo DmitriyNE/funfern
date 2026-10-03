@@ -33,6 +33,14 @@ The `funfern-app` examples open a window and read the autosave, so run them with
 `HOME` pointed at a scratch directory. Build with the real `HOME` first, or the
 toolchain is re-fetched into the scratch one.
 
+`examples/` is an export of the gallery's catalog, which stays the source.
+`cargo test -p funfern-app --test examples` fails when a scene changes without
+its file; regenerate them all with
+
+```sh
+FUNFERN_BLESS_EXAMPLES=1 cargo test -p funfern-app --test examples
+```
+
 Set `PLAYWRIGHT_CHANNEL=chrome` to run the smoke test with an installed Google
 Chrome instead of Playwright's pinned Chromium.
 

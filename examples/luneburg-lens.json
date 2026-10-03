@@ -1,0 +1,903 @@
+{
+  "version": 22,
+  "model": {
+    "draft": {
+      "domain": [
+        -1.0,
+        1.0,
+        -1.0,
+        1.0
+      ],
+      "physics": {
+        "kind": "electromagnetic",
+        "polarization": "te"
+      },
+      "materials": [
+        {
+          "id": 1,
+          "name": "Background",
+          "mass_density": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [],
+          "color": [
+            86,
+            116,
+            138
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "none"
+          },
+          "switch_ramp": 0.0
+        },
+        {
+          "id": 2,
+          "name": "Luneburg profile",
+          "mass_density": {
+            "kind": "formula",
+            "source": "max(2 - (r / R)^2, 1)"
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [
+            {
+              "name": "R",
+              "value": 0.43
+            }
+          ],
+          "color": [
+            66,
+            105,
+            151
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "none"
+          },
+          "switch_ramp": 0.0
+        }
+      ],
+      "regions": [
+        {
+          "id": 1,
+          "material": 1,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "world"
+          }
+        },
+        {
+          "id": 2,
+          "material": 2,
+          "frame": {
+            "origin": [
+              0.08,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "follow_region"
+          }
+        }
+      ],
+      "face_assignments": [
+        {
+          "anchor": {
+            "kind": "outer",
+            "side": "bottom",
+            "fraction": 0.5
+          },
+          "region": 1
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 2,
+            "span": 2,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": 2
+        }
+      ],
+      "volume_sources": [],
+      "outer_boundaries": [
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        }
+      ],
+      "curves": [
+        {
+          "id": 1,
+          "spline": {
+            "kind": "open",
+            "controls": [
+              [
+                -0.9311215932167729,
+                0.051313972081441395
+              ],
+              [
+                -0.7477882598834397,
+                -0.26622867597285277
+              ],
+              [
+                -0.5644549265501062,
+                -0.5837713240271469
+              ],
+              [
+                -0.3811215932167729,
+                -0.9013139720814413
+              ]
+            ],
+            "intervals": [
+              1.1
+            ],
+            "multiplicities": []
+          },
+          "nodes": [
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 1,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "neumann",
+                  "signal": {
+                    "kind": "harmonic",
+                    "offset": 0.0,
+                    "amplitude": 15.0,
+                    "frequency_hz": 3.5,
+                    "phase_radians": 0.0
+                  }
+                },
+                "right": {
+                  "kind": "second_order_outgoing"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.51,
+                0.0
+              ],
+              [
+                0.3840559159102155,
+                0.3040559159102154
+              ],
+              [
+                0.08000000000000003,
+                0.43
+              ],
+              [
+                -0.2240559159102154,
+                0.30405591591021547
+              ],
+              [
+                -0.35,
+                5.265981236333619e-17
+              ],
+              [
+                -0.2240559159102155,
+                -0.3040559159102154
+              ],
+              [
+                0.07999999999999992,
+                -0.43
+              ],
+              [
+                0.3840559159102154,
+                -0.3040559159102155
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 2,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 3,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 4,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 5,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 6,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 7,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 8,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 9,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            }
+          ]
+        }
+      ],
+      "vertices": []
+    },
+    "accepted": {
+      "domain": [
+        -1.0,
+        1.0,
+        -1.0,
+        1.0
+      ],
+      "physics": {
+        "kind": "electromagnetic",
+        "polarization": "te"
+      },
+      "materials": [
+        {
+          "id": 1,
+          "name": "Background",
+          "mass_density": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [],
+          "color": [
+            86,
+            116,
+            138
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "none"
+          },
+          "switch_ramp": 0.0
+        },
+        {
+          "id": 2,
+          "name": "Luneburg profile",
+          "mass_density": {
+            "kind": "formula",
+            "source": "max(2 - (r / R)^2, 1)"
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [
+            {
+              "name": "R",
+              "value": 0.43
+            }
+          ],
+          "color": [
+            66,
+            105,
+            151
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "none"
+          },
+          "switch_ramp": 0.0
+        }
+      ],
+      "regions": [
+        {
+          "id": 1,
+          "material": 1,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "world"
+          }
+        },
+        {
+          "id": 2,
+          "material": 2,
+          "frame": {
+            "origin": [
+              0.08,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "follow_region"
+          }
+        }
+      ],
+      "face_assignments": [
+        {
+          "anchor": {
+            "kind": "outer",
+            "side": "bottom",
+            "fraction": 0.5
+          },
+          "region": 1
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 2,
+            "span": 2,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": 2
+        }
+      ],
+      "volume_sources": [],
+      "outer_boundaries": [
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        }
+      ],
+      "curves": [
+        {
+          "id": 1,
+          "spline": {
+            "kind": "open",
+            "controls": [
+              [
+                -0.9311215932167729,
+                0.051313972081441395
+              ],
+              [
+                -0.7477882598834397,
+                -0.26622867597285277
+              ],
+              [
+                -0.5644549265501062,
+                -0.5837713240271469
+              ],
+              [
+                -0.3811215932167729,
+                -0.9013139720814413
+              ]
+            ],
+            "intervals": [
+              1.1
+            ],
+            "multiplicities": []
+          },
+          "nodes": [
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 1,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "neumann",
+                  "signal": {
+                    "kind": "harmonic",
+                    "offset": 0.0,
+                    "amplitude": 15.0,
+                    "frequency_hz": 3.5,
+                    "phase_radians": 0.0
+                  }
+                },
+                "right": {
+                  "kind": "second_order_outgoing"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.51,
+                0.0
+              ],
+              [
+                0.3840559159102155,
+                0.3040559159102154
+              ],
+              [
+                0.08000000000000003,
+                0.43
+              ],
+              [
+                -0.2240559159102154,
+                0.30405591591021547
+              ],
+              [
+                -0.35,
+                5.265981236333619e-17
+              ],
+              [
+                -0.2240559159102155,
+                -0.3040559159102154
+              ],
+              [
+                0.07999999999999992,
+                -0.43
+              ],
+              [
+                0.3840559159102154,
+                -0.3040559159102155
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 2,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 3,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 4,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 5,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 6,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 7,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 8,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 9,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            }
+          ]
+        }
+      ],
+      "vertices": []
+    },
+    "probes": [
+      {
+        "id": 1,
+        "name": "Focus energy",
+        "color": [
+          91,
+          220,
+          194
+        ],
+        "enabled": true,
+        "target": {
+          "kind": "area_disk",
+          "center": [
+            0.4307402885326977,
+            0.20249999999999996
+          ],
+          "radius": 0.065
+        }
+      },
+      {
+        "id": 2,
+        "name": "Lens energy",
+        "color": [
+          248,
+          196,
+          112
+        ],
+        "enabled": true,
+        "target": {
+          "kind": "area_region",
+          "region": 2
+        }
+      }
+    ],
+    "source": {
+      "enabled": false,
+      "position": [
+        -0.45,
+        0.0
+      ],
+      "width": 0.06,
+      "region": 1,
+      "signal": {
+        "kind": "harmonic",
+        "offset": 0.0,
+        "amplitude": 18.0,
+        "frequency_hz": 2.5,
+        "phase_radians": 1.5707963267948966
+      }
+    },
+    "far_field": {
+      "enabled": false,
+      "inset": 0.12
+    }
+  },
+  "presentation": {
+    "grid": true,
+    "control_polygons": true,
+    "handles": true,
+    "accepted_reference": true,
+    "boundary_conditions": true,
+    "mesh": false,
+    "mesh_boundaries": true,
+    "adaptation_target": false,
+    "point_probes": true,
+    "line_probes": true,
+    "boundary_probes": true,
+    "area_probes": true,
+    "far_field_contour": true,
+    "probe_labels": true,
+    "field": true,
+    "simulation_speed": 1.0,
+    "field_gain": 2.0,
+    "field_auto_exposure": true,
+    "vector_overlay": "relative_energy_flow",
+    "vector_overlay_smoothed": false,
+    "vector_overlay_ac_coupled": true,
+    "vector_overlay_lowpass": true,
+    "vector_overlay_lowpass_hz": 0.5,
+    "vector_overlay_density": 54.0,
+    "vector_overlay_gain": 2.0,
+    "material_overlay": {
+      "kind": "property",
+      "property": "density"
+    },
+    "material_overlay_opacity": 0.48,
+    "material_overlay_auto_range": true,
+    "material_overlay_logarithmic": false,
+    "material_overlay_manual_min": 0.0,
+    "material_overlay_manual_max": 1.0,
+    "mesh_edge": 0.08,
+    "adaptation_enabled": true,
+    "adaptation_accuracy_percent": 12.0,
+    "adaptation_elements_per_wavelength": 6.0,
+    "adaptation_minimum_edge": 0.02,
+    "adaptation_maximum_edge": 0.16,
+    "grid_scale_filter": true,
+    "advanced_material_ids": [],
+    "law_formula_numbers": false,
+    "integrated_field": false,
+    "probe_readouts": [
+      {
+        "probe": 1,
+        "readout": {
+          "span": 2.0,
+          "point": {
+            "field": false,
+            "rate": false,
+            "transverse": false,
+            "flow": false,
+            "energy": false,
+            "field_spectrum": false,
+            "rate_spectrum": false
+          },
+          "area": {
+            "mean_field": false,
+            "rms_field": false,
+            "rms_transverse": false,
+            "mean_energy": true,
+            "total_energy": false,
+            "mean_field_spectrum": false
+          },
+          "line": [],
+          "mean_window": 1.0,
+          "waterfall_gain": 1.0,
+          "far_field": {
+            "waterfall": false,
+            "polar": false,
+            "power": false
+          },
+          "spectrum": {
+            "decibels": false,
+            "max_hz": 0.0
+          }
+        }
+      },
+      {
+        "probe": 2,
+        "readout": {
+          "span": 2.0,
+          "point": {
+            "field": false,
+            "rate": false,
+            "transverse": false,
+            "flow": false,
+            "energy": false,
+            "field_spectrum": false,
+            "rate_spectrum": false
+          },
+          "area": {
+            "mean_field": false,
+            "rms_field": false,
+            "rms_transverse": false,
+            "mean_energy": false,
+            "total_energy": true,
+            "mean_field_spectrum": false
+          },
+          "line": [],
+          "mean_window": 1.0,
+          "waterfall_gain": 1.0,
+          "far_field": {
+            "waterfall": false,
+            "polar": false,
+            "power": false
+          },
+          "spectrum": {
+            "decibels": false,
+            "max_hz": 0.0
+          }
+        }
+      }
+    ]
+  }
+}

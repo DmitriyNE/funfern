@@ -1,0 +1,372 @@
+{
+  "version": 22,
+  "model": {
+    "draft": {
+      "domain": [
+        -1.0,
+        1.0,
+        -1.0,
+        1.0
+      ],
+      "physics": {
+        "kind": "electromagnetic",
+        "polarization": "tm"
+      },
+      "materials": [
+        {
+          "id": 1,
+          "name": "Junction",
+          "mass_density": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [
+            {
+              "name": "omega0",
+              "value": 12.0
+            }
+          ],
+          "color": [
+            86,
+            116,
+            138
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "sine_gordon",
+            "omega0": {
+              "kind": "formula",
+              "source": "omega0"
+            }
+          },
+          "switch_ramp": 0.0
+        }
+      ],
+      "regions": [
+        {
+          "id": 1,
+          "material": 1,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "world"
+          }
+        }
+      ],
+      "face_assignments": [
+        {
+          "anchor": {
+            "kind": "outer",
+            "side": "bottom",
+            "fraction": 0.5
+          },
+          "region": 1
+        }
+      ],
+      "volume_sources": [],
+      "outer_boundaries": [
+        {
+          "kind": "reflecting"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "reflecting"
+        },
+        {
+          "kind": "dirichlet",
+          "signal": {
+            "kind": "harmonic",
+            "offset": 3.0,
+            "amplitude": 0.0,
+            "frequency_hz": 0.0,
+            "phase_radians": 0.0
+          }
+        }
+      ],
+      "curves": [],
+      "vertices": []
+    },
+    "accepted": {
+      "domain": [
+        -1.0,
+        1.0,
+        -1.0,
+        1.0
+      ],
+      "physics": {
+        "kind": "electromagnetic",
+        "polarization": "tm"
+      },
+      "materials": [
+        {
+          "id": 1,
+          "name": "Junction",
+          "mass_density": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [
+            {
+              "name": "omega0",
+              "value": 12.0
+            }
+          ],
+          "color": [
+            86,
+            116,
+            138
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "sine_gordon",
+            "omega0": {
+              "kind": "formula",
+              "source": "omega0"
+            }
+          },
+          "switch_ramp": 0.0
+        }
+      ],
+      "regions": [
+        {
+          "id": 1,
+          "material": 1,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "world"
+          }
+        }
+      ],
+      "face_assignments": [
+        {
+          "anchor": {
+            "kind": "outer",
+            "side": "bottom",
+            "fraction": 0.5
+          },
+          "region": 1
+        }
+      ],
+      "volume_sources": [],
+      "outer_boundaries": [
+        {
+          "kind": "reflecting"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "reflecting"
+        },
+        {
+          "kind": "dirichlet",
+          "signal": {
+            "kind": "harmonic",
+            "offset": 3.0,
+            "amplitude": 0.0,
+            "frequency_hz": 0.0,
+            "phase_radians": 0.0
+          }
+        }
+      ],
+      "curves": [],
+      "vertices": []
+    },
+    "probes": [
+      {
+        "id": 1,
+        "name": "Down the line",
+        "color": [
+          91,
+          220,
+          194
+        ],
+        "enabled": true,
+        "target": {
+          "kind": "point",
+          "position": [
+            0.5,
+            0.0
+          ]
+        }
+      }
+    ],
+    "source": {
+      "enabled": false,
+      "position": [
+        -0.45,
+        0.0
+      ],
+      "width": 0.06,
+      "region": 1,
+      "signal": {
+        "kind": "harmonic",
+        "offset": 0.0,
+        "amplitude": 18.0,
+        "frequency_hz": 2.5,
+        "phase_radians": 1.5707963267948966
+      }
+    },
+    "far_field": {
+      "enabled": false,
+      "inset": 0.12
+    }
+  },
+  "presentation": {
+    "grid": true,
+    "control_polygons": true,
+    "handles": true,
+    "accepted_reference": true,
+    "boundary_conditions": true,
+    "mesh": false,
+    "mesh_boundaries": true,
+    "adaptation_target": false,
+    "point_probes": true,
+    "line_probes": true,
+    "boundary_probes": true,
+    "area_probes": true,
+    "far_field_contour": true,
+    "probe_labels": true,
+    "field": true,
+    "simulation_speed": 1.0,
+    "field_gain": 2.0,
+    "field_auto_exposure": true,
+    "vector_overlay": "off",
+    "vector_overlay_smoothed": false,
+    "vector_overlay_ac_coupled": true,
+    "vector_overlay_lowpass": true,
+    "vector_overlay_lowpass_hz": 0.5,
+    "vector_overlay_density": 54.0,
+    "vector_overlay_gain": 1.0,
+    "material_overlay": {
+      "kind": "regions"
+    },
+    "material_overlay_opacity": 0.48,
+    "material_overlay_auto_range": true,
+    "material_overlay_logarithmic": false,
+    "material_overlay_manual_min": 0.0,
+    "material_overlay_manual_max": 1.0,
+    "mesh_edge": 0.08,
+    "adaptation_enabled": true,
+    "adaptation_accuracy_percent": 12.0,
+    "adaptation_elements_per_wavelength": 6.0,
+    "adaptation_minimum_edge": 0.02,
+    "adaptation_maximum_edge": 0.16,
+    "grid_scale_filter": true,
+    "advanced_material_ids": [],
+    "law_formula_numbers": false,
+    "integrated_field": true,
+    "probe_readouts": [
+      {
+        "probe": 1,
+        "readout": {
+          "span": 10.0,
+          "point": {
+            "field": true,
+            "rate": false,
+            "transverse": false,
+            "flow": false,
+            "energy": false,
+            "field_spectrum": true,
+            "rate_spectrum": false
+          },
+          "area": {
+            "mean_field": false,
+            "rms_field": false,
+            "rms_transverse": false,
+            "mean_energy": false,
+            "total_energy": false,
+            "mean_field_spectrum": false
+          },
+          "line": [],
+          "mean_window": 1.0,
+          "waterfall_gain": 1.0,
+          "far_field": {
+            "waterfall": false,
+            "polar": false,
+            "power": false
+          },
+          "spectrum": {
+            "decibels": false,
+            "max_hz": 3.0
+          }
+        }
+      }
+    ]
+  }
+}

@@ -17682,3 +17682,23 @@ spectrum is the shutter's Fourier series.
   steps; Q 4.7e-6, b 4.1e-6 at 1000.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — Every gallery scene ships as a file
+
+The maintenance item from `docs/plan.md`: `examples/` carried the obstacle
+array alone, and nothing caught the catalog and the files disagreeing.
+
+- **Files.** `examples/` holds all 45 gallery scenes, each the scene's `save`
+  plus a newline, named after it (`maxwells-fisheye.json`). 2.3 MB, the
+  disordered crystal the largest at 514 KB, under the 2 MiB load cap.
+  `eight-obstacles.json` is now `obstacle-array.json`; the README, the user
+  guide and the browser checklist follow.
+- **The old check missed a drift.** It compared only the model, and the
+  shipped obstacle array lacked the two vector-overlay low-pass view keys the
+  scene has carried since they arrived. The check is now byte for byte.
+- **Tests** (`crates/funfern-app/tests/examples.rs`): every scene's file
+  matches its `save`; every file is a scene and loads; file names are
+  distinct. `FUNFERN_BLESS_EXAMPLES=1` rewrites them (`docs/checks.md`). The
+  builders stay the source, since the claim tests build their variants.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

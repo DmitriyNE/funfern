@@ -665,6 +665,7 @@ uses a world-space validation clearance of `1e-4` times the larger domain extent
 independent of zoom. The editor
 validator is deliberately conservative; final mesh topology uses adaptive exact
 orientation and incircle signs rather than geometric epsilons.
-Load [examples/eight-obstacles.json](../examples/eight-obstacles.json) for a
+`examples/` holds every gallery scene as a file, named after it: load
+[examples/obstacle-array.json](../examples/obstacle-array.json) for a
 representative scene, or open Obstacle array from the example gallery, which is
 the same scene.

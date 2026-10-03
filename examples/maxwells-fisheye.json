@@ -1,0 +1,972 @@
+{
+  "version": 22,
+  "model": {
+    "draft": {
+      "domain": [
+        -1.0,
+        1.0,
+        -1.0,
+        1.0
+      ],
+      "physics": {
+        "kind": "electromagnetic",
+        "polarization": "tm"
+      },
+      "materials": [
+        {
+          "id": 1,
+          "name": "Background",
+          "mass_density": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [],
+          "color": [
+            86,
+            116,
+            138
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "none"
+          },
+          "switch_ramp": 0.0
+        },
+        {
+          "id": 2,
+          "name": "Maxwell fisheye",
+          "mass_density": {
+            "kind": "formula",
+            "source": "(2 / (1 + (r / R)^2))^2"
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [
+            {
+              "name": "R",
+              "value": 0.45
+            }
+          ],
+          "color": [
+            66,
+            105,
+            151
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "none"
+          },
+          "switch_ramp": 0.0
+        }
+      ],
+      "regions": [
+        {
+          "id": 1,
+          "material": 1,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "world"
+          }
+        },
+        {
+          "id": 2,
+          "material": 2,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "follow_region"
+          }
+        }
+      ],
+      "face_assignments": [
+        {
+          "anchor": {
+            "kind": "outer",
+            "side": "bottom",
+            "fraction": 0.5
+          },
+          "region": 1
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 1,
+            "span": 1,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": 2
+        }
+      ],
+      "volume_sources": [],
+      "outer_boundaries": [
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        }
+      ],
+      "curves": [
+        {
+          "id": 1,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.4617278883644572,
+                0.0
+              ],
+              [
+                0.4265809456495783,
+                0.17669561313799548
+              ],
+              [
+                0.3264909209254529,
+                0.32649092092545284
+              ],
+              [
+                0.1766956131379955,
+                0.4265809456495783
+              ],
+              [
+                2.8272679028129946e-17,
+                0.4617278883644572
+              ],
+              [
+                -0.17669561313799545,
+                0.4265809456495783
+              ],
+              [
+                -0.32649092092545284,
+                0.3264909209254529
+              ],
+              [
+                -0.4265809456495783,
+                0.17669561313799553
+              ],
+              [
+                -0.4617278883644572,
+                5.654535805625989e-17
+              ],
+              [
+                -0.4265809456495784,
+                -0.17669561313799545
+              ],
+              [
+                -0.32649092092545295,
+                -0.32649092092545284
+              ],
+              [
+                -0.17669561313799576,
+                -0.4265809456495782
+              ],
+              [
+                -8.481803708438984e-17,
+                -0.4617278883644572
+              ],
+              [
+                0.1766956131379956,
+                -0.42658094564957827
+              ],
+              [
+                0.3264909209254528,
+                -0.32649092092545295
+              ],
+              [
+                0.4265809456495782,
+                -0.17669561313799578
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 1,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 2,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 3,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 4,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 5,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 6,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 7,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 8,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 9,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 10,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 11,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 12,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 13,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 14,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 15,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 16,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            }
+          ]
+        }
+      ],
+      "vertices": []
+    },
+    "accepted": {
+      "domain": [
+        -1.0,
+        1.0,
+        -1.0,
+        1.0
+      ],
+      "physics": {
+        "kind": "electromagnetic",
+        "polarization": "tm"
+      },
+      "materials": [
+        {
+          "id": 1,
+          "name": "Background",
+          "mass_density": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [],
+          "color": [
+            86,
+            116,
+            138
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "none"
+          },
+          "switch_ramp": 0.0
+        },
+        {
+          "id": 2,
+          "name": "Maxwell fisheye",
+          "mass_density": {
+            "kind": "formula",
+            "source": "(2 / (1 + (r / R)^2))^2"
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [
+            {
+              "name": "R",
+              "value": 0.45
+            }
+          ],
+          "color": [
+            66,
+            105,
+            151
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "none"
+          },
+          "switch_ramp": 0.0
+        }
+      ],
+      "regions": [
+        {
+          "id": 1,
+          "material": 1,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "world"
+          }
+        },
+        {
+          "id": 2,
+          "material": 2,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "follow_region"
+          }
+        }
+      ],
+      "face_assignments": [
+        {
+          "anchor": {
+            "kind": "outer",
+            "side": "bottom",
+            "fraction": 0.5
+          },
+          "region": 1
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 1,
+            "span": 1,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": 2
+        }
+      ],
+      "volume_sources": [],
+      "outer_boundaries": [
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        }
+      ],
+      "curves": [
+        {
+          "id": 1,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.4617278883644572,
+                0.0
+              ],
+              [
+                0.4265809456495783,
+                0.17669561313799548
+              ],
+              [
+                0.3264909209254529,
+                0.32649092092545284
+              ],
+              [
+                0.1766956131379955,
+                0.4265809456495783
+              ],
+              [
+                2.8272679028129946e-17,
+                0.4617278883644572
+              ],
+              [
+                -0.17669561313799545,
+                0.4265809456495783
+              ],
+              [
+                -0.32649092092545284,
+                0.3264909209254529
+              ],
+              [
+                -0.4265809456495783,
+                0.17669561313799553
+              ],
+              [
+                -0.4617278883644572,
+                5.654535805625989e-17
+              ],
+              [
+                -0.4265809456495784,
+                -0.17669561313799545
+              ],
+              [
+                -0.32649092092545295,
+                -0.32649092092545284
+              ],
+              [
+                -0.17669561313799576,
+                -0.4265809456495782
+              ],
+              [
+                -8.481803708438984e-17,
+                -0.4617278883644572
+              ],
+              [
+                0.1766956131379956,
+                -0.42658094564957827
+              ],
+              [
+                0.3264909209254528,
+                -0.32649092092545295
+              ],
+              [
+                0.4265809456495782,
+                -0.17669561313799578
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 1,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 2,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 3,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 4,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 5,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 6,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 7,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 8,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 9,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 10,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 11,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 12,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 13,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 14,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 15,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            },
+            {
+              "id": 16,
+              "behavior": {
+                "kind": "transmitting"
+              }
+            }
+          ]
+        }
+      ],
+      "vertices": []
+    },
+    "probes": [
+      {
+        "id": 1,
+        "name": "Round the rim",
+        "color": [
+          248,
+          196,
+          112
+        ],
+        "enabled": true,
+        "target": {
+          "kind": "boundary",
+          "curve": 1,
+          "spans": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16
+          ],
+          "side": "left",
+          "reversed": false,
+          "preset": "medium"
+        }
+      }
+    ],
+    "source": {
+      "enabled": true,
+      "position": [
+        -0.42000000000000004,
+        0.0
+      ],
+      "width": 0.03,
+      "region": 2,
+      "signal": {
+        "kind": "harmonic",
+        "offset": 0.0,
+        "amplitude": 10.0,
+        "frequency_hz": 3.0,
+        "phase_radians": 1.5707963267948966
+      }
+    },
+    "far_field": {
+      "enabled": false,
+      "inset": 0.12
+    }
+  },
+  "presentation": {
+    "grid": true,
+    "control_polygons": true,
+    "handles": true,
+    "accepted_reference": true,
+    "boundary_conditions": true,
+    "mesh": false,
+    "mesh_boundaries": true,
+    "adaptation_target": false,
+    "point_probes": true,
+    "line_probes": true,
+    "boundary_probes": true,
+    "area_probes": true,
+    "far_field_contour": true,
+    "probe_labels": true,
+    "field": true,
+    "simulation_speed": 1.0,
+    "field_gain": 2.0,
+    "field_auto_exposure": true,
+    "vector_overlay": "off",
+    "vector_overlay_smoothed": false,
+    "vector_overlay_ac_coupled": true,
+    "vector_overlay_lowpass": true,
+    "vector_overlay_lowpass_hz": 0.5,
+    "vector_overlay_density": 54.0,
+    "vector_overlay_gain": 1.0,
+    "material_overlay": {
+      "kind": "property",
+      "property": "density"
+    },
+    "material_overlay_opacity": 0.36,
+    "material_overlay_auto_range": true,
+    "material_overlay_logarithmic": false,
+    "material_overlay_manual_min": 0.0,
+    "material_overlay_manual_max": 1.0,
+    "mesh_edge": 0.08,
+    "adaptation_enabled": true,
+    "adaptation_accuracy_percent": 12.0,
+    "adaptation_elements_per_wavelength": 6.0,
+    "adaptation_minimum_edge": 0.02,
+    "adaptation_maximum_edge": 0.16,
+    "grid_scale_filter": true,
+    "advanced_material_ids": [],
+    "law_formula_numbers": false,
+    "integrated_field": false,
+    "probe_readouts": [
+      {
+        "probe": 1,
+        "readout": {
+          "span": 2.0,
+          "point": {
+            "field": false,
+            "rate": false,
+            "transverse": false,
+            "flow": false,
+            "energy": false,
+            "field_spectrum": false,
+            "rate_spectrum": false
+          },
+          "area": {
+            "mean_field": false,
+            "rms_field": false,
+            "rms_transverse": false,
+            "mean_energy": false,
+            "total_energy": false,
+            "mean_field_spectrum": false
+          },
+          "line": [
+            {
+              "quantity": "mean_energy",
+              "view": "arclength"
+            }
+          ],
+          "mean_window": 1.0,
+          "waterfall_gain": 1.0,
+          "far_field": {
+            "waterfall": false,
+            "polar": false,
+            "power": false
+          },
+          "spectrum": {
+            "decibels": false,
+            "max_hz": 0.0
+          }
+        }
+      }
+    ]
+  }
+}

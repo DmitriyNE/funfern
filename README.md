@@ -87,8 +87,8 @@ Geometry, snapshots and viewport recordings can be exported. The built-in
 example gallery holds 45 scenes in seven sections: basics, interfaces and
 media, lenses and imaging, guides and crystals, resonators, time-varying media,
 and nonlinear and self-organizing media. Each is ready to run with its sources,
-probes and view presets; `examples/` holds the obstacle array as a standalone
-file as well.
+probes and view presets, and `examples/` holds each as a scene file to open or
+start from.
 
 Materials take their laws from a preset selector or, in the Advanced view,
 slot by slot. The [material law catalogue](docs/material-law-catalogue.md)
@@ -354,7 +354,7 @@ These pins are deliberate:
 ```text
 crates/funfern-core/       Geometry, topology, meshing, FEM and f64 reference solver
 crates/funfern-app/        Bevy/egui application, GPU solver and visualization
-examples/                  Standalone scene files; the gallery scenes are built in
+examples/                  Every gallery scene as a file, exported from the catalog
 assets/                    Logo and application assets
 docs/                      Architecture, development plans and verification notes
 ```

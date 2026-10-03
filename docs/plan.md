@@ -1086,10 +1086,15 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   visibility pass (make private, compile, promote only what fails) is cheap once
   the boundaries stop moving.
 
-- Factor the built-in example scenes out of
+- [x] Factor the built-in example scenes out of
   `crates/funfern-app/src/topology_examples.rs` into `examples/`. The gallery
   scenes are compiled in while `examples/` carries one standalone file, so the
-  two can disagree with nothing to catch it.
+  two can disagree with nothing to catch it. Done on 2026-10-03: `examples/`
+  holds all 45 scenes, one file each named after its scene, and
+  `crates/funfern-app/tests/examples.rs` fails on a file that differs by a byte
+  from its scene's `save`, a scene without a file or a file without a scene.
+  The builders stay the source, since the claim tests build variants of them;
+  `FUNFERN_BLESS_EXAMPLES=1` regenerates the files.
 
 - Decide what `experiments/material-laws-spike/` is for. It is 500 KB committed,
   160 KB of it results JSON, referenced from the spike reports in `docs/spikes/`.

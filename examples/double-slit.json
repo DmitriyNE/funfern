@@ -1,0 +1,820 @@
+{
+  "version": 22,
+  "model": {
+    "draft": {
+      "domain": [
+        -1.0,
+        1.0,
+        -1.0,
+        1.0
+      ],
+      "physics": {
+        "kind": "mechanical"
+      },
+      "materials": [
+        {
+          "id": 1,
+          "name": "Background",
+          "mass_density": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [],
+          "color": [
+            86,
+            116,
+            138
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "none"
+          },
+          "switch_ramp": 0.0
+        }
+      ],
+      "regions": [
+        {
+          "id": 1,
+          "material": 1,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "world"
+          }
+        }
+      ],
+      "face_assignments": [
+        {
+          "anchor": {
+            "kind": "outer",
+            "side": "bottom",
+            "fraction": 0.5
+          },
+          "region": 1
+        }
+      ],
+      "volume_sources": [],
+      "outer_boundaries": [
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        }
+      ],
+      "curves": [
+        {
+          "id": 1,
+          "spline": {
+            "kind": "open",
+            "controls": [
+              [
+                0.0,
+                0.36
+              ],
+              [
+                0.0,
+                0.44
+              ],
+              [
+                0.0,
+                0.52
+              ],
+              [
+                0.0,
+                0.6
+              ],
+              [
+                -0.2833333333333333,
+                0.6
+              ],
+              [
+                -0.5666666666666667,
+                0.6
+              ],
+              [
+                -0.85,
+                0.6
+              ],
+              [
+                -0.8500000000000001,
+                0.20000000000000004
+              ],
+              [
+                -0.8500000000000001,
+                -0.19999999999999996
+              ],
+              [
+                -0.85,
+                -0.6
+              ],
+              [
+                -0.5666666666666668,
+                -0.6
+              ],
+              [
+                -0.2833333333333334,
+                -0.6
+              ],
+              [
+                0.0,
+                -0.6
+              ],
+              [
+                0.0,
+                -0.52
+              ],
+              [
+                0.0,
+                -0.44
+              ],
+              [
+                0.0,
+                -0.36
+              ]
+            ],
+            "intervals": [
+              0.24,
+              0.85,
+              1.2,
+              0.85,
+              0.24
+            ],
+            "multiplicities": [
+              3,
+              3,
+              3,
+              3
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 1,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 2,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "second_order_outgoing"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 3,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "second_order_outgoing"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 4,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "second_order_outgoing"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 5,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "spline": {
+            "kind": "open",
+            "controls": [
+              [
+                0.0,
+                -0.14
+              ],
+              [
+                0.0,
+                -0.04666666666666668
+              ],
+              [
+                0.0,
+                0.04666666666666666
+              ],
+              [
+                0.0,
+                0.14
+              ]
+            ],
+            "intervals": [
+              0.28
+            ],
+            "multiplicities": []
+          },
+          "nodes": [
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 6,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "vertices": []
+    },
+    "accepted": {
+      "domain": [
+        -1.0,
+        1.0,
+        -1.0,
+        1.0
+      ],
+      "physics": {
+        "kind": "mechanical"
+      },
+      "materials": [
+        {
+          "id": 1,
+          "name": "Background",
+          "mass_density": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [],
+          "color": [
+            86,
+            116,
+            138
+          ],
+          "mass_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "stiffness_law": {
+            "field": {
+              "kind": "linear"
+            },
+            "drive": {
+              "kind": "none"
+            },
+            "alternate": null,
+            "inverted": false
+          },
+          "electric_loss": null,
+          "magnetic_loss": null,
+          "restoring": {
+            "kind": "none"
+          },
+          "switch_ramp": 0.0
+        }
+      ],
+      "regions": [
+        {
+          "id": 1,
+          "material": 1,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "world"
+          }
+        }
+      ],
+      "face_assignments": [
+        {
+          "anchor": {
+            "kind": "outer",
+            "side": "bottom",
+            "fraction": 0.5
+          },
+          "region": 1
+        }
+      ],
+      "volume_sources": [],
+      "outer_boundaries": [
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        },
+        {
+          "kind": "second_order_outgoing"
+        }
+      ],
+      "curves": [
+        {
+          "id": 1,
+          "spline": {
+            "kind": "open",
+            "controls": [
+              [
+                0.0,
+                0.36
+              ],
+              [
+                0.0,
+                0.44
+              ],
+              [
+                0.0,
+                0.52
+              ],
+              [
+                0.0,
+                0.6
+              ],
+              [
+                -0.2833333333333333,
+                0.6
+              ],
+              [
+                -0.5666666666666667,
+                0.6
+              ],
+              [
+                -0.85,
+                0.6
+              ],
+              [
+                -0.8500000000000001,
+                0.20000000000000004
+              ],
+              [
+                -0.8500000000000001,
+                -0.19999999999999996
+              ],
+              [
+                -0.85,
+                -0.6
+              ],
+              [
+                -0.5666666666666668,
+                -0.6
+              ],
+              [
+                -0.2833333333333334,
+                -0.6
+              ],
+              [
+                0.0,
+                -0.6
+              ],
+              [
+                0.0,
+                -0.52
+              ],
+              [
+                0.0,
+                -0.44
+              ],
+              [
+                0.0,
+                -0.36
+              ]
+            ],
+            "intervals": [
+              0.24,
+              0.85,
+              1.2,
+              0.85,
+              0.24
+            ],
+            "multiplicities": [
+              3,
+              3,
+              3,
+              3
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 1,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 2,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "second_order_outgoing"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 3,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "second_order_outgoing"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 4,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "second_order_outgoing"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 5,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "spline": {
+            "kind": "open",
+            "controls": [
+              [
+                0.0,
+                -0.14
+              ],
+              [
+                0.0,
+                -0.04666666666666668
+              ],
+              [
+                0.0,
+                0.04666666666666666
+              ],
+              [
+                0.0,
+                0.14
+              ]
+            ],
+            "intervals": [
+              0.28
+            ],
+            "multiplicities": []
+          },
+          "nodes": [
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 6,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "vertices": []
+    },
+    "probes": [
+      {
+        "id": 1,
+        "name": "Screen",
+        "color": [
+          91,
+          220,
+          194
+        ],
+        "enabled": true,
+        "target": {
+          "kind": "segment",
+          "start": [
+            0.85,
+            -0.85
+          ],
+          "end": [
+            0.85,
+            0.85
+          ],
+          "preset": "high"
+        }
+      }
+    ],
+    "source": {
+      "enabled": true,
+      "position": [
+        -0.78,
+        0.0
+      ],
+      "width": 0.05,
+      "region": 1,
+      "signal": {
+        "kind": "harmonic",
+        "offset": 0.0,
+        "amplitude": 20.0,
+        "frequency_hz": 3.0,
+        "phase_radians": 1.5707963267948966
+      }
+    },
+    "far_field": {
+      "enabled": true,
+      "inset": 0.08
+    }
+  },
+  "presentation": {
+    "grid": true,
+    "control_polygons": true,
+    "handles": true,
+    "accepted_reference": true,
+    "boundary_conditions": true,
+    "mesh": false,
+    "mesh_boundaries": true,
+    "adaptation_target": false,
+    "point_probes": true,
+    "line_probes": true,
+    "boundary_probes": true,
+    "area_probes": true,
+    "far_field_contour": true,
+    "probe_labels": true,
+    "field": true,
+    "simulation_speed": 1.0,
+    "field_gain": 2.0,
+    "field_auto_exposure": true,
+    "vector_overlay": "off",
+    "vector_overlay_smoothed": false,
+    "vector_overlay_ac_coupled": true,
+    "vector_overlay_lowpass": true,
+    "vector_overlay_lowpass_hz": 0.5,
+    "vector_overlay_density": 54.0,
+    "vector_overlay_gain": 1.0,
+    "material_overlay": {
+      "kind": "regions"
+    },
+    "material_overlay_opacity": 0.48,
+    "material_overlay_auto_range": true,
+    "material_overlay_logarithmic": false,
+    "material_overlay_manual_min": 0.0,
+    "material_overlay_manual_max": 1.0,
+    "mesh_edge": 0.08,
+    "adaptation_enabled": true,
+    "adaptation_accuracy_percent": 12.0,
+    "adaptation_elements_per_wavelength": 6.0,
+    "adaptation_minimum_edge": 0.02,
+    "adaptation_maximum_edge": 0.16,
+    "grid_scale_filter": true,
+    "advanced_material_ids": [],
+    "law_formula_numbers": false,
+    "integrated_field": false,
+    "probe_readouts": [
+      {
+        "probe": 1,
+        "readout": {
+          "span": 2.0,
+          "point": {
+            "field": false,
+            "rate": false,
+            "transverse": false,
+            "flow": false,
+            "energy": false,
+            "field_spectrum": false,
+            "rate_spectrum": false
+          },
+          "area": {
+            "mean_field": false,
+            "rms_field": false,
+            "rms_transverse": false,
+            "mean_energy": false,
+            "total_energy": false,
+            "mean_field_spectrum": false
+          },
+          "line": [
+            {
+              "quantity": "mean_energy",
+              "view": "arclength"
+            }
+          ],
+          "mean_window": 1.0,
+          "waterfall_gain": 1.0,
+          "far_field": {
+            "waterfall": false,
+            "polar": false,
+            "power": false
+          },
+          "spectrum": {
+            "decibels": false,
+            "max_hz": 0.0
+          }
+        }
+      }
+    ],
+    "far_field_readout": {
+      "span": 2.0,
+      "point": {
+        "field": false,
+        "rate": false,
+        "transverse": false,
+        "flow": false,
+        "energy": false,
+        "field_spectrum": false,
+        "rate_spectrum": false
+      },
+      "area": {
+        "mean_field": false,
+        "rms_field": false,
+        "rms_transverse": false,
+        "mean_energy": false,
+        "total_energy": false,
+        "mean_field_spectrum": false
+      },
+      "line": [],
+      "mean_window": 1.0,
+      "waterfall_gain": 1.0,
+      "far_field": {
+        "waterfall": false,
+        "polar": true,
+        "power": false
+      },
+      "spectrum": {
+        "decibels": false,
+        "max_hz": 0.0
+      }
+    }
+  }
+}
