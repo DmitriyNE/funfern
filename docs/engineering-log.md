@@ -17753,3 +17753,43 @@ viscosity, authored on any material (catalogue row D4).
   the stress; no gallery scene carries it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-03 — The parametric fiber takes a short-wave loss
+
+- **Measured** (CPU as the app steps it, grid filter on, 8 s; rungs at mid
+  fiber against the signal there, gain at the far end against the pump off
+  with the same loss):
+
+  | edge | α | signal, pump off | gain | 7.5 / 12.5 / 17.5 Hz |
+  | --- | --- | --- | --- | --- |
+  | 0.08 | 0 | | 8.53× | 0.333 / 0.224 / 0.043 |
+  | 0.08 | 0.05 | −8.4% | 8.30× | 0.133 / 0.119 / 0.024 |
+  | 0.08 | 0.5 | −58% | 7.19× | 0.197 / 0.046 / 0.007 |
+  | 0.04 | 0 | | 8.48× | 0.205 / 0.198 / 0.095 |
+  | 0.04 | 0.05 | −4.5% | 8.35× | 0.198 / 0.105 / 0.049 |
+  | 0.04 | 0.5 | −37% | 7.57× | 0.195 / 0.034 / 0.007 |
+
+  At 0.04 the 12.5 and 17.5 Hz rungs sit at about 2.5 and 1.8 nodes a
+  wavelength and the 7.5 Hz one, the real first sum frequency, at about 4;
+  the loss takes the first two and keeps the third. At 0.08 7.5 Hz is not
+  resolved either and falls too. These rungs were read differently from the
+  27 September ones, so compare within the table only.
+- **Scene.** The user looked at 0.05 and asked for 0.5: it looks much
+  better, and a toy amplifier is to look right and keep its physics rather
+  than hold a gain. The card says it amplifies several times over and names
+  the loss as a weak viscosity on the field's gradient. The claims are
+  restated to the physics: gain more than 5× (7.19×) and steady, squeezed
+  below half (0.15), a standing pump oscillating more than 2× from 8 s to
+  12 s (2.37×; the loss slows it from 6×). The new
+  `the_fibers_short_wave_loss_trims_its_unresolved_rungs` holds the 12.5 Hz
+  rung under a third of itself (0.046 against 0.242) and the far end over a
+  quarter of its signal (35%).
+- **Editor.** The Short-wave loss group's line says it is a viscosity on the
+  field's gradient; its hover writes out the stress.
+- **Filed:** adaptation keeps running while paused (the user's report; not
+  reproduced), and the pattern floor binding the whole domain, reproduced on
+  the user's autosave: at edge 0.08 all 2,861 elements limit-bound at 0.029,
+  2,448 of them in the vacuum, against 27 under 0.035 without the pattern
+  floor. Both under "Maintenance" in `docs/plan.md`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

@@ -1059,6 +1059,25 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   Whether this was the 25.7 s "constitutive compile" of 2026-09-26 is not
   checked.
 
+- [ ] Adaptation keeps running while the simulation is paused. Reported by
+  the user on 2026-10-03, not yet reproduced. `refresh_amr`
+  (`crates/funfern-app/src/ui/amr.rs`) stops for adaptation being off, a
+  background failure, a mesh changed under a job and an edit in progress,
+  but not for the pause, so it presumably keeps estimating and adapting a
+  field that is not moving. Reproduce against the autosave first, then decide
+  what a pause holds: estimates, an adaptation in flight, or both.
+
+- [ ] A travelling drive's pattern floor binds the whole domain. Found on
+  2026-10-03 from the user's report on the parametric fiber (error 2%
+  against a 12% target, refining on). `CanonicalTemporalResolution::of_materials`
+  takes the shortest pattern over every material and the estimator applies
+  it to every element, so the vacuum is held to the fiber's 0.029 edge: on
+  the user's autosave at edge 0.08 all 2,861 elements were limit-bound, 2,448
+  of them outside the fiber, where the 2.5 Hz wave asks for 0.067. The
+  limit rule refines whatever the error reads. The fix is a per-element
+  floor from the element's own material, as the harmonic frequency already
+  is, and an AMR status that names the size rule when it is what refines.
+
 - Test a larger wasm memory cap on iOS Safari before shipping one. The
   threaded web build caps its shared memory at 1 GiB (`--max-memory` in
   `scripts/trunk`). After the memory fixes of 2026-09-28, Parametric pump at

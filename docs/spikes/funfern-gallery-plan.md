@@ -363,13 +363,26 @@ lowers the mode's index at 2.5 Hz from 1.38 to 1.18 and much less at
 `2β = 37.17`, because the pump shifts the signal's own propagation constant
 a little; it is flat to 2% over ±0.4 of that.
 
+Short-wave loss, added on 2026-10-03. The fiber carries α = 0.5, a
+viscosity on the field's gradient that damps what the mesh cannot carry. At
+edge 0.04 it takes the 12.5 and 17.5 Hz rungs, at 2.5 and 1.8 nodes a
+wavelength, from 0.198 and 0.095 of the signal to 0.034 and 0.007, keeps the
+resolved 7.5 Hz rung (0.205 to 0.195), and costs 37% of the far-end signal;
+the gain went from 8.48× to 7.57×. α = 0.05 halved the rungs for 4.5%, and
+the user chose 0.5 on how the scene looks: a toy amplifier is to look right
+and keep its physics, not to hold a gain figure. The claims were restated
+then to the physics.
+
 Claims at edge 0.08, at the far end at 2.5 Hz over 2 s windows:
 
-- The travelling pump amplifies the signal more than 7× against the pump
-  off (8.58×), and steadily: at 14 s the gain is within 10% of 8 s (8.71×).
-- Advanced by half a turn it squeezes the signal below half (0.12×).
+- The travelling pump amplifies the signal more than 5× against the pump
+  off (7.19×), and steadily: at 14 s the gain is within 10% of 8 s (7.18×).
+- Advanced by half a turn it squeezes the signal below half (0.15×).
 - Uniform in space, the same pump makes the fiber oscillate: its far end
-  grows more than 3× from 8 s to 12 s (6.0×).
+  grows more than 2× from 8 s to 12 s (2.37×; 6.0× without the loss).
+- The short-wave loss takes the 12.5 Hz rung at mid fiber to under a third
+  of itself (0.046 against 0.242 of the signal), and the far end keeps more
+  than a quarter of its signal (35%).
 
 ### 12. Bent fiber
 

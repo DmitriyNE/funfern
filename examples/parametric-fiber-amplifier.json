@@ -172,7 +172,8 @@
               "source": "omega0"
             }
           },
-          "switch_ramp": 0.0
+          "switch_ramp": 0.0,
+          "short_wave_loss": 0.5
         }
       ],
       "regions": [
@@ -544,7 +545,8 @@
               "source": "omega0"
             }
           },
-          "switch_ramp": 0.0
+          "switch_ramp": 0.0,
+          "short_wave_loss": 0.5
         }
       ],
       "regions": [

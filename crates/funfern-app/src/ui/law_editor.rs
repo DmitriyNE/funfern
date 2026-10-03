@@ -181,9 +181,10 @@ pub(super) fn needs_linear_response(material: &Material) -> bool {
 pub(super) fn short_wave_editor(ui: &mut egui::Ui, material: &mut Material) {
     let linear_response = material.mass_law.field == FieldLaw::Linear
         && material.stiffness_law.field == FieldLaw::Linear;
-    ui.small("τ = α / (h G) on each element: G its own ceiling, h the largest step")
+    ui.small("A viscosity on the field's gradient, τ = α / (h G) on each element")
         .on_hover_text(
-            "A viscous loss on the field's gradient. A wave at the mesh's own ceiling \
+            "A viscous stress τ η C u on the field's gradient, with G the element's own \
+             ceiling and h the largest step. A wave at the mesh's own ceiling \
              decays at about α/(2h) per second; a resolved wave loses the square of its share \
              of that ceiling, so mesh-scale residue fades and the waves the mesh carries \
              keep nearly all their energy. A uniform field feels none of it.",

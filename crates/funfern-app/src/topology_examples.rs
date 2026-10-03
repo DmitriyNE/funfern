@@ -408,11 +408,12 @@ pub fn catalog() -> &'static [TopologyExample] {
                 ExampleGroup::TimeVaryingMedia,
                 "Parametric fiber amplifier",
                 "A graded-index fiber whose permittivity is pumped at twice the signal's \
-                 frequency by a wave running with it amplifies the signal about eightfold by the \
-                 far end; shift the pump's phase by half a turn and the same signal is squeezed. \
+                 frequency by a wave running with it amplifies the signal several times over by \
+                 the far end; shift the pump's phase by half a turn and the same signal is squeezed. \
                  Stop the pump's wave (wavenumber 0) and the fiber oscillates on its own. The \
                  fiber is slightly dispersive, as real ones are, which keeps the pump from also \
-                 driving the signal's higher harmonics.",
+                 driving the signal's higher harmonics, and a short-wave loss, a weak viscosity \
+                 on the field's gradient, damps what of them the mesh is too coarse to carry.",
                 fiber_amplifier(),
             ),
             example(
@@ -2636,6 +2637,17 @@ const FIBER_DEPTH: f64 = 0.2;
 /// of fiber instead of 0.44, the rungs stay under a third of the signal,
 /// and the gain holds across meshes.
 const FIBER_CUTOFF_HZ: f64 = 1.25;
+/// The fiber's short-wave loss α, a viscosity on the field's gradient that
+/// damps the rungs the mesh cannot carry. Measured on 3 October 2026 over 8 s
+/// with the grid filter, at mid fiber against the signal there: at edge 0.04
+/// the 12.5 and 17.5 Hz rungs, about 2.5 and 1.8 nodes a wavelength, fell
+/// from 0.198 and 0.095 to 0.034 and 0.007, while the resolved 7.5 Hz one
+/// held (0.205, 0.195). It costs 37% of the far-end signal there and 58% at
+/// edge 0.08, and the gain moved from 8.48× to 7.57× (8.53× to 7.19× at
+/// 0.08). α = 0.05 halved the two rungs for 4.5% of the signal; 0.5 was
+/// chosen on how the scene looks, since this is a toy model of an amplifier,
+/// not a design for one.
+const FIBER_SHORT_WAVE: f64 = 0.5;
 /// Where the gain peaks, about 3% under twice the unpumped mode's
 /// propagation constant (β = 18.58 at 2.5 Hz, `n_eff` 1.183, measured from
 /// the phase along the axis at edges 0.08, 0.04 and 0.02): the pump shifts
@@ -2723,6 +2735,7 @@ fn fiber_amplifier_with(depth: f64, wavenumber: f64, phase: f64) -> TopologyDocu
         .find(|parameter| parameter.name == "omega0")
         .expect("the preset names its cutoff")
         .value = std::f64::consts::TAU * FIBER_CUTOFF_HZ;
+    fiber.short_wave_loss = FIBER_SHORT_WAVE;
     builder.scene.materials.push(fiber);
     let region = builder.band(-FIBER_H, FIBER_H, MaterialId(2));
     let mut document = builder.document();
@@ -6726,11 +6739,14 @@ mod tests {
         );
     }
     /// The parametric fiber claims, at edge 0.08, read at the far end at
-    /// 2.5 Hz over 2 s windows. The pump running with the signal amplifies it
-    /// more than 7× against the pump off, and steadily: 6 s later the gain
-    /// is the same within 10%. Advanced by half a turn, the same pump
-    /// squeezes it below half. The same pump uniform in space makes the fiber
-    /// an oscillator: its far-end field grows more than 3× from 8 s to 12 s.
+    /// 2.5 Hz over 2 s windows. It is a toy model, so the claims are its
+    /// physics rather than a gain figure. The pump running with the signal
+    /// amplifies it more than 5× against the pump off (7.19×), and steadily:
+    /// 6 s later the gain is the same within 10% (7.18×). Advanced by half a
+    /// turn, the same pump squeezes it below half (0.15). The same pump
+    /// uniform in space makes the fiber an oscillator: its far-end field
+    /// grows more than 2× from 8 s to 12 s (2.37×; the short-wave loss slows
+    /// the growth, which was 3× and more without it).
     #[test]
     fn a_pump_running_with_the_signal_amplifies_it_where_a_standing_one_oscillates() {
         let output = Point2::new(0.85, 0.0);
@@ -6763,7 +6779,7 @@ mod tests {
             &[8.0, 12.0],
         );
         let (gain, later) = (pumped[0] / off, pumped[1] / off);
-        assert!(gain > 7.0, "the pump amplifies {gain:.3}×");
+        assert!(gain > 5.0, "the pump amplifies {gain:.3}×");
         assert!(
             (later / gain - 1.0).abs() < 0.1,
             "the gain moved from {gain:.3} to {later:.3}"
@@ -6774,10 +6790,53 @@ mod tests {
             squeezed / off
         );
         assert!(
-            standing[1] > 3.0 * standing[0],
+            standing[1] > 2.0 * standing[0],
             "a standing pump's far end went from {:.4} to {:.4}",
             standing[0],
             standing[1]
+        );
+    }
+
+    /// The fiber's short-wave loss trims the sum-frequency rungs the mesh
+    /// cannot carry: at edge 0.08, read at mid fiber over 4 s to 8 s against
+    /// the signal there, the 12.5 Hz rung falls to under a third of itself
+    /// (0.046 against 0.242), while the pumped far end keeps more than a
+    /// quarter of what it reaches without it (35%; 56% at edge 0.04, where
+    /// less of the signal sits near the ceiling).
+    #[test]
+    fn the_fibers_short_wave_loss_trims_its_unresolved_rungs() {
+        let points = [Point2::new(0.0, 0.0), Point2::new(0.85, 0.0)];
+        let read = |document: &TopologyDocument| {
+            let rows = integrated_traces(document, 0.08, 8.0, &points, 0.0);
+            let dt = rows[1].0 - rows[0].0;
+            let series = |index: usize| rows.iter().map(|row| row.2[index]).collect::<Vec<_>>();
+            let amplitude = |series: &[f64], hz: f64, window: f64| {
+                let (re, im) = phasor(series, dt, hz, window);
+                re.hypot(im)
+            };
+            let (middle, far) = (series(0), series(1));
+            (
+                amplitude(&middle, 12.5, 4.0) / amplitude(&middle, FIBER_SIGNAL_HZ, 4.0),
+                amplitude(&far, FIBER_SIGNAL_HZ, 2.0),
+            )
+        };
+        let trimmed = fiber_amplifier();
+        let mut bare = trimmed.clone();
+        for scene in [&mut bare.model.draft, &mut bare.model.accepted] {
+            scene
+                .materials
+                .iter_mut()
+                .for_each(|material| material.short_wave_loss = 0.0);
+        }
+        let ((rung, far), (bare_rung, bare_far)) = (read(&trimmed), read(&bare));
+        assert!(
+            rung < 0.33 * bare_rung,
+            "the 12.5 Hz rung reads {rung:.3} against {bare_rung:.3} without the loss"
+        );
+        assert!(
+            far > 0.25 * bare_far,
+            "the far end keeps {:.3} of its signal",
+            far / bare_far
         );
     }
 
