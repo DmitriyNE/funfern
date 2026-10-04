@@ -1103,6 +1103,22 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   a step on fixed and driven generations and 1.19× under the kick form. The
   fourth-order step is the production integrator.
 
+- [ ] A larger step under the fourth-order integrator, the conservative
+  variant: 1.2× the leapfrog bound where the app runs 0.9× today. The scheme's
+  linear limit is `ω dt < 2√3`, √3 past the leapfrog's, but past `ω dt = √6`
+  (1.22× the leapfrog bound) its modified frequency
+  `ω² (1 − ω² dt²/12)` falls again as ω rises, so the shortest waves run
+  backwards; 1.2× stays below that turn and keeps dispersion monotone. The
+  temporal error grows as dt⁴, about 4e-5 rad at t = 10 on the box mode
+  against a 9e-3 spatial error. Worth about 1.1× simulated time a second on
+  fixed and driven generations and nothing under the kick form. The linear
+  limit covers none of these, each to be measured at the larger step: the
+  second-order outgoing walls, the short-wave loss and the grid filter (both
+  set against the mesh's ceiling), field laws in the kick form (amplitude
+  raises the tangent), restoring laws, the driven trajectory bound, and
+  handoffs that change the step (the alternating-step item in "Worth
+  checking sometime"). Gate: the device suite and long-run energies on each.
+
 ## Maintenance
 
 - [x] A self-oscillating gain lased on the mesh's shortest waves, at a
