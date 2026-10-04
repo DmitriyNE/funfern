@@ -943,8 +943,10 @@ impl CanonicalWaveOperator {
         self.maximum_time_step
     }
 
+    /// The production integrator's step, [`CanonicalIntegrator::recommended`]
+    /// of the leapfrog bound.
     pub fn recommended_time_step(&self) -> f64 {
-        0.9 * self.maximum_time_step
+        CanonicalIntegrator::default().recommended() * self.maximum_time_step
     }
 
     /// The grid filter's reach `1/Λ̃` at each node, from
@@ -1532,6 +1534,34 @@ pub enum CanonicalIntegrator {
     FourthOrder,
 }
 
+/// `√6/2`: past `ω dt = √6` the fourth-order step's modified frequency
+/// `ω² (1 − ω² dt²/12)` falls again as `ω` rises, so the shortest waves would
+/// run backwards, though the step stays stable to `2√3`.
+const FOURTH_ORDER_CEILING: f64 = 1.224_744_871_391_589;
+
+impl CanonicalIntegrator {
+    /// The largest step this integrator admits, over the leapfrog bound
+    /// `2/ω_max` an operator's `maximum_time_step` reports: the leapfrog's
+    /// own stability limit, and for the fourth-order step the last step at
+    /// which its dispersion stays monotone.
+    pub const fn ceiling(self) -> f64 {
+        match self {
+            Self::Leapfrog => 1.0,
+            Self::FourthOrder => FOURTH_ORDER_CEILING,
+        }
+    }
+
+    /// The step a caller should take, over the same leapfrog bound: 0.9 for
+    /// the leapfrog, and 1.2 for the fourth-order step, below the turn of
+    /// its dispersion (`docs/spikes/funfern-fourth-order-step.md`).
+    pub const fn recommended(self) -> f64 {
+        match self {
+            Self::Leapfrog => 0.9,
+            Self::FourthOrder => 1.2,
+        }
+    }
+}
+
 /// Where the fourth-order step puts its correction.
 ///
 /// Each form is the exact gradient of a modified store while the other side
@@ -1591,7 +1621,7 @@ impl CanonicalWaveState {
         primary_flux: Vec<f64>,
         complementary_flux: Vec<Point2>,
     ) -> Result<Self, WaveError> {
-        validate_time_step(operator, time_step)?;
+        validate_time_step(operator, time_step, CanonicalIntegrator::default())?;
         operator.validate_primary(&primary_flux)?;
         operator.validate_complementary(&complementary_flux)?;
         Self::assemble(operator, time_step, primary_flux, complementary_flux, true)
@@ -1613,7 +1643,7 @@ impl CanonicalWaveState {
         primary_flux: Vec<f64>,
         complementary_flux: Vec<Point2>,
     ) -> Result<Self, WaveError> {
-        validate_time_step(operator, time_step)?;
+        validate_time_step(operator, time_step, CanonicalIntegrator::default())?;
         operator.validate_primary(&primary_flux)?;
         operator.validate_complementary(&complementary_flux)?;
         Self::assemble(operator, time_step, primary_flux, complementary_flux, false)
@@ -1944,7 +1974,7 @@ impl CanonicalWaveState {
         operator: &CanonicalWaveOperator,
         forcing: &CanonicalForcing,
     ) -> Result<CanonicalStepAccounting, WaveError> {
-        validate_time_step(operator, self.time_step)?;
+        validate_time_step(operator, self.time_step, self.integrator)?;
         operator.validate_primary(&self.primary_flux)?;
         operator.validate_complementary(&self.complementary_flux)?;
         if forcing.prescribed.len() != operator.degrees_of_freedom() {
@@ -4979,11 +5009,19 @@ fn inverse_tensor(tensor: SymmetricTensor2) -> Option<SymmetricTensor2> {
     tensor.inverse()
 }
 
-fn validate_time_step(operator: &CanonicalWaveOperator, time_step: f64) -> Result<(), WaveError> {
-    if !time_step.is_finite() || time_step <= 0.0 || time_step > operator.maximum_time_step() {
+/// A state is built under the production integrator's ceiling and steps
+/// under its own, so a leapfrog state past the leapfrog's bound fails its
+/// first step.
+fn validate_time_step(
+    operator: &CanonicalWaveOperator,
+    time_step: f64,
+    integrator: CanonicalIntegrator,
+) -> Result<(), WaveError> {
+    let maximum = integrator.ceiling() * operator.maximum_time_step();
+    if !time_step.is_finite() || time_step <= 0.0 || time_step > maximum {
         Err(WaveError::InvalidTimeStep {
             requested: time_step,
-            maximum: operator.maximum_time_step(),
+            maximum,
         })
     } else {
         Ok(())

@@ -230,7 +230,8 @@ fn main() -> AppExit {
     } else {
         Vec::new()
     };
-    let time_step = 0.9 * operator.maximum_time_step();
+    // The app's own step, so the figure is what the app gets.
+    let time_step = operator.recommended_time_step();
     let primary = operator
         .node_points()
         .iter()

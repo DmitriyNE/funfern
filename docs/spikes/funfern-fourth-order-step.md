@@ -354,3 +354,93 @@ the old one read it once, in eight passes of their own, and the short-wave
 loss generation now pays the loss stages too. Generations without a
 short-wave term do not see it.
 
+
+## The larger step
+
+Done on 2026-10-04, the conservative variant: 1.2 of the leapfrog bound
+`2/ω_max`, where the app ran 0.9. The fourth-order step is stable to
+`ω dt < 2√3`, but past `ω dt = √6` its modified frequency
+`ω² (1 − ω² dt²/12)` falls again as `ω` rises; 1.2 stays below that turn,
+`√6/2 = 1.2247`, which is the ceiling the step now admits.
+`CanonicalIntegrator::ceiling` and `recommended` carry both shares (the
+leapfrog's 1 and 0.9); `validate_time_step`, the temporal state's checks,
+the GPU plan's bound and `recommended_time_step` read them. The step the
+harnesses take is `FOURTH_ORDER_STEP`, the leapfrog sitting out a step past
+its own bound.
+
+**The box mode** (the harness above, 9,215 dofs):
+
+| step | phase at t = 10 | at t = 160 | energy at t = 160 |
+| --- | --- | --- | --- |
+| 0.9 | −9.147e-3 rad | −1.4635e-1 rad | 1.1e-5 |
+| 1.2 | −9.192e-3 rad | −1.4707e-1 rad | 1.9e-5 |
+
+The temporal part at t = 10 goes from −2.1e-5 to −6.6e-5 rad, (4/3)⁴ to two
+digits, against the 9e-3 spatial error. The energy stays bounded over the
+run at either step.
+
+**Every composition**, smooth data, error at t = 1 under the form each
+generation takes:
+
+| composition | 0.9 | 1.2 |
+| --- | --- | --- |
+| bulk | 4.4e-4 | 1.3e-3 |
+| first-order wall | 3.3e-3 | 6.8e-3 |
+| second-order wall | 3.1e-3 | 6.4e-3 |
+| prescribed wall | 2.4e-3 | 7.1e-3 |
+| thin gap | 2.1e-4 | 3.2e-4 |
+| loss | 4.2e-4 | 1.2e-3 |
+| pumped stiffness | 4.4e-4 | 1.1e-3 |
+| Kerr, stiffness side (kick form) | 7.9e-4 | 1.5e-3 |
+| sine-Gordon | 3.6e-4 | 8.0e-4 |
+| van der Pol | 4.6e-4 | 8.4e-4 |
+| short-wave loss | 1.5e-5 | 2.8e-5 |
+
+1.5 to 3 times, the bounded second-order offset growing with the step;
+every row stays below the leapfrog's at 0.9 (bulk 6.1e-3, walls 3e-2).
+
+**Long runs**, energy change by t = 160 under each generation's form:
+
+| composition | 0.9 | 1.2 |
+| --- | --- | --- |
+| bulk | −7.3e-4 | −1.4e-3 |
+| sine-Gordon | −5.5e-4 | −1.2e-3 |
+| φ⁴ | +8.2e-5 | +7.0e-4 |
+| Kerr, mass side (drift form) | +5.4e-2 | **+2.2e2** |
+| Kerr, stiffness side (kick form) | +9.9e-3 | **+2.9** |
+| saturable, stiffness side (kick form) | +1.4e-2 | **+1.3e-1** |
+| Kerr mass, saturable stiffness (kick form) | +1.9e-2 | **+4.2e-1** |
+
+Every field-dependent medium gains energy 10 to 4,000 times as fast at 1.2,
+so a generation with a field law keeps 0.9 (`FIELD_LAW_STEP_SHARE`), chosen
+by `recommended_time_step` from its laws; the rest take 1.2.
+
+**Handoffs.** The box mode re-stepped every 25 steps, alternating the step
+with 0.75 of it, as in "Handoffs" above:
+
+| integrator and step | energy at t = 10 | at t = 40 |
+| --- | --- | --- |
+| leapfrog, 0.9 | 2.8e-4 | 2.1e4 |
+| fourth order, 0.9 | 2.5e-4 | 4.6e-4 |
+| fourth order, 1.2 | 3.2e-4 | 5.1e-1 |
+
+The parametric pumping of "Handoffs" shows by t = 40 at 25 steps, far below
+the leapfrog the app ran until M0 and above the fourth-order step at 0.9.
+The app re-steps only when a generation's stiffest row moves; kept in
+plan.md "Worth checking sometime".
+
+**Throughput.** The step costs what it did; the app covers 1.33 times the
+simulated time. `canonical_gpu_timing` now runs at the app's step: on the
+plain box (15,264 dofs, 20,000 steps, two alternating rounds) 0.15 ms a
+step either way, 16.5 simulated seconds a wall second at 0.9 and 22.0 at
+1.2; with forcing 10.2 and 13.6. A field-dependent generation gains nothing.
+
+**Device.** The suite passes, 23 default runs and 107 mode runs; the long
+run, the driven document and the filter calibration take the app's step.
+
+**Tests.** The workspace passes at the new step. One gallery check needed
+its estimator, not its tolerance: the Doppler mirror's static-field check
+took a plain mean over the 3.997 s that whole steps make of 4 s, which
+leaked 1.3e-3 of the carrier and its 3 Hz reflection; a Hann-weighted mean
+reads 1.5e-4. `a_field_law_keeps_the_leapfrog_era_step` holds every
+composition to its share.

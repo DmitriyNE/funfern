@@ -2551,8 +2551,9 @@ impl CanonicalTemporalWaveOperator {
         self
     }
 
-    /// The step a caller should actually take, carrying the fixed path's
-    /// safety margin onto the trajectory bound.
+    /// The step a caller should actually take: the production integrator's
+    /// share of the bound, [`CanonicalIntegrator::recommended`], carried onto
+    /// the trajectory bound, or [`FIELD_LAW_STEP_SHARE`] beside a field law.
     ///
     /// A driven generation's ceiling is the tighter of the two, because the
     /// bound covers every phase the coefficients reach rather than one set of
@@ -2560,9 +2561,14 @@ impl CanonicalTemporalWaveOperator {
     /// is free per step and about `1.23x` per simulated second, and this is
     /// the factor.
     pub fn recommended_time_step(&self) -> f64 {
+        let share = if self.has_field_laws {
+            FIELD_LAW_STEP_SHARE
+        } else {
+            CanonicalIntegrator::default().recommended()
+        };
         let base = self.base.maximum_time_step();
         if base > 0.0 {
-            self.base.recommended_time_step() * (self.maximum_time_step / base)
+            share * base * (self.maximum_time_step / base)
         } else {
             self.maximum_time_step
         }
@@ -3457,7 +3463,7 @@ impl CanonicalTemporalWaveState {
                 "the time-driven state was given a time step that is not positive and finite",
             ));
         }
-        if time_step > operator.maximum_time_step() {
+        if time_step > CanonicalIntegrator::default().ceiling() * operator.maximum_time_step() {
             return Err(WaveError::Unsupported(
                 "the time step exceeds what the time-driven trajectory holds stable",
             ));
@@ -4087,7 +4093,9 @@ impl CanonicalTemporalWaveState {
                 "the time-driven operator cannot compose the forcing it was handed",
             ));
         }
-        if !duration.is_finite() || duration == 0.0 || duration.abs() > operator.maximum_time_step()
+        if !duration.is_finite()
+            || duration == 0.0
+            || duration.abs() > self.integrator.ceiling() * operator.maximum_time_step()
         {
             return Err(WaveError::Unsupported(
                 "the signed step duration is outside what the time-driven trajectory allows",
@@ -4797,6 +4805,14 @@ fn trajectory_stiffness_rows(
 
 /// Gate O: a self-oscillating law's short-wave limit.
 ///
+/// The step a generation with a field law takes, over the leapfrog bound.
+/// Over a long run at 1.2 the field-dependent media gained energy 10 to
+/// 4,000 times as fast as at 0.9 (Kerr on the mass side +2.2e2 by t = 160
+/// against +5.4e-2), where linear media and the restoring laws stayed
+/// bounded, so these keep the leapfrog-era step
+/// (`docs/spikes/funfern-fourth-order-step.md`, "The larger step").
+pub const FIELD_LAW_STEP_SHARE: f64 = 0.9;
+
 /// The van der Pol rate is local, so it lifts every nodal pattern alike,
 /// including those near the mesh's own ceiling. In the continuum a wave that
 /// short would travel out of wherever the main oscillation leaves the gain
@@ -14436,6 +14452,35 @@ mod tests {
         }
     }
 
+    /// Every composition recommends 1.2 of its trajectory bound, and one
+    /// with a field law 0.9, the step it held over a long run.
+    #[test]
+    fn a_field_law_keeps_the_leapfrog_era_step() {
+        let cases = fourth_order_cases();
+        let mut field_laws = 0;
+        for case in &cases {
+            let operator = filter_operator(&case.scene, case.condition);
+            let share = operator.recommended_time_step() / operator.maximum_time_step();
+            let expected = if operator.has_field_laws() {
+                field_laws += 1;
+                FIELD_LAW_STEP_SHARE
+            } else {
+                CanonicalIntegrator::FourthOrder.recommended()
+            };
+            assert!((share - expected).abs() < 1e-12, "{}: {share}", case.label);
+        }
+        assert!(field_laws > 0 && field_laws < cases.len());
+    }
+
+    /// The step the measurements take over the leapfrog bound,
+    /// `FOURTH_ORDER_STEP` or the leapfrog's own 0.9.
+    fn measured_step_fraction() -> f64 {
+        std::env::var("FOURTH_ORDER_STEP")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.9)
+    }
+
     fn fourth_order_distance(
         operator: &CanonicalTemporalWaveOperator,
         run: &FourthOrderRun,
@@ -14459,11 +14504,13 @@ mod tests {
     /// and two halvings, for both integrators, against a Richardson
     /// extrapolation of the leapfrog at 1/64 and 1/128 of the step, which
     /// does not depend on the scheme under test. Run with `--ignored
-    /// --nocapture`.
+    /// --nocapture`; `FOURTH_ORDER_STEP` sets the step over the leapfrog
+    /// bound, 0.9 by default, and the leapfrog sits out a step past its own.
     #[test]
     #[ignore = "measurement"]
     fn measure_fourth_order_against_each_composition() {
-        let fractions = [0.9, 0.45, 0.225];
+        let step = measured_step_fraction();
+        let fractions = [step, 0.5 * step, 0.25 * step];
         let smooth_only = std::env::var("FOURTH_ORDER_SMOOTH").is_ok();
         let only = std::env::var("FOURTH_ORDER_CASES").ok();
         for case in fourth_order_cases().into_iter().filter(|case| {
@@ -14475,7 +14522,7 @@ mod tests {
                     continue;
                 }
                 let operator = filter_operator(&case.scene, case.condition);
-                let coarse = 0.9 * operator.maximum_time_step();
+                let coarse = step * operator.maximum_time_step();
                 let steps = (1.0 / coarse).ceil() as usize;
                 let fine = fourth_order_run(
                     &operator,
@@ -14518,6 +14565,12 @@ mod tests {
                     let mut line = format!("  {scheme:?}:");
                     let mut previous: Option<f64> = None;
                     for (index, fraction) in fractions.iter().enumerate() {
+                        if scheme == Scheme::Leapfrog
+                            && *fraction > CanonicalIntegrator::Leapfrog.ceiling()
+                        {
+                            line += &format!(" {fraction}: past its bound;");
+                            continue;
+                        }
                         let refinement = 1usize << index;
                         let run = fourth_order_run(
                             &operator,
@@ -14550,7 +14603,8 @@ mod tests {
     /// Stage A of M0: the energy of the conservative nonlinear compositions
     /// over a long run at the app's step. A stiffness-side or restoring law
     /// freezes its tangent in the fourth-order field, which is no longer an
-    /// exact gradient; a secular drift would show here.
+    /// exact gradient; a secular drift would show here. `FOURTH_ORDER_STEP`
+    /// as above.
     #[test]
     #[ignore = "measurement"]
     fn measure_fourth_order_long_run_energy() {
@@ -14577,8 +14631,12 @@ mod tests {
             .filter(|case| labels.contains(&case.label))
         {
             let operator = filter_operator(&case.scene, case.condition);
-            let time_step = 0.9 * operator.maximum_time_step();
+            let step = measured_step_fraction();
+            let time_step = step * operator.maximum_time_step();
             for scheme in [Scheme::Leapfrog, Scheme::Drift, Scheme::Kick] {
+                if scheme == Scheme::Leapfrog && step > CanonicalIntegrator::Leapfrog.ceiling() {
+                    continue;
+                }
                 let mut line = format!("{} {scheme:?}:", case.label);
                 let initial =
                     fourth_order_run(&operator, &case, time_step, 0, scheme, false).energy;

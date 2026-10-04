@@ -18768,3 +18768,41 @@ its three entries.
   open list; on the old combo it fails as reported.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-04 — The larger step: 1.2 of the bound, field laws kept at 0.9
+
+The plan item's conservative variant, on `step-calibration`; tables in
+`docs/spikes/funfern-fourth-order-step.md`, "The larger step".
+
+- **In.** `CanonicalIntegrator::ceiling` (leapfrog 1, fourth order `√6/2`,
+  where its dispersion turns) and `recommended` (0.9 and 1.2), over the
+  leapfrog bound `maximum_time_step` still reports. `validate_time_step`
+  takes the integrator (a state is built under the production ceiling and
+  steps under its own), the temporal state's checks and the GPU plan's step
+  bound (`maximum_dt`, `clock_f32.w`, which a live law patch checks) read
+  the ceiling, and `recommended_time_step` the share.
+- **Field laws keep 0.9.** Over a long run at 1.2 every field-dependent
+  medium gained energy 10 to 4,000 times as fast as at 0.9 (Kerr on the
+  mass side +2.2e2 by t = 160 against +5.4e-2; on the stiffness side +2.9
+  against +9.9e-3), where linear media, sine-Gordon and φ⁴ stayed bounded.
+  `FIELD_LAW_STEP_SHARE`, chosen by the generation's laws; the user kept it
+  at 0.9 without a finer sweep.
+- **Measured at 1.2.** Box mode: temporal phase at t = 10 −6.6e-5 rad
+  against the 9e-3 spatial error, energy bounded to t = 160. Every
+  composition's error at t = 1 1.5 to 3 times 0.9's, below the leapfrog's
+  at 0.9. Step-alternating handoffs every 25 steps: energy +0.51 by t = 40
+  at 1.2, +4.6e-4 at 0.9, and 2.1e4 times for the leapfrog the app ran
+  before M0; the "Worth checking sometime" item now says so.
+- **Harnesses.** The two ignored M0 measurements take `FOURTH_ORDER_STEP`
+  and skip the leapfrog past its bound; so does `canonical_fourth_order`.
+  `canonical_gpu_timing` runs at the app's step.
+- **Tests.** The Doppler mirror's static-field check took a plain mean over
+  3.997 s, which at the new step leaked 1.3e-3 of the carrier; a
+  Hann-weighted mean reads 1.5e-4. A driven-step test compared against the
+  older scalar operator's 0.9 and now uses the canonical base.
+  `a_field_law_keeps_the_leapfrog_era_step` holds each composition's share.
+- **Throughput:** 0.15 ms a step either way on the plain box; 16.5 to 22.0
+  simulated seconds a wall second, 10.2 to 13.6 with forcing.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check, the browser shader compile, and the
+  device suite (23 default runs, 107 mode runs).

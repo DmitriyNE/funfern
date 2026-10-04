@@ -2051,7 +2051,7 @@ mod second_preset_reproduction {
         // The gap the old comparison saw. Without it this test would pass on a
         // medium whose two bounds happen to agree, and prove nothing.
         let driven = active.recommended_time_step();
-        let base = active.operator.recommended_time_step();
+        let base = active.canonical_operator.recommended_time_step();
         assert!(
             (base / driven - 1.0).abs() > TIME_STEP_HYSTERESIS,
             "a driven generation must run tighter than its base operator by more \

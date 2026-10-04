@@ -1582,7 +1582,12 @@ impl CanonicalGpuPlan {
             runtime_records.len() * TEMPORAL_RUNTIME_WORDS_PER_SLOT,
         ));
         self.control.boundary_offsets.w &= !4;
-        self.control.clock_f32.w = finite_f32(operator.maximum_time_step(), "time step bound")?;
+        // What a live law patch may lower the step's bound to before the
+        // running step stops fitting, under the integrator the state steps.
+        self.control.clock_f32.w = finite_f32(
+            state.integrator().ceiling() * operator.maximum_time_step(),
+            "time step bound",
+        )?;
         // The filter's reach over the whole trajectory replaces the fixed
         // one, which holds only at the authored maps.
         for (node, reach) in self.nodes.iter_mut().zip(operator.grid_filter_reach()) {
@@ -1620,7 +1625,10 @@ impl CanonicalGpuPlan {
             ));
         }
         let dt = finite_f32(clock.time_step, "time step")?;
-        let maximum_dt = finite_f32(operator.maximum_time_step(), "maximum time step")?;
+        let maximum_dt = finite_f32(
+            state.integrator().ceiling() * operator.maximum_time_step(),
+            "maximum time step",
+        )?;
         if dt > maximum_dt {
             return Err(CanonicalGpuBuildError::InvalidClock);
         }
@@ -8090,7 +8098,7 @@ mod tests {
         );
         assert_eq!(
             plan.control.clock_f32.w,
-            operator.maximum_time_step() as f32
+            (state.integrator().ceiling() * operator.maximum_time_step()) as f32
         );
 
         for time in [0.0, 0.5 * state.time_step(), state.time_step(), 0.73] {

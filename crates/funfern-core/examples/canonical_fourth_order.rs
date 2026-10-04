@@ -70,15 +70,20 @@ fn main() {
         .map(|(phi, m)| m * phi * phi)
         .sum::<f64>();
     println!(
-        "Reflecting-box mode cos(5π(x+1)), wavelength {WAVELENGTH}, P2e parent edge {edge}: {} DOFs, dt_max {:.5e} (app runs 0.9 of it)\n",
+        "Reflecting-box mode cos(5π(x+1)), wavelength {WAVELENGTH}, P2e parent edge {edge}: {} DOFs, dt_max {:.5e} (the app runs {} of it)\n",
         operator.degrees_of_freedom(),
-        operator.maximum_time_step()
+        operator.maximum_time_step(),
+        CanonicalIntegrator::default().recommended()
     );
     for fraction in fractions {
         for integrator in [
             CanonicalIntegrator::Leapfrog,
             CanonicalIntegrator::FourthOrder,
         ] {
+            if fraction > integrator.ceiling() {
+                println!("{integrator:?} dt={fraction} dt_max: past its bound");
+                continue;
+            }
             let base_dt = fraction * operator.maximum_time_step();
             let mut dt = base_dt;
             let mut state = CanonicalWaveState::from_primary_velocity(

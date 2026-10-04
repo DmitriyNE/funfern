@@ -1112,21 +1112,17 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   1.16 to 1.23× a step under van der Pol and 1.47 to 1.62× under a short-wave
   loss alone; other generations are unchanged.
 
-- [ ] A larger step under the fourth-order integrator, the conservative
-  variant: 1.2× the leapfrog bound where the app runs 0.9× today. The scheme's
-  linear limit is `ω dt < 2√3`, √3 past the leapfrog's, but past `ω dt = √6`
-  (1.22× the leapfrog bound) its modified frequency
-  `ω² (1 − ω² dt²/12)` falls again as ω rises, so the shortest waves run
-  backwards; 1.2× stays below that turn and keeps dispersion monotone. The
-  temporal error grows as dt⁴, about 4e-5 rad at t = 10 on the box mode
-  against a 9e-3 spatial error. Worth about 1.1× simulated time a second on
-  fixed and driven generations and nothing under the kick form. The linear
-  limit covers none of these, each to be measured at the larger step: the
-  second-order outgoing walls, the short-wave loss and the grid filter (both
-  set against the mesh's ceiling), field laws in the kick form (amplitude
-  raises the tangent), restoring laws, the driven trajectory bound, and
-  handoffs that change the step (the alternating-step item in "Worth
-  checking sometime"). Gate: the device suite and long-run energies on each.
+- [x] A larger step under the fourth-order integrator, the conservative
+  variant, 2026-10-04 (`docs/spikes/funfern-fourth-order-step.md`, "The
+  larger step"). `CanonicalIntegrator` carries its ceiling over the leapfrog
+  bound (leapfrog 1, fourth order √6/2, where its dispersion turns) and its
+  recommended share (0.9 and 1.2); validation, the GPU plan's bound and
+  `recommended_time_step` read them. Generations with a field law keep 0.9:
+  over a long run at 1.2 they gained energy 10 to 4,000 times as fast as at
+  0.9, where linear media and the restoring laws stayed bounded. At 1.2 the
+  box mode's temporal phase error is 6.6e-5 rad at t = 10 against a 9e-3
+  spatial one, and every composition's error at t = 1 is 1.5 to 3 times
+  0.9's, below the leapfrog's at 0.9 everywhere.
 
 - [x] Step throughput, lossless (`docs/spikes/funfern-step-throughput.md`),
   2026-10-04. A dispatch costs 2 to 3 µs, so merging passes buys little;
@@ -1327,7 +1323,10 @@ is next touched.
   grid-scale modes parametrically: on the box mode at the app's mesh, the
   step switched between 0.9 and 0.675 of the bound every 4 steps grows the
   leapfrog's energy 1e9 times by t = 10 (the fourth-order step's about 4
-  times), and every 25 steps no growth shows. The app's pacing changes the
+  times). Every 25 steps nothing shows by t = 10, but by t = 40 the
+  leapfrog's energy has grown 2.1e4 times, the fourth-order step's by
+  4.6e-4 of it at 0.9 and by 0.51 of it at the app's 1.2 (alternating with
+  0.9). The app's pacing changes the
   step only when a new generation's stiffest row moves it, so nothing on
   screen should reach this; worth a look if a drag ever re-steps quickly
   (`docs/spikes/funfern-fourth-order-step.md`, "Handoffs").

@@ -5262,8 +5262,21 @@ mod tests {
                 &[DOPPLER_FRONT, DOPPLER_BEHIND],
             );
             let spectrum = |series: &Vec<f64>| {
+                // A Hann-weighted mean: the plain one over the 3.997 s that
+                // whole steps of the 1.2× step make of 4 s leaked 1.3e-3 of
+                // the carrier and its 3 Hz reflection into the static field.
                 let window = &series[series.len() - (4.0 / dt).round() as usize..];
-                let mean = window.iter().sum::<f64>() / window.len() as f64;
+                let weights = window.iter().enumerate().map(|(index, _)| {
+                    (std::f64::consts::PI * index as f64 / (window.len() - 1) as f64)
+                        .sin()
+                        .powi(2)
+                });
+                let mean = window
+                    .iter()
+                    .zip(weights.clone())
+                    .map(|(x, w)| x * w)
+                    .sum::<f64>()
+                    / weights.sum::<f64>();
                 let lines = [1.0, 2.0, 3.0, 4.0, 5.0]
                     .map(|n| amplitude_at(series, dt, n * DOPPLER_HZ, 4.0 * n));
                 // The launcher switches on as a cosine, so the channel holds
