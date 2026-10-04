@@ -3389,24 +3389,30 @@ above:
 
 - [x] No way to measure, from the host, how evenly the drawn state advances
   (2026-10-04: `FUNFERN_PACING_TRACE` and `examples/drawn_pacing_summary.rs`,
-  see `docs/spikes/funfern-drawn-pacing.md`). The drawn series turned out to
-  equal the requested one at every operating point measured; the completed
-  counter is the misleading one.
+  see `docs/spikes/funfern-drawn-pacing.md`). The picture is the read-back
+  state the painter uploads, three frames behind the solver, not the step the
+  frame encoded as first assumed; the trace records both. The encoded series
+  equals the requested one at every operating point measured.
 - [ ] The batch ceiling is cut by late frames the solver did not cause. In about
   80 % of cuts on the default scene no solver pass within two frames ran past
   12 ms of a 16.7 ms frame, and each cut costs a third of a second at about half
   speed; the wobble follows the cut rate, which follows how often frames come
-  in late for reasons other than the solver. The GPU pass time is now known a frame later and could tell
-  the two apart. Found with the trace, not yet designed.
+  in late for reasons other than the solver. The solver pass's GPU time is now
+  known a frame later (`gpu_frame_timer.rs`) and could tell the two apart; the
+  drawing cannot be timed from the solver's side, it runs beside the pass.
+  Found with the trace, not yet designed.
+- [ ] The picture is three frames behind the solver: a readback is encoded after
+  the frame's drawing, mapped at a later submission and delivered at the
+  extraction after that. Shortening it is a readback-path change.
 
 Submitting solver work outside the render graph, worth investigating:
 
 - [ ] `compute_canonical_wave` is a system in the `RenderGraph` schedule ordered
   `.before(camera_driver)`, so every step the solver takes is encoded into the
-  same command buffer as that frame's drawing. The renderer already samples a
-  GPU buffer the compute wrote in place, so there is no field state being copied
-  and nothing a double buffer would decouple - what is shared is the single
-  per-frame submission and the queue behind it. The whole batch-ceiling
+  same frame's submission as its drawing. (2026-10-04: the drawing does not
+  sample the solver's buffer as this once said; the painter uploads the latest
+  state readback, so the two share the frame's submission and the queue, not a
+  buffer, and the cameras' passes already run beside the solver on the GPU.) The whole batch-ceiling
   controller exists to bound that shared submission, and it can only ever bound
   it in whole frames.
   Worth investigating whether the solver can submit on its own cadence, from its
@@ -18846,3 +18852,54 @@ The first pacing TODO, on `drawn-pacing-trace`; method and tables in
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile. No device
   suite: the solver pass only gains timestamp writes, and only while tracing.
+
+## 2026-10-04 — The picture is the readback, and the readback gate was not gating
+
+The second pacing step, on `gpu-bound-cuts`; method and tables in
+`docs/spikes/funfern-drawn-pacing.md`. Set out to time the whole frame on the
+GPU so a late frame the solver did not cause would stop cutting the batch;
+found two things on the way that mattered more, and stopped there.
+
+- **The premise was wrong.** The drawing does not sample the buffer the
+  solver pass writes: `field_paint.rs` uploads its vertex values from the
+  host each frame, and they are the latest state readback. So the picture is
+  the read-back state, three frames behind the solver, and the readback's
+  cadence is what the eye sees. This morning's "drawn equals requested" was
+  about the encoded step, which the probes are paced by, not the picture; the
+  spike doc and the TODO say so now. The trace records the painted readback
+  (`picture`, `picture_step`, `picture_generation`) beside the encoded step,
+  and the summary its still share and wobble.
+- **A frame's end cannot be taken from the solver's side.** Three markers
+  after the cameras ran beside the solver pass or 34 µs after it (Metal
+  serialising compute encoders), because nothing they could touch depends on
+  the pass. The solver pass itself is timed: `gpu_frame_timer.rs` is on
+  wherever the device has timestamp queries, sixteen slots read back a few
+  frames later, the last 32 readings on the request for the main world, and
+  the trace reads the same clock. Metal writes no timestamp for an empty
+  pass, a render pass's start is its vertex stage's, and a resolve offset
+  must be 256-byte aligned; each cost a run.
+- **`PacedReadback` was ordered only before `PrepareResources`**, nothing
+  after `ExtractCommands` where the extracted `Readback` lands, so whether it
+  gated at all depended on the scheduler's choice, which flipped when systems
+  were added: the morning's build gated and the picture changed every other
+  frame, a 30 Hz picture on a 60 Hz display, every run; the afternoon's did
+  not and it changed every frame. Instrumented, the ungated build released 55
+  more copies than it claimed over 480 frames, exactly its refusals. The gate
+  is ordered after `ExtractCommands` now, counts copies in flight instead of
+  a flag (one claim per completion, tested), and `IN_FLIGHT_DEPTH` is 3: with
+  1 the picture changed on every other frame on every scene, with 2 on 92 %
+  of frames, with 3 on 97 %, and on 92 % where the solver fills the frame and
+  the round trip is three to four. The same shape as the 2026-09-16 capture
+  entry.
+- **After:** the picture changes on 97 to 98 % of frames at 60 fps on the
+  default scene with and without adaptation, overlay and the integrated
+  field, 85 % on a scene the solver cannot keep up with; picture wobble 6 %
+  and 12 %. The false cuts stand as a TODO, to be judged by the solver pass
+  alone.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check, the browser shader compile, and the 23
+  canonical GPU examples once each with their defaults (the 107 mode runs
+  were not rerun: no arithmetic changed, the pass only gains timestamp
+  writes). The examples log Bevy's "sending into a closed channel" readback
+  warning at exit, copies still in flight when the app quits; not compared
+  with the build before.

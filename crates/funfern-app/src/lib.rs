@@ -2,6 +2,7 @@
 pub mod canonical_gpu;
 pub mod document;
 pub mod drawn_pacing;
+pub mod gpu_frame_timer;
 mod paced_readback;
 pub mod topology_editor;
 pub mod topology_examples;

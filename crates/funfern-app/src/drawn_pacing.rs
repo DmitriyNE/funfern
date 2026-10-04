@@ -24,17 +24,12 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     path::Path,
-    sync::{Arc, Mutex},
     time::Instant,
 };
 
-use bevy::{
-    prelude::*,
-    render::{
-        render_resource::{BufferDescriptor, BufferUsages, CommandEncoder, MapMode, WgpuFeatures},
-        renderer::{RenderDevice, RenderQueue},
-    },
-};
+use bevy::prelude::*;
+
+use crate::gpu_frame_timer::GpuFrameReadings;
 
 /// The environment variable naming the trace file.
 pub const TRACE_VARIABLE: &str = "FUNFERN_PACING_TRACE";
@@ -59,6 +54,15 @@ pub struct PacingNote {
     pub running: bool,
     /// Whether a handoff withheld stepping this frame.
     pub withheld: bool,
+    /// The state readback the frame painted: its serial, and the step the
+    /// control readback carried at the time. The field a frame shows is the
+    /// latest readback's, uploaded to the painter, not the state the frame
+    /// encoded.
+    pub picture: u64,
+    pub picture_step: u64,
+    /// The generation the painted readback belongs to; it lags the drawn
+    /// generation across a handoff.
+    pub picture_generation: u64,
 }
 
 /// One rendered frame.
@@ -78,25 +82,24 @@ pub struct DrawnFrame {
     /// The read-back completed count, as the frame saw it.
     pub completed: u64,
     /// The GPU clock at the start and end of the frame's solver pass, seconds
-    /// since the first such reading. None where the frame had no pass or the
-    /// device no timestamp queries.
+    /// since the timer's first reading. None where the frame had no pass or
+    /// the device no timestamp queries.
     pub gpu: Option<(f64, f64)>,
     pub note: PacingNote,
 }
 
 const COLUMNS: &str = "frame,host_seconds,generation,drawn_step,requested,completed,\
-gpu_begin,gpu_end,frame_seconds,speed,time_step,ceiling,asked,admitted,running,withheld";
+gpu_begin,gpu_end,frame_seconds,speed,time_step,ceiling,asked,admitted,running,withheld,\
+picture,picture_step,picture_generation";
 
 impl DrawnFrame {
     fn csv(&self) -> String {
-        let (begin, end) = self
-            .gpu
-            .map_or((String::new(), String::new()), |(begin, end)| {
-                (begin.to_string(), end.to_string())
-            });
+        let [begin, end] = self.gpu.map_or(Default::default(), |(begin, end)| {
+            [begin, end].map(|seconds| seconds.to_string())
+        });
         let note = &self.note;
         format!(
-            "{},{},{},{},{},{},{begin},{end},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{begin},{end},{},{},{},{},{},{},{},{},{},{},{}",
             self.frame,
             self.host_seconds,
             self.generation,
@@ -111,6 +114,9 @@ impl DrawnFrame {
             note.admitted,
             u8::from(note.running),
             u8::from(note.withheld),
+            note.picture,
+            note.picture_step,
+            note.picture_generation,
         )
     }
 
@@ -148,6 +154,9 @@ impl DrawnFrame {
                 admitted: number(fields[13])?,
                 running: fields[14] == "1",
                 withheld: fields[15] == "1",
+                picture: number(fields[16])?,
+                picture_step: number(fields[17])?,
+                picture_generation: number(fields[18])?,
             },
         })
     }
@@ -216,6 +225,12 @@ pub struct DrawnSummary {
     pub jumps: f64,
     /// Intervals across which the read-back completed count did not move.
     pub completed_still: f64,
+    /// Intervals across which the picture did not change: the same readback
+    /// painted twice.
+    pub picture_still: f64,
+    /// The wobble of the picture's own clock: the step the painted readback
+    /// carried, over host time.
+    pub picture_wobble: f64,
     /// How often the batch ceiling came down, per wall second.
     pub cuts_per_second: f64,
     /// Steps requested but not yet encoded at each frame: p50, p90.
@@ -332,6 +347,7 @@ pub fn summarize(frames: &[DrawnFrame], skip_seconds: f64) -> DrawnSummary {
     let jumps =
         share(&|before, after| (after.drawn_step - before.drawn_step) as f64 > 1.5 * median_steps);
     let completed_still = share(&|before, after| after.completed == before.completed);
+    let picture_still = share(&|before, after| after.note.picture == before.note.picture);
     let cuts = measured
         .iter()
         .filter(|(before, after)| after.note.ceiling < before.note.ceiling)
@@ -354,6 +370,20 @@ pub fn summarize(frames: &[DrawnFrame], skip_seconds: f64) -> DrawnSummary {
             )
         })
     }));
+    let picture = runs(pairs.iter().map(|pair| {
+        // A readback's step is zero until its generation's first clock lands.
+        pair.filter(|(before, after)| {
+            after.note.picture_generation == before.note.picture_generation
+                && before.note.picture_step > 0
+                && after.note.picture_step >= before.note.picture_step
+        })
+        .map(|(before, after)| {
+            (
+                (after.note.picture_step - before.note.picture_step) as f64 * after.note.time_step,
+                wall(before, after),
+            )
+        })
+    }));
     let completed = runs(pairs.iter().map(|pair| {
         pair.map(|(before, after)| {
             (
@@ -373,7 +403,9 @@ pub fn summarize(frames: &[DrawnFrame], skip_seconds: f64) -> DrawnSummary {
             gpu_series.push(None);
             previous = None;
         }
-        let Some((_, end)) = frame.gpu else { continue };
+        let Some((_, end)) = frame.gpu else {
+            continue;
+        };
         if let Some(before) = previous
             && let Some((_, before_end)) = before.gpu
             && end > before_end
@@ -425,6 +457,8 @@ pub fn summarize(frames: &[DrawnFrame], skip_seconds: f64) -> DrawnSummary {
         frozen_withheld,
         jumps,
         completed_still,
+        picture_still,
+        picture_wobble: wobble(&picture),
         cuts_per_second: cuts as f64 / seconds.max(f64::MIN_POSITIVE),
         backlog: [percentile(&mut backlog, 0.5), percentile(&mut backlog, 0.9)],
         gpu_milliseconds,
@@ -468,6 +502,12 @@ impl fmt::Display for DrawnSummary {
             percent(self.jumps),
             percent(self.completed_still),
         )?;
+        writeln!(
+            f,
+            "picture: still {}, wobble {}",
+            percent(self.picture_still),
+            percent(self.picture_wobble),
+        )?;
         write!(
             f,
             "ceiling cuts {:.2} a second; requested ahead of drawn: p50 {:.0}, p90 {:.0} steps",
@@ -483,37 +523,8 @@ impl fmt::Display for DrawnSummary {
     }
 }
 
-/// Timestamp slots in flight. A slot is free again once its readback maps,
-/// a few frames after it was written; a frame that finds none free goes
-/// without GPU times.
-const TIMESTAMP_SLOTS: u32 = 16;
-
 /// Frames a row waits for its GPU times before it is written without them.
 const TIMESTAMP_PATIENCE: u64 = 64;
-
-enum SlotState {
-    Free,
-    /// Written by the pass of this frame, not yet submitted.
-    Claimed(u64),
-    /// Submitted; mapping asked for.
-    Mapping(u64),
-}
-
-struct TimestampSlot {
-    staging: wgpu::Buffer,
-    state: SlotState,
-    mapped: Arc<Mutex<Option<Option<[u64; 2]>>>>,
-}
-
-struct TimestampRing {
-    query_set: wgpu::QuerySet,
-    resolve: wgpu::Buffer,
-    slots: Vec<TimestampSlot>,
-    nanoseconds_per_tick: f64,
-    origin: Option<u64>,
-    /// The slot this frame's pass wrote, until it is resolved.
-    claimed: Option<u32>,
-}
 
 /// The render world's recorder, present only while tracing.
 #[derive(Resource)]
@@ -521,16 +532,15 @@ pub struct DrawnPacingTrace {
     writer: BufWriter<File>,
     started: Instant,
     frames: u64,
-    /// Rows not yet written, and the timestamp slot each waits on.
-    pending: VecDeque<(DrawnFrame, Option<u32>)>,
-    timestamps: Option<TimestampRing>,
+    /// Rows not yet written, and the GPU frame each waits on.
+    pending: VecDeque<(DrawnFrame, Option<u64>)>,
 }
 
 impl DrawnPacingTrace {
     /// Opens the trace named by [`TRACE_VARIABLE`], if it names one.
-    pub fn from_environment(device: &RenderDevice, queue: &RenderQueue) -> Option<Self> {
+    pub fn from_environment() -> Option<Self> {
         let path = std::env::var_os(TRACE_VARIABLE)?;
-        match Self::create(Path::new(&path), device, queue) {
+        match Self::create(Path::new(&path)) {
             Ok(trace) => Some(trace),
             Err(error) => {
                 warn!("cannot write the drawn pacing trace: {error}");
@@ -539,159 +549,40 @@ impl DrawnPacingTrace {
         }
     }
 
-    fn create(path: &Path, device: &RenderDevice, queue: &RenderQueue) -> std::io::Result<Self> {
+    fn create(path: &Path) -> std::io::Result<Self> {
         let mut writer = BufWriter::new(File::create(path)?);
         writeln!(writer, "{COLUMNS}")?;
         writer.flush()?;
-        let timestamps = device
-            .features()
-            .contains(WgpuFeatures::TIMESTAMP_QUERY)
-            .then(|| {
-                let device = device.wgpu_device();
-                TimestampRing {
-                    query_set: device.create_query_set(&wgpu::QuerySetDescriptor {
-                        label: Some("drawn pacing timestamps"),
-                        ty: wgpu::QueryType::Timestamp,
-                        count: 2 * TIMESTAMP_SLOTS,
-                    }),
-                    resolve: device.create_buffer(&BufferDescriptor {
-                        label: Some("drawn pacing timestamp resolve"),
-                        size: wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT * u64::from(TIMESTAMP_SLOTS),
-                        usage: BufferUsages::QUERY_RESOLVE | BufferUsages::COPY_SRC,
-                        mapped_at_creation: false,
-                    }),
-                    slots: (0..TIMESTAMP_SLOTS)
-                        .map(|_| TimestampSlot {
-                            staging: device.create_buffer(&BufferDescriptor {
-                                label: Some("drawn pacing timestamp staging"),
-                                size: 16,
-                                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-                                mapped_at_creation: false,
-                            }),
-                            state: SlotState::Free,
-                            mapped: Arc::new(Mutex::new(None)),
-                        })
-                        .collect(),
-                    nanoseconds_per_tick: f64::from(queue.get_timestamp_period()),
-                    origin: None,
-                    claimed: None,
-                }
-            });
-        if timestamps.is_none() {
-            info!("drawn pacing trace without GPU times: no timestamp queries");
-        }
         Ok(Self {
             writer,
             started: Instant::now(),
             frames: 0,
             pending: VecDeque::new(),
-            timestamps,
         })
     }
 
-    /// Timestamp writes for this frame's solver pass, if a slot is free.
-    pub fn pass_timestamps(&mut self) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
-        let frame = self.frames;
-        let ring = self.timestamps.as_mut()?;
-        if ring.claimed.is_some() {
-            return None;
-        }
-        let slot = ring
-            .slots
-            .iter()
-            .position(|slot| matches!(slot.state, SlotState::Free))? as u32;
-        ring.slots[slot as usize].state = SlotState::Claimed(frame);
-        ring.claimed = Some(slot);
-        Some(wgpu::ComputePassTimestampWrites {
-            query_set: &ring.query_set,
-            beginning_of_pass_write_index: Some(2 * slot),
-            end_of_pass_write_index: Some(2 * slot + 1),
-        })
-    }
-
-    /// Copies this frame's timestamps where they can be mapped, once the pass
-    /// that wrote them has ended.
-    pub fn resolve_pass(&mut self, encoder: &mut CommandEncoder) {
-        let Some(ring) = self.timestamps.as_ref() else {
-            return;
-        };
-        let Some(slot) = ring.claimed else { return };
-        // Each slot resolves at its own aligned offset.
-        let offset = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT * u64::from(slot);
-        encoder.resolve_query_set(
-            &ring.query_set,
-            2 * slot..2 * slot + 2,
-            &ring.resolve,
-            offset,
-        );
-        encoder.copy_buffer_to_buffer(
-            &ring.resolve,
-            offset,
-            &ring.slots[slot as usize].staging,
-            0,
-            16,
-        );
-    }
-
-    /// Records the frame. Called once a frame, after the solver's encode.
-    pub fn record(&mut self, mut row: DrawnFrame) {
+    /// Records the frame, called once a frame after the solver's encode.
+    /// `gpu_frame` is the GPU frame timer's count for it, if its solver pass
+    /// is being timed.
+    pub fn record(&mut self, mut row: DrawnFrame, gpu_frame: Option<u64>) {
         row.frame = self.frames;
         row.host_seconds = self.started.elapsed().as_secs_f64();
-        let slot = self
-            .timestamps
-            .as_mut()
-            .and_then(|ring| ring.claimed.take());
-        self.pending.push_back((row, slot));
+        self.pending.push_back((row, gpu_frame));
         self.frames += 1;
     }
 
-    /// Maps what this frame submitted, takes in what has mapped, and writes
-    /// every row no longer waiting. Called after the frame's submission.
-    pub fn collect(&mut self) {
-        if let Some(ring) = self.timestamps.as_mut() {
-            // A pass whose frame was never recorded leaves its slot claimed.
-            if let Some(slot) = ring.claimed.take() {
-                ring.slots[slot as usize].state = SlotState::Free;
-            }
-            for slot in &mut ring.slots {
-                match slot.state {
-                    SlotState::Claimed(frame) => {
-                        slot.state = SlotState::Mapping(frame);
-                        let mapped = slot.mapped.clone();
-                        let buffer = slot.staging.clone();
-                        slot.staging
-                            .slice(..)
-                            .map_async(MapMode::Read, move |outcome| {
-                                let ticks = outcome.ok().map(|()| {
-                                    let words: [u64; 2] = bytemuck::pod_read_unaligned(
-                                        &buffer.slice(..).get_mapped_range(),
-                                    );
-                                    words
-                                });
-                                buffer.unmap();
-                                *mapped.lock().unwrap() = Some(ticks);
-                            });
-                    }
-                    SlotState::Mapping(frame) => {
-                        let Some(ticks) = slot.mapped.lock().unwrap().take() else {
-                            continue;
-                        };
-                        slot.state = SlotState::Free;
-                        let Some([begin, end]) = ticks else { continue };
-                        let origin = *ring.origin.get_or_insert(begin);
-                        let seconds = |tick: u64| {
-                            (tick as f64 - origin as f64) * ring.nanoseconds_per_tick * 1.0e-9
-                        };
-                        if let Some((row, waiting)) = self
-                            .pending
-                            .iter_mut()
-                            .find(|(row, waiting)| row.frame == frame && waiting.is_some())
-                        {
-                            row.gpu = Some((seconds(begin), seconds(end)));
-                            *waiting = None;
-                        }
-                    }
-                    SlotState::Free => {}
+    /// Takes in the GPU times that have arrived and writes every row no
+    /// longer waiting. Called after the frame's submission.
+    pub fn collect(&mut self, readings: Option<&GpuFrameReadings>) {
+        if let Some(readings) = readings {
+            for reading in readings.recent() {
+                if let Some((row, waiting)) = self
+                    .pending
+                    .iter_mut()
+                    .find(|(_, waiting)| *waiting == Some(reading.frame))
+                {
+                    row.gpu = Some((reading.pass_begin, reading.pass_end));
+                    *waiting = None;
                 }
             }
         }
@@ -732,6 +623,9 @@ mod tests {
                 admitted: 10,
                 running: true,
                 withheld: false,
+                picture: index,
+                picture_step: step.saturating_sub(20),
+                picture_generation: 1,
             },
         }
     }

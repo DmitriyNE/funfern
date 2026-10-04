@@ -12,6 +12,8 @@ mod drawn_pacing;
 mod field_paint;
 #[allow(dead_code)]
 mod files;
+#[allow(dead_code)]
+mod gpu_frame_timer;
 mod material_overlay;
 mod paced_readback;
 mod recording;

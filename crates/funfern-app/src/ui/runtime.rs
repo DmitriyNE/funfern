@@ -750,6 +750,11 @@ impl Playground {
                 ceiling: self.frame_budget,
                 running: self.wave_running,
                 withheld,
+                picture: display.readbacks,
+                picture_step: display
+                    .clock
+                    .map_or(0, |clock| u64::from(clock.accepted_steps)),
+                picture_generation: display.generation,
                 ..PacingNote::default()
             };
             if !withheld {
