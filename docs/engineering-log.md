@@ -18745,3 +18745,26 @@ The candidate the throughput profile left, agreed and done on
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check, the browser shader compile, and the
   device suite (23 default runs, 107 mode runs).
+
+## 2026-10-04 — A combo list keeps up with its length
+
+The user saw the vector overlay list in the EM skins show two and a half of
+its three entries.
+
+- **Cause.** egui keeps a popup's size from its last showing and does not
+  grow it for a longer list. Reproduced headlessly: opened once on
+  Mechanical's two entries (66 px), the list then opened in TM at 78 px
+  instead of 95, the third entry cut after 6 of its 23 px, on every opening
+  after. Opened first in TM it showed whole, which is why the survey of 3
+  October found it fine. An explicit `combo_list_height` did not help.
+- **Fix.** `sized_combo` builds a combo `combo_list_height` tall under an id
+  that carries its entry count, so each length is sized on its own first
+  showing. Every list that can change length while the app runs uses it:
+  the vector overlay, both boundary lists (five entries in Mechanical, six in
+  the EM skins) and the three material pickers; the fixed lists (Overlay,
+  both Response lists) too, for one rule.
+- **Test.** `the_vector_overlay_list_shows_every_entry_after_the_physics_changes`
+  opens the list in Mechanical, then in TM, and holds every entry inside the
+  open list; on the old combo it fails as reported.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

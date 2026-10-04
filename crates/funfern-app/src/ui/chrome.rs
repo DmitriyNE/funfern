@@ -319,7 +319,8 @@ impl Playground {
                 .iter()
                 .find(|(id, _)| *id == selected)
                 .map_or("Missing", |(_, name)| name.as_str());
-            egui::ComboBox::from_label("Material")
+            // `sized_combo`'s id, with the label beside it.
+            egui::ComboBox::new(("Material", materials.len()), "Material")
                 .height(combo_list_height(ui, materials.len()))
                 .selected_text(selected_name)
                 .show_ui(ui, |ui| {

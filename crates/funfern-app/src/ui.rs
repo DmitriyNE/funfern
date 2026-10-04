@@ -1224,9 +1224,7 @@ fn edit_face_condition(
         FaceBoundaryCondition::Dirichlet { .. } => BoundaryKind::Dirichlet,
     }
     .presented(physics);
-    let menu_height = combo_list_height(ui, BoundaryKind::choices(physics).len());
-    egui::ComboBox::from_id_salt("span-condition")
-        .height(menu_height)
+    sized_combo(ui, "span-condition", BoundaryKind::choices(physics).len())
         .selected_text(kind.label_for(physics))
         .show_ui(ui, |ui| boundary_kind_choices(ui, physics, &mut kind));
     if kind != face_kind(before).presented(physics) {
@@ -1275,9 +1273,7 @@ fn edit_outer_condition(
 ) -> bool {
     let before = *condition;
     let mut kind = outer_kind(*condition).presented(physics);
-    let menu_height = combo_list_height(ui, BoundaryKind::choices(physics).len());
-    egui::ComboBox::from_id_salt("outer-condition")
-        .height(menu_height)
+    sized_combo(ui, "outer-condition", BoundaryKind::choices(physics).len())
         .selected_text(kind.label_for(physics))
         .show_ui(ui, |ui| boundary_kind_choices(ui, physics, &mut kind));
     if kind != outer_kind(before).presented(physics) {
@@ -1373,6 +1369,16 @@ fn combo_list_height(ui: &egui::Ui, rows: usize) -> f32 {
     }
     let whole = (capacity - 0.5).floor().max(1.0);
     rows_tall(whole) + gap + 0.5 * row
+}
+
+/// A combo whose list holds `rows` entries, drawn [`combo_list_height`] tall
+/// under an id that carries the count. egui keeps a popup's size from its
+/// last showing and does not grow it for a longer list: the vector overlay's
+/// list, once opened on its two Mechanical entries, showed two and a half of
+/// its three in the EM skins from then on, and an explicit height did not
+/// help. With the count in its id each length is sized on its first showing.
+fn sized_combo(ui: &egui::Ui, id_salt: impl egui::AsIdSalt, rows: usize) -> egui::ComboBox {
+    egui::ComboBox::from_id_salt((id_salt, rows)).height(combo_list_height(ui, rows))
 }
 
 /// Average of the triangle centroids carrying one region, used to anchor a

@@ -187,8 +187,7 @@ impl Playground {
                         .region(region)
                         .map(|region| region.material)
                 });
-                egui::ComboBox::from_id_salt(("face", index))
-                    .height(combo_list_height(ui, materials.len() + 1))
+                sized_combo(ui, ("face", index), materials.len() + 1)
                     .selected_text(match chosen {
                         Some(material) => materials
                             .iter()
@@ -246,8 +245,7 @@ impl Playground {
                     self.select_region(region.id);
                 }
                 let mut material = region.material;
-                egui::ComboBox::from_id_salt(("region", region.id.0))
-                    .height(combo_list_height(ui, materials.len()))
+                sized_combo(ui, ("region", region.id.0), materials.len())
                     .selected_text(
                         materials
                             .iter()
@@ -518,28 +516,31 @@ impl Playground {
             if advanced {
                 ui.horizontal(|ui| {
                     ui.label("Response");
-                    egui::ComboBox::from_id_salt(("material-response", material.id.0))
-                        .height(combo_list_height(ui, law_presets().len()))
-                        .selected_text(matched.as_ref().map_or_else(
-                            || "Custom".to_owned(),
-                            |found| law_preset_label(found.preset, physics),
-                        ))
-                        .show_ui(ui, |ui| {
-                            for preset in law_presets() {
-                                let current =
-                                    matched.as_ref().is_some_and(|found| found.preset == preset);
-                                if ui
-                                    .add(egui::Button::selectable(
-                                        current,
-                                        law_preset_label(preset, physics),
-                                    ))
-                                    .on_hover_text(preset.phenomenon)
-                                    .clicked()
-                                {
-                                    chosen = Some(preset);
-                                }
+                    sized_combo(
+                        ui,
+                        ("material-response", material.id.0),
+                        law_presets().len(),
+                    )
+                    .selected_text(matched.as_ref().map_or_else(
+                        || "Custom".to_owned(),
+                        |found| law_preset_label(found.preset, physics),
+                    ))
+                    .show_ui(ui, |ui| {
+                        for preset in law_presets() {
+                            let current =
+                                matched.as_ref().is_some_and(|found| found.preset == preset);
+                            if ui
+                                .add(egui::Button::selectable(
+                                    current,
+                                    law_preset_label(preset, physics),
+                                ))
+                                .on_hover_text(preset.phenomenon)
+                                .clicked()
+                            {
+                                chosen = Some(preset);
                             }
-                        });
+                        }
+                    });
                 });
             }
             if let Some(preset) = chosen {
@@ -1124,24 +1125,27 @@ impl Playground {
         let mut chosen = None;
         ui.horizontal(|ui| {
             ui.label("Response");
-            egui::ComboBox::from_id_salt(("material-medium", material.id.0))
-                .height(combo_list_height(ui, medium_presets().len()))
-                .selected_text(matched.as_ref().map_or_else(
-                    || "Custom".to_owned(),
-                    |found| medium_label(found.preset, physics),
-                ))
-                .show_ui(ui, |ui| {
-                    for preset in medium_presets() {
-                        let current = matched.as_ref().is_some_and(|found| found.preset == preset);
-                        if ui
-                            .selectable_label(current, medium_label(preset, physics))
-                            .on_hover_text(medium_hover(preset, physics))
-                            .clicked()
-                        {
-                            chosen = Some(preset);
-                        }
+            sized_combo(
+                ui,
+                ("material-medium", material.id.0),
+                medium_presets().len(),
+            )
+            .selected_text(matched.as_ref().map_or_else(
+                || "Custom".to_owned(),
+                |found| medium_label(found.preset, physics),
+            ))
+            .show_ui(ui, |ui| {
+                for preset in medium_presets() {
+                    let current = matched.as_ref().is_some_and(|found| found.preset == preset);
+                    if ui
+                        .selectable_label(current, medium_label(preset, physics))
+                        .on_hover_text(medium_hover(preset, physics))
+                        .clicked()
+                    {
+                        chosen = Some(preset);
                     }
-                });
+                }
+            });
         });
         if matched.is_none() {
             ui.small("Composed by hand: its laws are edited in Advanced.");

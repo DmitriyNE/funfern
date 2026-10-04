@@ -88,7 +88,7 @@ impl Playground {
         p.vector_overlay = p.vector_overlay.resolved(physics);
         ui.separator();
         ui.label("Vector overlay");
-        egui::ComboBox::from_id_salt("vector-overlay")
+        sized_combo(ui, "vector-overlay", VectorOverlay::choices(physics).len())
             .selected_text(p.vector_overlay.label(physics))
             .show_ui(ui, |ui| {
                 for mode in VectorOverlay::choices(physics) {
@@ -141,8 +141,7 @@ impl Playground {
             MaterialProperty::Anisotropy,
             MaterialProperty::VolumeSource,
         ];
-        egui::ComboBox::from_id_salt("overlay")
-            .height(combo_list_height(ui, 1 + LAYERS.len() + PROPERTIES.len()))
+        sized_combo(ui, "overlay", 1 + LAYERS.len() + PROPERTIES.len())
             .selected_text(
                 p.material_overlay
                     .label_for(self.editor.document.model.draft.physics),
@@ -761,6 +760,91 @@ fn compact_count(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The vector overlay's list shows all of its entries after the physics
+    /// changes under it. Opened once on Mechanical's two, it showed two and a
+    /// half of the EM skins' three, the third cut after 6 of its 23 px, every
+    /// time after: egui kept the popup's size from its last showing.
+    #[test]
+    fn the_vector_overlay_list_shows_every_entry_after_the_physics_changes() {
+        let mut state = Playground {
+            inspector: Some(InspectorPanel::View),
+            ..Playground::default()
+        };
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.enable_accesskit();
+        let mut time = 0.0;
+        let mut frame = |state: &mut Playground, events: Vec<egui::Event>| {
+            time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                time: Some(time),
+                events,
+                ..egui::RawInput::default()
+            };
+            context.run_ui(input, |ui| state.side_panel(ui))
+        };
+        frame(&mut state, vec![]);
+        for physics in [
+            PhysicsModel::Mechanical,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+        ] {
+            state.editor.document.model.draft.physics = physics;
+            let shown = VectorOverlay::Off.label(physics);
+            let output = frame(&mut state, vec![]);
+            let combo = super::super::test_support::laid_out(&output)
+                .into_iter()
+                .find(|widget| widget.label == shown)
+                .expect("the vector overlay combo");
+            frame(&mut state, super::super::test_support::click(&combo));
+            let output = frame(&mut state, vec![]);
+            let popup = context.memory(|memory| {
+                memory
+                    .areas()
+                    .visible_layer_ids()
+                    .into_iter()
+                    .filter(|layer| layer.order == egui::Order::Foreground)
+                    .find_map(|layer| memory.area_rect(layer.id))
+                    .expect("the open list")
+            });
+            let choices = VectorOverlay::choices(physics);
+            let entries: Vec<_> = super::super::test_support::laid_out(&output)
+                .into_iter()
+                .filter(|widget| widget.rect != combo.rect && popup.intersects(widget.rect))
+                .filter(|widget| {
+                    choices
+                        .iter()
+                        .any(|choice| choice.label(physics) == widget.label)
+                })
+                .collect();
+            assert_eq!(entries.len(), choices.len(), "{physics:?}");
+            for entry in &entries {
+                assert!(
+                    popup.contains_rect(entry.rect),
+                    "{physics:?}: {} at {:?} cut by the list at {popup:?}",
+                    entry.label,
+                    entry.rect
+                );
+            }
+            frame(
+                &mut state,
+                vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            frame(&mut state, vec![]);
+        }
+    }
 
     /// The estimate under the slider against meshes actually built: the
     /// empty 2 × 2 domain at 0.08, 0.04 and 0.03 (2,772, 11,190 and 20,031
