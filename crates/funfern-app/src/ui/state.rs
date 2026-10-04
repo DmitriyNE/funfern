@@ -128,7 +128,9 @@ pub struct Playground {
     /// behind one. Starts at the floor rather than the ceiling so the first
     /// frames are readings of the display rather than of the solver.
     /// See [`super::pacing::frame_step_budget`].
-    pub(super) frame_budget: f64,
+    pub(super) step_budget: StepBudget,
+    /// What a solver step costs the GPU, from the frame timer, when known.
+    pub(super) step_seconds: Option<f64>,
     /// What the previous frame asked the solver for, which is what the batch
     /// ceiling is steered by. See [`super::pacing::FrameBatch`].
     pub(super) last_batch: FrameBatch,
@@ -414,7 +416,8 @@ impl Default for Playground {
             fresh_requested: false,
             drop_requested: false,
             accumulator: 0.0,
-            frame_budget: 1.0,
+            step_budget: StepBudget::default(),
+            step_seconds: None,
             last_batch: FrameBatch::default(),
             solver_share: None,
             display_cadence: DisplayCadence::new(),

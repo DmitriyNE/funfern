@@ -7260,7 +7260,11 @@ fn compute_canonical_wave(
     }
     drop(pass);
     if let Some(timer) = timer.as_deref_mut() {
-        timer.resolve_pass(render_context.command_encoder());
+        timer.resolve_pass(
+            render_context.command_encoder(),
+            pending,
+            request.generation,
+        );
     }
     group.encoded_steps += pending;
     request.stats.dispatches.fetch_add(

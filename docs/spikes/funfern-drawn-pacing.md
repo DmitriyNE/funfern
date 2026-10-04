@@ -225,13 +225,138 @@ on the same build). Where the solver fills two frames both builds collapse
 the same way. The picture changed on 99 %, 97 %, 85 % and 88 % of frames at
 this refresh rate, so a depth of three still covers the round trip.
 
+## The budget from the measured cost
+
+Started 2026-10-05 on `feed-forward-budget`, after the submission spike
+(`funfern-solver-submission.md`) left the controller's shape alone and
+pointed at its knowledge. The controller found the batch that fits by
+feedback alone: a quarter step of ceiling a frame while the batch pressed
+it, a cut to three quarters when a frame came in late and the solver was
+filling it. Every operating point was reached through a sawtooth and a
+first late frame.
+
+The GPU timer prices a step. Each reading now carries the steps its pass
+ran and the generation it stepped; the main world takes the median of pass
+time over steps across the fresh readings of the current generation
+(`step_seconds`), and `StepBudget` sets the ceiling to what fits: a target
+share of the interval over the cost, every frame, from the measurement.
+The late-frame rule stays as the backstop and acts on the target: a late
+frame the solver is to answer for (its steady share at or past
+`SOLVER_BLAME_SHARE`, as before) lowers the target to nine tenths of the
+share the pass measured; frames in time at the ceiling bring it back by
+0.0025 a frame, to the nominal 0.8 and no further; it never drops below
+0.4. While the share reads well under the target (by 0.15) with the batch
+at the ceiling, the ceiling also probes a quarter step above the fit, for
+the trap described below. Without a cost, no timestamp queries or a
+generation too new for three readings, the old rule runs from where the
+ceiling stands. The trace carries the cost and the target as two more
+columns; the summary counts the target's drops as cuts where it has them.
+
+**What a step costs depends on the load.** A fixed-batch sweep on the heavy
+scene at 120 Hz priced a step at 1.6 ms in a batch of four, 1.2 in five,
+1.0 in six and seven, and 1.3 in eight and nine. A lightly loaded GPU
+clocks down, and a pass run while the queue is backed up shares the GPU
+with the frame before it. Both inflate the cost and shrink the budget,
+which lightens the load and brings the cost back; neither makes the budget
+over-promise. The pass's fixed cost on top of its steps has the same sign,
+so a ceiling priced in a small batch is short of the fit and the next
+readings, at the larger batch, raise it: it converges from below.
+
+**The first rule took the target to the floor.** It let the blame
+threshold follow the target down, for the case where frames stay late at
+a share below 0.75. Measured against the old build, alternating, 60 s a
+run, it ran the heavy scene at 0.22 and 0.42 of the set speed against the
+old build's 0.64 and 0.61, with 83 and 68 % picture wobble against 28 and
+31. The machine was carrying the user's nine fitting jobs at the time,
+load average 60 to 90, and a fifth of all frames were late for the host's
+reasons on both builds and on the light scene too. Each of those frames,
+blamed at a share of 0.8, cut the target by a tenth; once the target was
+under 0.75 the threshold went with it and every further late frame cut
+again, down to the floor, where batches of two steps on a clocked-down
+GPU cost 1.6 ms each. With the threshold fixed, frames late for the
+host's reasons are blamed only while the pass fills the interval, and the
+target hovers just under the threshold instead: the solver keeps most of
+its room, as it does under the old rule's balance of cuts and recovery.
+The fixed-batch sweep ran under the same load, so its late frames say
+nothing about the GPU; its costs are GPU timestamps and stand.
+
+**The second cut the ceiling's floor out from under it.** With the
+threshold fixed, the heavy scene ran at 0.52 and 0.56 of its set speed
+against the old build's 0.65 and 0.63, wobble 46 and 38 % against 35 and
+33. The target had hovered where meant, 0.59 to 0.78, dropping under three
+times a second, but the ceiling had a tail: a tenth of the frames at 1.5
+and 2.5 steps. Each late frame cut the target by a tenth of itself, and
+the share that decides the blame is a median that trails by several
+frames, so the late frames of one spell, all reading the same share,
+compounded into two or three cuts; the fit at the lowered target met a
+cost spike (p90 3.5 ms a step against a median of 1.1) and collapsed, and
+a small batch keeps the GPU clocked down and the cost high. The cut now
+goes to nine tenths of the share the pass measured, never under the
+target again: a spell's late frames land on the same target. Measured, 60
+s a run alternating, under the same host load:
+
+| run | fps | late | speed of set | picture wobble | cuts a second | batch p10 / p50 / p90 |
+| --- | --- | --- | --- | --- | --- | --- |
+| old | 80.7 | 23.9 % | 0.577 | 36.4 % | 7.25 | 3 / 6 / 8 |
+| new | 84.7 | 23.4 % | 0.584 | 29.6 % | 1.7 | 4 / 6 / 6 |
+| old | 83.7 | 23.6 % | 0.611 | 35.8 % | 7.10 | 3 / 6 / 8 |
+| new | 84.5 | 22.9 % | 0.669 | 25.3 % | 2.0 | 5 / 6 / 7 |
+
+The old rule's cuts are the ceiling's, the new rule's the target's. The
+ceiling's tail is gone (p10 at 4.3 and 5.2 steps), the batch spreads over
+four to seven steps where the old rule's sawtooth spread it over three to
+eight, and the light scene is unchanged (0.92 to 0.94 of set, wobble 18 to
+17 %).
+
+**The trap, and the probe.** A pass has a fixed cost on top of its steps
+and a lightly loaded GPU clocks down, so a step priced in a small batch is
+dear, and the integer floor on the steps can hold a fit on the same small
+batch for good: a fit of 2.5 steps runs two, which price the step at what
+gave 2.5. The first rule sat at a ceiling of one on half its frames for
+exactly this reason once its target had collapsed. So while the share
+reads 0.15 or more under the target with the batch at the ceiling, the
+ceiling probes a quarter step above the fit, as the old rule always did;
+the next readings, at the larger batch, price the step lower, and the fit
+follows. At the fit the share reads the target and the ceiling stays put:
+at a fixed batch the share spreads from 0.91 to 1.35 of its median, so a
+share within 0.15 of the target is the measurement's noise, not room. With
+the probe, the final rule, the same measurement (the host load easing from
+nine fitting jobs to six over the runs, hence the higher numbers):
+
+| run | fps | late | speed of set | picture wobble | cuts a second |
+| --- | --- | --- | --- | --- | --- |
+| old | 98.9 | 16.0 % | 0.764 | 25.9 % | 6.85 |
+| new | 105.0 | 11.9 % | 0.749 | 19.1 % | 1.08 |
+| old | 98.5 | 15.3 % | 0.766 | 26.9 % | 6.45 |
+| new | 110.8 | 7.2 % | 0.800 | 16.3 % | 0.67 |
+| old, light | 119.0 | 1.8 % | 0.995 | 6.0 % | 0 |
+| new, light | 118.9 | 1.9 % | 0.994 | 6.3 % | 0 |
+
+More frames, fewer late, the same speed or more, a third less picture
+wobble, on both heavy pairs; the light scene unchanged. In the pacing
+harness, whose display charges the draws on top of the pass, the run
+without room to spare settles at seven steps a frame and its wobble fell
+from 10.9 % to 4.9 %; with room to spare it reads 4.0 % against 3.8. The
+ratchets are at 6 and 8 %.
+
+Not measured: a quiet host, which the calibration run at the start of the
+day had and nothing since (the fitting jobs ran from the fixed-batch sweep
+on); the 60 Hz panel; a scene with adaptation, the overlay and the
+integrated field; a GPU slowing under Low Power Mode, which is the case
+the fit was built for. The threshold scene of 2026-10-04, blamed on some
+frames and held on others, is what the adaptive target now does on
+purpose: it hovers just under the threshold while the frames are not the
+solver's.
+
 ## Left for the pacing work
 
-- A scene at the threshold, the overlay scene at 120 Hz here, is blamed on
-  some frames and held on others as the GPU's clock moves its share; what the
-  right behaviour there is was not studied.
-- 0.75 against 0.9 for the backoff may be resolvable now that the display's
-  late frames no longer cut; the measurement that could not tell them apart
-  on 2026-09-23 was measuring those.
-- The picture is three frames behind the solver. Shortening that is a
-  readback-path change, not a pacing one.
+- The measurements above under a quiet host and at 60 Hz, and the Low Power
+  Mode case.
+- The picture is three frames behind the solver, and at 120 Hz under load
+  it stood still on 17 to 26 % of frames on the heavy scene in every run
+  above, old and new: a depth of three in flight does not cover the round
+  trip there. Shortening the lag is a readback-path change, not a pacing
+  one; the depth at 120 Hz may be a one-line one.
+- 0.75 for the old rule's backoff survives only in the path without a cost
+  of a step, a device without timestamp queries; on this machine the
+  question is moot.

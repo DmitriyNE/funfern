@@ -38,6 +38,11 @@ pub struct GpuFrameReading {
     pub frame: u64,
     pub pass_begin: f64,
     pub pass_end: f64,
+    /// The steps the pass carried, so pacing can price one; zero for a pass
+    /// that only ran an event or sampled the overlay.
+    pub steps: u64,
+    /// The solver generation the pass stepped. A step's cost is its mesh's.
+    pub generation: u64,
     /// The host's clock when the reading was taken in; pacing ignores stale
     /// ones.
     pub taken_at: Instant,
@@ -48,6 +53,14 @@ impl GpuFrameReading {
     pub fn pass_seconds(&self) -> f64 {
         self.pass_end - self.pass_begin
     }
+}
+
+/// What a resolved pass is remembered by until its reading maps.
+#[derive(Clone, Copy)]
+struct PassRecord {
+    frame: u64,
+    steps: u64,
+    generation: u64,
 }
 
 /// How many readings the main world can look back over.
@@ -87,9 +100,9 @@ enum SlotState {
     /// This frame's solver pass writes it.
     Timing,
     /// Resolved and submitted with its frame.
-    Submitted(u64),
+    Submitted(PassRecord),
     /// Mapping asked for.
-    Mapping(u64),
+    Mapping(PassRecord),
 }
 
 struct Slot {
@@ -184,8 +197,9 @@ impl GpuFrameTimer {
     }
 
     /// Copies this frame's timestamps where they can be mapped. Called once
-    /// the pass that wrote them has ended, on the same encoder or a later one.
-    pub fn resolve_pass(&mut self, encoder: &mut CommandEncoder) {
+    /// the pass that wrote them has ended, on the same encoder or a later one,
+    /// with the steps the pass carried and the generation it stepped.
+    pub fn resolve_pass(&mut self, encoder: &mut CommandEncoder, steps: u64, generation: u64) {
         let Some(slot) = self.timing.take() else {
             return;
         };
@@ -205,7 +219,11 @@ impl GpuFrameTimer {
             0,
             READING_BYTES,
         );
-        self.slots[slot as usize].state = SlotState::Submitted(self.frame);
+        self.slots[slot as usize].state = SlotState::Submitted(PassRecord {
+            frame: self.frame,
+            steps,
+            generation,
+        });
     }
 
     /// Maps what was submitted and takes in what has mapped, into `readings`,
@@ -220,8 +238,8 @@ impl GpuFrameTimer {
         self.frame += 1;
         for slot in &mut self.slots {
             match slot.state {
-                SlotState::Submitted(frame) => {
-                    slot.state = SlotState::Mapping(frame);
+                SlotState::Submitted(record) => {
+                    slot.state = SlotState::Mapping(record);
                     let mapped = slot.mapped.clone();
                     let buffer = slot.staging.clone();
                     slot.staging
@@ -237,7 +255,7 @@ impl GpuFrameTimer {
                             *mapped.lock().unwrap() = Some(ticks);
                         });
                 }
-                SlotState::Mapping(frame) => {
+                SlotState::Mapping(record) => {
                     let Some(ticks) = slot.mapped.lock().unwrap().take() else {
                         continue;
                     };
@@ -248,9 +266,11 @@ impl GpuFrameTimer {
                         (tick as f64 - origin as f64) * self.nanoseconds_per_tick * 1.0e-9
                     };
                     readings.push(GpuFrameReading {
-                        frame,
+                        frame: record.frame,
                         pass_begin: seconds(begin),
                         pass_end: seconds(end),
+                        steps: record.steps,
+                        generation: record.generation,
                         taken_at: Instant::now(),
                     });
                 }

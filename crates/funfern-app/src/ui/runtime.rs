@@ -6,6 +6,7 @@ use crate::canonical_gpu::{
     CanonicalGpuPlan, CanonicalGpuRequest, canonical_failure_description,
 };
 use crate::drawn_pacing::PacingNote;
+use crate::gpu_frame_timer::GpuFrameReading;
 use crate::wave_gpu::{VectorOverlayDisplay, WaveGpuRequest};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -335,24 +336,31 @@ impl Playground {
         // The solver's steady share of the frame, from the GPU's own clock on
         // its passes, decides whether a late frame is its doing.
         let now = Instant::now();
-        let passes: Vec<f64> = request
-            .gpu_frames()
-            .recent()
+        let readings = request.gpu_frames().recent();
+        let fresh: Vec<&GpuFrameReading> = readings
             .iter()
             .filter(|reading| {
                 now.saturating_duration_since(reading.taken_at)
                     .as_secs_f64()
                     <= SOLVER_SHARE_FRESH_SECONDS
             })
-            .map(|reading| reading.pass_seconds())
+            .collect();
+        let passes: Vec<f64> = fresh.iter().map(|reading| reading.pass_seconds()).collect();
+        // A step's cost is this generation's: another mesh's steps cost
+        // something else, so the first frames after a handoff go without.
+        let costs: Vec<(f64, u64)> = fresh
+            .iter()
+            .filter(|reading| reading.generation == request.generation())
+            .map(|reading| (reading.pass_seconds(), reading.steps))
             .collect();
         self.solver_share = solver_share(&passes, self.display_cadence.seconds());
-        self.frame_budget = frame_step_budget(
-            self.frame_budget,
+        self.step_seconds = step_seconds(&costs);
+        self.step_budget.update(
             delta,
             self.display_cadence.seconds(),
             batch,
             self.solver_share,
+            self.step_seconds,
         );
         if self.uploading.is_none()
             && self.source_commit.is_none()
@@ -763,7 +771,7 @@ impl Playground {
                 frame_seconds: delta,
                 speed: self.editor.document.presentation.simulation_speed,
                 time_step: dt,
-                ceiling: self.frame_budget,
+                ceiling: self.step_budget.ceiling,
                 running: self.wave_running,
                 withheld,
                 picture: display.readbacks,
@@ -772,6 +780,8 @@ impl Playground {
                     .map_or(0, |clock| u64::from(clock.accepted_steps)),
                 picture_generation: display.generation,
                 solver_share: self.solver_share.unwrap_or(f64::NAN),
+                step_seconds: self.step_seconds.unwrap_or(f64::NAN),
+                target: self.step_budget.target,
                 ..PacingNote::default()
             };
             if !withheld {
@@ -781,7 +791,7 @@ impl Playground {
                         delta,
                         self.editor.document.presentation.simulation_speed,
                         dt,
-                        self.frame_budget,
+                        self.step_budget.ceiling,
                     );
                     // Spike (2026-10-05, `docs/spikes/funfern-solver-submission.md`):
                     // a fixed batch, so the pass spills past the interval

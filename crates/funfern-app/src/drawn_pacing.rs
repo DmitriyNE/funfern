@@ -66,6 +66,11 @@ pub struct PacingNote {
     /// The solver's steady share of the display interval as the controller
     /// saw it, NaN when unknown.
     pub solver_share: f64,
+    /// What a solver step cost the GPU as the controller saw it, in seconds,
+    /// NaN when unknown.
+    pub step_seconds: f64,
+    /// The share of the interval the budget aimed the pass at.
+    pub target: f64,
 }
 
 /// One rendered frame.
@@ -91,9 +96,15 @@ pub struct DrawnFrame {
     pub note: PacingNote,
 }
 
-const COLUMNS: &str = "frame,host_seconds,generation,drawn_step,requested,completed,\
+/// The columns before the step's cost and the target joined on 2026-10-05.
+/// Traces written before then still read; the two are NaN.
+const COLUMNS_BEFORE_COST: &str = "frame,host_seconds,generation,drawn_step,requested,completed,\
 gpu_begin,gpu_end,frame_seconds,speed,time_step,ceiling,asked,admitted,running,withheld,\
 picture,picture_step,picture_generation,solver_share";
+
+const COLUMNS: &str = "frame,host_seconds,generation,drawn_step,requested,completed,\
+gpu_begin,gpu_end,frame_seconds,speed,time_step,ceiling,asked,admitted,running,withheld,\
+picture,picture_step,picture_generation,solver_share,step_seconds,target";
 
 impl DrawnFrame {
     fn csv(&self) -> String {
@@ -102,7 +113,7 @@ impl DrawnFrame {
         });
         let note = &self.note;
         format!(
-            "{},{},{},{},{},{},{begin},{end},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{begin},{end},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.frame,
             self.host_seconds,
             self.generation,
@@ -121,12 +132,15 @@ impl DrawnFrame {
             note.picture_step,
             note.picture_generation,
             note.solver_share,
+            note.step_seconds,
+            note.target,
         )
     }
 
     fn parse(line: &str) -> Result<Self, String> {
         let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() != COLUMNS.split(',').count() {
+        let before_cost = COLUMNS_BEFORE_COST.split(',').count();
+        if fields.len() != COLUMNS.split(',').count() && fields.len() != before_cost {
             return Err(format!(
                 "expected {} fields: {line}",
                 COLUMNS.split(',').count()
@@ -162,6 +176,8 @@ impl DrawnFrame {
                 picture_step: number(fields[17])?,
                 picture_generation: number(fields[18])?,
                 solver_share: number(fields[19])?,
+                step_seconds: fields.get(20).map_or(Ok(f64::NAN), |field| number(field))?,
+                target: fields.get(21).map_or(Ok(f64::NAN), |field| number(field))?,
             },
         })
     }
@@ -171,7 +187,7 @@ impl DrawnFrame {
 /// ending is dropped.
 pub fn parse_trace(text: &str) -> Result<Vec<DrawnFrame>, String> {
     let mut lines = text.lines();
-    if lines.next() != Some(COLUMNS) {
+    if !matches!(lines.next(), Some(COLUMNS | COLUMNS_BEFORE_COST)) {
         return Err("not a drawn pacing trace".into());
     }
     let lines: Vec<&str> = lines.filter(|line| !line.is_empty()).collect();
@@ -239,7 +255,8 @@ pub struct DrawnSummary {
     /// The wobble of the picture's own clock: the step the painted readback
     /// carried, over host time.
     pub picture_wobble: f64,
-    /// How often the batch ceiling came down, per wall second.
+    /// How often the controller answered a late frame, per wall second: the
+    /// target's drops where the trace has one, the ceiling's before that.
     pub cuts_per_second: f64,
     /// Steps requested but not yet encoded at each frame: p50, p90.
     pub backlog: [f64; 2],
@@ -362,9 +379,19 @@ pub fn summarize(frames: &[DrawnFrame], skip_seconds: f64) -> DrawnSummary {
         .collect();
     let median_delta = percentile(&mut deltas, 0.5);
     let late = share(&|_, after| after.note.frame_seconds > 1.5 * median_delta);
+    // A cut is the controller answering a late frame. Since 2026-10-05 that
+    // lowers the target and the ceiling moves with the measured cost every
+    // frame, so a trace with a target counts the target's drops; an older one
+    // the ceiling's.
     let cuts = measured
         .iter()
-        .filter(|(before, after)| after.note.ceiling < before.note.ceiling)
+        .filter(|(before, after)| {
+            if after.note.target.is_nan() {
+                after.note.ceiling < before.note.ceiling
+            } else {
+                after.note.target < before.note.target
+            }
+        })
         .count();
 
     let host = runs(
@@ -645,6 +672,8 @@ mod tests {
                 picture_step: step.saturating_sub(20),
                 picture_generation: 1,
                 solver_share: 0.3,
+                step_seconds: 0.0005,
+                target: 0.8,
             },
         }
     }

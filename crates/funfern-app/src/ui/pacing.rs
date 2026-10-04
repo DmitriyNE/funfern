@@ -203,6 +203,165 @@ const SOLVER_SHARE_MINIMUM: usize = 3;
 /// with headroom.
 pub(super) const SOLVER_SHARE_FRESH_SECONDS: f64 = 0.25;
 
+/// What a step costs the GPU: the median over the latest
+/// [`SOLVER_SHARE_WINDOW`] passes of each pass's time over the steps it
+/// carried, passes that carried none left out, or nothing under
+/// [`SOLVER_SHARE_MINIMUM`] of them.
+///
+/// The cost is of the state the GPU is in. It clocks down when lightly
+/// loaded, so a step measured in a small batch costs more (1.6 ms at four
+/// steps against 1.0 at seven on the heavy scene, 2026-10-05), and a pass
+/// run while the queue is backed up shares the GPU with the frame before it.
+/// Both inflate the cost and shrink the budget, which lightens the queue and
+/// brings the cost back down; neither makes it over-promise.
+pub(super) fn step_seconds(passes: &[(f64, u64)]) -> Option<f64> {
+    let mut recent: Vec<f64> = passes
+        .iter()
+        .rev()
+        .filter(|(pass, steps)| pass.is_finite() && *pass >= 0.0 && *steps > 0)
+        .map(|(pass, steps)| pass / *steps as f64)
+        .take(SOLVER_SHARE_WINDOW)
+        .collect();
+    if recent.len() < SOLVER_SHARE_MINIMUM {
+        return None;
+    }
+    recent.sort_by(|left, right| left.total_cmp(right));
+    Some(recent[recent.len() / 2])
+}
+
+/// The share of the display interval the budget aims the solver pass at when
+/// it knows what a step costs. The controller settled at 0.82 on the heavy
+/// scene at 120 Hz with 0.4 % of frames late (`docs/spikes/funfern-drawn-pacing.md`,
+/// "The budget from the measured cost"); what the GPU does beside the pass,
+/// the draws and the readback copies, has to fit in the rest.
+pub(super) const TARGET_SHARE: f64 = 0.8;
+
+/// A late frame the solver is to answer for lowers the target by this factor:
+/// the margin was not enough, whatever the GPU spent it on.
+const TARGET_SHARE_BACKOFF: f64 = 0.9;
+
+/// Frames in time at the ceiling give the target back this much a frame: a
+/// cut's tenth comes back over about thirty frames, a quarter second at 120
+/// Hz, so a target that is truly too high costs a late frame that often and
+/// not every few frames.
+const TARGET_SHARE_RECOVERY: f64 = 0.0025;
+
+/// The target never drops below this. A solver under 0.4 of the interval is
+/// not what makes a frame late, and a budget cut further would starve it for
+/// nothing.
+const TARGET_SHARE_FLOOR: f64 = 0.4;
+
+/// How far under the target the steady share has to read before the ceiling
+/// probes a quarter step above the fit. At a fixed batch the share spreads
+/// from 0.91 to 1.35 of its median on the heavy scene (p10 and p90,
+/// 2026-10-05), so a share within this of the target is the measurement's
+/// noise, not room.
+const CEILING_PROBE_MARGIN: f64 = 0.15;
+
+/// The batch ceiling and the share of the display interval it aims the
+/// solver pass at.
+///
+/// With the cost of a step known the ceiling is what fits: the target share
+/// of the interval over the cost, set each frame from the measurement rather
+/// than found by overrunning. The late-frame rule of [`frame_step_budget`]
+/// stays as the backstop, acting on the target instead of the steps: a late
+/// frame the solver is to answer for lowers the target under the share the
+/// pass measured, frames in time at the ceiling bring it back. Without a
+/// cost, no timestamp queries or a generation too new to have readings, the
+/// ceiling follows [`frame_step_budget`] as it always did.
+///
+/// A pass has a fixed cost on top of its steps and a lightly loaded GPU
+/// clocks down, so a step priced in a small batch is dear and the fit it
+/// gives is short of what the GPU could do at a larger one; the integer
+/// floor on the steps can then hold a small batch for good. While the
+/// GPU's own clock shows room under the target the ceiling also probes a
+/// quarter step above the fit, and the next readings, at the larger batch,
+/// price the step lower. Measured against the old rule under a loaded host
+/// (`docs/spikes/funfern-drawn-pacing.md`, "The budget from the measured
+/// cost"): the batch spreads over 4 to 7 steps where the old rule's
+/// sawtooth spread it over 3 to 8.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct StepBudget {
+    /// The most steps a frame may carry.
+    pub(super) ceiling: f64,
+    /// The share of the interval the ceiling aims the pass at.
+    pub(super) target: f64,
+}
+
+impl Default for StepBudget {
+    fn default() -> Self {
+        Self {
+            ceiling: 1.0,
+            target: TARGET_SHARE,
+        }
+    }
+}
+
+impl StepBudget {
+    /// Moves the budget on from what the last frame cost: its wall time, the
+    /// display's cadence, the batch it carried, the solver's steady share
+    /// ([`solver_share`]) and the cost of a step ([`step_seconds`]).
+    pub(super) fn update(
+        &mut self,
+        frame_seconds: f64,
+        cadence: f64,
+        batch: FrameBatch,
+        solver: Option<f64>,
+        cost: Option<f64>,
+    ) {
+        if !frame_seconds.is_finite()
+            || frame_seconds <= 0.0
+            || !cadence.is_finite()
+            || cadence <= 0.0
+        {
+            return;
+        }
+        let Some(cost) = cost.filter(|cost| cost.is_finite() && *cost > 0.0) else {
+            self.ceiling = frame_step_budget(self.ceiling, frame_seconds, cadence, batch, solver);
+            return;
+        };
+        let late = batch.steps > 0 && frame_seconds > cadence * FRAME_BUDGET_TOLERANCE;
+        if late {
+            // The blame threshold stays put. Frames late for the host's
+            // reasons, a fifth of them under a loaded CPU on 2026-10-05, are
+            // blamed while the pass fills the interval and stop being blamed
+            // once the target has dropped below the threshold, so the target
+            // hovers just under it and the solver keeps most of its room. A
+            // threshold that followed the target down took it to the floor.
+            // The cut goes to under the share the pass measured, not under
+            // the target again: the share is a median that trails by several
+            // frames, and the late frames of one spell all read the same
+            // share, so they land on the same target rather than compounding.
+            let blamed = match solver {
+                Some(share) if share >= SOLVER_BLAME_SHARE => {
+                    self.target = self.target.min(share * TARGET_SHARE_BACKOFF);
+                    true
+                }
+                Some(_) => false,
+                None => {
+                    self.target *= TARGET_SHARE_BACKOFF;
+                    true
+                }
+            };
+            if blamed {
+                self.target = self.target.max(TARGET_SHARE_FLOOR);
+            }
+        } else if batch.ceiling_bound {
+            self.target = (self.target + TARGET_SHARE_RECOVERY).min(TARGET_SHARE);
+        }
+        let fit = self.target * cadence / cost;
+        let room = !late
+            && batch.ceiling_bound
+            && solver.is_some_and(|share| share < self.target - CEILING_PROBE_MARGIN);
+        self.ceiling = if room {
+            fit.max(self.ceiling + FRAME_BUDGET_RECOVERY)
+        } else {
+            fit
+        }
+        .clamp(1.0, MAX_STEPS_PER_FRAME as f64);
+    }
+}
+
 /// The solver's steady share of the display interval: the median of the
 /// latest [`SOLVER_SHARE_WINDOW`] pass durations over the cadence, or nothing
 /// when there are too few readings to say.
@@ -513,19 +672,22 @@ mod tests {
     fn paced(display: &mut Display, time_step: f64, per_step: f64, budgeted: bool) -> Paced {
         let mut accumulator = 0.0;
         let mut cadence = DisplayCadence::new();
-        let mut budget = 1.0;
+        let mut budget = StepBudget::default();
         let mut frame = display.refresh;
         let mut asked = FrameBatch::default();
         let mut run: Vec<(u64, f64)> = Vec::new();
-        // The solver pass each frame carried, as the GPU timer would report it.
-        let mut passes: Vec<f64> = Vec::new();
+        // The solver pass each frame carried and its steps, as the GPU timer
+        // would report them.
+        let mut passes: Vec<(f64, u64)> = Vec::new();
         let (mut frames, mut steps, mut elapsed, mut warm) = (0u32, 0u64, 0.0, 0.0);
         while elapsed < 4.0 {
             cadence.observe(frame);
             if budgeted {
-                let known = passes.len().saturating_sub(READING_LAG);
-                let solver = solver_share(&passes[..known], cadence.seconds());
-                budget = frame_step_budget(budget, frame, cadence.seconds(), asked, solver);
+                let known = &passes[..passes.len().saturating_sub(READING_LAG)];
+                let times: Vec<f64> = known.iter().map(|(pass, _)| *pass).collect();
+                let solver = solver_share(&times, cadence.seconds());
+                let cost = step_seconds(known);
+                budget.update(frame, cadence.seconds(), asked, solver, cost);
             }
             asked = steps_for_frame(
                 &mut accumulator,
@@ -533,13 +695,13 @@ mod tests {
                 1.0,
                 time_step,
                 if budgeted {
-                    budget
+                    budget.ceiling
                 } else {
                     MAX_STEPS_PER_FRAME as f64
                 },
             );
             cadence.record_batch(asked.steps);
-            passes.push(asked.steps as f64 * per_step);
+            passes.push((asked.steps as f64 * per_step, asked.steps));
             frame = display.present(OVERHEAD + asked.steps as f64 * per_step);
             if warm < 1.0 {
                 warm += frame;
@@ -635,15 +797,17 @@ mod tests {
     /// whether the frame rate holds or whether the requested speed is reached
     /// on average. A run can do both and still visibly speed up and slow down.
     ///
-    /// Whenever the ceiling is the constraint the batch is the ceiling, so the
-    /// controller's sawtooth lands directly in the animation's clock: the
-    /// spread here is [`FRAME_BUDGET_BACKOFF`] transmitted, against about 1 %
-    /// for a pacer with no ceiling at all on the same frames. These bounds are
-    /// a ratchet on what is currently reached - 3.8 % with room to spare and
-    /// 10.9 % without - not a statement that this is good enough. They were
-    /// 18.3 % and 16.6 % while every late frame cut the batch; with room to
-    /// spare the display's own late frames were all of it, and
-    /// [`SOLVER_BLAME_SHARE`] no longer lets them.
+    /// Whenever the ceiling is the constraint the batch is the ceiling, so
+    /// whatever the controller does to the ceiling lands directly in the
+    /// animation's clock, against about 1 % for a pacer with no ceiling at all
+    /// on the same frames. These bounds are a ratchet on what is currently
+    /// reached - 4.0 % with room to spare and 4.9 % without - not a statement
+    /// that this is good enough. They were 18.3 % and 16.6 % while every late
+    /// frame cut the batch; 3.8 % and 10.9 % once [`SOLVER_BLAME_SHARE`] kept
+    /// the display's own late frames from cutting; and without room to spare
+    /// the [`StepBudget`] set from the measured cost holds the batch at seven
+    /// steps a frame where the old rule's sawtooth transmitted
+    /// [`FRAME_BUDGET_BACKOFF`] into the clock.
     #[test]
     fn the_simulated_clock_runs_evenly_in_both_regimes() {
         let refresh = 1.0 / 120.0;
@@ -672,7 +836,7 @@ mod tests {
             hard.speed
         );
         assert!(
-            hard.wobble < 0.14,
+            hard.wobble < 0.08,
             "falling behind got stuttery rather than slow: {:.1} %",
             hard.wobble * 100.0
         );
@@ -905,6 +1069,173 @@ mod tests {
         );
         // A frame in time grows the ceiling whatever the share.
         assert!(frame_step_budget(20.0, cadence, cadence, pressing, Some(0.28)) > 20.0);
+    }
+
+    /// With the cost of a step known the ceiling is what fits, set from the
+    /// measurement rather than found by overrunning: the target share of the
+    /// interval over the cost, following the cost down and back up at once.
+    /// Only while the GPU's own clock shows room well under the target does
+    /// it probe above the fit, so a small batch on a clocked-down GPU is not
+    /// held for good; at the fit it stays put.
+    #[test]
+    fn the_ceiling_is_what_fits_at_the_measured_cost() {
+        let cadence = 1.0 / 120.0;
+        let pressing = FrameBatch {
+            steps: 6,
+            ceiling_bound: true,
+        };
+        let fit = |target: f64, cost: f64| target * cadence / cost;
+        let mut budget = StepBudget::default();
+        // From a fresh scene's ceiling of one straight to the fit, probing
+        // past it while the share reads well under the target.
+        budget.update(cadence, cadence, pressing, Some(0.2), Some(1.0e-3));
+        let target = budget.target;
+        assert!(
+            (budget.ceiling - fit(target, 1.0e-3)).abs() < 1.0e-9,
+            "{}",
+            budget.ceiling
+        );
+        // At the fit with the share at the target, a frame in time leaves it.
+        let at_fit = budget.ceiling;
+        budget.update(cadence, cadence, pressing, Some(0.8), Some(1.0e-3));
+        assert!((budget.ceiling - fit(budget.target, 1.0e-3)).abs() < 1.0e-9);
+        assert!(
+            (budget.ceiling - at_fit).abs() < 1.0e-3,
+            "{}",
+            budget.ceiling
+        );
+        // The GPU slows: the ceiling halves on the next reading, and climbs
+        // straight back when it recovers, with no ramp to wait through.
+        budget.update(cadence, cadence, pressing, Some(0.8), Some(2.0e-3));
+        assert!((budget.ceiling - fit(budget.target, 2.0e-3)).abs() < 1.0e-9);
+        budget.update(cadence, cadence, pressing, Some(0.8), Some(1.0e-3));
+        assert!((budget.ceiling - fit(budget.target, 1.0e-3)).abs() < 1.0e-9);
+        // The trap: a small batch prices a step dear and the fit lands on
+        // the same batch; the share, well under the target, says the GPU has
+        // room, so the ceiling probes above the fit.
+        let dear = 2.6e-3;
+        let mut trapped = StepBudget {
+            ceiling: fit(TARGET_SHARE, dear),
+            target: TARGET_SHARE,
+        };
+        let small = FrameBatch {
+            steps: 2,
+            ceiling_bound: true,
+        };
+        trapped.update(cadence, cadence, small, Some(0.6), Some(dear));
+        assert!(
+            (trapped.ceiling - (fit(TARGET_SHARE, dear) + FRAME_BUDGET_RECOVERY)).abs() < 1.0e-9,
+            "{}",
+            trapped.ceiling
+        );
+        // With the share at the target it would have stayed at the fit.
+        let mut settled = StepBudget {
+            ceiling: fit(TARGET_SHARE, dear),
+            target: TARGET_SHARE,
+        };
+        settled.update(cadence, cadence, small, Some(0.8), Some(dear));
+        assert!((settled.ceiling - fit(TARGET_SHARE, dear)).abs() < 1.0e-9);
+        // Bounded as the ceiling always was.
+        let mut wide = StepBudget::default();
+        wide.update(cadence, cadence, pressing, Some(0.8), Some(1.0e-6));
+        assert_eq!(wide.ceiling, MAX_STEPS_PER_FRAME as f64);
+        wide.update(cadence, cadence, pressing, Some(0.8), Some(1.0));
+        assert_eq!(wide.ceiling, 1.0);
+    }
+
+    /// Without a cost the ceiling follows the late-frame rule from where it
+    /// stands, and the target is left alone.
+    #[test]
+    fn without_a_cost_the_ceiling_follows_the_late_frame_rule() {
+        let cadence = 1.0 / 120.0;
+        let pressing = FrameBatch {
+            steps: 6,
+            ceiling_bound: true,
+        };
+        let mut budget = StepBudget {
+            ceiling: 10.0,
+            target: TARGET_SHARE,
+        };
+        budget.update(cadence, cadence, pressing, None, None);
+        assert_eq!(budget.ceiling, 10.0 + FRAME_BUDGET_RECOVERY);
+        budget.update(cadence * 2.0, cadence, pressing, None, None);
+        assert_eq!(budget.ceiling, 6.0 * FRAME_BUDGET_BACKOFF);
+        assert_eq!(budget.target, TARGET_SHARE);
+        // Nonsense leaves both alone.
+        budget.update(f64::NAN, cadence, pressing, None, Some(1.0e-3));
+        assert_eq!(budget.ceiling, 6.0 * FRAME_BUDGET_BACKOFF);
+    }
+
+    /// A late frame the solver is to answer for lowers the target rather than
+    /// the steps; one at a share below the blame threshold leaves it, so
+    /// frames late for the host's reasons can take the target no further than
+    /// just under the threshold; frames in time at the ceiling bring it back,
+    /// to the nominal and no further; a slack frame says nothing; and the
+    /// target never drops below its floor.
+    #[test]
+    fn a_blamed_late_frame_lowers_the_target_and_frames_in_time_restore_it() {
+        let cadence = 1.0 / 120.0;
+        let cost = 1.0e-3;
+        let pressing = FrameBatch {
+            steps: 6,
+            ceiling_bound: true,
+        };
+        let mut budget = StepBudget::default();
+        budget.update(cadence * 2.0, cadence, pressing, Some(0.3), Some(cost));
+        assert_eq!(budget.target, TARGET_SHARE, "a light solver was blamed");
+        budget.update(cadence * 2.0, cadence, pressing, Some(0.8), Some(cost));
+        let lowered = budget.target;
+        assert!((lowered - 0.8 * TARGET_SHARE_BACKOFF).abs() < 1.0e-12);
+        assert!((budget.ceiling - lowered * cadence / cost).abs() < 1.0e-9);
+        // The share trails: more late frames on the same reading land on the
+        // same target rather than compounding.
+        for _ in 0..5 {
+            budget.update(cadence * 2.0, cadence, pressing, Some(0.8), Some(cost));
+        }
+        assert_eq!(budget.target, lowered, "the cuts compounded");
+        // Below the blame share now: a late frame at that share is not the
+        // solver's, and the target holds there however many come.
+        assert!(lowered < SOLVER_BLAME_SHARE);
+        for _ in 0..50 {
+            budget.update(cadence * 2.0, cadence, pressing, Some(lowered), Some(cost));
+        }
+        assert_eq!(budget.target, lowered, "the blame followed the target down");
+        let cut = budget.target;
+        for _ in 0..400 {
+            budget.update(cadence, cadence, pressing, Some(0.7), Some(cost));
+        }
+        assert!(budget.target > cut);
+        assert_eq!(budget.target, TARGET_SHARE, "overshot the nominal");
+        budget.update(cadence * 2.0, cadence, pressing, Some(0.8), Some(cost));
+        let cut = budget.target;
+        let slack = FrameBatch {
+            steps: 3,
+            ceiling_bound: false,
+        };
+        budget.update(cadence, cadence, slack, Some(0.3), Some(cost));
+        assert_eq!(budget.target, cut, "a slack frame is not evidence of room");
+        for _ in 0..200 {
+            budget.update(cadence * 2.0, cadence, pressing, None, Some(cost));
+        }
+        assert_eq!(budget.target, TARGET_SHARE_FLOOR);
+    }
+
+    /// The cost of a step is the median over the latest six passes of each
+    /// pass's time over its steps; a pass that ran none says nothing about
+    /// it, and too few readings say nothing at all.
+    #[test]
+    fn the_step_cost_is_the_median_over_recent_passes() {
+        assert_eq!(step_seconds(&[]), None);
+        assert_eq!(step_seconds(&[(1.0e-3, 1), (2.0e-3, 2)]), None);
+        let cost = step_seconds(&[(5.0e-3, 0), (1.0e-3, 1), (4.0e-3, 2), (9.0e-3, 3)]).unwrap();
+        assert!((cost - 2.0e-3).abs() < 1.0e-12, "{cost}");
+        let mut passes = vec![(10.0e-3, 1); 6];
+        passes.extend(std::iter::repeat_n((1.0e-3, 1), 6));
+        let recent = step_seconds(&passes).unwrap();
+        assert!(
+            (recent - 1.0e-3).abs() < 1.0e-12,
+            "an old slow spell lingered: {recent}"
+        );
     }
 
     /// The steady share is the median of the latest six passes, which one

@@ -3401,12 +3401,12 @@ above:
   the frame's drawing, mapped at a later submission and delivered at the
   extraction after that. Shortening it is a readback-path change.
 
-- [ ] A feed-forward step budget from the GPU timer: the steps that fit the
-  interval less the draws and a margin at the measured time a step, with the
-  late-frame cut kept as the backstop. The controller reaches its operating
-  point today by feedback alone, in whole steps, through a sawtooth and a
-  first late frame (2026-10-05, `docs/spikes/funfern-solver-submission.md`,
-  "Decision"). Needs the draws' GPU time, which no marker has given yet.
+- [x] A feed-forward step budget from the GPU timer (2026-10-05, see that
+  day's entry and `docs/spikes/funfern-drawn-pacing.md`, "The budget from
+  the measured cost"): the ceiling is the target share of the interval over
+  the measured cost of a step, the late-frame rule acts on the target. The
+  draws' GPU time was not needed; a target share of 0.8 stands in for it.
+  Not yet measured on a quiet host, at 60 Hz or under Low Power Mode.
 
 Submitting solver work outside the render graph, investigated and closed:
 
@@ -19022,3 +19022,58 @@ since the change is invasive and the benefit was not obvious.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, both wasm32 checks and the browser shader compile. No
   device suite: the solver module is as on main.
+
+## 2026-10-05 — The batch ceiling from the measured cost of a step
+
+The controller found the batch that fits by feedback alone: a quarter step
+of ceiling a frame while the batch pressed it, a cut to three quarters when
+a frame came in late and the solver was filling it, every operating point
+reached through a sawtooth and a first late frame. The GPU timer prices a
+step now, and the ceiling is set from the price (`StepBudget` in
+`ui/pacing.rs`; `docs/spikes/funfern-drawn-pacing.md`, "The budget from the
+measured cost").
+
+- **The rule.** Each timer reading carries the steps its pass ran and the
+  generation it stepped; the main world takes the median cost of a step over
+  the fresh readings of the current generation. The ceiling is the target
+  share of the display interval, 0.8, over that cost, every frame. The
+  late-frame rule acts on the target: a late frame the solver is to answer
+  for lowers it to nine tenths of the share the pass measured, frames in time
+  at the ceiling bring it back by 0.0025 a frame, to 0.8 and no further,
+  never under 0.4. While the share reads 0.15 under the target with the
+  batch at the ceiling, the ceiling also probes a quarter step above the fit.
+  Without a cost the old rule runs from where the ceiling stands.
+- **Three attempts.** The first let the blame threshold follow the target
+  down and took it to the floor under a loaded host: 0.22 of the set speed
+  against the old rule's 0.64. The second fixed the threshold but let a
+  spell's late frames, all reading the same trailing share, compound their
+  cuts, and the fit collapsed on cost spikes: a tenth of the frames at 1.5
+  steps. The third cuts to under the measured share, so a spell lands on
+  one target, and probes above the fit where the GPU's clock shows room,
+  since a small batch on a clocked-down GPU prices a step dear and the
+  integer floor would hold it there.
+- **What a step costs depends on the load.** 1.6 ms in a batch of four,
+  1.0 in six and seven, 1.3 in eight and nine on the heavy scene at 120 Hz:
+  a lightly loaded GPU clocks down, a backed-up queue shares the GPU with
+  the frame before. Both inflate the cost and shrink the budget, neither
+  makes it over-promise.
+- **Measured** against the old rule, alternating, 60 s a run, the heavy scene
+  at 120 Hz, the host carrying six to nine of the user's fitting jobs
+  throughout (load average 60 to 90; a fifth of frames late for the host's
+  reasons on both builds): 105 and 111 fps against 99 and 98.5, late frames
+  12 and 7 % against 16 and 15, speed 0.75 and 0.80 of set against 0.76 and
+  0.77, picture wobble 19 and 16 % against 26 and 27, about one target drop
+  a second against seven cuts. The batch spreads over four to seven steps
+  where the sawtooth spread it over three to eight. The light scene is
+  unchanged. In the harness the run without room to spare settles at seven
+  steps a frame, wobble 10.9 to 4.9 %; ratchets at 6 and 8 %.
+- **Not measured:** a quiet host, the 60 Hz panel, the overlay scene, Low
+  Power Mode. Seen on the way, for the readback TODO: at 120 Hz under load
+  the picture stood still on 17 to 26 % of the heavy scene's frames on both
+  builds.
+- **Trace:** `step_seconds` and `target` columns; traces without them still
+  read. The summary's cuts are the target's drops where the trace has one.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, both wasm32 checks and the browser shader compile. No
+  device suite: the render world only passes two numbers it already had to
+  the timer.
