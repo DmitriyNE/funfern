@@ -783,6 +783,13 @@ impl Playground {
                         dt,
                         self.frame_budget,
                     );
+                    // Spike (2026-10-05, `docs/spikes/funfern-solver-submission.md`):
+                    // a fixed batch, so the pass spills past the interval
+                    // whatever the controller would have done.
+                    let batch = fixed_batch().map_or(batch, |steps| FrameBatch {
+                        steps,
+                        ceiling_bound: false,
+                    });
                     let admitted = steps_with_gpu_backpressure(
                         request.stats().retired_steps(),
                         request.requested_steps(),
@@ -1142,6 +1149,14 @@ enum LiveEventFallback {
 /// case should not arise. It is kept truthful rather than trusted, because what
 /// it replaced failed later on with a reason that named neither the refusal nor
 /// the missing maps.
+/// Spike (2026-10-05): `FUNFERN_FIXED_BATCH=N` asks N steps every running
+/// frame in place of the controller's batch; the GPU backpressure still
+/// bounds what is admitted.
+fn fixed_batch() -> Option<u64> {
+    static FIXED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *FIXED.get_or_init(|| std::env::var("FUNFERN_FIXED_BATCH").ok()?.parse().ok())
+}
+
 fn live_event_fallback(error: &str, packable: bool) -> LiveEventFallback {
     if error == "another canonical transaction is pending" {
         LiveEventFallback::Retry

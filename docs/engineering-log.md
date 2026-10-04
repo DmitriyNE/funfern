@@ -3401,9 +3401,21 @@ above:
   the frame's drawing, mapped at a later submission and delivered at the
   extraction after that. Shortening it is a readback-path change.
 
-Submitting solver work outside the render graph, worth investigating:
+- [ ] A feed-forward step budget from the GPU timer: the steps that fit the
+  interval less the draws and a margin at the measured time a step, with the
+  late-frame cut kept as the backstop. The controller reaches its operating
+  point today by feedback alone, in whole steps, through a sawtooth and a
+  first late frame (2026-10-05, `docs/spikes/funfern-solver-submission.md`,
+  "Decision"). Needs the draws' GPU time, which no marker has given yet.
 
-- [ ] `compute_canonical_wave` is a system in the `RenderGraph` schedule ordered
+Submitting solver work outside the render graph, investigated and closed:
+
+- [x] (2026-10-05, `docs/spikes/funfern-solver-submission.md`: the queue runs
+  its command buffers in order, so the frame's draws wait behind every piece
+  of solver work committed before them whatever the submission; a chunked
+  feeder reaches the panel's rate only by trading steps for frames at a
+  worse rate than the controller's one pass a frame. Not worth building.)
+  `compute_canonical_wave` is a system in the `RenderGraph` schedule ordered
   `.before(camera_driver)`, so every step the solver takes is encoded into the
   same frame's submission as its drawing. (2026-10-04: the drawing does not
   sample the solver's buffer as this once said; the painter uploads the latest
@@ -18958,3 +18970,55 @@ Bevy's `Buffer` and `WgpuWrapper<QuerySet>` now, and the threaded check,
 joins the gate so the plain one cannot pass for it again. Gate: fmt, clippy
 with warnings denied, workspace tests (release), release build, both wasm32
 checks and the browser shader compile.
+
+## 2026-10-05 — The solver's own submission, measured and declined
+
+The TODO carried since 2026-09-23: whether the solver should submit its work
+on its own, outside the render graph, so the simulation advances
+continuously rather than in one lump a frame. A spike on `solver-submission`
+(`docs/spikes/funfern-solver-submission.md`) measured it before any design,
+since the change is invasive and the benefit was not obvious.
+
+- **The premise, corrected first.** Bevy flushes each graph system's encoder
+  into its own command buffer and submits the frame's buffers in one call, so
+  the solver's pass and the cameras' passes were already separate command
+  buffers, and the drawing reads nothing the solver writes. Yet a frame whose
+  pass outruns the interval is late. So what ties the present to the pass is
+  the queue's order, not the data.
+- **Placements.** The pass on its own encoder and its own `queue.submit`,
+  before the frame's submission and, separately, after its draws and
+  present, the batch forced to 12 steps so the pass was 13.9 ms against the
+  120 Hz panel's 8.33 ms interval. Every placement, two rounds and a
+  reference: 75 fps, the frame the length of the pass, the light scene
+  119.5 to 119.7 fps in all three. The queue executes in order; the draws
+  wait behind whatever solver work is committed before them.
+- **The feeder.** The one shape left, bounding the work ahead of the draws:
+  the frame's steps recorded in chunks of one to four steps, a thread
+  submitting them one or two at a time and waiting on each submission's
+  index before the next. It does free the frame, 118 fps at a chunk of one
+  step, but frames and steps trade along one line, the line lies below the
+  controller's point (controller 120 fps at 757 steps a second; the best
+  feeder 118 fps at 259, or 70 fps at 722; the graph with the batch forced
+  75 fps at 900), and 10 to 23 % of its frames come in late, the draws
+  caught behind a chunk. The controller's one pass a frame inside the
+  frame's submission has no handoff to pay for; the feeder pays a round
+  trip at every chunk and runs small passes less efficiently.
+- **Found on the way.** The GPU frame timer marks a slot submitted as the
+  pass is recorded and maps it at the frame's cleanup; a pass submitted from
+  another thread after that fails validation, `Buffer 'GPU frame timestamp
+  staging' is still mapped`, and the run hangs. The feeder's passes went
+  untimed. And under the controller at 120 fps the picture stood still on
+  29 % of frames, where at 75 fps it changed on every one: the readback's
+  depth of three does not cover the round trip there; a data point for the
+  readback TODO.
+- **Decision.** Closed, not worth building; the plan.md item and the TODO
+  say so. What it leaves is a feed-forward step budget from the timer
+  (new TODO). The spike's scaffolding is removed; `FUNFERN_FIXED_BATCH=N`
+  stays in `ui/runtime.rs`, since a spill is what a pacing experiment has to
+  force, and the summary prints the share of late frames.
+- **Also planned today**, at the user's request, two features in plan.md's
+  "Later experiments": streamlines for the vector overlay, and an onboarding
+  scene with an overlaid interactive guide.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, both wasm32 checks and the browser shader compile. No
+  device suite: the solver module is as on main.

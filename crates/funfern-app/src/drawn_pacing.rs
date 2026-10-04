@@ -201,6 +201,9 @@ pub struct DrawnSummary {
     pub seconds: f64,
     /// Frames a second, on the host clock.
     pub fps: f64,
+    /// Intervals the main world measured at more than one and a half times
+    /// its median frame delta: the frames that came in late.
+    pub late: f64,
     /// The speed setting, the median over the intervals.
     pub speed: f64,
     /// Drawn simulated seconds per wall second.
@@ -353,6 +356,12 @@ pub fn summarize(frames: &[DrawnFrame], skip_seconds: f64) -> DrawnSummary {
         share(&|before, after| (after.drawn_step - before.drawn_step) as f64 > 1.5 * median_steps);
     let completed_still = share(&|before, after| after.completed == before.completed);
     let picture_still = share(&|before, after| after.note.picture == before.note.picture);
+    let mut deltas: Vec<f64> = measured
+        .iter()
+        .map(|(_, after)| after.note.frame_seconds)
+        .collect();
+    let median_delta = percentile(&mut deltas, 0.5);
+    let late = share(&|_, after| after.note.frame_seconds > 1.5 * median_delta);
     let cuts = measured
         .iter()
         .filter(|(before, after)| after.note.ceiling < before.note.ceiling)
@@ -443,6 +452,7 @@ pub fn summarize(frames: &[DrawnFrame], skip_seconds: f64) -> DrawnSummary {
         intervals: measured.len(),
         seconds,
         fps: measured.len() as f64 / seconds.max(f64::MIN_POSITIVE),
+        late,
         speed,
         drawn_speed: advanced / seconds.max(f64::MIN_POSITIVE),
         wobble: wobble(&host),
@@ -475,8 +485,11 @@ impl fmt::Display for DrawnSummary {
         let percent = |value: f64| format!("{:.1} %", value * 100.0);
         writeln!(
             f,
-            "intervals {} over {:.2} s, {:.1} fps",
-            self.intervals, self.seconds, self.fps
+            "intervals {} over {:.2} s, {:.1} fps, late {}",
+            self.intervals,
+            self.seconds,
+            self.fps,
+            percent(self.late)
         )?;
         writeln!(
             f,

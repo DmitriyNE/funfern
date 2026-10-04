@@ -1142,6 +1142,81 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   driven, 0.89 to 0.92× short-wave and van der Pol, 0.97 to 0.99× under
   field laws; tables 5.75 to 7.09 MiB on 15,264 dofs.
 
+- [x] The solver's own submission, spike first
+  (`docs/spikes/funfern-solver-submission.md`; the TODO in
+  `docs/engineering-log.md`). Closed on 2026-10-05, not worth building: the
+  queue runs its command buffers in order, so the frame's draws wait
+  behind every piece of solver work committed before them whatever the
+  submission, 75 fps on a 13.9 ms pass in every placement; a feeder that
+  bounds the work ahead of the draws to a chunk reaches the panel's rate
+  but trades steps for frames at a worse rate than the controller's one
+  pass a frame already gets (controller 120 fps at 757 steps a second
+  against 118 fps at 259 for the best feeder). What it leaves is a
+  feed-forward step budget from the timer, listed in the log's TODOs. The
+  original reasoning follows. Every frame's steps are encoded in the render
+  graph before the cameras and go out in the frame's submission, and a frame
+  whose pass outruns the interval is late: where the solver fills the frame
+  the picture draws at 55–57 fps with 10–20 % wobble
+  (`docs/spikes/funfern-drawn-pacing.md`). The solver's and the cameras'
+  command buffers are already separate and the drawing reads nothing the
+  solver writes, so what ties the present to the pass is the queue's order
+  or the drawable's release, not the data, and the question is whether a
+  submission of the solver's own, before or after the frame's, frees the
+  present from it, on Metal and in Chrome. The spike: (a) the pass on its
+  own encoder and submit, placed after the frame's draws and, separately,
+  before them, the batch forced past the interval, late frames, fps and
+  picture wobble against the pass share on the heavy and the light scene,
+  60 s alternating against main at 60 and 120 Hz; (b) the gallery classified
+  by pass share and speed reached, each scene run from the autosave in an
+  isolated HOME, so the gain has a size; (c) the GPU's idle share a frame
+  from the timer's readings, which is what feeding it continuously could
+  claim. The architecture only if (a) keeps the frame on time while the pass
+  spills: a submission module in the render world owning the pass, the
+  handoff, the snapshot and the state readbacks on its own fence, which also
+  shortens the picture's lag; `desired_steps` kept as the interface; the
+  per-frame step ceiling replaced by a GPU-time budget from the timer, and
+  the blame rule with it; one path for native and the browser, since it is
+  one submit a frame from the render schedule. Otherwise the TODO closes
+  with the numbers.
+
+- [ ] Streamlines for the vector overlay. The arrows show the energy flow
+  and the complementary field at lattice points 28 to 120 px apart;
+  streamlines show where the energy goes, through a lens, along a fiber,
+  round a resonator, which arrows at that spacing cannot. Built on the
+  overlay's own samples, the lattice the GPU already samples and the host
+  already filters (AC coupling, low-pass) and exposes: bilinear
+  interpolation, RK4 both ways from seeds placed by Jobard–Lefer (evenly
+  spaced lines, a separation and a half-separation test), stopped where the
+  magnitude falls below the exposure's floor or the lattice ends, drawn as
+  polylines whose width or alpha follows the exposure as the arrows' length
+  does, direction as drifting dashes, since a line alone has none. A
+  presentation key for the overlay's style, arrows or streamlines,
+  defaulting to arrows, so no schema break. To settle first: the lattice
+  spacing against the lines' smoothness (a finer lattice for lines is one
+  cheap extra dispatch); frame-to-frame coherence of the seeding, so lines
+  do not jump as the field evolves (reseed from the previous frame's lines
+  first); whether the oscillating complementary field gets lines at all, as
+  field lines without arrowheads, or energy flow comes first.
+
+- [ ] An onboarding scene with an overlaid interactive guide. A first launch
+  opens a random example with its card, and nothing says what to do.
+  Instead it opens a guide scene, simple and quick (one source, one
+  obstacle, a region to repaint), with a guide laid over the viewport that
+  walks through the app in steps, each naming one action and waiting for
+  it: pause and resume; drag the source; draw a wall; give a region a
+  material; drop a probe and read it; open the gallery. Each step
+  spotlights its control, the rest dimmed and the control's rect outlined,
+  the rect taken from where the panel drew it that frame so it follows the
+  top bar's folds, and advances when the document or the state shows the
+  action done, with Next and Skip. Re-entered from the Examples menu and
+  the scene card; seen once, kept beside the autosave, not in the scene.
+  Checked step by step with the egui input harness
+  (`crates/funfern-app/src/ui/test_support.rs`) and in the browser build at
+  360–1280 px. To settle first: which scene (a candidate: the obstacle over
+  a mirror, trimmed); whether the steps are data the gallery descriptions
+  could share; the phone layout, where the panel a step points at may be
+  folded away.
+
 ## Maintenance
 
 - [x] A self-oscillating gain lased on the mesh's shortest waves, at a
