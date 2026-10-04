@@ -18945,3 +18945,16 @@ The third pacing step, on `solver-blame`; tables in
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile. No device
   suite: main-world controller logic, and a host timestamp on each reading.
+
+## 2026-10-04 — The browser bundle refused the timer's raw handles
+
+CI's browser bundle failed on 2dd8b01: `GpuFrameTimer` is a resource holding
+`wgpu::QuerySet` and `wgpu::Buffer`, and on the threaded web build (nightly,
+std rebuilt with atomics, `browser-threads`) wgpu's web handles are not
+`Send`, which a resource has to be. The plain `wasm32-unknown-unknown` check
+passed, because without atomics wgpu makes them `Send`. The handles are
+Bevy's `Buffer` and `WgpuWrapper<QuerySet>` now, and the threaded check,
+`scripts/trunk`'s environment under `cargo check --features browser-threads`,
+joins the gate so the plain one cannot pass for it again. Gate: fmt, clippy
+with warnings denied, workspace tests (release), release build, both wasm32
+checks and the browser shader compile.

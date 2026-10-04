@@ -24,8 +24,10 @@ use bevy::{
     platform::time::Instant,
     prelude::*,
     render::{
-        render_resource::{BufferDescriptor, BufferUsages, CommandEncoder, MapMode, WgpuFeatures},
-        renderer::{RenderDevice, RenderQueue},
+        render_resource::{
+            Buffer, BufferDescriptor, BufferUsages, CommandEncoder, MapMode, WgpuFeatures,
+        },
+        renderer::{RenderDevice, RenderQueue, WgpuWrapper},
     },
 };
 
@@ -91,7 +93,7 @@ enum SlotState {
 }
 
 struct Slot {
-    staging: wgpu::Buffer,
+    staging: Buffer,
     state: SlotState,
     mapped: Arc<Mutex<Option<Option<[u64; 2]>>>>,
 }
@@ -99,8 +101,10 @@ struct Slot {
 /// The render world's timer, present where the device has timestamp queries.
 #[derive(Resource)]
 pub struct GpuFrameTimer {
-    query_set: wgpu::QuerySet,
-    resolve: wgpu::Buffer,
+    // Bevy's wrappers: on the threaded web build a raw wgpu handle is not
+    // `Send`, and a resource has to be.
+    query_set: WgpuWrapper<wgpu::QuerySet>,
+    resolve: Buffer,
     slots: Vec<Slot>,
     nanoseconds_per_tick: f64,
     origin: Option<u64>,
@@ -116,13 +120,14 @@ impl GpuFrameTimer {
         if !device.features().contains(WgpuFeatures::TIMESTAMP_QUERY) {
             return None;
         }
-        let device = device.wgpu_device();
         Some(Self {
-            query_set: device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("GPU frame timestamps"),
-                ty: wgpu::QueryType::Timestamp,
-                count: QUERIES * SLOTS,
-            }),
+            query_set: WgpuWrapper::new(device.wgpu_device().create_query_set(
+                &wgpu::QuerySetDescriptor {
+                    label: Some("GPU frame timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: QUERIES * SLOTS,
+                },
+            )),
             resolve: device.create_buffer(&BufferDescriptor {
                 label: Some("GPU frame timestamp resolve"),
                 size: wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT * u64::from(SLOTS),
