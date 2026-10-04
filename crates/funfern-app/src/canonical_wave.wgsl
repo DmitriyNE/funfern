@@ -202,6 +202,14 @@ fn fourth_order_sample_offset() -> u32 {
 fn short_wave_node_offset() -> u32 {
     return fourth_order_sample_offset() + control.counts_a.y;
 }
+// A node's force entries (`ranges.xy`) and stiffness row (`stiffness.xy`)
+// sit in slices of `ENTRY_SLICE` nodes, entry `k` of each node side by side,
+// so the threads of a SIMD group read one contiguous stretch an iteration
+// where a node's own range would have them read 32: a range is the node's
+// first word and its count, and its next entry is `ENTRY_SLICE` words on.
+// Each node still visits its entries in order (`pack_entry_slices`).
+const ENTRY_SLICE: u32 = 32u;
+fn entry_end(range: vec2<u32>) -> u32 { return range.x + range.y * ENTRY_SLICE; }
 fn has_loss_stages() -> bool { return (control.boundary_offsets.w & 1u) != 0u; }
 // A time-driven generation carrying loss reads its rates from loss records.
 fn loss_records() -> bool { return (control.boundary_offsets.w & 64u) != 0u; }
@@ -1031,7 +1039,7 @@ fn gathered_force(node: u32, second: bool) -> f32 {
     let range = nodes[node].ranges.xy;
     let driven = temporal_enabled();
     var result = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         let index = tables[entry].data.x;
         let kind = tables[entry].data.y;
         let coefficient_x = table_float(entry, 2u);
@@ -1056,10 +1064,13 @@ fn gathered_force(node: u32, second: bool) -> f32 {
     return result;
 }
 
+// The thin-gap springs among a node's entries. Without any the walk finds
+// nothing and would return the same zero, so it is skipped.
 fn gap_force(node: u32, second: bool) -> f32 {
+    if control.counts_b.x == 0u { return 0.0; }
     let range = nodes[node].ranges.xy;
     var result = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         if tables[entry].data.y == FORCE_KIND_GAP {
             let auxiliary = tables[entry].data.x - auxiliary_offset();
             result += table_float(entry, 2u) * select(
@@ -1184,7 +1195,7 @@ fn expanded_signal(node: u32, time: f32, divisor: f32) -> f32 {
 fn fourth_order_kick_correction(node: u32, second: bool) -> f32 {
     let range = nodes[node].ranges.xy;
     var result = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         let coefficient = vec2<f32>(table_float(entry, 2u), table_float(entry, 3u));
         if tables[entry].data.y == FORCE_KIND_GAP {
             let gap = tables[control.table_offsets.x
@@ -1234,7 +1245,7 @@ fn stiffness_force(node: u32, time: f32) -> f32 {
     }
     let row_field = candidate_q(node) * inverse_mass;
     var result = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         let column = tables[entry].data.x;
         var column_inverse_mass = nodes[column].mass_loss.y;
         if temporal_enabled() {
@@ -1250,7 +1261,7 @@ fn constitutive_force(node: u32) -> f32 {
     let range = nodes[node].ranges.xy;
     let driven = temporal_enabled();
     var result = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         if tables[entry].data.y != FORCE_KIND_GAP {
             let sample = tables[entry].data.x;
             let coefficient = vec2<f32>(
@@ -1270,7 +1281,7 @@ fn candidate_constitutive_force(node: u32) -> f32 {
     let range = nodes[node].ranges.xy;
     let driven = temporal_enabled();
     var result = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         if tables[entry].data.y != FORCE_KIND_GAP {
             let sample = tables[entry].data.x;
             let coefficient = vec2<f32>(
@@ -1293,7 +1304,7 @@ fn stiffness_of_scratch(node: u32, lane: u32, reach_power: u32) -> f32 {
     let range = nodes[node].stiffness.xy;
     let row_field = scratch[node].values[lane] * filter_static_weight(node, reach_power);
     var result = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         let column = tables[entry].data.x;
         let column_field = scratch[column].values[lane] * filter_static_weight(column, reach_power);
         result += table_float(entry, 2u) * (column_field - row_field);
@@ -1369,7 +1380,7 @@ fn filter_tangent(sample: u32, flux: vec2<f32>) -> vec2<f32> {
 fn filter_gather(node: u32, second_pair: bool) -> f32 {
     let range = nodes[node].ranges.xy;
     var result = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         if tables[entry].data.y != FORCE_KIND_GAP {
             let sample = tables[entry].data.x;
             let value = scratch[control.counts_a.x + sample].values;
@@ -1386,7 +1397,7 @@ fn filter_gather(node: u32, second_pair: bool) -> f32 {
 fn filter_temporal_force(node: u32) -> f32 {
     let range = nodes[node].ranges.xy;
     var result = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         if tables[entry].data.y != FORCE_KIND_GAP {
             let sample = tables[entry].data.x;
             let coefficient = vec2<f32>(
@@ -3053,7 +3064,7 @@ fn stiffness_of_drift_field(node: u32, middle_time: f32) -> f32 {
     let range = nodes[node].stiffness.xy;
     let row_field = drift_field(node, middle_time);
     var result = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         let column = tables[entry].data.x;
         result += table_float(entry, 2u) * (drift_field(column, middle_time) - row_field);
     }
@@ -3135,7 +3146,7 @@ fn fourth_order_nodes(@builtin(global_invocation_id) id: vec3<u32>) {
         // On the rows the entries are visited only for the gap springs.
         let range = nodes[node].ranges.xy;
         if !rows || control.counts_b.x != 0u {
-            for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+            for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
                 let coefficient = vec2<f32>(table_float(entry, 2u), table_float(entry, 3u));
                 if tables[entry].data.y == FORCE_KIND_GAP {
                     let gap = tables[control.table_offsets.x
@@ -3255,7 +3266,7 @@ fn fourth_order_tangents_second(@builtin(global_invocation_id) id: vec3<u32>) {
 fn short_wave_gather(node: u32) -> f32 {
     let range = nodes[node].ranges.xy;
     var force = 0.0;
-    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
         if tables[entry].data.y == FORCE_KIND_GAP { continue; }
         let coefficient = vec2<f32>(table_float(entry, 2u), table_float(entry, 3u));
         force += dot(

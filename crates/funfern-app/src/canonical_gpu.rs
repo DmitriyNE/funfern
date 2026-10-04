@@ -81,6 +81,9 @@ pub const CANONICAL_GPU_MAX_WORKGROUPS: usize = 65_535;
 
 const NO_INDEX: u32 = u32::MAX;
 const FORCE_KIND_GAP: u32 = 1;
+/// Nodes a slice of a per-node entry table interleaves, the shader's
+/// `ENTRY_SLICE`; see `pack_entry_slices`.
+const ENTRY_SLICE: usize = 32;
 const MODE_WORDS: usize = 12;
 const EVENT_NONE: u32 = 0;
 const EVENT_PRIMARY_PULSE: u32 = 1;
@@ -1728,11 +1731,7 @@ impl CanonicalGpuPlan {
         }
 
         let mut tables = Vec::new();
-        let mut force_ranges = vec![(0_u32, 0_u32); node_count];
-        for (node, contributions) in force_by_node.into_iter().enumerate() {
-            force_ranges[node] = (usize_u32(tables.len())?, usize_u32(contributions.len())?);
-            tables.extend(contributions);
-        }
+        let force_ranges = pack_entry_slices(&mut tables, &force_by_node)?;
         let force_count = tables.len();
         let mut source_ranges = vec![(0_u32, 0_u32); node_count];
         for (node, contributions) in source_by_node.into_iter().enumerate() {
@@ -1778,7 +1777,7 @@ impl CanonicalGpuPlan {
                 ),
             });
         }
-        let mut stiffness_ranges = vec![(0_u32, 0_u32); node_count];
+        let mut rows = vec![Vec::<GpuCanonicalTableWord>::new(); node_count];
         if let Some(quadratic) = quadratic {
             let mut gap_correction = BTreeMap::<(u32, u32), f64>::new();
             for gap in operator.thin_gap_samples() {
@@ -1789,10 +1788,9 @@ impl CanonicalGpuPlan {
                     .entry((gap.right_node, gap.left_node))
                     .or_default() += gap.stiffness;
             }
-            for (node, range) in stiffness_ranges.iter_mut().enumerate() {
+            for (node, row) in rows.iter_mut().enumerate() {
                 let start = quadratic.row_offsets()[node] as usize;
                 let end = quadratic.row_offsets()[node + 1] as usize;
-                let table_start = tables.len();
                 for entry in start..end {
                     let column = quadratic.columns()[entry];
                     if column as usize == node {
@@ -1804,7 +1802,7 @@ impl CanonicalGpuPlan {
                             .copied()
                             .unwrap_or(0.0);
                     if coefficient != 0.0 {
-                        tables.push(table_word(
+                        row.push(table_word(
                             column,
                             0,
                             finite_f32(coefficient, "stiffness coefficient")?,
@@ -1812,16 +1810,11 @@ impl CanonicalGpuPlan {
                         ));
                     }
                 }
-                *range = (
-                    usize_u32(table_start)?,
-                    usize_u32(tables.len() - table_start)?,
-                );
             }
         } else {
-            for (node, row) in stiffness_by_node.unwrap().into_iter().enumerate() {
-                stiffness_ranges[node] = (usize_u32(tables.len())?, usize_u32(row.len())?);
-                for (column, coefficient) in row {
-                    tables.push(table_word(
+            for (row, entries) in rows.iter_mut().zip(stiffness_by_node.unwrap()) {
+                for (column, coefficient) in entries {
+                    row.push(table_word(
                         column,
                         0,
                         finite_f32(coefficient, "stiffness coefficient")?,
@@ -1830,6 +1823,7 @@ impl CanonicalGpuPlan {
                 }
             }
         }
+        let stiffness_ranges = pack_entry_slices(&mut tables, &rows)?;
         if tables.is_empty() {
             tables.push(GpuCanonicalTableWord::default());
         }
@@ -3030,6 +3024,32 @@ fn record_drive_signature(
     }
     signatures[runtime][lane] = Some(signature);
     Ok(())
+}
+
+/// Appends one entry list a node in slices of `ENTRY_SLICE` nodes, entry `k`
+/// of each side by side, and returns each node's first word and count. The
+/// threads of a SIMD group gather consecutive nodes, so each iteration reads
+/// one contiguous stretch where a node's own range would have them read 32;
+/// a node with fewer entries than its slice's widest leaves its words empty,
+/// and none is read. Each node still visits its entries in order, so every
+/// sum keeps its bits.
+fn pack_entry_slices(
+    tables: &mut Vec<GpuCanonicalTableWord>,
+    by_node: &[Vec<GpuCanonicalTableWord>],
+) -> Result<Vec<(u32, u32)>, CanonicalGpuBuildError> {
+    let mut ranges = Vec::with_capacity(by_node.len());
+    for slice in by_node.chunks(ENTRY_SLICE) {
+        let base = tables.len();
+        let width = slice.iter().map(Vec::len).max().unwrap_or(0);
+        tables.resize(base + width * ENTRY_SLICE, GpuCanonicalTableWord::default());
+        for (lane, entries) in slice.iter().enumerate() {
+            ranges.push((usize_u32(base + lane)?, usize_u32(entries.len())?));
+            for (k, word) in entries.iter().enumerate() {
+                tables[base + k * ENTRY_SLICE + lane] = *word;
+            }
+        }
+    }
+    Ok(ranges)
 }
 
 fn temporal_drive_signatures(
@@ -7433,7 +7453,8 @@ fn packed_temporal_force(
         .iter()
         .map(|node| {
             let range = node.ranges.to_array();
-            (range[0]..range[0] + range[1])
+            (0..range[1])
+                .map(|k| range[0] + k * ENTRY_SLICE as u32)
                 .filter(|entry| plan.tables[*entry as usize].data.y != FORCE_KIND_GAP)
                 .map(|entry| {
                     let word = plan.tables[entry as usize].data.to_array();

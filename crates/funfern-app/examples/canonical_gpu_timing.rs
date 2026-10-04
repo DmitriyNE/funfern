@@ -8,6 +8,10 @@
 //! The clock stops when a readback reports the last step, one to three frames
 //! after the device finished it, so the default 128 steps validate but do not
 //! time: read throughput from `--steps=3000` or more.
+//!
+//! Every run also prints a hash of the read-back state's bits, `Q`, `b`, the
+//! auxiliary lanes and the accounting, so a change meant to leave the
+//! arithmetic alone can be held to the same bits at the same step count.
 
 use std::time::{Duration, Instant};
 
@@ -702,6 +706,7 @@ fn finish_when_ready(
         overlay_error,
         request.stats().dispatches(),
     );
+    println!("state checksum: {:016x}", state_hash(&display));
     if q_error > 3.0e-5
         || b_error > 3.0e-5
         || auxiliary_absolute > 2.0e-5
@@ -714,6 +719,25 @@ fn finish_when_ready(
     } else {
         exit.write(AppExit::Success);
     }
+}
+
+/// FNV-1a over the bits of every lane the readback carries.
+fn state_hash(display: &CanonicalGpuDisplay) -> u64 {
+    let words = display
+        .primary_flux
+        .iter()
+        .chain(display.complementary_flux.iter().flatten())
+        .chain(&display.auxiliary)
+        .chain(&display.accounting);
+    words.fold(0xcbf2_9ce4_8422_2325, |hash, value| {
+        value
+            .to_bits()
+            .to_le_bytes()
+            .iter()
+            .fold(hash, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    })
 }
 
 fn gpu_energy(display: &CanonicalGpuDisplay, expected: &Expected) -> f64 {

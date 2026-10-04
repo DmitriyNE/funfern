@@ -106,14 +106,58 @@ generation whether it ran or not; this was not measured. The last row's gain
 is the loss stages it no longer runs, whose energies take a field law's
 solves.
 
-## Next candidate: interleaved entry tables
+## Interleaved entry tables
 
-Every gather walks its node's entries from a contiguous range, so the threads
-of a SIMD group read 32 separate stretches of the table. Packing the entries
-by slices of 32 nodes, entry `k` of each node side by side, makes each
-iteration's table read contiguous; nodes with fewer entries pad their slice.
-Each node still visits its entries in the same order, so the sums keep their
-bits. Measured potential above: about 60 µs off the kicks' 124 on a 380 µs
-step, and the same layout serves `fourth_order_nodes`, the kick form's
-correction and the short-wave gathers. Cost: the table packing and every loop
-over a node's range, events and the filter included.
+Agreed and done the same day. Every gather walked its node's entries from a
+contiguous range, so the threads of a SIMD group read 32 separate stretches
+of the table an iteration. Both per-node tables, the force entries
+(`ranges.xy`) and the stiffness rows the fixed plan's force cache walks
+(`stiffness.xy`), are now packed by `pack_entry_slices` in slices of 32
+nodes, entry `k` of each node side by side; a range is the node's first word
+and its count, and a loop steps `ENTRY_SLICE` words. Each node still visits
+its entries in order, so every sum keeps its bits. Nine loops walk the force
+entries and three the rows; the source entries stay contiguous.
+
+The app's plain scenes run a different plan from the timing fixture above:
+`compile_with_quadratic`, with the force cache, whose drift and
+`fourth_order_nodes` walk the stiffness rows. Profiled the same way through
+`canonical_gpu_timing` at the same mesh (step 211 µs): the drift 55 µs,
+`fourth_order_nodes` 61, each kick 40, the two small passes 5 each. The
+kick's 40 was the gap-spring walk over every force entry of a scene with no
+gap springs, which found nothing and returned zero; it is now skipped when
+the generation has none, the same zero.
+
+Held to the same bits: both timing examples' hashes match the commit before
+on all 14 temporal fixtures and on 14 plain ones (`canonical_gpu_timing`
+prints the hash on every run now: the default box, both walls, loss, thin
+gap, obstacles, forcing with and without the second-order wall, the filter,
+pulse, law patch and maintenance events, the periodic filter and a clock
+rebase). At 2,000 steps the second-order wall exceeds that example's
+accuracy gate on the commit before as after (`b` 4.5e-5 against 3e-5, a gate
+set for its default 128 steps, where it reads 7e-7).
+
+The padding grows the tables from 5.75 to 7.09 MiB on the 15,264-dof mesh,
+the generation's buffers from 14.5 to 15.9 MiB.
+
+`--steps=20000`, three rounds alternating which build runs first, medians,
+µs a step:
+
+| fixture | before | after | ratio |
+| --- | --- | --- | --- |
+| plain box | 211 | 147 | 0.70 |
+| plain, thin gap | 246 | 201 | 0.82 |
+| plain, second-order wall | 377 | 309 | 0.82 |
+| plain, forcing | 298 | 241 | 0.81 |
+| temporal, no drive | 384 | 338 | 0.88 |
+| driven | 383 | 336 | 0.88 |
+| van der Pol | 955 | 878 | 0.92 |
+| short-wave loss | 692 | 618 | 0.89 |
+| Kerr and saturable, kick form | 1672 | 1626 | 0.97 |
+| short-wave loss with Kerr | 3328 | 3298 | 0.99 |
+
+The thin gap still walks its springs, so its 0.82 is about what the layout
+alone gives a plain scene; the box's 0.70 adds the skipped walk. The
+temporal fixtures gained about 47 µs, short of the 60 the dummy gather
+predicted for the kicks alone; why was not measured. The field-dependent
+fixtures gain least, likely because their steps are mostly the field laws'
+solves, which the layout does not touch; also not measured.

@@ -18714,3 +18714,34 @@ lossless gain. On `step-throughput`; details and tables in
   table addresses cost half that.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-04 — Interleaved entry tables
+
+The candidate the throughput profile left, agreed and done on
+`step-throughput`; details in `docs/spikes/funfern-step-throughput.md`,
+"Interleaved entry tables".
+
+- **The app's plain plan, profiled first.** The temporal fixture is not
+  what a plain scene runs: `compile_with_quadratic` with the force cache.
+  `canonical_gpu_timing` now prints a state hash on every run. Its step on
+  the same mesh, 211 µs: drift 55 and `fourth_order_nodes` 61 walking the
+  stiffness rows, each kick 40 walking every force entry for gap springs
+  the scene does not have.
+- **In.** `pack_entry_slices` packs the force entries and the stiffness rows
+  in slices of 32 nodes, entry `k` of each node side by side, so a SIMD
+  group reads contiguous words; twelve shader loops step `ENTRY_SLICE`.
+  Each node keeps its entry order. `gap_force` returns its zero at once
+  without gap springs.
+- **Same bits** on 14 temporal and 14 plain fixtures. The second-order wall
+  exceeds `canonical_gpu_timing`'s accuracy gate at 2,000 steps before as
+  after (`b` 4.5e-5 against a 3e-5 gate set for 128 steps).
+- **Throughput**, 20,000 steps, alternating, medians: plain box 211 to 147
+  µs, its thin gap 246 to 201, second-order wall 377 to 309, forcing 298 to
+  241; temporal 384 to 338, driven 383 to 336, van der Pol 955 to 878,
+  short-wave loss 692 to 618, Kerr 1672 to 1626, short-wave with Kerr 3328
+  to 3298. The temporal gain is about 47 µs where the dummy gather
+  predicted 60 for the kicks; not explained.
+- **Cost:** tables 5.75 to 7.09 MiB on 15,264 dofs, buffers 14.5 to 15.9.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check, the browser shader compile, and the
+  device suite (23 default runs, 107 mode runs).

@@ -1137,14 +1137,14 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   (seven passes, not eight). Bit-identical state on all 14 timing fixtures;
   0.80× a step fixed and driven, 0.90× van der Pol, 0.76× short-wave loss,
   0.92× Kerr, 0.67× short-wave loss with Kerr.
-- [ ] Interleaved entry tables. Every gather walks a contiguous range per
-  node, so a SIMD group reads 32 separate stretches; packing entries by
-  slices of 32 nodes, entry `k` side by side, keeps each node's order and
-  so its bits. A dummy gather over interleaved addresses read half the
-  kicks' 124 µs on a 380 µs step; `fourth_order_nodes`, the kick form's
-  correction and the short-wave gathers share the layout. Touches the table
-  packing and every loop over a node's range, events and the filter
-  included. Proposed, not agreed.
+- [x] Interleaved entry tables, 2026-10-04 (same spike doc). Both per-node
+  tables, the force entries and the fixed plan's stiffness rows, in slices
+  of 32 nodes with entry `k` side by side (`pack_entry_slices`); the fixed
+  plan's kick skips its gap-spring walk where there are none. Bit-identical
+  on 14 temporal and 14 plain fixtures. 0.70× a step on the plain box,
+  0.81 to 0.82× on its walls, gap and forcing, 0.88× fixed-temporal and
+  driven, 0.89 to 0.92× short-wave and van der Pol, 0.97 to 0.99× under
+  field laws; tables 5.75 to 7.09 MiB on 15,264 dofs.
 
 ## Maintenance
 
