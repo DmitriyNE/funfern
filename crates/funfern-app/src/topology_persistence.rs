@@ -1189,13 +1189,9 @@ fn validate_document(document: &TopologyDocument) -> Result<(), String> {
         .accepted
         .compile(0)
         .map_err(|issue| format!("Accepted topology is invalid: {issue}"))?;
-    if !document.model.source.valid()
-        || document
-            .model
-            .accepted
-            .region(document.model.source.region)
-            .is_none()
-    {
+    // The source's region is not checked: preparation places the source by
+    // its position, and a file can name a region that has since gone.
+    if !document.model.source.valid() {
         return Err("Scene contains an invalid point source".into());
     }
     if !document.model.far_field.valid()

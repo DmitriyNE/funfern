@@ -337,9 +337,9 @@ pub struct TopologyPreparationJob {
     mesh: Option<Arc<TriMesh>>,
     assembly_job: Option<QuadraticAssemblyJob>,
     operator: Option<Arc<QuadraticWaveOperator>>,
-    point_source_validated: bool,
+    point_source_resolved: bool,
     #[cfg(test)]
-    point_source_validation_count: u32,
+    point_source_resolution_count: u32,
     canonical_assembly_job: Option<CanonicalAssemblyJob>,
     canonical_operator: Option<Arc<CanonicalWaveOperator>>,
     /// The time-driven operator over the same base, when the document carries
@@ -560,14 +560,15 @@ impl TopologyPreparationJob {
                     .clone()
             })
             .flatten();
-        let point_source_validated = operator_reused
-            && previous.as_ref().is_some_and(|previous| {
-                previous.point_source.enabled == document.model.source.enabled
-                    && previous.point_source.spatial_eq(document.model.source)
-            });
+        // The same mesh places an unmoved source in the same region, so the
+        // authored source is compared with the region left out.
         let canonical_forcing = (operator_reused
             && previous.as_ref().is_some_and(|previous| {
-                previous.point_source == document.model.source
+                previous.point_source
+                    == PointSource {
+                        region: previous.point_source.region,
+                        ..document.model.source
+                    }
                     && previous.bundle.authored.volume_sources
                         == document.model.accepted.volume_sources
             }))
@@ -614,9 +615,9 @@ impl TopologyPreparationJob {
             mesh_job,
             mesh,
             operator,
-            point_source_validated,
+            point_source_resolved: false,
             #[cfg(test)]
-            point_source_validation_count: 0,
+            point_source_resolution_count: 0,
             assembly_job: None,
             canonical_assembly_job: None,
             canonical_temporal_operator,
@@ -681,9 +682,9 @@ impl TopologyPreparationJob {
             mesh_job: None,
             mesh: Some(Arc::new(mesh)),
             operator: None,
-            point_source_validated: false,
+            point_source_resolved: false,
             #[cfg(test)]
-            point_source_validation_count: 0,
+            point_source_resolution_count: 0,
             assembly_job: None,
             canonical_assembly_job: None,
             canonical_temporal_operator: None,
@@ -869,11 +870,11 @@ impl TopologyPreparationJob {
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             };
             self.operator = Some(operator);
-            if let Err(error) = self.validate_point_source_once() {
+            if let Err(error) = self.resolve_point_source_once() {
                 return Some(Err(self.fail(error)));
             }
             return None;
-        } else if let Err(error) = self.validate_point_source_once() {
+        } else if let Err(error) = self.resolve_point_source_once() {
             return Some(Err(self.fail(error)));
         }
 
@@ -1238,54 +1239,33 @@ impl TopologyPreparationJob {
         Ok(())
     }
 
-    fn validate_point_source(
-        &self,
-        mesh: &TriMesh,
-        operator: &QuadraticWaveOperator,
-    ) -> Result<(), String> {
-        let active = self
-            .bundle
-            .plan
-            .domains
-            .iter()
-            .any(|domain| domain.region == self.point_source.region);
-        if !self.point_source.valid() || !active {
-            return Err("Point source references an inactive region".into());
-        }
-        if !self.point_source.enabled {
+    /// Places the point source on the candidate mesh. Its position decides
+    /// its region: the document's copy of the region is never read, because a
+    /// boundary dragged across a source that stays put leaves it naming the
+    /// region the source used to be in. A source over no mesh, inside a hole,
+    /// is silent for this generation and drives again once its spot is meshed.
+    /// The search runs once per candidate, not once per work unit after
+    /// assembly.
+    fn resolve_point_source_once(&mut self) -> Result<(), String> {
+        if self.point_source_resolved {
             return Ok(());
         }
-        let stencil = QuadraticPointStencil::build_topology(
-            mesh,
-            operator,
-            &self.bundle.plan,
-            self.stripped_model(),
-            self.point_source.position,
-        )
-        .map_err(|error| format!("Point source placement is invalid: {error}"))?;
-        if stencil.region != self.point_source.region {
-            return Err("Point source position does not lie in its assigned region".into());
-        }
-        Ok(())
-    }
-
-    /// Point-source placement depends on the candidate mesh/operator but not on
-    /// any later assembly or transfer phase. In particular, do not repeat its
-    /// linear mesh search for every cooperative work unit after assembly.
-    fn validate_point_source_once(&mut self) -> Result<(), String> {
-        if self.point_source_validated {
-            return Ok(());
-        }
-        let mesh = self.mesh.as_ref().unwrap().clone();
-        let operator = self.operator.as_ref().unwrap().clone();
         #[cfg(test)]
         {
-            self.point_source_validation_count =
-                self.point_source_validation_count.saturating_add(1);
+            self.point_source_resolution_count =
+                self.point_source_resolution_count.saturating_add(1);
         }
-        self.ensure_stripped_model();
-        self.validate_point_source(&mesh, &operator)?;
-        self.point_source_validated = true;
+        if !self.point_source.valid() {
+            return Err("Point source settings are invalid".into());
+        }
+        match region_under(self.mesh.as_ref().unwrap(), self.point_source.position) {
+            Some(region) => self.point_source.region = region,
+            None => {
+                self.point_source.region = BACKGROUND_REGION;
+                self.point_source.enabled = false;
+            }
+        }
+        self.point_source_resolved = true;
         Ok(())
     }
 
@@ -1645,6 +1625,20 @@ impl TopologyRuntime {
             });
         }
     }
+}
+
+/// The region of the first element holding `point`. On an interface either
+/// side's element will do: the source is a Gaussian over its region's
+/// elements, and a point exactly on the boundary is in both.
+fn region_under(mesh: &TriMesh, point: Point2) -> Option<RegionId> {
+    mesh.triangles.iter().find_map(|triangle| {
+        let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+        let twice_area = (b - a).cross(c - a);
+        let inside = [(b, c), (c, a), (a, b)]
+            .iter()
+            .all(|(from, to)| (*from - point).cross(*to - point) / twice_area >= -1.0e-10);
+        inside.then_some(triangle.region)
+    })
 }
 
 fn compile_canonical_forcing(
@@ -2217,8 +2211,124 @@ mod tests {
         assert_eq!(bounded.commit_ready(token).unwrap().timing.slices, calls);
     }
 
+    /// The editor's document prepared from nothing and committed.
+    fn prepared(editor: &TopologyEditor) -> Arc<PreparedTopology> {
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).expect("the scene prepares");
+        runtime.commit_ready(token).unwrap()
+    }
+
+    /// The point source's region is read off the mesh at its position. The
+    /// document's copy goes stale whenever a boundary moves across a source
+    /// that stays put, and preparation used to reject the scene over the
+    /// mismatch: a saved scene with a curve drawn over its source never
+    /// started. Every edit that moves a boundary across the source is
+    /// walked here - a curve arriving over it, a hole under it and filled
+    /// again, a merge taking its region away - and each one still prepares.
     #[test]
-    fn point_source_placement_is_validated_once_per_candidate() {
+    fn the_point_source_takes_its_region_from_its_position() {
+        let mut editor = TopologyEditor::default();
+        let mut source = editor.document.model.source;
+        source.enabled = true;
+        source.position = Point2::default();
+        editor.set_point_source(source).unwrap();
+        settle(&mut editor);
+        assert_eq!(prepared(&editor).point_source.region, BACKGROUND_REGION);
+
+        let curve = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.4),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let face = editor.enclosed_assignment(curve).unwrap();
+        let region = editor.assignment_region(face).unwrap();
+        assert_eq!(
+            editor.document.model.source.region, BACKGROUND_REGION,
+            "the stored copy is stale"
+        );
+        let active = prepared(&editor);
+        assert_eq!(active.point_source.region, region);
+        assert!(active.point_source.enabled);
+
+        editor.set_face_disposition(face, None).unwrap();
+        settle(&mut editor);
+        assert!(
+            !prepared(&editor).point_source.enabled,
+            "a source over a hole is silent"
+        );
+        assert!(editor.document.model.source.enabled);
+        assert!(editor.undo());
+        settle(&mut editor);
+        let active = prepared(&editor);
+        assert!(active.point_source.enabled, "a filled hole drives again");
+        assert_eq!(active.point_source.region, region);
+
+        editor.remove_curve(curve, Some(BACKGROUND_REGION)).unwrap();
+        settle(&mut editor);
+        let active = prepared(&editor);
+        assert_eq!(active.point_source.region, BACKGROUND_REGION);
+        assert!(active.point_source.enabled);
+    }
+
+    /// A stored region the source is not in, or one that no longer exists,
+    /// neither stops a document loading nor its preparation.
+    #[test]
+    fn a_stale_stored_source_region_still_loads_and_prepares() {
+        let mut editor = TopologyEditor::default();
+        let curve = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.4),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let region = editor
+            .enclosed_assignment(curve)
+            .and_then(|face| editor.assignment_region(face))
+            .unwrap();
+        for stored in [BACKGROUND_REGION, RegionId(99)] {
+            let mut document = editor.document.clone();
+            document.model.source.enabled = true;
+            document.model.source.position = Point2::default();
+            document.model.source.region = stored;
+            let saved = crate::topology_persistence::save(&document).unwrap();
+            let loaded = crate::topology_persistence::parse_document(saved.as_bytes())
+                .expect("the document loads");
+            assert_eq!(loaded.model.source.region, stored, "kept for the file");
+            let mut runtime = TopologyRuntime::default();
+            let token = runtime
+                .request(
+                    1,
+                    &loaded,
+                    loaded.model.accepted.compile(1).unwrap(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            prepare(&mut runtime).expect("the scene prepares");
+            let active = runtime.commit_ready(token).unwrap();
+            assert_eq!(active.point_source.region, region);
+            assert!(active.point_source.enabled);
+        }
+    }
+
+    #[test]
+    fn point_source_placement_is_resolved_once_per_candidate() {
         let mut editor = TopologyEditor::default();
         editor.document.model.source.enabled = true;
         let mut runtime = TopologyRuntime::default();
@@ -2234,10 +2344,10 @@ mod tests {
         let mut observed = 0;
         let finished = loop {
             if let Some(job) = runtime.preparing.as_ref() {
-                observed = observed.max(job.point_source_validation_count);
+                observed = observed.max(job.point_source_resolution_count);
                 assert!(
-                    job.point_source_validation_count <= 1,
-                    "point-source placement was revalidated during later work"
+                    job.point_source_resolution_count <= 1,
+                    "point-source placement was resolved again during later work"
                 );
             }
             if let Some(result) = runtime.advance(1) {
@@ -4119,9 +4229,11 @@ mod tests {
         prepare(&mut runtime).unwrap();
         let active = runtime.commit_ready(first).unwrap();
 
+        // A malformed source fails preparation. One off the mesh no longer
+        // does: it is silent, like a source over a hole.
         let mut bad = editor.document.clone();
         bad.model.source.enabled = true;
-        bad.model.source.position = Point2::new(4.0, 4.0);
+        bad.model.source.width = 0.0;
         runtime
             .request(
                 2,

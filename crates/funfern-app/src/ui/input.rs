@@ -618,19 +618,10 @@ impl Playground {
                         self.editor.set_region_frame_during_edit(region, frame)
                     }
                     DragGesture::Source => {
+                        // Only the position: preparation reads the region off
+                        // the mesh it prepares, which the active one may not be.
                         let mut source = self.editor.document.model.source;
                         source.position = point;
-                        if let Some(active) = self.runtime.active()
-                            && let Some(face) = active.bundle.snapshot.face_at(point)
-                            && let Some(region) = active
-                                .bundle
-                                .plan
-                                .domains
-                                .iter()
-                                .find(|domain| domain.face == face)
-                        {
-                            source.region = region.region;
-                        }
                         self.editor.set_point_source_during_edit(source)
                     }
                     DragGesture::Probe {

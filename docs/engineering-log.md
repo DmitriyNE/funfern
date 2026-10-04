@@ -18454,3 +18454,51 @@ rewrite of an active link, while the user guide still described it.
   the table within the readout's tolerance.
 - **State.** Uncommitted; the full gate was not rerun after this change
   (clippy and the module's 21 tests pass). Run the gate, then commit.
+
+## 2026-10-04 — The point source is placed by its position
+
+Reported: the saved scene does not start. Reproduced on a copy of the autosave
+with an isolated HOME. Every candidate failed in assembly with "Point source
+position does not lie in its assigned region", and no generation ever became
+active. The source sat at (0.649, −0.236), inside region 2's closed curve,
+while the document named region 1.
+
+- **Cause.** The document carried the source's region as a second copy of
+  what its position already says. Only a source drag refreshed it, and from
+  the *active* mesh, so it went stale two ways: a boundary moved across a
+  source that stayed put, or a drag made while a rebuilt mesh was still being
+  prepared. Preparation then refused the whole scene over the mismatch, and
+  a failed revision is not retried. After a restart nothing is active, so
+  dragging the source could not refresh the copy either: the scene could not
+  recover. The point source's forcing also masks its support by that region,
+  so the copy was not just checked, it was used.
+- **Fix.** Preparation resolves the source on the candidate mesh, once per
+  candidate (`resolve_point_source_once`, `region_under`). The region of the
+  element under the position is the source's region, and everything
+  downstream - the forcing, the far-field stencil, the readouts - sees the
+  resolved source. A source over no mesh (a hole, or off the domain) is silent
+  for that generation instead of failing, and drives again once its spot is
+  meshed. A source exactly on an interface takes either side's element: the
+  old stencil refused a point within 1e-9 of any curve, which a snapped source
+  on a snapped straight span can hit.
+- **Removed.** The drag's region lookup, the editor's merge retargeting, and
+  the switch-off on a hole or a deleted region; the region checks in
+  `set_point_source_during_edit` and in document validation (a file may name
+  a region that has gone). The far-field stencil checks the region of a driving
+  source only. Forcing reuse compares the authored source with the region left
+  out: the same mesh places an unmoved source in the same region.
+- **Schema.** The `region` key stays in version 22 files and is ignored on
+  load. No migration.
+- **Tests.** `the_point_source_takes_its_region_from_its_position` walks a
+  curve drawn over a standing source, a hole under it and the hole undone, and
+  a merge into the background, preparing after each.
+  `a_stale_stored_source_region_still_loads_and_prepares` saves and loads a
+  document naming the wrong region and a missing one. The two editor tests of
+  the retargeting went with it. `failed_or_superseded_candidate_never_replaces_active_state`
+  used an off-domain source to make a candidate fail; it now uses a zero
+  width.
+- **Checked on the autosave.** Headless: it prepares, stored region 1,
+  resolved 2. The app on a copy of it: status ready, about 4,900 steps in
+  20 s. Not driven by hand.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

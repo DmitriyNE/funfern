@@ -1070,10 +1070,13 @@ impl QuadraticFarFieldStencil {
             .iter()
             .map(|domain| domain.region)
             .collect::<BTreeSet<_>>();
+        // A silent point source has nothing under it to name, so only a
+        // driving one has to sit in a meshed region.
         let sources_valid = point_source.is_none_or(|source| {
             source.valid()
-                && active_regions.contains(&source.region)
-                && model.region(source.region).is_some()
+                && (!source.enabled
+                    || active_regions.contains(&source.region)
+                        && model.region(source.region).is_some())
         }) && volume_sources.len() <= crate::MAX_VOLUME_SOURCES
             && volume_sources.iter().enumerate().all(|(index, source)| {
                 source.valid()

@@ -720,7 +720,9 @@ impl TopologyEditor {
     }
 
     pub fn set_point_source_during_edit(&mut self, source: PointSource) -> Result<(), String> {
-        if !source.valid() || self.document.model.draft.region(source.region).is_none() {
+        // The region is not checked: preparation places the source by its
+        // position, and the stored region is only carried for the file.
+        if !source.valid() {
             return Err("Point source settings are invalid".into());
         }
         if self.document.model.source == source {
@@ -4693,7 +4695,6 @@ fn settle_merge(
             !dropped.contains(&source.region)
         }
     });
-    retarget_point_source(candidate, &region_remaps, &dropped, survivor);
     let removed_probes = settle_region_probes(&mut candidate.probes, &region_remaps, &dropped);
     Ok(MergeSettlement {
         removed_regions,
@@ -5034,44 +5035,9 @@ fn join_valence_two_ends(
     }
     records
 }
-/// Follows the point source through a region merge. A distributed source dies
-/// with its region because it is a profile over that face, but the point source
-/// has a position that is still meshed once the faces merge, so it moves to the
-/// surviving identity instead. Without this it names a region that no longer
-/// exists: the scene still compiles, and then every candidate is rejected with
-/// "references an inactive region" and the solver stops for no visible reason.
-fn retarget_point_source(
-    model: &mut TopologyDocumentModel,
-    remaps: &[(RegionId, RegionId)],
-    dropped: &BTreeSet<RegionId>,
-    survivor: Option<RegionId>,
-) {
-    if let Some((_, to)) = remaps.iter().find(|(from, _)| *from == model.source.region) {
-        model.source.region = *to;
-        return;
-    }
-    if !dropped.contains(&model.source.region) {
-        return;
-    }
-    match survivor {
-        Some(region) => model.source.region = region,
-        None => {
-            model.source.region = BACKGROUND_REGION;
-            model.source.enabled = false;
-        }
-    }
-}
-
 /// Removes everything that only existed because a region did: its distributed
 /// source and any probe integrating over it.
 fn drop_region_dependents(model: &mut TopologyDocumentModel, region: RegionId) {
-    // The point source names a region too. Left behind it points at nothing, and
-    // preparation rejects the whole candidate with "references an inactive
-    // region", so the simulation stops with no visible cause.
-    if model.source.region == region {
-        model.source.region = BACKGROUND_REGION;
-        model.source.enabled = false;
-    }
     model
         .draft
         .regions
@@ -8184,98 +8150,6 @@ mod tests {
             removal.promoted
         );
         assert!(all_separated(&editor, separator.curve));
-    }
-
-    /// A merge keeps the point source driving: its position is still meshed, so
-    /// it follows the surviving region rather than being disabled.
-    #[test]
-    fn merging_regions_carries_the_point_source_across() {
-        let build = || {
-            let mut editor = TopologyEditor::default();
-            let curve = editor
-                .create_closed_curve(
-                    PeriodicCubicSpline::rounded(Point2::default(), 0.4),
-                    ClosedCurvePurpose::Subdomain {
-                        material: DEFAULT_MATERIAL,
-                    },
-                )
-                .unwrap();
-            settle(&mut editor);
-            let region = editor
-                .enclosed_assignment(curve)
-                .and_then(|face| editor.assignment_region(face))
-                .unwrap();
-            let mut source = editor.document.model.source;
-            source.enabled = true;
-            source.position = Point2::default();
-            source.region = region;
-            editor.set_point_source(source).unwrap();
-            settle(&mut editor);
-            (editor, curve)
-        };
-
-        let (mut editor, curve) = build();
-        editor.remove_curve(curve, Some(BACKGROUND_REGION)).unwrap();
-        settle(&mut editor);
-        assert_eq!(editor.document.model.source.region, BACKGROUND_REGION);
-        assert!(
-            editor.document.model.source.enabled,
-            "the merge keeps it driving"
-        );
-
-        let (mut editor, curve) = build();
-        let span = editor
-            .document
-            .model
-            .draft
-            .geometry
-            .curve(curve)
-            .unwrap()
-            .spans[1]
-            .id;
-        let selected = [span].into_iter().collect::<BTreeSet<_>>();
-        editor
-            .remove_spans(&selected, Some(BACKGROUND_REGION))
-            .unwrap();
-        settle(&mut editor);
-        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
-        assert_eq!(editor.document.model.source.region, BACKGROUND_REGION);
-        assert!(editor.document.model.source.enabled);
-    }
-
-    /// A region that goes away must take the point source with it.    /// A region that goes away must take the point source with it. The scene
-    /// still compiles without this, but preparation rejects the candidate with
-    /// "references an inactive region" and the simulation stops for no visible
-    /// reason.
-    #[test]
-    fn making_a_hole_does_not_strand_the_point_source() {
-        let mut editor = TopologyEditor::default();
-        let curve = editor
-            .create_closed_curve(
-                PeriodicCubicSpline::rounded(Point2::default(), 0.4),
-                ClosedCurvePurpose::Subdomain {
-                    material: DEFAULT_MATERIAL,
-                },
-            )
-            .unwrap();
-        settle(&mut editor);
-        let face = editor.enclosed_assignment(curve).expect("an enclosed face");
-        let region = editor.assignment_region(face).expect("a subdomain");
-        let mut source = editor.document.model.source;
-        source.enabled = true;
-        source.position = Point2::default();
-        source.region = region;
-        editor.set_point_source(source).unwrap();
-        settle(&mut editor);
-
-        editor.set_face_disposition(face, None).unwrap();
-        settle(&mut editor);
-        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
-        assert_eq!(editor.document.model.source.region, BACKGROUND_REGION);
-        assert!(
-            !editor.document.model.source.enabled,
-            "a source left inside a hole cannot keep driving"
-        );
     }
 
     /// A transmitting span with an excluded face on one side has nothing to
