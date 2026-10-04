@@ -157,12 +157,81 @@ The committed build, 25 s runs, the same machine and display:
 | adaptation, overlay, integrated | 59.9 | 97 % | 3 | 6.4 % | 0.18 | 6.8 ms |
 | edge 0.025 at 2x speed | 55.2 | 85 % | 4 | 12.2 % | 4.8 | 16.6 ms |
 
+## The false cuts
+
+Done the same day on `solver-blame`. A late frame carrying steps used to cut
+the batch whatever made it late. The pass measured in the late frame itself
+cannot tell the solver's late frames from the display's: whatever stalls a
+frame stalls the GPU with it, so a late frame on the light scene often
+carried one slow pass, and the largest of the last four passes at the cuts
+had a median of 0.53 of the interval against 0.34 elsewhere. The solver's
+steady share can: the median of the latest six passes, as the ring delivers
+them, three frames late.
+
+| scene | steady share p50 / p99 | share at the cuts p10 – p90 | cuts |
+| --- | --- | --- | --- |
+| light, three 60 s runs | 0.23 – 0.26 / 0.46 – 0.55 | 0.16 – 0.33 | 887 |
+| adaptation, overlay, integrated field | 0.30 – 0.41 / 0.46 – 0.54 | 0.22 – 0.55 | 10 |
+| solver fills the frame, three runs | 1.02 – 1.04 / 1.20 – 1.27 | 1.02 – 1.26 | 285 |
+
+Any threshold from 0.6 to 0.9 keeps every cut of the last row and drops all
+but one of the 887 of the first. `SOLVER_BLAME_SHARE` is 0.75: a late frame
+cuts only when the solver's steady share has reached three quarters of the
+interval; below that the ceiling holds, neither cut nor grown. An unknown
+share, no timestamp queries or no reading in the last quarter second, cuts
+as before. The pacing harness models the share the same way, and its wobble
+with room to spare fell from 18.3 % to 3.8 %, without from 16.6 % to 10.9 %;
+the gates are ratcheted there.
+
+Old and new builds alternated, 60 s a run, two to four rounds a scene:
+
+| scene | cuts a second | picture wobble | fps | speed |
+| --- | --- | --- | --- | --- |
+| light | 0.52, 0.47 → 0.00, 0.00 | 7.2, 7.3 → 4.4, 4.4 % | 60 → 60 | 0.95 → 0.95 |
+| adaptation, overlay, integrated | 0.14, 0.10, 0.05 → 0.03, 0.00, 0.09 | 6.1, 6.5, 6.6 → 8.6, 4.5, 6.8 % | 60 → 60 | 0.96 → 0.96 |
+| edge 0.06 | 0.33, 2.30 → 0.00, 0.03 | 6.3, 17.5 → 4.7, 5.5 % | 60 → 60 | 0.95, 0.88 → 0.95, 0.95 |
+| solver fills the frame | 4.95, 4.89, 3.37, 3.99 → 5.41, 4.91, 3.37, 3.36 | 12.3, 11.3, 9.5, 20.0 → 21.2, 11.6, 9.3, 9.3 % | 55 – 57 → 55 – 57 | 0.73, 0.73, 1.20, 0.98 → 0.66, 0.73, 1.21, 1.21 |
+
+Where the solver has room the cuts are gone and the picture's wobble is down
+to the display's own; the second edge run caught one of the cut storms the
+display's late frames used to set off, 2.3 cuts a second and 17.5 % wobble,
+which the new build did not have. Where the solver fills the frame three of
+the four pairs match to the second decimal; the first new run had the GPU in
+a slower state (pass share 0.89 against 1.00), the share dipped below the
+threshold on 23 % of its frames after cuts had shrunk the batch, 49 late
+frames were held, and it came out slower. The edge scene, meant to sit at
+0.7 of the interval, landed at 0.33: a finer mesh at a tighter step ran
+nearly as cheaply a frame as the coarse one. The GPU's state moved between
+rounds, 0.73 to 1.2 of the set speed on the same scene and build, so only
+pairs run back to back compare.
+
+The same, with the window on the machine's 120 Hz panel, 60 s a run, two
+rounds:
+
+| scene | cuts a second | picture wobble | fps | speed | pass share |
+| --- | --- | --- | --- | --- | --- |
+| light | 1.08, 1.27 → 0.00, 0.00 | 6.1, 8.0 → 3.8, 4.2 % | 120 → 120 | 0.99 → 1.00 | 0.53, 0.25 → 0.14, 0.14 |
+| edge 0.06 | 0.35, 0.70 → 0.00, 0.00 | 4.2, 6.5 → 3.9, 3.5 % | 120 → 120 | 0.99 → 1.00 | 0.33, 0.22 → 0.19, 0.19 |
+| adaptation, overlay, integrated | 0.87, 11.6 → 2.2, 5.5 | 10.4, 21.9 → 12.3, 14.8 % | 118.6, 107.4 → 116.9, 113.6 | 0.96, 0.79 → 0.95, 0.91 | 0.42, 0.80 → 0.36, 0.73 |
+| solver fills the frame | 19.7, 17.1 → 20.0, 21.1 | 22, 32 → 21, 28 % | 96, 78 → 93, 92 | 0.31, 0.25 → 0.29, 0.27 | 1.00, 1.15 → 1.03, 0.99 |
+
+At 120 Hz a frame asks for half the steps, so the light scenes' passes are
+0.14 to 0.33 of the interval and their cuts vanish as at 60. The overlay
+scene is the borderline case here: its pass is 0.36 to 0.80 of the interval
+depending on the state the GPU's clock is in, the share crossed the
+threshold on 25 % of one new run's frames and 52 % of the other's, and the
+result is inside the swing between the old runs (0.9 to 11.6 cuts a second
+on the same build). Where the solver fills two frames both builds collapse
+the same way. The picture changed on 99 %, 97 %, 85 % and 88 % of frames at
+this refresh rate, so a depth of three still covers the round trip.
+
 ## Left for the pacing work
 
-- The controller cuts on any late frame carrying steps. The solver pass's GPU
-  time is now known a frame later; a late frame whose pass was a small share
-  of the refresh could be read as someone else's rather than the solver's.
-  The drawing cannot be timed from here, but it runs beside the solver and is
-  small on this device. A pacing change, not made.
+- A scene at the threshold, the overlay scene at 120 Hz here, is blamed on
+  some frames and held on others as the GPU's clock moves its share; what the
+  right behaviour there is was not studied.
+- 0.75 against 0.9 for the backoff may be resolvable now that the display's
+  late frames no longer cut; the measurement that could not tell them apart
+  on 2026-09-23 was measuring those.
 - The picture is three frames behind the solver. Shortening that is a
   readback-path change, not a pacing one.

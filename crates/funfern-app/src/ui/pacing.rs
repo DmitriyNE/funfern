@@ -167,6 +167,63 @@ const FRAME_BUDGET_BACKOFF: f64 = 0.75;
 /// which this does not yet do.
 const FRAME_BUDGET_RECOVERY: f64 = 0.25;
 
+/// The solver's steady share of the display interval from which a late frame
+/// is held to be the solver's.
+///
+/// A late frame used to cut the batch whatever made it late, and on this
+/// machine most of them were not the solver: over 60 s runs of the default
+/// scene the solver pass took a quarter of the interval and about 80 % of the
+/// cuts came with no pass near the frame past 12 ms of 16.7. Each cut costs a
+/// third of a second at about half speed, and the wobble followed the cut
+/// rate. The pass measured in the late frame itself does not tell the cases
+/// apart: whatever stalls a frame stalls the GPU with it, and a late frame
+/// often carries one slow pass. The solver's steady share does. Measured as
+/// the median of the latest six passes (`docs/spikes/funfern-drawn-pacing.md`):
+/// light scenes 0.16 to 0.33 at their cuts, p99 of the steady share 0.55; a
+/// scene the solver cannot keep up with 1.02 to 1.26. Anything from 0.6 to
+/// 0.9 keeps every cut of the second and drops all but one of 887 of the
+/// first; three quarters is a GPU with no slack left.
+///
+/// The share is roughly independent of the display: a solver that keeps up
+/// runs half the steps in half the frame. A solver that has just grown
+/// heavier takes three or four frames to move the median, on top of the
+/// readings' own three: the first cut comes about seven frames later than it
+/// used to. Without readings - no timestamp queries, or none fresh because
+/// the GPU has stalled - every late frame is the solver's, as before.
+pub(super) const SOLVER_BLAME_SHARE: f64 = 0.75;
+
+/// How many of the latest solver passes the steady share is the median of.
+const SOLVER_SHARE_WINDOW: usize = 6;
+
+/// Fewer readings than this say nothing about the steady share.
+const SOLVER_SHARE_MINIMUM: usize = 3;
+
+/// How old a reading may be and still describe the solver as it runs now.
+/// Older ones are a GPU that has stopped reporting, which is not a solver
+/// with headroom.
+pub(super) const SOLVER_SHARE_FRESH_SECONDS: f64 = 0.25;
+
+/// The solver's steady share of the display interval: the median of the
+/// latest [`SOLVER_SHARE_WINDOW`] pass durations over the cadence, or nothing
+/// when there are too few readings to say.
+pub(super) fn solver_share(passes: &[f64], cadence: f64) -> Option<f64> {
+    if !cadence.is_finite() || cadence <= 0.0 {
+        return None;
+    }
+    let mut recent: Vec<f64> = passes
+        .iter()
+        .rev()
+        .filter(|pass| pass.is_finite() && **pass >= 0.0)
+        .take(SOLVER_SHARE_WINDOW)
+        .copied()
+        .collect();
+    if recent.len() < SOLVER_SHARE_MINIMUM {
+        return None;
+    }
+    recent.sort_by(|left, right| left.total_cmp(right));
+    Some(recent[recent.len() / 2] / cadence)
+}
+
 /// How many display-only frames the cadence is the median of.
 ///
 /// Half a second at 120 Hz. Long enough that the median is stable to a tenth of
@@ -274,22 +331,34 @@ impl DisplayCadence {
 /// Multiplicative backoff and additive recovery rather than a cost model: it
 /// needs no estimate of what a step costs, and it converges on the largest
 /// batch that still ships frames at the cadence.
+///
+/// `solver` is the solver's steady share of the interval, [`solver_share`],
+/// or nothing when it is not known. A late frame is only the solver's to
+/// answer for when that share reaches [`SOLVER_BLAME_SHARE`]; otherwise the
+/// ceiling holds, neither cut nor grown.
 pub(super) fn frame_step_budget(
     budget: f64,
     frame_seconds: f64,
     cadence: f64,
     batch: FrameBatch,
+    solver: Option<f64>,
 ) -> f64 {
     if !frame_seconds.is_finite() || frame_seconds <= 0.0 || !cadence.is_finite() || cadence <= 0.0
     {
         return budget;
     }
-    let next = if batch.steps > 0 && frame_seconds > cadence * FRAME_BUDGET_TOLERANCE {
-        // Cut what the frame actually ran, not a ceiling it never reached. A
-        // ceiling well above the batch in use would take several cuts before it
-        // began to bite, and the display waits through every one of them.
-        // A frame that ran no steps is not the solver's to answer for.
-        budget.min(batch.steps as f64) * FRAME_BUDGET_BACKOFF
+    let late = batch.steps > 0 && frame_seconds > cadence * FRAME_BUDGET_TOLERANCE;
+    let next = if late {
+        if solver.is_none_or(|share| share >= SOLVER_BLAME_SHARE) {
+            // Cut what the frame actually ran, not a ceiling it never reached.
+            // A ceiling well above the batch in use would take several cuts
+            // before it began to bite, and the display waits through every one
+            // of them. A frame that ran no steps is not the solver's to answer
+            // for, and nor is one the solver was not filling.
+            budget.min(batch.steps as f64) * FRAME_BUDGET_BACKOFF
+        } else {
+            budget
+        }
     } else if batch.ceiling_bound {
         budget + FRAME_BUDGET_RECOVERY
     } else {
@@ -436,6 +505,10 @@ mod tests {
         wobble: f64,
     }
 
+    /// Frames a pass's reading takes to reach the controller in the app: the
+    /// ring maps it a frame later and the main world sees it the frame after.
+    const READING_LAG: usize = 3;
+
     /// Four seconds of paced frames after a second of warm-up.
     fn paced(display: &mut Display, time_step: f64, per_step: f64, budgeted: bool) -> Paced {
         let mut accumulator = 0.0;
@@ -444,11 +517,15 @@ mod tests {
         let mut frame = display.refresh;
         let mut asked = FrameBatch::default();
         let mut run: Vec<(u64, f64)> = Vec::new();
+        // The solver pass each frame carried, as the GPU timer would report it.
+        let mut passes: Vec<f64> = Vec::new();
         let (mut frames, mut steps, mut elapsed, mut warm) = (0u32, 0u64, 0.0, 0.0);
         while elapsed < 4.0 {
             cadence.observe(frame);
             if budgeted {
-                budget = frame_step_budget(budget, frame, cadence.seconds(), asked);
+                let known = passes.len().saturating_sub(READING_LAG);
+                let solver = solver_share(&passes[..known], cadence.seconds());
+                budget = frame_step_budget(budget, frame, cadence.seconds(), asked, solver);
             }
             asked = steps_for_frame(
                 &mut accumulator,
@@ -462,6 +539,7 @@ mod tests {
                 },
             );
             cadence.record_batch(asked.steps);
+            passes.push(asked.steps as f64 * per_step);
             frame = display.present(OVERHEAD + asked.steps as f64 * per_step);
             if warm < 1.0 {
                 warm += frame;
@@ -561,10 +639,11 @@ mod tests {
     /// controller's sawtooth lands directly in the animation's clock: the
     /// spread here is [`FRAME_BUDGET_BACKOFF`] transmitted, against about 1 %
     /// for a pacer with no ceiling at all on the same frames. These bounds are
-    /// a ratchet on what is currently reached - 18.3 % with room to spare and
-    /// 16.6 % without - not a statement that this is good enough. Reducing it
-    /// means a gentler cut, which measured better here and could not be
-    /// distinguished from run-to-run variation on the machine.
+    /// a ratchet on what is currently reached - 3.8 % with room to spare and
+    /// 10.9 % without - not a statement that this is good enough. They were
+    /// 18.3 % and 16.6 % while every late frame cut the batch; with room to
+    /// spare the display's own late frames were all of it, and
+    /// [`SOLVER_BLAME_SHARE`] no longer lets them.
     #[test]
     fn the_simulated_clock_runs_evenly_in_both_regimes() {
         let refresh = 1.0 / 120.0;
@@ -578,7 +657,7 @@ mod tests {
             easy.speed
         );
         assert!(
-            easy.wobble < 0.20,
+            easy.wobble < 0.06,
             "the simulated clock got less even with room to spare: {:.1} %",
             easy.wobble * 100.0
         );
@@ -593,7 +672,7 @@ mod tests {
             hard.speed
         );
         assert!(
-            hard.wobble < 0.20,
+            hard.wobble < 0.14,
             "falling behind got stuttery rather than slow: {:.1} %",
             hard.wobble * 100.0
         );
@@ -693,36 +772,36 @@ mod tests {
             ceiling_bound: true,
         };
 
-        let overran = frame_step_budget(budget, cadence * 2.0, cadence, pressing(64));
+        let overran = frame_step_budget(budget, cadence * 2.0, cadence, pressing(64), None);
         assert!(overran < budget, "an overrunning frame kept its batch");
-        let recovered = frame_step_budget(overran, cadence, cadence, pressing(48));
+        let recovered = frame_step_budget(overran, cadence, cadence, pressing(48), None);
         assert!(recovered > overran, "a cheap frame did not give any back");
 
         // It bottoms out at one rather than at zero: a solver that cannot fit
         // a step inside a frame still advances, one step at a time.
         let mut starved = budget;
         for _ in 0..200 {
-            starved = frame_step_budget(starved, cadence * 10.0, cadence, pressing(64));
+            starved = frame_step_budget(starved, cadence * 10.0, cadence, pressing(64), None);
         }
         assert_eq!(starved, 1.0);
 
         // And it climbs back to the ceiling rather than staying shy of it.
         let mut recovering = starved;
         for _ in 0..300 {
-            recovering = frame_step_budget(recovering, cadence * 0.5, cadence, pressing(64));
+            recovering = frame_step_budget(recovering, cadence * 0.5, cadence, pressing(64), None);
         }
         assert_eq!(recovering, MAX_STEPS_PER_FRAME as f64);
 
         // A frame just inside the tolerance is not held responsible.
-        assert!(frame_step_budget(budget, cadence * 1.02, cadence, pressing(64)) >= budget);
+        assert!(frame_step_budget(budget, cadence * 1.02, cadence, pressing(64), None) >= budget);
 
         // Nonsense leaves it alone.
         assert_eq!(
-            frame_step_budget(budget, f64::NAN, cadence, pressing(64)),
+            frame_step_budget(budget, f64::NAN, cadence, pressing(64), None),
             budget
         );
         assert_eq!(
-            frame_step_budget(budget, cadence, 0.0, pressing(64)),
+            frame_step_budget(budget, cadence, 0.0, pressing(64), None),
             budget
         );
     }
@@ -742,7 +821,7 @@ mod tests {
         };
         let mut budget = 15.0;
         for _ in 0..600 {
-            budget = frame_step_budget(budget, cadence, cadence, slack);
+            budget = frame_step_budget(budget, cadence, cadence, slack, None);
         }
         assert_eq!(
             budget, 15.0,
@@ -758,6 +837,7 @@ mod tests {
                 steps: 15,
                 ceiling_bound: true,
             },
+            None,
         );
         assert!(pressed > budget);
     }
@@ -776,6 +856,7 @@ mod tests {
                 steps: 12,
                 ceiling_bound: false,
             },
+            None,
         );
         assert!(
             cut < 12.0,
@@ -784,9 +865,74 @@ mod tests {
 
         // A frame that ran nothing is not the solver's to answer for.
         assert_eq!(
-            frame_step_budget(60.0, cadence * 4.0, cadence, FrameBatch::default()),
+            frame_step_budget(60.0, cadence * 4.0, cadence, FrameBatch::default(), None),
             60.0
         );
+    }
+
+    /// A late frame is the solver's to answer for only when the solver was
+    /// filling the frames: a solver at a quarter of the interval did not make
+    /// one twice as long, and cutting it costs a third of a second at half
+    /// speed for nothing. Without readings every late frame is the solver's,
+    /// as it always was.
+    #[test]
+    fn a_late_frame_the_solver_was_not_filling_is_not_its_to_answer_for() {
+        let cadence = 1.0 / 60.0;
+        let pressing = FrameBatch {
+            steps: 12,
+            ceiling_bound: true,
+        };
+        let held = frame_step_budget(20.0, cadence * 2.0, cadence, pressing, Some(0.28));
+        assert_eq!(held, 20.0, "a light solver was cut for a late frame");
+        // Held, not grown: a late frame is no evidence of room.
+        let blamed = frame_step_budget(20.0, cadence * 2.0, cadence, pressing, Some(1.05));
+        assert!(
+            blamed < 12.0,
+            "a solver filling the frame was not cut: {blamed}"
+        );
+        let edge = frame_step_budget(
+            20.0,
+            cadence * 2.0,
+            cadence,
+            pressing,
+            Some(SOLVER_BLAME_SHARE),
+        );
+        assert_eq!(edge, blamed, "the threshold is inclusive");
+        assert_eq!(
+            frame_step_budget(20.0, cadence * 2.0, cadence, pressing, None),
+            blamed,
+            "an unknown share was not treated as the solver's"
+        );
+        // A frame in time grows the ceiling whatever the share.
+        assert!(frame_step_budget(20.0, cadence, cadence, pressing, Some(0.28)) > 20.0);
+    }
+
+    /// The steady share is the median of the latest six passes, which one
+    /// slow pass in a stalled frame does not move; too few readings say
+    /// nothing.
+    #[test]
+    fn the_solver_share_is_the_median_of_recent_passes() {
+        let cadence = 1.0 / 60.0;
+        let quarter = cadence / 4.0;
+        assert_eq!(solver_share(&[], cadence), None);
+        assert_eq!(solver_share(&[quarter, quarter], cadence), None);
+        let steady = solver_share(&[quarter; 8], cadence).unwrap();
+        assert!((steady - 0.25).abs() < 1.0e-12, "{steady}");
+        // One stalled pass among the latest six, and an old heavy one outside
+        // them, leave the reading where it was.
+        let mut passes = vec![cadence * 3.0, cadence * 3.0, cadence * 3.0];
+        passes.extend([quarter, quarter, cadence * 2.0, quarter, quarter, quarter]);
+        let spiked = solver_share(&passes, cadence).unwrap();
+        assert!((spiked - 0.25).abs() < 1.0e-12, "{spiked}");
+        // Whereas a solver that has grown heavier moves it within the window.
+        let heavier = solver_share(
+            &[quarter, quarter, cadence, cadence, cadence, cadence],
+            cadence,
+        )
+        .unwrap();
+        assert!((heavier - 1.0).abs() < 1.0e-12, "{heavier}");
+        assert_eq!(solver_share(&[quarter; 8], 0.0), None);
+        assert_eq!(solver_share(&[f64::NAN, quarter, quarter], cadence), None);
     }
 
     /// Backlog is held only up to what a frame may spend. Holding a full ceiling

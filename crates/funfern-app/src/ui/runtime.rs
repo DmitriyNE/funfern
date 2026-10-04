@@ -332,11 +332,27 @@ impl Playground {
         // Taken, so that a frame which asked for nothing - paused, or with a
         // handoff withholding steps - is not read as the solver's doing.
         let batch = core::mem::take(&mut self.last_batch);
+        // The solver's steady share of the frame, from the GPU's own clock on
+        // its passes, decides whether a late frame is its doing.
+        let now = Instant::now();
+        let passes: Vec<f64> = request
+            .gpu_frames()
+            .recent()
+            .iter()
+            .filter(|reading| {
+                now.saturating_duration_since(reading.taken_at)
+                    .as_secs_f64()
+                    <= SOLVER_SHARE_FRESH_SECONDS
+            })
+            .map(|reading| reading.pass_seconds())
+            .collect();
+        self.solver_share = solver_share(&passes, self.display_cadence.seconds());
         self.frame_budget = frame_step_budget(
             self.frame_budget,
             delta,
             self.display_cadence.seconds(),
             batch,
+            self.solver_share,
         );
         if self.uploading.is_none()
             && self.source_commit.is_none()
@@ -755,6 +771,7 @@ impl Playground {
                     .clock
                     .map_or(0, |clock| u64::from(clock.accepted_steps)),
                 picture_generation: display.generation,
+                solver_share: self.solver_share.unwrap_or(f64::NAN),
                 ..PacingNote::default()
             };
             if !withheld {

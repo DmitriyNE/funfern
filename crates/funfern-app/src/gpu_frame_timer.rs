@@ -21,6 +21,7 @@ use std::{
 };
 
 use bevy::{
+    platform::time::Instant,
     prelude::*,
     render::{
         render_resource::{BufferDescriptor, BufferUsages, CommandEncoder, MapMode, WgpuFeatures},
@@ -35,6 +36,9 @@ pub struct GpuFrameReading {
     pub frame: u64,
     pub pass_begin: f64,
     pub pass_end: f64,
+    /// The host's clock when the reading was taken in; pacing ignores stale
+    /// ones.
+    pub taken_at: Instant,
 }
 
 impl GpuFrameReading {
@@ -242,6 +246,7 @@ impl GpuFrameTimer {
                         frame,
                         pass_begin: seconds(begin),
                         pass_end: seconds(end),
+                        taken_at: Instant::now(),
                     });
                 }
                 SlotState::Free | SlotState::Timing => {}

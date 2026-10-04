@@ -63,6 +63,9 @@ pub struct PacingNote {
     /// The generation the painted readback belongs to; it lags the drawn
     /// generation across a handoff.
     pub picture_generation: u64,
+    /// The solver's steady share of the display interval as the controller
+    /// saw it, NaN when unknown.
+    pub solver_share: f64,
 }
 
 /// One rendered frame.
@@ -90,7 +93,7 @@ pub struct DrawnFrame {
 
 const COLUMNS: &str = "frame,host_seconds,generation,drawn_step,requested,completed,\
 gpu_begin,gpu_end,frame_seconds,speed,time_step,ceiling,asked,admitted,running,withheld,\
-picture,picture_step,picture_generation";
+picture,picture_step,picture_generation,solver_share";
 
 impl DrawnFrame {
     fn csv(&self) -> String {
@@ -99,7 +102,7 @@ impl DrawnFrame {
         });
         let note = &self.note;
         format!(
-            "{},{},{},{},{},{},{begin},{end},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{begin},{end},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.frame,
             self.host_seconds,
             self.generation,
@@ -117,6 +120,7 @@ impl DrawnFrame {
             note.picture,
             note.picture_step,
             note.picture_generation,
+            note.solver_share,
         )
     }
 
@@ -157,6 +161,7 @@ impl DrawnFrame {
                 picture: number(fields[16])?,
                 picture_step: number(fields[17])?,
                 picture_generation: number(fields[18])?,
+                solver_share: number(fields[19])?,
             },
         })
     }
@@ -626,6 +631,7 @@ mod tests {
                 picture: index,
                 picture_step: step.saturating_sub(20),
                 picture_generation: 1,
+                solver_share: 0.3,
             },
         }
     }

@@ -132,6 +132,9 @@ pub struct Playground {
     /// What the previous frame asked the solver for, which is what the batch
     /// ceiling is steered by. See [`super::pacing::FrameBatch`].
     pub(super) last_batch: FrameBatch,
+    /// The solver's steady share of the display interval, when the GPU's
+    /// clock on its passes is available.
+    pub(super) solver_share: Option<f64>,
     /// Frame interval the display is actually reaching, measured rather than
     /// assumed. See [`DisplayCadence`].
     pub(super) display_cadence: DisplayCadence,
@@ -413,6 +416,7 @@ impl Default for Playground {
             accumulator: 0.0,
             frame_budget: 1.0,
             last_batch: FrameBatch::default(),
+            solver_share: None,
             display_cadence: DisplayCadence::new(),
             sim_time_offset: 0.0,
             sim_time_step: 0.0,

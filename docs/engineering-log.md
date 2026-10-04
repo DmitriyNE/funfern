@@ -3393,14 +3393,10 @@ above:
   state the painter uploads, three frames behind the solver, not the step the
   frame encoded as first assumed; the trace records both. The encoded series
   equals the requested one at every operating point measured.
-- [ ] The batch ceiling is cut by late frames the solver did not cause. In about
-  80 % of cuts on the default scene no solver pass within two frames ran past
-  12 ms of a 16.7 ms frame, and each cut costs a third of a second at about half
-  speed; the wobble follows the cut rate, which follows how often frames come
-  in late for reasons other than the solver. The solver pass's GPU time is now
-  known a frame later (`gpu_frame_timer.rs`) and could tell the two apart; the
-  drawing cannot be timed from the solver's side, it runs beside the pass.
-  Found with the trace, not yet designed.
+- [x] The batch ceiling is cut by late frames the solver did not cause
+  (2026-10-04: a late frame cuts only when the solver's steady share of the
+  interval, the median of its last six GPU passes, reaches 0.75; see that day's
+  entry and `docs/spikes/funfern-drawn-pacing.md`).
 - [ ] The picture is three frames behind the solver: a readback is encoded after
   the frame's drawing, mapped at a later submission and delivered at the
   extraction after that. Shortening it is a readback-path change.
@@ -18903,3 +18899,49 @@ found two things on the way that mattered more, and stopped there.
   writes). The examples log Bevy's "sending into a closed channel" readback
   warning at exit, copies still in flight when the app quits; not compared
   with the build before.
+
+## 2026-10-04 — A late frame is the solver's only when the solver was filling it
+
+The third pacing step, on `solver-blame`; tables in
+`docs/spikes/funfern-drawn-pacing.md`, "The false cuts".
+
+- **The rule.** `frame_step_budget` takes the solver's steady share of the
+  display interval: the median of the latest six GPU pass readings over the
+  cadence (`solver_share`), from readings no older than a quarter second. A
+  late frame carrying steps cuts the batch only when that share has reached
+  `SOLVER_BLAME_SHARE`, 0.75; below it the ceiling holds, neither cut nor
+  grown. An unknown share - no timestamp queries, fewer than three readings,
+  none fresh - cuts as before, so a device without the timer and a GPU that
+  has stalled both keep today's behaviour.
+- **Why the steady share and not the late frame's own pass.** Whatever
+  stalls a frame stalls the GPU with it: on the light scene the largest of
+  the last four passes at the cuts had a median of 0.53 of the interval
+  against 0.34 elsewhere, and a rule on it would have kept half the false
+  cuts. The median of six at the cuts was 0.16 to 0.33 on the light scenes
+  and 1.02 to 1.26 where the solver fills the frame; any threshold from 0.6
+  to 0.9 keeps every cut of the second and drops all but one of 887 of the
+  first.
+- **Measured**, old and new alternated, 60 s a run: light scene 0.5 cuts a
+  second to none, picture wobble 7.2 to 4.4 %; the overlay scene 0.1 to
+  about 0.03; the edge-0.06 scene 0.33 and 2.30 to 0.00 and 0.03, wobble 6.3
+  and 17.5 to 4.7 and 5.5 %; fps and speed unchanged on all three. Where the
+  solver fills the frame three of four pairs match (3.37 against 3.37 cuts a
+  second, 9.3 against 9.5 % wobble); one new run came out slower with the
+  GPU in a slower state and the share dipping below the threshold after cuts.
+  The GPU's state moved between rounds (0.73 to 1.2 of the set speed on the
+  same build), so only back-to-back pairs compare. On the 120 Hz panel: light
+  and edge scenes 1.1 and 0.5 cuts a second to none, wobble 7 and 5 % to 4 %,
+  speed 0.99 to 1.00; the overlay scene sits at the threshold there (pass
+  0.36 to 0.80 of the interval with the GPU's clock) and came out inside the
+  old build's own swing; where the solver fills two frames both collapse
+  alike. The picture changed on 85 to 99 % of frames at 120 Hz.
+- **Harness.** The pacing harness models the share as the solver's steps
+  times their cost over the refresh, three frames late. Its wobble with room
+  to spare fell from 18.3 % to 3.8 % and without from 16.6 % to 10.9 %; the
+  ratchets are at 6 % and 14 %. Two unit tests: a light solver's late frame
+  holds, a filling one's cuts, an unknown share cuts; the share is the median
+  of the latest six and says nothing under three readings.
+- **Trace:** `solver_share` is a column, the controller's view of it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile. No device
+  suite: main-world controller logic, and a host timestamp on each reading.
