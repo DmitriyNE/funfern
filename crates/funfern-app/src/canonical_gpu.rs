@@ -158,6 +158,9 @@ const FOURTH_ORDER_FLAG: u32 = 256;
 /// The fourth-order correction sits in the kicks, beside a stiffness-side
 /// field law, rather than in the drift.
 const KICK_FORM_FLAG: u32 = 512;
+/// The short-wave split's passes a step: field, stresses and apply before the
+/// first kick; field, stresses, predict, stresses and apply after the second.
+const SHORT_WAVE_DISPATCHES: usize = 8;
 /// A loss record whose rate is van der Pol's, `β(u²/a² − 1)`.
 const TEMPORAL_LOSS_VAN_DER_POL: u32 = 16;
 /// A record whose drive runs under its lane's gate window, with the
@@ -1045,6 +1048,11 @@ pub struct CanonicalGpuPlan {
     /// refused on such a generation until their device stages read the
     /// nonlinear maps; the filter reads them through its site pass.
     pub field_laws: bool,
+    /// Gate O: the generation carries a short-wave viscosity, split about
+    /// the core: three passes before the first kick and five after the
+    /// second, a word a node after the fourth-order ones, and loss stages,
+    /// whose copy of the flux the first half writes for the first kick.
+    pub short_wave: bool,
     /// Gate O: nodes carrying the integrated field `r`, the tail of the
     /// auxiliary lanes. Zero without a restoring law.
     pub integrated_count: usize,
@@ -1108,23 +1116,32 @@ impl CanonicalGpuPlan {
             self.manifest.dispatches_per_step -= fourth_order_dispatches(flags);
         }
         let mut flags = flags & !(FOURTH_ORDER_FLAG | KICK_FORM_FLAG);
-        if integrator == CanonicalIntegrator::FourthOrder {
+        let fourth_order = integrator == CanonicalIntegrator::FourthOrder;
+        if fourth_order {
             flags |= FOURTH_ORDER_FLAG;
             if form == FourthOrderForm::Kick {
                 flags |= KICK_FORM_FLAG;
             }
+            self.manifest.dispatches_per_step += fourth_order_dispatches(flags);
+        }
+        // The short-wave prediction's words sit after the fourth-order ones,
+        // under either integrator.
+        if fourth_order || self.short_wave {
             let control = &self.control;
             let (nodes, samples) = (control.counts_a.x as usize, control.counts_a.y as usize);
             let (traces, modes) = (control.counts_b.y as usize, control.counts_b.z as usize);
             let work = control.counts_a.w as usize + 3 * modes + traces;
             let accounting = nodes + samples + modes;
-            let end = work + 2 * accounting + traces + 2 * (nodes + samples);
+            let end = work
+                + 2 * accounting
+                + traces
+                + 2 * (nodes + samples)
+                + if self.short_wave { nodes } else { 0 };
             if self.scratch.len() < end {
                 self.scratch.resize(end, GpuCanonicalScratchWord::default());
                 self.manifest.bytes.scratch =
                     self.scratch.len() * size_of::<GpuCanonicalScratchWord>();
             }
-            self.manifest.dispatches_per_step += fourth_order_dispatches(flags);
         }
         self.control.boundary_offsets.w = flags;
     }
@@ -1526,6 +1543,15 @@ impl CanonicalGpuPlan {
             self.needs_accounting = true;
             self.control.boundary_offsets.w |= 2;
             self.manifest.dispatches_per_step += 1;
+        }
+        if !short_wave.is_empty() && !self.short_wave {
+            self.short_wave = true;
+            self.manifest.dispatches_per_step += SHORT_WAVE_DISPATCHES;
+            if !self.needs_loss_stages {
+                self.needs_loss_stages = true;
+                self.control.boundary_offsets.w |= 1;
+                self.manifest.dispatches_per_step += 2;
+            }
         }
 
         self.tables[header_offset] = GpuCanonicalTableWord {
@@ -2058,6 +2084,7 @@ impl CanonicalGpuPlan {
             trace_direct,
             grid_filter_admitted: true,
             field_laws: false,
+            short_wave: false,
             integrated_count: 0,
             needs_loss_stages,
             needs_accounting,
@@ -2178,7 +2205,8 @@ impl CanonicalGpuPlan {
         }
         self.needs_loss_stages = primary_rates.iter().any(|rate| *rate != 0.0)
             || complementary_rates.iter().any(|rate| *rate != 0.0)
-            || self.nodes.iter().any(|node| node.boundary.z != 0);
+            || self.nodes.iter().any(|node| node.boundary.z != 0)
+            || self.short_wave;
         self.needs_accounting |= self.needs_loss_stages;
         let mut flags = self.control.boundary_offsets.w & !0b111;
         flags |= u32::from(self.needs_loss_stages);
@@ -2187,6 +2215,7 @@ impl CanonicalGpuPlan {
         self.control.boundary_offsets.w = flags;
         self.manifest.dispatches_per_step = 4
             + fourth_order_dispatches(flags)
+            + SHORT_WAVE_DISPATCHES * usize::from(self.short_wave)
             + usize::from(self.needs_loss_stages) * 2
             + usize::from(self.needs_accounting)
             + 3 * usize::from(self.field_laws)
@@ -3987,6 +4016,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     nonlinear_trace: bool,
     fourth_order: bool,
     fourth_order_kick_form: bool,
+    short_wave: bool,
     drive_count: u32,
     material_runtime_count: u32,
     source_count: u32,
@@ -4216,6 +4246,7 @@ fn add_canonical_buffers(
         nonlinear_trace: plan.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0,
         fourth_order: plan.control.boundary_offsets.w & FOURTH_ORDER_FLAG != 0,
         fourth_order_kick_form: plan.control.boundary_offsets.w & KICK_FORM_FLAG != 0,
+        short_wave: plan.short_wave,
         drive_count,
         material_runtime_count,
         source_count,
@@ -5812,6 +5843,13 @@ struct CanonicalPipeline {
     fourth_order_tangents_first: CachedComputePipelineId,
     fourth_order_tangents_second: CachedComputePipelineId,
     fourth_order_fields: CachedComputePipelineId,
+    short_wave_fields_first: CachedComputePipelineId,
+    short_wave_stresses_first: CachedComputePipelineId,
+    short_wave_apply_first: CachedComputePipelineId,
+    short_wave_fields_second: CachedComputePipelineId,
+    short_wave_stresses_second: CachedComputePipelineId,
+    short_wave_predict: CachedComputePipelineId,
+    short_wave_apply_second: CachedComputePipelineId,
 }
 
 #[derive(Resource)]
@@ -5917,6 +5955,13 @@ fn init_canonical_pipeline(
     let fourth_order_tangents_first = queue("fourth_order_tangents_first");
     let fourth_order_tangents_second = queue("fourth_order_tangents_second");
     let fourth_order_fields = queue("fourth_order_fields");
+    let short_wave_fields_first = queue("short_wave_fields_first");
+    let short_wave_stresses_first = queue("short_wave_stresses_first");
+    let short_wave_apply_first = queue("short_wave_apply_first");
+    let short_wave_fields_second = queue("short_wave_fields_second");
+    let short_wave_stresses_second = queue("short_wave_stresses_second");
+    let short_wave_predict = queue("short_wave_predict");
+    let short_wave_apply_second = queue("short_wave_apply_second");
     commands.insert_resource(CanonicalPipeline {
         layout,
         start_loss,
@@ -5970,6 +6015,13 @@ fn init_canonical_pipeline(
         fourth_order_tangents_first,
         fourth_order_tangents_second,
         fourth_order_fields,
+        short_wave_fields_first,
+        short_wave_stresses_first,
+        short_wave_apply_first,
+        short_wave_fields_second,
+        short_wave_stresses_second,
+        short_wave_predict,
+        short_wave_apply_second,
     });
 
     let map_layout = BindGroupLayoutDescriptor::new(
@@ -6647,6 +6699,13 @@ fn compute_canonical_wave(
         pipeline.fourth_order_tangents_first,
         pipeline.fourth_order_tangents_second,
         pipeline.fourth_order_fields,
+        pipeline.short_wave_fields_first,
+        pipeline.short_wave_stresses_first,
+        pipeline.short_wave_apply_first,
+        pipeline.short_wave_fields_second,
+        pipeline.short_wave_stresses_second,
+        pipeline.short_wave_predict,
+        pipeline.short_wave_apply_second,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -6894,6 +6953,15 @@ fn compute_canonical_wave(
             pass.set_pipeline(pipelines[0]);
             pass.dispatch_workgroups(workgroups(handles.scratch_count), 1, 1);
         }
+        // The short-wave split's first half, on the flux the loss stage left.
+        if handles.short_wave {
+            pass.set_pipeline(pipelines[47]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.set_pipeline(pipelines[48]);
+            pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+            pass.set_pipeline(pipelines[49]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+        }
         // A field-dependent generation solves each site's inverse once per
         // stage into its cache: the samples' secants before each kick, the
         // nodes' fields before the drift.
@@ -6948,6 +7016,20 @@ fn compute_canonical_wave(
         pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         if handles.trace_count > 0 {
             encode_boundary_kick(&mut pass, &pipelines, handles, true);
+        }
+        // The short-wave split's second half: the field, the stresses on it,
+        // the prediction, the stresses on that, and the half applied.
+        if handles.short_wave {
+            pass.set_pipeline(pipelines[50]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.set_pipeline(pipelines[51]);
+            pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+            pass.set_pipeline(pipelines[52]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.set_pipeline(pipelines[51]);
+            pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+            pass.set_pipeline(pipelines[53]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         }
         if handles.needs_loss_stages {
             pass.set_pipeline(pipelines[11]);

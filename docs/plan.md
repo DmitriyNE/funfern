@@ -1088,7 +1088,8 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   on the production CPU path the box mode's temporal error at the app's step
   is 2.1e-5 rad against 6.4e-2, so the step is spatial-error limited; every
   composition of the step is 5 to 19 times more accurate at that step, the
-  short-wave rows excepted (first order under any integrator). Two forms: the
+  short-wave rows excepted (first order under any integrator, until the
+  split below). Two forms: the
   correction in the drift for most generations, in the kicks where a
   stiffness-side field law is present, because each is symplectic only when
   the other side is quadratic (the drift form leaks 38% of a stiffness-side
@@ -1101,7 +1102,14 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   its modes (130 runs) agree with the fourth-order reference to their gates,
   and fail at 1e-3 to 6e-2 against a leapfrog device. It costs 1.07 to 1.08×
   a step on fixed and driven generations and 1.19× under the kick form. The
-  fourth-order step is the production integrator.
+  fourth-order step is the production integrator. The short-wave split,
+  done the same day before the merge: the viscosity sits outside the core in
+  two halves, a forward Euler one before the first kick and a predicted one
+  after the second, second order together; the short-wave rows reach order
+  two under both integrators (smooth short-wave loss 1.7e-3 to 1.5e-5 at the
+  app's step) and the ledger closes as before. On the device it is eight
+  passes on short-wave generations, which also run the loss stages now; the
+  throughput cost waits on an unloaded GPU.
 
 - [ ] A larger step under the fourth-order integrator, the conservative
   variant: 1.2× the leapfrog bound where the app runs 0.9× today. The scheme's
@@ -1304,15 +1312,6 @@ is next touched.
   step only when a new generation's stiffest row moves it, so nothing on
   screen should reach this; worth a look if a drag ever re-steps quickly
   (`docs/spikes/funfern-fourth-order-step.md`, "Handoffs").
-- A self-oscillating medium's short-wave viscosity is first order in the step,
-  on CPU and device alike: it is applied on the drift's midpoint field, which
-  does not contain the viscosity's own increment, so within that subflow the
-  step is forward Euler. Measured through `canonical_temporal_primary_rate`, a
-  van der Pol state with a gradient closes on its trajectory at order one while
-  a uniform one closes at order two. The term damps mesh-scale patterns and
-  vanishes as the mesh refines; splitting it half before the drift and half
-  after would make it symmetric. The authored short-wave loss is the same
-  stress, applied the same way, so it is first order too.
 - The fixed estimator's outgoing-trace defect does not take out the primary
   loss the step applies at trace nodes, a defect of order `γh` in the trace
   flux. Measured on a static box behind second-order walls with a primary loss

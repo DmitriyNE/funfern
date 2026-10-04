@@ -119,7 +119,8 @@ Three things the table does not show directly:
   Pol's automatic short-wave viscosity and the authored short-wave loss are
   applied once after the second kick on the drift's field, forward Euler in
   their own subflow, as plan.md "Worth checking sometime" already records.
-  They bound what any integrator gains there to about 1.6 to 3 times.
+  They bound what any integrator gains there to about 1.6 to 3 times. Fixed
+  after stage D: see "The short-wave split" below.
 - **Forcing needs its own quadrature.** The kicks integrate a source rate by
   the trapezoid at the step's ends, an `h³/12 · s″` error per step that holds
   every integrator at second order with the leapfrog's constant. Applying
@@ -276,3 +277,70 @@ when the stiffest row does. Filed under "Worth checking sometime".
   with the step's breathing about its conserved store: the Kerr bulk's
   energy, 2.3e-4 against the leapfrog's 1.9e-4 at the same second order, and
   the short-wave loss's closure, now held to the bare step's own breathing.
+
+## The short-wave split
+
+Done after stage D, on 2026-10-04, before the branch was merged. The
+short-wave viscosity (van der Pol's automatic one and the authored
+short-wave loss) was read once on the drift's midpoint field and applied
+after the second kick: forward Euler in its own subflow, and a Lie step
+against the core, so first order under either integrator.
+
+Two repairs that do not work, both measured:
+
+- **A predictor alone.** Reading the force at `u(Q − h/2 · F)` makes the
+  viscosity second order against itself, but its whole impulse still lands
+  after the second kick while the drift integrates a field without it, so
+  `b` takes an `h²` error a step. The composition table's short-wave rows
+  stayed at order 1.0 (1.65e-3 at the app's step). The rate-against-
+  trajectory test cannot see this; it checks one step's consistency.
+- **Half before the drift, the rest after the second kick.** Second order,
+  but the viscosity then sits inside the kick-drift-kick core and breaks the
+  core's energy identity: the ledger's residual grows as `dt²` and reaches
+  30% of the short-wave loss on a mesh-ceiling mode at the app's step,
+  against 1e-5 of it before. The same under both integrators.
+
+What is in: the viscosity is split about the core as the loss stages are,
+outside it, in two halves of different kinds:
+
+- before the first kick, a forward Euler half on the field the core starts
+  from, `Q − h/2 · F(Q)`;
+- after the second kick, a half that predicts before it applies,
+  `Q − h/2 · F(Q − h/2 · F(Q))`.
+
+On the viscosity alone the pair is `1 − x + x²/2`, the exponential to second
+order. With the core between them the composition matches the exact flow to
+`h²`: writing `C` and `V` for the two generators, both halves have the same
+first-order term `−V/2`, the second has `V²/4` as its own second-order term,
+and the products collect to `(C − V)²/2`. Each half reads the
+complementary map's drive at its own instant, the step's start and end.
+
+| short-wave rows, at the app's step (0.9) | before | split |
+| --- | --- | --- |
+| short-wave loss, smooth, drift form | 1.7e-3 (order 1.0) | 1.5e-5 (order 2.0) |
+| short-wave loss, rough, drift form | 1.6e-2 (order 1.0) | 6.3e-4 (order 2.0) |
+| van der Pol, smooth, drift form | 6.1e-4 (order 1.1) | 4.6e-4 (order 2.0) |
+| van der Pol, rough, drift form | 1.1e-2 (order 1.0) | 2.7e-3 (order 2.0) |
+
+The leapfrog gains the same order: the smooth short-wave row goes from
+2.7e-3 to 1.0e-3. Van der Pol's smooth row moves little because its Bernoulli
+loss stages, not the viscosity, dominate there. The ledger closes as it did:
+on the mesh-ceiling mode the residual is 6e-13 of a 4.8e-9 loss at 0.2 of
+the bound and 8e-15 at 0.9.
+
+On the device the stress no longer rides the drift and the second kick. The
+first half is three passes after the loss stage (each node's field, each
+sample's stress over its drive, each node's gather and update) and the
+second five after the second kick and its wall (field, stresses, the
+prediction, stresses, update), on a word a node after the fourth-order ones.
+The first half writes the flux the first kick reads, which the kick takes
+from the loss stage's copy, so a generation with a short-wave loss and no
+other now runs the loss stages too, and the live loss patch keeps them on
+there. The suite: 23 default runs and 107 mode runs, all within their gates,
+the short-wave modes at 3e-7 to 2e-6.
+
+Not measured: the throughput cost. The timing runs were taken while another
+process loaded the GPU, and the unchanged driven scene alone read 410 to
+2,094 µs a step between rounds, against 425 µs in stage C. Expected: eight
+passes, three of them over the samples, on short-wave generations only.
+

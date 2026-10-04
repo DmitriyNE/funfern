@@ -2299,6 +2299,29 @@ impl CanonicalTemporalWaveOperator {
         Ok(Some(force))
     }
 
+    /// Whether a self-oscillating law or a short-wave loss gives the
+    /// generation a short-wave viscosity.
+    fn has_short_wave(&self) -> bool {
+        !self.short_wave_samples.is_empty()
+    }
+
+    /// The nodes whose flux the short-wave force moves. A prescribed node
+    /// holds its pin and an outgoing trace node is the wall's, as on the
+    /// device, where both are stepped outside the bulk kick.
+    fn short_wave_moved(&self, forcing: &CanonicalForcing) -> Vec<bool> {
+        let mut moved = forcing
+            .prescribed()
+            .iter()
+            .map(|signal| signal.is_none())
+            .collect::<Vec<_>>();
+        if let Some(boundary) = self.base.outgoing_boundary() {
+            for node in boundary.trace_nodes() {
+                moved[*node as usize] = false;
+            }
+        }
+        moved
+    }
+
     /// Whether the generation carries a restoring law (Gate O).
     pub fn has_restoring(&self) -> bool {
         self.has_restoring
@@ -4115,6 +4138,30 @@ impl CanonicalTemporalWaveState {
         // here: a pin at an instant the work quadrature does not know about
         // leaves a first-order hole in the energy balance, measured at order
         // 0.99 before this was moved.
+        // The short-wave viscosity of a self-oscillating medium or a
+        // short-wave loss, split about the conservative core as the loss
+        // stages are: a forward Euler half here, on the field the core starts
+        // from, and after the second kick a half that predicts before it
+        // applies. Together they are second order, the core included, and
+        // on the viscosity alone they are `1 − x + x²/2` of a step. The core
+        // itself is left whole, so its energy identity, and the balance,
+        // close as they do without the viscosity. Read once on the drift's
+        // midpoint field and applied after the second kick, as it was, the
+        // step was first order.
+        let (mut short_wave_gain, mut short_wave_loss) = (0.0, 0.0);
+        if operator.has_short_wave() {
+            let (gain, loss) = short_wave_half(
+                operator,
+                &mut primary,
+                forcing,
+                0.5 * duration,
+                start_time,
+                false,
+                &self.runtime,
+            )?;
+            short_wave_gain += gain;
+            short_wave_loss += loss;
+        }
         let mut first_force = operator.force_at(&complementary, start_time, &self.runtime)?;
         add_gap_force(operator, &self.thin_gap_jump, &mut first_force)?;
         add_restoring_force(operator, &self.integrated_field, &mut first_force)?;
@@ -4175,8 +4222,7 @@ impl CanonicalTemporalWaveState {
             }
             field
         };
-        // Everything that drifts reads the integrator's field; the
-        // short-wave viscosity below, a loss, keeps the plain midpoint one.
+        // Everything that drifts reads the integrator's field.
         let drift_field = if form == Some(FourthOrderForm::Drift) {
             fourth_order_temporal_field(
                 operator,
@@ -4223,13 +4269,6 @@ impl CanonicalTemporalWaveState {
         validate_finite(&integrated)?;
         let (_, complementary_rate_end) =
             operator.complementary_energy_and_rate(&complementary, end_time, &self.runtime)?;
-        // The short-wave viscosity of a self-oscillating medium or a
-        // short-wave loss, on the drift's midpoint field and over the whole
-        // step: the midpoint rule. It is applied after the second kick, as the
-        // device does.
-        let short_wave_force =
-            operator.short_wave_force(&midpoint_field, end_time, &self.runtime)?;
-
         let mut second_force = operator.force_at(&complementary, end_time, &self.runtime)?;
         add_gap_force(operator, &gap_jump, &mut second_force)?;
         add_restoring_force(operator, &integrated, &mut second_force)?;
@@ -4265,18 +4304,19 @@ impl CanonicalTemporalWaveState {
         prescribed_exchange += exchange;
         boundary_loss += escaped;
         validate_finite(&primary)?;
-        let (short_wave_gain, short_wave_loss) = match &short_wave_force {
-            Some(force) => apply_short_wave(
+        if operator.has_short_wave() {
+            let (gain, loss) = short_wave_half(
                 operator,
                 &mut primary,
-                force,
-                duration,
                 forcing,
+                0.5 * duration,
                 end_time,
+                true,
                 &self.runtime,
-            )?,
-            None => (0.0, 0.0),
-        };
+            )?;
+            short_wave_gain += gain;
+            short_wave_loss += loss;
+        }
 
         let (second_primary_loss, second_complementary_loss, second_gain) = decay(
             operator,
@@ -4856,6 +4896,60 @@ fn active_nodes(
     active
 }
 
+/// One half of the short-wave viscosity's split, over `duration` at `time`,
+/// and the energy it put in and took out, as [`apply_short_wave`] returns them.
+/// The first half is forward Euler on the field it is handed. The second
+/// predicts the flux a forward Euler half would reach and applies the force
+/// read there, so that on the viscosity alone the pair is `1 − x + x²/2`.
+fn short_wave_half(
+    operator: &CanonicalTemporalWaveOperator,
+    primary: &mut [f64],
+    forcing: &CanonicalForcing,
+    duration: f64,
+    time: f64,
+    predicted: bool,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<(f64, f64), WaveError> {
+    let field = short_wave_field(operator, primary, forcing, time, runtime)?;
+    let Some(mut force) = operator.short_wave_force(&field, time, runtime)? else {
+        return Ok((0.0, 0.0));
+    };
+    if predicted {
+        let mut flux = primary.to_vec();
+        for ((flux, value), moved) in flux
+            .iter_mut()
+            .zip(&force)
+            .zip(operator.short_wave_moved(forcing))
+        {
+            if moved {
+                *flux -= duration * value;
+            }
+        }
+        let field = short_wave_field(operator, &flux, forcing, time, runtime)?;
+        force = operator
+            .short_wave_force(&field, time, runtime)?
+            .ok_or(WaveError::InvalidState)?;
+    }
+    apply_short_wave(operator, primary, &force, duration, forcing, time, runtime)
+}
+
+/// The field the short-wave stress reads: the flux's, and a pin's signal.
+fn short_wave_field(
+    operator: &CanonicalTemporalWaveOperator,
+    primary: &[f64],
+    forcing: &CanonicalForcing,
+    time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<Vec<f64>, WaveError> {
+    let mut field = operator.primary_field_at(primary, time, runtime)?;
+    for (value, signal) in field.iter_mut().zip(forcing.prescribed()) {
+        if let Some(signal) = signal {
+            *value = signal.value(time);
+        }
+    }
+    Ok(field)
+}
+
 /// Applies the short-wave force over `duration` and returns the energy it put
 /// in at active nodes and the energy it took out elsewhere; see
 /// [`CanonicalTemporalStepAccounting::short_wave_loss`] for their sign. At an
@@ -4877,12 +4971,7 @@ fn apply_short_wave(
     runtime: &CanonicalMaterialRuntimeState,
 ) -> Result<(f64, f64), WaveError> {
     let mass = operator.primary_mass_at(time, runtime)?;
-    let mut trace = vec![false; primary.len()];
-    if let Some(boundary) = operator.base().outgoing_boundary() {
-        for node in boundary.trace_nodes() {
-            trace[*node as usize] = true;
-        }
-    }
+    let moved = operator.short_wave_moved(forcing);
     let active = |node: usize| match operator.active_nodes.get(node) {
         Some(active) => *active,
         None => operator.has_active_loss,
@@ -4894,7 +4983,7 @@ fn apply_short_wave(
     };
     let (mut gained, mut lost) = (0.0, 0.0);
     for (node, value) in force.iter().enumerate() {
-        if *value == 0.0 || forcing.prescribed()[node].is_some() || trace[node] {
+        if *value == 0.0 || !moved[node] {
             continue;
         }
         let old = primary[node];
@@ -13787,14 +13876,16 @@ mod tests {
     /// takes, to second order, on every composition the step runs: halving
     /// the step divides the gap to the centred difference by four.
     ///
-    /// Except one term, whose limit is the step's and not the rate's. The
-    /// short-wave viscosity is applied on the drift's midpoint field, which
-    /// does not contain the viscosity's own increment, so within its own
-    /// subflow the step is forward Euler and a self-oscillating medium with a
-    /// gradient converges at first order. Measured, the gap halves with each
-    /// halving past the first; a uniform state, which the viscosity does not
-    /// touch, is second order again, so the Bernoulli rate and the restoring
-    /// force are exact.
+    /// That includes the short-wave viscosity. It used to be read once on the
+    /// drift's midpoint field and applied after the second kick, forward Euler
+    /// in its own subflow, and a self-oscillating medium with a gradient
+    /// closed at first order (the gap halved with each halving). The step now
+    /// splits it about the core in two halves that are second order together,
+    /// and the gradient cases close at second order with the rest. The pumped
+    /// short-wave loss reads 2.7 the old way and holds the stress's map to
+    /// each half's instant. On the second-order wall the wall's own terms
+    /// dominate the gap and it reads 4.0 either way: that case keeps the
+    /// halves off the trace nodes, it does not measure the order.
     #[test]
     fn the_temporal_rate_is_the_trajectorys_own_derivative() {
         let mut pumped = Scene::default();
@@ -13810,6 +13901,10 @@ mod tests {
         kerr_pumped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
         let (_, mut gapped, _) = filter_compositions().remove(3);
         gapped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
+        let mut short_wave = Scene::default();
+        short_wave.materials[0].short_wave_loss = 1.0;
+        let mut short_wave_pumped = short_wave.clone();
+        short_wave_pumped.materials[0].stiffness_law.drive = pump(0.25, 0.7, -0.3);
         // Label, generation, prescribed wall, uniform state, least ratio.
         let cases = [
             (
@@ -13883,7 +13978,21 @@ mod tests {
                 van_der_pol_operator(4.0, 0.05, 3.0),
                 false,
                 false,
-                1.8,
+                3.5,
+            ),
+            (
+                "short-wave loss, second-order wall",
+                walled(OuterBoundaryCondition::SecondOrderOutgoing, &short_wave),
+                false,
+                false,
+                3.5,
+            ),
+            (
+                "short-wave loss, pumped stiffness, prescribed wall",
+                walled(OuterBoundaryCondition::Reflecting, &short_wave_pumped),
+                true,
+                false,
+                3.5,
             ),
         ];
         for (label, operator, prescribed, uniform, least_ratio) in cases {
@@ -13908,6 +14017,10 @@ mod tests {
             let time_step = 0.25 * operator.maximum_time_step();
             let coarse = rate_against_trajectory(&operator, &forcing, time_step, 2, uniform);
             let fine = rate_against_trajectory(&operator, &forcing, 0.5 * time_step, 4, uniform);
+            println!(
+                "{label}: {coarse:.3e} then {fine:.3e}, ratio {:.2}",
+                coarse / fine
+            );
             assert!(
                 fine < 0.025 && coarse / fine > least_ratio,
                 "{label}: the rate missed the trajectory by {coarse:.3e}, then {fine:.3e}"

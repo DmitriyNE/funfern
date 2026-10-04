@@ -34,6 +34,10 @@
 //! run, so every factor pays for the envelope's exponential: the dearest a
 //! gate gets.
 //!
+//! `--short-wave` adds an authored short-wave loss α = 0.5, so the step runs
+//! the short-wave split's eight passes and, with no other loss, the two loss
+//! stages its first half needs. Van der Pol carries the same split already.
+//!
 //! Stepping is unfenced, so the figure is what a step costs the device rather
 //! than the readback round trip the interactive lead fence waits on.
 
@@ -62,7 +66,7 @@ struct Pending {
 
 #[derive(Resource)]
 struct Timing {
-    label: &'static str,
+    label: String,
     nodes: usize,
     time_step: f64,
     started: Option<Instant>,
@@ -79,6 +83,7 @@ fn main() -> AppExit {
     let constant_loss = std::env::args().any(|argument| argument == "--loss");
     let oscillator = van_der_pol || std::env::args().any(|argument| argument == "--oscillator");
     let gated = std::env::args().any(|argument| argument == "--gated");
+    let short_wave = std::env::args().any(|argument| argument == "--short-wave");
     let amplitude = if nonlinear { 12.0 } else { 1.0 };
     let mut scene = Scene::initial();
     if driven {
@@ -144,6 +149,9 @@ fn main() -> AppExit {
             },
         });
     }
+    if short_wave {
+        scene.materials[0].short_wave_loss = 0.5;
+    }
     let mut fixed_scene = scene.clone();
     for material in &mut fixed_scene.materials {
         material.mass_law = CoefficientLaw::linear();
@@ -208,6 +216,11 @@ fn main() -> AppExit {
         (_, true, _, _) => "nonlinear",
         (true, false, _, _) => "driven",
         (false, false, _, _) => "fixed",
+    };
+    let label = if short_wave {
+        format!("{label}, short-wave loss")
+    } else {
+        label.to_string()
     };
     println!(
         "gpu {label} timing: {} Q, {} b, dt {time_step:.4e}, {STEPS} steps",

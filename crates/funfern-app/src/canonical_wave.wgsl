@@ -197,6 +197,11 @@ fn fourth_order_node_offset() -> u32 { return sample_secant_offset() + control.c
 fn fourth_order_sample_offset() -> u32 {
     return fourth_order_node_offset() + control.counts_a.x;
 }
+// Gate O: the short-wave words, after the fourth-order ones, one per node: the
+// field the short-wave stress reads, in x.
+fn short_wave_node_offset() -> u32 {
+    return fourth_order_sample_offset() + control.counts_a.y;
+}
 fn has_loss_stages() -> bool { return (control.boundary_offsets.w & 1u) != 0u; }
 // A time-driven generation carrying loss reads its rates from loss records.
 fn loss_records() -> bool { return (control.boundary_offsets.w & 64u) != 0u; }
@@ -573,9 +578,9 @@ fn sample_loss_rate(sample: u32, local_time: f32) -> f32 {
 fn node_is_active(node: u32) -> bool { return nodes[node].boundary.w != 0u; }
 
 // Gate O: where each sample's short-wave viscosity `τ` sits, four to a word,
-// or 0 when no self-oscillating law or short-wave loss acts. The drift leaves
-// `τ η C u` in the sample's scratch `zw`, and every node's second kick
-// gathers it; see `short_wave_viscosity` on the reference.
+// or 0 when no self-oscillating law or short-wave loss acts. The short-wave
+// passes leave `τ η C u` in each sample's scratch `zw` and gather it at the
+// nodes; see `short_wave_viscosity` on the reference.
 fn short_wave_offset() -> u32 {
     if !temporal_enabled() { return 0u; }
     return tables[control.runtime_slots.z + 2u].data.w;
@@ -1023,21 +1028,11 @@ fn source_rate(node: u32, local_time: f32) -> f32 {
 }
 
 fn gathered_force(node: u32, second: bool) -> f32 {
-    return gathered_forces(node, second, false).x;
-}
-
-// The node's force and, with `short_wave`, the gather of the short-wave
-// stresses the drift left, through the same entries. The stress reads the
-// complementary map with its drive and without a field law's secant, as the
-// reference's `short_wave_force` does: it is a viscosity, not the medium's
-// own response.
-fn gathered_forces(node: u32, second: bool, short_wave: bool) -> vec2<f32> {
     let range = nodes[node].ranges.xy;
     let driven = temporal_enabled();
     let force_time = control.clock_f32.y
         + select(0.0, control.clock_f32.x, second);
     var result = 0.0;
-    var stress = 0.0;
     for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
         let index = tables[entry].data.x;
         let kind = tables[entry].data.y;
@@ -1062,13 +1057,9 @@ fn gathered_forces(node: u32, second: bool, short_wave: bool) -> vec2<f32> {
             }
             let coefficient = vec2<f32>(coefficient_x, table_float(entry, 3u));
             result += inverse_factor * dot(coefficient, flux);
-            if short_wave {
-                stress += drive_factor
-                    * dot(coefficient, scratch[complementary_offset() + index].values.zw);
-            }
         }
     }
-    return vec2<f32>(result, stress);
+    return result;
 }
 
 fn gap_force(node: u32, second: bool) -> f32 {
@@ -2033,6 +2024,9 @@ fn commit_event() {
     if operation == 3u {
         var flags = control.boundary_offsets.w & (8u | 256u | 512u);
         flags |= control.event.w & 1u;
+        // The short-wave split's first half writes the flux the first kick
+        // reads, which it reads from the loss stage's copy.
+        if short_wave_offset() != 0u { flags |= 1u; }
         flags |= 2u;
         flags |= control.event.w & 4u;
         control.boundary_offsets.w = flags;
@@ -2348,22 +2342,7 @@ fn kick_node(node: u32, second: bool) {
     let target_time = control.clock_f32.y
         + select(select(duration, 0.0, temporal_enabled()), control.clock_f32.x, second);
     let source = step_source(node, source_time);
-    // Gate O: the second kick also gathers the short-wave stresses; a
-    // law-carrying generation keeps no force cache, so the gather is the one
-    // the force needs anyway.
-    let short_wave = second && short_wave_offset() != 0u;
-    var held_force: f32;
-    var viscous = 0.0;
-    if short_wave {
-        let forces = gathered_forces(node, second, true);
-        held_force = forces.x + restoring_force(node, second);
-        if fourth_order() && fourth_order_kick_form() {
-            held_force += fourth_order_kick_correction(node, second);
-        }
-        viscous = forces.y;
-    } else {
-        held_force = kick_force(node, second);
-    }
+    let held_force = kick_force(node, second);
     let net = source - held_force;
     if nodes[node].boundary.x != NO_INDEX {
         return;
@@ -2371,8 +2350,7 @@ fn kick_node(node: u32, second: bool) {
     let old = select(
         accepted_q(node), candidate_q(node), second || has_loss_stages());
     if temporal_enabled() && node_is_nonlinear(node) {
-        kick_nonlinear_node(
-            node, old, net, source, held_force, duration, target_time, short_wave, viscous);
+        kick_nonlinear_node(node, old, net, source, held_force, duration, target_time);
         if second { inject_at(node); }
         return;
     }
@@ -2408,15 +2386,6 @@ fn kick_node(node: u32, second: bool) {
     if nodes[node].boundary.z != 0u {
         scratch[node].values.y += energy_change - source_work + force_work + boundary_loss;
     }
-    // The short-wave viscosity over the whole step, on the drift's midpoint
-    // gradient, after the kick as the reference applies it. What it takes is
-    // charged to the loss lane, which an active node's reduction books as
-    // gain and a passive one's as primary loss. A pin holds.
-    if short_wave && nodes[node].boundary.z == 0u {
-        let damped = next - control.clock_f32.x * viscous;
-        scratch[node].values.z += 0.5 * (next * next - damped * damped) * inverse_mass;
-        next = damped;
-    }
     set_candidate_q(node, next);
     if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
     if second { inject_at(node); }
@@ -2427,13 +2396,10 @@ fn kick_node(node: u32, second: bool) {
 // written through the forward map, `Q = P(g)`. The energy lanes charge source and force work at the field of
 // the kick's mean flux, a second-order stand-in for the reference's exact
 // discrete gradient: these lanes are diagnostics, and an f32 energy quotient
-// would lose more to cancellation than the midpoint rule does. The
-// short-wave viscosity follows the kick as on a linear node, and its loss is
-// charged the same way, at the field of the mean of the two fluxes; the
-// reference takes the exact store difference.
+// would lose more to cancellation than the midpoint rule does.
 fn kick_nonlinear_node(
     node: u32, old: f32, net: f32, source: f32, held_force: f32,
-    duration: f32, target_time: f32, short_wave: bool, viscous: f32,
+    duration: f32, target_time: f32,
 ) {
     let pinned = nodes[node].boundary.z != 0u;
     let damping = nodes[node].damping_support.x;
@@ -2480,11 +2446,6 @@ fn kick_nonlinear_node(
             - temporal_primary_energy(node, old, target_time);
         scratch[node].values.y += energy_change - source_work + force_work
             + duration * damping * field * field;
-    } else if short_wave && viscous != 0.0 {
-        let damped = next - control.clock_f32.x * viscous;
-        let middle = temporal_primary_field(node, 0.5 * (next + damped), target_time);
-        scratch[node].values.z += middle * (next - damped);
-        next = damped;
     }
     set_candidate_q(node, next);
     if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
@@ -3290,6 +3251,145 @@ fn fourth_order_tangents_second(@builtin(global_invocation_id) id: vec3<u32>) {
     fourth_order_tangent(id.x, true);
 }
 
+// The short-wave force at a node, `Cᵀ W v(τ η C u)`, gathered from the stresses
+// the samples left. The stress reads the complementary map with its drive,
+// divided out where it was written, and without a field law's secant, as the
+// reference's `short_wave_force` does: it is a viscosity, not the medium's own
+// response.
+fn short_wave_gather(node: u32) -> f32 {
+    let range = nodes[node].ranges.xy;
+    var force = 0.0;
+    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+        if tables[entry].data.y == FORCE_KIND_GAP { continue; }
+        let coefficient = vec2<f32>(table_float(entry, 2u), table_float(entry, 3u));
+        force += dot(
+            coefficient, scratch[complementary_offset() + tables[entry].data.x].values.zw);
+    }
+    return force;
+}
+
+// The instant a half of the short-wave split sits at: the step's start for the
+// first, its end for the second.
+fn short_wave_time(second: bool) -> f32 {
+    return control.clock_f32.y + select(0.0, control.clock_f32.x, second);
+}
+
+// A pin holds and a trace node is the wall's, so the viscosity moves neither.
+fn short_wave_moves(node: u32) -> bool {
+    return nodes[node].boundary.x == NO_INDEX && nodes[node].boundary.z == 0u;
+}
+
+// The field the short-wave stress reads at a node holding `flux`: a pin's
+// signal, otherwise the flux through the node's map.
+fn short_wave_node_field(node: u32, flux: f32, time: f32) -> f32 {
+    if nodes[node].boundary.z != 0u { return prescribed_value(node, time); }
+    return temporal_primary_field(node, flux, time);
+}
+
+// Gate O: the short-wave viscosity is split about the conservative core as
+// the loss stages are, with the same composition as the reference's
+// `short_wave_half`: a forward Euler half before the first kick, and after the
+// second kick a half that predicts before it applies. Each half reads the
+// field (this pass), the stresses on it, and gathers them; the second half
+// does the last two twice.
+fn short_wave_fields(node: u32, second: bool) {
+    if stopped() || short_wave_offset() == 0u || node >= control.counts_a.x { return; }
+    let field = short_wave_node_field(node, candidate_q(node), short_wave_time(second));
+    scratch[short_wave_node_offset() + node].values.x = field;
+    if !finite_scalar(field) { reject(STATUS_NON_FINITE); }
+}
+
+// Each sample's stress `τ η C u` on the fields above, over its drive at the
+// half's instant. Written for every sample, zero where `τ` is, since the
+// gather sums every entry and the grid filter shares the lanes.
+fn short_wave_stresses(i: u32, second: bool) {
+    let short_wave = short_wave_offset();
+    if stopped() || short_wave == 0u || i >= control.counts_a.y { return; }
+    let viscosity = table_float(short_wave + i / 4u, i % 4u);
+    var stress = vec2<f32>(0.0);
+    if viscosity != 0.0 {
+        let sample = samples[i];
+        let reference = scratch[short_wave_node_offset() + sample.nodes_a.x].values.x;
+        var curl = vec2<f32>(0.0);
+        for (var local = 1u; local < 7u; local += 1u) {
+            let node = sample_node(sample, local);
+            curl += sample_curl(sample, local)
+                * (scratch[short_wave_node_offset() + node].values.x - reference);
+        }
+        stress = viscosity * control.evolution.y * curl
+            / temporal_complementary_factor(i, short_wave_time(second));
+    }
+    scratch[complementary_offset() + i].values.z = stress.x;
+    scratch[complementary_offset() + i].values.w = stress.y;
+}
+
+// The second half's prediction: the field a forward Euler half would reach.
+@compute @workgroup_size(128)
+fn short_wave_predict(@builtin(global_invocation_id) id: vec3<u32>) {
+    let node = id.x;
+    if stopped() || short_wave_offset() == 0u || node >= control.counts_a.x { return; }
+    if !short_wave_moves(node) { return; }
+    let force = short_wave_gather(node);
+    if force == 0.0 { return; }
+    let field = short_wave_node_field(
+        node, candidate_q(node) - 0.5 * control.clock_f32.x * force, short_wave_time(true));
+    scratch[short_wave_node_offset() + node].values.x = field;
+    if !finite_scalar(field) { reject(STATUS_NON_FINITE); }
+}
+
+// A half applied: the gathered force over half a step. What it takes is
+// charged to the loss lane, which an active node's reduction books as gain
+// and a passive one's as primary loss; a field law's store is charged at the
+// field of the mean flux, where the reference takes the exact difference.
+fn short_wave_apply(node: u32, second: bool) {
+    if stopped() || short_wave_offset() == 0u || node >= control.counts_a.x { return; }
+    if !short_wave_moves(node) { return; }
+    let force = short_wave_gather(node);
+    if force == 0.0 { return; }
+    let time = short_wave_time(second);
+    let old = candidate_q(node);
+    let next = old - 0.5 * control.clock_f32.x * force;
+    if node_is_nonlinear(node) {
+        scratch[node].values.z += temporal_primary_field(node, 0.5 * (old + next), time)
+            * (old - next);
+    } else {
+        scratch[node].values.z += 0.5 * (old * old - next * next)
+            * temporal_inverse_primary_mass(node, time);
+    }
+    set_candidate_q(node, next);
+    if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
+}
+
+@compute @workgroup_size(128)
+fn short_wave_fields_first(@builtin(global_invocation_id) id: vec3<u32>) {
+    short_wave_fields(id.x, false);
+}
+
+@compute @workgroup_size(128)
+fn short_wave_stresses_first(@builtin(global_invocation_id) id: vec3<u32>) {
+    short_wave_stresses(id.x, false);
+}
+
+@compute @workgroup_size(128)
+fn short_wave_apply_first(@builtin(global_invocation_id) id: vec3<u32>) {
+    short_wave_apply(id.x, false);
+}
+
+@compute @workgroup_size(128)
+fn short_wave_fields_second(@builtin(global_invocation_id) id: vec3<u32>) {
+    short_wave_fields(id.x, true);
+}
+
+@compute @workgroup_size(128)
+fn short_wave_stresses_second(@builtin(global_invocation_id) id: vec3<u32>) {
+    short_wave_stresses(id.x, true);
+}
+
+@compute @workgroup_size(128)
+fn short_wave_apply_second(@builtin(global_invocation_id) id: vec3<u32>) {
+    short_wave_apply(id.x, true);
+}
+
 @compute @workgroup_size(128)
 fn nonlinear_node_fields(@builtin(global_invocation_id) id: vec3<u32>) {
     let node = id.x;
@@ -3349,9 +3449,6 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let sample = samples[i];
         var curl = vec2<f32>(0.0);
-        // The stress below is a viscosity on the plain midpoint gradient,
-        // whatever the drift itself reads.
-        var plain_curl = vec2<f32>(0.0);
         if fourth_order() {
             let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
             let reference = drift_field(sample.nodes_a.x, middle_time);
@@ -3359,14 +3456,6 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
                 let node = sample_node(sample, local);
                 curl += sample_curl(sample, local)
                     * (drift_field(node, middle_time) - reference);
-            }
-            if short_wave_offset() != 0u {
-                let plain_reference = plain_drift_field(sample.nodes_a.x, middle_time);
-                for (var local = 1u; local < 7u; local += 1u) {
-                    let node = sample_node(sample, local);
-                    plain_curl += sample_curl(sample, local)
-                        * (plain_drift_field(node, middle_time) - plain_reference);
-                }
             }
         } else if temporal_enabled() {
             let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
@@ -3376,7 +3465,6 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
                 let field = temporal_drift_field(node, middle_time);
                 curl += sample_curl(sample, local) * (field - reference);
             }
-            plain_curl = curl;
         } else {
             let reference = candidate_q(sample.nodes_a.x)
                 * nodes[sample.nodes_a.x].mass_loss.y;
@@ -3385,22 +3473,10 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
                 let field = candidate_q(node) * nodes[node].mass_loss.y;
                 curl += sample_curl(sample, local) * (field - reference);
             }
-            plain_curl = curl;
         }
         let old = select(accepted_b(i), candidate_b(i), has_loss_stages());
         let next = old + control.evolution.y * control.clock_f32.x * curl;
         set_candidate_b(i, next);
-        // Gate O: a sample's viscous stress `τ η C u` on the same midpoint
-        // gradient, for the second kick to gather. Written for every sample,
-        // zero where `τ` is: a generation with only a short-wave loss runs no
-        // loss stage to clear the lanes, and the grid filter shares them.
-        let short_wave = short_wave_offset();
-        if short_wave != 0u {
-            let viscosity = table_float(short_wave + i / 4u, i % 4u);
-            let stress = viscosity * control.evolution.y * plain_curl;
-            scratch[complementary_offset() + i].values.z = stress.x;
-            scratch[complementary_offset() + i].values.w = stress.y;
-        }
         if !finite_vec2(next) {
             reject(STATUS_NON_FINITE);
         }

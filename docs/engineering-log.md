@@ -18627,3 +18627,47 @@ while the document named region 1.
   examples run the app's runtime types, not its UI.
 - **State.** Branch `fourth-order-step`, not merged or pushed.
 
+
+## 2026-10-04 — The short-wave viscosity, split about the core
+
+The item from plan.md "Worth checking sometime", done on `fourth-order-step`
+before the merge: the short-wave viscosity (van der Pol's own and the
+authored short-wave loss) was the step's only first-order term, so those
+rows gained 1.6 to 3 times from M0 where every other row gained 5 to 19.
+
+- **Two attempts that failed, both measured.** A predictor alone (the force
+  read at `u(Q − h/2 F)`) fixes the viscosity against itself, but its whole
+  impulse still landed after the second kick while the drift integrated a
+  field without it: order 1.0 in the composition table. The one-step
+  rate-against-trajectory test passed it at 3.8, because it checks
+  consistency, not accumulation. Half before the drift and the rest after
+  the second kick is second order, but puts the viscosity inside the core:
+  the ledger's residual grew as `dt²` to 30% of the short-wave loss on a
+  ceiling mode at the app's step, under both integrators.
+- **In.** Outside the core, as the loss stages: forward Euler half before
+  the first kick, and after the second a half that predicts before it
+  applies (`short_wave_half`). The pair is `1 − x + x²/2` on the viscosity
+  alone and matches the exact flow to `h²` with the core between them. Each
+  half reads the drive at its own instant. Details and tables:
+  `docs/spikes/funfern-fourth-order-step.md`, "The short-wave split".
+- **Measured on CPU**, drift form at the app's step: smooth short-wave loss
+  1.7e-3 to 1.5e-5, rough 1.6e-2 to 6.3e-4; van der Pol rough 1.1e-2 to
+  2.7e-3; order two in every short-wave row under both integrators. Ledger
+  residual on the ceiling mode 6e-13 of a 4.8e-9 loss (0.2 of the bound)
+  and 8e-15 (0.9).
+- **Device.** The stress left the drift and the second kick; three passes
+  after the loss stage and five after the second kick's wall, a word a node
+  after the fourth-order ones. Short-wave generations run the loss stages,
+  whose copy of the flux the first kick reads, and the live loss patch keeps
+  them on there. 23 default and 107 mode runs pass, short-wave modes at 3e-7
+  to 2e-6.
+- **Tests.** `the_temporal_rate_is_the_trajectorys_own_derivative` holds van
+  der Pol with a gradient at 3.5 (was 1.8) and adds two short-wave loss
+  cases, a pumped one with pins (2.7 the old way) and one on a second-order
+  wall (4.0 either way: it guards the trace nodes, not the order).
+  `canonical_gpu_temporal_timing` takes `--short-wave`.
+- **Not measured: throughput.** The GPU was loaded by another process; the
+  unchanged driven scene read 410 to 2,094 µs between rounds. To do on an
+  idle GPU: `--van-der-pol` and `--short-wave`, old against new.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.
