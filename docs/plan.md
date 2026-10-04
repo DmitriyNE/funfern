@@ -1128,6 +1128,24 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   handoffs that change the step (the alternating-step item in "Worth
   checking sometime"). Gate: the device suite and long-run energies on each.
 
+- [x] Step throughput, lossless (`docs/spikes/funfern-step-throughput.md`),
+  2026-10-04. A dispatch costs 2 to 3 µs, so merging passes buys little;
+  the kicks were two thirds of a step. Each time-driven kick now reads every
+  sample's drive factor from the secant pass instead of evaluating it at
+  every node the sample meets, and the first kick applies the short-wave
+  split's first half, so a short-wave-only generation drops the loss stages
+  (seven passes, not eight). Bit-identical state on all 14 timing fixtures;
+  0.80× a step fixed and driven, 0.90× van der Pol, 0.76× short-wave loss,
+  0.92× Kerr, 0.67× short-wave loss with Kerr.
+- [ ] Interleaved entry tables. Every gather walks a contiguous range per
+  node, so a SIMD group reads 32 separate stretches; packing entries by
+  slices of 32 nodes, entry `k` side by side, keeps each node's order and
+  so its bits. A dummy gather over interleaved addresses read half the
+  kicks' 124 µs on a 380 µs step; `fourth_order_nodes`, the kick form's
+  correction and the short-wave gathers share the layout. Touches the table
+  packing and every loop over a node's range, events and the filter
+  included. Proposed, not agreed.
+
 ## Maintenance
 
 - [x] A self-oscillating gain lased on the mesh's shortest waves, at a

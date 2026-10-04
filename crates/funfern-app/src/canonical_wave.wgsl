@@ -181,11 +181,11 @@ fn nonlinear_trace_offset() -> u32 {
 fn nonlinear_trace() -> bool { return (control.boundary_offsets.w & 16u) != 0u; }
 // Any record carries a field law.
 fn field_laws() -> bool { return (control.boundary_offsets.w & 32u) != 0u; }
-// Per-site words of every time-driven generation. A field-dependent one
-// caches in them, one solve per site and stage, the nodal field at the
-// drift's midpoint and each sample's secant `r/(j|b|)` at the kick's instant,
-// so every sample reads a node's field, and every node a sample's secant,
-// without solving it again. The grid filter borrows the other lanes for its
+// Per-site words of every time-driven generation. Each caches in them each
+// sample's secant at the kick's instant, `1/factor` for a linear record and
+// `r/(j|b|)` for a field law, so every node reads it once an entry without
+// evaluating the drive or solving again; a field-dependent one also caches
+// the nodal field at the drift's midpoint, one solve a node. The grid filter borrows the other lanes for its
 // frozen maps at the event instant.
 fn node_field_offset() -> u32 { return nonlinear_trace_offset() + control.counts_b.y; }
 fn sample_secant_offset() -> u32 { return node_field_offset() + control.counts_a.x; }
@@ -1030,8 +1030,6 @@ fn source_rate(node: u32, local_time: f32) -> f32 {
 fn gathered_force(node: u32, second: bool) -> f32 {
     let range = nodes[node].ranges.xy;
     let driven = temporal_enabled();
-    let force_time = control.clock_f32.y
-        + select(0.0, control.clock_f32.x, second);
     var result = 0.0;
     for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
         let index = tables[entry].data.x;
@@ -1045,15 +1043,11 @@ fn gathered_force(node: u32, second: bool) -> f32 {
         } else {
             let flux = select(
                 accepted_b(index), candidate_b(index), second || has_loss_stages());
+            // A time-driven generation's secant pass left `1/factor` at this
+            // kick's instant, or a field law's `r/(j|b|)`, once a sample.
             var inverse_factor = 1.0;
-            var drive_factor = 1.0;
             if driven {
-                drive_factor = 1.0 / temporal_complementary_factor(index, force_time);
-            }
-            if field_laws() {
                 inverse_factor = scratch[sample_secant_offset() + index].values.x;
-            } else {
-                inverse_factor = drive_factor;
             }
             let coefficient = vec2<f32>(coefficient_x, table_float(entry, 3u));
             result += inverse_factor * dot(coefficient, flux);
@@ -2024,9 +2018,6 @@ fn commit_event() {
     if operation == 3u {
         var flags = control.boundary_offsets.w & (8u | 256u | 512u);
         flags |= control.event.w & 1u;
-        // The short-wave split's first half writes the flux the first kick
-        // reads, which it reads from the loss stage's copy.
-        if short_wave_offset() != 0u { flags |= 1u; }
         flags |= 2u;
         flags |= control.event.w & 4u;
         control.boundary_offsets.w = flags;
@@ -2347,8 +2338,13 @@ fn kick_node(node: u32, second: bool) {
     if nodes[node].boundary.x != NO_INDEX {
         return;
     }
-    let old = select(
+    var old = select(
         accepted_q(node), candidate_q(node), second || has_loss_stages());
+    // Gate O: the short-wave split's first half, applied to the flux this
+    // kick starts from; its stresses were left on that flux before the kick.
+    if !second && short_wave_offset() != 0u {
+        old = short_wave_applied(node, old, false);
+    }
     if temporal_enabled() && node_is_nonlinear(node) {
         kick_nonlinear_node(node, old, net, source, held_force, duration, target_time);
         if second { inject_at(node); }
@@ -3291,10 +3287,12 @@ fn short_wave_node_field(node: u32, flux: f32, time: f32) -> f32 {
 // `short_wave_half`: a forward Euler half before the first kick, and after the
 // second kick a half that predicts before it applies. Each half reads the
 // field (this pass), the stresses on it, and gathers them; the second half
-// does the last two twice.
+// does the last two twice. The first half reads the flux the first kick
+// would, and the kick applies it before its own update.
 fn short_wave_fields(node: u32, second: bool) {
     if stopped() || short_wave_offset() == 0u || node >= control.counts_a.x { return; }
-    let field = short_wave_node_field(node, candidate_q(node), short_wave_time(second));
+    let flux = select(accepted_q(node), candidate_q(node), second || has_loss_stages());
+    let field = short_wave_node_field(node, flux, short_wave_time(second));
     scratch[short_wave_node_offset() + node].values.x = field;
     if !finite_scalar(field) { reject(STATUS_NON_FINITE); }
 }
@@ -3337,17 +3335,16 @@ fn short_wave_predict(@builtin(global_invocation_id) id: vec3<u32>) {
     if !finite_scalar(field) { reject(STATUS_NON_FINITE); }
 }
 
-// A half applied: the gathered force over half a step. What it takes is
+// A half applied to `old`, the flux it returns: the gathered force over half
+// a step. What it takes is
 // charged to the loss lane, which an active node's reduction books as gain
 // and a passive one's as primary loss; a field law's store is charged at the
 // field of the mean flux, where the reference takes the exact difference.
-fn short_wave_apply(node: u32, second: bool) {
-    if stopped() || short_wave_offset() == 0u || node >= control.counts_a.x { return; }
-    if !short_wave_moves(node) { return; }
+fn short_wave_applied(node: u32, old: f32, second: bool) -> f32 {
+    if !short_wave_moves(node) { return old; }
     let force = short_wave_gather(node);
-    if force == 0.0 { return; }
+    if force == 0.0 { return old; }
     let time = short_wave_time(second);
-    let old = candidate_q(node);
     let next = old - 0.5 * control.clock_f32.x * force;
     if node_is_nonlinear(node) {
         scratch[node].values.z += temporal_primary_field(node, 0.5 * (old + next), time)
@@ -3356,8 +3353,8 @@ fn short_wave_apply(node: u32, second: bool) {
         scratch[node].values.z += 0.5 * (old * old - next * next)
             * temporal_inverse_primary_mass(node, time);
     }
-    set_candidate_q(node, next);
     if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
+    return next;
 }
 
 @compute @workgroup_size(128)
@@ -3368,11 +3365,6 @@ fn short_wave_fields_first(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(128)
 fn short_wave_stresses_first(@builtin(global_invocation_id) id: vec3<u32>) {
     short_wave_stresses(id.x, false);
-}
-
-@compute @workgroup_size(128)
-fn short_wave_apply_first(@builtin(global_invocation_id) id: vec3<u32>) {
-    short_wave_apply(id.x, false);
 }
 
 @compute @workgroup_size(128)
@@ -3387,7 +3379,9 @@ fn short_wave_stresses_second(@builtin(global_invocation_id) id: vec3<u32>) {
 
 @compute @workgroup_size(128)
 fn short_wave_apply_second(@builtin(global_invocation_id) id: vec3<u32>) {
-    short_wave_apply(id.x, true);
+    let node = id.x;
+    if stopped() || short_wave_offset() == 0u || node >= control.counts_a.x { return; }
+    set_candidate_q(node, short_wave_applied(node, candidate_q(node), true));
 }
 
 @compute @workgroup_size(128)
@@ -3408,12 +3402,12 @@ fn cache_sample_secant(sample: u32, second: bool) {
 }
 
 @compute @workgroup_size(128)
-fn nonlinear_sample_secants_first(@builtin(global_invocation_id) id: vec3<u32>) {
+fn sample_secants_first(@builtin(global_invocation_id) id: vec3<u32>) {
     cache_sample_secant(id.x, false);
 }
 
 @compute @workgroup_size(128)
-fn nonlinear_sample_secants_second(@builtin(global_invocation_id) id: vec3<u32>) {
+fn sample_secants_second(@builtin(global_invocation_id) id: vec3<u32>) {
     cache_sample_secant(id.x, true);
 }
 

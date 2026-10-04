@@ -18675,3 +18675,42 @@ rows gained 1.6 to 3 times from M0 where every other row gained 5 to 19.
   generation.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.
+
+## 2026-10-04 — Step throughput, without moving a bit
+
+Asked after the short-wave split's cost: merge passes and take any other
+lossless gain. On `step-throughput`; details and tables in
+`docs/spikes/funfern-step-throughput.md`.
+
+- **Measured first.** A dispatch that returns at once costs 2 to 3 µs, so
+  merging the split's passes would have saved 10 to 15 µs of 460. A
+  per-pass profile (each pipeline repeated four extra times) put the two
+  kicks at 138 and 140 µs of a 417 µs driven step. Skipping the drive
+  factor in their gather, for timing only, read 260.
+- **The factor once a sample.** The kick's gather evaluated each sample's
+  drive factor at every node the sample meets. The secant passes a
+  field-dependent generation already ran before each kick now run on every
+  time-driven one, renamed `sample_secants_first/_second`, and the gather
+  reads their word: for a linear record that is `1/factor` at the same
+  instant.
+- **Node masses: nothing to do** in the production step; the per-entry
+  evaluations sit on the fixed rows and the leapfrog's drift.
+- **The split's first half in the first kick.** The kick applies it to the
+  flux it starts from, so `short_wave_apply_first` is gone, and a
+  short-wave-only generation no longer forces the loss stages, which at
+  zero loss changed nothing. Seven passes; `SHORT_WAVE_DISPATCHES` 7.
+- **Held to the same bits.** `canonical_gpu_temporal_timing --checksum`
+  hashes the read-back state after 2,000 steps; all 14 fixtures match the
+  baseline after both changes. `--steps=N` times longer runs: at 2,000 the
+  device's clock had not settled and two runs of one build read a sixth
+  apart. The device suite passes, 23 default and 107 mode runs.
+- **Throughput**, 20,000 steps, three rotated rounds, medians: fixed 475 to
+  380 µs, driven 468 to 373, van der Pol 1035 to 931, short-wave loss 914
+  to 692, Kerr 1794 to 1652, short-wave loss with Kerr 4848 to 3270. The
+  fixed fixture never evaluated a factor and still gained a fifth; the
+  likely cause, the kick's register use, was not measured.
+- **Next candidate, proposed:** interleaved entry tables. After the change
+  the kicks' gathers are 124 µs of 380; the same reads from interleaved
+  table addresses cost half that.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile.

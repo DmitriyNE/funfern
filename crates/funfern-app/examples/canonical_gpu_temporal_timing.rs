@@ -35,11 +35,22 @@
 //! gate gets.
 //!
 //! `--short-wave` adds an authored short-wave loss α = 0.5, so the step runs
-//! the short-wave split's eight passes and, with no other loss, the two loss
-//! stages its first half needs. Van der Pol carries the same split already.
+//! the short-wave split's seven passes and the first kick applies its first
+//! half. Van der Pol carries the same split already.
 //!
 //! Stepping is unfenced, so the figure is what a step costs the device rather
 //! than the readback round trip the interactive lead fence waits on.
+//!
+//! `--steps=N` times `N` steps instead of 2,000. A run of a second or less
+//! can end before the device's clock settles, and then two runs of the same
+//! build read apart by a sixth; at 20,000 repeat runs agreed to about 2%,
+//! with an occasional slow first run after a heavy scene, so compare medians
+//! of runs whose order rotates.
+//!
+//! `--checksum` times nothing: it runs exactly `STEPS` steps, reads the whole
+//! state back and prints a hash of its bits, `Q`, `b`, `r` and the accounting
+//! lanes, so a change meant to leave the arithmetic alone can be held to the
+//! same bits on every fixture above.
 
 use std::time::{Duration, Instant};
 
@@ -67,6 +78,8 @@ struct Pending {
 #[derive(Resource)]
 struct Timing {
     label: String,
+    checksum: bool,
+    steps: u64,
     nodes: usize,
     time_step: f64,
     started: Option<Instant>,
@@ -84,6 +97,10 @@ fn main() -> AppExit {
     let oscillator = van_der_pol || std::env::args().any(|argument| argument == "--oscillator");
     let gated = std::env::args().any(|argument| argument == "--gated");
     let short_wave = std::env::args().any(|argument| argument == "--short-wave");
+    let checksum = std::env::args().any(|argument| argument == "--checksum");
+    let steps = std::env::args()
+        .find_map(|argument| argument.strip_prefix("--steps=")?.parse().ok())
+        .unwrap_or(STEPS);
     let amplitude = if nonlinear { 12.0 } else { 1.0 };
     let mut scene = Scene::initial();
     if driven {
@@ -223,7 +240,7 @@ fn main() -> AppExit {
         label.to_string()
     };
     println!(
-        "gpu {label} timing: {} Q, {} b, dt {time_step:.4e}, {STEPS} steps",
+        "gpu {label} timing: {} Q, {} b, dt {time_step:.4e}, {steps} steps",
         plan.node_count, plan.sample_count
     );
 
@@ -245,6 +262,8 @@ fn main() -> AppExit {
     })
     .insert_resource(Timing {
         label,
+        checksum,
+        steps,
         nodes: base.degrees_of_freedom(),
         time_step,
         started: None,
@@ -261,6 +280,7 @@ fn install(
     mut pending: ResMut<Pending>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut canonical: ResMut<CanonicalGpuRequest>,
+    timing: Res<Timing>,
 ) {
     canonical.set_unfenced_stepping(true);
     canonical.set_grid_scale_filter(pending.filter);
@@ -269,6 +289,9 @@ fn install(
         &mut commands,
         pending.plan.take().expect("one plan"),
     );
+    if timing.checksum {
+        canonical.request_steps(STEPS);
+    }
     commands.spawn(Camera2d);
 }
 
@@ -287,6 +310,21 @@ fn drive(
         timing.finished = true;
         return;
     }
+    if timing.checksum {
+        if request.stats().completed_steps() < STEPS
+            || (!request.request_full_state_readback() && display.full_readbacks == 0)
+            || display.primary_flux.len() != timing.nodes
+        {
+            return;
+        }
+        println!(
+            "gpu {} checksum after {STEPS} steps: {:016x}",
+            timing.label,
+            state_hash(&display)
+        );
+        timing.finished = true;
+        return;
+    }
     if timing.started.is_none() {
         // Let the first frames settle before the clock starts, so pipeline
         // creation and the first buffer upload are not charged to stepping.
@@ -295,15 +333,15 @@ fn drive(
             return;
         }
         timing.started = Some(Instant::now());
-        request.request_steps(STEPS);
+        request.request_steps(timing.steps);
         return;
     }
-    if request.stats().completed_steps() < STEPS + 32 {
+    if request.stats().completed_steps() < timing.steps + 32 {
         return;
     }
     let elapsed = timing.started.expect("started").elapsed().as_secs_f64();
-    let per_step = elapsed * 1.0e6 / STEPS as f64;
-    let simulated = timing.time_step * STEPS as f64;
+    let per_step = elapsed * 1.0e6 / timing.steps as f64;
+    let simulated = timing.time_step * timing.steps as f64;
     println!(
         "gpu {}: {} DOFs, {per_step:.1} us/step, {:.1} simulated s per wall s",
         timing.label,
@@ -311,4 +349,24 @@ fn drive(
         simulated / elapsed
     );
     timing.finished = true;
+}
+
+/// FNV-1a over the bits of every lane the readback carries.
+fn state_hash(display: &CanonicalGpuDisplay) -> u64 {
+    let words = display
+        .primary_flux
+        .iter()
+        .chain(display.complementary_flux.iter().flatten())
+        .chain(display.integrated_field())
+        .chain(&display.accounting)
+        .chain([&display.active_gain]);
+    words.fold(0xcbf2_9ce4_8422_2325, |hash, value| {
+        value
+            .to_bits()
+            .to_le_bytes()
+            .iter()
+            .fold(hash, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    })
 }

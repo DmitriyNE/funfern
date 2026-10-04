@@ -158,9 +158,10 @@ const FOURTH_ORDER_FLAG: u32 = 256;
 /// The fourth-order correction sits in the kicks, beside a stiffness-side
 /// field law, rather than in the drift.
 const KICK_FORM_FLAG: u32 = 512;
-/// The short-wave split's passes a step: field, stresses and apply before the
-/// first kick; field, stresses, predict, stresses and apply after the second.
-const SHORT_WAVE_DISPATCHES: usize = 8;
+/// The short-wave split's passes a step: field and stresses before the first
+/// kick, which applies them; field, stresses, predict, stresses and apply
+/// after the second.
+const SHORT_WAVE_DISPATCHES: usize = 7;
 /// A loss record whose rate is van der Pol's, `β(u²/a² − 1)`.
 const TEMPORAL_LOSS_VAN_DER_POL: u32 = 16;
 /// A record whose drive runs under its lane's gate window, with the
@@ -1049,9 +1050,9 @@ pub struct CanonicalGpuPlan {
     /// nonlinear maps; the filter reads them through its site pass.
     pub field_laws: bool,
     /// Gate O: the generation carries a short-wave viscosity, split about
-    /// the core: three passes before the first kick and five after the
-    /// second, a word a node after the fourth-order ones, and loss stages,
-    /// whose copy of the flux the first half writes for the first kick.
+    /// the core: two passes before the first kick, which applies the first
+    /// half, and five after the second, on a word a node after the
+    /// fourth-order ones.
     pub short_wave: bool,
     /// Gate O: nodes carrying the integrated field `r`, the tail of the
     /// auxiliary lanes. Zero without a restoring law.
@@ -1278,9 +1279,12 @@ impl CanonicalGpuPlan {
             self.trace_count + self.node_count + self.sample_count,
         ));
         self.manifest.bytes.scratch = self.scratch.len() * size_of::<GpuCanonicalScratchWord>();
+        // Each kick's secant pass runs on every time-driven generation; the
+        // drift's nodal field pass only where a field law needs a solve.
+        self.manifest.dispatches_per_step += 2;
         if self.field_laws {
             self.control.boundary_offsets.w |= FIELD_LAWS_FLAG;
-            self.manifest.dispatches_per_step += 3;
+            self.manifest.dispatches_per_step += 1;
         }
         if self.field_laws && self.trace_count > 0 {
             if self.trace_direct {
@@ -1547,11 +1551,6 @@ impl CanonicalGpuPlan {
         if !short_wave.is_empty() && !self.short_wave {
             self.short_wave = true;
             self.manifest.dispatches_per_step += SHORT_WAVE_DISPATCHES;
-            if !self.needs_loss_stages {
-                self.needs_loss_stages = true;
-                self.control.boundary_offsets.w |= 1;
-                self.manifest.dispatches_per_step += 2;
-            }
         }
 
         self.tables[header_offset] = GpuCanonicalTableWord {
@@ -2205,8 +2204,7 @@ impl CanonicalGpuPlan {
         }
         self.needs_loss_stages = primary_rates.iter().any(|rate| *rate != 0.0)
             || complementary_rates.iter().any(|rate| *rate != 0.0)
-            || self.nodes.iter().any(|node| node.boundary.z != 0)
-            || self.short_wave;
+            || self.nodes.iter().any(|node| node.boundary.z != 0);
         self.needs_accounting |= self.needs_loss_stages;
         let mut flags = self.control.boundary_offsets.w & !0b111;
         flags |= u32::from(self.needs_loss_stages);
@@ -2218,7 +2216,8 @@ impl CanonicalGpuPlan {
             + SHORT_WAVE_DISPATCHES * usize::from(self.short_wave)
             + usize::from(self.needs_loss_stages) * 2
             + usize::from(self.needs_accounting)
-            + 3 * usize::from(self.field_laws)
+            + 2 * usize::from(self.manifest.temporal.is_some())
+            + usize::from(self.field_laws)
             + if self.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0 {
                 nonlinear_trace_dispatches(self.trace_count, self.trace_sweeps)
             } else {
@@ -4012,6 +4011,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     trace_direct: bool,
     grid_filter_admitted: bool,
     field_laws: bool,
+    sample_secants: bool,
     integrated_count: u32,
     nonlinear_trace: bool,
     fourth_order: bool,
@@ -4242,6 +4242,7 @@ fn add_canonical_buffers(
         trace_direct: plan.trace_direct,
         grid_filter_admitted: plan.grid_filter_admitted,
         field_laws: plan.field_laws,
+        sample_secants: plan.manifest.temporal.is_some(),
         integrated_count: plan.integrated_count as u32,
         nonlinear_trace: plan.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0,
         fourth_order: plan.control.boundary_offsets.w & FOURTH_ORDER_FLAG != 0,
@@ -5832,8 +5833,8 @@ struct CanonicalPipeline {
     boundary_linearize_first: CachedComputePipelineId,
     boundary_linearize_begin_second: CachedComputePipelineId,
     boundary_linearize_second: CachedComputePipelineId,
-    nonlinear_sample_secants_first: CachedComputePipelineId,
-    nonlinear_sample_secants_second: CachedComputePipelineId,
+    sample_secants_first: CachedComputePipelineId,
+    sample_secants_second: CachedComputePipelineId,
     nonlinear_node_fields: CachedComputePipelineId,
     filter_temporal_sites: CachedComputePipelineId,
     fourth_order_samples: CachedComputePipelineId,
@@ -5845,7 +5846,6 @@ struct CanonicalPipeline {
     fourth_order_fields: CachedComputePipelineId,
     short_wave_fields_first: CachedComputePipelineId,
     short_wave_stresses_first: CachedComputePipelineId,
-    short_wave_apply_first: CachedComputePipelineId,
     short_wave_fields_second: CachedComputePipelineId,
     short_wave_stresses_second: CachedComputePipelineId,
     short_wave_predict: CachedComputePipelineId,
@@ -5944,8 +5944,8 @@ fn init_canonical_pipeline(
     let boundary_linearize_first = queue("boundary_linearize_first");
     let boundary_linearize_begin_second = queue("boundary_linearize_begin_second");
     let boundary_linearize_second = queue("boundary_linearize_second");
-    let nonlinear_sample_secants_first = queue("nonlinear_sample_secants_first");
-    let nonlinear_sample_secants_second = queue("nonlinear_sample_secants_second");
+    let sample_secants_first = queue("sample_secants_first");
+    let sample_secants_second = queue("sample_secants_second");
     let nonlinear_node_fields = queue("nonlinear_node_fields");
     let filter_temporal_sites = queue("filter_temporal_sites");
     let fourth_order_samples = queue("fourth_order_samples");
@@ -5957,7 +5957,6 @@ fn init_canonical_pipeline(
     let fourth_order_fields = queue("fourth_order_fields");
     let short_wave_fields_first = queue("short_wave_fields_first");
     let short_wave_stresses_first = queue("short_wave_stresses_first");
-    let short_wave_apply_first = queue("short_wave_apply_first");
     let short_wave_fields_second = queue("short_wave_fields_second");
     let short_wave_stresses_second = queue("short_wave_stresses_second");
     let short_wave_predict = queue("short_wave_predict");
@@ -6004,8 +6003,8 @@ fn init_canonical_pipeline(
         boundary_linearize_first,
         boundary_linearize_begin_second,
         boundary_linearize_second,
-        nonlinear_sample_secants_first,
-        nonlinear_sample_secants_second,
+        sample_secants_first,
+        sample_secants_second,
         nonlinear_node_fields,
         filter_temporal_sites,
         fourth_order_samples,
@@ -6017,7 +6016,6 @@ fn init_canonical_pipeline(
         fourth_order_fields,
         short_wave_fields_first,
         short_wave_stresses_first,
-        short_wave_apply_first,
         short_wave_fields_second,
         short_wave_stresses_second,
         short_wave_predict,
@@ -6688,8 +6686,8 @@ fn compute_canonical_wave(
         pipeline.boundary_linearize_first,
         pipeline.boundary_linearize_begin_second,
         pipeline.boundary_linearize_second,
-        pipeline.nonlinear_sample_secants_first,
-        pipeline.nonlinear_sample_secants_second,
+        pipeline.sample_secants_first,
+        pipeline.sample_secants_second,
         pipeline.nonlinear_node_fields,
         pipeline.filter_temporal_sites,
         pipeline.fourth_order_samples,
@@ -6701,7 +6699,6 @@ fn compute_canonical_wave(
         pipeline.fourth_order_fields,
         pipeline.short_wave_fields_first,
         pipeline.short_wave_stresses_first,
-        pipeline.short_wave_apply_first,
         pipeline.short_wave_fields_second,
         pipeline.short_wave_stresses_second,
         pipeline.short_wave_predict,
@@ -6953,19 +6950,20 @@ fn compute_canonical_wave(
             pass.set_pipeline(pipelines[0]);
             pass.dispatch_workgroups(workgroups(handles.scratch_count), 1, 1);
         }
-        // The short-wave split's first half, on the flux the loss stage left.
+        // The short-wave split's first half, on the flux the first kick
+        // starts from: its field and stresses, which that kick applies.
         if handles.short_wave {
             pass.set_pipeline(pipelines[47]);
             pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
             pass.set_pipeline(pipelines[48]);
             pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
-            pass.set_pipeline(pipelines[49]);
-            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         }
-        // A field-dependent generation solves each site's inverse once per
-        // stage into its cache: the samples' secants before each kick, the
-        // nodes' fields before the drift.
-        if handles.field_laws {
+        // A time-driven generation caches each sample's secant once before
+        // each kick, the drive's factor and any field law's solve, which the
+        // kick's gather would otherwise repeat at every node the sample
+        // meets; a field-dependent one also solves the nodes' fields once
+        // before the drift.
+        if handles.sample_secants {
             pass.set_pipeline(pipelines[36]);
             pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
         }
@@ -7002,7 +7000,7 @@ fn compute_canonical_wave(
             1,
             1,
         );
-        if handles.field_laws {
+        if handles.sample_secants {
             pass.set_pipeline(pipelines[37]);
             pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
         }
@@ -7020,15 +7018,15 @@ fn compute_canonical_wave(
         // The short-wave split's second half: the field, the stresses on it,
         // the prediction, the stresses on that, and the half applied.
         if handles.short_wave {
-            pass.set_pipeline(pipelines[50]);
+            pass.set_pipeline(pipelines[49]);
             pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.set_pipeline(pipelines[50]);
+            pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
             pass.set_pipeline(pipelines[51]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.set_pipeline(pipelines[50]);
             pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
             pass.set_pipeline(pipelines[52]);
-            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
-            pass.set_pipeline(pipelines[51]);
-            pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
-            pass.set_pipeline(pipelines[53]);
             pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
         }
         if handles.needs_loss_stages {
