@@ -3387,12 +3387,17 @@ above:
 
 ## Current TODOs
 
-- [ ] No way to measure, from the host, how evenly the drawn state advances.
-  The requested stream is measurable and the completed counter is not usable for
-  it - the counter is zero on 62 % of frames and then jumps by 33, which is the
-  readback arriving, not the solver running. The drawn field is a GPU buffer the
-  compute writes in place each frame, so what the eye sees is neither series.
-  Until there is a way to see it, smoothness work is being tuned against a proxy.
+- [x] No way to measure, from the host, how evenly the drawn state advances
+  (2026-10-04: `FUNFERN_PACING_TRACE` and `examples/drawn_pacing_summary.rs`,
+  see `docs/spikes/funfern-drawn-pacing.md`). The drawn series turned out to
+  equal the requested one at every operating point measured; the completed
+  counter is the misleading one.
+- [ ] The batch ceiling is cut by late frames the solver did not cause. In about
+  80 % of cuts on the default scene no solver pass within two frames ran past
+  12 ms of a 16.7 ms frame, and each cut costs a third of a second at about half
+  speed; the wobble follows the cut rate, which follows how often frames come
+  in late for reasons other than the solver. The GPU pass time is now known a frame later and could tell
+  the two apart. Found with the trace, not yet designed.
 
 Submitting solver work outside the render graph, worth investigating:
 
@@ -18806,3 +18811,38 @@ The plan item's conservative variant, on `step-calibration`; tables in
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check, the browser shader compile, and the
   device suite (23 default runs, 107 mode runs).
+
+## 2026-10-04 — What the eye sees, measured
+
+The first pacing TODO, on `drawn-pacing-trace`; method and tables in
+`docs/spikes/funfern-drawn-pacing.md`.
+
+- **What a frame draws.** The solver pass and the drawing share a command
+  buffer, so a frame draws the render world's encoded step count after its
+  encode, which the host knows exactly. When it is shown is not reachable
+  (wgpu keeps the Metal drawable private); the render world's host time and
+  GPU timestamps around the solver pass stand in, each exact up to the next
+  vsync.
+- **In.** `drawn_pacing.rs`: with `FUNFERN_PACING_TRACE` set, one CSV row a
+  rendered frame, the drawn generation and step, requested and completed
+  counts, the pass's GPU times from a ring of sixteen timestamp slots, and the
+  main world's `PacingNote` (delta, speed, step, ceiling, asked, admitted,
+  running, withheld) carried on the request. `drawn_pacing_summary` prints
+  the wobble on the drawn series, away from handoffs, on the GPU clock, on the
+  requested proxy and on the completed count, the frozen and jump shares, the
+  cut rate and the pass's GPU time. `wgpu` is a direct dependency, pinned to
+  the version Bevy links, for the query types Bevy does not re-export.
+  Without the variable nothing is created and the pass is encoded as before.
+- **Found.** Drawn equals requested on every run (nothing requested was
+  still unencoded when the frame drew), so the proxy was right and only the
+  completed count misleads (still on 51 % of frames). Handoffs freeze the
+  picture three frames, 50 ms each. The remaining wobble is the ceiling's
+  sawtooth, and about 80 % of cuts came with no solver pass past 12 ms within
+  two frames: late frames the solver did not cause, punished as its own. Filed above.
+- **0.75 against 0.9, again unresolved:** three alternating 60 s runs each,
+  wobble 18.3/22.0/26.7 % against 30.0/27.6/12.0 %, tracking a cut rate that
+  moved threefold between runs. The variation is not the solver's, and the eye
+  sees it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 check and the browser shader compile. No device
+  suite: the solver pass only gains timestamp writes, and only while tracing.

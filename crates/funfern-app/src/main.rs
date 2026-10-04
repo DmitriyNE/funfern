@@ -7,6 +7,8 @@
 #[allow(dead_code)]
 mod canonical_gpu;
 mod capture;
+#[allow(dead_code)]
+mod drawn_pacing;
 mod field_paint;
 #[allow(dead_code)]
 mod files;

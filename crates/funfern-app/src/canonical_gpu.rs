@@ -44,6 +44,7 @@ use funfern_core::{
     RestoringLawValues, TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
 };
 
+use crate::drawn_pacing::{DrawnFrame, DrawnPacingTrace, PacingNote};
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
 use crate::wave_gpu::{
     AreaProbeBindGroup, CurveProbeBindGroup, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS,
@@ -4144,6 +4145,9 @@ pub struct CanonicalGpuRequest {
     handoff: Option<CanonicalGpuHandoffHandles>,
     handoff_outcome: CanonicalGpuHandoffOutcome,
     live_event: Option<CanonicalGpuLiveEventHandles>,
+    /// What the main world's pacing decided this frame, for the drawn
+    /// pacing trace.
+    pacing_note: PacingNote,
 }
 
 impl Default for CanonicalGpuRequest {
@@ -4168,6 +4172,7 @@ impl Default for CanonicalGpuRequest {
             handoff: None,
             handoff_outcome: CanonicalGpuHandoffOutcome::None,
             live_event: None,
+            pacing_note: PacingNote::default(),
         }
     }
 }
@@ -4391,6 +4396,10 @@ impl CanonicalGpuRequest {
 
     pub fn requested_steps(&self) -> u64 {
         self.desired_steps
+    }
+
+    pub fn set_pacing_note(&mut self, note: PacingNote) {
+        self.pacing_note = note;
     }
 
     pub fn live_event_pending(&self) -> bool {
@@ -5761,7 +5770,10 @@ impl Plugin for CanonicalWaveGpuPlugin {
         };
         render_app
             .init_resource::<CanonicalSnapshotStaging>()
-            .add_systems(RenderStartup, init_canonical_pipeline)
+            .add_systems(
+                RenderStartup,
+                (init_canonical_pipeline, init_drawn_pacing_trace),
+            )
             .add_systems(
                 Render,
                 destroy_released_shader_buffers
@@ -5783,6 +5795,7 @@ impl Plugin for CanonicalWaveGpuPlugin {
                     compute_canonical_wave,
                     compute_canonical_handoff.after(compute_canonical_wave),
                     copy_canonical_snapshot.after(compute_canonical_handoff),
+                    record_drawn_frame.after(copy_canonical_snapshot),
                 )
                     .before(camera_driver),
             )
@@ -5792,7 +5805,7 @@ impl Plugin for CanonicalWaveGpuPlugin {
             )
             .add_systems(
                 Render,
-                map_canonical_snapshot.in_set(RenderSystems::Cleanup),
+                (map_canonical_snapshot, collect_drawn_pacing_trace).in_set(RenderSystems::Cleanup),
             );
     }
 }
@@ -6327,6 +6340,44 @@ fn prepare_canonical_bind_group(
     });
 }
 
+/// Opens the drawn pacing trace when `FUNFERN_PACING_TRACE` names a file.
+fn init_drawn_pacing_trace(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+) {
+    if let Some(trace) = DrawnPacingTrace::from_environment(&device, &queue) {
+        commands.insert_resource(trace);
+    }
+}
+
+/// Records what this frame draws: the encoded step count once the solver and
+/// any handoff have encoded, since the drawing that follows samples it.
+fn record_drawn_frame(
+    trace: Option<ResMut<DrawnPacingTrace>>,
+    request: Option<Res<CanonicalGpuRequest>>,
+    group: Option<Res<CanonicalBindGroup>>,
+) {
+    let Some(mut trace) = trace else { return };
+    let Some(request) = request else { return };
+    trace.record(DrawnFrame {
+        generation: group.as_ref().map_or(0, |group| group.generation),
+        drawn_step: group.as_ref().map_or(0, |group| group.encoded_steps),
+        requested: request.desired_steps,
+        completed: request.stats.completed_steps(),
+        note: request.pacing_note,
+        ..default()
+    });
+}
+
+/// Takes in the trace's GPU times and writes what is complete, once the frame
+/// is submitted.
+fn collect_drawn_pacing_trace(trace: Option<ResMut<DrawnPacingTrace>>) {
+    if let Some(mut trace) = trace {
+        trace.collect();
+    }
+}
+
 /// Asks the queue to report when everything submitted so far has executed, and
 /// credits that to the generation the steps were encoded for. It runs after the
 /// frame's submission, so the steps it names are all in flight. Each generation
@@ -6662,6 +6713,7 @@ fn compute_canonical_wave(
     consumer_pipeline: Option<Res<WavePipeline>>,
     pipeline: Res<CanonicalPipeline>,
     pipeline_cache: Res<PipelineCache>,
+    mut trace: Option<ResMut<DrawnPacingTrace>>,
 ) {
     let Some(request) = request else {
         return;
@@ -6786,7 +6838,9 @@ fn compute_canonical_wave(
         .command_encoder()
         .begin_compute_pass(&ComputePassDescriptor {
             label: Some("canonical wave evolution"),
-            ..default()
+            timestamp_writes: trace
+                .as_deref_mut()
+                .and_then(DrawnPacingTrace::pass_timestamps),
         });
     pass.set_bind_group(0, &group.bind_group, &[]);
     if has_pending_event {
@@ -7159,6 +7213,9 @@ fn compute_canonical_wave(
         sampled_vector_overlay = true;
     }
     drop(pass);
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.resolve_pass(render_context.command_encoder());
+    }
     group.encoded_steps += pending;
     request.stats.dispatches.fetch_add(
         pending

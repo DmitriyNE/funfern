@@ -5,6 +5,7 @@ use crate::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuHandoffOutcome, CanonicalGpuLiveEvent,
     CanonicalGpuPlan, CanonicalGpuRequest, canonical_failure_description,
 };
+use crate::drawn_pacing::PacingNote;
 use crate::wave_gpu::{VectorOverlayDisplay, WaveGpuRequest};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -741,7 +742,17 @@ impl Playground {
                     .as_ref()
                     .is_some_and(|job| job.result.is_some());
             let fresh_upload = self.uploading.as_ref().is_some_and(|upload| upload.fresh);
-            if !canonical_steps_withheld(packed_candidate_waiting, fresh_upload) {
+            let withheld = canonical_steps_withheld(packed_candidate_waiting, fresh_upload);
+            let mut note = PacingNote {
+                frame_seconds: delta,
+                speed: self.editor.document.presentation.simulation_speed,
+                time_step: dt,
+                ceiling: self.frame_budget,
+                running: self.wave_running,
+                withheld,
+                ..PacingNote::default()
+            };
+            if !withheld {
                 if self.wave_running {
                     let batch = steps_for_frame(
                         &mut self.accumulator,
@@ -758,6 +769,8 @@ impl Playground {
                     if admitted > 0 {
                         request.request_steps(admitted);
                     }
+                    note.asked = batch.steps;
+                    note.admitted = admitted;
                     self.last_batch = FrameBatch {
                         steps: admitted,
                         ceiling_bound: batch.ceiling_bound,
@@ -776,6 +789,9 @@ impl Playground {
                     self.speed_short,
                 );
             }
+            request.set_pacing_note(note);
+        } else {
+            request.set_pacing_note(PacingNote::default());
         }
         self.completed_steps = request.stats().completed_steps();
         self.gpu_status = request.stats().status();
