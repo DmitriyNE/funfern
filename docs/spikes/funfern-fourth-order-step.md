@@ -339,8 +339,18 @@ other now runs the loss stages too, and the live loss patch keeps them on
 there. The suite: 23 default runs and 107 mode runs, all within their gates,
 the short-wave modes at 3e-7 to 2e-6.
 
-Not measured: the throughput cost. The timing runs were taken while another
-process loaded the GPU, and the unchanged driven scene alone read 410 to
-2,094 µs a step between rounds, against 425 µs in stage C. Expected: eight
-passes, three of them over the samples, on short-wave generations only.
+Throughput (`canonical_gpu_temporal_timing`, 15,264 dofs, M1 Max, 2,000
+steps, five rounds alternating the commit before and the split, medians):
+
+| generation | before | split | cost |
+| --- | --- | --- | --- |
+| driven, no short wave | 457 µs | 446 µs | unchanged |
+| van der Pol | 831 µs | 969 µs | 1.16 to 1.23× |
+| short-wave loss 0.5 | 621 µs | 918 µs | 1.47 to 1.62× |
+
+The short-wave work itself goes from about 170 µs a step over the driven
+scene to about 470: the split reads the viscosity three times a step where
+the old one read it once, in eight passes of their own, and the short-wave
+loss generation now pays the loss stages too. Generations without a
+short-wave term do not see it.
 

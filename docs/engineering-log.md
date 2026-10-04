@@ -18666,8 +18666,12 @@ rows gained 1.6 to 3 times from M0 where every other row gained 5 to 19.
   cases, a pumped one with pins (2.7 the old way) and one on a second-order
   wall (4.0 either way: it guards the trace nodes, not the order).
   `canonical_gpu_temporal_timing` takes `--short-wave`.
-- **Not measured: throughput.** The GPU was loaded by another process; the
-  unchanged driven scene read 410 to 2,094 µs between rounds. To do on an
-  idle GPU: `--van-der-pol` and `--short-wave`, old against new.
+- **Throughput, measured later the same day on an idle GPU**, five rounds
+  alternating the commit before and the split, medians: driven 457 to
+  446 µs (unchanged), van der Pol 831 to 969 µs (1.16 to 1.23× by round),
+  short-wave loss 0.5 621 to 918 µs (1.47 to 1.62×). The short-wave work
+  goes from about 170 µs over the driven scene to about 470: three reads of
+  the viscosity a step instead of one, and the loss stages on a short-wave
+  generation.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 check and the browser shader compile.

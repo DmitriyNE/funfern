@@ -1108,8 +1108,9 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   after the second, second order together; the short-wave rows reach order
   two under both integrators (smooth short-wave loss 1.7e-3 to 1.5e-5 at the
   app's step) and the ledger closes as before. On the device it is eight
-  passes on short-wave generations, which also run the loss stages now; the
-  throughput cost waits on an unloaded GPU.
+  passes on short-wave generations, which also run the loss stages now,
+  1.16 to 1.23× a step under van der Pol and 1.47 to 1.62× under a short-wave
+  loss alone; other generations are unchanged.
 
 - [ ] A larger step under the fourth-order integrator, the conservative
   variant: 1.2× the leapfrog bound where the app runs 0.9× today. The scheme's
