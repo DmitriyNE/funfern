@@ -1867,7 +1867,29 @@
     "far_field": {
       "enabled": true,
       "inset": 0.08
-    }
+    },
+    "region_names": [
+      {
+        "region": 2,
+        "name": "Element 1"
+      },
+      {
+        "region": 3,
+        "name": "Element 2"
+      },
+      {
+        "region": 4,
+        "name": "Element 3"
+      },
+      {
+        "region": 5,
+        "name": "Element 4"
+      },
+      {
+        "region": 6,
+        "name": "Element 5"
+      }
+    ]
   },
   "presentation": {
     "grid": true,

@@ -1112,7 +1112,29 @@
     "far_field": {
       "enabled": false,
       "inset": 0.12
-    }
+    },
+    "region_names": [
+      {
+        "region": 1,
+        "name": "Past the slab"
+      },
+      {
+        "region": 2,
+        "name": "Behind the launcher"
+      },
+      {
+        "region": 3,
+        "name": "Launcher"
+      },
+      {
+        "region": 4,
+        "name": "Slab"
+      },
+      {
+        "region": 5,
+        "name": "Before the slab"
+      }
+    ]
   },
   "presentation": {
     "grid": true,

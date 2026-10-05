@@ -19587,3 +19587,18 @@ re-blessed (the rename, 70 lines over 35 files).
 - Follow-up: Hide holes is offered only while the scene has a hole; the
   choice is kept for the next one. The roster test checks the empty scene
   New makes shows none.
+
+## 2026-10-05 — The gallery names its regions
+
+Every region of every gallery scene is named, but the background where it
+is just the space round things (`every_gallery_region_but_the_background_is_named`,
+which also holds a scene's names apart). Names are given where the builder
+makes the regions (`Builder::name`, carried into the document): the
+launcher names its strip and the face behind it, the two-arm channel its
+launcher halves, what is behind them and the reference arm, and returns
+the sample arm's pieces for the scene to name; `rod` numbers a crystal's
+rods in the order built; each scene names the rest. A slab channel's
+pieces read Before the slab, the slab, Past the slab, and so on. One
+departure from the agreed list: FTIR's region above the guide is the gap
+under the block and everything left of it, so it is Above the guide rather
+than Gap. The shipped scenes were re-blessed with the names.

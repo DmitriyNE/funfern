@@ -807,7 +807,21 @@
     "far_field": {
       "enabled": false,
       "inset": 0.12
-    }
+    },
+    "region_names": [
+      {
+        "region": 1,
+        "name": "Below the fiber"
+      },
+      {
+        "region": 2,
+        "name": "Above the fiber"
+      },
+      {
+        "region": 3,
+        "name": "Fiber"
+      }
+    ]
   },
   "presentation": {
     "grid": true,

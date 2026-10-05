@@ -11576,7 +11576,133 @@
     "far_field": {
       "enabled": false,
       "inset": 0.12
-    }
+    },
+    "region_names": [
+      {
+        "region": 1,
+        "name": "Reference arm"
+      },
+      {
+        "region": 2,
+        "name": "Behind the reference launcher"
+      },
+      {
+        "region": 3,
+        "name": "Reference launcher"
+      },
+      {
+        "region": 4,
+        "name": "Sample launcher"
+      },
+      {
+        "region": 5,
+        "name": "Behind the sample launcher"
+      },
+      {
+        "region": 6,
+        "name": "Sample arm"
+      },
+      {
+        "region": 7,
+        "name": "Rod 1"
+      },
+      {
+        "region": 8,
+        "name": "Rod 2"
+      },
+      {
+        "region": 9,
+        "name": "Rod 3"
+      },
+      {
+        "region": 10,
+        "name": "Rod 4"
+      },
+      {
+        "region": 11,
+        "name": "Rod 5"
+      },
+      {
+        "region": 12,
+        "name": "Rod 6"
+      },
+      {
+        "region": 13,
+        "name": "Rod 7"
+      },
+      {
+        "region": 14,
+        "name": "Rod 8"
+      },
+      {
+        "region": 15,
+        "name": "Rod 9"
+      },
+      {
+        "region": 16,
+        "name": "Rod 10"
+      },
+      {
+        "region": 17,
+        "name": "Rod 11"
+      },
+      {
+        "region": 18,
+        "name": "Rod 12"
+      },
+      {
+        "region": 19,
+        "name": "Rod 13"
+      },
+      {
+        "region": 20,
+        "name": "Rod 14"
+      },
+      {
+        "region": 21,
+        "name": "Rod 15"
+      },
+      {
+        "region": 22,
+        "name": "Rod 16"
+      },
+      {
+        "region": 23,
+        "name": "Rod 17"
+      },
+      {
+        "region": 24,
+        "name": "Rod 18"
+      },
+      {
+        "region": 25,
+        "name": "Rod 19"
+      },
+      {
+        "region": 26,
+        "name": "Rod 20"
+      },
+      {
+        "region": 27,
+        "name": "Rod 21"
+      },
+      {
+        "region": 28,
+        "name": "Rod 22"
+      },
+      {
+        "region": 29,
+        "name": "Rod 23"
+      },
+      {
+        "region": 30,
+        "name": "Rod 24"
+      },
+      {
+        "region": 31,
+        "name": "Rod 25"
+      }
+    ]
   },
   "presentation": {
     "grid": true,

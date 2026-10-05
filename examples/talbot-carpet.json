@@ -1114,7 +1114,17 @@
     "far_field": {
       "enabled": false,
       "inset": 0.12
-    }
+    },
+    "region_names": [
+      {
+        "region": 2,
+        "name": "Behind the launcher"
+      },
+      {
+        "region": 3,
+        "name": "Launcher"
+      }
+    ]
   },
   "presentation": {
     "grid": true,

@@ -10,6 +10,7 @@ use crate::topology_editor::{
     TopologyProbeTarget,
 };
 use funfern_core::*;
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 pub struct TopologyExample {
@@ -513,6 +514,10 @@ struct Builder {
     next_span: u64,
     next_region: u64,
     next_vertex: u64,
+    /// What the scene calls its regions, which the Materials panel lists.
+    names: BTreeMap<RegionId, String>,
+    /// How many rods `rod` has built.
+    rods: usize,
 }
 
 impl Builder {
@@ -523,6 +528,31 @@ impl Builder {
             next_span: 1,
             next_region: 2,
             next_vertex: 1,
+            names: BTreeMap::new(),
+            rods: 0,
+        }
+    }
+
+    /// Names a region, which must be one the scene holds by the time it is
+    /// a document.
+    fn name(&mut self, region: RegionId, name: &str) {
+        self.names.insert(region, name.to_owned());
+    }
+
+    /// A crystal's rod of `material`, named Rod n in the order built.
+    fn rod(&mut self, spline: PeriodicCubicSpline, material: MaterialId) -> RegionId {
+        let region = self.subdomain(spline, material, MaterialFrame::world());
+        self.rods += 1;
+        let name = format!("Rod {}", self.rods);
+        self.name(region, &name);
+        region
+    }
+
+    /// Names regions in order, one name each.
+    fn name_all(&mut self, regions: &[RegionId], names: &[&str]) {
+        assert_eq!(regions.len(), names.len(), "a name for each of {regions:?}");
+        for (region, name) in regions.iter().zip(names) {
+            self.name(*region, name);
         }
     }
 
@@ -838,6 +868,9 @@ impl Builder {
     fn launcher(&mut self, x: f64, frequency: f64, amplitude: f64) -> RegionId {
         let background = self.scene.regions[0].material;
         let region = self.strip(x - 0.03, x + 0.03, background);
+        // The strip names the face behind it just before itself.
+        self.name(RegionId(region.0 - 1), "Behind the launcher");
+        self.name(region, "Launcher");
         self.scene.volume_sources.push(VolumeSource {
             region,
             enabled: true,
@@ -914,13 +947,15 @@ impl Builder {
     /// the upper arm there, and what lies past it is cut away. Every face is
     /// named from the floor or the ceiling, so the background's own anchor,
     /// on the floor at `x = 0`, names the lower arm's face past the launcher.
+    /// Names the launcher's halves, what is behind them and the lower arm;
+    /// returns the upper arm's pieces past the launcher, left to right.
     fn arms(
         &mut self,
         x: f64,
         signal: TimeSignal,
         layers: &[(f64, f64, MaterialId)],
         mirror: Option<f64>,
-    ) {
+    ) -> Vec<RegionId> {
         let domain = self.scene.geometry.domain;
         let background = self.scene.regions[0].material;
         let (left, right) = (x - 0.03, x + 0.03);
@@ -979,9 +1014,13 @@ impl Builder {
         // The lower arm: behind the launcher, the launcher, and the face past
         // it, which is the background's own.
         let behind = 0.5 * (domain.min_x + left);
-        self.face_on(OuterSide::Bottom, behind, background);
+        let behind = self.face_on(OuterSide::Bottom, behind, background);
         let lower = self.face_on(OuterSide::Bottom, x, background);
         let upper = self.face_on(OuterSide::Top, x, background);
+        self.name(BACKGROUND_REGION, "Reference arm");
+        self.name(behind, "Behind the reference launcher");
+        self.name(lower, "Reference launcher");
+        self.name(upper, "Sample launcher");
         for region in [upper, lower] {
             self.scene.volume_sources.push(VolumeSource {
                 region,
@@ -994,6 +1033,9 @@ impl Builder {
         let mut edges = vec![domain.min_x, left, right];
         edges.extend(&cuts);
         edges.push(domain.max_x);
+        // The upper arm's pieces past the launcher, left to right, for the
+        // scene to name.
+        let mut past = vec![];
         for pair in edges.windows(2) {
             if pair[0] == left {
                 continue;
@@ -1013,13 +1055,26 @@ impl Builder {
                 .iter()
                 .find(|(x0, x1, _)| *x0 <= pair[0] && pair[1] <= *x1)
                 .map_or(background, |layer| layer.2);
-            self.face_on(OuterSide::Top, middle, material);
+            let piece = self.face_on(OuterSide::Top, middle, material);
+            if pair[0] == domain.min_x {
+                self.name(piece, "Behind the sample launcher");
+            } else {
+                past.push(piece);
+            }
         }
+        past
     }
 
     fn document(self) -> TopologyDocument {
         let scene = self.scene;
         scene.compile(0).unwrap();
+        for (region, name) in &self.names {
+            assert!(
+                scene.region(*region).is_some(),
+                "{name:?} names region {}, which the scene does not hold",
+                region.0
+            );
+        }
         TopologyDocument {
             model: TopologyDocumentModel {
                 draft: scene.clone(),
@@ -1027,7 +1082,7 @@ impl Builder {
                 probes: vec![],
                 source: PointSource::default(),
                 far_field: FarFieldSettings::default(),
-                region_names: Default::default(),
+                region_names: self.names,
             },
             presentation: PresentationSettings::default(),
             readouts: ProbeReadouts::default(),
@@ -1346,7 +1401,7 @@ fn material_lens() -> TopologyDocument {
         color: [61, 116, 139],
         ..Material::default_medium()
     });
-    builder.subdomain(
+    let lens = builder.subdomain(
         PeriodicCubicSpline::rounded(Point2::default(), 0.45),
         MaterialId(2),
         MaterialFrame {
@@ -1354,6 +1409,7 @@ fn material_lens() -> TopologyDocument {
             ..MaterialFrame::world()
         },
     );
+    builder.name(lens, "Lens");
     let mut document = builder.document();
     document.model.source = source(Point2::new(-0.72, 0.0), 3.5, 16.0, 0.045);
     // The power converging behind the lens.
@@ -1413,6 +1469,7 @@ fn grin_rod_with(dn: f64) -> TopologyDocument {
             ..MaterialFrame::world()
         },
     );
+    builder.name(region, "GRIN rod");
     let mut document = builder.document();
     document.model.source = PointSource {
         region,
@@ -1453,7 +1510,7 @@ fn anisotropic_crystal() -> TopologyDocument {
         color: [54, 125, 126],
         ..Material::default_medium()
     });
-    builder.subdomain(
+    let crystal = builder.subdomain(
         PeriodicCubicSpline::rounded(center, 0.48),
         MaterialId(2),
         MaterialFrame {
@@ -1462,6 +1519,7 @@ fn anisotropic_crystal() -> TopologyDocument {
             attachment: MaterialFrameAttachment::FollowRegion,
         },
     );
+    builder.name(crystal, "Crystal");
     let mut document = builder.document();
     document.model.source = source(Point2::new(-0.72, 0.0), 3.2, 15.0, 0.045);
     document.presentation.material_overlay =
@@ -1540,6 +1598,7 @@ fn luneburg_lens_with(lens: bool) -> TopologyDocument {
             ..MaterialFrame::world()
         },
     );
+    builder.name(region, "Lens");
     let mut document = builder.document();
     document.model.source.enabled = false;
     document.model.probes.push(TopologyProbeDefinition {
@@ -1587,6 +1646,7 @@ fn phased_array() -> TopologyDocument {
                 ..MaterialFrame::world()
             },
         );
+        builder.name(region, &format!("Element {}", index + 1));
         builder.scene.volume_sources.push(VolumeSource {
             region,
             enabled: true,
@@ -1704,7 +1764,7 @@ fn kerr_slab_with(chi: f64, amplitude: f64) -> TopologyDocument {
     );
     medium.short_wave_loss = KERR_SLAB_SHORT_WAVE;
     builder.scene.materials.push(medium);
-    builder.subdomain(
+    let slab = builder.subdomain(
         slab(-0.3, 0.3, 0.55),
         MaterialId(2),
         MaterialFrame {
@@ -1712,6 +1772,7 @@ fn kerr_slab_with(chi: f64, amplitude: f64) -> TopologyDocument {
             ..MaterialFrame::world()
         },
     );
+    builder.name(slab, "Slab");
     let mut document = builder.document();
     document.model.source = source(Point2::new(-0.6, 0.0), 2.5, amplitude, 0.05);
     document.model.probes.push(TopologyProbeDefinition {
@@ -1750,7 +1811,7 @@ fn pumped_slab_with(depth: f64, pump_hz: f64, phase: f64) -> TopologyDocument {
             ("pump_phase", phase),
         ],
     ));
-    builder.subdomain(
+    let slab = builder.subdomain(
         slab(-0.35, 0.35, 0.55),
         MaterialId(2),
         MaterialFrame {
@@ -1758,6 +1819,7 @@ fn pumped_slab_with(depth: f64, pump_hz: f64, phase: f64) -> TopologyDocument {
             ..MaterialFrame::world()
         },
     );
+    builder.name(slab, "Slab");
     let mut document = builder.document();
     document.model.source = source(Point2::new(-0.65, 0.0), 2.5, 20.0, 0.05);
     document.model.probes.push(TopologyProbeDefinition {
@@ -1793,7 +1855,7 @@ fn modulated_slab(
         LawPresetRow::Mass,
         values,
     ));
-    builder.subdomain(
+    let slab = builder.subdomain(
         slab(-half_width, half_width, 0.55),
         MaterialId(2),
         MaterialFrame {
@@ -1801,6 +1863,7 @@ fn modulated_slab(
             ..MaterialFrame::world()
         },
     );
+    builder.name(slab, "Slab");
     let side = if mirrored { -1.0 } else { 1.0 };
     let mut document = builder.document();
     document.model.source = source(
@@ -1896,7 +1959,7 @@ fn spatial_soliton_with(amplitude: f64) -> TopologyDocument {
         .value = std::f64::consts::TAU * SOLITON_CUTOFF_HZ;
     slab_material.mass_density =
         ScalarField::constant(1.0 / (1.0 - (SOLITON_CUTOFF_HZ / SOLITON_HZ).powi(2)));
-    builder.subdomain(
+    let slab = builder.subdomain(
         slab(-0.6, 0.6, 0.9),
         MaterialId(2),
         MaterialFrame {
@@ -1904,6 +1967,7 @@ fn spatial_soliton_with(amplitude: f64) -> TopologyDocument {
             ..MaterialFrame::world()
         },
     );
+    builder.name(slab, "Slab");
     let mut document = builder.document();
     document.model.source.enabled = false;
     document.model.probes.push(TopologyProbeDefinition {
@@ -1983,6 +2047,14 @@ fn doppler_mirror_with(pump_hz: f64) -> TopologyDocument {
     ] {
         let region = RegionId(builder.next_region);
         builder.next_region += 1;
+        builder.name(
+            region,
+            if side == CurveTraceSide::Right {
+                "Grating"
+            } else {
+                "Before the grating"
+            },
+        );
         builder.scene.regions.push(Region {
             id: region,
             material,
@@ -1999,6 +2071,7 @@ fn doppler_mirror_with(pump_hz: f64) -> TopologyDocument {
             region: Some(region),
         });
     }
+    builder.name(BACKGROUND_REGION, "Past the grating");
     let mut document = builder.document();
     document.model.source.enabled = false;
     document.model.probes.push(TopologyProbeDefinition {
@@ -2117,6 +2190,14 @@ fn temporal_slab_with(drop: bool) -> TopologyDocument {
     ] {
         let region = RegionId(builder.next_region);
         builder.next_region += 1;
+        builder.name(
+            region,
+            if side == CurveTraceSide::Right {
+                "Slab"
+            } else {
+                "Before the slab"
+            },
+        );
         builder.scene.regions.push(Region {
             id: region,
             material,
@@ -2133,6 +2214,7 @@ fn temporal_slab_with(drop: bool) -> TopologyDocument {
             region: Some(region),
         });
     }
+    builder.name(BACKGROUND_REGION, "Past the slab");
     let mut document = builder.document();
     document.model.source.enabled = false;
     for (id, name, color, point) in [
@@ -2233,6 +2315,14 @@ fn chopper_with(shutter: Shutter, rate: f64, front: f64) -> TopologyDocument {
     ] {
         let region = RegionId(builder.next_region);
         builder.next_region += 1;
+        builder.name(
+            region,
+            if side == CurveTraceSide::Right {
+                "Shutter"
+            } else {
+                "Before the shutter"
+            },
+        );
         builder.scene.regions.push(Region {
             id: region,
             material,
@@ -2249,6 +2339,7 @@ fn chopper_with(shutter: Shutter, rate: f64, front: f64) -> TopologyDocument {
             region: Some(region),
         });
     }
+    builder.name(BACKGROUND_REGION, "Past the shutter");
     let mut document = builder.document();
     document.model.source.enabled = false;
     document.model.probes.push(TopologyProbeDefinition {
@@ -2575,6 +2666,7 @@ fn emitter_with(plasma_hz: f64) -> TopologyDocument {
         MaterialId(2),
         MaterialFrame::world(),
     );
+    builder.name(region, "Emitter");
     let mut document = builder.document();
     document.model.source = PointSource {
         region,
@@ -2683,6 +2775,7 @@ fn whispering_gallery_with(frequency: f64) -> TopologyDocument {
         MaterialId(2),
         MaterialFrame::world(),
     );
+    builder.name(region, "Vacuum disk");
     let mut document = builder.document();
     document.model.source = PointSource {
         region,
@@ -2826,6 +2919,10 @@ fn fiber_amplifier_with(depth: f64, wavenumber: f64, phase: f64) -> TopologyDocu
     fiber.short_wave_loss = FIBER_SHORT_WAVE;
     builder.scene.materials.push(fiber);
     let region = builder.band(-FIBER_H, FIBER_H, MaterialId(2));
+    // The band names the face above it just before itself.
+    builder.name(BACKGROUND_REGION, "Below the fiber");
+    builder.name(RegionId(region.0 - 1), "Above the fiber");
+    builder.name(region, "Fiber");
     let mut document = builder.document();
     document.model.source = PointSource {
         region,
@@ -3010,6 +3107,9 @@ fn bent_fiber_with(radius: f64) -> TopologyDocument {
         ),
         &[SpanBehavior::Transmitting; 4],
     );
+    builder.name(BACKGROUND_REGION, "Outside the bend");
+    builder.name(inside, "Inside the bend");
+    builder.name(core, "Fiber");
     let mut document = builder.document();
     document.model.source = PointSource {
         region: core,
@@ -3091,7 +3191,8 @@ fn photonic_crystal_with(repeat: f64, rods: bool) -> TopologyDocument {
         polarization: ElectromagneticPolarization::Tm,
     };
     builder.scene.outer_boundaries = channel();
-    builder.arms(-0.85, sinc_pulse(0.8, 3.0, repeat), &[], None);
+    let past = builder.arms(-0.85, sinc_pulse(0.8, 3.0, repeat), &[], None);
+    builder.name_all(&past, &["Sample arm"]);
     builder.scene.materials.push(Material {
         id: MaterialId(2),
         name: "Ceramic".into(),
@@ -3106,10 +3207,9 @@ fn photonic_crystal_with(repeat: f64, rods: bool) -> TopologyDocument {
                     (column as f64 - 2.0) * CRYSTAL_PITCH,
                     (row as f64 + 0.5) * CRYSTAL_PITCH,
                 );
-                builder.subdomain(
+                builder.rod(
                     octagonal_rod(centre, CRYSTAL_ROD_FRACTION * CRYSTAL_PITCH),
                     MaterialId(2),
-                    MaterialFrame::world(),
                 );
             }
         }
@@ -3153,13 +3253,12 @@ fn crystal_block(open: fn(i32, i32) -> bool) -> Builder {
     for column in -3..=3 {
         for row in -3..=3 {
             if !open(column, row) {
-                builder.subdomain(
+                builder.rod(
                     octagonal_rod(
                         Point2::new(column as f64, row as f64) * CRYSTAL_PITCH,
                         CRYSTAL_ROD_FRACTION * CRYSTAL_PITCH,
                     ),
                     MaterialId(2),
-                    MaterialFrame::world(),
                 );
             }
         }
@@ -3253,11 +3352,19 @@ fn ring_resonator_with(frequency: f64, ring: bool) -> TopologyDocument {
             MaterialId(2),
             MaterialFrame::world(),
         ));
-        builder.subdomain(
+        let inside = builder.subdomain(
             circle(centre, RING_RADIUS - 0.5 * CORE_WIDTH),
             DEFAULT_MATERIAL,
             MaterialFrame::world(),
         );
+        builder.name(inside, "Inside the ring");
+    }
+    // The band names the face above it just before itself.
+    builder.name(BACKGROUND_REGION, "Below the bus");
+    builder.name(RegionId(bus.0 - 1), "Above the bus");
+    builder.name(bus, "Bus waveguide");
+    if let Some(ring) = region {
+        builder.name(ring, "Ring");
     }
     let mut document = builder.document();
     document.model.source = PointSource {
@@ -3409,6 +3516,7 @@ fn dielectric_gallery_with(frequency: f64) -> TopologyDocument {
     let spline = circle(Point2::default(), DISK_RADIUS);
     let spans = spline.intervals().len() as u64;
     let region = builder.subdomain(spline, MaterialId(2), MaterialFrame::world());
+    builder.name(region, "Disk");
     let mut document = builder.document();
     document.model.source = PointSource {
         region,
@@ -3561,6 +3669,7 @@ fn fisheye_with(lens: bool) -> TopologyDocument {
             ..MaterialFrame::world()
         },
     );
+    builder.name(region, "Fisheye lens");
     let mut document = builder.document();
     document.model.source = PointSource {
         region,
@@ -3750,6 +3859,8 @@ fn brewster_with(polarization: ElectromagneticPolarization, glass: bool) -> Topo
         ),
         &[SpanBehavior::Transmitting; 2],
     );
+    builder.name(BACKGROUND_REGION, "Incident side");
+    builder.name(region, "Glass");
     let mut document = builder.document();
     document.model.source = source(BREWSTER_SOURCE, BREWSTER_HZ, 10.0, 0.03);
     document.model.probes.push(TopologyProbeDefinition {
@@ -3879,6 +3990,10 @@ fn tunnelling_with(gap: f64, glass: bool) -> TopologyDocument {
         },
         region: Some(block),
     });
+    builder.name(BACKGROUND_REGION, "Below the guide");
+    builder.name(fiber, "Glass guide");
+    builder.name(above, "Above the guide");
+    builder.name(block, "Block");
     let mut document = builder.document();
     document.model.source = PointSource {
         region: fiber,
@@ -4213,10 +4328,9 @@ fn rods_with(sites: &[Point2]) -> TopologyDocument {
         ..Material::default_medium()
     });
     for site in sites {
-        builder.subdomain(
+        builder.rod(
             octagonal_rod(*site, CRYSTAL_ROD_FRACTION * CRYSTAL_PITCH),
             MaterialId(2),
-            MaterialFrame::world(),
         );
     }
     let mut document = builder.document();
@@ -4275,7 +4389,8 @@ fn echo_comb_with(repeat: f64) -> TopologyDocument {
         polarization: ElectromagneticPolarization::Tm,
     };
     builder.scene.outer_boundaries = channel();
-    builder.arms(-0.85, sinc_pulse(0.5, 3.5, repeat), &[], Some(ECHO_MIRROR));
+    let past = builder.arms(-0.85, sinc_pulse(0.5, 3.5, repeat), &[], Some(ECHO_MIRROR));
+    builder.name_all(&past, &["Sample arm"]);
     let mut document = builder.document();
     document.model.source.enabled = false;
     arm_probes_at(
@@ -4321,12 +4436,13 @@ fn etalon_with(permittivity: f64, repeat: f64) -> TopologyDocument {
         color: [66, 105, 151],
         ..Material::default_medium()
     });
-    builder.arms(
+    let past = builder.arms(
         -0.85,
         sinc_pulse(0.5, 3.5, repeat),
         &[(ETALON_FRONT, ETALON_FRONT + ETALON_THICKNESS, MaterialId(2))],
         None,
     );
+    builder.name_all(&past, &["Before the etalon", "Etalon", "Past the etalon"]);
     let mut document = builder.document();
     document.model.source.enabled = false;
     arm_probes(
@@ -4373,7 +4489,7 @@ fn cavity_filter_with(repeat: f64) -> TopologyDocument {
         ..Material::default_medium()
     });
     let back = CAVITY_FRONT + CAVITY_PLATE + CAVITY_GAP;
-    builder.arms(
+    let past = builder.arms(
         -0.85,
         sinc_pulse(1.0, 3.0, repeat),
         &[
@@ -4381,6 +4497,16 @@ fn cavity_filter_with(repeat: f64) -> TopologyDocument {
             (back, back + CAVITY_PLATE, MaterialId(2)),
         ],
         None,
+    );
+    builder.name_all(
+        &past,
+        &[
+            "Before the filter",
+            "First mirror",
+            "Cavity",
+            "Second mirror",
+            "Past the filter",
+        ],
     );
     let mut document = builder.document();
     document.model.source.enabled = false;
@@ -4408,22 +4534,25 @@ fn skin_depth() -> TopologyDocument {
 /// shortcut, would put the depth at 0.053. A line probe runs along the
 /// channel through the slab and a point probe sits behind it.
 fn skin_with(rate: f64) -> TopologyDocument {
-    slab_channel(Material {
-        id: MaterialId(2),
-        name: "Lossy medium".into(),
-        electric_loss: Some(LossChannel {
-            base_rate: ScalarField::constant(rate),
-            law: DampingLaw::constant(),
-        }),
-        color: [139, 92, 66],
-        ..Material::default_medium()
-    })
+    slab_channel(
+        Material {
+            id: MaterialId(2),
+            name: "Lossy medium".into(),
+            electric_loss: Some(LossChannel {
+                base_rate: ScalarField::constant(rate),
+                law: DampingLaw::constant(),
+            }),
+            color: [139, 92, 66],
+            ..Material::default_medium()
+        },
+        "Lossy slab",
+    )
 }
 
 /// A TM channel lit by a 3 Hz launcher at the left, with a slab of
-/// `material` from `x = −0.35` to `−0.05`, a line probe along the channel
-/// through it and a point probe behind it.
-fn slab_channel(material: Material) -> TopologyDocument {
+/// `material`, called `slab_name`, from `x = −0.35` to `−0.05`, a line
+/// probe along the channel through it and a point probe behind it.
+fn slab_channel(material: Material, slab_name: &str) -> TopologyDocument {
     let mut builder = Builder::new();
     builder.scene.physics = PhysicsModel::Electromagnetic {
         polarization: ElectromagneticPolarization::Tm,
@@ -4440,6 +4569,14 @@ fn slab_channel(material: Material) -> TopologyDocument {
     ] {
         let region = RegionId(builder.next_region);
         builder.next_region += 1;
+        builder.name(
+            region,
+            if side == CurveTraceSide::Right {
+                slab_name
+            } else {
+                "Before the slab"
+            },
+        );
         builder.scene.regions.push(Region {
             id: region,
             material,
@@ -4456,6 +4593,7 @@ fn slab_channel(material: Material) -> TopologyDocument {
             region: Some(region),
         });
     }
+    builder.name(BACKGROUND_REGION, "Past the slab");
     let mut document = builder.document();
     document.model.source.enabled = false;
     document.model.probes.push(TopologyProbeDefinition {
@@ -4501,7 +4639,7 @@ fn plasma_skin_depth() -> TopologyDocument {
 /// power: it all comes back. `c/ω_p`, the depth far below the cutoff, would
 /// put it at 0.040.
 fn plasma_skin_with(cutoff: f64) -> TopologyDocument {
-    slab_channel(tm_plasma(cutoff))
+    slab_channel(tm_plasma(cutoff), "Plasma slab")
 }
 
 /// The TM skin's Klein-Gordon medium, a collisionless plasma, as material 2,
@@ -4563,7 +4701,7 @@ fn plasma_delay_with(repeat: f64) -> TopologyDocument {
         .scene
         .materials
         .push(tm_plasma(PLASMA_DELAY_CUTOFF_HZ));
-    builder.arms(
+    let past = builder.arms(
         -0.85,
         TimeSignal::pulsed(
             [0.0, 40.0, PLASMA_DELAY_HZ, 0.0],
@@ -4576,6 +4714,10 @@ fn plasma_delay_with(repeat: f64) -> TopologyDocument {
         &[(PLASMA_DELAY_FRONT, PLASMA_DELAY_BACK, MaterialId(2))],
         None,
     );
+    builder.name_all(
+        &past,
+        &["Before the plasma", "Plasma slab", "Past the plasma"],
+    );
     let mut document = builder.document();
     document.model.source.enabled = false;
     arm_probes(&mut document, "Behind the plasma", field_readout(4.0));
@@ -4585,6 +4727,35 @@ fn plasma_delay_with(repeat: f64) -> TopologyDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every region of every gallery scene is named, but the background,
+    /// which a scene names only when it is one piece among others, and no
+    /// two regions of a scene share a name: the Materials panel lists them
+    /// by these names.
+    #[test]
+    fn every_gallery_region_but_the_background_is_named() {
+        for example in catalog() {
+            let model = &example.document.model;
+            for region in &model.draft.regions {
+                assert!(
+                    region.id == BACKGROUND_REGION || model.region_names.contains_key(&region.id),
+                    "{}: region {} has no name",
+                    example.name,
+                    region.id.0
+                );
+            }
+            let names = model
+                .region_names
+                .values()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                names.len(),
+                model.region_names.len(),
+                "{}: two regions share a name",
+                example.name
+            );
+        }
+    }
 
     /// A scene near the topology limits: 63 rods of 42 corners, 126 controls
     /// each against a curve's 128 and 63 curves against 64.

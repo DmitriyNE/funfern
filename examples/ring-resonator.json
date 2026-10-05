@@ -1667,7 +1667,29 @@
     "far_field": {
       "enabled": false,
       "inset": 0.12
-    }
+    },
+    "region_names": [
+      {
+        "region": 1,
+        "name": "Below the bus"
+      },
+      {
+        "region": 2,
+        "name": "Above the bus"
+      },
+      {
+        "region": 3,
+        "name": "Bus waveguide"
+      },
+      {
+        "region": 4,
+        "name": "Ring"
+      },
+      {
+        "region": 5,
+        "name": "Inside the ring"
+      }
+    ]
   },
   "presentation": {
     "grid": true,

@@ -1722,7 +1722,41 @@
     "far_field": {
       "enabled": false,
       "inset": 0.12
-    }
+    },
+    "region_names": [
+      {
+        "region": 1,
+        "name": "Reference arm"
+      },
+      {
+        "region": 2,
+        "name": "Behind the reference launcher"
+      },
+      {
+        "region": 3,
+        "name": "Reference launcher"
+      },
+      {
+        "region": 4,
+        "name": "Sample launcher"
+      },
+      {
+        "region": 5,
+        "name": "Behind the sample launcher"
+      },
+      {
+        "region": 6,
+        "name": "Before the plasma"
+      },
+      {
+        "region": 7,
+        "name": "Plasma slab"
+      },
+      {
+        "region": 8,
+        "name": "Past the plasma"
+      }
+    ]
   },
   "presentation": {
     "grid": true,

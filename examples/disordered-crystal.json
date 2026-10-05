@@ -21308,7 +21308,217 @@
     "far_field": {
       "enabled": false,
       "inset": 0.12
-    }
+    },
+    "region_names": [
+      {
+        "region": 2,
+        "name": "Behind the launcher"
+      },
+      {
+        "region": 3,
+        "name": "Launcher"
+      },
+      {
+        "region": 4,
+        "name": "Rod 1"
+      },
+      {
+        "region": 5,
+        "name": "Rod 2"
+      },
+      {
+        "region": 6,
+        "name": "Rod 3"
+      },
+      {
+        "region": 7,
+        "name": "Rod 4"
+      },
+      {
+        "region": 8,
+        "name": "Rod 5"
+      },
+      {
+        "region": 9,
+        "name": "Rod 6"
+      },
+      {
+        "region": 10,
+        "name": "Rod 7"
+      },
+      {
+        "region": 11,
+        "name": "Rod 8"
+      },
+      {
+        "region": 12,
+        "name": "Rod 9"
+      },
+      {
+        "region": 13,
+        "name": "Rod 10"
+      },
+      {
+        "region": 14,
+        "name": "Rod 11"
+      },
+      {
+        "region": 15,
+        "name": "Rod 12"
+      },
+      {
+        "region": 16,
+        "name": "Rod 13"
+      },
+      {
+        "region": 17,
+        "name": "Rod 14"
+      },
+      {
+        "region": 18,
+        "name": "Rod 15"
+      },
+      {
+        "region": 19,
+        "name": "Rod 16"
+      },
+      {
+        "region": 20,
+        "name": "Rod 17"
+      },
+      {
+        "region": 21,
+        "name": "Rod 18"
+      },
+      {
+        "region": 22,
+        "name": "Rod 19"
+      },
+      {
+        "region": 23,
+        "name": "Rod 20"
+      },
+      {
+        "region": 24,
+        "name": "Rod 21"
+      },
+      {
+        "region": 25,
+        "name": "Rod 22"
+      },
+      {
+        "region": 26,
+        "name": "Rod 23"
+      },
+      {
+        "region": 27,
+        "name": "Rod 24"
+      },
+      {
+        "region": 28,
+        "name": "Rod 25"
+      },
+      {
+        "region": 29,
+        "name": "Rod 26"
+      },
+      {
+        "region": 30,
+        "name": "Rod 27"
+      },
+      {
+        "region": 31,
+        "name": "Rod 28"
+      },
+      {
+        "region": 32,
+        "name": "Rod 29"
+      },
+      {
+        "region": 33,
+        "name": "Rod 30"
+      },
+      {
+        "region": 34,
+        "name": "Rod 31"
+      },
+      {
+        "region": 35,
+        "name": "Rod 32"
+      },
+      {
+        "region": 36,
+        "name": "Rod 33"
+      },
+      {
+        "region": 37,
+        "name": "Rod 34"
+      },
+      {
+        "region": 38,
+        "name": "Rod 35"
+      },
+      {
+        "region": 39,
+        "name": "Rod 36"
+      },
+      {
+        "region": 40,
+        "name": "Rod 37"
+      },
+      {
+        "region": 41,
+        "name": "Rod 38"
+      },
+      {
+        "region": 42,
+        "name": "Rod 39"
+      },
+      {
+        "region": 43,
+        "name": "Rod 40"
+      },
+      {
+        "region": 44,
+        "name": "Rod 41"
+      },
+      {
+        "region": 45,
+        "name": "Rod 42"
+      },
+      {
+        "region": 46,
+        "name": "Rod 43"
+      },
+      {
+        "region": 47,
+        "name": "Rod 44"
+      },
+      {
+        "region": 48,
+        "name": "Rod 45"
+      },
+      {
+        "region": 49,
+        "name": "Rod 46"
+      },
+      {
+        "region": 50,
+        "name": "Rod 47"
+      },
+      {
+        "region": 51,
+        "name": "Rod 48"
+      },
+      {
+        "region": 52,
+        "name": "Rod 49"
+      },
+      {
+        "region": 53,
+        "name": "Rod 50"
+      }
+    ]
   },
   "presentation": {
     "grid": true,

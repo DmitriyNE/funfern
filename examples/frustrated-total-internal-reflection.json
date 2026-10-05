@@ -990,7 +990,25 @@
     "far_field": {
       "enabled": false,
       "inset": 0.12
-    }
+    },
+    "region_names": [
+      {
+        "region": 1,
+        "name": "Below the guide"
+      },
+      {
+        "region": 2,
+        "name": "Glass guide"
+      },
+      {
+        "region": 3,
+        "name": "Above the guide"
+      },
+      {
+        "region": 4,
+        "name": "Block"
+      }
+    ]
   },
   "presentation": {
     "grid": true,
