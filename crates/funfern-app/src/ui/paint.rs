@@ -296,6 +296,13 @@ impl Playground {
                 mesh_revision: layout.key.mesh_revision,
                 physics: layout.key.physics,
             });
+            // Only the streamline lattice is a regular grid the lines can
+            // read; an arrow layout still in use after a style change is
+            // drawn as the arrows it is.
+            let lattice = layout.and_then(|layout| {
+                (layout.key.style == VectorOverlayStyle::Streamlines)
+                    .then_some(layout.key.world_spacing)
+            });
             let samples = layout
                 .map(|layout| {
                     layout
@@ -309,7 +316,7 @@ impl Playground {
                                 VectorOverlay::Off => Point2::default(),
                             };
                             (
-                                point.element,
+                                point.key,
                                 self.screen(point.point, r),
                                 value,
                                 sample.pre_filter_complementary,
@@ -320,7 +327,9 @@ impl Playground {
                 .unwrap_or_default();
             self.draw_vector_overlay(
                 painter,
+                r,
                 samples,
+                lattice,
                 owner.unwrap_or(VectorOverlayFilterOwner {
                     mesh_revision: active.mesh.mesh_revision,
                     physics: active.bundle.authored.physics,
@@ -334,17 +343,28 @@ impl Playground {
         }
     }
 
-    /// Drops every arrow's filter history and the mesh it belonged to.
+    /// Drops every arrow's filter history and the mesh it belonged to, and
+    /// the streamlines' seeds with them.
     pub(super) fn clear_vector_overlay_filter(&mut self) {
         self.vector_overlay_filter_state.clear();
         self.vector_overlay_filter_owner = None;
         self.vector_overlay_filter_step = u64::MAX;
+        self.vector_overlay_streamlines.lines.clear();
+        self.streamline_dash_time = None;
     }
 
+    /// Filters and draws the overlay's samples, `(key, screen origin, value,
+    /// pre-filter complementary)`. With `lattice`, the world spacing of a
+    /// streamline lattice the samples are the cell centres of, the flow is
+    /// drawn as streamlines where the style asks for them; otherwise as
+    /// arrows.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_vector_overlay(
         &mut self,
         painter: &egui::Painter,
-        mut samples: Vec<(u32, Pos2, Point2, Point2)>,
+        viewport: Rect,
+        mut samples: Vec<(u64, Pos2, Point2, Point2)>,
+        lattice: Option<f64>,
         owner: VectorOverlayFilterOwner,
         completed_steps: u64,
         absolute_time: f64,
@@ -373,7 +393,7 @@ impl Playground {
             self.vector_overlay_exposure.clear();
             self.vector_overlay_filter = filter;
         }
-        let magnitudes_of = |samples: &[(u32, Pos2, Point2, Point2)]| {
+        let magnitudes_of = |samples: &[(u64, Pos2, Point2, Point2)]| {
             samples
                 .iter()
                 .map(|(_, _, value, _)| value.norm())
@@ -440,6 +460,20 @@ impl Playground {
         if visibility <= VECTOR_OVERLAY_VISIBILITY_CUTOFF {
             return;
         }
+        if let Some(world_spacing) = lattice
+            && settings.vector_overlay_style.resolved(mode) == VectorOverlayStyle::Streamlines
+        {
+            self.draw_streamlines(
+                painter,
+                viewport,
+                &samples,
+                world_spacing,
+                reference,
+                visibility,
+                absolute_time,
+            );
+            return;
+        }
         let maximum_length = settings.vector_overlay_density * 0.46;
         for (_, origin, value, _) in samples {
             let magnitude = value.norm();
@@ -467,6 +501,133 @@ impl Playground {
         }
     }
 
+    /// The flow as streamlines through the lattice of filtered samples,
+    /// placed a line spacing apart from the previous frame's seeds, each
+    /// drawn as dashes drifting along the flow in simulated time, their
+    /// alpha from the local magnitude as the arrows' length is.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_streamlines(
+        &mut self,
+        painter: &egui::Painter,
+        viewport: Rect,
+        samples: &[(u64, Pos2, Point2, Point2)],
+        world_spacing: f64,
+        reference: f64,
+        visibility: f64,
+        absolute_time: f64,
+    ) {
+        let settings = self.editor.document.presentation;
+        let scale = self.scale;
+        if !(scale.is_finite() && scale > 0.0 && viewport.is_positive()) {
+            return;
+        }
+        let Some(lattice) = VectorLattice::new(
+            world_spacing,
+            samples
+                .iter()
+                .map(|(_, origin, value, _)| (self.world(*origin, viewport), *value)),
+        ) else {
+            return;
+        };
+        let corners = [
+            self.world(viewport.min, viewport),
+            self.world(viewport.max, viewport),
+        ];
+        let view = WorldRect {
+            min: Point2::new(
+                corners[0].x.min(corners[1].x),
+                corners[0].y.min(corners[1].y),
+            ),
+            max: Point2::new(
+                corners[0].x.max(corners[1].x),
+                corners[0].y.max(corners[1].y),
+            ),
+        };
+        let separation = f64::from(settings.vector_overlay_density) / scale;
+        let parameters = StreamlineParameters {
+            separation,
+            step: separation / 8.0,
+            // The same floor the arrows are culled at.
+            floor: reference * 0.015,
+            maximum_length: f64::from(viewport.size().length()) / scale * 2.0,
+        };
+        self.vector_overlay_streamlines
+            .place(&lattice, &parameters, &view);
+        if absolute_time.is_finite() {
+            if let Some(last) = self.streamline_dash_time {
+                let elapsed = (absolute_time - last).clamp(0.0, 1.0);
+                self.streamline_dash_phase = (self.streamline_dash_phase
+                    + elapsed * STREAMLINE_DASH_SPEED)
+                    .rem_euclid(STREAMLINE_DASH_PERIOD);
+            }
+            self.streamline_dash_time = Some(absolute_time);
+        }
+        let phase = self.streamline_dash_phase;
+        let stroke_color = |alpha: u8| Color32::from_rgba_unmultiplied(116, 232, 210, alpha);
+        for line in &self.vector_overlay_streamlines.lines {
+            let screen = line
+                .points
+                .iter()
+                .map(|point| {
+                    let at = self.screen(*point, viewport);
+                    Point2::new(f64::from(at.x), f64::from(at.y))
+                })
+                .collect::<Vec<_>>();
+            let arcs = line
+                .cumulative_arcs()
+                .into_iter()
+                .map(|arc| arc * scale)
+                .collect::<Vec<_>>();
+            let Some(length) = arcs.last().copied() else {
+                continue;
+            };
+            for (from, to) in dash_intervals(
+                length,
+                arcs[line.seed_index],
+                phase,
+                STREAMLINE_DASH_ON,
+                STREAMLINE_DASH_PERIOD,
+            ) {
+                let dash = section(&screen, &arcs, from, to);
+                let (Some(first), Some(last)) = (dash.first(), dash.last()) else {
+                    continue;
+                };
+                let middle = first.lerp(*last, 0.5);
+                let magnitude = lattice
+                    .sample(self.world(Pos2::new(middle.x as f32, middle.y as f32), viewport))
+                    .map_or(0.0, Point2::norm);
+                // The exposed strength, as the arrows' length is, over a
+                // floor: a short arrow is still a full stroke, where a dash
+                // at the same alpha would vanish, and the stop at the floor
+                // has already removed what is too quiet to follow. The
+                // whole overlay still fades out with the visibility.
+                let exposed = vector_arrow_length(
+                    magnitude,
+                    reference,
+                    settings.vector_overlay_gain,
+                    1.0,
+                    1.0,
+                );
+                let alpha = (visibility
+                    * (STREAMLINE_ALPHA_FLOOR
+                        + (1.0 - STREAMLINE_ALPHA_FLOOR) * f64::from(exposed))
+                    * 230.0)
+                    .round();
+                if alpha.is_nan() || alpha < 2.0 {
+                    continue;
+                }
+                let points = dash
+                    .iter()
+                    .map(|point| Pos2::new(point.x as f32, point.y as f32))
+                    .collect::<Vec<_>>();
+                painter.add(egui::Shape::line(
+                    points,
+                    Stroke::new(1.45, stroke_color(alpha as u8)),
+                ));
+            }
+        }
+    }
+
     /// Keeps the arrows' filter history across a solver handoff on the same
     /// mesh and physics, carries it to the nearest new sample across a
     /// same-physics remesh, and drops it for anything else.
@@ -474,7 +635,7 @@ impl Playground {
         &mut self,
         filter: VectorFilter,
         owner: VectorOverlayFilterOwner,
-        samples: &[(u32, Pos2, Point2, Point2)],
+        samples: &[(u64, Pos2, Point2, Point2)],
         completed_steps: u64,
         absolute_time: f64,
         remap_radius: f32,
@@ -487,16 +648,9 @@ impl Playground {
                 && absolute_time.is_finite();
             if compatible_remesh {
                 let previous = std::mem::take(&mut self.vector_overlay_filter_state);
-                let radius_squared = remap_radius * remap_radius;
+                let grid = OriginGrid::new(previous.values(), remap_radius);
                 for (key, origin, value, _) in samples {
-                    let nearest = previous
-                        .values()
-                        .filter_map(|state| {
-                            let distance = state.origin.distance_sq(*origin);
-                            (distance <= radius_squared).then_some((distance, state))
-                        })
-                        .min_by(|left, right| left.0.total_cmp(&right.0));
-                    if let Some((_, state)) = nearest {
+                    if let Some(state) = grid.nearest(*origin) {
                         let elapsed = (absolute_time - state.time).max(0.0);
                         // Remeshing is a zero-duration representation change.
                         // The raw input is rebased to the transferred new
@@ -537,7 +691,7 @@ impl Playground {
     /// attenuating ordinary source frequencies.
     pub(super) fn ac_couple_vector_samples(
         &mut self,
-        samples: &mut [(u32, Pos2, Point2, Point2)],
+        samples: &mut [(u64, Pos2, Point2, Point2)],
         completed_steps: u64,
         absolute_time: f64,
         maintenance_discontinuity: bool,
@@ -618,7 +772,7 @@ impl Playground {
     /// picture of a first enable.
     pub(super) fn low_pass_vector_samples(
         &mut self,
-        samples: &mut [(u32, Pos2, Point2, Point2)],
+        samples: &mut [(u64, Pos2, Point2, Point2)],
         completed_steps: u64,
         absolute_time: f64,
         rate: f64,
@@ -633,21 +787,17 @@ impl Playground {
         // Seeds are chosen before any arrow is updated, so the order of the
         // samples does not decide which arrows count as live.
         let previous_step = self.vector_overlay_filter_step;
-        let radius_squared = remap_radius * remap_radius;
+        let live = OriginGrid::new(
+            self.vector_overlay_filter_state
+                .values()
+                .filter(|state| state.step == previous_step),
+            remap_radius,
+        );
         let seeded = samples
             .iter()
             .filter(|(key, ..)| !self.vector_overlay_filter_state.contains_key(key))
             .map(|(key, origin, value, _)| {
-                let nearest = self
-                    .vector_overlay_filter_state
-                    .values()
-                    .filter(|state| state.step == previous_step)
-                    .filter_map(|state| {
-                        let distance = state.origin.distance_sq(*origin);
-                        (distance <= radius_squared).then_some((distance, state))
-                    })
-                    .min_by(|left, right| left.0.total_cmp(&right.0));
-                let seed = nearest.map_or_else(Default::default, |(_, state)| *state);
+                let seed = live.nearest(*origin).copied().unwrap_or_default();
                 (
                     *key,
                     VectorFilterState {
@@ -1394,6 +1544,72 @@ impl Playground {
     }
 }
 
+/// Filter states bucketed by their screen origin in cells of the search
+/// radius, so the nearest state within the radius is found among the nine
+/// cells around a point rather than by a scan of every state. A lattice of
+/// thousands of samples replaces every key on a zoom step or a remesh, and a
+/// scan per key there was a hitch of tens of milliseconds.
+struct OriginGrid<'a> {
+    radius_squared: f32,
+    cell: f32,
+    buckets: std::collections::HashMap<(i32, i32), Vec<&'a VectorFilterState>>,
+}
+
+impl<'a> OriginGrid<'a> {
+    fn new(states: impl Iterator<Item = &'a VectorFilterState>, radius: f32) -> Self {
+        let cell = if radius.is_finite() && radius > 0.0 {
+            radius
+        } else {
+            1.0
+        };
+        let mut buckets = std::collections::HashMap::<(i32, i32), Vec<_>>::new();
+        for state in states {
+            if state.origin.x.is_finite() && state.origin.y.is_finite() {
+                buckets
+                    .entry(Self::bucket(state.origin, cell))
+                    .or_default()
+                    .push(state);
+            }
+        }
+        Self {
+            radius_squared: radius * radius,
+            cell,
+            buckets,
+        }
+    }
+
+    fn bucket(origin: Pos2, cell: f32) -> (i32, i32) {
+        (
+            (origin.x / cell).floor() as i32,
+            (origin.y / cell).floor() as i32,
+        )
+    }
+
+    fn nearest(&self, origin: Pos2) -> Option<&'a VectorFilterState> {
+        if !origin.x.is_finite() || !origin.y.is_finite() {
+            return None;
+        }
+        let (column, row) = Self::bucket(origin, self.cell);
+        let mut best: Option<(f32, &'a VectorFilterState)> = None;
+        for column in column.saturating_sub(1)..=column.saturating_add(1) {
+            for row in row.saturating_sub(1)..=row.saturating_add(1) {
+                let Some(states) = self.buckets.get(&(column, row)) else {
+                    continue;
+                };
+                for state in states {
+                    let distance = state.origin.distance_sq(origin);
+                    if distance <= self.radius_squared
+                        && best.is_none_or(|(nearest, _)| distance < nearest)
+                    {
+                        best = Some((distance, state));
+                    }
+                }
+            }
+        }
+        best.map(|(_, state)| state)
+    }
+}
+
 /// Advances the low-pass chain by every stage's response to the sample
 /// `input` held for `a = rate × elapsed`. With `d` a stage's deviation from
 /// the held input, `d₁ → d₁e^{−a}`, `d₂ → (d₂ + a d₁)e^{−a}`,
@@ -1493,13 +1709,118 @@ mod tests {
                         && key.0 <= common[1]
                         && key.1 >= common[2]
                         && key.1 <= common[3])
-                        .then_some((key, point.element))
+                        .then_some((key, point.stencil.element))
                 })
                 .collect::<BTreeMap<_, _>>()
         };
         let before = interior(&points);
         assert!(!before.is_empty());
         assert_eq!(before, interior(&shifted));
+    }
+
+    /// The streamline lattice samples the centre of every cell an element
+    /// holds, in that element, so the field between samples reads bilinearly
+    /// off a regular grid; a centre no element holds has no sample; and a
+    /// pan keeps every interior cell's key and element.
+    #[test]
+    fn the_streamline_lattice_samples_cell_centres_inside_their_elements() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let active = activate_at(&mut state, 0.08);
+        let viewport = viewport();
+        let separation = 54.0;
+        let (world_spacing, visible_bins) =
+            streamline_lattice(state.scale, separation, state.center, viewport).unwrap();
+        let pixel_spacing = world_spacing * state.scale;
+        let target = f64::from(separation / 3.0).max(f64::from(STREAMLINE_LATTICE_FLOOR_PIXELS));
+        assert!(
+            pixel_spacing >= target - 1.0e-9
+                && pixel_spacing <= target * std::f64::consts::SQRT_2 + 1.0e-9,
+            "{pixel_spacing} px for a target of {target}"
+        );
+        let points = streamline_layout(
+            active.fixed_model(),
+            &active.mesh,
+            &active.operator,
+            world_spacing,
+            visible_bins,
+        );
+        assert!(!points.is_empty());
+        let vertices_of = |element: u32| {
+            active.mesh.triangles[element as usize]
+                .vertices
+                .map(|index| active.mesh.vertices[index].point)
+        };
+        for point in &points {
+            let weights = point.stencil.barycentric;
+            assert!(weights.iter().all(|weight| (0.0..=1.0).contains(weight)));
+            assert!((weights.iter().sum::<f64>() - 1.0).abs() < 1.0e-12);
+            let [a, b, c] = vertices_of(point.stencil.element);
+            let held = a * weights[0] + b * weights[1] + c * weights[2];
+            assert!(
+                (held - point.point).norm() < 1.0e-9,
+                "{held:?} vs {:?}",
+                point.point
+            );
+            let column = (point.point.x / world_spacing).floor();
+            let row = (point.point.y / world_spacing).floor();
+            assert!((point.point.x / world_spacing - column - 0.5).abs() < 1.0e-9);
+            assert!((point.point.y / world_spacing - row - 0.5).abs() < 1.0e-9);
+            assert_eq!(point.key, lattice_cell_key(column as i64, row as i64));
+            assert_eq!(
+                point.stencil.value_weights,
+                enriched_quadratic_basis(weights)
+            );
+        }
+        // Exactly the cells some element holds the centre of, by brute force.
+        let mut held = 0;
+        for column in visible_bins[0]..=visible_bins[1] {
+            for row in visible_bins[2]..=visible_bins[3] {
+                let center = Point2::new(
+                    (column as f64 + 0.5) * world_spacing,
+                    (row as f64 + 0.5) * world_spacing,
+                );
+                if (0..active.mesh.triangles.len() as u32)
+                    .any(|element| barycentric_in(center, vertices_of(element)).is_some())
+                {
+                    held += 1;
+                }
+            }
+        }
+        assert_eq!(points.len(), held);
+        assert!(
+            held < (visible_bins[1] - visible_bins[0] + 1) as usize
+                * (visible_bins[3] - visible_bins[2] + 1) as usize,
+            "the apron reaches outside the domain"
+        );
+
+        let shifted_center = state.center + Point2::new(world_spacing * 0.35, 0.0);
+        let (shifted_spacing, shifted_bins) =
+            streamline_lattice(state.scale, separation, shifted_center, viewport).unwrap();
+        assert_eq!(shifted_spacing, world_spacing);
+        let shifted = streamline_layout(
+            active.fixed_model(),
+            &active.mesh,
+            &active.operator,
+            shifted_spacing,
+            shifted_bins,
+        )
+        .into_iter()
+        .map(|point| (point.key, point.stencil.element))
+        .collect::<BTreeMap<_, _>>();
+        let mut common = 0;
+        for point in &points {
+            let column = (point.point.x / world_spacing).floor() as i64;
+            if column > visible_bins[0].max(shifted_bins[0])
+                && column < visible_bins[1].min(shifted_bins[1])
+            {
+                assert_eq!(shifted.get(&point.key), Some(&point.stencil.element));
+                common += 1;
+            }
+        }
+        assert!(common > 0);
     }
 
     /// The authored model refuses a law-carrying material, so a lattice that
@@ -1536,7 +1857,7 @@ mod tests {
                 .collect::<BTreeSet<_>>()
         };
         let meshed = regions(&mut (0..active.mesh.triangles.len()));
-        let covered = regions(&mut points.iter().map(|point| point.element as usize));
+        let covered = regions(&mut points.iter().map(|point| point.stencil.element as usize));
         assert!(!points.is_empty());
         assert_eq!(covered, meshed, "every meshed region carries arrows");
         // The coefficients are the base ones the operator was built from.
@@ -1870,7 +2191,7 @@ mod tests {
         let mut state = Playground::default();
         let rate = std::f64::consts::TAU * 0.5;
         let value = Point2::new(1.0, 0.0);
-        let at = |state: &mut Playground, keys: &[(u32, Pos2)], step: u64, time: f64| {
+        let at = |state: &mut Playground, keys: &[(u64, Pos2)], step: u64, time: f64| {
             let mut samples = keys
                 .iter()
                 .map(|(key, origin)| (*key, *origin, value, value))
@@ -2009,19 +2330,118 @@ mod tests {
             mesh_revision: 1,
             physics: state.editor.document.model.draft.physics,
         };
-        let samples = (0..20)
+        let samples = (0..20u32)
             .map(|index| {
                 let value = Point2::new(1.0 + f64::from(index) * 0.1, 0.0);
-                (index, Pos2::new(index as f32 * 60.0, 0.0), value, value)
+                (
+                    u64::from(index),
+                    Pos2::new(index as f32 * 60.0, 0.0),
+                    value,
+                    value,
+                )
             })
             .collect::<Vec<_>>();
-        state.draw_vector_overlay(&painter, samples, owner, 10, 0.1);
+        state.draw_vector_overlay(&painter, viewport(), samples, None, owner, 10, 0.1);
         assert_eq!(state.vector_overlay_filter, Some(VectorFilter::LowPass));
         let reference = state
             .vector_overlay_exposure
             .reference()
             .expect("a scale from the raw samples");
         assert!((reference - 2.7).abs() < 1.0e-9, "{reference}");
+    }
+
+    /// With the streamline style and a lattice layout, the flow is placed
+    /// as lines through the samples; the dashes drift with simulated time,
+    /// so a paused simulation holds them still; and an arrow layout, with
+    /// no lattice to read, is drawn as arrows whatever the style.
+    #[test]
+    fn streamlines_are_placed_from_the_lattice_and_drift_in_simulated_time() {
+        let mut state = Playground::default();
+        let presentation = &mut state.editor.document.presentation;
+        presentation.vector_overlay = VectorOverlay::RelativeEnergyFlow;
+        presentation.vector_overlay_style = VectorOverlayStyle::Streamlines;
+        presentation.vector_overlay_lowpass = false;
+        let viewport = viewport();
+        let context = egui::Context::default();
+        let painter = egui::Painter::new(context, egui::LayerId::background(), Rect::EVERYTHING);
+        let owner = VectorOverlayFilterOwner {
+            mesh_revision: 1,
+            physics: state.editor.document.model.draft.physics,
+        };
+        let world_spacing = 20.0 / state.scale;
+        let corners = [
+            state.world(viewport.min, viewport),
+            state.world(viewport.max, viewport),
+        ];
+        let bin = |value: f64| (value / world_spacing).floor() as i64;
+        let (columns, rows) = (
+            bin(corners[0].x.min(corners[1].x)) - 1..=bin(corners[0].x.max(corners[1].x)) + 1,
+            bin(corners[0].y.min(corners[1].y)) - 1..=bin(corners[0].y.max(corners[1].y)) + 1,
+        );
+        let samples = columns
+            .flat_map(|column| {
+                rows.clone().map(move |row| {
+                    let center = Point2::new(column as f64 + 0.5, row as f64 + 0.5) * world_spacing;
+                    (lattice_cell_key(column, row), center)
+                })
+            })
+            .map(|(key, center)| {
+                let value = Point2::new(1.0, 0.2);
+                (key, state.screen(center, viewport), value, value)
+            })
+            .collect::<Vec<_>>();
+        state.draw_vector_overlay(
+            &painter,
+            viewport,
+            samples.clone(),
+            Some(world_spacing),
+            owner,
+            10,
+            0.1,
+        );
+        let lines = state.vector_overlay_streamlines.lines.len();
+        assert!(lines >= 5, "{lines} lines");
+        assert!(state.vector_overlay_streamlines.lines.iter().all(|line| {
+            line.points
+                .windows(2)
+                .all(|pair| (pair[1] - pair[0]).dot(Point2::new(1.0, 0.2)) > 0.0)
+        }));
+        let phase = state.streamline_dash_phase;
+        state.draw_vector_overlay(
+            &painter,
+            viewport,
+            samples.clone(),
+            Some(world_spacing),
+            owner,
+            10,
+            0.1,
+        );
+        assert_eq!(state.streamline_dash_phase, phase, "paused: no drift");
+        assert_eq!(state.vector_overlay_streamlines.lines.len(), lines);
+        state.draw_vector_overlay(
+            &painter,
+            viewport,
+            samples.clone(),
+            Some(world_spacing),
+            owner,
+            20,
+            0.2,
+        );
+        assert!(
+            (state.streamline_dash_phase - phase - 0.1 * STREAMLINE_DASH_SPEED).abs() < 1.0e-9,
+            "drifted to {}",
+            state.streamline_dash_phase
+        );
+
+        state.draw_vector_overlay(&painter, viewport, samples, None, owner, 30, 0.3);
+        assert_eq!(
+            state.vector_overlay_streamlines.lines.len(),
+            lines,
+            "arrows drawn from an arrow layout leave the lines' seeds alone"
+        );
+        state.clear_vector_overlay_filter();
+        assert!(state.vector_overlay_streamlines.lines.is_empty());
+        assert_eq!(state.streamline_dash_time, None);
     }
 
     #[test]

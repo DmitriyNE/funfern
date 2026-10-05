@@ -15,6 +15,7 @@ use crate::document::{
     AdaptationSettings, DEFAULT_TRANSFER_SEGMENT, LineProbeQuantity, LineProbeRepresentation,
     MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty, PresentationSettings,
     ProbeId, ProbeReadout, ProbeReadouts, ProbeSamplingPreset, TransferReference, VectorOverlay,
+    VectorOverlayStyle,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -1540,6 +1541,10 @@ struct StoredPresentation {
     vector_overlay_density: f32,
     #[serde(default = "default_vector_overlay_gain")]
     vector_overlay_gain: f32,
+    /// Written only when it is not the arrows, so a scene that kept them stays
+    /// readable by a build from before the streamlines.
+    #[serde(default, skip_serializing_if = "StoredVectorOverlayStyle::is_arrows")]
+    vector_overlay_style: StoredVectorOverlayStyle,
     material_overlay: StoredMaterialOverlay,
     material_overlay_opacity: f32,
     material_overlay_auto_range: bool,
@@ -1632,6 +1637,20 @@ enum StoredVectorOverlay {
     #[serde(rename = "complementary_field_rate", alias = "complementary_field")]
     ComplementaryField,
     RelativeEnergyFlow,
+}
+
+#[derive(Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StoredVectorOverlayStyle {
+    #[default]
+    Arrows,
+    Streamlines,
+}
+
+impl StoredVectorOverlayStyle {
+    fn is_arrows(&self) -> bool {
+        *self == Self::Arrows
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2397,6 +2416,10 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
         vector_overlay_lowpass_hz: Some(settings.vector_overlay_lowpass_hz),
         vector_overlay_density: settings.vector_overlay_density,
         vector_overlay_gain: settings.vector_overlay_gain,
+        vector_overlay_style: match settings.vector_overlay_style {
+            VectorOverlayStyle::Arrows => StoredVectorOverlayStyle::Arrows,
+            VectorOverlayStyle::Streamlines => StoredVectorOverlayStyle::Streamlines,
+        },
         material_overlay: match settings.material_overlay {
             MaterialOverlay::Off => StoredMaterialOverlay::Off,
             MaterialOverlay::Regions => StoredMaterialOverlay::Regions,
@@ -2478,6 +2501,10 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
             .unwrap_or(defaults.vector_overlay_lowpass_hz),
         vector_overlay_density: stored.vector_overlay_density,
         vector_overlay_gain: stored.vector_overlay_gain,
+        vector_overlay_style: match stored.vector_overlay_style {
+            StoredVectorOverlayStyle::Arrows => VectorOverlayStyle::Arrows,
+            StoredVectorOverlayStyle::Streamlines => VectorOverlayStyle::Streamlines,
+        },
         // A scene from before the move carries the target as its own flag. It
         // becomes the overlay it now is, unless that slot already holds a
         // material overlay, which is the one that was actually visible.
@@ -3043,6 +3070,11 @@ mod tests {
                 vector_overlay_lowpass_hz: if flag { 0.35 } else { 2.0 },
                 vector_overlay_density: 71.5,
                 vector_overlay_gain: 2.5,
+                vector_overlay_style: if flag {
+                    VectorOverlayStyle::Streamlines
+                } else {
+                    VectorOverlayStyle::Arrows
+                },
                 material_overlay: overlay,
                 material_overlay_opacity: 0.75,
                 material_overlay_auto_range: flag,
@@ -3201,6 +3233,36 @@ mod tests {
         assert!(
             !decoded.presentation.adaptation.enabled,
             "a session left with adaptation off must open with it off"
+        );
+    }
+
+    /// The overlay's style is written only when it is the streamlines, so a
+    /// scene that kept the arrows is a file an older build still opens; and
+    /// a file without the key, from such a build, opens with the arrows.
+    #[test]
+    fn the_overlay_style_is_written_only_for_streamlines() {
+        let mut document = TopologyDocument::default();
+        let value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        assert!(
+            value["presentation"].get("vector_overlay_style").is_none(),
+            "the arrows are the default and must not be written"
+        );
+        let decoded = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+        assert_eq!(
+            decoded.presentation.vector_overlay_style,
+            VectorOverlayStyle::Arrows
+        );
+
+        document.presentation.vector_overlay_style = VectorOverlayStyle::Streamlines;
+        let value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        assert_eq!(
+            value["presentation"]["vector_overlay_style"],
+            serde_json::json!("streamlines")
+        );
+        let decoded = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+        assert_eq!(
+            decoded.presentation.vector_overlay_style,
+            VectorOverlayStyle::Streamlines
         );
     }
 

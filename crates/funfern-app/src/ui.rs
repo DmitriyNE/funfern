@@ -19,7 +19,7 @@ use bevy_egui::{
     EguiContexts,
     egui::{self, Color32, Pos2, Rect, Sense, Stroke},
 };
-use funfern_app::document::{ProbeId, ProbeSamplingPreset};
+use funfern_app::document::{ProbeId, ProbeSamplingPreset, VectorOverlayStyle};
 use funfern_app::topology_examples::ExampleGroup;
 use funfern_app::topology_runtime::{PreparedTopology, TopologyPreparationTiming, TopologyToken};
 use funfern_app::topology_viewport::{
@@ -64,6 +64,7 @@ mod selection;
 mod session;
 mod signals;
 mod state;
+mod streamlines;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -83,6 +84,7 @@ use gesture::*;
 use pacing::*;
 use probe_view::*;
 use signals::*;
+use streamlines::*;
 #[cfg(test)]
 use test_support::*;
 use theme::*;
@@ -460,15 +462,26 @@ struct VectorOverlayLayoutKey {
     mesh_revision: u64,
     generation: u64,
     physics: PhysicsModel,
+    style: VectorOverlayStyle,
     world_spacing: f64,
     visible_bins: [i64; 4],
 }
 
 #[derive(Clone, Copy, Debug)]
 struct VectorOverlayLayoutPoint {
-    element: u32,
+    /// The sample's filter history key: the element for an arrow, which a
+    /// pan keeps, and the world cell for a streamline lattice sample, which
+    /// a pan keeps too. See [`lattice_cell_key`].
+    key: u64,
     point: Point2,
     stencil: QuadraticPointStencil,
+}
+
+/// The filter key of a lattice cell. The high bit keeps the cells apart
+/// from the element keys the arrows use, so a style change cannot hand a
+/// cell an element's history.
+fn lattice_cell_key(column: i64, row: i64) -> u64 {
+    (1 << 63) | (u64::from(column as i32 as u32) << 32) | u64::from(row as i32 as u32)
 }
 
 struct VectorOverlayLayout {
@@ -2031,6 +2044,59 @@ fn vector_overlay_lattice(
     center: Point2,
     viewport: Rect,
 ) -> Option<(f64, [i64; 4])> {
+    world_lattice(
+        scale,
+        pixel_spacing,
+        center,
+        viewport,
+        10.0,
+        &[1.0, 2.0, 5.0],
+    )
+}
+
+/// The streamlines are placed `pixel_separation` apart but integrated
+/// through a finer lattice, a third of that, so a line can follow a feature
+/// the arrows' spacing would step over. The ladder is √2 rather than 1/2/5
+/// so the real spacing stays within 1.4 of the target. The floor keeps the
+/// lattice under the sampler's cap on any viewport: at most about 12,000
+/// cells cover the view, and the apron adds a few hundred.
+fn streamline_lattice(
+    scale: f64,
+    pixel_separation: f32,
+    center: Point2,
+    viewport: Rect,
+) -> Option<(f64, [i64; 4])> {
+    if !viewport.is_positive() {
+        return None;
+    }
+    let by_cap = (viewport.area() / 12_000.0).sqrt();
+    let pixel_spacing = (pixel_separation / 3.0)
+        .max(STREAMLINE_LATTICE_FLOOR_PIXELS)
+        .max(by_cap);
+    world_lattice(
+        scale,
+        pixel_spacing,
+        center,
+        viewport,
+        2.0,
+        &[1.0, std::f64::consts::SQRT_2],
+    )
+}
+
+const STREAMLINE_LATTICE_FLOOR_PIXELS: f32 = 14.0;
+
+/// A world-anchored lattice whose projected spacing is at least
+/// `pixel_spacing`: the spacing is the first rung of `ladder`, scaled to the
+/// decade of `base`, that reaches it. The bins are counted from the world
+/// origin and widened by one cell on each side.
+fn world_lattice(
+    scale: f64,
+    pixel_spacing: f32,
+    center: Point2,
+    viewport: Rect,
+    base: f64,
+    ladder: &[f64],
+) -> Option<(f64, [i64; 4])> {
     if !scale.is_finite()
         || scale <= 0.0
         || !pixel_spacing.is_finite()
@@ -2042,9 +2108,11 @@ fn vector_overlay_lattice(
         return None;
     }
     let raw = f64::from(pixel_spacing) / scale;
-    let power = 10f64.powf(raw.log10().floor());
-    let digit = [1.0, 2.0, 5.0, 10.0]
-        .into_iter()
+    let power = base.powf(raw.log(base).floor());
+    let digit = ladder
+        .iter()
+        .copied()
+        .chain(std::iter::once(base))
         .find(|digit| digit * power >= raw)?;
     let world_spacing = digit * power;
     let half_width = f64::from(viewport.width()) * 0.5 / scale;
@@ -2116,12 +2184,111 @@ fn vector_overlay_layout(
                 stiffness: coefficients.stiffness,
             };
             Some(VectorOverlayLayoutPoint {
-                element: element as u32,
+                key: u64::from(element as u32),
                 point: centroid,
                 stencil,
             })
         })
         .collect()
+}
+
+/// The streamline lattice: a sample at the centre of every cell the mesh
+/// covers, in the element that holds the centre, so the lattice is regular
+/// and the field between its samples reads bilinearly. A cell whose centre
+/// no element holds, outside the domain, has no sample, which is where a
+/// line ends. Elements are binned by their bounding boxes first, so each
+/// centre is tested against the few elements over its cell rather than the
+/// whole mesh.
+fn streamline_layout(
+    model: TopologyWaveModel<'_>,
+    mesh: &TriMesh,
+    operator: &QuadraticWaveOperator,
+    world_spacing: f64,
+    visible_bins: [i64; 4],
+) -> Vec<VectorOverlayLayoutPoint> {
+    if mesh.triangles.len() != operator.element_nodes().len()
+        || !world_spacing.is_finite()
+        || world_spacing <= 0.0
+        || visible_bins[1] < visible_bins[0]
+        || visible_bins[3] < visible_bins[2]
+    {
+        return vec![];
+    }
+    let bin = |value: f64| (value / world_spacing).floor() as i64;
+    let mut over_cell = BTreeMap::<(i64, i64), Vec<usize>>::new();
+    for (element, triangle) in mesh.triangles.iter().enumerate() {
+        let points = triangle.vertices.map(|index| mesh.vertices[index].point);
+        let (mut low, mut high) = (points[0], points[0]);
+        for point in &points[1..] {
+            low = Point2::new(low.x.min(point.x), low.y.min(point.y));
+            high = Point2::new(high.x.max(point.x), high.y.max(point.y));
+        }
+        let columns = bin(low.x).max(visible_bins[0])..=bin(high.x).min(visible_bins[1]);
+        let rows = bin(low.y).max(visible_bins[2])..=bin(high.y).min(visible_bins[3]);
+        for column in columns {
+            for row in rows.clone() {
+                over_cell.entry((column, row)).or_default().push(element);
+            }
+        }
+    }
+    over_cell
+        .into_iter()
+        .filter_map(|((column, row), elements)| {
+            let center = Point2::new(
+                (column as f64 + 0.5) * world_spacing,
+                (row as f64 + 0.5) * world_spacing,
+            );
+            let (element, barycentric) = elements.into_iter().find_map(|element| {
+                let points = mesh.triangles[element]
+                    .vertices
+                    .map(|index| mesh.vertices[index].point);
+                barycentric_in(center, points).map(|barycentric| (element, barycentric))
+            })?;
+            let triangle = &mesh.triangles[element];
+            let coefficients = model
+                .directional_material_at(triangle.region, center)
+                .ok()?;
+            let stencil = QuadraticPointStencil {
+                element: element as u32,
+                barycentric,
+                nodes: operator.element_nodes()[element],
+                value_weights: enriched_quadratic_basis(barycentric),
+                gradient_weights: [Point2::default(); 7],
+                region: triangle.region,
+                mass_density: coefficients.mass_density,
+                stiffness: coefficients.stiffness,
+            };
+            Some(VectorOverlayLayoutPoint {
+                key: lattice_cell_key(column, row),
+                point: center,
+                stencil,
+            })
+        })
+        .collect()
+}
+
+/// The barycentric coordinates of `point` in the triangle, when it lies
+/// inside or on its edge within a rounding tolerance, clamped and renormalised
+/// so they are a valid interpolation even on the edge.
+fn barycentric_in(point: Point2, [a, b, c]: [Point2; 3]) -> Option<[f64; 3]> {
+    let area = (b - a).cross(c - a);
+    if !area.is_finite() || area.abs() <= f64::MIN_POSITIVE {
+        return None;
+    }
+    let mut weights = [
+        (b - point).cross(c - point) / area,
+        (c - point).cross(a - point) / area,
+        (a - point).cross(b - point) / area,
+    ];
+    const TOLERANCE: f64 = 1.0e-9;
+    if weights.iter().any(|weight| *weight < -TOLERANCE) {
+        return None;
+    }
+    for weight in &mut weights {
+        *weight = weight.max(0.0);
+    }
+    let total: f64 = weights.iter().sum();
+    Some(weights.map(|weight| weight / total))
 }
 
 fn aligned_indicator_auxiliary(

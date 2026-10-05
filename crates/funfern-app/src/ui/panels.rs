@@ -4,7 +4,7 @@
 use crate::material_overlay::{MaterialOverlay, MaterialProperty};
 use bevy::prelude::*;
 use bevy_egui::egui::{self};
-use funfern_app::document::{VECTOR_LOWPASS_HZ_RANGE, VectorOverlay};
+use funfern_app::document::{VECTOR_LOWPASS_HZ_RANGE, VectorOverlay, VectorOverlayStyle};
 use funfern_core::*;
 
 use super::*;
@@ -14,6 +14,10 @@ const LOW_PASS_HELP: &str = "Average the energy-flow arrows below this corner. A
      flow ripples at twice its source's frequency; a corner four times under that leaves a \
      few percent of the ripple and settles in 5.3 / (2π·f) seconds, 1.7 s at 0.5 Hz. The \
      canonical field, probes and energy remain unchanged.";
+
+const STYLE_HELP: &str = "Arrows at every lattice point, or streamlines an even spacing \
+     apart that follow the flow through a lens, along a fiber or round a resonator. The \
+     dashes drift the way the energy goes.";
 
 impl Playground {
     /// Whether the active generation carries a restoring law, and so an
@@ -118,12 +122,39 @@ impl Playground {
                     )
                     .on_hover_text(LOW_PASS_HELP);
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Style");
+                    sized_combo(
+                        ui,
+                        "vector-overlay-style",
+                        VectorOverlayStyle::CHOICES.len(),
+                    )
+                    .selected_text(p.vector_overlay_style.label())
+                    .show_ui(ui, |ui| {
+                        for style in VectorOverlayStyle::CHOICES {
+                            ui.selectable_value(&mut p.vector_overlay_style, style, style.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text(STYLE_HELP);
+                });
             }
+            let lines = p.vector_overlay_style.resolved(p.vector_overlay)
+                == VectorOverlayStyle::Streamlines;
             ui.add(
-                egui::Slider::new(&mut p.vector_overlay_density, 28.0..=120.0)
-                    .text("Arrow spacing"),
+                egui::Slider::new(&mut p.vector_overlay_density, 28.0..=120.0).text(if lines {
+                    "Line spacing"
+                } else {
+                    "Arrow spacing"
+                }),
             );
-            ui.add(egui::Slider::new(&mut p.vector_overlay_gain, 0.1..=5.0).text("Arrow gain"));
+            ui.add(
+                egui::Slider::new(&mut p.vector_overlay_gain, 0.1..=5.0).text(if lines {
+                    "Line gain"
+                } else {
+                    "Arrow gain"
+                }),
+            );
         }
         ui.separator();
         ui.label("Overlay");
@@ -760,6 +791,59 @@ fn compact_count(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The style is the energy flow's: its choice and the lines' labels show
+    /// for the energy flow, and the complementary field keeps the arrows and
+    /// their labels whatever the style says.
+    #[test]
+    fn the_style_choice_belongs_to_the_energy_flow() {
+        let mut state = Playground {
+            inspector: Some(InspectorPanel::View),
+            ..Playground::default()
+        };
+        state.editor.document.model.draft.physics = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.enable_accesskit();
+        let mut time = 0.0;
+        let mut labels = |state: &mut Playground| {
+            time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                time: Some(time),
+                ..egui::RawInput::default()
+            };
+            let output = context.run_ui(input, |ui| state.side_panel(ui));
+            super::super::test_support::laid_out(&output)
+                .into_iter()
+                .map(|widget| widget.label)
+                .collect::<Vec<_>>()
+        };
+        let has = |labels: &[String], label: &str| labels.iter().any(|shown| shown == label);
+
+        state.editor.document.presentation.vector_overlay = VectorOverlay::RelativeEnergyFlow;
+        let shown = labels(&mut state);
+        assert!(has(&shown, "Arrows"), "{shown:?}");
+        assert!(has(&shown, "Arrow spacing") && has(&shown, "Arrow gain"));
+
+        state.editor.document.presentation.vector_overlay_style = VectorOverlayStyle::Streamlines;
+        let shown = labels(&mut state);
+        assert!(has(&shown, "Streamlines"), "{shown:?}");
+        assert!(has(&shown, "Line spacing") && has(&shown, "Line gain"));
+
+        state.editor.document.presentation.vector_overlay = VectorOverlay::ComplementaryField;
+        let shown = labels(&mut state);
+        assert!(
+            !has(&shown, "Streamlines") && !has(&shown, "Arrows"),
+            "{shown:?}"
+        );
+        assert!(has(&shown, "Arrow spacing") && has(&shown, "Arrow gain"));
+    }
 
     /// The vector overlay's list shows all of its entries after the physics
     /// changes under it. Opened once on Mechanical's two, it showed two and a

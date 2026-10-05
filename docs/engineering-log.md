@@ -19077,3 +19077,69 @@ measured cost").
   release build, both wasm32 checks and the browser shader compile. No
   device suite: the render world only passes two numbers it already had to
   the timer.
+
+## 2026-10-05 — Streamlines for the energy flow
+
+The plan's "streamlines for the vector overlay", on `streamlines`. Arrows at
+54 to 135 px show the direction at a point; where the energy goes, through a
+lens, along a fiber or round a resonator, wants lines.
+
+- **What was decided first.** Energy flow only: the complementary field
+  oscillates at the source's frequency, so its lines would change topology
+  every half period and the placement would thrash; the style key is stored
+  for the overlay regardless, so field lines can come later without a schema
+  change. A finer lattice from the same sampler: the arrow lattice samples
+  element centroids one per bin, too coarse for a fiber and too irregular to
+  interpolate, so the streamline style builds cells at a third of the line
+  spacing (floor 14 px, a √2 ladder in place of 1/2/5, under the 16,384 cap
+  on any viewport) with stencils at the exact cell centres, located through a
+  bin of element bounding boxes since the probe builder scans every element
+  per point. The shader, bind group, dispatch and readback are unchanged.
+  Coherence by carried seeds: each line remembers its seed; the next frame
+  places those first, in order, then fills with Jobard–Lefer candidates.
+- **The pieces.** `VectorOverlayStyle` in the document, written only as
+  `streamlines` (older builds keep loading untouched scenes; the frozen v22
+  fixtures pass). `streamline_lattice`/`streamline_layout` beside the arrow
+  ones, the style in the layout key, filter keys widened to `u64` so a cell is
+  keyed by its world bin with the high bit set, apart from the arrows'
+  element keys. `ui/streamlines.rs`: the lattice read bilinearly with
+  missing corners reweighted (a line reads to half a cell from the mesh's
+  edge), RK4 on the unit direction field both ways, an occupancy grid of
+  spacing-sized cells for the stop test at half a spacing (own points within
+  a spacing of arc excluded) and the acceptance test, dashes by arc length
+  anchored at the seed with a phase in simulated time. Drawing in
+  `draw_vector_overlay` after the shared filter and exposure; the View panel
+  gets a Style choice for the energy flow and relabels the sliders.
+- **Two tolerances the first run taught.** A fresh candidate sits exactly one
+  spacing from its parent's point, and the normal's rounding put it a hair
+  inside the acceptance radius: the first line on a rotating field spawned
+  nothing. Acceptance is at 0.9 of the spacing. A carried seed's neighbours
+  were placed exactly a spacing from it, and any drift of the field rejected
+  it: 13 of 21 seeds survived a slight change of the field. Carried seeds are
+  accepted at 0.75; the test now keeps nine of ten.
+- **The low-pass cold start was a scan.** Every new key searched every live
+  state for its nearest neighbour; at 4,000 lattice keys a zoom step would
+  have been a 40 ms hitch. `OriginGrid` buckets states by origin in cells of
+  the search radius, for the cold start and the remesh rebase alike.
+- **Looked at.** The default scene (a resonator: 586 of 1,144 cells above the
+  floor, 14 lines whose length covers exactly that area at the spacing; the
+  picture is honest but sparse, the net flow of a standing wave is small),
+  the Luneburg lens (lines fan from the source and bend through the profile),
+  the bent fiber (a line each side of the core follows the bend, the
+  radiated field's lines outside) and the ring resonator (a dashed loop round
+  the ring, lines along the bus). Weak lines were near invisible at an alpha
+  proportional to strength where a short arrow is still a full stroke, so a
+  dash keeps three tenths of its alpha and the rest follows the exposure.
+- **Cost.** Placement 0.3 to 0.6 ms a frame on those scenes (14 to 21 lines,
+  450 to 1,000 points). Paired 10 s runs on the default scene, same host
+  load: 117.5 / 118.0 / 118.9 fps for lines / arrows / lines. An earlier
+  unpaired lines run at 79 fps with 44 % late frames was the host's fitting
+  jobs, not the lines.
+- **Left.** Field lines of the complementary field, if wanted, as lines
+  without direction. The browser build was checked to compile, not looked
+  at. The dash speed (40 px a simulated second) and period (8 of 14 px) are
+  the first values that looked right.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, both wasm32 checks and the browser shader compile. No
+  device suite: the GPU path is unchanged, the stencils it receives are the
+  point stencils probes already send.

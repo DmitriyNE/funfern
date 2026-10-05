@@ -244,7 +244,17 @@ impl Playground {
         if generation == 0 || !self.viewport_rect.is_positive() {
             return;
         }
-        let Some((world_spacing, visible_bins)) = vector_overlay_lattice(
+        let style = self
+            .editor
+            .document
+            .presentation
+            .vector_overlay_style
+            .resolved(mode);
+        let lattice = match style {
+            VectorOverlayStyle::Arrows => vector_overlay_lattice,
+            VectorOverlayStyle::Streamlines => streamline_lattice,
+        };
+        let Some((world_spacing, visible_bins)) = lattice(
             self.scale,
             self.editor.document.presentation.vector_overlay_density,
             self.center,
@@ -256,6 +266,7 @@ impl Playground {
             mesh_revision: active.mesh.mesh_revision,
             generation,
             physics: active.bundle.authored.physics,
+            style,
             world_spacing,
             visible_bins,
         };
@@ -293,7 +304,11 @@ impl Playground {
         {
             self.vector_overlay_previous_layout = Some(previous);
         }
-        let points = vector_overlay_layout(
+        let layout = match style {
+            VectorOverlayStyle::Arrows => vector_overlay_layout,
+            VectorOverlayStyle::Streamlines => streamline_layout,
+        };
+        let points = layout(
             active.fixed_model(),
             &active.mesh,
             &active.operator,

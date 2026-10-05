@@ -163,6 +163,37 @@ impl VectorOverlay {
     }
 }
 
+/// How the vector overlay draws its field: an arrow at every lattice point, or
+/// streamlines placed an even distance apart and integrated through the
+/// lattice. Streamlines are drawn for the energy flow only; the oscillating
+/// complementary field keeps its arrows whatever the style says, so the choice
+/// survives a switch of the overlay's mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VectorOverlayStyle {
+    #[default]
+    Arrows,
+    Streamlines,
+}
+
+impl VectorOverlayStyle {
+    pub const CHOICES: [Self; 2] = [Self::Arrows, Self::Streamlines];
+
+    /// The style the overlay is drawn in for the mode that is on.
+    pub const fn resolved(self, overlay: VectorOverlay) -> Self {
+        match overlay {
+            VectorOverlay::RelativeEnergyFlow => self,
+            VectorOverlay::Off | VectorOverlay::ComplementaryField => Self::Arrows,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Arrows => "Arrows",
+            Self::Streamlines => "Streamlines",
+        }
+    }
+}
+
 /// A set of material ids, at most one per material a scene can hold, so it
 /// stays `Copy` with the rest of the view settings. Ids are kept sorted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -254,8 +285,10 @@ pub struct PresentationSettings {
     /// envelope is worth seeing, and neither is derivable for every scene.
     pub vector_overlay_lowpass: bool,
     pub vector_overlay_lowpass_hz: f64,
+    /// Arrow spacing, or the separation of the streamlines, in screen pixels.
     pub vector_overlay_density: f32,
     pub vector_overlay_gain: f32,
+    pub vector_overlay_style: VectorOverlayStyle,
     pub material_overlay: MaterialOverlay,
     pub material_overlay_opacity: f32,
     pub material_overlay_auto_range: bool,
@@ -380,6 +413,7 @@ impl Default for PresentationSettings {
             vector_overlay_lowpass_hz: 0.5,
             vector_overlay_density: 54.0,
             vector_overlay_gain: 1.0,
+            vector_overlay_style: VectorOverlayStyle::Arrows,
             material_overlay: MaterialOverlay::Regions,
             material_overlay_opacity: 0.48,
             material_overlay_auto_range: true,

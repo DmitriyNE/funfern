@@ -1179,7 +1179,13 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   one submit a frame from the render schedule. Otherwise the TODO closes
   with the numbers.
 
-- [ ] Streamlines for the vector overlay. The arrows show the energy flow
+- [x] Streamlines for the vector overlay. Done 2026-10-05: a Style choice on
+  the energy-flow overlay, arrows by default; a cell-centre lattice a third of
+  the line spacing from the same sampler, read bilinearly; RK4 both ways,
+  Jobard–Lefer placement from the previous frame's seeds, dashes drifting in
+  simulated time; the complementary field keeps its arrows. The field lines of
+  the oscillating complementary field remain a question for another day. The
+  arrows show the energy flow
   and the complementary field at lattice points 28 to 120 px apart;
   streamlines show where the energy goes, through a lens, along a fiber,
   round a resonator, which arrows at that spacing cannot. Built on the

@@ -444,6 +444,32 @@ overlay's run peak provides the global quiet reference: below `10⁻²` of that
 amplitude, a squared smoothstep suppresses normalized arrows. This prevents
 arbitrary directions in f32 residue from being amplified back into view.
 
+The energy flow has a second style, streamlines, chosen per document and
+defaulting to arrows; the complementary field keeps its arrows, since lines of
+a field that oscillates at the source's frequency would change their topology
+every half period. Streamlines are a presentation of the same filtered lattice
+samples, through a different lattice: cells about a third of the line spacing
+on a √2 ladder, each sampled at its exact centre in the element that holds it,
+so the lattice is regular and the field between its centres reads bilinearly;
+a centre no element holds has no sample, and lines end there. The same
+sampler, bind group, dispatch and readback serve both lattices; only the
+layout the CPU builds differs, and the filter history is keyed by world cell
+rather than element, which a pan keeps just as well. Lines are integrated with
+RK4 both ways from a seed through the unit direction field, stopped where the
+magnitude falls below the arrows' culling floor, where the lattice ends, within
+half a spacing of another line or of themselves, or at twice the view's
+diagonal. They are placed after Jobard and Lefer: candidate seeds one spacing
+beside every line, accepted when no line passes within nine tenths of a
+spacing, tested through an occupancy grid. The previous frame's seeds are
+placed first, in their order and with a quarter of a spacing more tolerance,
+so a line that still has room stays where it was as the flow evolves, and
+only a line crowded out by the field's drift dies. A line is drawn as dashes,
+anchored at its seed and shifted by a phase that advances with the readback's
+simulated time, so the dashes drift the way the energy goes, stand when the
+simulation is paused, and do not jump when a line's extent changes. Each
+dash's alpha is the arrows' exposed strength over a floor of three tenths,
+under the overlay's shared quiet fade.
+
 The accepted primary field is drawn directly, including a real free-component
 constant. There is no display-only mean subtraction or hidden gauge correction.
 The paired grid-scale filter is an explicit accepted-state event at its exact
@@ -1245,7 +1271,9 @@ display-rate consumer: the CPU chooses one stencil per cell of a quantized,
 world-origin-anchored lattice covering the view plus a one-cell apron. Panning
 therefore translates the existing interior arrows with the scene and rebuilds
 only when a view edge crosses a world cell; zoom changes density only at the
-lattice's scale thresholds. The GPU samples complementary field and energy flow
+lattice's scale thresholds. The streamline style builds its finer cell-centre
+lattice for the same consumer, locating each centre among the elements whose
+bounding boxes cover its cell. The GPU samples complementary field and energy flow
 after each rendered solver batch, and only the arrow records cross back. Each readback
 carries a GPU-written step marker and compensated two-f32 absolute time. Stale
 asynchronous results cannot be mistaken for a newer level, and presentation

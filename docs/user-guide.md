@@ -305,7 +305,15 @@ names or with every expression evaluated at the material frame's origin. Each ro
   solution AMR evaluates varying coefficients and their gradients directly.
 - **Vector view:** View can overlay the canonical complementary field or energy flow
   sampled directly on the GPU at display cadence. Arrow spacing and gain are
-  screen-space presentation controls. Complementary-field arrows optionally subtract
+  screen-space presentation controls. The energy flow can be drawn as arrows or,
+  with the Style choice, as streamlines: lines an even spacing apart that follow
+  the averaged flow through a lens, along a fiber or round a resonator, drawn as
+  dashes that drift the way the energy goes, in simulated time, so they stand
+  still when the simulation is paused. The spacing slider sets the distance
+  between lines; the gain brightens them, as it lengthens the arrows, and a line
+  stops where the flow falls below the level the arrows are culled at, or where
+  the mesh ends. Lines keep their places from frame to frame as the flow evolves.
+  The complementary field keeps its arrows. Complementary-field arrows optionally subtract
   a slow, explicitly presentation-only baseline. Energy-flow arrows are instead
   averaged below a corner the panel sets in Hz, since their time average is the
   transport: a harmonic flow ripples at twice its source's frequency, so the corner

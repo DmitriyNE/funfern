@@ -266,12 +266,19 @@ pub struct Playground {
     /// Presentation-only per-arrow filter state: the complementary field's
     /// DC blocker or the energy flow's low-pass, whichever is drawn. It never
     /// feeds the canonical solver or physical consumers.
-    pub(super) vector_overlay_filter_state: BTreeMap<u32, VectorFilterState>,
+    pub(super) vector_overlay_filter_state: BTreeMap<u64, VectorFilterState>,
     pub(super) vector_overlay_filter_owner: Option<VectorOverlayFilterOwner>,
     pub(super) vector_overlay_filter_step: u64,
     pub(super) vector_overlay_filter: Option<VectorFilter>,
     pub(super) vector_overlay_mode: VectorOverlay,
     pub(super) vector_overlay_exposure: AutoExposure,
+    /// The streamlines of the last frame, kept for their seeds, which the
+    /// next frame places first so the lines stay where they were.
+    pub(super) vector_overlay_streamlines: Streamlines,
+    /// How far the streamlines' dashes have drifted along the flow, in
+    /// screen pixels, and the simulated time they were last advanced at.
+    pub(super) streamline_dash_phase: f64,
+    pub(super) streamline_dash_time: Option<f64>,
     pub(super) field_exposure: AutoExposure,
     /// Whether `field_exposure` measures the integrated field `r` rather than
     /// the field.
@@ -503,6 +510,9 @@ impl Default for Playground {
             vector_overlay_filter: None,
             vector_overlay_mode: VectorOverlay::Off,
             vector_overlay_exposure: AutoExposure::default(),
+            vector_overlay_streamlines: Streamlines::default(),
+            streamline_dash_phase: 0.0,
+            streamline_dash_time: None,
             field_exposure: AutoExposure::default(),
             field_exposure_integrated: false,
             field_paint_topology: None,
