@@ -19199,3 +19199,27 @@ spacing, the three new ones the mode and gain too.
   either way; the lines are not what that scene pays for.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, both wasm32 checks and the browser shader compile.
+
+## 2026-10-05 — Streamlines stop at walls
+
+Reported by the user: the lines passed through baffles the flow does not.
+The lattice reads bilinearly across a zero-thickness span, blending the
+flow on its two sides, and a step of a few pixels carried a line over.
+
+- `Barriers` in `ui/streamlines.rs`: the blocking spans' segments bucketed
+  by cells of one line spacing; a step tests the segments over the cells it
+  touches (`segments_cross`, touching included) and the line ends short of
+  one it would cross. Built per frame in `draw_streamlines` from the spans
+  the viewport already samples for drawing, in world coordinates, a few
+  hundred segments.
+- What blocks: a separated span with independent sides, every wall, baffle
+  and separator (`span_blocks_flow`). Transmitting spans are material
+  interfaces; a thin gap is a compliant layer energy does cross, so lines
+  cross it too; the outer boundary is where the lattice ends anyway.
+- A seed beside a line that lands across a wall still starts a line, since
+  the other side has its own flow; the test has lines stop within a step of
+  the wall, run on behind it, and pass its ends.
+- Looked at: the double slit's box and the echo comb's baffle, before and
+  after.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, both wasm32 checks and the browser shader compile.

@@ -314,8 +314,8 @@ names or with every expression evaluated at the material frame's origin. Each ro
   dashes that drift the way the energy goes, in simulated time, so they stand
   still when the simulation is paused. The spacing slider sets the distance
   between lines; the gain brightens them, as it lengthens the arrows, and a line
-  stops where the flow falls below the level the arrows are culled at, or where
-  the mesh ends. Lines keep their places from frame to frame as the flow evolves.
+  stops where the flow falls below the level the arrows are culled at, where
+  the mesh ends, or at a wall or baffle. Lines keep their places from frame to frame as the flow evolves.
   The complementary field keeps its arrows. Complementary-field arrows optionally subtract
   a slow, explicitly presentation-only baseline. Energy-flow arrows are instead
   averaged below a corner the panel sets in Hz, since their time average is the

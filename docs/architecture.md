@@ -460,7 +460,12 @@ magnitude falls below the arrows' culling floor, where the lattice ends, within
 half a spacing of another line or of themselves, or at twice the view's
 diagonal. They are placed after Jobard and Lefer: candidate seeds one spacing
 beside every line, accepted when no line passes within nine tenths of a
-spacing, tested through an occupancy grid. The previous frame's seeds are
+spacing, tested through an occupancy grid. A line also ends at a wall or a
+baffle, a separated span with independent sides: the lattice reads
+bilinearly across a zero-thickness span and blends the flow on its two
+sides, so a step is tested against the sampled spans' segments, bucketed by
+cells of one spacing, and stops short of one it would cross. Transmitting
+spans and thin gaps, which pass energy, do not stop a line. The previous frame's seeds are
 placed first, in their order and with a quarter of a spacing more tolerance,
 so a line that still has room stays where it was as the flow evolves, and
 only a line crowded out by the field's drift dies. A line is drawn as dashes,

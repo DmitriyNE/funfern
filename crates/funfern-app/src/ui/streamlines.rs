@@ -253,12 +253,14 @@ impl Streamlines {
     /// Places the lines anew on `lattice`: the previous lines' seeds first,
     /// in their order, then the strongest cell if nothing survived, then
     /// Jobard and Lefer's candidates beside every line until no room is
-    /// left. Seeds start inside `view`; lines run to the lattice's edge.
+    /// left. Seeds start inside `view`; lines run to the lattice's edge, or
+    /// to a barrier.
     pub(super) fn place(
         &mut self,
         lattice: &VectorLattice,
         parameters: &StreamlineParameters,
         view: &WorldRect,
+        barriers: &Barriers,
     ) {
         let carried = self.lines.iter().map(|line| line.seed).collect::<Vec<_>>();
         self.lines.clear();
@@ -272,6 +274,7 @@ impl Streamlines {
                 lattice,
                 parameters,
                 view,
+                barriers,
                 &mut occupancy,
                 &mut self.lines,
                 seed,
@@ -286,6 +289,7 @@ impl Streamlines {
                 lattice,
                 parameters,
                 view,
+                barriers,
                 &mut occupancy,
                 &mut self.lines,
                 seed,
@@ -299,6 +303,7 @@ impl Streamlines {
                     lattice,
                     parameters,
                     view,
+                    barriers,
                     &mut occupancy,
                     &mut self.lines,
                     candidate,
@@ -342,10 +347,12 @@ fn candidates_beside(line: &Streamline, separation: f64) -> Vec<Point2> {
 /// integrates it both ways, and keeps it when it has any length. Its points
 /// join the occupancy either way, since a spot too small for a line is too
 /// small for the next one.
+#[allow(clippy::too_many_arguments)]
 fn grow(
     lattice: &VectorLattice,
     parameters: &StreamlineParameters,
     view: &WorldRect,
+    barriers: &Barriers,
     occupancy: &mut Occupancy,
     lines: &mut Vec<Streamline>,
     seed: Point2,
@@ -359,8 +366,8 @@ fn grow(
     }
     let line = lines.len();
     occupancy.insert(seed, line, 0.0);
-    let backward = integrate(lattice, parameters, seed, -1.0, occupancy, line);
-    let forward = integrate(lattice, parameters, seed, 1.0, occupancy, line);
+    let backward = integrate(lattice, parameters, barriers, seed, -1.0, occupancy, line);
+    let forward = integrate(lattice, parameters, barriers, seed, 1.0, occupancy, line);
     if backward.len() + forward.len() < 2 {
         return false;
     }
@@ -378,10 +385,12 @@ fn grow(
 }
 
 /// The points after the seed in one direction, `sign` along or against the
-/// flow, each added to the occupancy as it is reached.
+/// flow, each added to the occupancy as it is reached; the line ends short
+/// of a barrier its step would cross.
 fn integrate(
     lattice: &VectorLattice,
     parameters: &StreamlineParameters,
+    barriers: &Barriers,
     seed: Point2,
     sign: f64,
     occupancy: &mut Occupancy,
@@ -401,7 +410,7 @@ fn integrate(
             break;
         }
         arc += moved;
-        if arc > half_length {
+        if arc > half_length || barriers.blocks(point, next) {
             break;
         }
         if occupancy.within(
@@ -435,6 +444,94 @@ fn rk4(lattice: &VectorLattice, point: Point2, h: f64, sign: f64, floor: f64) ->
     let k3 = at(point + k2 * (h * 0.5))?;
     let k4 = at(point + k3 * h)?;
     Some(point + (k1 + k2 * 2.0 + k3 * 2.0 + k4) * (h / 6.0))
+}
+
+/// The spans a line may not cross, walls and baffles, as world segments
+/// bucketed by cells of one separation, so a step tests the few segments
+/// over the cells it touches. The lattice reads bilinearly across a
+/// zero-thickness span, blending the flow on its two sides, so without this
+/// a line walked through a wall the solver stops the energy at.
+pub(super) struct Barriers {
+    cell: f64,
+    segments: HashMap<(i64, i64), Vec<(Point2, Point2)>>,
+}
+
+impl Barriers {
+    pub(super) fn new(cell: f64) -> Self {
+        Self {
+            cell: if cell.is_finite() && cell > 0.0 {
+                cell
+            } else {
+                1.0
+            },
+            segments: HashMap::new(),
+        }
+    }
+
+    /// No barriers at all.
+    #[cfg(test)]
+    pub(super) fn none() -> Self {
+        Self::new(1.0)
+    }
+
+    fn bin(&self, value: f64) -> i64 {
+        (value / self.cell).floor() as i64
+    }
+
+    /// Adds a polyline's segments.
+    pub(super) fn add_polyline(&mut self, points: &[Point2]) {
+        for pair in points.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if !a.finite() || !b.finite() {
+                continue;
+            }
+            for column in self.bin(a.x.min(b.x))..=self.bin(a.x.max(b.x)) {
+                for row in self.bin(a.y.min(b.y))..=self.bin(a.y.max(b.y)) {
+                    self.segments.entry((column, row)).or_default().push((a, b));
+                }
+            }
+        }
+    }
+
+    /// Whether the step from `from` to `to` crosses a barrier.
+    pub(super) fn blocks(&self, from: Point2, to: Point2) -> bool {
+        if self.segments.is_empty() {
+            return false;
+        }
+        for column in self.bin(from.x.min(to.x))..=self.bin(from.x.max(to.x)) {
+            for row in self.bin(from.y.min(to.y))..=self.bin(from.y.max(to.y)) {
+                let Some(segments) = self.segments.get(&(column, row)) else {
+                    continue;
+                };
+                if segments
+                    .iter()
+                    .any(|(a, b)| segments_cross(from, to, *a, *b))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Whether the segments `pq` and `ab` meet, touching included.
+fn segments_cross(p: Point2, q: Point2, a: Point2, b: Point2) -> bool {
+    let along = q - p;
+    let d1 = along.cross(a - p);
+    let d2 = along.cross(b - p);
+    let across = b - a;
+    let d3 = across.cross(p - a);
+    let d4 = across.cross(q - a);
+    if d1 == 0.0 && d2 == 0.0 {
+        // Collinear: they meet where their extents overlap.
+        let overlaps = |low_a: f64, high_a: f64, low_b: f64, high_b: f64| {
+            low_a.max(low_b) <= high_a.min(high_b)
+        };
+        return overlaps(p.x.min(q.x), p.x.max(q.x), a.x.min(b.x), a.x.max(b.x))
+            && overlaps(p.y.min(q.y), p.y.max(q.y), a.y.min(b.y), a.y.max(b.y));
+    }
+    d1 * d2 <= 0.0 && d3 * d4 <= 0.0
 }
 
 /// Every placed point, bucketed by cells of one separation, so a distance
@@ -628,7 +725,7 @@ mod tests {
         let parameters = parameters(3.0);
         let view = view(columns, rows, spacing);
         let mut lines = Streamlines::default();
-        lines.place(&lattice, &parameters, &view);
+        lines.place(&lattice, &parameters, &view, &Barriers::none());
         assert!(lines.lines.len() >= 8, "{} lines", lines.lines.len());
         let mut heights = Vec::new();
         for line in &lines.lines {
@@ -668,7 +765,12 @@ mod tests {
         });
         let parameters = parameters(2.0);
         let mut lines = Streamlines::default();
-        lines.place(&lattice, &parameters, &view(columns, rows, spacing));
+        lines.place(
+            &lattice,
+            &parameters,
+            &view(columns, rows, spacing),
+            &Barriers::none(),
+        );
         assert!(lines.lines.len() >= 5, "{} lines", lines.lines.len());
         let mut closed = 0;
         for line in &lines.lines {
@@ -712,7 +814,12 @@ mod tests {
         });
         let parameters = parameters(3.0);
         let mut lines = Streamlines::default();
-        lines.place(&lattice, &parameters, &view(columns, rows, spacing));
+        lines.place(
+            &lattice,
+            &parameters,
+            &view(columns, rows, spacing),
+            &Barriers::none(),
+        );
         let points = all_points(&lines);
         assert!(points.len() > 100);
         let allowed = parameters.test_distance() - parameters.step;
@@ -752,7 +859,12 @@ mod tests {
             ..parameters(2.0)
         };
         let mut lines = Streamlines::default();
-        lines.place(&lattice, &parameters, &view(columns, rows, spacing));
+        lines.place(
+            &lattice,
+            &parameters,
+            &view(columns, rows, spacing),
+            &Barriers::none(),
+        );
         assert!(lines.lines.len() >= 5);
         for (_, point) in all_points(&lines) {
             assert!(
@@ -777,9 +889,9 @@ mod tests {
         let parameters = parameters(3.0);
         let view = view(columns, rows, spacing);
         let mut lines = Streamlines::default();
-        lines.place(&lattice, &parameters, &view);
+        lines.place(&lattice, &parameters, &view, &Barriers::none());
         let first = lines.lines.clone();
-        lines.place(&lattice, &parameters, &view);
+        lines.place(&lattice, &parameters, &view, &Barriers::none());
         assert_eq!(lines.lines, first);
 
         // A slightly changed field keeps the seeds, and so the lines'
@@ -787,7 +899,7 @@ mod tests {
         let drifted = self::lattice(spacing, columns, rows, |at| {
             Some(Point2::new(1.0, (at.y * 0.2 + 0.05).cos() * 0.5))
         });
-        lines.place(&drifted, &parameters, &view);
+        lines.place(&drifted, &parameters, &view, &Barriers::none());
         let kept = lines
             .lines
             .iter()
@@ -798,6 +910,86 @@ mod tests {
             "{kept} of {} seeds kept",
             first.len()
         );
+    }
+
+    #[test]
+    fn a_wall_stops_the_lines_that_reach_it_and_lines_pass_its_ends() {
+        let spacing = 1.0;
+        let (columns, rows) = (40, 30);
+        let lattice = lattice(spacing, columns, rows, |_| Some(Point2::new(1.0, 0.0)));
+        let parameters = parameters(3.0);
+        let wall = 20.0;
+        let (from, to) = (5.0, 25.0);
+        let mut barriers = Barriers::new(parameters.separation);
+        barriers.add_polyline(&[Point2::new(wall, from), Point2::new(wall, to)]);
+        let mut lines = Streamlines::default();
+        lines.place(
+            &lattice,
+            &parameters,
+            &view(columns, rows, spacing),
+            &barriers,
+        );
+        let (mut stopped, mut resumed, mut passed) = (0, 0, 0);
+        for line in &lines.lines {
+            let first = line.points[0];
+            let last = *line.points.last().unwrap();
+            let y = first.y;
+            if y > from && y < to {
+                assert!(
+                    first.x >= wall || last.x <= wall,
+                    "a line crossed the wall at y {y}: {first:?} to {last:?}"
+                );
+                if last.x <= wall {
+                    assert!(
+                        last.x > wall - parameters.step - 1.0e-9,
+                        "stopped {} short of the wall",
+                        wall - last.x
+                    );
+                    stopped += 1;
+                } else {
+                    resumed += 1;
+                }
+            } else if first.x < wall && last.x > wall {
+                passed += 1;
+            }
+        }
+        assert!(stopped >= 3, "{stopped} lines stopped at the wall");
+        assert!(resumed >= 3, "{resumed} lines run on behind it");
+        assert!(passed >= 1, "{passed} lines pass the wall's ends");
+
+        // Touching counts, a shared endpoint included; parallel segments
+        // apart do not.
+        let o = Point2::new(0.0, 0.0);
+        assert!(segments_cross(
+            o,
+            Point2::new(2.0, 0.0),
+            Point2::new(1.0, -1.0),
+            Point2::new(1.0, 1.0)
+        ));
+        assert!(segments_cross(
+            o,
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(3.0, 1.0)
+        ));
+        assert!(!segments_cross(
+            o,
+            Point2::new(2.0, 0.0),
+            Point2::new(0.0, 1.0),
+            Point2::new(2.0, 1.0)
+        ));
+        assert!(!segments_cross(
+            o,
+            Point2::new(2.0, 0.0),
+            Point2::new(3.0, 0.0),
+            Point2::new(4.0, 0.0)
+        ));
+        assert!(segments_cross(
+            o,
+            Point2::new(2.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(4.0, 0.0)
+        ));
     }
 
     #[test]

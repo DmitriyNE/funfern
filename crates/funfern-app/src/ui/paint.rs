@@ -551,8 +551,23 @@ impl Playground {
             floor: reference * 0.015,
             maximum_length: f64::from(viewport.size().length()) / scale * 2.0,
         };
+        // The walls and baffles the lines may not cross, from the spans the
+        // viewport already samples for drawing.
+        let mut barriers = Barriers::new(separation);
+        if let Some(sampled) = &self.sampled {
+            for span in &sampled.spans {
+                if self.span_blocks_flow(span.target) {
+                    let points = span
+                        .samples
+                        .iter()
+                        .map(|sample| sample.point)
+                        .collect::<Vec<_>>();
+                    barriers.add_polyline(&points);
+                }
+            }
+        }
         self.vector_overlay_streamlines
-            .place(&lattice, &parameters, &view);
+            .place(&lattice, &parameters, &view, &barriers);
         if absolute_time.is_finite() {
             if let Some(last) = self.streamline_dash_time {
                 let elapsed = (absolute_time - last).clamp(0.0, 1.0);
@@ -625,6 +640,35 @@ impl Playground {
                     Stroke::new(1.45, stroke_color(alpha as u8)),
                 ));
             }
+        }
+    }
+
+    /// Whether a span stops the energy: a separated span with independent
+    /// sides, which is a wall or a baffle. A transmitting span is a material
+    /// interface, a thin gap a compliant layer energy does cross, and the
+    /// outer boundary is where the lattice ends anyway.
+    fn span_blocks_flow(&self, target: TopologySpanTarget) -> bool {
+        match target {
+            TopologySpanTarget::Outer(_) => false,
+            TopologySpanTarget::Curve(id) => self
+                .editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curves
+                .iter()
+                .flat_map(|curve| &curve.spans)
+                .find(|span| span.id == id)
+                .is_some_and(|span| {
+                    matches!(
+                        span.behavior,
+                        SpanBehavior::Separated {
+                            coupling: InternalBoundaryCoupling::Independent,
+                            ..
+                        }
+                    )
+                }),
         }
     }
 
