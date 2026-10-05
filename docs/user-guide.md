@@ -17,14 +17,16 @@ running; this file covers using it.
   card are what a phone shows first. A first launch, with nothing to restore,
   opens the guided tour: a small scene with a source, an echoing right-hand
   wall, a round obstacle and a round region, the panels closed, and a card
-  over it that walks through the app in ten steps, each naming one thing to
-  do and lighting the control to do it with, the rest of the screen dimmed:
+  at the foot of the view that walks through the app in ten steps, each
+  naming one thing to do and lighting the control to do it with, an arrow
+  from the card to it and the rest of the screen dimmed:
   pause and run the wave; drag the source; open Edit, click the right wall
   and give it an outgoing law; drag a rectangle round the obstacle and move
   it by its gizmo; draw a wall; give the region the glass in Materials;
   switch the vector overlay on in View; open Simulation; drop a point probe
   from Probes; and open the gallery. A step moves on a moment after its
-  action shows, and Next and Skip the tour are always there. The tour is
+  action shows, counted from the step's own start, so something done early
+  is asked for again; Next and Skip the tour are always there. The tour is
   seen once, remembered beside the autosave, and is back under Guided tour
   at the top of the Examples window and on the scene card whenever wanted.
   A scene opens fitted to the window and

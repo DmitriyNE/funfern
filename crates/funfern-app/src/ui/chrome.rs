@@ -256,7 +256,12 @@ impl Playground {
                         ui.label(egui::RichText::new(tool.prompt()).strong());
                         ui.horizontal(|ui| {
                             let finish = egui::Button::new("Finish").shortcut_text("Enter");
-                            if ui.add_enabled(tool.finishes_with(points), finish).clicked() {
+                            let finishes = tool.finishes_with(points);
+                            let response = ui.add_enabled(finishes, finish);
+                            if finishes {
+                                self.spotlights.record(Spotlight::DrawFinish, response.rect);
+                            }
+                            if response.clicked() {
                                 self.finish_draw();
                             }
                             let undo = egui::Button::new("Undo point").shortcut_text("Backspace");

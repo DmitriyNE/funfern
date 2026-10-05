@@ -30,8 +30,10 @@ pub(super) enum Spotlight {
     BoundaryLaw,
     /// The View panel's vector overlay choice.
     VectorOverlay,
-    /// The Draw palette's line tool.
+    /// The Draw palette's line tool, and its Finish button while a line is
+    /// being drawn.
     DrawLine,
+    DrawFinish,
     /// The source, where the viewport draws it.
     Source,
     /// The obstacle, where the viewport draws it.
@@ -76,12 +78,17 @@ pub(super) struct GuideStep {
     targets: &'static [(Spotlight, Option<&'static str>)],
     /// Lit as well, with no hint, when drawn: the thing the step is about.
     extra: &'static [Spotlight],
+    /// The light is a dashed rectangle, a marquee's shape, rather than a
+    /// ring.
+    dashed: bool,
     done: fn(&Playground) -> bool,
 }
 
 /// A done step waits this long before moving on, so its tick is seen.
 const GUIDE_ADVANCE_DELAY: f64 = 0.9;
-const GUIDE_CARD_WIDTH: f32 = 380.0;
+const GUIDE_CARD_WIDTH: f32 = 400.0;
+/// How dark the rest of the screen goes round the lit controls.
+const GUIDE_DIM_ALPHA: u8 = 140;
 
 const PANELS_HINT: Option<&str> = Some("The panel is under Panels in the bar.");
 
@@ -92,6 +99,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
                sit at the right end of the bar. Pause the wave, then run it again.",
         targets: &[(Spotlight::RunPause, None)],
         extra: &[],
+        dashed: false,
         done: |state| state.guide.paused_seen && state.wave_running,
     },
     GuideStep {
@@ -100,6 +108,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
                Drag it somewhere else and watch the field follow.",
         targets: &[(Spotlight::Source, None)],
         extra: &[],
+        dashed: false,
         done: |state| {
             state.editor.document.model.source.position != state.guide.baseline.source
                 && !state.editor.editing()
@@ -120,6 +129,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             ),
         ],
         extra: &[Spotlight::Wall],
+        dashed: false,
         done: |state| {
             state.editor.document.model.draft.outer_boundaries.sides[OuterSide::Right.index()]
                 != state.guide.baseline.right_wall
@@ -127,11 +137,13 @@ pub(super) static STEPS: [GuideStep; 10] = [
     },
     GuideStep {
         title: "Select and move",
-        text: "Drag a rectangle round the round obstacle to select the whole of it. A gizmo \
-               appears on the selection, with handles to move, scale and turn it. Drag the \
-               gizmo and put the obstacle somewhere else.",
+        text: "Press on empty space beside the round obstacle, drag a rectangle over the \
+               whole of it and let go: that is a marquee, and everything inside it is \
+               selected. Handles appear round the selection, the gizmo, to move, scale and \
+               turn it. Drag the gizmo's centre and put the obstacle somewhere else.",
         targets: &[(Spotlight::Obstacle, None)],
         extra: &[],
+        dashed: true,
         done: |state| {
             state.guide_obstacle_controls() != state.guide.baseline.obstacle
                 && !state.editor.editing()
@@ -139,10 +151,23 @@ pub(super) static STEPS: [GuideStep; 10] = [
     },
     GuideStep {
         title: "Draw",
-        text: "+ Draw opens the palette: circles, rectangles, polygons, splines and lines, \
-               as regions, holes or walls. Draw a line across the scene; it becomes a wall.",
-        targets: &[(Spotlight::DrawLine, None), (Spotlight::Draw, None)],
+        text: "+ Draw opens the palette. Under Open curve pick Polyline, then click two or \
+               three points across the scene; each click adds a vertex. Press Finish in the \
+               palette, or Enter, to end the line, which becomes a wall. A line that crosses \
+               itself cannot be finished: Cancel, or Esc, and draw it again.",
+        targets: &[
+            (
+                Spotlight::DrawFinish,
+                Some("Press Finish, or Enter, to end the line."),
+            ),
+            (
+                Spotlight::DrawLine,
+                Some("Pick Polyline, then click the line's points in the scene."),
+            ),
+            (Spotlight::Draw, None),
+        ],
         extra: &[],
+        dashed: false,
         done: |state| {
             state.editor.document.model.draft.geometry.curves.len() > state.guide.baseline.curves
         },
@@ -160,6 +185,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Panels, PANELS_HINT),
         ],
         extra: &[],
+        dashed: false,
         done: |state| {
             state
                 .editor
@@ -182,6 +208,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Panels, PANELS_HINT),
         ],
         extra: &[],
+        dashed: false,
         done: |state| state.editor.document.presentation.vector_overlay != VectorOverlay::Off,
     },
     GuideStep {
@@ -193,6 +220,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Panels, PANELS_HINT),
         ],
         extra: &[],
+        dashed: false,
         done: |state| state.inspector == Some(InspectorPanel::Simulation),
     },
     GuideStep {
@@ -209,6 +237,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Panels, PANELS_HINT),
         ],
         extra: &[],
+        dashed: false,
         done: |state| {
             state.editor.document.model.probes.len() > state.guide.baseline.probes
                 && !state.probe_windows.is_empty()
@@ -221,6 +250,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
                whenever you want it back.",
         targets: &[(Spotlight::Examples, None)],
         extra: &[],
+        dashed: false,
         done: |state| state.examples_open,
     },
 ];
@@ -338,7 +368,10 @@ impl Playground {
         }
     }
 
-    /// The next step, or the end after the last.
+    /// The next step, or the end after the last. A step's baseline is what
+    /// the scene holds as the step starts, so an action done early, the
+    /// source dragged before its step, does not count for the step when it
+    /// comes: the user does it again, or presses Next.
     pub(super) fn guide_advance(&mut self) {
         self.guide.done_since = None;
         if self.guide.step + 1 >= STEPS.len() {
@@ -346,6 +379,7 @@ impl Playground {
         } else {
             self.guide.step += 1;
             self.guide.paused_seen = false;
+            self.guide.baseline = self.guide_baseline();
         }
     }
 
@@ -442,32 +476,53 @@ impl Playground {
         }
         // The dimming is paint on a foreground layer, no widget, so clicks
         // go through it to the controls underneath.
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("guide-spotlight"),
+        ));
         if !holes.is_empty() {
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::new("guide-spotlight"),
-            ));
             for shade in dim_except(screen, &holes) {
-                painter.rect_filled(shade, 0.0, Color32::from_black_alpha(96));
+                painter.rect_filled(shade, 0.0, Color32::from_black_alpha(GUIDE_DIM_ALPHA));
             }
             for hole in &holes {
-                painter.rect_stroke(
-                    *hole,
-                    6.0,
-                    Stroke::new(2.0, TEAL),
-                    egui::StrokeKind::Outside,
-                );
+                if step.dashed {
+                    let corners = [
+                        hole.left_top(),
+                        hole.right_top(),
+                        hole.right_bottom(),
+                        hole.left_bottom(),
+                        hole.left_top(),
+                    ];
+                    painter.add(egui::Shape::dashed_line(
+                        &corners,
+                        Stroke::new(2.5, TEAL),
+                        8.0,
+                        5.0,
+                    ));
+                } else {
+                    // A glow: three rings, the outer ones faint.
+                    for (width, alpha) in [(9.0, 0.16), (5.0, 0.43), (2.5, 1.0)] {
+                        painter.rect_stroke(
+                            *hole,
+                            6.0,
+                            Stroke::new(width, TEAL.gamma_multiply(alpha)),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                }
             }
         }
         let (index, total) = (self.guide.step + 1, STEPS.len());
         let last = index == total;
         let mut skip = false;
         let mut next = false;
-        egui::Window::new("Guided tour")
+        let frame = egui::Frame::window(&ctx.global_style()).stroke(Stroke::new(1.5, TEAL));
+        let card = egui::Window::new("Guided tour")
             .id(egui::Id::new("guide-card"))
             .title_bar(false)
             .resizable(false)
             .collapsible(false)
+            .frame(frame)
             // At the viewport's foot: the palette, the floating inspector,
             // the probe windows and the gallery all open at its top.
             .pivot(egui::Align2::CENTER_BOTTOM)
@@ -476,16 +531,17 @@ impl Playground {
             .show(ctx, |ui| {
                 ui.set_width(GUIDE_CARD_WIDTH.min(viewport.width() - 24.0));
                 ui.horizontal(|ui| {
-                    ui.strong(step.title);
+                    ui.colored_label(TEAL, egui::RichText::new("GUIDED TOUR").small().strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak(format!("{index} / {total}"));
+                        ui.weak(format!("step {index} of {total}"));
                     });
                 });
+                ui.heading(step.title);
                 ui.label(step.text);
                 if let Some((_, Some(hint))) = spotlight {
-                    ui.small(hint);
+                    ui.colored_label(TEAL, hint);
                 }
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.small_button("Skip the tour").clicked() {
                         skip = true;
@@ -500,12 +556,36 @@ impl Playground {
                     });
                 });
             });
+        // An arrow from the card to the control the step points at.
+        if let (Some(card), Some(hole)) = (card, holes.first()) {
+            if let Some((from, to)) = pointer_between(card.response.rect, *hole) {
+                let stroke = Stroke::new(2.5, TEAL);
+                painter.line_segment([from, to], stroke);
+                let direction = (to - from).normalized();
+                let normal = egui::vec2(-direction.y, direction.x);
+                let head = 10.0;
+                painter.line_segment([to, to - direction * head + normal * head * 0.5], stroke);
+                painter.line_segment([to, to - direction * head - normal * head * 0.5], stroke);
+            }
+        }
         if skip {
             self.finish_guide();
         } else if next {
             self.guide_advance();
         }
     }
+}
+
+/// The arrow from the card to a lit rect: from the point of the card's
+/// edge nearest the rect to the point of the rect's edge nearest the card,
+/// or nothing when the two touch or overlap.
+pub(super) fn pointer_between(card: Rect, hole: Rect) -> Option<(Pos2, Pos2)> {
+    if card.intersects(hole) {
+        return None;
+    }
+    let from = card.clamp(hole.center());
+    let to = hole.clamp(card.center());
+    ((to - from).length() > 24.0).then_some((from, to))
 }
 
 /// The rects that cover `screen` but for `holes`: the screen cut into
@@ -770,6 +850,45 @@ mod tests {
         for control in state.guide_obstacle_controls() {
             assert!(rect.contains(state.screen(control, viewport)));
         }
+    }
+
+    /// A step's baseline is taken as the step starts: the source dragged
+    /// during the first step does not count for the second, which asks for
+    /// it again.
+    #[test]
+    fn an_action_done_early_does_not_skip_its_step() {
+        let mut state = Playground::default();
+        state.start_guide(false);
+        settle(&mut state.editor);
+        let mut source = state.editor.document.model.source;
+        source.position = source.position + Point2::new(0.2, 0.0);
+        state.editor.set_point_source(source).unwrap();
+        state.guide_advance();
+        assert_eq!(STEPS[state.guide.step].title, "The source");
+        state.guide_update(1.0);
+        assert!(!state.guide_step_done(), "the early drag counted");
+        source.position = source.position + Point2::new(0.0, 0.2);
+        state.editor.set_point_source(source).unwrap();
+        state.guide_update(1.0);
+        assert!(state.guide_step_done());
+    }
+
+    /// The arrow runs from the card's edge to the lit rect's edge, and is
+    /// left out when the two meet.
+    #[test]
+    fn the_pointer_runs_between_the_cards_edge_and_the_lit_rects_edge() {
+        let card = Rect::from_min_size(Pos2::new(200.0, 500.0), egui::vec2(400.0, 100.0));
+        let above = Rect::from_min_size(Pos2::new(380.0, 40.0), egui::vec2(60.0, 24.0));
+        let (from, to) = pointer_between(card, above).unwrap();
+        assert_eq!(from.y, card.min.y);
+        assert_eq!(to.y, above.max.y);
+        assert!(from.x >= above.min.x && from.x <= above.max.x);
+        let aside = Rect::from_min_size(Pos2::new(700.0, 520.0), egui::vec2(40.0, 40.0));
+        let (from, to) = pointer_between(card, aside).unwrap();
+        assert_eq!(from.x, card.max.x);
+        assert_eq!(to.x, aside.min.x);
+        let touching = Rect::from_min_size(Pos2::new(590.0, 540.0), egui::vec2(40.0, 40.0));
+        assert_eq!(pointer_between(card, touching), None);
     }
 
     /// The dimming covers the screen but for the holes, each point once.
