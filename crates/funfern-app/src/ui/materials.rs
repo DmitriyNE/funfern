@@ -254,7 +254,14 @@ impl Playground {
                     )
                     .show_ui(ui, |ui| {
                         for item in materials {
-                            ui.selectable_value(&mut material, item.id, &item.name);
+                            let entry = ui.selectable_value(&mut material, item.id, &item.name);
+                            self.spotlights.record(
+                                Spotlight::MaterialChoice {
+                                    region: region.id,
+                                    material: item.id,
+                                },
+                                entry.rect,
+                            );
                         }
                     });
                 self.spotlights

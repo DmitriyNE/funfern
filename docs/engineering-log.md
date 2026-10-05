@@ -19389,3 +19389,19 @@ Three more from the user.
   names the grips now: the four-way grip moves, the ring turns, the arrows
   scale, the centre dot is the pivot the others work about; the obstacle
   itself, or the four-way grip, is what to drag.
+
+## 2026-10-05 — The tour, sixth pass
+
+Two more from the testers.
+
+- **The glass and the energy flow were not lit.** The Materials and View
+  steps lit the combo buttons; the entries inside the opened lists, the
+  glass for the region and the energy flow for the overlay, were not lit,
+  as the outgoing law had not been. Each list records its entries while it
+  is open (`MaterialChoice { region, material }`, `OverlayChoice(mode)`),
+  and the steps light the entry ahead of the combo, which carries a hint to
+  pick it.
+- **Stale lights.** A done step kept lighting its chain's fallback for the
+  0.9 s before it moved on: a finished line hid the Finish button, and the
+  chain fell back to the Polyline tool for that moment. A done step lights
+  nothing now (`guide_light`), and the screen dims evenly under its tick.

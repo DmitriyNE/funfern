@@ -9,7 +9,7 @@
 
 use super::*;
 use funfern_app::document::VectorOverlay;
-use funfern_app::topology_examples::{GUIDE_OBSTACLE, GUIDE_REGION, guide_scene};
+use funfern_app::topology_examples::{GUIDE_GLASS, GUIDE_OBSTACLE, GUIDE_REGION, guide_scene};
 
 /// A control a step points at. The top bar and the panels record where they
 /// drew these this frame; a step asks for its controls in order of
@@ -23,8 +23,15 @@ pub(super) enum Spotlight {
     Tab(InspectorPanel),
     /// The Probes panel's point-probe button.
     ProbePoint,
-    /// A region's material choice in the Materials panel.
+    /// A region's material choice in the Materials panel, and an entry of
+    /// its list while the list is open.
     RegionMaterial(RegionId),
+    MaterialChoice {
+        region: RegionId,
+        material: MaterialId,
+    },
+    /// An entry of the View panel's vector overlay list while it is open.
+    OverlayChoice(VectorOverlay),
     /// The Edit panel's boundary law picker, drawn while a boundary is
     /// selected, and its second-order outgoing entry while the list is open.
     BoundaryLaw,
@@ -181,7 +188,17 @@ pub(super) static STEPS: [GuideStep; 10] = [
         text: "Materials holds the library and says which region has which. Give the round \
                region at the bottom the glass.",
         targets: &[
-            (Spotlight::RegionMaterial(GUIDE_REGION), None),
+            (
+                Spotlight::MaterialChoice {
+                    region: GUIDE_REGION,
+                    material: GUIDE_GLASS,
+                },
+                None,
+            ),
+            (
+                Spotlight::RegionMaterial(GUIDE_REGION),
+                Some("Pick the glass for it."),
+            ),
             (
                 Spotlight::Tab(InspectorPanel::Materials),
                 Some("Open the Materials panel first."),
@@ -207,7 +224,11 @@ pub(super) static STEPS: [GuideStep; 10] = [
                as arrows or streamlines, material overlays, the mesh. Switch the vector \
                overlay on.",
         targets: &[
-            (Spotlight::VectorOverlay, None),
+            (
+                Spotlight::OverlayChoice(VectorOverlay::RelativeEnergyFlow),
+                None,
+            ),
+            (Spotlight::VectorOverlay, Some("Pick the energy flow.")),
             (Spotlight::Tab(InspectorPanel::View), None),
             (Spotlight::Panels, PANELS_HINT),
         ],
@@ -438,6 +459,15 @@ impl Playground {
         }
     }
 
+    /// What the tour lights this frame: the current step's spotlight, or
+    /// nothing once the step is done.
+    pub(super) fn guide_light(&self, viewport: Rect) -> Option<(Rect, Option<&'static str>)> {
+        if !self.guide.active || self.guide_step_done() {
+            return None;
+        }
+        self.guide_spotlight(&STEPS[self.guide.step], viewport)
+    }
+
     /// The rect the step lights this frame and the hint for it, the first
     /// of its targets that was drawn.
     pub(super) fn guide_spotlight(
@@ -464,17 +494,23 @@ impl Playground {
         }
         let step = &STEPS[self.guide.step];
         let done = self.guide_step_done();
-        let spotlight = self.guide_spotlight(step, viewport);
+        // A done step lights nothing while it waits to move on: its chain
+        // of targets would otherwise fall back to an earlier control, the
+        // Polyline tool after a line was finished, for the moment the tick
+        // shows.
+        let spotlight = self.guide_light(viewport);
         let screen = ctx.content_rect();
         let mut holes = spotlight
             .iter()
             .map(|(rect, _)| rect.expand(6.0).intersect(screen))
             .collect::<Vec<_>>();
-        for extra in step.extra {
-            if let Some(rect) = self.spotlight_rect(*extra, viewport) {
-                let hole = rect.expand(6.0).intersect(screen);
-                if !holes.contains(&hole) {
-                    holes.push(hole);
+        if !done {
+            for extra in step.extra {
+                if let Some(rect) = self.spotlight_rect(*extra, viewport) {
+                    let hole = rect.expand(6.0).intersect(screen);
+                    if !holes.contains(&hole) {
+                        holes.push(hole);
+                    }
                 }
             }
         }
@@ -500,7 +536,7 @@ impl Playground {
                 .filter_map(|layer| memory.area_rect(layer.id))
                 .collect::<Vec<_>>()
         }));
-        if !holes.is_empty() {
+        {
             for shade in dim_except(screen, &clear) {
                 painter.rect_filled(shade, 0.0, Color32::from_black_alpha(GUIDE_DIM_ALPHA));
             }
@@ -702,7 +738,6 @@ pub(super) fn dim_except(screen: Rect, holes: &[Rect]) -> Vec<Rect> {
 mod tests {
     use super::*;
     use funfern_app::topology_editor::{OpenCurvePurpose, TopologyProbeTarget};
-    use funfern_app::topology_examples::GUIDE_GLASS;
     use funfern_app::topology_viewport::{
         RigidTransform, TopologySpanTarget, plan_rigid_transform,
     };
@@ -922,6 +957,76 @@ mod tests {
         for control in state.guide_obstacle_controls() {
             assert!(rect.contains(state.screen(control, viewport)));
         }
+    }
+
+    /// The lists' entries are lit once the lists are open: the glass in the
+    /// region's material list, the energy flow in the overlay list; before
+    /// that, the combo with a hint to pick them.
+    #[test]
+    fn the_list_entries_are_lit_once_the_lists_are_open() {
+        let mut state = Playground::default();
+        state.start_guide(false);
+        let viewport = viewport();
+        state.inspector = Some(InspectorPanel::Materials);
+        let combo = Rect::from_min_size(Pos2::new(600.0, 200.0), egui::vec2(120.0, 20.0));
+        state
+            .spotlights
+            .record(Spotlight::RegionMaterial(GUIDE_REGION), combo);
+        let materials = &STEPS[step_index("Materials")];
+        assert_eq!(
+            state.guide_spotlight(materials, viewport),
+            Some((combo, Some("Pick the glass for it.")))
+        );
+        let entry = Rect::from_min_size(Pos2::new(600.0, 240.0), egui::vec2(120.0, 18.0));
+        state.spotlights.record(
+            Spotlight::MaterialChoice {
+                region: GUIDE_REGION,
+                material: GUIDE_GLASS,
+            },
+            entry,
+        );
+        assert_eq!(
+            state.guide_spotlight(materials, viewport),
+            Some((entry, None))
+        );
+
+        state.spotlights.clear();
+        state.inspector = Some(InspectorPanel::View);
+        state.spotlights.record(Spotlight::VectorOverlay, combo);
+        let view = &STEPS[step_index("View")];
+        assert_eq!(
+            state.guide_spotlight(view, viewport),
+            Some((combo, Some("Pick the energy flow.")))
+        );
+        state.spotlights.record(
+            Spotlight::OverlayChoice(VectorOverlay::RelativeEnergyFlow),
+            entry,
+        );
+        assert_eq!(state.guide_spotlight(view, viewport), Some((entry, None)));
+    }
+
+    /// A done step lights nothing while it waits to move on, so its chain
+    /// of targets does not fall back to an earlier control.
+    #[test]
+    fn a_done_step_lights_nothing() {
+        let mut state = Playground::default();
+        state.start_guide(false);
+        let viewport = viewport();
+        let pause = Rect::from_min_size(Pos2::new(700.0, 4.0), egui::vec2(60.0, 24.0));
+        state.spotlights.record(Spotlight::RunPause, pause);
+        assert_eq!(state.guide_light(viewport), Some((pause, None)));
+        state.wave_running = false;
+        state.guide_update(1.0);
+        state.wave_running = true;
+        state.guide_update(1.0);
+        assert!(state.guide_step_done());
+        assert_eq!(state.guide_light(viewport), None);
+        state.guide_update(1.0 + GUIDE_ADVANCE_DELAY + 0.1);
+        assert_eq!(STEPS[state.guide.step].title, "The source");
+        assert!(
+            state.guide_light(viewport).is_some(),
+            "the next step lights its own"
+        );
     }
 
     /// A step's baseline is taken as the step starts: the source dragged

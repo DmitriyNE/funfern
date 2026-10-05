@@ -96,7 +96,10 @@ impl Playground {
             .selected_text(p.vector_overlay.label(physics))
             .show_ui(ui, |ui| {
                 for mode in VectorOverlay::choices(physics) {
-                    ui.selectable_value(&mut p.vector_overlay, *mode, mode.label(physics));
+                    let entry =
+                        ui.selectable_value(&mut p.vector_overlay, *mode, mode.label(physics));
+                    self.spotlights
+                        .record(Spotlight::OverlayChoice(*mode), entry.rect);
                 }
             });
         self.spotlights
