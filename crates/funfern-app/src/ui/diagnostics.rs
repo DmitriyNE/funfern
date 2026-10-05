@@ -248,6 +248,18 @@ impl Playground {
             .constrain_to(between_bars)
             .default_pos(between_bars.left_top() + egui::vec2(16.0, 8.0))
             .show(ctx, |ui| {
+                // On its own row above the heading, where it is seen; beside
+                // the heading it kept the heading from wrapping at a phone's
+                // width and made the window wider than its grid.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("Guided tour")
+                        .on_hover_text("A walk through the app, step by step")
+                        .clicked()
+                    {
+                        tour = true;
+                    }
+                });
                 ui.label("Pick a scene to open it. Hover one for what it shows.");
                 // The minimum as well as the maximum: an auto-sized window
                 // offers its content the size it had the frame before, so a
@@ -282,19 +294,6 @@ impl Playground {
                             }
                         }
                     });
-                // At the foot rather than beside the heading: a row there
-                // kept the heading from wrapping at a phone's width and
-                // made the window wider than its grid.
-                ui.add_space(4.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .button("Guided tour")
-                        .on_hover_text("A walk through the app, step by step")
-                        .clicked()
-                    {
-                        tour = true;
-                    }
-                });
             });
         self.examples_open = open;
         if tour {

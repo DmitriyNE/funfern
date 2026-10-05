@@ -176,9 +176,9 @@ pub(super) static STEPS: [GuideStep; 9] = [
     },
     GuideStep {
         title: "The gallery",
-        text: "Examples holds forty-five ready scenes in seven sections, each with a card \
-               saying what it shows and what to look for. Open it and pick one. This tour \
-               is there too, whenever you want it back.",
+        text: "Examples holds ready scenes in sections, each with a card saying what it \
+               shows and what to look for. Open it and pick one. This tour is there too, \
+               whenever you want it back.",
         targets: &[(Spotlight::Examples, None)],
         done: |state| state.examples_open,
     },

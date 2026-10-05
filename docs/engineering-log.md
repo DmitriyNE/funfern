@@ -19291,8 +19291,10 @@ dig.
   storage in the browser, written once when the tour ends or is skipped.
   `open_startup_scene` takes the flag: no autosave and no marker opens the
   tour; the marker, a random example as before. Re-entry from a Guided tour
-  button at the gallery window's foot (a header row stopped the label
-  wrapping at phone width) and a small button on the expanded scene card.
+  button on its own row at the top of the gallery window (beside the
+  heading it stopped the heading wrapping at phone width) and a small
+  button on the expanded scene card. The last step names no counts of
+  scenes or sections, which would be a chore to keep true.
 - **Tests:** each step done by the action it asks for and the last ending
   the tour, the marker written once; the spotlight's fallback along a
   step's targets and the source lit where it is drawn; the card showing the
