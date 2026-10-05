@@ -19602,3 +19602,19 @@ pieces read Before the slab, the slab, Past the slab, and so on. One
 departure from the agreed list: FTIR's region above the guide is the gap
 under the block and everything left of it, so it is Above the guide rather
 than Gap. The shipped scenes were re-blessed with the names.
+
+## 2026-10-05 — The Josephson line shows E_z
+
+Asked: the Josephson line opened in the integrated field, −A_z, which in a
+junction line is the phase. With the left end held at a constant voltage the
+phase there winds without bound, the exposure follows it, and after 25 s the
+line was one red wash with each fluxon's 2π kink a ripple on it. In E_z each
+fluxon is a voltage pulse of one height, two of them running down the line
+at that moment, and the picture holds at any time. The scene opens in E_z
+now; the card names the pulse and the kink the integrated field shows.
+
+- The probe reads the primary field, E_z here, whichever field is shown:
+  the probe shader binds the state alone, and the integrated view only adds
+  a readback for the picture. The gallery test had checked the tone at V/2π
+  on −A_z; it now checks E_z too, as the app's probe hears it: the strongest
+  line is 0.466 Hz against V/2π = 0.477, within the window's resolution.

@@ -330,7 +330,7 @@
     "grid_scale_filter": true,
     "advanced_material_ids": [],
     "law_formula_numbers": false,
-    "integrated_field": true,
+    "integrated_field": false,
     "probe_readouts": [
       {
         "probe": 1,

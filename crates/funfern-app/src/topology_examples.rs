@@ -442,9 +442,9 @@ pub fn catalog() -> &'static [TopologyExample] {
                 ExampleGroup::NonlinearAndSelfOrganizing,
                 "Josephson line",
                 "A junction line held at a constant voltage V on one end sheds one fluxon per \
-                 turn of its phase; each runs down the line as a kink in the integrated field, \
-                 and a probe down the line hears them as a tone at V/2π, the Josephson \
-                 frequency.",
+                 turn of its phase; each runs down the line as a voltage pulse, a kink of 2π \
+                 in the phase the integrated field shows, and a probe down the line hears them \
+                 as a tone at V/2π, the Josephson frequency.",
                 josephson_line(),
             ),
             example(
@@ -2462,7 +2462,9 @@ fn josephson_line_with(restoring: &str, bias: f64) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(JOSEPHSON_PROBE),
     });
-    document.presentation.integrated_field = true;
+    // Shown in E_z, the voltage: each fluxon a pulse of one height. The
+    // integrated field is the phase, which the biased end winds without
+    // bound, so the scale follows that and the kinks shrink into it.
     document
         .readouts
         .set_probe(ProbeId(1), spectrum_readout(WHOLE_HISTORY, 3.0));
@@ -6513,6 +6515,22 @@ mod tests {
         // frequency, 0.46 Hz in view against 0.477, and its harmonics.
         let (strongest, _) = lines.strongest(0.1, 3.0);
         assert!((strongest - JOSEPHSON_BIAS / tau).abs() < 1.0 / lines.span);
+        // The scene shows E_z, and the probe in the app reads it, not r: a
+        // train of voltage pulses, one per fluxon, whose strongest line is
+        // the same tone.
+        let voltage = rows.iter().map(|row| row.2[2]).collect::<Vec<_>>();
+        let lines = Lines::read(
+            &josephson_line(),
+            ProbeId(1),
+            &voltage,
+            rows[1].0 - rows[0].0,
+            JOSEPHSON_BIAS / tau,
+        );
+        let (strongest, _) = lines.strongest(0.1, 3.0);
+        assert!(
+            (strongest - JOSEPHSON_BIAS / tau).abs() < 1.0 / lines.span,
+            "E_z's strongest line is at {strongest:.3} Hz"
+        );
         let arrivals = (0..points.len())
             .map(|index| fluxon_arrivals(&rows, index))
             .collect::<Vec<_>>();
