@@ -19583,3 +19583,7 @@ re-blessed (the rename, 70 lines over 35 files).
   Unnamed, a region is Background or Region n. The merge question's Keep
   reads "name / material" for a named region and the material, as before,
   for one not named. The tour's region is called Round region.
+
+- Follow-up: Hide holes is offered only while the scene has a hole; the
+  choice is kept for the next one. The roster test checks the empty scene
+  New makes shows none.

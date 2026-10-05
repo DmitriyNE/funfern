@@ -130,12 +130,11 @@ impl Playground {
 
     pub(super) fn materials_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Materials");
-        let count = self
-            .editor
-            .document
-            .model
-            .draft
-            .face_assignments
+        let assignments = &self.editor.document.model.draft.face_assignments;
+        let holes = assignments
+            .iter()
+            .any(|assignment| assignment.region.is_none());
+        let count = assignments
             .iter()
             .filter(|assignment| !self.hide_holes || assignment.region.is_some())
             .count();
@@ -149,10 +148,14 @@ impl Playground {
         )
         .show_header(ui, |ui| {
             ui.label(format!("Subdomains ({count})"));
-            ui.checkbox(&mut self.hide_holes, "Hide holes")
-                .on_hover_text(
-                    "Leave the holes out of the list; a hole's row is where it is filled again",
-                );
+            // Offered only while there is a hole to hide; the choice is kept
+            // for the next one.
+            if holes {
+                ui.checkbox(&mut self.hide_holes, "Hide holes")
+                    .on_hover_text(
+                        "Leave the holes out of the list; a hole's row is where it is filled again",
+                    );
+            }
         })
         .body(|ui| {
             let materials = self.editor.document.model.draft.materials.clone();
@@ -1360,6 +1363,27 @@ mod tests {
         }
         assert!(!shown.iter().any(|label| label == "ambient"));
         assert!(shown.iter().any(|label| label == "Ambient"), "{shown:?}");
+        assert!(
+            shown.iter().any(|label| label == "Hide holes"),
+            "a hole to hide"
+        );
+        // A scene without holes: the empty one New makes, in a context of
+        // its own.
+        let mut empty = Playground {
+            editor: funfern_app::topology_editor::TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let fresh = egui::Context::default();
+        fresh.enable_accesskit();
+        let shown = labels(&roster_pass(&mut empty, &fresh, vec![]));
+        assert!(
+            shown.iter().any(|label| label == "Subdomains (1)"),
+            "{shown:?}"
+        );
+        assert!(
+            !shown.iter().any(|label| label == "Hide holes"),
+            "no hole, no checkbox: {shown:?}"
+        );
 
         state.hide_holes = true;
         let shown = labels(&roster_pass(&mut state, &context, vec![]));

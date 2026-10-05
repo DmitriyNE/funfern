@@ -253,7 +253,7 @@ running; this file covers using it.
 - **Materials:** create and name materials in the Library, edit the three base
   properties named by the active physics skin, and assign them under
   Subdomains, one row per face the curves cut the domain into, holes
-  included unless Hide holes is ticked. A face and its region are one thing:
+  included unless Hide holes, offered while the scene has a hole, is ticked. A face and its region are one thing:
   a region is the material slot of exactly one face, and a hole has none. A
   row is named by its region, Background for the outer one and Region n for
   the rest until it is given a name in the Name field below the list, which
