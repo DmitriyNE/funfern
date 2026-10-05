@@ -96,7 +96,31 @@ pub(super) struct GuideStep {
     /// The light is a dashed rectangle, a marquee's shape, rather than a
     /// ring.
     dashed: bool,
+    /// What the step is about, which has to be in the scene for it to be
+    /// done: one that is gone holds the step until it is back.
+    needs: &'static [GuideSubject],
     done: fn(&Playground) -> bool,
+}
+
+/// A part of the tour's scene a step is about.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum GuideSubject {
+    Source,
+    Obstacle,
+    Region,
+    Glass,
+}
+
+impl GuideSubject {
+    /// What the card says when it is missing.
+    fn missing(self) -> &'static str {
+        match self {
+            Self::Source => "The source is switched off",
+            Self::Obstacle => "The round obstacle is gone",
+            Self::Region => "The round region is gone",
+            Self::Glass => "The glass is gone from the materials",
+        }
+    }
 }
 
 /// A done step waits this long before moving on, so its tick is seen.
@@ -114,6 +138,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
                sit at the right end of the bar. Pause the wave, then run it again.",
         targets: &[(Spotlight::RunPause, None)],
         dashed: false,
+        needs: &[],
         done: |state| state.guide.paused_seen && state.wave_running,
     },
     GuideStep {
@@ -122,6 +147,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
                Drag it somewhere else and watch the field follow.",
         targets: &[(Spotlight::Source, None)],
         dashed: false,
+        needs: &[GuideSubject::Source],
         done: |state| {
             state.editor.document.model.source.position != state.guide.baseline.source
                 && !state.editor.editing()
@@ -143,6 +169,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Panels, PANELS_HINT),
         ],
         dashed: false,
+        needs: &[],
         done: |state| {
             state.editor.document.model.draft.outer_boundaries.sides[OuterSide::Right.index()]
                 != state.guide.baseline.right_wall
@@ -158,6 +185,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
                and put it somewhere else.",
         targets: &[(Spotlight::Obstacle, None)],
         dashed: true,
+        needs: &[GuideSubject::Obstacle],
         done: |state| {
             state.guide_obstacle_controls() != state.guide.baseline.obstacle
                 && !state.editor.editing()
@@ -181,6 +209,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Draw, None),
         ],
         dashed: false,
+        needs: &[],
         done: |state| {
             state.editor.document.model.draft.geometry.curves.len() > state.guide.baseline.curves
         },
@@ -208,6 +237,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Panels, PANELS_HINT),
         ],
         dashed: false,
+        needs: &[GuideSubject::Region, GuideSubject::Glass],
         done: |state| {
             state
                 .editor
@@ -234,6 +264,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Panels, PANELS_HINT),
         ],
         dashed: false,
+        needs: &[],
         done: |state| state.editor.document.presentation.vector_overlay != VectorOverlay::Off,
     },
     GuideStep {
@@ -255,6 +286,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Panels, PANELS_HINT),
         ],
         dashed: false,
+        needs: &[GuideSubject::Source],
         done: |state| {
             let signal = state.editor.document.model.source.signal;
             signal.is_pulsed() && signal.carrier()[2] != state.guide.baseline.source_frequency
@@ -274,6 +306,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Panels, PANELS_HINT),
         ],
         dashed: false,
+        needs: &[],
         done: |state| {
             state.editor.document.model.probes.len() > state.guide.baseline.probes
                 && !state.probe_windows.is_empty()
@@ -286,6 +319,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
                whenever you want it back.",
         targets: &[(Spotlight::Examples, None)],
         dashed: false,
+        needs: &[],
         done: |state| state.examples_open,
     },
 ];
@@ -311,6 +345,9 @@ pub(super) struct GuideBaseline {
 pub(super) struct GuideSetback {
     pub(super) target: Spotlight,
     pub(super) text: String,
+    /// Whether the card offers the tour's scene back, for a step's subject
+    /// gone with edits made since, which Undo alone would unwind too.
+    pub(super) restore: bool,
 }
 
 #[derive(Default)]
@@ -322,6 +359,10 @@ pub(super) struct Guide {
     /// Whether the wave has been paused during the current step.
     pub(super) paused_seen: bool,
     pub(super) baseline: GuideBaseline,
+    /// Whether the step has been held for a missing subject: the baseline is
+    /// taken again once it is back, since the one taken without it would
+    /// count its return as the step's action.
+    held: bool,
     /// Whether the tour has ended, by its last step or by Skip, which is
     /// what the marker beside the autosave records.
     pub(super) finished: bool,
@@ -344,6 +385,7 @@ impl Playground {
                     done_since: None,
                     paused_seen: false,
                     baseline: self.guide_baseline(),
+                    held: false,
                     finished: false,
                     persisted: self.guide.persisted,
                 };
@@ -380,15 +422,66 @@ impl Playground {
                     "The scene cannot take this line: {reason}. Undo point, or Backspace, \
                      takes its last point back; Cancel, or Esc, gives the line up."
                 ),
+                restore: false,
             });
         }
         if let TopologyAcceptance::Invalid(issue) = self.editor.acceptance {
             return Some(GuideSetback {
                 target: Spotlight::Undo,
                 text: format!("The scene cannot take that change: {issue}. Undo takes it back."),
+                restore: false,
             });
         }
-        None
+        self.guide_missing().map(|subject| GuideSetback {
+            target: Spotlight::Undo,
+            text: format!(
+                "{}, and this step needs it. Undo brings it back, or Restore the scene \
+                 puts the tour's scene back as it started.",
+                subject.missing()
+            ),
+            restore: true,
+        })
+    }
+
+    /// The first of the current step's subjects missing from the scene.
+    pub(super) fn guide_missing(&self) -> Option<GuideSubject> {
+        let model = &self.editor.document.model;
+        let present = |subject: GuideSubject| match subject {
+            GuideSubject::Source => model.source.enabled,
+            GuideSubject::Obstacle => model
+                .draft
+                .geometry
+                .curves
+                .iter()
+                .any(|curve| curve.id == GUIDE_OBSTACLE),
+            GuideSubject::Region => model.draft.region(GUIDE_REGION).is_some(),
+            GuideSubject::Glass => model
+                .draft
+                .materials
+                .iter()
+                .any(|material| material.id == GUIDE_GLASS),
+        };
+        STEPS
+            .get(self.guide.step)
+            .filter(|_| self.guide.active)?
+            .needs
+            .iter()
+            .copied()
+            .find(|subject| !present(*subject))
+    }
+
+    /// The tour's scene again, as one undoable scene change, on the same
+    /// step, whose baseline it takes afresh.
+    pub(super) fn restore_guide_scene(&mut self) {
+        match self.set_document(guide_scene(), true, true) {
+            Ok(()) => {
+                self.guide.done_since = None;
+                self.guide.paused_seen = false;
+                self.guide.baseline = self.guide_baseline();
+                self.notify("The tour's scene is back");
+            }
+            Err(error) => self.notify(error),
+        }
     }
 
     /// The obstacle's control points, which any move, turn or scaling of it
@@ -429,6 +522,12 @@ impl Playground {
         }
         if !self.wave_running {
             self.guide.paused_seen = true;
+        }
+        if self.guide_missing().is_some() {
+            self.guide.held = true;
+        } else if self.guide.held {
+            self.guide.held = false;
+            self.guide.baseline = self.guide_baseline();
         }
         if self.guide_step_done() {
             let since = *self.guide.done_since.get_or_insert(now);
@@ -629,6 +728,7 @@ impl Playground {
         let last = index == total;
         let mut skip = false;
         let mut next = false;
+        let mut restore = false;
         let frame = egui::Frame::window(&ctx.global_style()).stroke(Stroke::new(1.5, TEAL));
         let card = egui::Window::new("Guided tour")
             .id(egui::Id::new("guide-card"))
@@ -653,6 +753,9 @@ impl Playground {
                 ui.label(step.text);
                 if let Some(setback) = &setback {
                     ui.colored_label(GOLD, &setback.text);
+                    if setback.restore && ui.button("Restore the scene").clicked() {
+                        restore = true;
+                    }
                 } else if let Some((_, Some(hint))) = spotlight {
                     ui.colored_label(TEAL, hint);
                 }
@@ -703,6 +806,9 @@ impl Playground {
                 TEAL,
                 Stroke::NONE,
             ));
+        }
+        if restore {
+            self.restore_guide_scene();
         }
         if skip {
             self.finish_guide();
@@ -1027,6 +1133,104 @@ mod tests {
         settle(&mut state.editor);
         assert_eq!(state.guide_setback(), None);
         assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
+    }
+
+    /// A step whose subject is gone is held, the deletion not counting as
+    /// its action, with Undo lit and the scene offered back; once Undo
+    /// brings the subject back the step starts from there, so its return
+    /// does not count either.
+    #[test]
+    fn a_missing_subject_holds_its_step() {
+        let at = |title: &str| {
+            let mut state = Playground::default();
+            state.start_guide(false);
+            settle(&mut state.editor);
+            state.guide.step = step_index(title);
+            state.guide.baseline = state.guide_baseline();
+            state
+        };
+        let held = |state: &mut Playground, subject: GuideSubject| {
+            settle(&mut state.editor);
+            for now in [10.0, 12.0] {
+                state.guide_update(now);
+            }
+            assert_eq!(state.guide_missing(), Some(subject));
+            assert!(!state.guide_step_done(), "{subject:?} gone counted as done");
+            let setback = state.guide_setback().unwrap();
+            assert_eq!(setback.target, Spotlight::Undo);
+            assert!(setback.restore);
+            assert!(
+                setback.text.starts_with(subject.missing()),
+                "{}",
+                setback.text
+            );
+        };
+
+        // The obstacle deleted during its step, and before it.
+        let mut state = at("Select and move");
+        state.editor.remove_curve(GUIDE_OBSTACLE, None).unwrap();
+        held(&mut state, GuideSubject::Obstacle);
+        let mut state = at("Edit");
+        state.editor.remove_curve(GUIDE_OBSTACLE, None).unwrap();
+        settle(&mut state.editor);
+        state.guide_advance();
+        assert_eq!(state.guide.step, step_index("Select and move"));
+        held(&mut state, GuideSubject::Obstacle);
+        state.undo();
+        settle(&mut state.editor);
+        state.guide_update(14.0);
+        assert_eq!(state.guide_setback(), None);
+        assert!(
+            !state.guide_step_done(),
+            "the obstacle's return counted as a move"
+        );
+
+        // The region, deleted into the background, and the glass.
+        let mut state = at("Materials");
+        let region_curve = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id != GUIDE_OBSTACLE)
+            .unwrap()
+            .id;
+        state
+            .editor
+            .remove_curve(region_curve, Some(BACKGROUND_REGION))
+            .unwrap();
+        held(&mut state, GuideSubject::Region);
+        // Restore puts the scene back on the same step, from which the
+        // step's action counts again.
+        state.restore_guide_scene();
+        settle(&mut state.editor);
+        state.guide_update(14.0);
+        assert_eq!(state.guide.step, step_index("Materials"));
+        assert_eq!(state.guide_setback(), None);
+        assert!(!state.guide_step_done());
+        state
+            .editor
+            .set_region_material(GUIDE_REGION, GUIDE_GLASS)
+            .unwrap();
+        settle(&mut state.editor);
+        state.guide_update(15.0);
+        assert!(state.guide_step_done());
+        let mut state = at("Materials");
+        state.editor.delete_material(GUIDE_GLASS).unwrap();
+        held(&mut state, GuideSubject::Glass);
+
+        // The source switched off.
+        for title in ["The source", "Simulation"] {
+            let mut state = at(title);
+            let mut source = state.editor.document.model.source;
+            source.enabled = false;
+            source.position = source.position + Point2::new(0.2, 0.0);
+            state.editor.set_point_source(source).unwrap();
+            held(&mut state, GuideSubject::Source);
+        }
     }
 
     /// The Simulation step lights the frequency until it is changed, then

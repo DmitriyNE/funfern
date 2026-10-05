@@ -30,8 +30,11 @@ running; this file covers using it.
   in a scene the topology check has accepted. A line Finish refuses, or a
   change that leaves the scene invalid, holds the tour: the card says why in
   gold and lights the way back, Undo point and Cancel in the Draw palette
-  for the line, Undo in the bar for the change. Next and Skip the tour are
-  always there. The tour is
+  for the line, Undo in the bar for the change. A step whose subject is gone,
+  the obstacle, the region, the glass or the source switched off, is held the
+  same way, Undo lit, with Restore the scene on the card, which puts the
+  tour's scene back as one undoable change and stays on the step. Next and
+  Skip the tour are always there. The tour is
   seen once, remembered beside the autosave, and is back under Guided tour
   at the top of the Examples window and on the scene card whenever wanted.
   A scene opens fitted to the window and

@@ -19470,3 +19470,23 @@ Two from the user.
   lit only while the Edit panel is open and ahead of a folded bar's Panels,
   so the step reads: Edit, the wall, the boundary law, the outgoing law. No
   step lit an extra any more, and the mechanism went.
+
+## 2026-10-05 — The tour held a step whose subject was gone
+
+Reported: deleting the circle deadlocks the tour. Reproduced in a test for
+both circles. A step compares the scene with what it held as it started, so
+a subject deleted before its step left a step that could never be done, with
+nothing to light, and one deleted during it counted as the step's action: the
+obstacle gone read as moved, the region gone as its material changed. The
+source switched off (Enabled) had the same shape: no marker to drag.
+
+- Each step names what it is about (`needs`: the source, the obstacle, the
+  region, the glass, which the user asked to cover too; a material not in
+  use can be deleted). One missing is a third setback, after a refused line
+  and an invalid scene: the step is held, Undo is lit, and the card offers
+  Restore the scene, the tour's scene back as one undoable change on the
+  same step, for a subject gone with edits made since that Undo would
+  unwind too.
+- Once a held subject is back the step takes its baseline again (`held`),
+  or the subject's return, against a baseline taken without it, would count
+  as the step's action.
