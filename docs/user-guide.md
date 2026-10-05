@@ -252,15 +252,21 @@ running; this file covers using it.
   two separate places is refused before anything is removed.
 - **Materials:** create and name materials in the Library, edit the three base
   properties named by the active physics skin, and assign them under
-  Subdomain assignment, which lists either Faces or Regions. Faces shows one row
-  per compiled subdomain, holes included, and its dropdown offers Hole alongside
-  the materials, so a subdomain becomes a hole and back from the same place.
-  Emptying a face walls its own boundary and nothing else: a span transmits
-  exactly when the faces on both of its sides carry a material. The toggle also
-  steers the viewport, where a click selects a face or a region to match. The
-  header counts the rows and folds the listing away, which a scene of many
-  subdomains, such as the photonic crystal's fifty rods, wants; the selected
-  subdomain's detail stays below it. Each coefficient can be a constant or a formula. Formulas
+  Subdomains, one row per face the curves cut the domain into, holes
+  included unless Hide holes is ticked. A face and its region are one thing:
+  a region is the material slot of exactly one face, and a hole has none. A
+  row is named by its region, Background for the outer one and Region n for
+  the rest until it is given a name in the Name field below the list, which
+  the merge question's Keep then shows beside the material; a hole's row reads
+  Hole. Its dropdown offers Hole alongside the materials, so a subdomain
+  becomes a hole and back from the same place. Emptying a face walls its own
+  boundary and nothing else: a span transmits exactly when the faces on both
+  of its sides carry a material. A click on a row, or on the face in the
+  viewport, selects it, outlined in the scene. The header counts the rows and
+  folds the list away, which a scene of many subdomains, such as the photonic
+  crystal's fifty rods, wants; the selected subdomain's detail stays below
+  it. The default material is called Ambient, so Background names only the
+  outer region; it cannot be deleted, and a new scene starts with it. Each coefficient can be a constant or a formula. Formulas
   use local `x`, `y`, `r`, and `theta`, constants `pi` and `e`, named material
   parameters, arithmetic, powers, and `sqrt`, `abs`, `sin`, `cos`, `tan`, `exp`,
   `log`, `min`, `max`, `clamp`, and `smoothstep`. For example, a radial profile can
@@ -523,7 +529,7 @@ names or with every expression evaluated at the material frame's origin. Each ro
   shortcuts on hover.
   Each drag, coordinate edit, insertion, removal, creation, or deletion is one
   action. History keeps up to 100 actions, including invalid drafts.
-- **Files:** New starts an empty scene: one background material, every wall
+- **Files:** New starts an empty scene: the Ambient material, every wall
   second-order outgoing, and the point source on, so it runs as soon as it
   opens. Save scene downloads JSON in the browser or opens a native save
   dialog. Load scene uses file upload/native selection and validates before

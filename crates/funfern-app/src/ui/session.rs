@@ -120,6 +120,8 @@ impl Playground {
         // click on a subdomain back from selecting its material.
         self.material_selection = DEFAULT_MATERIAL;
         self.region_selection = BACKGROUND_REGION;
+        self.hole_selected = false;
+        self.region_name_edit = None;
         self.face_selection = 0;
         self.material_edit = None;
         self.material_formula_edits.clear();

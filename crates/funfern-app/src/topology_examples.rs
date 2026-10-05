@@ -1027,6 +1027,7 @@ impl Builder {
                 probes: vec![],
                 source: PointSource::default(),
                 far_field: FarFieldSettings::default(),
+                region_names: Default::default(),
             },
             presentation: PresentationSettings::default(),
             readouts: ProbeReadouts::default(),
@@ -1251,6 +1252,11 @@ pub fn guide_scene() -> TopologyDocument {
     debug_assert_eq!(region, Some(GUIDE_REGION));
     let mut document = builder.document();
     document.model.source = source(Point2::new(-0.6, 0.15), 2.0, 18.0, 0.06);
+    // The tour's words for it.
+    document
+        .model
+        .region_names
+        .insert(GUIDE_REGION, "Round region".into());
     document
 }
 

@@ -72,11 +72,16 @@ pub struct Playground {
     /// clears focus on Escape before any app code runs, so the live predicate is
     /// already false on the one frame where it matters.
     pub(super) keyboard_focus_previous: bool,
-    /// Whether the Materials panel lists compiled faces or material regions, and
-    /// which of the two a viewport click picks.
-    pub(super) subdomain_listing: SubdomainListing,
-    /// Index into `face_assignments` while the panel lists faces.
+    /// Whether the Materials panel's roster leaves the holes out.
+    pub(super) hide_holes: bool,
+    /// Index into `face_assignments` of the selected face; kept on the
+    /// selected region's face, and on a hole while one is selected.
     pub(super) face_selection: usize,
+    /// Whether the selection is a hole, which has no region: the face at
+    /// `face_selection`, outlined, with no region detail below the roster.
+    pub(super) hole_selected: bool,
+    /// The selected region's name while its field is being typed in.
+    pub(super) region_name_edit: Option<(RegionId, String)>,
     pub(super) material_edit: Option<Material>,
     pub(super) material_formula_edits: BTreeMap<(u64, u8), String>,
     pub(super) material_formula_errors: BTreeMap<(u64, u8), String>,
@@ -398,8 +403,10 @@ impl Default for Playground {
             material_selection: DEFAULT_MATERIAL,
             region_selection: BACKGROUND_REGION,
             keyboard_focus_previous: false,
-            subdomain_listing: SubdomainListing::Regions,
+            hide_holes: false,
             face_selection: 0,
+            hole_selected: false,
+            region_name_edit: None,
             material_edit: None,
             material_formula_edits: BTreeMap::new(),
             material_formula_errors: BTreeMap::new(),

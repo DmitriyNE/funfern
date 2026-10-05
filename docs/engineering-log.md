@@ -19557,3 +19557,29 @@ Three from the user.
   material list only after a click has selected the region (outlined in
   the scene, its row marked); the step is done only with the region
   selected and the glass on it.
+
+## 2026-10-05 — Ambient, region names, and one roster of subdomains
+
+Asked for, after the question of what "ambient" meant. Nothing physical:
+material 1 is undeletable, what a new scene and its Background region start
+with, and the fallback choice, and the tag said no more. The tag is gone and
+the material is called Ambient, so Background names only the outer region;
+saved scenes keep the names they stored, and the shipped scenes were
+re-blessed (the rename, 70 lines over 35 files).
+
+- **Regions and faces are one roster.** Validation holds a region to
+  exactly one face (`DuplicateRegion`, `UnassignedRegion`), and no gallery
+  scene has one over several, so Faces and Regions listed the same thing,
+  Faces with the holes too. One list now, Subdomains, a row per face named
+  by its region, with Hide holes in its header. A click on a row or a face
+  selects the face and its region (`select_face`), or a hole alone
+  (`hole_selected`), which is outlined grey and has no detail below.
+- **Names.** `TopologyDocumentModel::region_names`, beside the probes and
+  the source: undoable with the model, pruned in `changed()` when a region
+  goes, and carried by a merge to the region kept, as its sources and probes
+  are. Saved under an optional `region_names` key written only when a region
+  has a name, so a scene without names saves as before; a name for a region
+  the scene does not hold, a blank one or a duplicate is refused on load.
+  Unnamed, a region is Background or Region n. The merge question's Keep
+  reads "name / material" for a named region and the material, as before,
+  for one not named. The tour's region is called Round region.

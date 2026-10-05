@@ -15,7 +15,7 @@
       "materials": [
         {
           "id": 1,
-          "name": "Background",
+          "name": "Ambient",
           "mass_density": {
             "kind": "constant",
             "value": 1.0
@@ -338,7 +338,7 @@
       "materials": [
         {
           "id": 1,
-          "name": "Background",
+          "name": "Ambient",
           "mass_density": {
             "kind": "constant",
             "value": 1.0

@@ -255,7 +255,7 @@ impl Material {
     pub fn default_medium() -> Self {
         Self {
             id: DEFAULT_MATERIAL,
-            name: "Background".into(),
+            name: "Ambient".into(),
             mass_density: ScalarField::constant(1.0),
             stiffness: ScalarField::constant(1.0),
             damping: ScalarField::constant(0.0),

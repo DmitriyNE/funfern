@@ -53,7 +53,14 @@ pub struct TopologyDocumentModel {
     pub probes: Vec<TopologyProbeDefinition>,
     pub source: PointSource,
     pub far_field: FarFieldSettings,
+    /// The names given to regions, and with them to their faces; a region
+    /// without one is called Background (the outer one) or Region n. Only
+    /// regions the draft holds keep a name.
+    pub region_names: BTreeMap<RegionId, String>,
 }
+
+/// The longest region name kept.
+pub const REGION_NAME_LIMIT: usize = 64;
 
 impl Default for TopologyDocumentModel {
     fn default() -> Self {
@@ -64,6 +71,7 @@ impl Default for TopologyDocumentModel {
             probes: vec![],
             source: PointSource::default(),
             far_field: FarFieldSettings::default(),
+            region_names: BTreeMap::new(),
         }
     }
 }
@@ -709,6 +717,38 @@ impl TopologyEditor {
         Ok(())
     }
 
+    /// Names a region, and with it its face; an empty name gives it back
+    /// its default. One undoable edit.
+    pub fn rename_region(&mut self, region: RegionId, name: &str) -> Result<(), String> {
+        if self.document.model.draft.region(region).is_none() {
+            return Err("That region no longer exists".into());
+        }
+        let name = name.trim();
+        if name.chars().count() > REGION_NAME_LIMIT {
+            return Err(format!(
+                "A region name is at most {REGION_NAME_LIMIT} characters"
+            ));
+        }
+        let names = &self.document.model.region_names;
+        if names.get(&region).map(String::as_str) == Some(name).filter(|name| !name.is_empty())
+            || (name.is_empty() && !names.contains_key(&region))
+        {
+            return Ok(());
+        }
+        self.begin();
+        if name.is_empty() {
+            self.document.model.region_names.remove(&region);
+        } else {
+            self.document
+                .model
+                .region_names
+                .insert(region, name.to_owned());
+        }
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
     pub fn set_point_source(&mut self, source: PointSource) -> Result<(), String> {
         self.begin();
         if let Err(error) = self.set_point_source_during_edit(source) {
@@ -826,6 +866,12 @@ impl TopologyEditor {
     }
 
     pub fn changed(&mut self) {
+        // A name leaves with its region, whichever edit took the region.
+        let regions = &self.document.model.draft.regions;
+        self.document
+            .model
+            .region_names
+            .retain(|id, _| regions.iter().any(|region| region.id == *id));
         self.revision = self.revision.wrapping_add(1);
         self.acceptance = TopologyAcceptance::Pending;
         self.compiled_draft = None;
@@ -4648,6 +4694,15 @@ fn settle_merge(
     candidate.draft.face_assignments = rebuild_face_assignments(&landings.live, topology, &forced)?;
 
     if let Some((from, to)) = region_remaps.first().copied() {
+        // The name goes with the region chosen, as its sources and probes do.
+        match candidate.region_names.remove(&from) {
+            Some(name) => {
+                candidate.region_names.insert(to, name);
+            }
+            None => {
+                candidate.region_names.remove(&to);
+            }
+        }
         let replacement = candidate
             .draft
             .region(from)

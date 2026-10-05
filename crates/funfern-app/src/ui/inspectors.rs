@@ -156,6 +156,26 @@ impl Playground {
             .find(|assignment| assignment.face == face)
             .and_then(|assignment| assignment.region)
     }
+    /// What a region, and its face, is called: the name it was given, or
+    /// its default.
+    pub(super) fn region_name(&self, region: RegionId) -> String {
+        self.editor
+            .document
+            .model
+            .region_names
+            .get(&region)
+            .cloned()
+            .unwrap_or_else(|| default_region_name(region))
+    }
+    /// A region where a choice between regions names it, as a merge's Keep
+    /// does: its name and material when it was named, its material alone,
+    /// as before names, when not.
+    pub(super) fn region_choice_name(&self, region: RegionId) -> String {
+        match self.editor.document.model.region_names.get(&region) {
+            Some(name) => format!("{name} / {}", self.material_name(region)),
+            None => self.material_name(region),
+        }
+    }
     pub(super) fn material_name(&self, region: RegionId) -> String {
         let draft = &self.editor.document.model.draft;
         draft
@@ -164,7 +184,7 @@ impl Playground {
             .map_or_else(|| format!("Region {}", region.0), |m| m.name.clone())
     }
     /// Highlights every subdomain a staged deletion may keep: the mesh of each
-    /// candidate filled gold, its boundary stroked, and its material named at
+    /// candidate filled gold, its boundary stroked, and its region named at
     /// the face centre. The one under the cursor reads stronger.
     pub(super) fn draw_removal_candidates(&self, painter: &egui::Painter, r: Rect) {
         if self.capturing() {
@@ -240,7 +260,7 @@ impl Playground {
                 continue;
             };
             let point = self.screen(centroid, r);
-            let label = format!("Keep {}", self.material_name(region));
+            let label = format!("Keep {}", self.region_choice_name(region));
             let galley =
                 painter.layout_no_wrap(label, egui::FontId::proportional(13.0), Color32::WHITE);
             let rect = egui::Rect::from_center_size(point, galley.size() + egui::vec2(14.0, 8.0));

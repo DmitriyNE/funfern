@@ -3116,7 +3116,7 @@ mod tests {
                 coefficient: "density",
                 point: Point2 { x: 0.0, y: 0.0 },
                 ..
-            } if material == "Background"
+            } if material == "Ambient"
         ));
     }
 

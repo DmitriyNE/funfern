@@ -1362,12 +1362,9 @@ impl Playground {
                     p.material_overlay,
                     MaterialOverlay::Regions | MaterialOverlay::Subdomains
                 ));
-        // While the Materials panel lists faces, outline the selected face
-        // instead of the selected region, so a hole can be picked out too.
-        let selected_face = (self.inspector == Some(InspectorPanel::Materials)
-            && self.subdomain_listing == SubdomainListing::Faces)
-            .then(|| self.selected_face())
-            .flatten();
+        // A selected hole has no region to outline: its face is outlined
+        // instead, in grey.
+        let selected_face = self.hole_selected.then(|| self.selected_face()).flatten();
         if show_region && let Some(sampled) = &self.sampled {
             let color = match selected_face {
                 Some((_, Some(region))) => {

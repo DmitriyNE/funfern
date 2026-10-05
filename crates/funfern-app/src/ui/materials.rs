@@ -3,6 +3,7 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32};
+use funfern_app::topology_editor::REGION_NAME_LIMIT;
 use funfern_core::*;
 use std::collections::BTreeSet;
 
@@ -35,8 +36,41 @@ impl Playground {
         shown.set(material, advanced);
     }
 
+    /// Selects a face, from the roster or the scene: its region, as
+    /// `select_region` does, or, for a hole, the face alone.
+    pub(super) fn select_face(&mut self, index: usize) {
+        let Some(assignment) = self
+            .editor
+            .document
+            .model
+            .draft
+            .face_assignments
+            .get(index)
+            .copied()
+        else {
+            return;
+        };
+        self.face_selection = index;
+        match assignment.region {
+            Some(region) => self.select_region(region),
+            None => self.hole_selected = true,
+        }
+    }
+
     pub(super) fn select_region(&mut self, region: RegionId) {
         self.region_selection = region;
+        self.hole_selected = false;
+        if let Some(index) = self
+            .editor
+            .document
+            .model
+            .draft
+            .face_assignments
+            .iter()
+            .position(|assignment| assignment.region == Some(region))
+        {
+            self.face_selection = index;
+        }
         let Some(assigned) = self
             .editor
             .document
@@ -96,11 +130,15 @@ impl Playground {
 
     pub(super) fn materials_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Materials");
-        let draft = &self.editor.document.model.draft;
-        let count = match self.subdomain_listing {
-            SubdomainListing::Faces => draft.face_assignments.len(),
-            SubdomainListing::Regions => draft.regions.len(),
-        };
+        let count = self
+            .editor
+            .document
+            .model
+            .draft
+            .face_assignments
+            .iter()
+            .filter(|assignment| !self.hide_holes || assignment.region.is_some())
+            .count();
         // A scene of many subdomains, such as a crystal's rods, folds its
         // listing away; the selection's detail below it stays in view, and a
         // click in the scene still picks one.
@@ -110,47 +148,33 @@ impl Playground {
             true,
         )
         .show_header(ui, |ui| {
-            ui.label(format!("Subdomain assignment ({count})"));
-            for (mode, label, hint) in [
-                (
-                    SubdomainListing::Faces,
-                    "Faces",
-                    "Every compiled subdomain, holes included; a click in the scene picks one",
-                ),
-                (
-                    SubdomainListing::Regions,
-                    "Regions",
-                    "Only the material regions; a click in the scene picks one",
-                ),
-            ] {
-                if ui
-                    .selectable_label(self.subdomain_listing == mode, label)
-                    .on_hover_text(hint)
-                    .clicked()
-                {
-                    self.subdomain_listing = mode;
-                }
-            }
+            ui.label(format!("Subdomains ({count})"));
+            ui.checkbox(&mut self.hide_holes, "Hide holes")
+                .on_hover_text(
+                    "Leave the holes out of the list; a hole's row is where it is filled again",
+                );
         })
         .body(|ui| {
             let materials = self.editor.document.model.draft.materials.clone();
-            if self.subdomain_listing == SubdomainListing::Faces {
-                self.face_listing(ui, &materials);
-            } else {
-                self.region_listing(ui, &materials);
-            }
+            self.subdomain_roster(ui, &materials);
         });
         self.region_detail(ui);
     }
 
-    /// One row per assigned face, so a hole is editable in the same place a
-    /// subdomain is: it is simply the row whose material is Hole.
-    fn face_listing(&mut self, ui: &mut egui::Ui, materials: &[Material]) {
+    /// One row per face, holes included unless hidden: its name, which is
+    /// its region's or Hole, and what fills it, a material or Hole. A face
+    /// and its region are one thing here: a region is the material slot of
+    /// exactly one face, and a hole has none. A click on a row selects it as
+    /// a click on the face in the scene does.
+    fn subdomain_roster(&mut self, ui: &mut egui::Ui, materials: &[Material]) {
         let assignments = self.editor.document.model.draft.face_assignments.clone();
         if self.face_selection >= assignments.len() {
             self.face_selection = 0;
         }
         for (index, assignment) in assignments.iter().enumerate() {
+            if self.hide_holes && assignment.region.is_none() {
+                continue;
+            }
             ui.horizontal(|ui| {
                 let (swatch, _) =
                     ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
@@ -164,44 +188,23 @@ impl Playground {
                         None => Color32::from_gray(70),
                     },
                 );
-                let name = match assignment.region {
-                    Some(region) if region == BACKGROUND_REGION => "Background".to_owned(),
-                    Some(region) => self.material_name(region),
-                    None => "Hole".to_owned(),
+                let (selected, name) = match assignment.region {
+                    Some(region) => (
+                        !self.hole_selected && self.region_selection == region,
+                        self.region_name(region),
+                    ),
+                    None => (
+                        self.hole_selected && self.face_selection == index,
+                        "Hole".to_owned(),
+                    ),
                 };
                 if ui
-                    .selectable_label(self.face_selection == index, name)
+                    .selectable_label(selected, name)
                     .on_hover_text("Select this subdomain and outline it in the scene")
                     .clicked()
                 {
-                    self.face_selection = index;
-                    if let Some(region) = assignment.region {
-                        self.select_region(region);
-                    }
+                    self.select_face(index);
                 }
-                let mut chosen = assignment.region.and_then(|region| {
-                    self.editor
-                        .document
-                        .model
-                        .draft
-                        .region(region)
-                        .map(|region| region.material)
-                });
-                sized_combo(ui, ("face", index), materials.len() + 1)
-                    .selected_text(match chosen {
-                        Some(material) => materials
-                            .iter()
-                            .find(|item| item.id == material)
-                            .map_or("Missing", |item| item.name.as_str()),
-                        None => "Hole",
-                    })
-                    .show_ui(ui, |ui| {
-                        for item in materials.iter() {
-                            ui.selectable_value(&mut chosen, Some(item.id), &item.name);
-                        }
-                        ui.selectable_value(&mut chosen, None, "Hole")
-                            .on_hover_text("Remove this subdomain and wall its boundary");
-                    });
                 let current = assignment.region.and_then(|region| {
                     self.editor
                         .document
@@ -210,6 +213,35 @@ impl Playground {
                         .region(region)
                         .map(|region| region.material)
                 });
+                let mut chosen = current;
+                let combo = sized_combo(ui, ("face", index), materials.len() + 1)
+                    .selected_text(match chosen {
+                        Some(material) => materials
+                            .iter()
+                            .find(|item| item.id == material)
+                            .map_or("Missing", |item| item.name.as_str()),
+                        None => "Hole",
+                    })
+                    .show_ui(ui, |ui| {
+                        for item in materials {
+                            let entry = ui.selectable_value(&mut chosen, Some(item.id), &item.name);
+                            if let Some(region) = assignment.region {
+                                self.spotlights.record(
+                                    Spotlight::MaterialChoice {
+                                        region,
+                                        material: item.id,
+                                    },
+                                    entry.rect,
+                                );
+                            }
+                        }
+                        ui.selectable_value(&mut chosen, None, "Hole")
+                            .on_hover_text("Remove this subdomain and wall its boundary");
+                    });
+                if let Some(region) = assignment.region {
+                    self.spotlights
+                        .record(Spotlight::RegionMaterial(region), combo.response.rect);
+                }
                 if chosen != current
                     && let Err(error) = self.editor.set_face_disposition(index, chosen)
                 {
@@ -219,65 +251,10 @@ impl Playground {
         }
     }
 
-    fn region_listing(&mut self, ui: &mut egui::Ui, materials: &[Material]) {
-        let regions = self.editor.document.model.draft.regions.clone();
-        for region in regions {
-            ui.horizontal(|ui| {
-                let (swatch, _) =
-                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                ui.painter().rect_filled(
-                    swatch,
-                    2.0,
-                    subdomain_color(&self.editor.document.model.draft, region.id, 1.0),
-                );
-
-                if ui
-                    .selectable_label(
-                        self.region_selection == region.id,
-                        if region.id == BACKGROUND_REGION {
-                            "Background".into()
-                        } else {
-                            format!("Region {}", region.id.0)
-                        },
-                    )
-                    .clicked()
-                {
-                    self.select_region(region.id);
-                }
-                let mut material = region.material;
-                let combo = sized_combo(ui, ("region", region.id.0), materials.len())
-                    .selected_text(
-                        materials
-                            .iter()
-                            .find(|item| item.id == material)
-                            .map_or("Missing", |item| item.name.as_str()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for item in materials {
-                            let entry = ui.selectable_value(&mut material, item.id, &item.name);
-                            self.spotlights.record(
-                                Spotlight::MaterialChoice {
-                                    region: region.id,
-                                    material: item.id,
-                                },
-                                entry.rect,
-                            );
-                        }
-                    });
-                self.spotlights
-                    .record(Spotlight::RegionMaterial(region.id), combo.response.rect);
-                if material != region.material {
-                    if let Err(error) = self.editor.set_region_material(region.id, material) {
-                        self.notify(error)
-                    }
-                }
-            });
-        }
-    }
-
     /// The selected region's source and frame, plus the material library.
     fn region_detail(&mut self, ui: &mut egui::Ui) {
         let materials = self.editor.document.model.draft.materials.clone();
+        // A hole has no region, so nothing to name or source.
         if let Some(region) = self
             .editor
             .document
@@ -285,8 +262,10 @@ impl Playground {
             .draft
             .region(self.region_selection)
             .copied()
+            .filter(|_| !self.hole_selected)
         {
             ui.separator();
+            self.region_name_field(ui, region.id);
             let existing = self
                 .editor
                 .document
@@ -466,9 +445,6 @@ impl Playground {
                     self.material_edit = None;
                     self.material_formula_edits.clear();
                     self.material_formula_errors.clear();
-                }
-                if material.id == DEFAULT_MATERIAL {
-                    ui.small("ambient");
                 }
             });
         }
@@ -970,6 +946,49 @@ impl Playground {
 }
 
 /// The persistent id of the Materials panel's subdomain listing fold.
+impl Playground {
+    /// The selected region's name, which its face shows too: empty for the
+    /// default, which the field shows greyed. Committed on Enter or when
+    /// the field lets go, as one undoable edit; while the field is not being
+    /// typed in it follows the document, so an Undo shows at once.
+    fn region_name_field(&mut self, ui: &mut egui::Ui, region: RegionId) {
+        let id = egui::Id::new(("region-name", region.0));
+        let stored = self
+            .editor
+            .document
+            .model
+            .region_names
+            .get(&region)
+            .cloned()
+            .unwrap_or_default();
+        let focused = ui.memory(|memory| memory.has_focus(id));
+        if !focused || !matches!(&self.region_name_edit, Some((edited, _)) if *edited == region) {
+            self.region_name_edit = Some((region, stored.clone()));
+        }
+        let hint = default_region_name(region);
+        let mut commit = None;
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            if let Some((_, name)) = self.region_name_edit.as_mut() {
+                let response = ui.add(
+                    egui::TextEdit::singleline(name)
+                        .id(id)
+                        .hint_text(hint)
+                        .char_limit(REGION_NAME_LIMIT),
+                );
+                if response.lost_focus() && name.trim() != stored {
+                    commit = Some(name.clone());
+                }
+            }
+        });
+        if let Some(name) = commit
+            && let Err(error) = self.editor.rename_region(region, &name)
+        {
+            self.notify(error);
+        }
+    }
+}
+
 fn subdomain_listing_id(ui: &egui::Ui) -> egui::Id {
     ui.make_persistent_id("subdomain-listing")
 }
@@ -1284,7 +1303,156 @@ fn switch_label(heading: Option<bool>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{click, laid_out, settle};
     use super::*;
+    use funfern_app::topology_examples::{GUIDE_REGION, GUIDE_REGION_CURVE, guide_scene};
+
+    fn roster_pass(
+        state: &mut Playground,
+        context: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> Vec<super::super::test_support::LaidOut> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(420.0, 900.0),
+            )),
+            events,
+            ..egui::RawInput::default()
+        };
+        let output = context.run_ui(input, |ui| state.materials_panel(ui));
+        laid_out(&output)
+    }
+
+    fn labels(widgets: &[super::super::test_support::LaidOut]) -> Vec<String> {
+        widgets.iter().map(|widget| widget.label.clone()).collect()
+    }
+
+    /// One roster: a row per face, holes included unless hidden, each named
+    /// by its region; a click selects a face and its region, or a hole
+    /// alone, which has no detail; a name given shows in its row and in a
+    /// merge's Keep, and Undo takes it back.
+    #[test]
+    fn the_roster_names_each_face_by_its_region() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut state = Playground::default();
+        state.set_document(guide_scene(), false, true).unwrap();
+        settle(&mut state.editor);
+        let draft = &state.editor.document.model.draft;
+        let hole = draft
+            .face_assignments
+            .iter()
+            .position(|assignment| assignment.region.is_none())
+            .expect("the obstacle is a hole");
+        let region = draft
+            .face_assignments
+            .iter()
+            .position(|assignment| assignment.region == Some(GUIDE_REGION))
+            .unwrap();
+        let widgets = roster_pass(&mut state, &context, vec![]);
+        let shown = labels(&widgets);
+        for name in ["Background", "Round region", "Hole", "Subdomains (3)"] {
+            assert!(
+                shown.iter().any(|label| label == name),
+                "no {name} in {shown:?}"
+            );
+        }
+        assert!(!shown.iter().any(|label| label == "ambient"));
+        assert!(shown.iter().any(|label| label == "Ambient"), "{shown:?}");
+
+        state.hide_holes = true;
+        let shown = labels(&roster_pass(&mut state, &context, vec![]));
+        assert!(!shown.iter().any(|label| label == "Hole"), "{shown:?}");
+        assert!(shown.iter().any(|label| label == "Subdomains (2)"));
+        state.hide_holes = false;
+
+        state.select_face(hole);
+        assert!(state.hole_selected);
+        let shown = labels(&roster_pass(&mut state, &context, vec![]));
+        assert!(
+            !shown.iter().any(|label| label == "Name"),
+            "a hole has no detail"
+        );
+        state.select_face(region);
+        assert!(!state.hole_selected);
+        assert_eq!(state.region_selection, GUIDE_REGION);
+
+        // A name typed in the field and let go of is one edit.
+        let widgets = roster_pass(&mut state, &context, vec![]);
+        // The field is below the roster, where its row carries the same name.
+        let field = widgets
+            .iter()
+            .filter(|widget| widget.label == "Round region")
+            .max_by(|a, b| a.rect.top().total_cmp(&b.rect.top()))
+            .unwrap();
+        let mut events = click(field);
+        roster_pass(&mut state, &context, std::mem::take(&mut events));
+        roster_pass(
+            &mut state,
+            &context,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                },
+                egui::Event::Text("Lens".into()),
+            ],
+        );
+        roster_pass(
+            &mut state,
+            &context,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(state.region_name(GUIDE_REGION), "Lens");
+        assert_eq!(state.region_choice_name(GUIDE_REGION), "Lens / Ambient");
+        let shown = labels(&roster_pass(&mut state, &context, vec![]));
+        assert!(shown.iter().any(|label| label == "Lens"), "{shown:?}");
+        state.undo();
+        assert_eq!(state.region_name(GUIDE_REGION), "Round region");
+        state.editor.rename_region(GUIDE_REGION, "  ").unwrap();
+        assert_eq!(state.region_name(GUIDE_REGION), "Region 2");
+        assert_eq!(
+            state.region_choice_name(GUIDE_REGION),
+            "Ambient",
+            "unnamed, as before"
+        );
+    }
+
+    /// A merge's name goes with the region chosen to stay, as its sources
+    /// and probes do, and leaves with the one that goes.
+    #[test]
+    fn a_name_follows_the_region_a_merge_keeps() {
+        for (keep, background) in [
+            (GUIDE_REGION, Some("Round region")),
+            (BACKGROUND_REGION, None),
+        ] {
+            let mut state = Playground::default();
+            state.set_document(guide_scene(), false, true).unwrap();
+            settle(&mut state.editor);
+            state
+                .editor
+                .remove_curve(GUIDE_REGION_CURVE, Some(keep))
+                .unwrap();
+            settle(&mut state.editor);
+            let names = &state.editor.document.model.region_names;
+            assert_eq!(
+                names.get(&BACKGROUND_REGION).map(String::as_str),
+                background,
+                "keeping {keep:?}"
+            );
+            assert!(!names.contains_key(&GUIDE_REGION), "{names:?}");
+        }
+    }
 
     /// Both Switch labels draw in the button font.
     #[test]

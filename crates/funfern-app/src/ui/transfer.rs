@@ -295,7 +295,11 @@ impl Playground {
                 .map_or_else(|| "a deleted probe".to_owned(), |probe| probe.name.clone()),
             TransferReference::PointSource => "Point source".to_owned(),
             TransferReference::VolumeSource(region) => {
-                format!("{} source, region {}", self.material_name(region), region.0)
+                format!(
+                    "{} source, {}",
+                    self.material_name(region),
+                    self.region_name(region)
+                )
             }
             TransferReference::Wall(side) => format!("{} wall", side.label()),
             TransferReference::Face { span, side } => format!(

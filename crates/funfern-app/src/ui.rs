@@ -196,12 +196,14 @@ fn amr_accuracy_preset_name(percent: f64) -> &'static str {
         .map_or("Custom", |(_, name)| *name)
 }
 
-/// What the Materials panel lists, and what a viewport click selects with it.
-/// Faces include holes, which own no region and so cannot appear in the other.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SubdomainListing {
-    Faces,
-    Regions,
+/// What a region is called until it is given a name: Background for the
+/// outer one, Region n for the rest.
+fn default_region_name(region: RegionId) -> String {
+    if region == BACKGROUND_REGION {
+        "Background".into()
+    } else {
+        format!("Region {}", region.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

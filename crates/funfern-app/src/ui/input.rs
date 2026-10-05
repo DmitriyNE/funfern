@@ -721,15 +721,8 @@ impl Playground {
                     self.selection = TopologySelection::None;
                     self.selected_probe = None;
                     let point = self.world(pos, r);
-                    if self.subdomain_listing == SubdomainListing::Faces {
-                        if let Some(index) = self.draft_face_assignment_at(point) {
-                            self.face_selection = index;
-                            if let Some(region) =
-                                self.editor.document.model.draft.face_assignments[index].region
-                            {
-                                self.select_region(region);
-                            }
-                        }
+                    if let Some(index) = self.draft_face_assignment_at(point) {
+                        self.select_face(index);
                     } else if let Some(region) = self.region_at(point) {
                         self.select_region(region);
                     }

@@ -23,7 +23,7 @@ use crate::topology_editor::{
 };
 use funfern_core::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const TOPOLOGY_FILE_VERSION: u32 = 22;
 /// What a scene file, autosave or unpacked link may hold. A scene at the
@@ -63,6 +63,17 @@ struct StoredTopologyDocumentModel {
     probes: Vec<StoredTopologyProbe>,
     source: StoredPointSource,
     far_field: StoredFarField,
+    /// Written only when a region has a name: a scene without names reads
+    /// and writes as it did before names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    region_names: Vec<StoredRegionName>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRegionName {
+    region: u64,
+    name: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -520,6 +531,15 @@ fn encode_document(document: &TopologyDocument) -> FileV22 {
                 enabled: document.model.far_field.enabled,
                 inset: document.model.far_field.inset,
             },
+            region_names: document
+                .model
+                .region_names
+                .iter()
+                .map(|(region, name)| StoredRegionName {
+                    region: region.0,
+                    name: name.clone(),
+                })
+                .collect(),
         },
         presentation: StoredPresentation {
             // Only a probe the scene still has keeps its readout: one deleted
@@ -766,6 +786,7 @@ fn decode_document(mut file: FileV22) -> Result<TopologyDocument, String> {
         readouts.probes.insert(id, decode_readout(entry.readout));
     }
     let draft = decode_scene(file.model.draft)?;
+    let region_names = region_names(file.model.region_names, &draft)?;
     let mut presentation = decode_presentation(file.presentation)?;
     presentation.advanced_materials = shown_materials(
         presentation.advanced_materials,
@@ -793,6 +814,7 @@ fn decode_document(mut file: FileV22) -> Result<TopologyDocument, String> {
                 enabled: file.model.far_field.enabled,
                 inset: file.model.far_field.inset,
             },
+            region_names,
         },
         presentation,
         readouts,
@@ -807,6 +829,27 @@ fn decode_document(mut file: FileV22) -> Result<TopologyDocument, String> {
         return Err("Scene contains a transfer from nothing it holds".into());
     }
     Ok(document)
+}
+
+/// The names a file gives its regions: each for a region the draft holds,
+/// once, trimmed, not empty and not past the limit.
+fn region_names(
+    stored: Vec<StoredRegionName>,
+    draft: &TopologyScene,
+) -> Result<BTreeMap<RegionId, String>, String> {
+    let mut names = BTreeMap::new();
+    for entry in stored {
+        let region = RegionId(entry.region);
+        let name = entry.name.trim();
+        if draft.region(region).is_none()
+            || name.is_empty()
+            || name.chars().count() > crate::topology_editor::REGION_NAME_LIMIT
+            || names.insert(region, name.to_owned()).is_some()
+        {
+            return Err(format!("Scene names region {} wrongly", entry.region));
+        }
+    }
+    Ok(names)
 }
 
 fn encode_scene(scene: &TopologyScene) -> StoredTopologyScene {
@@ -2563,6 +2606,42 @@ mod tests {
     use crate::topology_editor::{
         OpenCurvePurpose, TopologyAcceptance, TopologyAttachment, TopologyEditor,
     };
+
+    /// Region names save under their own key and load back; a scene
+    /// without names writes no key, as before names, and a name for a region
+    /// the scene does not hold, or a blank one, is refused.
+    #[test]
+    fn region_names_round_trip_and_a_scene_without_them_writes_none() {
+        let mut document = crate::topology_examples::guide_scene();
+        assert!(!document.model.region_names.is_empty());
+        let saved = save(&document).unwrap();
+        let loaded = parse_document(saved.as_bytes()).unwrap();
+        assert_eq!(loaded.model.region_names, document.model.region_names);
+        let with = |names: serde_json::Value| {
+            let mut file: serde_json::Value = serde_json::from_str(&saved).unwrap();
+            file["model"]["region_names"] = names;
+            parse_document(serde_json::to_string(&file).unwrap().as_bytes())
+        };
+        assert!(with(serde_json::json!([{ "region": 9, "name": "Nowhere" }])).is_err());
+        assert!(with(serde_json::json!([{ "region": 2, "name": "  " }])).is_err());
+        assert!(
+            with(serde_json::json!([
+                { "region": 2, "name": "A" },
+                { "region": 2, "name": "B" }
+            ]))
+            .is_err()
+        );
+        document.model.region_names.clear();
+        let saved = save(&document).unwrap();
+        assert!(!saved.contains("region_names"), "no key without names");
+        assert!(
+            parse_document(saved.as_bytes())
+                .unwrap()
+                .model
+                .region_names
+                .is_empty()
+        );
+    }
 
     fn settle(editor: &mut TopologyEditor) {
         for _ in 0..100_000 {
