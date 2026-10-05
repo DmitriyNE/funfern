@@ -177,12 +177,13 @@ impl Playground {
         let finish = matches!(gesture.tool, DrawTool::Rectangle | DrawTool::Circle)
             && gesture.points.len() == 2;
         self.draw = Some(gesture);
-        if finish {
+        if finish || ends_here {
             self.finish_draw();
-        } else if ends_here {
-            self.finish_draw();
-            // Refused: the attachment comes back off, so the curve can still be
-            // taken elsewhere, and the reason stays in the status.
+            // Refused: the click that finished comes back off, the attachment
+            // so the curve can still be taken elsewhere, a two-click shape's
+            // second so the next click tries again rather than add a point
+            // to a shape that finishes only at two; the reason stays in the
+            // status.
             if let Some(gesture) = &mut self.draw {
                 gesture.points.pop();
                 gesture.attachments.pop();
@@ -1056,6 +1057,63 @@ mod tests {
             assert_eq!(
                 state.editor.document.model.draft.regions.len(),
                 regions + usize::from(!hole)
+            );
+        }
+    }
+
+    /// A two-click shape refused at its second click takes that click back
+    /// off and keeps the first, so the next click tries again: it kept both,
+    /// and every click after added a point to a shape that finishes only at
+    /// two, a line that could never be finished.
+    #[test]
+    fn a_refused_two_click_shape_takes_its_second_click_back() {
+        use funfern_app::topology_examples::guide_scene;
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        // Both overlap the round region at the bottom, which a subdomain may
+        // not; the retries stay clear of it.
+        for (tool, first, refused, clear) in [
+            (
+                DrawTool::Circle,
+                Point2::new(-0.35, -0.45),
+                Point2::new(-0.35, -0.2),
+                Point2::new(-0.35, -0.38),
+            ),
+            (
+                DrawTool::Rectangle,
+                Point2::new(-0.3, -0.6),
+                Point2::new(0.0, -0.3),
+                Point2::new(-0.2, -0.5),
+            ),
+        ] {
+            let mut state = Playground::default();
+            state.set_document(guide_scene(), false, true).unwrap();
+            settle(&mut state.editor);
+            let click = |state: &mut Playground, point: Point2| {
+                let screen = state.screen(point, viewport);
+                state.draw_click(
+                    point,
+                    ScreenPoint::new(screen.x as f64, screen.y as f64),
+                    viewport,
+                    false,
+                )
+            };
+            let curves = state.editor.document.model.draft.geometry.curves.len();
+            state.begin_draw(tool);
+            click(&mut state, first);
+            click(&mut state, refused);
+            assert!(!state.message.is_empty(), "{tool:?}: the reason is said");
+            assert_eq!(
+                state.draw.as_ref().map(|draw| draw.points.clone()),
+                Some(vec![first]),
+                "{tool:?}: the refused click comes back off"
+            );
+            click(&mut state, clear);
+            settle(&mut state.editor);
+            assert!(state.draw.is_none(), "{tool:?}: {}", state.message);
+            assert_eq!(
+                state.editor.document.model.draft.geometry.curves.len(),
+                curves + 1,
+                "{tool:?}"
             );
         }
     }

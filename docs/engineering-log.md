@@ -19507,3 +19507,15 @@ stays inside the domain.
 
 - Not shot: the rubber preview needs the pointer over the window, which
   would have meant moving the user's cursor; the committed circle was shot.
+
+## 2026-10-05 — A refused circle or rectangle kept its second click
+
+Reported: a circle the scene refused (one overlapping a subdomain, which
+leaves a face with no material) turned into a polyline that could never be
+finished. The rectangle had it all along. A two-click shape commits at its
+second click; refused, the drawing was kept with both points, every click
+after added another, and the tool finishes only at two. The refused click
+now comes back off, as a refused open-curve ending already did, and the
+first stays, so the next click tries again; the reason stays in the status.
+`a_refused_two_click_shape_takes_its_second_click_back` failed before the
+fix, for the circle, and covers the rectangle too.
