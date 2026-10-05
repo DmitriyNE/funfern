@@ -379,7 +379,11 @@ impl Playground {
         ui.horizontal(|ui| {
             for &(tool, label) in tools {
                 let button = egui::Button::new(label).selected(active == Some(tool));
-                if ui.add(button).clicked() {
+                let response = ui.add(button);
+                if tool == DrawTool::Polyline {
+                    self.spotlights.record(Spotlight::DrawLine, response.rect);
+                }
+                if response.clicked() {
                     self.begin_draw(tool);
                 }
             }

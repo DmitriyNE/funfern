@@ -675,13 +675,20 @@ impl Playground {
             let mut condition =
                 self.editor.document.model.draft.outer_boundaries.sides[outer[0].index()];
             let fire_at = self.fire_times();
-            if edit_outer_condition(
-                ui,
-                self.editor.document.model.draft.physics,
-                &mut condition,
-                fire_at,
-                &mut self.pulse_preview,
-            ) && let Err(error) = self.editor.set_outer_condition(&sides, condition)
+            let physics = self.editor.document.model.draft.physics;
+            let picker = ui.scope(|ui| {
+                edit_outer_condition(
+                    ui,
+                    physics,
+                    &mut condition,
+                    fire_at,
+                    &mut self.pulse_preview,
+                )
+            });
+            self.spotlights
+                .record(Spotlight::BoundaryLaw, picker.response.rect);
+            if picker.inner
+                && let Err(error) = self.editor.set_outer_condition(&sides, condition)
             {
                 self.notify(error);
             }

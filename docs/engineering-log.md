@@ -19345,3 +19345,25 @@ The user's look at the first pass, four points, all taken.
   through `plan_rigid_transform` and `apply_transform_updates_during_edit`.
   The obstacle is lit where the viewport draws it, like the source. Ten
   steps now.
+
+## 2026-10-05 — The tour, third pass
+
+Two more from the user's look: the Draw palette opened over the tour's
+card, and the lights were thin.
+
+- **The card sits at the viewport's foot** now, above the status line. The
+  palette, the floating inspector, the probe windows and the gallery all
+  open at the top, where the card was.
+- **More is lit, and several things at once.** `GuideStep` gained `extra`,
+  rects lit beside the chosen target: the Edit step lights the right-hand
+  wall in the scene throughout, the wall's screen strip from the domain's
+  corners. The dimming is `dim_except`: the screen cut into bands at every
+  hole's top and bottom and each band filled between the holes crossing it,
+  so any number of holes are left clear, tested by area and by sampling.
+- **A tab is lit only while its panel is closed.** Once the panel is open
+  the next target takes the light: the boundary law picker in Edit
+  (recorded round `edit_outer_condition` in a scope), the vector overlay
+  choice in View, the + Point button in Probes, the region's material in
+  Materials; and the Draw step lights the palette's Polyline tool once the
+  palette is open. Before the wall is selected the Edit step's light falls
+  to the wall itself, with the hint to click it.

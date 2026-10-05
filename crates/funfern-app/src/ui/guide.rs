@@ -25,10 +25,19 @@ pub(super) enum Spotlight {
     ProbePoint,
     /// A region's material choice in the Materials panel.
     RegionMaterial(RegionId),
+    /// The Edit panel's boundary law picker, drawn while a boundary is
+    /// selected.
+    BoundaryLaw,
+    /// The View panel's vector overlay choice.
+    VectorOverlay,
+    /// The Draw palette's line tool.
+    DrawLine,
     /// The source, where the viewport draws it.
     Source,
     /// The obstacle, where the viewport draws it.
     Obstacle,
+    /// The right-hand wall, where the viewport draws it.
+    Wall,
 }
 
 /// Where the spotlit controls were drawn this frame.
@@ -61,8 +70,12 @@ pub(super) struct GuideStep {
     pub(super) text: &'static str,
     /// The controls to light, in order of preference, each with the hint
     /// shown when it is the one lit: a panel's tab folded into the Panels
-    /// menu lights the menu and says so.
+    /// menu lights the menu and says so. A tab counts as drawn only while
+    /// its panel is closed, so once the panel is open the next target, a
+    /// control inside it, takes the light.
     targets: &'static [(Spotlight, Option<&'static str>)],
+    /// Lit as well, with no hint, when drawn: the thing the step is about.
+    extra: &'static [Spotlight],
     done: fn(&Playground) -> bool,
 }
 
@@ -78,6 +91,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
         text: "The wave runs as soon as its mesh is ready. Run and Pause, Step and Reset \
                sit at the right end of the bar. Pause the wave, then run it again.",
         targets: &[(Spotlight::RunPause, None)],
+        extra: &[],
         done: |state| state.guide.paused_seen && state.wave_running,
     },
     GuideStep {
@@ -85,6 +99,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
         text: "The circled point is the source; the Simulation panel sets its signal. \
                Drag it somewhere else and watch the field follow.",
         targets: &[(Spotlight::Source, None)],
+        extra: &[],
         done: |state| {
             state.editor.document.model.source.position != state.guide.baseline.source
                 && !state.editor.editing()
@@ -96,9 +111,15 @@ pub(super) static STEPS: [GuideStep; 10] = [
                tools, from reshaping it to its boundary law. The right-hand wall echoes. \
                Open Edit, click that wall and give it an outgoing law; the echo stops.",
         targets: &[
+            (Spotlight::BoundaryLaw, None),
             (Spotlight::Tab(InspectorPanel::Edit), None),
             (Spotlight::Panels, PANELS_HINT),
+            (
+                Spotlight::Wall,
+                Some("Click the right-hand wall to select it."),
+            ),
         ],
+        extra: &[Spotlight::Wall],
         done: |state| {
             state.editor.document.model.draft.outer_boundaries.sides[OuterSide::Right.index()]
                 != state.guide.baseline.right_wall
@@ -110,6 +131,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
                appears on the selection, with handles to move, scale and turn it. Drag the \
                gizmo and put the obstacle somewhere else.",
         targets: &[(Spotlight::Obstacle, None)],
+        extra: &[],
         done: |state| {
             state.guide_obstacle_controls() != state.guide.baseline.obstacle
                 && !state.editor.editing()
@@ -119,7 +141,8 @@ pub(super) static STEPS: [GuideStep; 10] = [
         title: "Draw",
         text: "+ Draw opens the palette: circles, rectangles, polygons, splines and lines, \
                as regions, holes or walls. Draw a line across the scene; it becomes a wall.",
-        targets: &[(Spotlight::Draw, None)],
+        targets: &[(Spotlight::DrawLine, None), (Spotlight::Draw, None)],
+        extra: &[],
         done: |state| {
             state.editor.document.model.draft.geometry.curves.len() > state.guide.baseline.curves
         },
@@ -136,6 +159,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             ),
             (Spotlight::Panels, PANELS_HINT),
         ],
+        extra: &[],
         done: |state| {
             state
                 .editor
@@ -153,9 +177,11 @@ pub(super) static STEPS: [GuideStep; 10] = [
                as arrows or streamlines, material overlays, the mesh. Switch the vector \
                overlay on.",
         targets: &[
+            (Spotlight::VectorOverlay, None),
             (Spotlight::Tab(InspectorPanel::View), None),
             (Spotlight::Panels, PANELS_HINT),
         ],
+        extra: &[],
         done: |state| state.editor.document.presentation.vector_overlay != VectorOverlay::Off,
     },
     GuideStep {
@@ -166,6 +192,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Tab(InspectorPanel::Simulation), None),
             (Spotlight::Panels, PANELS_HINT),
         ],
+        extra: &[],
         done: |state| state.inspector == Some(InspectorPanel::Simulation),
     },
     GuideStep {
@@ -181,6 +208,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
             ),
             (Spotlight::Panels, PANELS_HINT),
         ],
+        extra: &[],
         done: |state| {
             state.editor.document.model.probes.len() > state.guide.baseline.probes
                 && !state.probe_windows.is_empty()
@@ -192,6 +220,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
                shows and what to look for. Open it and pick one. This tour is there too, \
                whenever you want it back.",
         targets: &[(Spotlight::Examples, None)],
+        extra: &[],
         done: |state| state.examples_open,
     },
 ];
@@ -336,6 +365,41 @@ impl Playground {
         }
     }
 
+    /// Where a target is this frame: the recorded rect for a control, the
+    /// viewport's own for the source, the obstacle and the wall, and
+    /// nothing for a tab whose panel is already open.
+    pub(super) fn spotlight_rect(&self, target: Spotlight, viewport: Rect) -> Option<Rect> {
+        match target {
+            Spotlight::Source => {
+                let source = &self.editor.document.model.source;
+                source.enabled.then(|| {
+                    Rect::from_center_size(
+                        self.screen(source.position, viewport),
+                        egui::vec2(48.0, 48.0),
+                    )
+                })
+            }
+            Spotlight::Obstacle => {
+                let controls = self.guide_obstacle_controls();
+                (!controls.is_empty()).then(|| {
+                    let mut rect = Rect::NOTHING;
+                    for control in controls {
+                        rect.extend_with(self.screen(control, viewport));
+                    }
+                    rect.expand(10.0)
+                })
+            }
+            Spotlight::Wall => {
+                let domain = self.editor.document.model.draft.geometry.domain;
+                let top = self.screen(Point2::new(domain.max_x, domain.max_y), viewport);
+                let bottom = self.screen(Point2::new(domain.max_x, domain.min_y), viewport);
+                Some(Rect::from_two_pos(top, bottom).expand(8.0))
+            }
+            Spotlight::Tab(panel) if self.inspector == Some(panel) => None,
+            other => self.spotlights.rect(other),
+        }
+    }
+
     /// The rect the step lights this frame and the hint for it, the first
     /// of its targets that was drawn.
     pub(super) fn guide_spotlight(
@@ -344,29 +408,8 @@ impl Playground {
         viewport: Rect,
     ) -> Option<(Rect, Option<&'static str>)> {
         step.targets.iter().find_map(|(target, hint)| {
-            let rect = match target {
-                Spotlight::Source => {
-                    let source = &self.editor.document.model.source;
-                    source.enabled.then(|| {
-                        Rect::from_center_size(
-                            self.screen(source.position, viewport),
-                            egui::vec2(48.0, 48.0),
-                        )
-                    })
-                }
-                Spotlight::Obstacle => {
-                    let controls = self.guide_obstacle_controls();
-                    (!controls.is_empty()).then(|| {
-                        let mut rect = Rect::NOTHING;
-                        for control in controls {
-                            rect.extend_with(self.screen(control, viewport));
-                        }
-                        rect.expand(10.0)
-                    })
-                }
-                other => self.spotlights.rect(*other),
-            };
-            rect.map(|rect| (rect, *hint))
+            self.spotlight_rect(*target, viewport)
+                .map(|rect| (rect, *hint))
         })
     }
 
@@ -384,33 +427,37 @@ impl Playground {
         let step = &STEPS[self.guide.step];
         let done = self.guide_step_done();
         let spotlight = self.guide_spotlight(step, viewport);
+        let screen = ctx.content_rect();
+        let mut holes = spotlight
+            .iter()
+            .map(|(rect, _)| rect.expand(6.0).intersect(screen))
+            .collect::<Vec<_>>();
+        for extra in step.extra {
+            if let Some(rect) = self.spotlight_rect(*extra, viewport) {
+                let hole = rect.expand(6.0).intersect(screen);
+                if !holes.contains(&hole) {
+                    holes.push(hole);
+                }
+            }
+        }
         // The dimming is paint on a foreground layer, no widget, so clicks
         // go through it to the controls underneath.
-        if let Some((rect, _)) = spotlight {
-            let screen = ctx.content_rect();
-            let hole = rect.expand(6.0).intersect(screen);
+        if !holes.is_empty() {
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("guide-spotlight"),
             ));
-            let dim = Color32::from_black_alpha(96);
-            for shade in [
-                Rect::from_min_max(screen.min, Pos2::new(screen.max.x, hole.min.y)),
-                Rect::from_min_max(Pos2::new(screen.min.x, hole.max.y), screen.max),
-                Rect::from_min_max(
-                    Pos2::new(screen.min.x, hole.min.y),
-                    Pos2::new(hole.min.x, hole.max.y),
-                ),
-                Rect::from_min_max(
-                    Pos2::new(hole.max.x, hole.min.y),
-                    Pos2::new(screen.max.x, hole.max.y),
-                ),
-            ] {
-                if shade.is_positive() {
-                    painter.rect_filled(shade, 0.0, dim);
-                }
+            for shade in dim_except(screen, &holes) {
+                painter.rect_filled(shade, 0.0, Color32::from_black_alpha(96));
             }
-            painter.rect_stroke(hole, 6.0, Stroke::new(2.0, TEAL), egui::StrokeKind::Outside);
+            for hole in &holes {
+                painter.rect_stroke(
+                    *hole,
+                    6.0,
+                    Stroke::new(2.0, TEAL),
+                    egui::StrokeKind::Outside,
+                );
+            }
         }
         let (index, total) = (self.guide.step + 1, STEPS.len());
         let last = index == total;
@@ -421,8 +468,10 @@ impl Playground {
             .title_bar(false)
             .resizable(false)
             .collapsible(false)
-            .pivot(egui::Align2::CENTER_TOP)
-            .fixed_pos(viewport.center_top() + egui::vec2(0.0, 14.0))
+            // At the viewport's foot: the palette, the floating inspector,
+            // the probe windows and the gallery all open at its top.
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .fixed_pos(viewport.center_bottom() - egui::vec2(0.0, 14.0))
             .default_width(GUIDE_CARD_WIDTH)
             .show(ctx, |ui| {
                 ui.set_width(GUIDE_CARD_WIDTH.min(viewport.width() - 24.0));
@@ -457,6 +506,50 @@ impl Playground {
             self.guide_advance();
         }
     }
+}
+
+/// The rects that cover `screen` but for `holes`: the screen cut into
+/// horizontal bands at every hole's top and bottom, and each band filled
+/// between the holes that cross it.
+pub(super) fn dim_except(screen: Rect, holes: &[Rect]) -> Vec<Rect> {
+    let mut edges = vec![screen.min.y, screen.max.y];
+    for hole in holes {
+        edges.push(hole.min.y.clamp(screen.min.y, screen.max.y));
+        edges.push(hole.max.y.clamp(screen.min.y, screen.max.y));
+    }
+    edges.sort_by(f32::total_cmp);
+    edges.dedup();
+    let mut shades = Vec::new();
+    for band in edges.windows(2) {
+        let (top, bottom) = (band[0], band[1]);
+        if bottom <= top {
+            continue;
+        }
+        let middle = 0.5 * (top + bottom);
+        let mut crossing = holes
+            .iter()
+            .filter(|hole| hole.min.y < middle && middle < hole.max.y)
+            .map(|hole| (hole.min.x.max(screen.min.x), hole.max.x.min(screen.max.x)))
+            .collect::<Vec<_>>();
+        crossing.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut x = screen.min.x;
+        for (from, to) in crossing {
+            if from > x {
+                shades.push(Rect::from_min_max(
+                    Pos2::new(x, top),
+                    Pos2::new(from, bottom),
+                ));
+            }
+            x = x.max(to);
+        }
+        if screen.max.x > x {
+            shades.push(Rect::from_min_max(
+                Pos2::new(x, top),
+                Pos2::new(screen.max.x, bottom),
+            ));
+        }
+    }
+    shades
 }
 
 #[cfg(test)]
@@ -645,6 +738,26 @@ mod tests {
         state.spotlights.clear();
         assert_eq!(state.guide_spotlight(step, viewport), None);
 
+        // A tab is lit only while its panel is closed; open, the light
+        // moves on to the control inside the panel, or to the thing in the
+        // scene the step is about.
+        let edit = &STEPS[step_index("Edit")];
+        state
+            .spotlights
+            .record(Spotlight::Tab(InspectorPanel::Edit), tab);
+        assert_eq!(state.guide_spotlight(edit, viewport), Some((tab, None)));
+        state.inspector = Some(InspectorPanel::Edit);
+        let wall = state.spotlight_rect(Spotlight::Wall, viewport).unwrap();
+        assert_eq!(
+            state.guide_spotlight(edit, viewport),
+            Some((wall, Some("Click the right-hand wall to select it.")))
+        );
+        let right = state.editor.document.model.draft.geometry.domain.max_x;
+        assert!(wall.contains(state.screen(Point2::new(right, 0.0), viewport)));
+        assert!(!wall.contains(state.screen(Point2::new(right - 0.5, 0.0), viewport)));
+        state.spotlights.record(Spotlight::BoundaryLaw, button);
+        assert_eq!(state.guide_spotlight(edit, viewport), Some((button, None)));
+
         // The source and the obstacle are lit where the viewport draws them.
         let (rect, hint) = state
             .guide_spotlight(&STEPS[step_index("The source")], viewport)
@@ -657,6 +770,45 @@ mod tests {
         for control in state.guide_obstacle_controls() {
             assert!(rect.contains(state.screen(control, viewport)));
         }
+    }
+
+    /// The dimming covers the screen but for the holes, each point once.
+    #[test]
+    fn the_dimming_covers_everything_but_the_holes_once() {
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let holes = [
+            Rect::from_min_size(Pos2::new(100.0, 50.0), egui::vec2(60.0, 30.0)),
+            Rect::from_min_size(Pos2::new(700.0, 40.0), egui::vec2(50.0, 50.0)),
+            Rect::from_min_size(Pos2::new(300.0, 400.0), egui::vec2(200.0, 100.0)),
+            // One reaching past the screen's edge.
+            Rect::from_min_size(Pos2::new(780.0, 580.0), egui::vec2(60.0, 60.0)),
+        ];
+        let shades = dim_except(screen, &holes);
+        let mut covered = 0.0;
+        for shade in &shades {
+            assert!(screen.contains_rect(*shade));
+            covered += shade.area();
+            for hole in &holes {
+                assert!(
+                    !shade.intersects(hole.shrink(0.01)),
+                    "{shade:?} over {hole:?}"
+                );
+            }
+        }
+        let holed: f32 = holes.iter().map(|hole| hole.intersect(screen).area()).sum();
+        assert!(
+            (covered + holed - screen.area()).abs() < 1.0,
+            "{covered} + {holed}"
+        );
+        for y in (5..600).step_by(37) {
+            for x in (5..800).step_by(29) {
+                let at = Pos2::new(x as f32, y as f32);
+                let in_hole = holes.iter().any(|hole| hole.contains(at));
+                let shaded = shades.iter().filter(|shade| shade.contains(at)).count();
+                assert_eq!(shaded, usize::from(!in_hole), "at {at:?}");
+            }
+        }
+        assert!(dim_except(screen, &[]).len() == 1);
     }
 
     /// The card shows the step and Skip ends the tour.

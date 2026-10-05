@@ -92,13 +92,15 @@ impl Playground {
         p.vector_overlay = p.vector_overlay.resolved(physics);
         ui.separator();
         ui.label("Vector overlay");
-        sized_combo(ui, "vector-overlay", VectorOverlay::choices(physics).len())
+        let overlay = sized_combo(ui, "vector-overlay", VectorOverlay::choices(physics).len())
             .selected_text(p.vector_overlay.label(physics))
             .show_ui(ui, |ui| {
                 for mode in VectorOverlay::choices(physics) {
                     ui.selectable_value(&mut p.vector_overlay, *mode, mode.label(physics));
                 }
             });
+        self.spotlights
+            .record(Spotlight::VectorOverlay, overlay.response.rect);
         if p.vector_overlay != VectorOverlay::Off {
             if p.vector_overlay == VectorOverlay::ComplementaryField {
                 ui.checkbox(&mut p.vector_overlay_ac_coupled, "AC-couple arrows")
