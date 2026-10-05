@@ -110,7 +110,9 @@ impl Playground {
 }
 
 /// The first pulse a carrier at `frequency_hz` gets: a Hann burst three
-/// cycles long, or half a second with no carrier, fired at `fire_at`.
+/// cycles long, or half a second with no carrier, fired at `fire_at` and
+/// repeating after a gap as long as itself, the period Repeat offers when
+/// ticked, so a pulse switched on keeps showing rather than passing once.
 fn burst(frequency_hz: f64, fire_at: f64) -> PulseTrain {
     let duration = if frequency_hz > 0.0 {
         3.0 / frequency_hz
@@ -123,14 +125,14 @@ fn burst(frequency_hz: f64, fire_at: f64) -> PulseTrain {
             edge: 0.5 * duration,
         },
         start: fire_at,
-        repeat: 0.0,
+        repeat: 2.0 * duration,
     }
 }
 
 /// A pulse made from a continuous signal: the same carrier, and for an
 /// integrated use its rate amplitude, so the strength does not jump. A sine
 /// counted from the pulse's centre has no area. The envelope is a Hann burst
-/// three carrier cycles long, fired at `fire_at`.
+/// three carrier cycles long, fired at `fire_at` and repeating.
 pub(super) fn pulse_from(signal: TimeSignal, role: SignalUse, fire_at: f64) -> TimeSignal {
     let [offset, amplitude, frequency_hz, _] = signal.carrier();
     let omega = std::f64::consts::TAU * frequency_hz;
@@ -694,7 +696,7 @@ mod tests {
                 edge: 0.5
             }
         );
-        assert_eq!((start, repeat), (4.5, 0.0));
+        assert_eq!((start, repeat), (4.5, 2.0), "repeating after a gap as long");
         assert!(pulse.valid());
         let back = continuous_from(pulse, SignalUse::Source);
         assert!((back.carrier()[1] - 6.0).abs() < 1.0e-12);
@@ -863,7 +865,7 @@ mod tests {
                     edge: 0.75,
                 },
                 start: 7.25,
-                repeat: 0.0,
+                repeat: 3.0,
             })
         );
         gate.as_mut().unwrap().start = 1.0;

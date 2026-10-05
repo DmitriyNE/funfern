@@ -93,8 +93,6 @@ pub(super) struct GuideStep {
     /// its panel is closed, so once the panel is open the next target, a
     /// control inside it, takes the light.
     targets: &'static [(Spotlight, Option<&'static str>)],
-    /// Lit as well, with no hint, when drawn: the thing the step is about.
-    extra: &'static [Spotlight],
     /// The light is a dashed rectangle, a marquee's shape, rather than a
     /// ring.
     dashed: bool,
@@ -115,7 +113,6 @@ pub(super) static STEPS: [GuideStep; 10] = [
         text: "The wave runs as soon as its mesh is ready. Run and Pause, Step and Reset \
                sit at the right end of the bar. Pause the wave, then run it again.",
         targets: &[(Spotlight::RunPause, None)],
-        extra: &[],
         dashed: false,
         done: |state| state.guide.paused_seen && state.wave_running,
     },
@@ -124,7 +121,6 @@ pub(super) static STEPS: [GuideStep; 10] = [
         text: "The circled point is the source; the Simulation panel sets its signal. \
                Drag it somewhere else and watch the field follow.",
         targets: &[(Spotlight::Source, None)],
-        extra: &[],
         dashed: false,
         done: |state| {
             state.editor.document.model.source.position != state.guide.baseline.source
@@ -139,14 +135,13 @@ pub(super) static STEPS: [GuideStep; 10] = [
         targets: &[
             (Spotlight::OutgoingLaw, None),
             (Spotlight::BoundaryLaw, Some("Pick an outgoing law for it.")),
-            (Spotlight::Tab(InspectorPanel::Edit), None),
-            (Spotlight::Panels, PANELS_HINT),
             (
                 Spotlight::Wall,
                 Some("Click the right-hand wall to select it."),
             ),
+            (Spotlight::Tab(InspectorPanel::Edit), None),
+            (Spotlight::Panels, PANELS_HINT),
         ],
-        extra: &[Spotlight::Wall],
         dashed: false,
         done: |state| {
             state.editor.document.model.draft.outer_boundaries.sides[OuterSide::Right.index()]
@@ -162,7 +157,6 @@ pub(super) static STEPS: [GuideStep; 10] = [
                pivot the others work about. Drag the obstacle itself, or the four-way grip, \
                and put it somewhere else.",
         targets: &[(Spotlight::Obstacle, None)],
-        extra: &[],
         dashed: true,
         done: |state| {
             state.guide_obstacle_controls() != state.guide.baseline.obstacle
@@ -186,7 +180,6 @@ pub(super) static STEPS: [GuideStep; 10] = [
             ),
             (Spotlight::Draw, None),
         ],
-        extra: &[],
         dashed: false,
         done: |state| {
             state.editor.document.model.draft.geometry.curves.len() > state.guide.baseline.curves
@@ -214,7 +207,6 @@ pub(super) static STEPS: [GuideStep; 10] = [
             ),
             (Spotlight::Panels, PANELS_HINT),
         ],
-        extra: &[],
         dashed: false,
         done: |state| {
             state
@@ -241,7 +233,6 @@ pub(super) static STEPS: [GuideStep; 10] = [
             (Spotlight::Tab(InspectorPanel::View), None),
             (Spotlight::Panels, PANELS_HINT),
         ],
-        extra: &[],
         dashed: false,
         done: |state| state.editor.document.presentation.vector_overlay != VectorOverlay::Off,
     },
@@ -250,7 +241,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
         text: "Simulation holds the mesh size and adaptation, the solver's settings and the \
                source's signal; the status line below says what is being rebuilt. Open it, \
                change the source's frequency and watch the waves' length follow, then \
-               switch it to Pulse: a single burst leaves the source.",
+               switch it to Pulse: bursts leave the source, one after another.",
         targets: &[
             (
                 Spotlight::SourceFrequency,
@@ -263,7 +254,6 @@ pub(super) static STEPS: [GuideStep; 10] = [
             ),
             (Spotlight::Panels, PANELS_HINT),
         ],
-        extra: &[],
         dashed: false,
         done: |state| {
             let signal = state.editor.document.model.source.signal;
@@ -283,7 +273,6 @@ pub(super) static STEPS: [GuideStep; 10] = [
             ),
             (Spotlight::Panels, PANELS_HINT),
         ],
-        extra: &[],
         dashed: false,
         done: |state| {
             state.editor.document.model.probes.len() > state.guide.baseline.probes
@@ -296,7 +285,6 @@ pub(super) static STEPS: [GuideStep; 10] = [
                shows and what to look for. Open it and pick one. This tour is there too, \
                whenever you want it back.",
         targets: &[(Spotlight::Examples, None)],
-        extra: &[],
         dashed: false,
         done: |state| state.examples_open,
     },
@@ -507,6 +495,9 @@ impl Playground {
                     rect.expand(10.0)
                 })
             }
+            // Lit once Edit is open, so the step reads Edit first, then the
+            // wall.
+            Spotlight::Wall if self.inspector != Some(InspectorPanel::Edit) => None,
             Spotlight::Wall => {
                 let domain = self.editor.document.model.draft.geometry.domain;
                 let top = self.screen(Point2::new(domain.max_x, domain.max_y), viewport);
@@ -576,20 +567,10 @@ impl Playground {
         // shows.
         let spotlight = self.guide_light(viewport);
         let screen = ctx.content_rect();
-        let mut holes = spotlight
+        let holes = spotlight
             .iter()
             .map(|(rect, _)| rect.expand(6.0).intersect(screen))
             .collect::<Vec<_>>();
-        if !done && setback.is_none() {
-            for extra in step.extra {
-                if let Some(rect) = self.spotlight_rect(*extra, viewport) {
-                    let hole = rect.expand(6.0).intersect(screen);
-                    if !holes.contains(&hole) {
-                        holes.push(hole);
-                    }
-                }
-            }
-        }
         // The dimming is paint on a foreground layer, no widget, so clicks
         // go through it to the controls underneath. Open lists and menus
         // are foreground areas too, drawn before this paint, so each is a
@@ -1110,12 +1091,20 @@ mod tests {
 
         // A tab is lit only while its panel is closed; open, the light
         // moves on to the control inside the panel, or to the thing in the
-        // scene the step is about.
+        // scene the step is about. The Edit step lights Edit alone first,
+        // the wall only once Edit is open, ahead of a folded bar's Panels.
         let edit = &STEPS[step_index("Edit")];
         state
             .spotlights
             .record(Spotlight::Tab(InspectorPanel::Edit), tab);
         assert_eq!(state.guide_spotlight(edit, viewport), Some((tab, None)));
+        state.spotlights.clear();
+        state.spotlights.record(Spotlight::Panels, panels);
+        assert_eq!(
+            state.guide_spotlight(edit, viewport),
+            Some((panels, PANELS_HINT)),
+            "the wall waits for Edit"
+        );
         state.inspector = Some(InspectorPanel::Edit);
         let wall = state.spotlight_rect(Spotlight::Wall, viewport).unwrap();
         assert_eq!(

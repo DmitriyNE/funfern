@@ -19453,3 +19453,20 @@ Two from the user.
   outline showed no red, though the viewport colours an invalid draft red.
   The state there was set by a temporary hook that edited the draft outside
   a drag; to check against a real drag before calling it a bug.
+
+## 2026-10-05 — Pulses repeat when switched on, and the Edit step lights Edit first
+
+Two from the user.
+
+- **Repeat by default.** A signal switched to Pulse, and a drive's Timing
+  switched to Pulsed, started as one burst three carrier cycles long, which
+  passed once and left nothing to see. `burst`, the one place every first
+  pulse comes from, now repeats it after a gap as long as itself, the
+  period the Repeat checkbox offers when ticked. Only the switch changes:
+  stored pulses keep their repeat, so no scene format change. Seen in the
+  tour's scene: a 2 Hz source pulsed, a 1.5 s burst every 3 s.
+- **Edit, then the wall.** The Edit step lit the right-hand wall from its
+  start, beside the Edit button. The wall is now one of the step's targets,
+  lit only while the Edit panel is open and ahead of a folded bar's Panels,
+  so the step reads: Edit, the wall, the boundary law, the outgoing law. No
+  step lit an extra any more, and the mechanism went.

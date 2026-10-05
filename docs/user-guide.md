@@ -391,7 +391,10 @@ names or with every expression evaluated at the material frame's origin. Each ro
   Escape. Drag the visible point-source marker directly to reposition it.
   Pulse strength/width and point-source position, width, region, bias, amplitude,
   frequency, and phase are editable in Simulation. Point-source settings are included
-  in scene files, shared links, examples, Undo/Redo, and autosave.
+  in scene files, shared links, examples, Undo/Redo, and autosave. A signal
+  switched from Continuous to Pulse, a source's, a wall's or a drive's
+  Timing, starts as a burst three carrier cycles long fired at once and
+  repeating after a gap as long as itself; untick Repeat for a single one.
 - **Point probes:** add persistent point receivers from Probes, then click repeatedly
   in the viewport, holding Shift to place each marker on the grid. Markers can be selected, dragged, renamed, colored, disabled,
   cleared, or deleted; double-clicking one opens its floating readout. Each readout
