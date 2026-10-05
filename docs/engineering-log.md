@@ -3397,10 +3397,16 @@ above:
   (2026-10-04: a late frame cuts only when the solver's steady share of the
   interval, the median of its last six GPU passes, reaches 0.75; see that day's
   entry and `docs/spikes/funfern-drawn-pacing.md`).
+- [ ] The budget's 60 Hz and Low Power Mode measurements (postponed
+  2026-10-05; the machine has one panel and the mode is the user's to
+  toggle). Quiet host and overlay scene are measured, see the spike doc.
 - [ ] The picture is three frames behind the solver: a readback is encoded after
   the frame's drawing, mapped at a later submission and delivered at the
   extraction after that. Shortening it is a readback-path change.
-
+  On a quiet host (2026-10-05) the budget reaches 119 fps and the picture
+  stands still on a fifth of the frames, wobble 21 % against the old rule's
+  14 at 105 fps: the next pacing item, see `docs/spikes/funfern-drawn-pacing.md`
+  "On a quiet host".
 - [x] A feed-forward step budget from the GPU timer (2026-10-05, see that
   day's entry and `docs/spikes/funfern-drawn-pacing.md`, "The budget from
   the measured cost"): the ceiling is the target share of the interval over
@@ -19223,3 +19229,27 @@ flow on its two sides, and a step of a few pixels carried a line over.
   after.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, both wasm32 checks and the browser shader compile.
+
+## 2026-10-05 — The budget on a quiet host
+
+The measurements the budget entry left open, the host quiet at last (load
+3, no fitting jobs): heavy and light at 120 Hz, the overlay scene with
+adaptation on, old rule and budget alternated, two pairs each; the 60 Hz
+and Low Power cases postponed to a TODO. Written up in the spike doc, "On
+a quiet host".
+
+- The light scene is a tie. On the heavy and overlay scenes the budget
+  keeps the cadence (late 14 % to 1 %, 105 to 119 fps) and gives up a
+  quarter of the speed (451/424 to 328/337 steps a second), and its wobble
+  is worse (21 % against 14), the reverse of the day before under load.
+- One cause: a step costs 2.15 ms on the quiet host against 1.07 under the
+  fitting load, same binary, same scene. Three steps fit where six did, and
+  four would be late. A fixed batch confirms the GPU is slow at any batch
+  on the quiet host (six steps: 1.87 ms a step, 87 fps, 37 % late; eight:
+  2.06 ms, 65 fps): the chip clocks up under CPU load and the memory-bound
+  solver rides on it. Speeds compare within a day's pairs only.
+- The wobble is the readback's: at 119 fps the picture stands still on a
+  fifth of the frames and jumps after; the depth of three does not cover
+  the round trip at 120 Hz, and the budget, reaching the cadence, exposes
+  it. The readback depth moves to the front of the pacing list.
+- Docs only; no gate beyond the formatter's check.

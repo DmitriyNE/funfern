@@ -348,15 +348,60 @@ frames and held on others, is what the adaptive target now does on
 purpose: it hovers just under the threshold while the frames are not the
 solver's.
 
+## On a quiet host
+
+5 October, 13:00, the fitting jobs gone (load 3): the same two binaries as
+E4, the old rule and the budget, alternated, 60 s a run, two pairs a scene,
+the window on the 120 Hz panel. The light scene is a tie (118 to 120 fps,
+0.98 to 1.0 of its speed, 4.5 to 7.7 % wobble, within the run-to-run
+spread). The heavy scene and the overlay scene (adaptation on, flow arrows,
+integrated field) are not:
+
+| scene | rule | fps | late | steps / s | still | wobble | cuts / s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| heavy | old | 105.1 / 104.8 | 14.0 / 14.6 % | 451 / 424 | 16 % | 13.7 / 13.6 % | 14.6 / 15.0 |
+| heavy | budget | 119.0 / 118.3 | 0.8 / 1.5 % | 328 / 337 | 19 / 20 % | 21.0 / 20.9 % | 0.14 / 0.23 |
+| overlay | old | 105.5 / 105.2 | 12.8 / 13.5 % | 478 / 455 | 17 % | 21.7 / 22.6 % | 13.3 / 13.9 |
+| overlay | budget | 115.8 / 116.6 | 2.2 / 2.4 % | 371 / 380 | 19 / 20 % | 25.1 / 23.4 % | 0.47 / 0.30 |
+
+Steps a second are the completed count over the steady part of the run
+(after 10 s); the overlay scene's adaptation chose different meshes for the
+two builds (dt 2.62e-3 against 2.16e-3), so its speeds are not comparable
+and its steps are. The budget keeps the cadence, as it is meant to, 14 %
+late frames down to 1, and gives up a quarter of the speed for it; and the
+wobble, which it halved under load, is worse here, 21 % against 14.
+
+Both have one cause. A step costs 2.15 ms on the quiet host, against 1.07
+ms the day before under the fitting load, on the same binary and scene, so
+the budget fits three steps an interval where it fitted six, and four would
+be late: three steps use 77 % of the interval and there is nothing between.
+The old rule takes the rest by overrunning every seventh frame. A fixed
+batch on the quiet host says the slow step is the machine's, not the
+controller's: at six steps the step costs 1.87 ms, the pass 10.6 ms, 87 fps
+at 37 % late; at eight, 2.06 ms and 65 fps. The chip clocks up under the
+CPU load and the solver, memory-bound, rides on it; a quiet host gives the
+GPU alone half the speed at any batch. Speeds compare within a day's pairs
+only.
+
+The wobble is the readback's. At 119 fps the picture stands still on a
+fifth of the frames and then jumps (1.8 to 3 % of frames, against none
+under the old rule), where at 105 fps it stands still less. The depth of
+three in flight does not cover the round trip at 120 Hz, as the runs under
+load already showed, and the budget, by reaching the cadence, exposes it.
+
 ## Left for the pacing work
 
-- The measurements above under a quiet host and at 60 Hz, and the Low Power
-  Mode case.
-- The picture is three frames behind the solver, and at 120 Hz under load
-  it stood still on 17 to 26 % of frames on the heavy scene in every run
-  above, old and new: a depth of three in flight does not cover the round
-  trip there. Shortening the lag is a readback-path change, not a pacing
-  one; the depth at 120 Hz may be a one-line one.
+- The readback depth at 120 Hz, first. The picture is three frames behind
+  the solver and stood still on 16 to 26 % of frames on the heavy scene in
+  every run on this panel, old rule and budget, loaded host and quiet; at
+  the cadence the budget reaches it is what the eye sees. Shortening the
+  lag is a readback-path change, not a pacing one; the depth may be a
+  one-line one.
+- The 60 Hz case and Low Power Mode, postponed (5 October): the machine
+  has one panel and the mode is the user's to toggle.
+- The integer step at a 2 ms step leaves a quarter of a 120 Hz interval
+  unused; whether a second batch a frame, or a share above 0.8 where the
+  draws leave room, could take it is a question for after the readback.
 - 0.75 for the old rule's backoff survives only in the path without a cost
   of a step, a device without timestamp queries; on this machine the
   question is moot.
