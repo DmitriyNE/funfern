@@ -15,14 +15,17 @@ running; this file covers using it.
   Examples and Reset. Below 700 px the inspector floats over the viewport
   instead of docking beside it, and a launch opens none, so the scene and its
   card are what a phone shows first. A first launch, with nothing to restore,
-  opens the guided tour: a small scene with a source, an echoing right-hand
-  wall, a round obstacle and a round region, the panels closed, and a card
+  opens the guided tour: a small scene in the TM skin with a source, an
+  echoing right-hand wall, a round obstacle and a round region, the panels
+  closed, and a card
   at the foot of the view that walks through the app in ten steps, each
   naming one thing to do and lighting the control to do it with, an arrow
   from the card to it and the rest of the screen dimmed:
   pause and run the wave; drag the source; open Edit, click the right wall
-  and give it an outgoing law; drag a rectangle round the obstacle and move
-  it; draw a wall; give the region the glass in Materials;
+  and give it an outgoing law; drag a rectangle round the obstacle, then
+  move, stretch and turn it with the gizmo, each ticked off on the card as
+  it is seen and its grip lit in turn; draw a wall; in Materials click the
+  region to select it and give it the glass;
   switch the vector overlay on in View; in Simulation change the source's
   frequency and switch it to Pulse; drop a point probe from Probes; and open
   the gallery. A step moves on a moment after its action shows, counted from

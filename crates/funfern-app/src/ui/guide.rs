@@ -11,7 +11,10 @@
 use super::*;
 use funfern_app::document::VectorOverlay;
 use funfern_app::topology_editor::TopologyAcceptance;
-use funfern_app::topology_examples::{GUIDE_GLASS, GUIDE_OBSTACLE, GUIDE_REGION, guide_scene};
+use funfern_app::topology_examples::{
+    GUIDE_GLASS, GUIDE_OBSTACLE, GUIDE_REGION, GUIDE_REGION_CURVE, guide_scene,
+};
+use funfern_app::topology_viewport::TopologySpanTarget;
 
 /// A control a step points at. The top bar and the panels record where they
 /// drew these this frame; a step asks for its controls in order of
@@ -55,6 +58,13 @@ pub(super) enum Spotlight {
     Source,
     /// The obstacle, where the viewport draws it.
     Obstacle,
+    /// The gizmo's grips round the selected obstacle: the four-way grip,
+    /// the square that stretches sideways, and a spot on the ring.
+    GizmoMove,
+    GizmoStretch,
+    GizmoTurn,
+    /// The round region, where the viewport draws it.
+    Region,
     /// The right-hand wall, where the viewport draws it.
     Wall,
 }
@@ -93,12 +103,15 @@ pub(super) struct GuideStep {
     /// its panel is closed, so once the panel is open the next target, a
     /// control inside it, takes the light.
     targets: &'static [(Spotlight, Option<&'static str>)],
-    /// The light is a dashed rectangle, a marquee's shape, rather than a
-    /// ring.
+    /// The light on the obstacle, while it waits for a marquee, is a dashed
+    /// rectangle, a marquee's shape, rather than a glow.
     dashed: bool,
     /// What the step is about, which has to be in the scene for it to be
     /// done: one that is gone holds the step until it is back.
     needs: &'static [GuideSubject],
+    /// Actions the step asks for together, each ticked on the card as it
+    /// is seen, with where it is done: `Guide::ticks` holds them.
+    checklist: &'static [(&'static str, &'static str)],
     done: fn(&Playground) -> bool,
 }
 
@@ -125,6 +138,12 @@ impl GuideSubject {
 
 /// A done step waits this long before moving on, so its tick is seen.
 const GUIDE_ADVANCE_DELAY: f64 = 0.9;
+/// What ticks the transform step's checklist, read from the map that best
+/// takes the obstacle as the step began onto it now: its centre moved this
+/// far, its two stretches this far apart, or a turn this large.
+const TICK_SHIFT: f64 = 0.05;
+const TICK_STRETCH: f64 = 1.15;
+const TICK_TURN: f64 = 15.0 * std::f64::consts::PI / 180.0;
 const GUIDE_CARD_WIDTH: f32 = 400.0;
 /// How dark the rest of the screen goes round the lit controls.
 const GUIDE_DIM_ALPHA: u8 = 140;
@@ -139,6 +158,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
         targets: &[(Spotlight::RunPause, None)],
         dashed: false,
         needs: &[],
+        checklist: &[],
         done: |state| state.guide.paused_seen && state.wave_running,
     },
     GuideStep {
@@ -148,6 +168,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
         targets: &[(Spotlight::Source, None)],
         dashed: false,
         needs: &[GuideSubject::Source],
+        checklist: &[],
         done: |state| {
             state.editor.document.model.source.position != state.guide.baseline.source
                 && !state.editor.editing()
@@ -170,26 +191,47 @@ pub(super) static STEPS: [GuideStep; 10] = [
         ],
         dashed: false,
         needs: &[],
+        checklist: &[],
         done: |state| {
             state.editor.document.model.draft.outer_boundaries.sides[OuterSide::Right.index()]
                 != state.guide.baseline.right_wall
         },
     },
     GuideStep {
-        title: "Select and move",
+        title: "Select and transform",
         text: "Press on empty space beside the round obstacle, drag a rectangle over the \
                whole of it and let go: that is a marquee, and everything inside it is \
-               selected. Handles appear round it, the gizmo: the four-way grip moves it, \
-               the ring turns it, the arrows scale it, and the dot at the centre is the \
-               pivot the others work about. Drag the obstacle itself, or the four-way grip, \
-               and put it somewhere else.",
-        targets: &[(Spotlight::Obstacle, None)],
+               selected. Handles appear round it, the gizmo; the dot at its centre is the \
+               pivot the others work about, and dragging the dot moves the pivot.",
+        targets: &[
+            (
+                Spotlight::GizmoMove,
+                Some("Now move it: drag the four-way grip, or the obstacle itself."),
+            ),
+            (
+                Spotlight::GizmoStretch,
+                Some(
+                    "Now stretch it into an oval with the square on the right; the top one \
+                     stretches up and down, the corner one both alike.",
+                ),
+            ),
+            (
+                Spotlight::GizmoTurn,
+                Some("Now turn it: drag the ring round."),
+            ),
+            (
+                Spotlight::Obstacle,
+                Some("Drag a rectangle over the whole of it."),
+            ),
+        ],
         dashed: true,
         needs: &[GuideSubject::Obstacle],
-        done: |state| {
-            state.guide_obstacle_controls() != state.guide.baseline.obstacle
-                && !state.editor.editing()
-        },
+        checklist: &[
+            ("Move it", "the four-way grip, bottom left"),
+            ("Stretch it", "the square on the right"),
+            ("Turn it", "the ring"),
+        ],
+        done: |state| state.guide.ticks.iter().all(|tick| *tick) && !state.editor.editing(),
     },
     GuideStep {
         title: "Draw",
@@ -210,14 +252,16 @@ pub(super) static STEPS: [GuideStep; 10] = [
         ],
         dashed: false,
         needs: &[],
+        checklist: &[],
         done: |state| {
             state.editor.document.model.draft.geometry.curves.len() > state.guide.baseline.curves
         },
     },
     GuideStep {
         title: "Materials",
-        text: "Materials holds the library and says which region has which. Give the round \
-               region at the bottom the glass.",
+        text: "Materials holds the library and says which region has which. Open it, \
+               click inside the round region at the bottom to select it, and give it the \
+               glass.",
         targets: &[
             (
                 Spotlight::MaterialChoice {
@@ -231,6 +275,10 @@ pub(super) static STEPS: [GuideStep; 10] = [
                 Some("Pick the glass for it."),
             ),
             (
+                Spotlight::Region,
+                Some("Click inside the round region to select it."),
+            ),
+            (
                 Spotlight::Tab(InspectorPanel::Materials),
                 Some("Open the Materials panel first."),
             ),
@@ -238,6 +286,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
         ],
         dashed: false,
         needs: &[GuideSubject::Region, GuideSubject::Glass],
+        checklist: &[],
         done: |state| {
             state
                 .editor
@@ -247,6 +296,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
                 .region(GUIDE_REGION)
                 .map(|region| region.material)
                 != state.guide.baseline.region_material
+                && state.region_selection == GUIDE_REGION
         },
     },
     GuideStep {
@@ -259,12 +309,13 @@ pub(super) static STEPS: [GuideStep; 10] = [
                 Spotlight::OverlayChoice(VectorOverlay::RelativeEnergyFlow),
                 None,
             ),
-            (Spotlight::VectorOverlay, Some("Pick the energy flow.")),
+            (Spotlight::VectorOverlay, Some("Pick the Poynting flow.")),
             (Spotlight::Tab(InspectorPanel::View), None),
             (Spotlight::Panels, PANELS_HINT),
         ],
         dashed: false,
         needs: &[],
+        checklist: &[],
         done: |state| state.editor.document.presentation.vector_overlay != VectorOverlay::Off,
     },
     GuideStep {
@@ -287,6 +338,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
         ],
         dashed: false,
         needs: &[GuideSubject::Source],
+        checklist: &[],
         done: |state| {
             let signal = state.editor.document.model.source.signal;
             signal.is_pulsed() && signal.carrier()[2] != state.guide.baseline.source_frequency
@@ -307,6 +359,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
         ],
         dashed: false,
         needs: &[],
+        checklist: &[],
         done: |state| {
             state.editor.document.model.probes.len() > state.guide.baseline.probes
                 && !state.probe_windows.is_empty()
@@ -320,6 +373,7 @@ pub(super) static STEPS: [GuideStep; 10] = [
         targets: &[(Spotlight::Examples, None)],
         dashed: false,
         needs: &[],
+        checklist: &[],
         done: |state| state.examples_open,
     },
 ];
@@ -363,6 +417,9 @@ pub(super) struct Guide {
     /// taken again once it is back, since the one taken without it would
     /// count its return as the step's action.
     held: bool,
+    /// The current step's checklist, ticked as each action is seen and
+    /// kept ticked.
+    pub(super) ticks: [bool; 3],
     /// Whether the tour has ended, by its last step or by Skip, which is
     /// what the marker beside the autosave records.
     pub(super) finished: bool,
@@ -386,6 +443,7 @@ impl Playground {
                     paused_seen: false,
                     baseline: self.guide_baseline(),
                     held: false,
+                    ticks: [false; 3],
                     finished: false,
                     persisted: self.guide.persisted,
                 };
@@ -487,6 +545,43 @@ impl Playground {
     /// The obstacle's control points, which any move, turn or scaling of it
     /// changes; empty once it is gone.
     pub(super) fn guide_obstacle_controls(&self) -> Vec<Point2> {
+        self.guide_curve_controls(GUIDE_OBSTACLE)
+    }
+
+    fn guide_curve_controls(&self, id: CurveId) -> Vec<Point2> {
+        self.editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == id)
+            .map(|curve| match &curve.spline {
+                CurveSpline::Closed(spline) => spline.controls().to_vec(),
+                CurveSpline::Open(spline) => spline.controls().to_vec(),
+            })
+            .unwrap_or_default()
+    }
+
+    /// The screen rect round a curve's controls, padded; none once it is
+    /// gone.
+    fn guide_curve_rect(&self, id: CurveId, viewport: Rect) -> Option<Rect> {
+        let controls = self.guide_curve_controls(id);
+        (!controls.is_empty()).then(|| {
+            let mut rect = Rect::NOTHING;
+            for control in controls {
+                rect.extend_with(self.screen(control, viewport));
+            }
+            rect.expand(10.0)
+        })
+    }
+
+    /// Whether the whole obstacle is selected, so the gizmo is round it.
+    pub(super) fn guide_obstacle_selected(&self) -> bool {
+        let Some(selected) = self.selection.spans() else {
+            return false;
+        };
         self.editor
             .document
             .model
@@ -495,11 +590,12 @@ impl Playground {
             .curves
             .iter()
             .find(|curve| curve.id == GUIDE_OBSTACLE)
-            .map(|curve| match &curve.spline {
-                CurveSpline::Closed(spline) => spline.controls().to_vec(),
-                CurveSpline::Open(spline) => spline.controls().to_vec(),
+            .is_some_and(|curve| {
+                curve
+                    .spans
+                    .iter()
+                    .all(|span| selected.contains(&TopologySpanTarget::Curve(span.id)))
             })
-            .unwrap_or_default()
     }
 
     /// Whether the current step's action shows in the state, in a scene
@@ -529,6 +625,17 @@ impl Playground {
             self.guide.held = false;
             self.guide.baseline = self.guide_baseline();
         }
+        if !STEPS[self.guide.step].checklist.is_empty()
+            && let Some(change) = fitted_change(
+                &self.guide.baseline.obstacle,
+                &self.guide_obstacle_controls(),
+            )
+        {
+            let ticks = &mut self.guide.ticks;
+            ticks[0] |= change.shift > TICK_SHIFT;
+            ticks[1] |= change.stretch > TICK_STRETCH;
+            ticks[2] |= change.turn > TICK_TURN;
+        }
         if self.guide_step_done() {
             let since = *self.guide.done_since.get_or_insert(now);
             if now - since >= GUIDE_ADVANCE_DELAY {
@@ -550,6 +657,7 @@ impl Playground {
         } else {
             self.guide.step += 1;
             self.guide.paused_seen = false;
+            self.guide.ticks = [false; 3];
             self.guide.baseline = self.guide_baseline();
         }
     }
@@ -584,16 +692,44 @@ impl Playground {
                     )
                 })
             }
-            Spotlight::Obstacle => {
-                let controls = self.guide_obstacle_controls();
-                (!controls.is_empty()).then(|| {
-                    let mut rect = Rect::NOTHING;
-                    for control in controls {
-                        rect.extend_with(self.screen(control, viewport));
-                    }
-                    rect.expand(10.0)
-                })
+            // The marquee's cue until the obstacle is selected; its grips
+            // after, each until its action is ticked.
+            Spotlight::Obstacle if self.guide_obstacle_selected() => None,
+            Spotlight::Obstacle => self.guide_curve_rect(GUIDE_OBSTACLE, viewport),
+            Spotlight::GizmoMove | Spotlight::GizmoStretch | Spotlight::GizmoTurn => {
+                let index = match target {
+                    Spotlight::GizmoMove => 0,
+                    Spotlight::GizmoStretch => 1,
+                    _ => 2,
+                };
+                if self.guide.ticks[index] || !self.guide_obstacle_selected() {
+                    return None;
+                }
+                let (_, center, radius, x_radius, _) = self.transform_gizmo(viewport)?;
+                let diagonal = radius * std::f32::consts::FRAC_1_SQRT_2;
+                let (at, size) = match target {
+                    Spotlight::GizmoMove => (egui::vec2(-diagonal, diagonal), 22.0),
+                    Spotlight::GizmoStretch => (egui::vec2(x_radius, 0.0), 20.0),
+                    // A spot on the ring where no grip is.
+                    _ => (egui::vec2(-diagonal, -diagonal), 22.0),
+                };
+                Some(Rect::from_center_size(center + at, egui::vec2(size, size)))
             }
+            // Lit once Materials is open and until the region is selected,
+            // and its material list only after that, so the step reads:
+            // the panel, the region, its list.
+            Spotlight::Region
+                if self.inspector != Some(InspectorPanel::Materials)
+                    || self.region_selection == GUIDE_REGION =>
+            {
+                None
+            }
+            Spotlight::Region => self.guide_curve_rect(GUIDE_REGION_CURVE, viewport),
+            Spotlight::RegionMaterial(GUIDE_REGION)
+            | Spotlight::MaterialChoice {
+                region: GUIDE_REGION,
+                ..
+            } if self.region_selection != GUIDE_REGION => None,
             // Lit once Edit is open, so the step reads Edit first, then the
             // wall.
             Spotlight::Wall if self.inspector != Some(InspectorPanel::Edit) => None,
@@ -660,11 +796,19 @@ impl Playground {
         let step = &STEPS[self.guide.step];
         let done = self.guide_step_done();
         let setback = self.guide_setback();
+
         // A done step lights nothing while it waits to move on: its chain
         // of targets would otherwise fall back to an earlier control, the
         // Polyline tool after a line was finished, for the moment the tick
         // shows.
         let spotlight = self.guide_light(viewport);
+        // The marquee's dashed cue is for the obstacle while it waits to be
+        // selected; the grips after it glow as every other control does.
+        let marquee = step.dashed
+            && setback.is_none()
+            && spotlight.is_some_and(|(rect, _)| {
+                self.spotlight_rect(Spotlight::Obstacle, viewport) == Some(rect)
+            });
         let screen = ctx.content_rect();
         let holes = spotlight
             .iter()
@@ -697,7 +841,7 @@ impl Playground {
                 painter.rect_filled(shade, 0.0, Color32::from_black_alpha(GUIDE_DIM_ALPHA));
             }
             for hole in &holes {
-                if step.dashed && setback.is_none() {
+                if marquee {
                     let corners = [
                         hole.left_top(),
                         hole.right_top(),
@@ -724,6 +868,7 @@ impl Playground {
                 }
             }
         }
+        let ticks = self.guide.ticks;
         let (index, total) = (self.guide.step + 1, STEPS.len());
         let last = index == total;
         let mut skip = false;
@@ -751,6 +896,46 @@ impl Playground {
                 });
                 ui.heading(step.title);
                 ui.label(step.text);
+                // The checklist: a drawn tick for each action seen, the next
+                // one in bold with a teal ring, the rest a grey ring.
+                let next_item = ticks.iter().position(|tick| !tick);
+                for (item, (action, place)) in step.checklist.iter().enumerate() {
+                    let ticked = ticks[item];
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        let (mark, _) =
+                            ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                        let middle = mark.center();
+                        if ticked {
+                            ui.painter().circle_filled(middle, 7.0, TEAL);
+                            ui.painter().add(egui::Shape::line(
+                                vec![
+                                    middle + egui::vec2(-3.5, 0.2),
+                                    middle + egui::vec2(-1.0, 2.8),
+                                    middle + egui::vec2(3.8, -2.6),
+                                ],
+                                Stroke::new(1.8, Color32::from_rgb(16, 23, 31)),
+                            ));
+                        } else {
+                            let ring = if next_item == Some(item) {
+                                TEAL
+                            } else {
+                                Color32::from_gray(120)
+                            };
+                            ui.painter()
+                                .circle_stroke(middle, 6.5, Stroke::new(1.5, ring));
+                        }
+                        let action = egui::RichText::new(*action);
+                        ui.label(if ticked {
+                            action.color(TEAL)
+                        } else if next_item == Some(item) {
+                            action.strong()
+                        } else {
+                            action
+                        });
+                        ui.weak(*place);
+                    });
+                }
                 if let Some(setback) = &setback {
                     ui.colored_label(GOLD, &setback.text);
                     if setback.restore && ui.button("Restore the scene").clicked() {
@@ -816,6 +1001,79 @@ impl Playground {
             self.guide_advance();
         }
     }
+}
+
+/// How the obstacle changed: how far its centre moved, how far apart the
+/// two stretches of the map are, as a ratio, and how far it turned, in
+/// radians.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct FittedChange {
+    pub(super) shift: f64,
+    pub(super) stretch: f64,
+    pub(super) turn: f64,
+}
+
+/// The affine map that best takes `from` onto `to`, point for point, by
+/// least squares, read as a change: exact for the gizmo's moves, turns and
+/// stretches and any sequence of them. None when the points do not pair
+/// up or do not span the plane.
+pub(super) fn fitted_change(from: &[Point2], to: &[Point2]) -> Option<FittedChange> {
+    if from.len() != to.len() || from.len() < 3 {
+        return None;
+    }
+    let count = from.len() as f64;
+    let mean = |points: &[Point2]| {
+        let sum = points
+            .iter()
+            .fold(Point2::new(0.0, 0.0), |sum, point| sum + *point);
+        sum * (1.0 / count)
+    };
+    let (from_mean, to_mean) = (mean(from), mean(to));
+    // A = (Σ q pᵀ)(Σ p pᵀ)⁻¹ over the centred points.
+    let (mut qp, mut pp) = ([[0.0; 2]; 2], [[0.0; 2]; 2]);
+    for (p, q) in from.iter().zip(to) {
+        let (p, q) = (*p - from_mean, *q - to_mean);
+        let (p, q) = ([p.x, p.y], [q.x, q.y]);
+        for row in 0..2 {
+            for column in 0..2 {
+                qp[row][column] += q[row] * p[column];
+                pp[row][column] += p[row] * p[column];
+            }
+        }
+    }
+    let determinant = pp[0][0] * pp[1][1] - pp[0][1] * pp[1][0];
+    if determinant.abs() <= f64::EPSILON {
+        return None;
+    }
+    let inverse = [
+        [pp[1][1] / determinant, -pp[0][1] / determinant],
+        [-pp[1][0] / determinant, pp[0][0] / determinant],
+    ];
+    let mut a = [[0.0; 2]; 2];
+    for row in 0..2 {
+        for column in 0..2 {
+            a[row][column] = qp[row][0] * inverse[0][column] + qp[row][1] * inverse[1][column];
+        }
+    }
+    // The turn is the rotation of A's polar decomposition; the stretches
+    // are its singular values.
+    let turn = (a[1][0] - a[0][1]).atan2(a[0][0] + a[1][1]).abs();
+    let frobenius = a.iter().flatten().map(|value| value * value).sum::<f64>();
+    let area = (a[0][0] * a[1][1] - a[0][1] * a[1][0]).abs();
+    let spread = (frobenius * frobenius - 4.0 * area * area).max(0.0).sqrt();
+    let (larger, smaller) = (
+        ((frobenius + spread) / 2.0).sqrt(),
+        ((frobenius - spread) / 2.0).max(0.0).sqrt(),
+    );
+    Some(FittedChange {
+        shift: (to_mean - from_mean).norm(),
+        stretch: if smaller > 0.0 {
+            larger / smaller
+        } else {
+            f64::INFINITY
+        },
+        turn,
+    })
 }
 
 /// The pointer from the card to a lit rect: from the middle of the card's
@@ -904,7 +1162,7 @@ mod tests {
     use super::*;
     use funfern_app::topology_editor::{OpenCurvePurpose, TopologyProbeTarget};
     use funfern_app::topology_viewport::{
-        RigidTransform, TopologySpanTarget, plan_rigid_transform,
+        RigidTransform, TopologySpanTarget, plan_axis_scale, plan_rigid_transform,
     };
 
     /// Each step is done by the action it asks for, read from the state,
@@ -912,6 +1170,53 @@ mod tests {
     /// tour.
     fn step_index(title: &str) -> usize {
         STEPS.iter().position(|step| step.title == title).unwrap()
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Drag {
+        Move,
+        Stretch,
+        Turn,
+    }
+
+    /// One of the gizmo's drags on the whole obstacle, as one edit about
+    /// its centre: what the four-way grip, the side square and the ring do.
+    fn gizmo_drag(state: &mut Playground, drag: Drag) {
+        let geometry = state.editor.document.model.draft.geometry.clone();
+        let selected = geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == GUIDE_OBSTACLE)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| TopologySpanTarget::Curve(span.id))
+            .collect::<BTreeSet<_>>();
+        let controls = state.guide_obstacle_controls();
+        let pivot = controls
+            .iter()
+            .fold(Point2::new(0.0, 0.0), |sum, point| sum + *point)
+            * (1.0 / controls.len() as f64);
+        let rigid = |translation, rotation_radians| RigidTransform {
+            pivot,
+            translation,
+            rotation_radians,
+            scale: 1.0,
+        };
+        let updates = match drag {
+            Drag::Move => {
+                plan_rigid_transform(&geometry, &selected, rigid(Point2::new(-0.15, 0.0), 0.0))
+            }
+            Drag::Stretch => plan_axis_scale(&geometry, &selected, pivot, 1.4, 1.0),
+            Drag::Turn => plan_rigid_transform(&geometry, &selected, rigid(Point2::default(), 0.6)),
+        }
+        .unwrap();
+        state.editor.begin();
+        state
+            .editor
+            .apply_transform_updates_during_edit(&updates)
+            .unwrap();
+        state.editor.commit();
     }
 
     #[test]
@@ -969,35 +1274,17 @@ mod tests {
                 .unwrap();
         });
         expect_step(&mut state, 3, &|state| {
-            // What the gizmo does on a drag: the whole obstacle selected and
-            // moved by a rigid transform, in one edit.
-            let geometry = state.editor.document.model.draft.geometry.clone();
-            let selected = geometry
-                .curves
-                .iter()
-                .find(|curve| curve.id == GUIDE_OBSTACLE)
-                .unwrap()
-                .spans
-                .iter()
-                .map(|span| TopologySpanTarget::Curve(span.id))
-                .collect::<BTreeSet<_>>();
-            let updates = plan_rigid_transform(
-                &geometry,
-                &selected,
-                RigidTransform {
-                    pivot: Point2::default(),
-                    translation: Point2::new(-0.15, 0.0),
-                    rotation_radians: 0.0,
-                    scale: 1.0,
-                },
-            )
-            .unwrap();
-            state.editor.begin();
-            state
-                .editor
-                .apply_transform_updates_during_edit(&updates)
-                .unwrap();
-            state.editor.commit();
+            // What the gizmo does on its three drags: moved, stretched
+            // sideways and turned, each an edit of its own.
+            // Not done before all three; the last one's update is the
+            // sequence's own, whose clock moves the tour on.
+            for drag in [Drag::Move, Drag::Stretch] {
+                gizmo_drag(state, drag);
+                settle(&mut state.editor);
+                state.guide_update(0.0);
+                assert!(!state.guide_step_done(), "done at {drag:?}");
+            }
+            gizmo_drag(state, Drag::Turn);
         });
         expect_step(&mut state, 4, &|state| {
             let wall =
@@ -1013,6 +1300,13 @@ mod tests {
                 .editor
                 .set_region_material(GUIDE_REGION, GUIDE_GLASS)
                 .unwrap();
+            settle(&mut state.editor);
+            state.guide_update(0.0);
+            assert!(
+                !state.guide_step_done(),
+                "the glass set without the region picked"
+            );
+            state.select_region(GUIDE_REGION);
         });
         expect_step(&mut state, 6, &|state| {
             state.editor.document.presentation.vector_overlay = VectorOverlay::RelativeEnergyFlow;
@@ -1102,7 +1396,7 @@ mod tests {
         let mut state = Playground::default();
         state.start_guide(false);
         settle(&mut state.editor);
-        state.guide.step = step_index("Select and move");
+        state.guide.step = step_index("Select and transform");
         state.guide.baseline = state.guide_baseline();
         // The obstacle's control dragged out of the domain: moved, which
         // the step asks for, but invalid.
@@ -1128,7 +1422,7 @@ mod tests {
             state.guide_update(now);
         }
         assert!(!state.guide_step_done());
-        assert_eq!(state.guide.step, step_index("Select and move"));
+        assert_eq!(state.guide.step, step_index("Select and transform"));
         state.undo();
         settle(&mut state.editor);
         assert_eq!(state.guide_setback(), None);
@@ -1167,14 +1461,14 @@ mod tests {
         };
 
         // The obstacle deleted during its step, and before it.
-        let mut state = at("Select and move");
+        let mut state = at("Select and transform");
         state.editor.remove_curve(GUIDE_OBSTACLE, None).unwrap();
         held(&mut state, GuideSubject::Obstacle);
         let mut state = at("Edit");
         state.editor.remove_curve(GUIDE_OBSTACLE, None).unwrap();
         settle(&mut state.editor);
         state.guide_advance();
-        assert_eq!(state.guide.step, step_index("Select and move"));
+        assert_eq!(state.guide.step, step_index("Select and transform"));
         held(&mut state, GuideSubject::Obstacle);
         state.undo();
         settle(&mut state.editor);
@@ -1215,6 +1509,7 @@ mod tests {
             .editor
             .set_region_material(GUIDE_REGION, GUIDE_GLASS)
             .unwrap();
+        state.select_region(GUIDE_REGION);
         settle(&mut state.editor);
         state.guide_update(15.0);
         assert!(state.guide_step_done());
@@ -1231,6 +1526,105 @@ mod tests {
             state.editor.set_point_source(source).unwrap();
             held(&mut state, GuideSubject::Source);
         }
+    }
+
+    /// The fitted change reads the gizmo's moves, stretches and turns back
+    /// exactly, alone and composed, and a uniform scaling stretches nothing.
+    #[test]
+    fn the_fitted_change_reads_a_move_a_stretch_and_a_turn() {
+        let from = PeriodicCubicSpline::rounded(Point2::new(0.25, 0.3), 0.18)
+            .controls()
+            .to_vec();
+        let map = |scale_x: f64, scale_y: f64, turn: f64, shift: Point2| {
+            from.iter()
+                .map(|point| {
+                    let (x, y) = (point.x * scale_x, point.y * scale_y);
+                    let (sin, cos) = turn.sin_cos();
+                    Point2::new(cos * x - sin * y, sin * x + cos * y) + shift
+                })
+                .collect::<Vec<_>>()
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1.0e-9;
+        let change = fitted_change(&from, &from).unwrap();
+        assert!(close(change.shift, 0.0) && close(change.stretch, 1.0) && close(change.turn, 0.0));
+        let change = fitted_change(&from, &map(1.7, 1.7, 0.0, Point2::default())).unwrap();
+        assert!(close(change.stretch, 1.0), "uniform: {change:?}");
+        let change = fitted_change(&from, &map(1.4, 1.0, 0.6, Point2::new(-0.3, 0.2))).unwrap();
+        assert!(close(change.stretch, 1.4), "{change:?}");
+        assert!(close(change.turn, 0.6), "{change:?}");
+        // Turned about the origin, the centre moves with the shift and the
+        // turn alike.
+        let mean = |points: &[Point2]| {
+            points
+                .iter()
+                .fold(Point2::new(0.0, 0.0), |sum, point| sum + *point)
+                * (1.0 / points.len() as f64)
+        };
+        let to = map(1.4, 1.0, 0.6, Point2::new(-0.3, 0.2));
+        assert!(close(change.shift, (mean(&to) - mean(&from)).norm()));
+        assert_eq!(
+            fitted_change(&from, &from[..3]),
+            None,
+            "points that do not pair"
+        );
+    }
+
+    /// The transform step lights the obstacle as a marquee's cue until it is
+    /// selected, then each grip until its action is ticked, in the card's
+    /// order; a tick stays when the obstacle goes back.
+    #[test]
+    fn the_transform_step_lights_each_grip_until_ticked() {
+        let mut state = Playground::default();
+        state.start_guide(false);
+        settle(&mut state.editor);
+        state.guide.step = step_index("Select and transform");
+        state.guide.baseline = state.guide_baseline();
+        let viewport = viewport();
+        let lit = |state: &Playground| state.guide_light(viewport).map(|(_, hint)| hint);
+        assert_eq!(
+            lit(&state),
+            Some(Some("Drag a rectangle over the whole of it."))
+        );
+        let spans = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == GUIDE_OBSTACLE)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| TopologySpanTarget::Curve(span.id))
+            .collect::<BTreeSet<_>>();
+        state.selection = TopologySelection::Spans(spans);
+        let (_, center, radius, _, _) = state.transform_gizmo(viewport).unwrap();
+        let (grip, _) = state.guide_light(viewport).unwrap();
+        assert!(
+            grip.contains(center + egui::vec2(-radius, radius) * std::f32::consts::FRAC_1_SQRT_2)
+        );
+        for (drag, hint) in [(Drag::Move, "Now stretch"), (Drag::Stretch, "Now turn")] {
+            gizmo_drag(&mut state, drag);
+            settle(&mut state.editor);
+            state.guide_update(1.0);
+            assert!(
+                lit(&state).flatten().unwrap().starts_with(hint),
+                "after {drag:?}: {:?}",
+                lit(&state)
+            );
+        }
+        // Undone, the move and the stretch stay ticked.
+        state.undo();
+        state.undo();
+        settle(&mut state.editor);
+        state.guide_update(2.0);
+        assert_eq!(state.guide.ticks, [true, true, false]);
+        gizmo_drag(&mut state, Drag::Turn);
+        settle(&mut state.editor);
+        state.guide_update(3.0);
+        assert!(state.guide_step_done());
     }
 
     /// The Simulation step lights the frequency until it is changed, then
@@ -1334,7 +1728,7 @@ mod tests {
         let at = state.screen(state.editor.document.model.source.position, viewport);
         assert!(rect.contains(at) && hint.is_none());
         let (rect, _) = state
-            .guide_spotlight(&STEPS[step_index("Select and move")], viewport)
+            .guide_spotlight(&STEPS[step_index("Select and transform")], viewport)
             .unwrap();
         for control in state.guide_obstacle_controls() {
             assert!(rect.contains(state.screen(control, viewport)));
@@ -1355,6 +1749,13 @@ mod tests {
             .spotlights
             .record(Spotlight::RegionMaterial(GUIDE_REGION), combo);
         let materials = &STEPS[step_index("Materials")];
+        // The region first, where the scene draws it, and its list only
+        // once a click has selected it.
+        let (region, hint) = state.guide_spotlight(materials, viewport).unwrap();
+        assert_eq!(hint, Some("Click inside the round region to select it."));
+        let center = state.screen(Point2::new(0.1, -0.45), viewport);
+        assert!(region.contains(center), "{region:?}");
+        state.select_region(GUIDE_REGION);
         assert_eq!(
             state.guide_spotlight(materials, viewport),
             Some((combo, Some("Pick the glass for it.")))
@@ -1378,7 +1779,7 @@ mod tests {
         let view = &STEPS[step_index("View")];
         assert_eq!(
             state.guide_spotlight(view, viewport),
-            Some((combo, Some("Pick the energy flow.")))
+            Some((combo, Some("Pick the Poynting flow.")))
         );
         state.spotlights.record(
             Spotlight::OverlayChoice(VectorOverlay::RelativeEnergyFlow),

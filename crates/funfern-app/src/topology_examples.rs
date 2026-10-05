@@ -1203,19 +1203,24 @@ fn obstacle_over_a_mirror() -> TopologyDocument {
     document
 }
 
-/// The guide scene's obstacle to move, its region to repaint and the
-/// material waiting for it.
+/// The guide scene's obstacle to move, its region to repaint, the curve
+/// round that region, and the material waiting for it.
 pub const GUIDE_OBSTACLE: CurveId = CurveId(1);
 pub const GUIDE_REGION: RegionId = RegionId(2);
+pub const GUIDE_REGION_CURVE: CurveId = CurveId(2);
 pub const GUIDE_GLASS: MaterialId = MaterialId(2);
 
 /// The scene the guided tour opens on, not a gallery entry: a source, a
 /// right-hand wall that reflects until the tour has it made outgoing, a
-/// round obstacle to select and move, and a round region in the background
-/// material with glass in the library for it. Quick to mesh, so the tour
-/// runs on any machine.
+/// round obstacle to select and transform, and a round region in the
+/// background material with glass in the library for it. In the TM skin,
+/// where glass is an optical thing: ε 2.25 and μ 1, an index of 1.5. Quick
+/// to mesh, so the tour runs on any machine.
 pub fn guide_scene() -> TopologyDocument {
     let mut builder = Builder::new();
+    builder.scene.physics = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
     builder.scene.outer_boundaries.sides[OuterSide::Right.index()] =
         OuterBoundaryCondition::Reflecting;
     builder.scene.materials.push(Material {
@@ -1231,15 +1236,19 @@ pub fn guide_scene() -> TopologyDocument {
     });
     let obstacle = builder.hole(PeriodicCubicSpline::rounded(Point2::new(0.25, 0.3), 0.18));
     debug_assert_eq!(obstacle, GUIDE_OBSTACLE);
-    let region = builder.subdomain(
+    let (curve, region) = builder.closed(
         PeriodicCubicSpline::rounded(Point2::new(0.1, -0.45), 0.26),
-        DEFAULT_MATERIAL,
-        MaterialFrame {
-            attachment: MaterialFrameAttachment::FollowRegion,
-            ..MaterialFrame::world()
-        },
+        SpanBehavior::Transmitting,
+        Some((
+            DEFAULT_MATERIAL,
+            MaterialFrame {
+                attachment: MaterialFrameAttachment::FollowRegion,
+                ..MaterialFrame::world()
+            },
+        )),
     );
-    debug_assert_eq!(region, GUIDE_REGION);
+    debug_assert_eq!(curve, GUIDE_REGION_CURVE);
+    debug_assert_eq!(region, Some(GUIDE_REGION));
     let mut document = builder.document();
     document.model.source = source(Point2::new(-0.6, 0.15), 2.0, 18.0, 0.06);
     document

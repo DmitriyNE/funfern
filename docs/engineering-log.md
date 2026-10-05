@@ -19531,3 +19531,29 @@ still holds from 320 to 1600 px). The row is as tall as the theme's padded
 button; at the default row height the hint sat a few pixels above the
 button's middle. `the_gallery_hint_and_the_tour_share_the_top_row` checks
 both at 360 and 1400 px.
+
+## 2026-10-05 — The tour in TM, the gizmo's three drags, and the region clicked first
+
+Three from the user.
+
+- **TM.** The tour's scene was Mechanical, where a glass is a strange
+  thing. It is TM now: the glass's numbers already read ε 2.25 and μ 1, an
+  index of 1.5, and the background is unchanged at speed 1. The View step
+  asks for the Poynting flow, the overlay's name in EM.
+- **The gizmo.** "Select and move" took any change; "Select and transform"
+  asks for a move, a stretch and a turn on one card, a checklist the user
+  chose over three steps. Each item ticks as it is seen and stays ticked
+  (`Guide::ticks`), read from the least-squares affine map from the step's
+  starting controls to the current ones (`fitted_change`): its centre's
+  shift over 0.05, its singular values' ratio over 1.15, its polar turn over
+  15 degrees, exact for the gizmo's moves, stretches and turns in any
+  sequence. The light follows the first item unticked to its grip, placed
+  where the gizmo draws it, with a hint naming the action; before the
+  obstacle is selected it is the marquee's dashed cue, the only light that
+  is dashed now. The checklist's marks are drawn, not glyphs.
+- **The region first.** The Materials step lit the region's row in the
+  panel, so what was being set was never shown in the scene. It now lights
+  the round region in the scene once the panel is open, and the row's
+  material list only after a click has selected the region (outlined in
+  the scene, its row marked); the step is done only with the region
+  selected and the glass on it.
