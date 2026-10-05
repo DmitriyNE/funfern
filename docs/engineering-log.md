@@ -19143,3 +19143,54 @@ lens, along a fiber or round a resonator, wants lines.
   release build, both wasm32 checks and the browser shader compile. No
   device suite: the GPU path is unchanged, the stencils it receives are the
   point stencils probes already send.
+
+## 2026-10-05 — Streamlines in the gallery, and two things the pass turned up
+
+The user's pick, after seeing the lines: the material and Luneburg lenses,
+the GRIN collimator, the phased array, the crystal bend and frustrated
+total internal reflection switch from flow arrows to streamlines; the
+double slit, the Fresnel zone plate and the acoustic whispering gallery get
+lines where they had no overlay. The bent fiber, the ring and the skin
+depths keep their arrows, Brewster its field arrows. A `streamlines` helper
+beside `power_flow` sets the mode, the style and a spacing of 40 px, since
+the application's 54 is sparse for a scene judged at its own launch (the
+defaults are due a retuning of their own, the user's call). The test
+`every_streamline_scene_shows_the_energy_flow` names the nine and pins the
+style to its mode. Judged on a capture of each scene's window 12 s from
+launch, once the fit below was fixed: all nine read; the crystal bend is
+the faintest, still adapting and filling at 12 s, one line already tracing
+the channel round the corner. The nine shipped files under `examples/`
+re-blessed (`FUNFERN_BLESS_EXAMPLES=1`), each gaining the style and the
+spacing, the three new ones the mode and gain too.
+
+- **The spatial soliton's lag was a scan, not the lines.** The user found
+  the Kerr scene laggy on zoom with streamlines, adaptation off or on.
+  Measured: the lattice layout builds in 2 ms there as everywhere, but its
+  upload took 36 to 78 ms against 1.5 ms on the linear scenes, and a zoom
+  rebuilds the lattice on nearly every frame. The temporal point stencil
+  (`CanonicalTemporalPointStencil::from_quadratic`) found its element's
+  primary sample by scanning every primary contribution of the mesh, 10 µs
+  a point. The contributions are pushed seven to an element in element
+  order, the layout `TemporalTableIndex` already relies on, so the lookup
+  is indexed now, the scan kept as a fallback: 4 to 5 ms an upload. Arrows
+  on that scene paid the same per point at a tenth of the points, which is
+  the borderline the user felt. Probes and the area recorders go through
+  the same function and get the same saving.
+- **A scene opened at the wrong zoom, by desktop.** The screenshots for the
+  pass came out at twice the fit, inconsistently between runs. The view
+  fitted the domain on the first frame, and that frame's viewport is not
+  the window's: on this machine it reported 2268 by 1529 points on a
+  1512-point screen, and the user's window tiler then sizes the window to
+  the desktop's layout. The fit is sticky now: `fit_view` keeps the flag,
+  the three camera gestures (pinch, scroll zoom, secondary drag) clear it,
+  so a scene stays fitted to whatever window it ends up in until the user
+  takes the view. `the_view_keeps_fitting_until_a_gesture_takes_the_camera`.
+- **Looking at the gallery without a hand on the mouse.** Launch with an
+  isolated HOME wiped each run, 12 s, then `screencapture -l` of the app's
+  own window, its id from a 12-line Swift `CGWindowListCopyWindowInfo`
+  lister (the owner name is the binary's, the title carries "funfern").
+  Clicking Fit view by script needs assistive access the terminal does not
+  have, which is what made the fit bug worth fixing rather than working
+  around.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, both wasm32 checks and the browser shader compile.

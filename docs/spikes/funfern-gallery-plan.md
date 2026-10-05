@@ -1400,6 +1400,18 @@ showing the mean flow rather than its ripple; the log has the measurement.
     about nothing in the plasma.
 - **Electric-field arrows** in Brewster's TE skin, since the in-plane field's
   direction is the point there.
+- **Streamlines** (5 October, the user's pick after seeing them, judged on a
+  capture of each scene's window 12 s from launch) where the route the power
+  takes is the lesson, 40 px apart since the application's 54 is sparse at a
+  scene's launch: the material and Luneburg lenses (rays bending to the
+  focus), the GRIN collimator (rays made parallel), the phased array (the
+  steered fan), the crystal bend (the channel round the corner; faint at 12 s,
+  still adapting), FTIR (the fan crossing the gap into the block and leaving
+  tilted), and three scenes that had no overlay: the double slit (the energy
+  through both slits), the Fresnel zone plate (through the open zones to the
+  focus) and the acoustic whispering gallery (the sound hugging the wall round
+  to the far side). The bent fiber, the ring and the skin depths keep their
+  arrows.
 - **Material overlays:** the GRIN rod, the Luneburg lens and the fisheye show
   density or permittivity instead of wave speed. That keeps the vacuum at the
   bottom of the palette rather than painting the domain over. The

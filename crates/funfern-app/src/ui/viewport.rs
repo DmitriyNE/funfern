@@ -345,6 +345,58 @@ mod tests {
     /// Both axes step upwards from the lower bound. The vertical one used to
     /// start at the top of the view and test against the bottom, so the grid
     /// had only ever been columns.
+    /// The view keeps fitting the domain to whatever window it is shown in
+    /// until a gesture takes the camera: a window tiler resizes a new window
+    /// after its first frame, and a fit taken once on that frame framed the
+    /// scene for a window that no longer existed.
+    #[test]
+    fn the_view_keeps_fitting_until_a_gesture_takes_the_camera() {
+        let mut state = Playground {
+            fit: true,
+            ..Playground::default()
+        };
+        let context = viewport_context(&mut state);
+        state.fit_view(viewport());
+        assert!(state.fit, "a fit leaves the fit on");
+        let fitted = state.scale;
+        state.fit_view(Rect::from_min_size(Pos2::ZERO, viewport().size() * 2.0));
+        assert!(
+            (state.scale - 2.0 * fitted).abs() < 1.0e-9 * fitted,
+            "refitted to a window twice the size: {} from {fitted}",
+            state.scale
+        );
+        assert!(state.fit);
+
+        // A pan with the secondary button takes the camera.
+        let from = Pos2::new(400.0, 300.0);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut time = 0.1;
+        for events in [
+            vec![egui::Event::PointerMoved(from), press(true)],
+            vec![egui::Event::PointerMoved(from + egui::vec2(30.0, 0.0))],
+            vec![egui::Event::PointerMoved(from + egui::vec2(60.0, 0.0))],
+            vec![press(false)],
+        ] {
+            time += 0.05;
+            viewport_frame(&mut state, &context, time, egui::Modifiers::NONE, events);
+        }
+        assert!(!state.fit, "the pan took the camera");
+        let taken = state.center;
+        viewport_frame(
+            &mut state,
+            &context,
+            time + 0.05,
+            egui::Modifiers::NONE,
+            vec![],
+        );
+        assert_eq!(state.center, taken, "and the view stays where it was put");
+    }
+
     #[test]
     fn the_grid_covers_both_axes_of_the_view() {
         // An 800x600 view at 300 pixels per world unit, centred on the origin.

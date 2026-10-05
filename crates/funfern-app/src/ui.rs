@@ -733,13 +733,17 @@ impl Playground {
         self.transform(viewport)
             .screen_to_world(ScreenPoint::new(point.x as f64, point.y as f64))
     }
+    /// Frames the domain in `viewport`. The fit stays on until a gesture
+    /// takes the camera, so the view is fitted to the window the scene is
+    /// actually shown in rather than to the first frame's: a window tiler
+    /// resizes a new window after it appears, and fitted once on that first
+    /// frame the scene opened at twice the zoom, or more, by desktop.
     fn fit_view(&mut self, viewport: Rect) {
         let domain = self.editor.document.model.draft.geometry.domain;
         self.center = domain.center();
         self.scale = (viewport.width() as f64 / domain.width())
             .min(viewport.height() as f64 / domain.height())
             * 0.88;
-        self.fit = false;
     }
     fn invalidate_samples(&mut self) {
         self.sampled_revision = u64::MAX;

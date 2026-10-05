@@ -14,7 +14,10 @@ running; this file covers using it.
   ☰, and last Examples to its picture. A phone held upright keeps File,
   Examples and Reset. Below 700 px the inspector floats over the viewport
   instead of docking beside it, and a launch opens none, so the scene and its
-  card are what a phone shows first. Edit contains
+  card are what a phone shows first. A scene opens fitted to the window and
+  stays fitted while the window is still being sized, by a tiler for one,
+  until the first pan or zoom takes the view over; Fit view hands it back.
+  Edit contains
   selection, transforms, topology, and boundary tools; View contains visual
   overlays and field intensity; Simulation contains mesh and solver settings;
   Materials contains the material library; Probes contains receivers and recording

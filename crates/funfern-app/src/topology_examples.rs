@@ -3,7 +3,7 @@
 use crate::document::{
     FarFieldSettings, LineProbeQuantity, LineProbeRepresentation, MaterialOverlay,
     MaterialProperty, PresentationSettings, ProbeId, ProbeReadout, ProbeReadouts,
-    ProbeSamplingPreset, TransferReference, VectorOverlay,
+    ProbeSamplingPreset, TransferReference, VectorOverlay, VectorOverlayStyle,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -1055,6 +1055,19 @@ fn power_flow(presentation: &mut PresentationSettings) {
     presentation.vector_overlay_gain = ARROW_GAIN;
 }
 
+/// The distance between a gallery scene's streamlines, in screen pixels. The
+/// application's default spacing is on the sparse side for a scene judged at
+/// its own launch; the defaults are due a retuning of their own.
+const LINE_SPACING: f32 = 40.0;
+
+/// Streamlines of the power flow: the route it takes, through a lens, round a
+/// corner or across a gap, is what the scene is about.
+fn streamlines(presentation: &mut PresentationSettings) {
+    power_flow(presentation);
+    presentation.vector_overlay_style = VectorOverlayStyle::Streamlines;
+    presentation.vector_overlay_density = LINE_SPACING;
+}
+
 /// The seconds a readout keeps: a probe on a mode that takes that long to
 /// build up shows all of it.
 const WHOLE_HISTORY: f64 = 10.0;
@@ -1253,6 +1266,8 @@ fn double_slit_with(half_width: f64, back: f64, source_x: f64) -> TopologyDocume
     });
     document.readouts.set_probe(ProbeId(1), profile_readout());
     document.readouts.far_field = polar_readout();
+    // The energy bunching into the bright fringes and skirting the dark.
+    streamlines(&mut document.presentation);
     document
 }
 
@@ -1285,7 +1300,7 @@ fn material_lens() -> TopologyDocument {
     let mut document = builder.document();
     document.model.source = source(Point2::new(-0.72, 0.0), 3.5, 16.0, 0.045);
     // The power converging behind the lens.
-    power_flow(&mut document.presentation);
+    streamlines(&mut document.presentation);
     document
 }
 
@@ -1362,7 +1377,7 @@ fn grin_rod_with(dn: f64) -> TopologyDocument {
     // leaving the rod straight.
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::Density);
     document.presentation.material_overlay_opacity = 0.45;
-    power_flow(&mut document.presentation);
+    streamlines(&mut document.presentation);
     document.readouts.set_probe(ProbeId(1), profile_readout());
     document
 }
@@ -1490,7 +1505,7 @@ fn luneburg_lens_with(lens: bool) -> TopologyDocument {
     // The permittivity, 1 in the vacuum, and the rays' power bending onto
     // the focus.
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::Density);
-    power_flow(&mut document.presentation);
+    streamlines(&mut document.presentation);
     document
         .readouts
         .set_probe(ProbeId(1), area_readout(false, 2.0));
@@ -1535,7 +1550,7 @@ fn phased_array() -> TopologyDocument {
         MaterialOverlay::Property(MaterialProperty::VolumeSource);
     document.presentation.material_overlay_opacity = 0.62;
     // The beam the phase ramp steers.
-    power_flow(&mut document.presentation);
+    streamlines(&mut document.presentation);
     document.readouts.far_field = polar_readout();
     document
 }
@@ -3141,7 +3156,7 @@ fn crystal_bend() -> TopologyDocument {
     });
     // The power following the channel round the corner, over rods without
     // their control polygons and handles.
-    power_flow(&mut document.presentation);
+    streamlines(&mut document.presentation);
     document.presentation.control_polygons = false;
     document.presentation.handles = false;
     document.readouts.set_probe(ProbeId(1), profile_readout());
@@ -3297,6 +3312,8 @@ fn acoustic_gallery_with(wall: bool) -> TopologyDocument {
     document
         .readouts
         .set_probe(ProbeId(2), area_readout(false, 2.0));
+    // The sound travelling round the wall.
+    streamlines(&mut document.presentation);
     document
 }
 
@@ -3607,6 +3624,8 @@ fn zone_plate_with(plate: bool) -> TopologyDocument {
     });
     document.readouts.set_probe(ProbeId(1), field_readout(2.0));
     document.readouts.set_probe(ProbeId(2), profile_readout());
+    // The energy through the open zones converging on the focus.
+    streamlines(&mut document.presentation);
     document
 }
 
@@ -3819,7 +3838,7 @@ fn tunnelling_with(gap: f64, glass: bool) -> TopologyDocument {
         });
     }
     // The power tunnelling across the gap and leaving as a tilted beam.
-    power_flow(&mut document.presentation);
+    streamlines(&mut document.presentation);
     document.readouts.set_probe(ProbeId(1), field_readout(2.0));
     document.readouts.set_probe(ProbeId(2), field_readout(2.0));
     document
@@ -4701,6 +4720,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A scene drawn as streamlines shows the energy flow, the one field the
+    /// lines are of; a style without its mode would be a choice that draws
+    /// nothing different.
+    #[test]
+    fn every_streamline_scene_shows_the_energy_flow() {
+        let mut lined = Vec::new();
+        for example in catalog() {
+            let presentation = &example.document.presentation;
+            if presentation.vector_overlay_style == VectorOverlayStyle::Streamlines {
+                assert_eq!(
+                    presentation.vector_overlay,
+                    VectorOverlay::RelativeEnergyFlow,
+                    "{}",
+                    example.name
+                );
+                lined.push(example.name);
+            }
+        }
+        assert_eq!(
+            lined,
+            [
+                "Double slit",
+                "Phased array",
+                "Material lens",
+                "GRIN collimator",
+                "Luneburg lens",
+                "Fresnel zone plate",
+                "Frustrated total internal reflection",
+                "Crystal bend",
+                "Acoustic whispering gallery",
+            ]
+        );
     }
 
     /// Every gallery probe opens on what its claim reads: one or two plots of

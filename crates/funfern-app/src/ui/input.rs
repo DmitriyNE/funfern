@@ -51,6 +51,8 @@ impl Playground {
                 self.touch_navigation = true;
                 self.suppress_touch_click = true;
             }
+            // A gesture takes the camera from the fit.
+            self.fit = false;
             self.center = self.center
                 + Point2::new(
                     -gesture.translation_delta.x as f64 / self.scale,
@@ -79,6 +81,7 @@ impl Playground {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                    self.fit = false;
                     let before = self.world(pos, r);
                     self.scale = (self.scale * (scroll as f64 * 0.0015).exp()).clamp(20.0, 5000.0);
                     let after = self.world(pos, r);
@@ -88,6 +91,7 @@ impl Playground {
             }
         }
         if response.dragged_by(egui::PointerButton::Secondary) {
+            self.fit = false;
             let delta = response.drag_delta();
             self.center = self.center - Point2::new(delta.x as f64, -delta.y as f64) / self.scale;
             self.invalidate_samples();

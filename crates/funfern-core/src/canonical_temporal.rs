@@ -543,18 +543,43 @@ impl CanonicalTemporalPointStencil {
             std::array::from_fn(|local| samples[local].coefficient.into());
         let mut complementary: CanonicalTemporalCoefficientSample = samples[0].coefficient.into();
         complementary.coordinates = coordinates;
-        let mut primary: CanonicalTemporalCoefficientSample = operator
-            .base
-            .primary_contributions()
-            .iter()
-            .zip(operator.primary.iter())
-            .find(|(contribution, sample)| {
-                contribution.element as usize == element && sample.coefficient.material == material
+        // The contributions are pushed seven to an element in element order,
+        // the layout the GPU's table index relies on too, so the element's
+        // own sit at `element × 7`. Scanning every contribution per stencil
+        // cost 10 µs a point: 50 to 80 ms for a streamline lattice on a Kerr
+        // scene, at every zoom step. The scan remains the fallback for any
+        // layout that does not hold the block.
+        let contributions = operator.base.primary_contributions();
+        let owns = |contribution: &crate::LinearPrimaryContribution,
+                    sample: &TemporalPrimarySample| {
+            contribution.element as usize == element && sample.coefficient.material == material
+        };
+        let block = element
+            .checked_mul(7)
+            .and_then(|first| {
+                contributions
+                    .get(first..first + 7)
+                    .zip(operator.primary.window(first, 7))
             })
-            .map(|(_, sample)| sample.coefficient.into())
-            .ok_or(WaveError::InvalidMesh(
-                "the point stencil has no temporal primary samples",
-            ))?;
+            .and_then(|(contributions, samples)| {
+                contributions
+                    .iter()
+                    .zip(samples)
+                    .find(|(contribution, sample)| owns(contribution, sample))
+                    .map(|(_, sample)| sample.coefficient)
+            });
+        let coefficient = match block {
+            Some(coefficient) => coefficient,
+            None => contributions
+                .iter()
+                .zip(operator.primary.iter())
+                .find(|(contribution, sample)| owns(contribution, sample))
+                .map(|(_, sample)| sample.coefficient)
+                .ok_or(WaveError::InvalidMesh(
+                    "the point stencil has no temporal primary samples",
+                ))?,
+        };
+        let mut primary: CanonicalTemporalCoefficientSample = coefficient.into();
         primary.coordinates = coordinates;
         Ok(Self {
             fixed,
