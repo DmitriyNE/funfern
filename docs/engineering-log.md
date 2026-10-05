@@ -19519,3 +19519,15 @@ now comes back off, as a refused open-curve ending already did, and the
 first stays, so the next click tries again; the reason stays in the status.
 `a_refused_two_click_shape_takes_its_second_click_back` failed before the
 fix, for the circle, and covers the rectangle too.
+
+## 2026-10-05 — The gallery's hint beside Guided tour
+
+Reported: the gallery's hint sat below Guided tour, which had a row of its
+own, leaving a gap beside the button. Both are on one row now
+(`egui::Sides`, shrink_left): the button at the right end, placed first, and
+the hint taking what is left, wrapping beside it at a phone's width, so the
+window stays as wide as its grid (`the_gallery_window_is_as_wide_as_its_grid`
+still holds from 320 to 1600 px). The row is as tall as the theme's padded
+button; at the default row height the hint sat a few pixels above the
+button's middle. `the_gallery_hint_and_the_tour_share_the_top_row` checks
+both at 360 and 1400 px.

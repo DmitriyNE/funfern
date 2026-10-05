@@ -248,14 +248,26 @@ impl Playground {
             .constrain_to(between_bars)
             .default_pos(between_bars.left_top() + egui::vec2(16.0, 8.0))
             .show(ctx, |ui| {
-                // On its own row above the heading, where it is seen; beside
-                // the heading it kept the heading from wrapping at a phone's
-                // width and made the window wider than its grid. The row is
-                // a `horizontal`: a bare right-to-left layout takes the whole
-                // remaining height for itself and pushed the grid out of the
-                // window.
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The hint and Guided tour share the top row, the button at
+                // its right end, where it is seen. The button is placed first
+                // and the hint takes what is left, wrapping beside it at a
+                // phone's width rather than widening the window past its
+                // grid; on a row of its own the button left a gap beside it.
+                // As tall as the button, which the theme pads past the
+                // default row height the sides are centred in.
+                let row = ui.text_style_height(&egui::TextStyle::Button)
+                    + 2.0 * ui.spacing().button_padding.y;
+                egui::Sides::new().height(row).shrink_left().show(
+                    ui,
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                "Pick a scene to open it. Hover one for what it shows.",
+                            )
+                            .wrap(),
+                        );
+                    },
+                    |ui| {
                         if ui
                             .button("Guided tour")
                             .on_hover_text("A walk through the app, step by step")
@@ -263,9 +275,8 @@ impl Playground {
                         {
                             tour = true;
                         }
-                    });
-                });
-                ui.label("Pick a scene to open it. Hover one for what it shows.");
+                    },
+                );
                 // The minimum as well as the maximum: an auto-sized window
                 // offers its content the size it had the frame before, so a
                 // scroll area left to shrink never grows past its first frame.
@@ -1638,6 +1649,56 @@ mod tests {
                 gallery_width(columns)
             );
             assert!(window.right() <= width + 0.5, "{width}: {window:?}");
+        }
+    }
+
+    /// The hint and Guided tour share the gallery's top row, the button at
+    /// the right end and the hint beside it, wrapping at a phone's width
+    /// rather than pushing the button below or out of the window.
+    #[test]
+    fn the_gallery_hint_and_the_tour_share_the_top_row() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.enable_accesskit();
+        let mut state = Playground {
+            examples_open: true,
+            ..Playground::default()
+        };
+        for width in [360.0, 1400.0] {
+            state.viewport_rect =
+                egui::Rect::from_min_max(egui::pos2(0.0, 40.0), egui::pos2(width, 820.0));
+            let mut widgets = vec![];
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 844.0),
+                    )),
+                    ..egui::RawInput::default()
+                };
+                let output = context.run_ui(input, |ui| state.examples_window(ui.ctx()));
+                widgets = laid_out(&output);
+            }
+            let find = |prefix: &str| {
+                widgets
+                    .iter()
+                    .find(|widget| widget.label.starts_with(prefix))
+                    .unwrap_or_else(|| panic!("no {prefix}"))
+                    .rect
+            };
+            let (hint, tour) = (find("Pick a scene"), find("Guided tour"));
+            let window = context
+                .memory(|memory| memory.area_rect(egui::Id::new("examples")))
+                .unwrap();
+            assert!(
+                hint.top() < tour.bottom() && tour.top() < hint.bottom(),
+                "at {width} the hint {hint:?} is not beside the button {tour:?}"
+            );
+            assert!(hint.right() <= tour.left(), "{width}: {hint:?} {tour:?}");
+            assert!(
+                tour.right() <= window.right(),
+                "{width}: {tour:?} {window:?}"
+            );
         }
     }
 
