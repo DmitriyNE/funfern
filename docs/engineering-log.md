@@ -19308,3 +19308,14 @@ dig.
   script here.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, both wasm32 checks and the browser shader compile.
+
+## 2026-10-05 — The top bar's buttons sat against the window's edge
+
+Noticed by the user on the tour's first-launch picture: the bar's buttons
+too close to the top of the window. Measured on the capture at two pixels a
+point: 2 pt above the buttons, 23 pt of button, 16 pt below. The bar is a
+top panel of exactly 42 pt and its row was laid out at the top, where
+egui's top-panel frame leaves 2 pt; the panel's spare height all fell
+below. The row is `horizontal_centered` now: 9.5 pt above, 8.5 below. The
+folds measure their widths from the same row, so nothing else moved; the
+chrome tests pass unchanged.

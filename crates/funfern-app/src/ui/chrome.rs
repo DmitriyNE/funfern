@@ -194,7 +194,10 @@ impl Playground {
             right: egui::Rect::NOTHING,
         };
         egui::Panel::top("top").exact_size(42.0).show(root, |ui| {
-            ui.horizontal(|ui| {
+            // Centred in the bar's height: a top panel's frame leaves 2 pt
+            // above its first row, and a plain row put the buttons 2 pt
+            // from the window's edge with the bar's spare 16 pt below them.
+            ui.horizontal_centered(|ui| {
                 let fold = ToolbarFold::fitting(ui, ui.available_width());
                 let (left, right) = fold.items();
                 fit.fold = fold;
