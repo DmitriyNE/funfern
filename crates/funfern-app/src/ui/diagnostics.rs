@@ -250,15 +250,20 @@ impl Playground {
             .show(ctx, |ui| {
                 // On its own row above the heading, where it is seen; beside
                 // the heading it kept the heading from wrapping at a phone's
-                // width and made the window wider than its grid.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .button("Guided tour")
-                        .on_hover_text("A walk through the app, step by step")
-                        .clicked()
-                    {
-                        tour = true;
-                    }
+                // width and made the window wider than its grid. The row is
+                // a `horizontal`: a bare right-to-left layout takes the whole
+                // remaining height for itself and pushed the grid out of the
+                // window.
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("Guided tour")
+                            .on_hover_text("A walk through the app, step by step")
+                            .clicked()
+                        {
+                            tour = true;
+                        }
+                    });
                 });
                 ui.label("Pick a scene to open it. Hover one for what it shows.");
                 // The minimum as well as the maximum: an auto-sized window

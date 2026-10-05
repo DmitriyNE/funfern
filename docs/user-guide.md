@@ -15,16 +15,18 @@ running; this file covers using it.
   Examples and Reset. Below 700 px the inspector floats over the viewport
   instead of docking beside it, and a launch opens none, so the scene and its
   card are what a phone shows first. A first launch, with nothing to restore,
-  opens the guided tour: a small scene with a source, a round obstacle and a
-  round region, and a card over it that walks through the app in nine steps,
-  each naming one thing to do and lighting the control to do it with, the
-  rest of the screen dimmed: pause and run the wave, drag the source, select
-  the obstacle from Edit, draw a wall, give the region the glass in
-  Materials, switch the vector overlay on in View, open Simulation, drop a
-  point probe from Probes, and open the gallery. A step moves on a moment
-  after its action shows, and Next and Skip the tour are always there. The
-  tour is seen once, remembered beside the autosave, and is back under
-  Guided tour in the Examples window and on the scene card whenever wanted.
+  opens the guided tour: a small scene with a source, an echoing right-hand
+  wall, a round obstacle and a round region, the panels closed, and a card
+  over it that walks through the app in ten steps, each naming one thing to
+  do and lighting the control to do it with, the rest of the screen dimmed:
+  pause and run the wave; drag the source; open Edit, click the right wall
+  and give it an outgoing law; drag a rectangle round the obstacle and move
+  it by its gizmo; draw a wall; give the region the glass in Materials;
+  switch the vector overlay on in View; open Simulation; drop a point probe
+  from Probes; and open the gallery. A step moves on a moment after its
+  action shows, and Next and Skip the tour are always there. The tour is
+  seen once, remembered beside the autosave, and is back under Guided tour
+  at the top of the Examples window and on the scene card whenever wanted.
   A scene opens fitted to the window and
   stays fitted while the window is still being sized, by a tiler for one,
   until the first pan or zoom takes the view over; Fit view hands it back.

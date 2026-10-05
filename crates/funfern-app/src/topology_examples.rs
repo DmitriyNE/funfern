@@ -1203,16 +1203,21 @@ fn obstacle_over_a_mirror() -> TopologyDocument {
     document
 }
 
-/// The guide scene's region to repaint and the material waiting for it.
+/// The guide scene's obstacle to move, its region to repaint and the
+/// material waiting for it.
+pub const GUIDE_OBSTACLE: CurveId = CurveId(1);
 pub const GUIDE_REGION: RegionId = RegionId(2);
 pub const GUIDE_GLASS: MaterialId = MaterialId(2);
 
 /// The scene the guided tour opens on, not a gallery entry: a source, a
-/// round reflecting obstacle to select, and a round region in the
-/// background material with glass in the library for it. Quick to mesh, so
-/// the tour runs on any machine.
+/// right-hand wall that reflects until the tour has it made outgoing, a
+/// round obstacle to select and move, and a round region in the background
+/// material with glass in the library for it. Quick to mesh, so the tour
+/// runs on any machine.
 pub fn guide_scene() -> TopologyDocument {
     let mut builder = Builder::new();
+    builder.scene.outer_boundaries.sides[OuterSide::Right.index()] =
+        OuterBoundaryCondition::Reflecting;
     builder.scene.materials.push(Material {
         id: GUIDE_GLASS,
         name: "Glass".into(),
@@ -1224,7 +1229,8 @@ pub fn guide_scene() -> TopologyDocument {
         color: [61, 116, 139],
         ..Material::default_medium()
     });
-    builder.hole(PeriodicCubicSpline::rounded(Point2::new(0.25, 0.3), 0.18));
+    let obstacle = builder.hole(PeriodicCubicSpline::rounded(Point2::new(0.25, 0.3), 0.18));
+    debug_assert_eq!(obstacle, GUIDE_OBSTACLE);
     let region = builder.subdomain(
         PeriodicCubicSpline::rounded(Point2::new(0.1, -0.45), 0.26),
         DEFAULT_MATERIAL,
@@ -4769,6 +4775,12 @@ mod tests {
         let draft = &document.model.draft;
         let region = draft.region(GUIDE_REGION).expect("the region to repaint");
         assert_eq!(region.material, DEFAULT_MATERIAL);
+        assert_eq!(draft.geometry.curves[0].id, GUIDE_OBSTACLE);
+        assert_eq!(
+            draft.outer_boundaries.sides[OuterSide::Right.index()],
+            OuterBoundaryCondition::Reflecting,
+            "the right wall echoes until the tour has it made outgoing"
+        );
         assert!(
             draft
                 .materials

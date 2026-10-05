@@ -9,8 +9,7 @@
 
 use super::*;
 use funfern_app::document::VectorOverlay;
-use funfern_app::topology_examples::{GUIDE_REGION, guide_scene};
-use funfern_app::topology_viewport::TopologySpanTarget;
+use funfern_app::topology_examples::{GUIDE_OBSTACLE, GUIDE_REGION, guide_scene};
 
 /// A control a step points at. The top bar and the panels record where they
 /// drew these this frame; a step asks for its controls in order of
@@ -28,6 +27,8 @@ pub(super) enum Spotlight {
     RegionMaterial(RegionId),
     /// The source, where the viewport draws it.
     Source,
+    /// The obstacle, where the viewport draws it.
+    Obstacle,
 }
 
 /// Where the spotlit controls were drawn this frame.
@@ -71,7 +72,7 @@ const GUIDE_CARD_WIDTH: f32 = 380.0;
 
 const PANELS_HINT: Option<&str> = Some("The panel is under Panels in the bar.");
 
-pub(super) static STEPS: [GuideStep; 9] = [
+pub(super) static STEPS: [GuideStep; 10] = [
     GuideStep {
         title: "Welcome to funfern",
         text: "The wave runs as soon as its mesh is ready. Run and Pause, Step and Reset \
@@ -91,16 +92,27 @@ pub(super) static STEPS: [GuideStep; 9] = [
     },
     GuideStep {
         title: "Edit",
-        text: "Edit is the selection: click a curve or a boundary and the panel offers \
-               its tools, from reshaping it to its boundary condition and topology. Click \
-               the round obstacle.",
+        text: "Edit is the selection: click a curve or a wall and the panel offers its \
+               tools, from reshaping it to its boundary law. The right-hand wall echoes. \
+               Open Edit, click that wall and give it an outgoing law; the echo stops.",
         targets: &[
             (Spotlight::Tab(InspectorPanel::Edit), None),
             (Spotlight::Panels, PANELS_HINT),
         ],
         done: |state| {
-            matches!(&state.selection, TopologySelection::Spans(spans)
-                if spans.iter().any(|span| matches!(span, TopologySpanTarget::Curve(_))))
+            state.editor.document.model.draft.outer_boundaries.sides[OuterSide::Right.index()]
+                != state.guide.baseline.right_wall
+        },
+    },
+    GuideStep {
+        title: "Select and move",
+        text: "Drag a rectangle round the round obstacle to select the whole of it. A gizmo \
+               appears on the selection, with handles to move, scale and turn it. Drag the \
+               gizmo and put the obstacle somewhere else.",
+        targets: &[(Spotlight::Obstacle, None)],
+        done: |state| {
+            state.guide_obstacle_controls() != state.guide.baseline.obstacle
+                && !state.editor.editing()
         },
     },
     GuideStep {
@@ -186,9 +198,12 @@ pub(super) static STEPS: [GuideStep; 9] = [
 
 /// What the scene held when the tour started, for the steps that ask for a
 /// change.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct GuideBaseline {
     pub(super) source: Point2,
+    pub(super) right_wall: OuterBoundaryCondition,
+    /// The obstacle's control points.
+    pub(super) obstacle: Vec<Point2>,
     pub(super) curves: usize,
     pub(super) region_material: Option<MaterialId>,
     pub(super) probes: usize,
@@ -216,6 +231,9 @@ impl Playground {
         match self.set_document(guide_scene(), history, true) {
             Ok(()) => {
                 self.examples_open = false;
+                // Each panel's step opens that panel; one already open would
+                // make its step a puzzle.
+                self.inspector = None;
                 self.guide = Guide {
                     active: true,
                     step: 0,
@@ -235,6 +253,8 @@ impl Playground {
         let model = &self.editor.document.model;
         GuideBaseline {
             source: model.source.position,
+            right_wall: model.draft.outer_boundaries.sides[OuterSide::Right.index()],
+            obstacle: self.guide_obstacle_controls(),
             curves: model.draft.geometry.curves.len(),
             region_material: model
                 .draft
@@ -242,6 +262,24 @@ impl Playground {
                 .map(|region| region.material),
             probes: model.probes.len(),
         }
+    }
+
+    /// The obstacle's control points, which any move, turn or scaling of it
+    /// changes; empty once it is gone.
+    pub(super) fn guide_obstacle_controls(&self) -> Vec<Point2> {
+        self.editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == GUIDE_OBSTACLE)
+            .map(|curve| match &curve.spline {
+                CurveSpline::Closed(spline) => spline.controls().to_vec(),
+                CurveSpline::Open(spline) => spline.controls().to_vec(),
+            })
+            .unwrap_or_default()
     }
 
     /// Whether the current step's action shows in the state.
@@ -314,6 +352,16 @@ impl Playground {
                             self.screen(source.position, viewport),
                             egui::vec2(48.0, 48.0),
                         )
+                    })
+                }
+                Spotlight::Obstacle => {
+                    let controls = self.guide_obstacle_controls();
+                    (!controls.is_empty()).then(|| {
+                        let mut rect = Rect::NOTHING;
+                        for control in controls {
+                            rect.extend_with(self.screen(control, viewport));
+                        }
+                        rect.expand(10.0)
                     })
                 }
                 other => self.spotlights.rect(*other),
@@ -416,16 +464,27 @@ mod tests {
     use super::*;
     use funfern_app::topology_editor::{OpenCurvePurpose, TopologyProbeTarget};
     use funfern_app::topology_examples::GUIDE_GLASS;
+    use funfern_app::topology_viewport::{
+        RigidTransform, TopologySpanTarget, plan_rigid_transform,
+    };
 
     /// Each step is done by the action it asks for, read from the state,
     /// and a done step moves on after its moment, the last one ending the
     /// tour.
+    fn step_index(title: &str) -> usize {
+        STEPS.iter().position(|step| step.title == title).unwrap()
+    }
+
     #[test]
     fn the_steps_are_done_by_the_actions_they_ask_for() {
         let mut state = Playground::default();
         state.start_guide(false);
         assert!(state.guide.active);
         assert_eq!(state.example_opened, None, "the guide scene has no card");
+        assert_eq!(
+            state.inspector, None,
+            "the panels are closed for their steps"
+        );
         let mut now = 10.0;
         let mut expect_step =
             |state: &mut Playground, step: usize, action: &dyn Fn(&mut Playground)| {
@@ -461,10 +520,46 @@ mod tests {
             state.editor.set_point_source(source).unwrap();
         });
         expect_step(&mut state, 2, &|state| {
-            let span = state.editor.document.model.draft.geometry.curves[0].spans[0].id;
-            state.selection = TopologySelection::Spans([TopologySpanTarget::Curve(span)].into());
+            state
+                .editor
+                .set_outer_condition(
+                    &[OuterSide::Right].into(),
+                    OuterBoundaryCondition::SecondOrderOutgoing,
+                )
+                .unwrap();
         });
         expect_step(&mut state, 3, &|state| {
+            // What the gizmo does on a drag: the whole obstacle selected and
+            // moved by a rigid transform, in one edit.
+            let geometry = state.editor.document.model.draft.geometry.clone();
+            let selected = geometry
+                .curves
+                .iter()
+                .find(|curve| curve.id == GUIDE_OBSTACLE)
+                .unwrap()
+                .spans
+                .iter()
+                .map(|span| TopologySpanTarget::Curve(span.id))
+                .collect::<BTreeSet<_>>();
+            let updates = plan_rigid_transform(
+                &geometry,
+                &selected,
+                RigidTransform {
+                    pivot: Point2::default(),
+                    translation: Point2::new(-0.15, 0.0),
+                    rotation_radians: 0.0,
+                    scale: 1.0,
+                },
+            )
+            .unwrap();
+            state.editor.begin();
+            state
+                .editor
+                .apply_transform_updates_during_edit(&updates)
+                .unwrap();
+            state.editor.commit();
+        });
+        expect_step(&mut state, 4, &|state| {
             let wall =
                 OpenCubicSpline::polyline(vec![Point2::new(-0.3, 0.8), Point2::new(-0.3, 0.5)])
                     .unwrap();
@@ -473,19 +568,19 @@ mod tests {
                 .create_open_curve(wall, OpenCurvePurpose::BoundaryBaffle, None, None)
                 .unwrap();
         });
-        expect_step(&mut state, 4, &|state| {
+        expect_step(&mut state, 5, &|state| {
             state
                 .editor
                 .set_region_material(GUIDE_REGION, GUIDE_GLASS)
                 .unwrap();
         });
-        expect_step(&mut state, 5, &|state| {
+        expect_step(&mut state, 6, &|state| {
             state.editor.document.presentation.vector_overlay = VectorOverlay::RelativeEnergyFlow;
         });
-        expect_step(&mut state, 6, &|state| {
+        expect_step(&mut state, 7, &|state| {
             state.inspector = Some(InspectorPanel::Simulation);
         });
-        expect_step(&mut state, 7, &|state| {
+        expect_step(&mut state, 8, &|state| {
             let id = state
                 .editor
                 .create_probe(
@@ -496,7 +591,7 @@ mod tests {
                 .unwrap();
             state.probe_windows.insert(id);
         });
-        expect_step(&mut state, 8, &|state| {
+        expect_step(&mut state, 9, &|state| {
             state.examples_open = true;
         });
         assert!(!state.guide.active, "the last step ends the tour");
@@ -522,8 +617,8 @@ mod tests {
     fn the_spotlight_falls_back_along_the_steps_targets() {
         let mut state = Playground::default();
         state.start_guide(false);
-        state.guide.step = 7;
-        let step = &STEPS[7];
+        state.guide.step = step_index("Probes");
+        let step = &STEPS[state.guide.step];
         let viewport = viewport();
         assert_eq!(
             state.guide_spotlight(step, viewport),
@@ -550,11 +645,18 @@ mod tests {
         state.spotlights.clear();
         assert_eq!(state.guide_spotlight(step, viewport), None);
 
-        // The source is lit where the viewport draws it.
-        state.guide.step = 1;
-        let (rect, hint) = state.guide_spotlight(&STEPS[1], viewport).unwrap();
+        // The source and the obstacle are lit where the viewport draws them.
+        let (rect, hint) = state
+            .guide_spotlight(&STEPS[step_index("The source")], viewport)
+            .unwrap();
         let at = state.screen(state.editor.document.model.source.position, viewport);
         assert!(rect.contains(at) && hint.is_none());
+        let (rect, _) = state
+            .guide_spotlight(&STEPS[step_index("Select and move")], viewport)
+            .unwrap();
+        for control in state.guide_obstacle_controls() {
+            assert!(rect.contains(state.screen(control, viewport)));
+        }
     }
 
     /// The card shows the step and Skip ends the tour.

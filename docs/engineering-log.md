@@ -19319,3 +19319,29 @@ egui's top-panel frame leaves 2 pt; the panel's spare height all fell
 below. The row is `horizontal_centered` now: 9.5 pt above, 8.5 below. The
 folds measure their widths from the same row, so nothing else moved; the
 chrome tests pass unchanged.
+
+## 2026-10-05 — The tour, second pass
+
+The user's look at the first pass, four points, all taken.
+
+- **The gallery window had lost its grid.** The Guided tour button's row
+  was a bare right-to-left layout at the top of the window, and such a
+  layout takes the whole remaining height for itself: the button sat alone
+  in a tall empty window with the grid pushed out. Wrapped in a
+  `horizontal`, which is one line tall. The width test had passed, since
+  only the height was wrong; the lesson is to capture every window a change
+  touches, which a scratch build with the gallery open at launch now did.
+- **Edit was already open.** The tour starts with the inspector closed, so
+  each panel's step opens its panel.
+- **The Edit step does something visible.** The guide scene's right-hand
+  wall reflects (`GUIDE_OBSTACLE`, `GUIDE_REGION` and the wall in
+  `guide_scene`); the step says to click it and give it an outgoing law, and
+  is done when the wall's law has changed from the baseline's, so the echo
+  stopping is the lesson.
+- **A select-and-move step** after Edit: a marquee round the obstacle, the
+  gizmo on the selection, the obstacle dragged elsewhere. Done when the
+  obstacle's control points differ from the baseline's with the edit
+  committed; the test moves it the way the gizmo does, a rigid transform
+  through `plan_rigid_transform` and `apply_transform_updates_during_edit`.
+  The obstacle is lit where the viewport draws it, like the source. Ten
+  steps now.
