@@ -19490,3 +19490,20 @@ source switched off (Enabled) had the same shape: no marker to drag.
 - Once a held subject is back the step takes its baseline again (`held`),
   or the subject's return, against a baseline taken without it, would count
   as the step's action.
+
+## 2026-10-05 — The circle tool takes a centre and then a radius
+
+Asked for: the Circle tool placed a radius-0.15 circle at one click. It now
+takes two, as the Rectangle does: the centre, then a point on the circle,
+whose distance is the radius, and the second click commits through the same
+Finish as every other tool (`DrawGesture::curve`, `finishes_with`), so the
+one-click branch in `draw_click` went. Snapped, the radius is a whole number
+of grid steps and at least one (`placed_disk_radius`, the disk probe's rule),
+the point kept on the circle along the click's direction; unsnapped, a second
+click within 4 px of the centre is a slip and the drawing goes on. A rubber
+circle previews the radius by the same rule. The shared Finish test's points
+were drawn closer together so a circle round the first through the second
+stays inside the domain.
+
+- Not shot: the rubber preview needs the pointer over the window, which
+  would have meant moving the user's cursor; the committed circle was shot.

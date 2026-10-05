@@ -1547,7 +1547,19 @@ impl Playground {
                         }
                     });
                 let rubber = Stroke::new(1.2, Color32::from_rgba_unmultiplied(248, 196, 112, 180));
-                if draw.tool == DrawTool::Rectangle {
+                if draw.tool == DrawTool::Circle {
+                    // The circle the second click makes, its radius taken as
+                    // the click will take it.
+                    let center = draw.points[0];
+                    let snap = self.snapping(painter.ctx().input(|input| input.modifiers.shift));
+                    let radius = Self::placed_disk_radius(
+                        center,
+                        self.world(pointer, r),
+                        snap,
+                        self.snap_step(),
+                    );
+                    painter.circle_stroke(*last, (radius * self.scale) as f32, rubber);
+                } else if draw.tool == DrawTool::Rectangle {
                     painter.rect_stroke(
                         Rect::from_two_pos(*last, target),
                         0.0,

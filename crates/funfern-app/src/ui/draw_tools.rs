@@ -65,7 +65,16 @@ impl DrawGesture {
                 .map(CurveSpline::Open)
             }
             DrawTool::OpenSpline => OpenCubicSpline::uniform(points.clone()).map(CurveSpline::Open),
-            DrawTool::Circle => return Err("A circle is placed with one click".into()),
+            DrawTool::Circle => {
+                let [center, rim] = [points[0], points[1]];
+                let radius = (rim - center).norm();
+                if radius <= 0.0 {
+                    return Err("Place the second point away from the centre".into());
+                }
+                Ok(CurveSpline::Closed(PeriodicCubicSpline::rounded(
+                    center, radius,
+                )))
+            }
         }
         .map_err(|error| error.to_string())
     }
@@ -95,7 +104,23 @@ pub(super) fn span_deletion(whole: usize) -> (&'static str, &'static str) {
     }
 }
 
+/// The smallest circle a second click makes, on screen: one nearer the
+/// centre is taken as a slip rather than a circle.
+const CIRCLE_MIN_PIXELS: f64 = 4.0;
+
 impl Playground {
+    /// The way from a circle's centre to a click, along which its rim point
+    /// is kept; a click on the centre itself, a snapped radius's, goes right.
+    pub(super) fn circle_direction(center: Point2, clicked: Point2) -> Point2 {
+        let offset = clicked - center;
+        let length = offset.norm();
+        if length > 0.0 {
+            offset * (1.0 / length)
+        } else {
+            Point2::new(1.0, 0.0)
+        }
+    }
+
     pub(super) fn draw_click(
         &mut self,
         mut point: Point2,
@@ -107,6 +132,7 @@ impl Playground {
         let Some(mut gesture) = self.draw.take() else {
             return;
         };
+        let clicked = point;
         let open = matches!(gesture.tool, DrawTool::Polyline | DrawTool::OpenSpline);
         let mut attachment = None;
         // An attachment is a snap of its own and outranks the grid: the point
@@ -117,23 +143,19 @@ impl Playground {
         } else if snap_to_grid {
             point = Self::snap_point(point, self.snap_step());
         }
-        if gesture.tool == DrawTool::Circle {
-            let spline = PeriodicCubicSpline::rounded(point, 0.15);
-            let purpose = match self.closed_purpose {
-                ClosedPurpose::Subdomain => ClosedCurvePurpose::Subdomain {
-                    material: self.resolved_material_selection(),
-                },
-                ClosedPurpose::Hole => ClosedCurvePurpose::Hole,
-            };
-            match self.editor.create_closed_curve(spline, purpose) {
-                Ok(curve) => {
-                    self.select_curve(curve);
-                    self.notify("Closed curve added");
-                }
-                Err(error) => self.notify(error),
+        // A circle's second click sets its radius: the distance from the
+        // centre, in whole grid steps when snapping, as a disk probe's, so the
+        // point kept is on the circle along the click's direction.
+        if gesture.tool == DrawTool::Circle
+            && let Some(&center) = gesture.points.first()
+        {
+            let radius = Self::placed_disk_radius(center, clicked, snap_to_grid, self.snap_step());
+            if radius * self.scale < CIRCLE_MIN_PIXELS {
+                self.notify("Click away from the centre to set the radius");
+                self.draw = Some(gesture);
+                return;
             }
-            self.invalidate_samples();
-            return;
+            point = center + Self::circle_direction(center, clicked) * radius;
         }
         if gesture
             .points
@@ -152,7 +174,8 @@ impl Playground {
         // first point is where it ends. Kept as an inner point it was drawn
         // through as if it were free, and the curve crossed what it touched.
         let ends_here = attachment.is_some() && gesture.points.len() > 1;
-        let finish = gesture.tool == DrawTool::Rectangle && gesture.points.len() == 2;
+        let finish = matches!(gesture.tool, DrawTool::Rectangle | DrawTool::Circle)
+            && gesture.points.len() == 2;
         self.draw = Some(gesture);
         if finish {
             self.finish_draw();
@@ -923,10 +946,12 @@ mod tests {
                     editor: TopologyEditor::default(),
                     ..Playground::default()
                 };
+                // Close enough together that a circle round the first
+                // through the second stays inside the domain.
                 let points = (0..count)
                     .map(|index| {
                         let angle = std::f64::consts::TAU * index as f64 / 5.0;
-                        Point2::new(0.4 + 0.3 * angle.cos(), 0.4 + 0.3 * angle.sin())
+                        Point2::new(0.4 + 0.15 * angle.cos(), 0.4 + 0.15 * angle.sin())
                     })
                     .collect::<Vec<_>>();
                 let gesture = DrawGesture {
@@ -953,6 +978,85 @@ mod tests {
                     assert_eq!(last_curve(&state).spline, preview, "{tool:?} {count}");
                 }
             }
+        }
+    }
+
+    /// A circle is a centre and then a point on it: the second click sets
+    /// the radius, in whole grid steps when snapping, and commits the
+    /// circle as the purpose chosen. Unsnapped, a second click on the
+    /// centre is taken as a slip and the drawing goes on; snapped, the
+    /// radius is never under one step.
+    #[test]
+    fn a_circle_takes_its_centre_and_then_its_radius() {
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let click = |state: &mut Playground, point: Point2, snap: bool| {
+            let screen = state.screen(point, viewport);
+            state.draw_click(
+                point,
+                ScreenPoint::new(screen.x as f64, screen.y as f64),
+                viewport,
+                snap,
+            )
+        };
+        let center = Point2::new(0.2, 0.1);
+        let rim = Point2::new(0.2, 0.1 + 0.27);
+        for (snap, hole) in [(false, false), (true, true)] {
+            let mut state = Playground {
+                editor: TopologyEditor::default(),
+                ..Playground::default()
+            };
+            if hole {
+                state.closed_purpose = ClosedPurpose::Hole;
+            }
+            let step = state.snap_step();
+            let placed = if snap {
+                Playground::snap_point(center, step)
+            } else {
+                center
+            };
+            state.begin_draw(DrawTool::Circle);
+            click(&mut state, center, snap);
+            assert_eq!(state.draw.as_ref().unwrap().points, vec![placed]);
+            if !snap {
+                click(&mut state, center, snap);
+                assert_eq!(
+                    state.draw.as_ref().map(|draw| draw.points.len()),
+                    Some(1),
+                    "a click on the centre is a slip"
+                );
+            }
+            let curves = state.editor.document.model.draft.geometry.curves.len();
+            let regions = state.editor.document.model.draft.regions.len();
+            click(&mut state, rim, snap);
+            assert!(state.draw.is_none(), "{}", state.message);
+            assert_eq!(
+                state.editor.document.model.draft.geometry.curves.len(),
+                curves + 1
+            );
+            let radius = if snap {
+                Playground::placed_disk_radius(placed, rim, true, step)
+            } else {
+                0.27
+            };
+            if snap {
+                assert!((radius / step - (radius / step).round()).abs() < 1.0e-9);
+            }
+            let curve = last_curve(&state);
+            let CurveSpline::Closed(spline) = &curve.spline else {
+                panic!("not closed");
+            };
+            let expected = PeriodicCubicSpline::rounded(placed, radius);
+            for (got, want) in spline.controls().iter().zip(expected.controls()) {
+                assert!(
+                    (*got - *want).norm() < 1.0e-9,
+                    "snap {snap}: {got:?} {want:?}"
+                );
+            }
+            // A subdomain is a region of its own; a hole is none.
+            assert_eq!(
+                state.editor.document.model.draft.regions.len(),
+                regions + usize::from(!hole)
+            );
         }
     }
 

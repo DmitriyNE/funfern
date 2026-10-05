@@ -183,8 +183,12 @@ running; this file covers using it.
   start on an attachment, and clicking one after the first point finishes the
   curve there. An ending that is refused takes the point back off, with the reason
   in the status, and the curve can be taken on elsewhere.
-- **Circle:** click to place eight controls on a radius `0.15` circle, then
-  automatically return to selection. The spline lies inside its control polygon.
+- **Circle:** click the centre, then a point on the circle: the second click
+  sets the radius and makes the circle, eight controls round it, then returns
+  to selection. After the first, a rubber circle shows the one the second
+  will make. With snapping the radius is a whole number of grid steps, at
+  least one, as a disk probe's; without it, a second click within a few pixels
+  of the centre is taken as a slip. The spline lies inside its control polygon.
 - **Rectangle:** two opposite-corner clicks create an axis-aligned rectangular
   loop from exact straight cubic spans and then return to selection; after the
   first, a rubber band shows the rectangle the second will make.
