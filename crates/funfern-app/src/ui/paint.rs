@@ -7,7 +7,7 @@ use crate::wave_gpu::{VectorOverlayDisplay, WaveDisplay};
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, Pos2, Rect, Stroke};
 use funfern_app::document::VectorOverlay;
-use funfern_app::topology_editor::TopologyProbeTarget;
+use funfern_app::topology_editor::{TopologyAcceptance, TopologyProbeTarget};
 use funfern_app::topology_viewport::{
     SampledTopologyGeometry, ScreenPoint, TopologyHandle, TopologySelection, TopologySpanTarget,
     selected_span_controls,
@@ -908,7 +908,12 @@ impl Playground {
         }
         // The boundary-law strokes are a diagnostic layer: draw them first and
         // push them clear of a selected span so the selection always reads above.
-        if interactive && self.editor.document.presentation.boundary_conditions {
+        // An invalid draft has no laws to show until it is mended, and teal
+        // strokes either side of its red outline drown the red.
+        if interactive
+            && self.editor.document.presentation.boundary_conditions
+            && !matches!(self.editor.acceptance, TopologyAcceptance::Invalid(_))
+        {
             for span in &sampled.spans {
                 let Some((left, right)) = self.span_condition_colors(span.target) else {
                     continue;

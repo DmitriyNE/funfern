@@ -19618,3 +19618,18 @@ now; the card names the pulse and the kink the integrated field shows.
   a readback for the picture. The gallery test had checked the tone at V/2π
   on −A_z; it now checks E_z too, as the app's probe hears it: the strongest
   line is 0.466 Hz against V/2π = 0.477, within the window's resolution.
+
+## 2026-10-06 — An invalid draft reads red
+
+An invalid draft was drawn teal in every gallery scene while the status line
+called it invalid. The outline was red as designed; the boundary-law layer,
+which every gallery scene turns on, strokes each curve 2.5 px out on both
+sides, teal on a transmitting one, and the two teal strokes buried the 2 px
+red line between them. Reproduced on the live site by dragging the tour's
+obstacle into the other circle. The law strokes now step aside while the
+draft is invalid: it cannot run, so its laws mean nothing until it is mended,
+and they return with the valid scene.
+`an_invalid_draft_reads_red_with_the_boundary_laws_shown` paints the viewport
+for two crossing transmitting circles with the layer on: teal before the
+crossing, red and no teal after it (it fails without the fix). The user
+guide's Drafts line said green and amber; the curves are teal either way.

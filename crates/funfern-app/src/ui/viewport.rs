@@ -341,6 +341,7 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use funfern_app::topology_editor::ClosedCurvePurpose;
 
     /// Both axes step upwards from the lower bound. The vertical one used to
     /// start at the top of the view and test against the bottom, so the grid
@@ -449,5 +450,92 @@ mod tests {
                 "{scale} divides {step} into {divisions}"
             );
         }
+    }
+
+    /// The stroke colours one viewport pass paints, outlines and segments.
+    fn painted_colours(state: &mut Playground, context: &egui::Context) -> Vec<Color32> {
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(viewport()),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        state.viewport(
+                            ui,
+                            &WaveDisplay::default(),
+                            &VectorOverlayDisplay::default(),
+                        );
+                    });
+            },
+        );
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Path(path) => match path.stroke.color {
+                    egui::epaint::ColorMode::Solid(color) => Some(color),
+                    _ => None,
+                },
+                egui::Shape::LineSegment { stroke, .. } => Some(stroke.color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every gallery scene shows the boundary laws, whose strokes run either
+    /// side of each curve. They were teal on a transmitting curve and buried
+    /// the red outline of an invalid draft between them, so a draft the
+    /// status line called invalid still read teal in the scene.
+    #[test]
+    fn an_invalid_draft_reads_red_with_the_boundary_laws_shown() {
+        let mut state = with_baffles(&[]);
+        state.editor.document.presentation.boundary_conditions = true;
+        for centre in [Point2::new(0.4, 0.3), Point2::new(0.4, -0.4)] {
+            state
+                .editor
+                .create_closed_curve(
+                    PeriodicCubicSpline::rounded(centre, 0.25),
+                    ClosedCurvePurpose::Subdomain {
+                        material: DEFAULT_MATERIAL,
+                    },
+                )
+                .unwrap();
+            settle(&mut state.editor);
+        }
+        let context = egui::Context::default();
+        let valid = painted_colours(&mut state, &context);
+        assert!(valid.contains(&TEAL), "a valid scene shows its laws");
+        assert!(!valid.contains(&RED));
+
+        // One circle pulled into the other: two transmitting curves crossing.
+        let lower = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .last()
+            .unwrap()
+            .id;
+        state.editor.begin();
+        state
+            .editor
+            .set_control(lower, 0, Point2::new(0.4, 0.3))
+            .unwrap();
+        settle(&mut state.editor);
+        assert!(matches!(
+            state.editor.acceptance,
+            TopologyAcceptance::Invalid(_)
+        ));
+        let invalid = painted_colours(&mut state, &context);
+        assert!(invalid.contains(&RED), "the draft is outlined red");
+        assert!(
+            !invalid.contains(&TEAL),
+            "no law stroke crowds the red outline"
+        );
     }
 }

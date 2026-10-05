@@ -144,7 +144,7 @@ running; this file covers using it.
   New scenes start with the second-order outgoing condition on all four outer
   edges. View > Boundary conditions colors the assigned laws directly on the
   outer box, hole spans, and both baffle traces, each law on its own side of the
-  span.
+  span, while the draft is valid.
 - **Physics skins:** Simulation switches the shared scalar PDE between mechanical,
   electromagnetic TM (`E_z`), and electromagnetic TE (`H_z`) views. Mechanical
   materials expose density, stiffness, and damping. EM materials expose relative
@@ -519,8 +519,9 @@ names or with every expression evaluated at the material frame's origin. Each ro
   encloses spans while right-to-left selects crossings. Fit View frames the
   current domain, and a scene that replaces the whole document (New, a load, an
   example, or Undo/Redo across one) opens framed, as launch does. Panel scrolling and text editing do not manipulate the viewport.
-- **Drafts:** green curves are accepted, amber curves are being checked, red
-  curves are invalid. The last accepted scene stays as a subdued reference.
+- **Drafts:** curves are teal, accepted or being checked, and red while the
+  draft is invalid; the boundary laws step aside then so the red reads. The
+  last accepted scene stays as a subdued reference.
   Invalid edits remain after release. Escape during a drag restores its starting
   document; Undo can restore earlier accepted snapshots.
 - **History:** Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes outside text editing.
