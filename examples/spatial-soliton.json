@@ -1055,13 +1055,14 @@
     "simulation_speed": 1.0,
     "field_gain": 2.0,
     "field_auto_exposure": true,
-    "vector_overlay": "off",
+    "vector_overlay": "relative_energy_flow",
     "vector_overlay_smoothed": false,
     "vector_overlay_ac_coupled": true,
     "vector_overlay_lowpass": true,
     "vector_overlay_lowpass_hz": 0.5,
-    "vector_overlay_density": 54.0,
-    "vector_overlay_gain": 1.0,
+    "vector_overlay_density": 40.0,
+    "vector_overlay_gain": 2.0,
+    "vector_overlay_style": "streamlines",
     "material_overlay": {
       "kind": "regions"
     },

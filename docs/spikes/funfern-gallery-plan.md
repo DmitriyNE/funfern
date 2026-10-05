@@ -1410,8 +1410,10 @@ showing the mean flow rather than its ripple; the log has the measurement.
   tilted), and three scenes that had no overlay: the double slit (the energy
   through both slits), the Fresnel zone plate (through the open zones to the
   focus) and the acoustic whispering gallery (the sound hugging the wall round
-  to the far side). The bent fiber, the ring and the skin depths keep their
-  arrows.
+  to the far side); and, once the temporal stencil's scan that made the scene
+  lag on zoom was indexed, the spatial soliton (the lines drawn into the beam
+  inside the slab and fanning out behind it). The bent fiber, the ring and
+  the skin depths keep their arrows.
 - **Material overlays:** the GRIN rod, the Luneburg lens and the fisheye show
   density or permittivity instead of wave speed. That keeps the vacuum at the
   bottom of the palette rather than painting the domain over. The

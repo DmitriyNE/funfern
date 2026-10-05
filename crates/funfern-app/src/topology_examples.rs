@@ -1875,6 +1875,8 @@ fn spatial_soliton_with(amplitude: f64) -> TopologyDocument {
     });
     document.readouts.set_probe(ProbeId(1), profile_readout());
     document.readouts.set_probe(ProbeId(2), profile_readout());
+    // The beam's energy held in the channel it makes for itself.
+    streamlines(&mut document.presentation);
     document
 }
 
@@ -4752,6 +4754,7 @@ mod tests {
                 "Frustrated total internal reflection",
                 "Crystal bend",
                 "Acoustic whispering gallery",
+                "Spatial soliton",
             ]
         );
     }

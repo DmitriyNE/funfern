@@ -19155,7 +19155,7 @@ depths keep their arrows, Brewster its field arrows. A `streamlines` helper
 beside `power_flow` sets the mode, the style and a spacing of 40 px, since
 the application's 54 is sparse for a scene judged at its own launch (the
 defaults are due a retuning of their own, the user's call). The test
-`every_streamline_scene_shows_the_energy_flow` names the nine and pins the
+`every_streamline_scene_shows_the_energy_flow` names the ten and pins the
 style to its mode. Judged on a capture of each scene's window 12 s from
 launch, once the fit below was fixed: all nine read; the crystal bend is
 the faintest, still adapting and filling at 12 s, one line already tracing
@@ -19192,5 +19192,10 @@ spacing, the three new ones the mode and gain too.
   Clicking Fit view by script needs assistive access the terminal does not
   have, which is what made the fit bug worth fixing rather than working
   around.
+- **The soliton too.** With the scan gone the user asked for lines there as
+  well: a tenth scene, the lines drawn into the beam inside the slab and
+  fanning out behind it. Paired 20 s runs, arrows / lines / lines: 97.0 /
+  97.0 / 93.6 fps on a scene still adapting at 11 to 16 % late frames
+  either way; the lines are not what that scene pays for.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, both wasm32 checks and the browser shader compile.
