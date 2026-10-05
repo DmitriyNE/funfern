@@ -19367,3 +19367,25 @@ card, and the lights were thin.
   Materials; and the Draw step lights the palette's Polyline tool once the
   palette is open. Before the wall is selected the Edit step's light falls
   to the wall itself, with the hint to click it.
+
+## 2026-10-05 — The tour, fifth pass
+
+Three more from the user.
+
+- **The arrow was crude.** A straight 2.5 pt line with a chevron. It is a
+  thin cubic curve now, leaving the card square to its edge and arriving
+  square to the lit control's (`edge_normal` of the clamped end points), a
+  faint wide stroke under a fine one, and a small filled head.
+- **The outgoing law was not lit.** The picker's rect was recorded, the test
+  says so, but the open list is a popup on egui's foreground order, drawn
+  before the tour's paint on the same order, and the dimming covered it:
+  the list the step had the user open went dark, its entries with it. Every
+  visible foreground area but the tour's own is a hole now, read from egui's
+  memory as the panel tests read popups, without a glow; and the list
+  reports where it drew the second-order outgoing entry
+  (`boundary_kind_choices` returns it, `edit_outer_condition` passes it on),
+  which the Edit step lights ahead of the picker.
+- **The gizmo's centre is the pivot.** The move step said to drag it. It
+  names the grips now: the four-way grip moves, the ring turns, the arrows
+  scale, the centre dot is the pivot the others work about; the obstacle
+  itself, or the four-way grip, is what to drag.

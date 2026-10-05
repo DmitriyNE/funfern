@@ -685,11 +685,13 @@ impl Playground {
                     &mut self.pulse_preview,
                 )
             });
+            let (changed, outgoing) = picker.inner;
             self.spotlights
                 .record(Spotlight::BoundaryLaw, picker.response.rect);
-            if picker.inner
-                && let Err(error) = self.editor.set_outer_condition(&sides, condition)
-            {
+            if let Some(entry) = outgoing {
+                self.spotlights.record(Spotlight::OutgoingLaw, entry);
+            }
+            if changed && let Err(error) = self.editor.set_outer_condition(&sides, condition) {
                 self.notify(error);
             }
             let mut domain = self.editor.document.model.draft.geometry.domain;

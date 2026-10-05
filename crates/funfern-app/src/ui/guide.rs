@@ -26,8 +26,9 @@ pub(super) enum Spotlight {
     /// A region's material choice in the Materials panel.
     RegionMaterial(RegionId),
     /// The Edit panel's boundary law picker, drawn while a boundary is
-    /// selected.
+    /// selected, and its second-order outgoing entry while the list is open.
     BoundaryLaw,
+    OutgoingLaw,
     /// The View panel's vector overlay choice.
     VectorOverlay,
     /// The Draw palette's line tool, and its Finish button while a line is
@@ -120,7 +121,8 @@ pub(super) static STEPS: [GuideStep; 10] = [
                tools, from reshaping it to its boundary law. The right-hand wall echoes. \
                Open Edit, click that wall and give it an outgoing law; the echo stops.",
         targets: &[
-            (Spotlight::BoundaryLaw, None),
+            (Spotlight::OutgoingLaw, None),
+            (Spotlight::BoundaryLaw, Some("Pick an outgoing law for it.")),
             (Spotlight::Tab(InspectorPanel::Edit), None),
             (Spotlight::Panels, PANELS_HINT),
             (
@@ -139,8 +141,10 @@ pub(super) static STEPS: [GuideStep; 10] = [
         title: "Select and move",
         text: "Press on empty space beside the round obstacle, drag a rectangle over the \
                whole of it and let go: that is a marquee, and everything inside it is \
-               selected. Handles appear round the selection, the gizmo, to move, scale and \
-               turn it. Drag the gizmo's centre and put the obstacle somewhere else.",
+               selected. Handles appear round it, the gizmo: the four-way grip moves it, \
+               the ring turns it, the arrows scale it, and the dot at the centre is the \
+               pivot the others work about. Drag the obstacle itself, or the four-way grip, \
+               and put it somewhere else.",
         targets: &[(Spotlight::Obstacle, None)],
         extra: &[],
         dashed: true,
@@ -475,13 +479,29 @@ impl Playground {
             }
         }
         // The dimming is paint on a foreground layer, no widget, so clicks
-        // go through it to the controls underneath.
+        // go through it to the controls underneath. Open lists and menus
+        // are foreground areas too, drawn before this paint, so each is a
+        // hole as well, without a glow: a list the step had the user open
+        // went dark otherwise, its entries with it.
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("guide-spotlight"),
         ));
+        let mut clear = holes.clone();
+        clear.extend(ctx.memory(|memory| {
+            memory
+                .areas()
+                .visible_layer_ids()
+                .into_iter()
+                .filter(|layer| {
+                    layer.order == egui::Order::Foreground
+                        && layer.id != egui::Id::new("guide-spotlight")
+                })
+                .filter_map(|layer| memory.area_rect(layer.id))
+                .collect::<Vec<_>>()
+        }));
         if !holes.is_empty() {
-            for shade in dim_except(screen, &holes) {
+            for shade in dim_except(screen, &clear) {
                 painter.rect_filled(shade, 0.0, Color32::from_black_alpha(GUIDE_DIM_ALPHA));
             }
             for hole in &holes {
@@ -556,17 +576,38 @@ impl Playground {
                     });
                 });
             });
-        // An arrow from the card to the control the step points at.
-        if let (Some(card), Some(hole)) = (card, holes.first()) {
-            if let Some((from, to)) = pointer_between(card.response.rect, *hole) {
-                let stroke = Stroke::new(2.5, TEAL);
-                painter.line_segment([from, to], stroke);
-                let direction = (to - from).normalized();
-                let normal = egui::vec2(-direction.y, direction.x);
-                let head = 10.0;
-                painter.line_segment([to, to - direction * head + normal * head * 0.5], stroke);
-                painter.line_segment([to, to - direction * head - normal * head * 0.5], stroke);
+        // A pointer from the card to the control the step points at: a thin
+        // curve leaving the card square to its edge and arriving square to
+        // the control's, with a small head.
+        if let (Some(card), Some(hole)) = (card, holes.first())
+            && let Some((from, to)) = pointer_between(card.response.rect, *hole)
+        {
+            let leave = edge_normal(card.response.rect, from);
+            let arrive = edge_normal(*hole, to);
+            let reach = (to - from).length() * 0.4;
+            let points = [from, from + leave * reach, to + arrive * reach, to];
+            for (width, alpha) in [(5.0, 0.18), (1.5, 0.9)] {
+                painter.add(egui::Shape::CubicBezier(
+                    egui::epaint::CubicBezierShape::from_points_stroke(
+                        points,
+                        false,
+                        Color32::TRANSPARENT,
+                        Stroke::new(width, TEAL.gamma_multiply(alpha)),
+                    ),
+                ));
             }
+            let direction = -arrive;
+            let normal = egui::vec2(-direction.y, direction.x);
+            let head = 7.0;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    to,
+                    to - direction * head + normal * head * 0.45,
+                    to - direction * head - normal * head * 0.45,
+                ],
+                TEAL,
+                Stroke::NONE,
+            ));
         }
         if skip {
             self.finish_guide();
@@ -576,16 +617,41 @@ impl Playground {
     }
 }
 
-/// The arrow from the card to a lit rect: from the point of the card's
-/// edge nearest the rect to the point of the rect's edge nearest the card,
-/// or nothing when the two touch or overlap.
+/// The pointer from the card to a lit rect: from the middle of the card's
+/// edge that faces the rect to the middle of the rect's edge that faces the
+/// card, so the curve between them is a connector's S; nothing when the two
+/// touch or overlap.
 pub(super) fn pointer_between(card: Rect, hole: Rect) -> Option<(Pos2, Pos2)> {
     if card.intersects(hole) {
         return None;
     }
-    let from = card.clamp(hole.center());
-    let to = hole.clamp(card.center());
+    let (from, to) = if hole.max.y <= card.min.y {
+        (card.center_top(), hole.center_bottom())
+    } else if hole.min.y >= card.max.y {
+        (card.center_bottom(), hole.center_top())
+    } else if hole.max.x <= card.min.x {
+        (card.left_center(), hole.right_center())
+    } else {
+        (card.right_center(), hole.left_center())
+    };
     ((to - from).length() > 24.0).then_some((from, to))
+}
+
+/// The outward normal of the edge of `rect` that `point` lies on, for a
+/// point the rect's edge was clamped to; the direction out from the centre
+/// for any other.
+pub(super) fn edge_normal(rect: Rect, point: Pos2) -> egui::Vec2 {
+    if (point.y - rect.min.y).abs() < 0.5 {
+        egui::vec2(0.0, -1.0)
+    } else if (point.y - rect.max.y).abs() < 0.5 {
+        egui::vec2(0.0, 1.0)
+    } else if (point.x - rect.min.x).abs() < 0.5 {
+        egui::vec2(-1.0, 0.0)
+    } else if (point.x - rect.max.x).abs() < 0.5 {
+        egui::vec2(1.0, 0.0)
+    } else {
+        (point - rect.center()).normalized()
+    }
 }
 
 /// The rects that cover `screen` but for `holes`: the screen cut into
@@ -836,7 +902,13 @@ mod tests {
         assert!(wall.contains(state.screen(Point2::new(right, 0.0), viewport)));
         assert!(!wall.contains(state.screen(Point2::new(right - 0.5, 0.0), viewport)));
         state.spotlights.record(Spotlight::BoundaryLaw, button);
-        assert_eq!(state.guide_spotlight(edit, viewport), Some((button, None)));
+        assert_eq!(
+            state.guide_spotlight(edit, viewport),
+            Some((button, Some("Pick an outgoing law for it.")))
+        );
+        let entry = Rect::from_min_size(Pos2::new(610.0, 130.0), egui::vec2(120.0, 18.0));
+        state.spotlights.record(Spotlight::OutgoingLaw, entry);
+        assert_eq!(state.guide_spotlight(edit, viewport), Some((entry, None)));
 
         // The source and the obstacle are lit where the viewport draws them.
         let (rect, hint) = state
@@ -880,15 +952,58 @@ mod tests {
         let card = Rect::from_min_size(Pos2::new(200.0, 500.0), egui::vec2(400.0, 100.0));
         let above = Rect::from_min_size(Pos2::new(380.0, 40.0), egui::vec2(60.0, 24.0));
         let (from, to) = pointer_between(card, above).unwrap();
-        assert_eq!(from.y, card.min.y);
-        assert_eq!(to.y, above.max.y);
-        assert!(from.x >= above.min.x && from.x <= above.max.x);
+        assert_eq!(from, card.center_top());
+        assert_eq!(to, above.center_bottom());
         let aside = Rect::from_min_size(Pos2::new(700.0, 520.0), egui::vec2(40.0, 40.0));
         let (from, to) = pointer_between(card, aside).unwrap();
-        assert_eq!(from.x, card.max.x);
-        assert_eq!(to.x, aside.min.x);
+        assert_eq!(from, card.right_center());
+        assert_eq!(to, aside.left_center());
         let touching = Rect::from_min_size(Pos2::new(590.0, 540.0), egui::vec2(40.0, 40.0));
         assert_eq!(pointer_between(card, touching), None);
+
+        // The curve leaves and arrives square to the edges.
+        let (from, to) = pointer_between(card, above).unwrap();
+        assert_eq!(edge_normal(card, from), egui::vec2(0.0, -1.0));
+        assert_eq!(edge_normal(above, to), egui::vec2(0.0, 1.0));
+        let (from, to) = pointer_between(card, aside).unwrap();
+        assert_eq!(edge_normal(card, from), egui::vec2(1.0, 0.0));
+        assert_eq!(edge_normal(aside, to), egui::vec2(-1.0, 0.0));
+    }
+
+    /// With the right-hand wall selected and Edit open, the panel records
+    /// where it drew the wall's boundary law picker, which the Edit step
+    /// lights.
+    #[test]
+    fn the_edit_panel_records_the_boundary_law_picker_for_a_selected_wall() {
+        let mut state = Playground::default();
+        state.start_guide(false);
+        state.inspector = Some(InspectorPanel::Edit);
+        state.selection =
+            TopologySelection::Spans([TopologySpanTarget::Outer(OuterSide::Right)].into());
+        let context = egui::Context::default();
+        theme::apply(&context);
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                time: Some(0.1),
+                ..egui::RawInput::default()
+            };
+            state.spotlights.clear();
+            let _ = context.run_ui(input, |ui| state.side_panel(ui));
+        }
+        let picker = state
+            .spotlights
+            .rect(Spotlight::BoundaryLaw)
+            .expect("the picker's rect");
+        assert!(picker.is_positive());
+        let step = &STEPS[step_index("Edit")];
+        assert_eq!(
+            state.guide_spotlight(step, viewport()),
+            Some((picker, Some("Pick an outgoing law for it.")))
+        );
     }
 
     /// The dimming covers the screen but for the holes, each point once.

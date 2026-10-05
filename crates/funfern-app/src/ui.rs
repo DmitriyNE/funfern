@@ -1285,18 +1285,22 @@ fn edit_face_condition(
 
 /// `fire` is when "Fire now" starts a driven wall's pulse, and `preview`
 /// the shape window its "Shape" opens.
+/// Edits an outer boundary's law. Answers whether it changed, and where the
+/// list drew its second-order outgoing entry while the list is open.
 fn edit_outer_condition(
     ui: &mut egui::Ui,
     physics: PhysicsModel,
     condition: &mut OuterBoundaryCondition,
     fire: FireTimes,
     preview: &mut PulsePreview,
-) -> bool {
+) -> (bool, Option<Rect>) {
     let before = *condition;
     let mut kind = outer_kind(*condition).presented(physics);
-    sized_combo(ui, "outer-condition", BoundaryKind::choices(physics).len())
+    let outgoing = sized_combo(ui, "outer-condition", BoundaryKind::choices(physics).len())
         .selected_text(kind.label_for(physics))
-        .show_ui(ui, |ui| boundary_kind_choices(ui, physics, &mut kind));
+        .show_ui(ui, |ui| boundary_kind_choices(ui, physics, &mut kind))
+        .inner
+        .flatten();
     if kind != outer_kind(before).presented(physics) {
         *condition = match kind {
             BoundaryKind::Reflecting => OuterBoundaryCondition::Reflecting,
@@ -1321,7 +1325,7 @@ fn edit_outer_condition(
         }
         _ => {}
     }
-    *condition != before
+    (*condition != before, outgoing)
 }
 
 fn outer_kind(condition: OuterBoundaryCondition) -> BoundaryKind {
@@ -1348,10 +1352,21 @@ fn face_kind(condition: FaceBoundaryCondition) -> BoundaryKind {
     }
 }
 
-fn boundary_kind_choices(ui: &mut egui::Ui, physics: PhysicsModel, kind: &mut BoundaryKind) {
+/// The list of laws, and where the second-order outgoing one was drawn,
+/// which the guided tour lights.
+fn boundary_kind_choices(
+    ui: &mut egui::Ui,
+    physics: PhysicsModel,
+    kind: &mut BoundaryKind,
+) -> Option<Rect> {
+    let mut outgoing = None;
     for value in BoundaryKind::choices(physics) {
-        ui.selectable_value(kind, *value, value.label_for(physics));
+        let response = ui.selectable_value(kind, *value, value.label_for(physics));
+        if *value == BoundaryKind::SecondOrder {
+            outgoing = Some(response.rect);
+        }
     }
+    outgoing
 }
 
 /// The share of the window a combo's list may take before it scrolls.

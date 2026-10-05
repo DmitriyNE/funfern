@@ -22,7 +22,7 @@ running; this file covers using it.
   from the card to it and the rest of the screen dimmed:
   pause and run the wave; drag the source; open Edit, click the right wall
   and give it an outgoing law; drag a rectangle round the obstacle and move
-  it by its gizmo; draw a wall; give the region the glass in Materials;
+  it; draw a wall; give the region the glass in Materials;
   switch the vector overlay on in View; open Simulation; drop a point probe
   from Probes; and open the gallery. A step moves on a moment after its
   action shows, counted from the step's own start, so something done early
