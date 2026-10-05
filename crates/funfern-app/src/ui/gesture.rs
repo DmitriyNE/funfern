@@ -13,6 +13,10 @@ pub(super) struct DrawGesture {
     pub(super) tool: DrawTool,
     pub(super) points: Vec<Point2>,
     pub(super) attachments: Vec<Option<TopologyAttachment>>,
+    /// The points a Finish was refused on, and why: the drawing is kept
+    /// for the user to take a point back or give it up, and the refusal
+    /// stands while the points are those.
+    pub(super) refused: Option<(Vec<Point2>, String)>,
 }
 
 /// Which part of the outer rectangle a domain resize has hold of.

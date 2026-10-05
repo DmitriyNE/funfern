@@ -15,6 +15,13 @@ use std::collections::BTreeSet;
 use super::*;
 
 impl DrawGesture {
+    /// Why Finish refused the points as they are, if it did.
+    pub(super) fn refusal(&self) -> Option<&str> {
+        self.refused
+            .as_ref()
+            .filter(|(points, _)| *points == self.points)
+            .map(|(_, reason)| reason.as_str())
+    }
     /// The curve the points placed so far make: what Finish commits and what
     /// the overlay previews, built once so that what is drawn is what is
     /// committed.
@@ -174,8 +181,11 @@ impl Playground {
                 self.invalidate_samples();
             }
             Err(error) => {
-                self.message = error;
-                self.draw = Some(gesture);
+                self.message = error.clone();
+                self.draw = Some(DrawGesture {
+                    refused: Some((gesture.points.clone(), error)),
+                    ..gesture
+                });
             }
         }
     }
@@ -923,6 +933,7 @@ mod tests {
                     tool,
                     attachments: vec![None; count],
                     points,
+                    refused: None,
                 };
                 let preview = gesture.curve();
                 assert_eq!(

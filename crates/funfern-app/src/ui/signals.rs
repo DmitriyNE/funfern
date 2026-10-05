@@ -187,22 +187,31 @@ enum Previewed {
 }
 
 /// Edits `signal` in place. `fire` is when "Fire now" starts a pulse, and
-/// `preview` the shape window a pulse's "Shape" opens.
+/// `preview` the shape window a pulse's "Shape" opens. Returns where it drew
+/// the controls the guided tour points at.
 pub(super) fn edit_time_signal(
     ui: &mut egui::Ui,
     signal: &mut TimeSignal,
     role: SignalUse,
     fire: FireTimes,
     preview: &mut PulsePreview,
-) {
+) -> SignalControls {
     let fire_at = if role.takes_handoff() {
         fire.handoff
     } else {
         fire.live
     };
     ui.push_id(("time-signal", role), |ui| {
-        edit_time_signal_in(ui, signal, role, fire_at, preview);
-    });
+        edit_time_signal_in(ui, signal, role, fire_at, preview)
+    })
+    .inner
+}
+
+/// Where a signal editor drew its Pulse choice and its frequency.
+#[derive(Clone, Copy)]
+pub(super) struct SignalControls {
+    pub(super) pulse: egui::Rect,
+    pub(super) frequency: egui::Rect,
 }
 
 fn edit_time_signal_in(
@@ -211,13 +220,15 @@ fn edit_time_signal_in(
     role: SignalUse,
     fire_at: f64,
     preview: &mut PulsePreview,
-) {
+) -> SignalControls {
     let editor = ui.id();
     let mut pulsed = signal.is_pulsed();
-    ui.horizontal(|ui| {
-        ui.selectable_value(&mut pulsed, false, "Continuous");
-        ui.selectable_value(&mut pulsed, true, "Pulse");
-    });
+    let pulse = ui
+        .horizontal(|ui| {
+            ui.selectable_value(&mut pulsed, false, "Continuous");
+            ui.selectable_value(&mut pulsed, true, "Pulse").rect
+        })
+        .inner;
     if pulsed != signal.is_pulsed() {
         *signal = if pulsed {
             pulse_from(*signal, role, fire_at)
@@ -234,15 +245,18 @@ fn edit_time_signal_in(
                 .prefix("Amplitude "),
         );
     });
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::DragValue::new(frequency)
-                .speed(0.05)
-                .range(0.0..=1.0e6)
-                .prefix("Hz "),
-        );
-        ui.add(egui::DragValue::new(phase).speed(0.05).prefix("Phase "));
-    });
+    let frequency = ui
+        .horizontal(|ui| {
+            let frequency = ui.add(
+                egui::DragValue::new(frequency)
+                    .speed(0.05)
+                    .range(0.0..=1.0e6)
+                    .prefix("Hz "),
+            );
+            ui.add(egui::DragValue::new(phase).speed(0.05).prefix("Phase "));
+            frequency.rect
+        })
+        .inner;
     if let TimeSignal::Pulsed {
         amplitude,
         frequency_hz,
@@ -268,6 +282,7 @@ fn edit_time_signal_in(
     if preview.editor == Some(editor) {
         preview.shown = Some(Previewed::Signal(*signal, role));
     }
+    SignalControls { pulse, frequency }
 }
 
 /// What a press in the pulse controls asks of their owner.

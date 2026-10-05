@@ -506,13 +506,17 @@ impl Playground {
             );
         });
         let fire_at = self.fire_times();
-        edit_time_signal(
+        let controls = edit_time_signal(
             ui,
             &mut source.signal,
             SignalUse::Source,
             fire_at,
             &mut self.pulse_preview,
         );
+        self.spotlights
+            .record(Spotlight::SourceFrequency, controls.frequency);
+        self.spotlights
+            .record(Spotlight::SourcePulse, controls.pulse);
         if source != before {
             if let Err(error) = self.editor.set_point_source(source) {
                 self.notify(error)

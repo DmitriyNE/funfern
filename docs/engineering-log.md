@@ -19426,3 +19426,30 @@ used the same ḡ and read g too.
 - A wider font (DejaVu Sans and Sans Mono as fallbacks, subset to a few tens
   of KB) was costed and declined for five characters; the test is where to
   start if one is ever wanted.
+
+## 2026-10-05 — The tour, seventh pass: a way back, and a Simulation step that does something
+
+Two from the user.
+
+- **A way back.** Reproduced on the tour's scene: every bad line tried
+  (across the obstacle or the region, past the wall, of no length, crossing
+  itself) is refused at Finish, and the drawing is kept with Finish still
+  lit, so the tour pointed at the button that had just refused. The gesture
+  now keeps the points a Finish was refused on and why
+  (`DrawGesture::refused`, standing while the points are those), and a
+  setback (`guide_setback`) lights the palette's Undo point and Cancel with
+  the refusal on the card, in gold. A change the topology check finds
+  invalid (an obstacle's control dragged out of the domain) lights the bar's
+  Undo the same way. No step is done in a scene the check has not accepted,
+  so a step no longer moves on from an edit still being checked, or from
+  one refused.
+- **Simulation.** The step asked only that the panel be opened. It now asks
+  for the source's frequency changed and then Pulse, lighting the Hz field
+  until it changes and then the Pulse choice (`SourceFrequency`,
+  `SourcePulse`, recorded where the panel draws the source's signal editor,
+  which returns its rects). Frequency first, so the change is seen on the
+  continuous wave before the burst.
+- Seen but not chased: in the screenshot of the invalid state the invalid
+  outline showed no red, though the viewport colours an invalid draft red.
+  The state there was set by a temporary hook that edited the draft outside
+  a drag; to check against a real drag before calling it a bug.

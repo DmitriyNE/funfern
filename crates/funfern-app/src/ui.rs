@@ -775,6 +775,7 @@ impl Playground {
             tool,
             points: vec![],
             attachments: vec![],
+            refused: None,
         });
         self.selection = TopologySelection::None;
     }
@@ -1273,10 +1274,10 @@ fn edit_face_condition(
             );
         }
         FaceBoundaryCondition::Neumann { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Flux, fire, preview)
+            edit_time_signal(ui, signal, SignalUse::Flux, fire, preview);
         }
         FaceBoundaryCondition::Dirichlet { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Field, fire, preview)
+            edit_time_signal(ui, signal, SignalUse::Field, fire, preview);
         }
         _ => {}
     }
@@ -1318,10 +1319,10 @@ fn edit_outer_condition(
     }
     match condition {
         OuterBoundaryCondition::Neumann { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Flux, fire, preview)
+            edit_time_signal(ui, signal, SignalUse::Flux, fire, preview);
         }
         OuterBoundaryCondition::Dirichlet { signal } => {
-            edit_time_signal(ui, signal, SignalUse::Field, fire, preview)
+            edit_time_signal(ui, signal, SignalUse::Field, fire, preview);
         }
         _ => {}
     }

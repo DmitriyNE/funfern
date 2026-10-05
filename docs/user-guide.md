@@ -23,10 +23,15 @@ running; this file covers using it.
   pause and run the wave; drag the source; open Edit, click the right wall
   and give it an outgoing law; drag a rectangle round the obstacle and move
   it; draw a wall; give the region the glass in Materials;
-  switch the vector overlay on in View; open Simulation; drop a point probe
-  from Probes; and open the gallery. A step moves on a moment after its
-  action shows, counted from the step's own start, so something done early
-  is asked for again; Next and Skip the tour are always there. The tour is
+  switch the vector overlay on in View; in Simulation change the source's
+  frequency and switch it to Pulse; drop a point probe from Probes; and open
+  the gallery. A step moves on a moment after its action shows, counted from
+  the step's own start, so something done early is asked for again, and only
+  in a scene the topology check has accepted. A line Finish refuses, or a
+  change that leaves the scene invalid, holds the tour: the card says why in
+  gold and lights the way back, Undo point and Cancel in the Draw palette
+  for the line, Undo in the bar for the change. Next and Skip the tour are
+  always there. The tour is
   seen once, remembered beside the autosave, and is back under Guided tour
   at the top of the Examples window and on the scene card whenever wanted.
   A scene opens fitted to the window and

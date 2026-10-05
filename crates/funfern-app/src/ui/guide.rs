@@ -1,14 +1,16 @@
 //! The guided tour. A first launch, with nothing to restore and the tour
-//! not yet seen, opens a small scene and lays the tour over it: nine steps,
-//! each naming one thing to do and the control to do it with, spotlit where
-//! the bar or the panel drew it this frame, so the light follows the bar's
-//! folds; a step moves on a moment after the state shows the action done,
-//! and Next and Skip are always there. By the end the panels have each been
+//! not yet seen, opens a small scene and lays the tour over it: a step at a
+//! time, each naming one thing to do and the control to do it with, spotlit
+//! where the bar or the panel drew it this frame, so the light follows the
+//! bar's folds; a step moves on a moment after the state shows the action
+//! done, a refused line or an invalid scene lights the way back first, and
+//! Next and Skip are always there. By the end the panels have each been
 //! opened once and said what they hold. The tour is back under Examples
 //! and on the scene card; seen once is a marker beside the autosave.
 
 use super::*;
 use funfern_app::document::VectorOverlay;
+use funfern_app::topology_editor::TopologyAcceptance;
 use funfern_app::topology_examples::{GUIDE_GLASS, GUIDE_OBSTACLE, GUIDE_REGION, guide_scene};
 
 /// A control a step points at. The top bar and the panels record where they
@@ -42,6 +44,13 @@ pub(super) enum Spotlight {
     /// being drawn.
     DrawLine,
     DrawFinish,
+    /// The Draw palette's Undo point and Cancel, while a line is drawn.
+    DrawBack,
+    /// The bar's Undo.
+    Undo,
+    /// The Simulation panel's source frequency and its Pulse choice.
+    SourceFrequency,
+    SourcePulse,
     /// The source, where the viewport draws it.
     Source,
     /// The obstacle, where the viewport draws it.
@@ -164,8 +173,8 @@ pub(super) static STEPS: [GuideStep; 10] = [
         title: "Draw",
         text: "+ Draw opens the palette. Under Open curve pick Polyline, then click two or \
                three points across the scene; each click adds a vertex. Press Finish in the \
-               palette, or Enter, to end the line, which becomes a wall. A line that crosses \
-               itself cannot be finished: Cancel, or Esc, and draw it again.",
+               palette, or Enter, to end the line, which becomes a wall. If the scene cannot \
+               take the line, this card says why and how to take it back.",
         targets: &[
             (
                 Spotlight::DrawFinish,
@@ -239,14 +248,27 @@ pub(super) static STEPS: [GuideStep; 10] = [
     GuideStep {
         title: "Simulation",
         text: "Simulation holds the mesh size and adaptation, the solver's settings and the \
-               source's signal; the status line below says what is being rebuilt. Open it.",
+               source's signal; the status line below says what is being rebuilt. Open it, \
+               change the source's frequency and watch the waves' length follow, then \
+               switch it to Pulse: a single burst leaves the source.",
         targets: &[
-            (Spotlight::Tab(InspectorPanel::Simulation), None),
+            (
+                Spotlight::SourceFrequency,
+                Some("Drag the Hz field, or click it and type."),
+            ),
+            (Spotlight::SourcePulse, Some("Now pick Pulse.")),
+            (
+                Spotlight::Tab(InspectorPanel::Simulation),
+                Some("Open the Simulation panel first."),
+            ),
             (Spotlight::Panels, PANELS_HINT),
         ],
         extra: &[],
         dashed: false,
-        done: |state| state.inspector == Some(InspectorPanel::Simulation),
+        done: |state| {
+            let signal = state.editor.document.model.source.signal;
+            signal.is_pulsed() && signal.carrier()[2] != state.guide.baseline.source_frequency
+        },
     },
     GuideStep {
         title: "Probes",
@@ -291,6 +313,16 @@ pub(super) struct GuideBaseline {
     pub(super) curves: usize,
     pub(super) region_material: Option<MaterialId>,
     pub(super) probes: usize,
+    pub(super) source_frequency: f64,
+}
+
+/// Something done along the way that the scene cannot take, which has to
+/// be taken back before the tour goes on: the control that takes it back,
+/// and what the card says.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct GuideSetback {
+    pub(super) target: Spotlight,
+    pub(super) text: String,
 }
 
 #[derive(Default)]
@@ -345,7 +377,30 @@ impl Playground {
                 .region(GUIDE_REGION)
                 .map(|region| region.material),
             probes: model.probes.len(),
+            source_frequency: model.source.signal.carrier()[2],
         }
+    }
+
+    /// What has to be taken back first: a line Finish refused, kept for a
+    /// point to be taken back or the line given up, or a draft the topology
+    /// check found invalid, which Undo takes back.
+    pub(super) fn guide_setback(&self) -> Option<GuideSetback> {
+        if let Some(reason) = self.draw.as_ref().and_then(DrawGesture::refusal) {
+            return Some(GuideSetback {
+                target: Spotlight::DrawBack,
+                text: format!(
+                    "The scene cannot take this line: {reason}. Undo point, or Backspace, \
+                     takes its last point back; Cancel, or Esc, gives the line up."
+                ),
+            });
+        }
+        if let TopologyAcceptance::Invalid(issue) = self.editor.acceptance {
+            return Some(GuideSetback {
+                target: Spotlight::Undo,
+                text: format!("The scene cannot take that change: {issue}. Undo takes it back."),
+            });
+        }
+        None
     }
 
     /// The obstacle's control points, which any move, turn or scaling of it
@@ -366,9 +421,13 @@ impl Playground {
             .unwrap_or_default()
     }
 
-    /// Whether the current step's action shows in the state.
+    /// Whether the current step's action shows in the state, in a scene
+    /// the topology check has accepted: an edit it is still checking, or
+    /// one it refused, moves no step on.
     pub(super) fn guide_step_done(&self) -> bool {
         self.guide.active
+            && self.editor.acceptance == TopologyAcceptance::Valid
+            && self.guide_setback().is_none()
             && STEPS
                 .get(self.guide.step)
                 .is_some_and(|step| (step.done)(self))
@@ -455,14 +514,30 @@ impl Playground {
                 Some(Rect::from_two_pos(top, bottom).expand(8.0))
             }
             Spotlight::Tab(panel) if self.inspector == Some(panel) => None,
+            // Each half of the Simulation step goes dark once done.
+            Spotlight::SourceFrequency
+                if self.editor.document.model.source.signal.carrier()[2]
+                    != self.guide.baseline.source_frequency =>
+            {
+                None
+            }
+            Spotlight::SourcePulse if self.editor.document.model.source.signal.is_pulsed() => None,
             other => self.spotlights.rect(other),
         }
     }
 
-    /// What the tour lights this frame: the current step's spotlight, or
-    /// nothing once the step is done.
+    /// What the tour lights this frame: the control that takes a setback
+    /// back, the current step's spotlight, or nothing once the step is done.
     pub(super) fn guide_light(&self, viewport: Rect) -> Option<(Rect, Option<&'static str>)> {
-        if !self.guide.active || self.guide_step_done() {
+        if !self.guide.active {
+            return None;
+        }
+        if let Some(setback) = self.guide_setback() {
+            return self
+                .spotlight_rect(setback.target, viewport)
+                .map(|rect| (rect, None));
+        }
+        if self.guide_step_done() {
             return None;
         }
         self.guide_spotlight(&STEPS[self.guide.step], viewport)
@@ -494,6 +569,7 @@ impl Playground {
         }
         let step = &STEPS[self.guide.step];
         let done = self.guide_step_done();
+        let setback = self.guide_setback();
         // A done step lights nothing while it waits to move on: its chain
         // of targets would otherwise fall back to an earlier control, the
         // Polyline tool after a line was finished, for the moment the tick
@@ -504,7 +580,7 @@ impl Playground {
             .iter()
             .map(|(rect, _)| rect.expand(6.0).intersect(screen))
             .collect::<Vec<_>>();
-        if !done {
+        if !done && setback.is_none() {
             for extra in step.extra {
                 if let Some(rect) = self.spotlight_rect(*extra, viewport) {
                     let hole = rect.expand(6.0).intersect(screen);
@@ -541,7 +617,7 @@ impl Playground {
                 painter.rect_filled(shade, 0.0, Color32::from_black_alpha(GUIDE_DIM_ALPHA));
             }
             for hole in &holes {
-                if step.dashed {
+                if step.dashed && setback.is_none() {
                     let corners = [
                         hole.left_top(),
                         hole.right_top(),
@@ -594,7 +670,9 @@ impl Playground {
                 });
                 ui.heading(step.title);
                 ui.label(step.text);
-                if let Some((_, Some(hint))) = spotlight {
+                if let Some(setback) = &setback {
+                    ui.colored_label(GOLD, &setback.text);
+                } else if let Some((_, Some(hint))) = spotlight {
                     ui.colored_label(TEAL, hint);
                 }
                 ui.add_space(6.0);
@@ -773,6 +851,7 @@ mod tests {
                     STEPS[step].title
                 );
                 action(state);
+                settle(&mut state.editor);
                 state.guide_update(now);
                 assert!(
                     state.guide_step_done(),
@@ -852,7 +931,12 @@ mod tests {
             state.editor.document.presentation.vector_overlay = VectorOverlay::RelativeEnergyFlow;
         });
         expect_step(&mut state, 7, &|state| {
-            state.inspector = Some(InspectorPanel::Simulation);
+            let mut source = state.editor.document.model.source;
+            *source.signal.carrier_mut().2 += 6.0;
+            state.editor.set_point_source(source).unwrap();
+            assert!(!state.guide_step_done(), "the frequency alone");
+            source.signal = pulse_from(source.signal, SignalUse::Source, 0.0);
+            state.editor.set_point_source(source).unwrap();
         });
         expect_step(&mut state, 8, &|state| {
             let id = state
@@ -882,6 +966,111 @@ mod tests {
             Ok(())
         });
         assert!(!marked, "the marker is written once");
+    }
+
+    /// A line Finish refuses keeps the tour where it is and lights the
+    /// palette's way back, Undo point and Cancel, with the refusal on the
+    /// card; a point taken back clears it.
+    #[test]
+    fn a_refused_line_lights_its_way_back() {
+        let mut state = Playground::default();
+        state.start_guide(false);
+        settle(&mut state.editor);
+        state.guide.step = step_index("Draw");
+        state.guide.baseline = state.guide_baseline();
+        state.begin_draw(DrawTool::Polyline);
+        // Across the obstacle, which a wall cannot cross.
+        for point in [Point2::new(0.0, 0.3), Point2::new(0.5, 0.3)] {
+            let draw = state.draw.as_mut().unwrap();
+            draw.points.push(point);
+            draw.attachments.push(None);
+        }
+        state.finish_draw();
+        let setback = state.guide_setback().expect("the refusal is a setback");
+        assert_eq!(setback.target, Spotlight::DrawBack);
+        assert!(setback.text.contains("touch"), "{}", setback.text);
+        let viewport = viewport();
+        let back = Rect::from_min_size(Pos2::new(300.0, 120.0), egui::vec2(140.0, 20.0));
+        state.spotlights.record(Spotlight::DrawBack, back);
+        state.spotlights.record(
+            Spotlight::DrawFinish,
+            back.translate(egui::vec2(-60.0, 0.0)),
+        );
+        assert_eq!(state.guide_light(viewport), Some((back, None)));
+        state.guide_update(10.0);
+        assert!(!state.guide_step_done());
+        state.undo_draw_point();
+        assert_eq!(state.guide_setback(), None, "a point taken back clears it");
+        assert_eq!(
+            state.guide_light(viewport).map(|(rect, _)| rect),
+            Some(back.translate(egui::vec2(-60.0, 0.0))),
+            "the step's own light is back"
+        );
+    }
+
+    /// A scene the topology check finds invalid holds every step, done or
+    /// not, and lights the bar's Undo; Undo takes it back.
+    #[test]
+    fn an_invalid_scene_holds_the_tour_and_lights_undo() {
+        let mut state = Playground::default();
+        state.start_guide(false);
+        settle(&mut state.editor);
+        state.guide.step = step_index("Select and move");
+        state.guide.baseline = state.guide_baseline();
+        // The obstacle's control dragged out of the domain: moved, which
+        // the step asks for, but invalid.
+        state.editor.begin();
+        state
+            .editor
+            .set_control(GUIDE_OBSTACLE, 0, Point2::new(4.0, 0.0))
+            .unwrap();
+        state.editor.commit();
+        settle(&mut state.editor);
+        assert!(matches!(
+            state.editor.acceptance,
+            TopologyAcceptance::Invalid(_)
+        ));
+        let setback = state
+            .guide_setback()
+            .expect("an invalid scene is a setback");
+        assert_eq!(setback.target, Spotlight::Undo);
+        let undo = Rect::from_min_size(Pos2::new(8.0, 8.0), egui::vec2(28.0, 22.0));
+        state.spotlights.record(Spotlight::Undo, undo);
+        assert_eq!(state.guide_light(viewport()), Some((undo, None)));
+        for now in [10.0, 12.0] {
+            state.guide_update(now);
+        }
+        assert!(!state.guide_step_done());
+        assert_eq!(state.guide.step, step_index("Select and move"));
+        state.undo();
+        settle(&mut state.editor);
+        assert_eq!(state.guide_setback(), None);
+        assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
+    }
+
+    /// The Simulation step lights the frequency until it is changed, then
+    /// Pulse.
+    #[test]
+    fn the_simulation_step_lights_the_frequency_then_pulse() {
+        let mut state = Playground::default();
+        state.start_guide(false);
+        settle(&mut state.editor);
+        state.guide.step = step_index("Simulation");
+        state.guide.baseline = state.guide_baseline();
+        state.inspector = Some(InspectorPanel::Simulation);
+        let viewport = viewport();
+        let frequency = Rect::from_min_size(Pos2::new(900.0, 400.0), egui::vec2(80.0, 20.0));
+        let pulse = Rect::from_min_size(Pos2::new(960.0, 370.0), egui::vec2(50.0, 20.0));
+        state
+            .spotlights
+            .record(Spotlight::SourceFrequency, frequency);
+        state.spotlights.record(Spotlight::SourcePulse, pulse);
+        let lit = |state: &Playground| state.guide_light(viewport).map(|(rect, _)| rect);
+        assert_eq!(lit(&state), Some(frequency));
+        let mut source = state.editor.document.model.source;
+        *source.signal.carrier_mut().2 *= 0.5;
+        state.editor.set_point_source(source).unwrap();
+        assert_eq!(lit(&state), Some(pulse));
     }
 
     /// A step lights the first of its controls that was drawn: the panel's
@@ -1011,6 +1200,7 @@ mod tests {
     fn a_done_step_lights_nothing() {
         let mut state = Playground::default();
         state.start_guide(false);
+        settle(&mut state.editor);
         let viewport = viewport();
         let pause = Rect::from_min_size(Pos2::new(700.0, 4.0), egui::vec2(60.0, 24.0));
         state.spotlights.record(Spotlight::RunPause, pause);
@@ -1042,10 +1232,12 @@ mod tests {
         state.editor.set_point_source(source).unwrap();
         state.guide_advance();
         assert_eq!(STEPS[state.guide.step].title, "The source");
+        settle(&mut state.editor);
         state.guide_update(1.0);
         assert!(!state.guide_step_done(), "the early drag counted");
         source.position = source.position + Point2::new(0.0, 0.2);
         state.editor.set_point_source(source).unwrap();
+        settle(&mut state.editor);
         state.guide_update(1.0);
         assert!(state.guide_step_done());
     }

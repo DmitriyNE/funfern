@@ -265,15 +265,16 @@ impl Playground {
                                 self.finish_draw();
                             }
                             let undo = egui::Button::new("Undo point").shortcut_text("Backspace");
-                            if ui.add_enabled(points > 0, undo).clicked() {
+                            let undo = ui.add_enabled(points > 0, undo);
+                            if undo.clicked() {
                                 self.undo_draw_point();
                             }
-                            if ui
-                                .add(egui::Button::new("Cancel").shortcut_text("Esc"))
-                                .clicked()
-                            {
+                            let cancel = ui.add(egui::Button::new("Cancel").shortcut_text("Esc"));
+                            if cancel.clicked() {
                                 self.draw = None;
                             }
+                            self.spotlights
+                                .record(Spotlight::DrawBack, undo.rect.union(cancel.rect));
                         });
                     }
                     ui.separator();
@@ -411,11 +412,9 @@ impl Playground {
         match item {
             ToolbarItem::Undo => {
                 let shortcut = ui.ctx().format_shortcut(&session::UNDO_SHORTCUT);
-                if ui
-                    .button(label)
-                    .on_hover_text(format!("Undo ({shortcut})"))
-                    .clicked()
-                {
+                let response = ui.button(label).on_hover_text(format!("Undo ({shortcut})"));
+                self.spotlights.record(Spotlight::Undo, response.rect);
+                if response.clicked() {
                     self.undo();
                 }
             }
