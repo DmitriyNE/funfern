@@ -1049,6 +1049,60 @@ fn time_step_bound_line(bound: CanonicalTimeStepBound, physics: PhysicsModel) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every glyph the formula syntax window shows is in the fonts it is
+    /// shown with: the forms in the monospace face, the meanings in the
+    /// small proportional one. A glyph the font lacks draws as a box.
+    #[test]
+    fn the_formula_helps_glyphs_are_in_the_fonts() {
+        let mut missing = Vec::new();
+        let mut check = |family: egui::FontFamily, text: &str| {
+            for glyph in fonts_lack(&family, text) {
+                missing.push(format!("{glyph} (U+{:04X}) in {text:?}", glyph as u32));
+            }
+        };
+        for (names, meaning) in FORMULA_SYMBOLS {
+            check(egui::FontFamily::Monospace, names);
+            check(egui::FontFamily::Proportional, meaning);
+        }
+        for (signature, meaning, _) in FORMULA_FUNCTIONS {
+            check(egui::FontFamily::Monospace, signature);
+            check(egui::FontFamily::Proportional, meaning);
+        }
+        for (form, meaning) in FORMULA_LAWS {
+            check(egui::FontFamily::Monospace, form);
+            check(egui::FontFamily::Proportional, meaning);
+        }
+        assert!(
+            missing.is_empty(),
+            "glyphs not in the fonts:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    /// The characters of `text` that no face of `family` holds, read from
+    /// egui's own font files. egui's `has_glyphs` cannot be asked: it calls
+    /// a glyph the family's replacement face owns missing, and for the
+    /// monospace family that face is Hack, the primary one.
+    fn fonts_lack(family: &egui::FontFamily, text: &str) -> Vec<char> {
+        let definitions = egui::FontDefinitions::default();
+        let faces = definitions.families[family]
+            .iter()
+            .map(|name| {
+                let data = &definitions.font_data[name];
+                ab_glyph::FontRef::try_from_slice_and_index(&data.font, data.index)
+                    .unwrap_or_else(|error| panic!("{name}: {error}"))
+            })
+            .collect::<Vec<_>>();
+        text.chars()
+            .filter(|glyph| {
+                !glyph.is_whitespace()
+                    && !faces
+                        .iter()
+                        .any(|face| ab_glyph::Font::glyph_id(face, *glyph).0 != 0)
+            })
+            .collect()
+    }
     use crate::material_overlay::MaterialProperty;
     use crate::ui::test_support::*;
     use funfern_app::topology_editor::TopologyEditor;

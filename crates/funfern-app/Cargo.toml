@@ -50,3 +50,7 @@ web-sys = { version = "0.3", features = ["Blob", "console", "Document", "Element
 # every edit was checked by hand against a throwaway crate. `wgsl-out` is the
 # rewrite wgpu hands a browser in place of the source.
 naga = { version = "=29.0.4", features = ["wgsl-in", "wgsl-out"] }
+# The version epaint links, to read egui's own font files: egui's glyph check
+# calls a glyph the family's replacement face owns missing, and for the
+# monospace family that face is the primary one.
+ab_glyph = "=0.2.32"

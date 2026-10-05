@@ -19405,3 +19405,24 @@ Two more from the testers.
   0.9 s before it moved on: a finished line hid the Finish button, and the
   chain fell back to the Polyline tool for that moment. A done step lights
   nothing now (`guide_light`), and the screen dims evenly under its tick.
+
+## 2026-10-05 — Glyphs the formula syntax window had no font for
+
+Reported: characters drawn as boxes in the formula syntax reference. Five,
+all in the laws table: ḡ (U+1E21) in the coefficient, Kerr and Saturable
+forms, the combining diaeresis of r̈ in the Restoring form, and ṙ in its
+meaning. egui's bundled faces (Ubuntu Light, Hack) hold every other
+character of the window. The user chose plain text over a wider font: ḡ is
+g, r̈ is d²r/dt², ṙ is dr/dt. The law editor's Kerr and Saturable hovers
+used the same ḡ and read g too.
+
+- **The test.** `the_formula_helps_glyphs_are_in_the_fonts` reads egui's own
+  font files through ab_glyph (a dev dependency pinned to the version epaint
+  links) and checks every form in the monospace family and every meaning in
+  the proportional one. egui's `has_glyphs` could not be asked: it calls a
+  glyph missing when the family's replacement face owns it, and for the
+  monospace family that face is Hack, the primary one, so every monospace
+  glyph read as missing.
+- A wider font (DejaVu Sans and Sans Mono as fallbacks, subset to a few tens
+  of KB) was costed and declined for five characters; the test is where to
+  start if one is ever wanted.

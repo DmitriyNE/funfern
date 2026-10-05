@@ -974,7 +974,7 @@ const FORMULA_SYMBOLS: [(&str, &str); 4] = [
 /// offers is here; nothing here is a law the solver does not run.
 const FORMULA_LAWS: [(&str, &str); 14] = [
     (
-        "c = c₀(x)·ḡ·d(t)·s(t)",
+        "c = c₀(x)·g·d(t)·s(t)",
         "a coefficient is its base value times the field response, the drive and the Switch; \
          Divide makes the drive and Switch divide it instead",
     ),
@@ -984,11 +984,11 @@ const FORMULA_LAWS: [(&str, &str); 14] = [
          magnitude of the complementary field",
     ),
     (
-        "Kerr  ḡ = 1 + χ|u|²",
+        "Kerr  g = 1 + χ|u|²",
         "χ is relative, per unit |u|²; χ < 0 defocuses and needs an amplitude bound",
     ),
     (
-        "Saturable  ḡ = 1 + χ|u|²/(1 + |u|²/σ²)",
+        "Saturable  g = 1 + χ|u|²/(1 + |u|²/σ²)",
         "Kerr that levels off at 1 + χσ²",
     ),
     (
@@ -1013,8 +1013,8 @@ const FORMULA_LAWS: [(&str, &str); 14] = [
          admitted amplitude, and by a restoring law's largest curvature",
     ),
     (
-        "Restoring  M₀r̈ + Kr + M₀V′(r) = 0",
-        "r = ∫u dt is carried as state; the field shown is u = ṙ, so a static kink shows \
+        "Restoring  M₀ d²r/dt² + Kr + M₀V′(r) = 0",
+        "r = ∫u dt is carried as state; the field shown is u = dr/dt, so a static kink shows \
          u = 0 and the Integrated field view shows r",
     ),
     (

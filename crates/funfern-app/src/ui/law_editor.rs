@@ -779,9 +779,9 @@ fn coefficient_law_editor(
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut chosen, ResponseKind::Linear, "Linear");
                 ui.selectable_value(&mut chosen, ResponseKind::Kerr, "Kerr")
-                    .on_hover_text("ḡ = 1 + χ|u|²");
+                    .on_hover_text("g = 1 + χ|u|²");
                 ui.selectable_value(&mut chosen, ResponseKind::Saturable, "Saturable")
-                    .on_hover_text("ḡ = 1 + χ|u|² / (1 + |u|²/σ²)");
+                    .on_hover_text("g = 1 + χ|u|² / (1 + |u|²/σ²)");
             });
     });
     if chosen != kind {
