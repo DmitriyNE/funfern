@@ -424,11 +424,9 @@ impl Playground {
             // picture, rather than a panel tab: it opens a window, as
             // + Draw does.
             ToolbarItem::Examples => {
-                if ui
-                    .button(label)
-                    .on_hover_text("Ready-to-run scenes")
-                    .clicked()
-                {
+                let response = ui.button(label).on_hover_text("Ready-to-run scenes");
+                self.spotlights.record(Spotlight::Examples, response.rect);
+                if response.clicked() {
                     self.examples_open = !self.examples_open;
                 }
             }
@@ -439,7 +437,9 @@ impl Playground {
             }
             ToolbarItem::Tab(panel) => {
                 let selected = self.inspector == Some(panel);
-                if ui.selectable_label(selected, label).clicked() {
+                let response = ui.selectable_label(selected, label);
+                self.spotlights.record(Spotlight::Tab(panel), response.rect);
+                if response.clicked() {
                     self.inspector = (!selected).then_some(panel);
                 }
             }
@@ -452,12 +452,15 @@ impl Playground {
                         }
                     }
                 });
+                self.spotlights
+                    .record(Spotlight::Panels, menu.response.rect);
                 if fold >= ToolbarFold::Compact {
                     menu.response.on_hover_text("Panels");
                 }
             }
             ToolbarItem::Draw => {
                 let button = ui.button(label);
+                self.spotlights.record(Spotlight::Draw, button.rect);
                 let button = if fold >= ToolbarFold::Compact {
                     button.on_hover_text("Draw")
                 } else {
@@ -469,7 +472,9 @@ impl Playground {
             }
             ToolbarItem::RunPause => {
                 let name = if self.wave_running { "Pause" } else { "Run" };
-                if named(ui.button(label), name).clicked() {
+                let response = named(ui.button(label), name);
+                self.spotlights.record(Spotlight::RunPause, response.rect);
+                if response.clicked() {
                     self.wave_running = !self.wave_running;
                 }
             }

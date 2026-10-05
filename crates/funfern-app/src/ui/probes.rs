@@ -89,11 +89,13 @@ impl Playground {
                 let selected = self.probe_mode.is_some_and(|active| {
                     std::mem::discriminant(&active) == std::mem::discriminant(&mode)
                 });
-                if ui
+                let response = ui
                     .add(egui::Button::new(format!("+ {label}")).selected(selected))
-                    .on_hover_text(hint)
-                    .clicked()
-                {
+                    .on_hover_text(hint);
+                if matches!(mode, ProbePlacement::Point) {
+                    self.spotlights.record(Spotlight::ProbePoint, response.rect);
+                }
+                if response.clicked() {
                     self.probe_mode = (!selected).then_some(mode);
                     self.pulse_mode = false;
                 }

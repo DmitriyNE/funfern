@@ -1203,6 +1203,42 @@ fn obstacle_over_a_mirror() -> TopologyDocument {
     document
 }
 
+/// The guide scene's region to repaint and the material waiting for it.
+pub const GUIDE_REGION: RegionId = RegionId(2);
+pub const GUIDE_GLASS: MaterialId = MaterialId(2);
+
+/// The scene the guided tour opens on, not a gallery entry: a source, a
+/// round reflecting obstacle to select, and a round region in the
+/// background material with glass in the library for it. Quick to mesh, so
+/// the tour runs on any machine.
+pub fn guide_scene() -> TopologyDocument {
+    let mut builder = Builder::new();
+    builder.scene.materials.push(Material {
+        id: GUIDE_GLASS,
+        name: "Glass".into(),
+        mass_density: ScalarField::constant(2.25),
+        stiffness: ScalarField::constant(1.0),
+        damping: ScalarField::constant(0.0),
+        axis_ratio: ScalarField::constant(1.0),
+        parameters: vec![],
+        color: [61, 116, 139],
+        ..Material::default_medium()
+    });
+    builder.hole(PeriodicCubicSpline::rounded(Point2::new(0.25, 0.3), 0.18));
+    let region = builder.subdomain(
+        PeriodicCubicSpline::rounded(Point2::new(0.1, -0.45), 0.26),
+        DEFAULT_MATERIAL,
+        MaterialFrame {
+            attachment: MaterialFrameAttachment::FollowRegion,
+            ..MaterialFrame::world()
+        },
+    );
+    debug_assert_eq!(region, GUIDE_REGION);
+    let mut document = builder.document();
+    document.model.source = source(Point2::new(-0.6, 0.15), 2.0, 18.0, 0.06);
+    document
+}
+
 fn straight_baffle(y0: f64, y1: f64) -> OpenCubicSpline {
     OpenCubicSpline::polyline(vec![Point2::new(0.0, y0), Point2::new(0.0, y1)]).unwrap()
 }
@@ -4722,6 +4758,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The guide scene compiles and holds what its steps ask for: the round
+    /// region in the background material, the glass in the library, the
+    /// obstacle, and a source that is on.
+    #[test]
+    fn the_guide_scene_holds_what_its_steps_ask_for() {
+        let document = guide_scene();
+        let draft = &document.model.draft;
+        let region = draft.region(GUIDE_REGION).expect("the region to repaint");
+        assert_eq!(region.material, DEFAULT_MATERIAL);
+        assert!(
+            draft
+                .materials
+                .iter()
+                .any(|material| material.id == GUIDE_GLASS)
+        );
+        assert_eq!(
+            draft.geometry.curves.len(),
+            2,
+            "the obstacle and the region"
+        );
+        assert!(document.model.source.enabled);
+        let prepared = prepare(&document, 0.16);
+        assert!(prepared.mesh.triangles.len() > 100);
     }
 
     /// A scene drawn as streamlines shows the energy flow, the one field the

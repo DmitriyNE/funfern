@@ -184,7 +184,8 @@ impl Playground {
         }
     }
     /// What launch opens: a shared link first, then the last session's
-    /// autosave, then a random example. A link or an autosave that does not
+    /// autosave, then the guided tour on a first launch, and a random example
+    /// once the tour has been seen. A link or an autosave that does not
     /// open, an older version's among them, raises a notice and leaves the
     /// next in line to open: a broken link does not cost the last session,
     /// and an autosave this version cannot read is replaced at the next
@@ -193,6 +194,7 @@ impl Playground {
         &mut self,
         link: Option<Result<Vec<u8>, String>>,
         autosave: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
+        guide_seen: bool,
     ) {
         // A link that does not open is still in the address, and is replaced
         // by the scene that opens in its place.
@@ -207,10 +209,15 @@ impl Playground {
             .and_then(|bytes| bytes.map(|bytes| self.open_scene_bytes(&bytes)).transpose())
         {
             Ok(Some(())) => true,
-            // A first run. A random example rather than the same one every
-            // time, so the app opens on something worth looking at.
+            // A first run: the guided tour, until it has been seen once;
+            // then a random example rather than the same one every time, so
+            // the app opens on something worth looking at.
             Ok(None) => {
-                self.open_random_example();
+                if guide_seen {
+                    self.open_random_example();
+                } else {
+                    self.start_guide(false);
+                }
                 false
             }
             Err(error) => {
@@ -828,7 +835,7 @@ mod tests {
             (Err("Autosave exceeds 16 MiB".to_string()), "16 MiB"),
         ] {
             let mut state = Playground::default();
-            state.open_startup_scene(None, || autosave);
+            state.open_startup_scene(None, || autosave, true);
             assert!(
                 state.example_opened.is_some(),
                 "{reason}: no example opened"
@@ -842,15 +849,38 @@ mod tests {
         }
     }
 
+    /// A first launch, with nothing to restore and the tour not yet seen,
+    /// opens the guided tour on its own scene, with no card; once the tour
+    /// has been seen, a random example with its card.
+    #[test]
+    fn a_first_launch_opens_the_tour_until_it_has_been_seen() {
+        let mut state = Playground::default();
+        state.open_startup_scene(None, || Ok(None), false);
+        assert!(state.guide.active);
+        assert_eq!(state.example_opened, None);
+        assert_eq!(
+            state.editor.document,
+            funfern_app::topology_examples::guide_scene()
+        );
+        assert!(state.notices.is_empty());
+
+        let mut state = Playground::default();
+        state.open_startup_scene(None, || Ok(None), true);
+        assert!(!state.guide.active);
+        assert!(state.example_opened.is_some());
+    }
+
+    /// With the tour seen, a launch with nothing to restore opens an
+    /// example quietly, and an autosave restores.
     #[test]
     fn a_first_run_opens_an_example_quietly_and_an_autosave_restores() {
         let mut state = Playground::default();
-        state.open_startup_scene(None, || Ok(None));
+        state.open_startup_scene(None, || Ok(None), true);
         assert!(state.example_opened.is_some());
         assert!(state.notices.is_empty());
 
         let mut state = Playground::default();
-        state.open_startup_scene(None, || Ok(Some(example_bytes(2))));
+        state.open_startup_scene(None, || Ok(Some(example_bytes(2))), true);
         let expected = &funfern_app::topology_examples::catalog()[2].document;
         assert_eq!(&state.editor.document, expected);
         assert_eq!(state.example_opened, None);
@@ -868,7 +898,7 @@ mod tests {
             (Err("Shared scene data is damaged".to_string()), "damaged"),
         ] {
             let mut state = Playground::default();
-            state.open_startup_scene(Some(link), || Ok(Some(example_bytes(2))));
+            state.open_startup_scene(Some(link), || Ok(Some(example_bytes(2))), true);
             assert_eq!(&state.editor.document, expected, "{reason}");
             let notices = notices(&state);
             assert!(
@@ -879,7 +909,11 @@ mod tests {
         }
 
         let mut state = Playground::default();
-        state.open_startup_scene(Some(Ok(version_21_bytes())), || Ok(Some(b"[]".to_vec())));
+        state.open_startup_scene(
+            Some(Ok(version_21_bytes())),
+            || Ok(Some(b"[]".to_vec())),
+            true,
+        );
         assert!(state.example_opened.is_some());
         let notices = notices(&state);
         assert!(
@@ -896,9 +930,11 @@ mod tests {
     #[test]
     fn a_notice_is_held_past_the_status_line_until_closed() {
         let mut state = Playground::default();
-        state.open_startup_scene(Some(Err("Shared scene data is damaged".into())), || {
-            Ok(None)
-        });
+        state.open_startup_scene(
+            Some(Err("Shared scene data is damaged".into())),
+            || Ok(None),
+            true,
+        );
         state.notify("Simulation topology committed");
         let context = egui::Context::default();
         theme::apply(&context);
@@ -937,9 +973,11 @@ mod tests {
     #[test]
     fn a_link_that_opens_leaves_the_autosave_unread() {
         let mut state = Playground::default();
-        state.open_startup_scene(Some(Ok(example_bytes(3))), || {
-            panic!("the autosave was read under a link that opened")
-        });
+        state.open_startup_scene(
+            Some(Ok(example_bytes(3))),
+            || panic!("the autosave was read under a link that opened"),
+            true,
+        );
         let expected = &funfern_app::topology_examples::catalog()[3].document;
         assert_eq!(&state.editor.document, expected);
     }
@@ -1031,7 +1069,7 @@ mod tests {
     #[test]
     fn an_opened_link_follows_the_document() {
         let mut state = Playground::default();
-        state.open_startup_scene(Some(Ok(example_bytes(3))), || Ok(None));
+        state.open_startup_scene(Some(Ok(example_bytes(3))), || Ok(None), true);
         state.open_example(2);
         state.refresh_link();
         let expected = &funfern_app::topology_examples::catalog()[2].document;
@@ -1043,7 +1081,11 @@ mod tests {
     #[test]
     fn a_link_that_did_not_open_is_replaced_by_the_scene_that_did() {
         let mut state = Playground::default();
-        state.open_startup_scene(Some(Ok(version_21_bytes())), || Ok(Some(example_bytes(2))));
+        state.open_startup_scene(
+            Some(Ok(version_21_bytes())),
+            || Ok(Some(example_bytes(2))),
+            true,
+        );
         state.refresh_link();
         let expected = &funfern_app::topology_examples::catalog()[2].document;
         assert_eq!(&scene_in(&address().unwrap()), expected);
@@ -1052,7 +1094,7 @@ mod tests {
     #[test]
     fn without_a_link_the_address_is_left_alone() {
         let mut state = Playground::default();
-        state.open_startup_scene(None, || Ok(None));
+        state.open_startup_scene(None, || Ok(None), true);
         state.open_example(2);
         state.refresh_link();
         assert_eq!(address(), None);
@@ -1061,7 +1103,7 @@ mod tests {
     #[test]
     fn a_copied_link_follows_the_document() {
         let mut state = Playground::default();
-        state.open_startup_scene(None, || Ok(None));
+        state.open_startup_scene(None, || Ok(None), true);
         state.copy_link(&egui::Context::default());
         assert_eq!(state.message, "Scene link copied");
         state.open_example(4);
@@ -1073,7 +1115,7 @@ mod tests {
     #[test]
     fn a_scene_past_the_links_size_takes_the_link_out_of_the_address() {
         let mut state = Playground::default();
-        state.open_startup_scene(Some(Ok(example_bytes(3))), || Ok(None));
+        state.open_startup_scene(Some(Ok(example_bytes(3))), || Ok(None), true);
         state.follow_link(Err(
             "Scene is too large for a shareable link; save it as a file instead".into(),
         ));

@@ -45,6 +45,7 @@ mod events;
 mod exposure;
 mod gesture;
 mod gizmo;
+mod guide;
 mod input;
 mod inspectors;
 mod law_editor;
@@ -81,6 +82,7 @@ pub use state::Playground;
 use events::*;
 use exposure::*;
 use gesture::*;
+use guide::*;
 use pacing::*;
 use probe_view::*;
 use signals::*;
@@ -827,6 +829,7 @@ impl Playground {
             ));
         }
         self.history_shortcuts(root.ctx());
+        self.spotlights.clear();
         self.top_bar(root);
         self.status_bar(root);
         self.side_panel(root);
@@ -844,6 +847,7 @@ impl Playground {
             self.notice_window(root.ctx());
             self.scene_card(root.ctx(), viewport);
             self.examples_window(root.ctx());
+            self.guide_frame(root.ctx(), viewport);
         }
         self.keyboard_focus_previous = root.ctx().egui_wants_keyboard_input();
         viewport
@@ -2499,7 +2503,11 @@ pub fn frame(
     if !state.startup_done {
         state.startup_done = true;
         state.fit_inspector_to_screen(ctx.content_rect().width());
-        state.open_startup_scene(crate::sharing::initial_fragment(), crate::recovery::load);
+        state.open_startup_scene(
+            crate::sharing::initial_fragment(),
+            crate::recovery::load,
+            crate::recovery::guide_seen(),
+        );
     }
     state.editor.validate_frame(12000);
     state.refresh_runtime(
@@ -2618,5 +2626,6 @@ pub fn frame(
         }
     }
     state.autosave();
+    state.persist_guide_seen(crate::recovery::mark_guide_seen);
     Ok(())
 }

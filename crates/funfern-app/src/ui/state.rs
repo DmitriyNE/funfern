@@ -95,6 +95,10 @@ pub struct Playground {
     /// and the scene card. Any other load clears it.
     pub(super) example_opened: Option<usize>,
     pub(super) scene_card: SceneCard,
+    /// The guided tour, and where the controls it lights were drawn this
+    /// frame.
+    pub(super) guide: Guide,
+    pub(super) spotlights: Spotlights,
     pub(super) material_color_edit: Option<(MaterialId, [u8; 3])>,
     pub(super) new_separator_material: MaterialId,
     /// The slider produces a value per frame; the rebuild waits for release.
@@ -408,6 +412,8 @@ impl Default for Playground {
                 .collect(),
             example_opened: Some(0),
             scene_card: SceneCard::default(),
+            guide: Guide::default(),
+            spotlights: Spotlights::default(),
             material_color_edit: None,
             new_separator_material: DEFAULT_MATERIAL,
             mesh_edge_dragging: false,

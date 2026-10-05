@@ -219,6 +219,7 @@ impl Playground {
         let opened = self.example_opened;
         let mut open = true;
         let mut selected = None;
+        let mut tour = false;
         // A section a row, or as many tiles as a narrow screen has room for,
         // and as tall as the screen allows below the top bar; the grid sets
         // the window's size.
@@ -281,9 +282,24 @@ impl Playground {
                             }
                         }
                     });
+                // At the foot rather than beside the heading: a row there
+                // kept the heading from wrapping at a phone's width and
+                // made the window wider than its grid.
+                ui.add_space(4.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("Guided tour")
+                        .on_hover_text("A walk through the app, step by step")
+                        .clicked()
+                    {
+                        tour = true;
+                    }
+                });
             });
         self.examples_open = open;
-        if let Some(index) = selected {
+        if tour {
+            self.start_guide(true);
+        } else if let Some(index) = selected {
             self.pick_example(index);
         }
     }

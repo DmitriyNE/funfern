@@ -19253,3 +19253,56 @@ a quiet host".
   the round trip at 120 Hz, and the budget, reaching the cadence, exposes
   it. The readback depth moves to the front of the pacing list.
 - Docs only; no gate beyond the formatter's check.
+
+## 2026-10-05 — The guided tour
+
+The plan's onboarding scene with an overlaid guide, on `guide`. A first
+launch opened a random example with its card and nothing said what to do.
+The user's one addition to the plan: the tour goes through the panels, not
+in detail, so that at its end the user knows what to expect and where to
+dig.
+
+- **The scene** is its own builder, `topology_examples::guide_scene`, not a
+  gallery entry, so the gallery stays physics and its file tests stay: a
+  source at the left, a round reflecting obstacle to select, a round region
+  in the background material with glass waiting in the library. No card,
+  since it is no example.
+- **Nine steps as data** (`ui/guide.rs`, `STEPS`): pause and run; drag the
+  source; Edit and select the obstacle; draw a wall; Materials and give the
+  region the glass; View and switch the vector overlay on; Simulation,
+  opened; Probes and drop a point probe; the gallery, which ends the tour.
+  Each has a done test on the state (the running flag, the source's
+  position with the edit committed, a curve span in the selection, the curve
+  count, the region's material, the overlay mode, the inspector, the probe
+  count with a readout open, the gallery flag) read against a baseline
+  taken when the tour starts. A done step moves on after 0.9 s so its tick
+  is seen; Next and Skip are always there.
+- **The spotlight** follows the frame: the top bar's items and the two
+  panel buttons of interest record their response rects into `Spotlights`
+  as they draw, cleared at the top of `show`, and a step lights the first
+  of its targets that was drawn, with a hint for a fallback: a panel's tab
+  folded into the Panels menu lights the menu and says the panel is under
+  it; the Probes step lights the + Point button when the panel is open, the
+  tab when not. The source step lights the source where the viewport draws
+  it. The dimming is four rects on a foreground layer painter, no widget,
+  so clicks pass through to the controls.
+- **Seen once** is `recovery::guide_seen` / `mark_guide_seen`: a `guide-seen`
+  file beside the autosave on native, a `funfern.guide.v1` key in local
+  storage in the browser, written once when the tour ends or is skipped.
+  `open_startup_scene` takes the flag: no autosave and no marker opens the
+  tour; the marker, a random example as before. Re-entry from a Guided tour
+  button at the gallery window's foot (a header row stopped the label
+  wrapping at phone width) and a small button on the expanded scene card.
+- **Tests:** each step done by the action it asks for and the last ending
+  the tour, the marker written once; the spotlight's fallback along a
+  step's targets and the source lit where it is drawn; the card showing the
+  step and Skip ending the tour through the harness; a first launch opening
+  the tour and a seen one an example; the guide scene compiling with what
+  the steps ask for. The startup tests pass the seen flag.
+- **Looked at:** a first launch with an empty home shows the scene, the
+  welcome card at one of nine and the Pause button lit. The narrow layouts
+  (360 to 700 px, floating inspector, folded bar) are covered by the
+  fallback test, not by a picture: the window cannot be resized from a
+  script here.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, both wasm32 checks and the browser shader compile.

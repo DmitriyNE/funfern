@@ -4,6 +4,28 @@ use funfern_app::{
 
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "funfern.autosave.v1";
+/// The guided tour's seen marker, beside the autosave: a launch with
+/// nothing to restore opens the tour until it has been seen once.
+#[cfg(target_arch = "wasm32")]
+const GUIDE_KEY: &str = "funfern.guide.v1";
+
+#[cfg(target_arch = "wasm32")]
+pub fn guide_seen() -> bool {
+    web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(GUIDE_KEY).ok().flatten())
+        .is_some()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn mark_guide_seen() -> Result<(), String> {
+    let storage = web_sys::window()
+        .ok_or("Browser window is unavailable")?
+        .local_storage()
+        .map_err(js_error)?
+        .ok_or("Browser local storage is unavailable")?;
+    storage.set_item(GUIDE_KEY, "seen").map_err(js_error)
+}
 
 #[cfg(target_arch = "wasm32")]
 pub fn load() -> Result<Option<Vec<u8>>, String> {
@@ -68,6 +90,27 @@ pub fn load() -> Result<Option<Vec<u8>>, String> {
 pub fn save(document: &Document) -> Result<(), String> {
     let path = recovery_path()?;
     write_atomic(&path, persistence::save(document)?.as_bytes())
+}
+
+/// Whether the guided tour has been seen on this machine: a marker file
+/// beside the autosave.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn guide_seen() -> bool {
+    guide_marker_path().is_ok_and(|path| path.exists())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn mark_guide_seen() -> Result<(), String> {
+    let path = guide_marker_path()?;
+    let parent = path.parent().ok_or("Marker path has no parent")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create the marker's folder: {error}"))?;
+    std::fs::write(&path, b"seen\n").map_err(|error| format!("Could not write the marker: {error}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn guide_marker_path() -> Result<std::path::PathBuf, String> {
+    Ok(recovery_path()?.with_file_name("guide-seen"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

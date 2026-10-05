@@ -1204,7 +1204,12 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   first); whether the oscillating complementary field gets lines at all, as
   field lines without arrowheads, or energy flow comes first.
 
-- [ ] An onboarding scene with an overlaid interactive guide. A first launch
+- [x] An onboarding scene with an overlaid interactive guide. Done 2026-10-05:
+  `guide_scene` (not a gallery entry), nine steps as data in `ui/guide.rs`
+  with done tests on the state, spotlights recorded by the bar and the
+  panels each frame with a Panels fallback, a `guide-seen` marker beside the
+  autosave, re-entry from the Examples window and the scene card. The
+  browser at 360-1280 px remains a manual check. A first launch
   opens a random example with its card, and nothing says what to do.
   Instead it opens a guide scene, simple and quick (one source, one
   obstacle, a region to repaint), with a guide laid over the viewport that

@@ -245,7 +245,7 @@ impl Playground {
                     self.select_region(region.id);
                 }
                 let mut material = region.material;
-                sized_combo(ui, ("region", region.id.0), materials.len())
+                let combo = sized_combo(ui, ("region", region.id.0), materials.len())
                     .selected_text(
                         materials
                             .iter()
@@ -257,6 +257,8 @@ impl Playground {
                             ui.selectable_value(&mut material, item.id, &item.name);
                         }
                     });
+                self.spotlights
+                    .record(Spotlight::RegionMaterial(region.id), combo.response.rect);
                 if material != region.material {
                     if let Err(error) = self.editor.set_region_material(region.id, material) {
                         self.notify(error)

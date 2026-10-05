@@ -566,7 +566,15 @@ indistinguishable from a steady one.
 
 Autosave retains both the accepted scene and any invalid editable draft, writing to
 browser local storage or an atomic per-user native recovery file after a short
-debounce. On browser startup, a `#scene=v1.…` fragment takes precedence over local
+debounce. Beside the autosave sits one more per-user marker, that the guided
+tour has been seen: a launch with nothing to restore opens the tour's own
+scene with the tour over it until then, and a random example with its card
+after. The tour's steps are data, each with a done test on the state and the
+controls it lights in order of preference; the top bar and the panels record
+where they drew those controls each frame, so the light follows the bar's
+folds, and a panel's tab folded into the Panels menu lights the menu with a
+hint. The dimming is paint on a foreground layer, no widget, so the controls
+underneath stay clickable. On browser startup, a `#scene=v1.…` fragment takes precedence over local
 recovery. Its URL-safe payload is zlib-compressed versioned scene JSON, capped before
 and after decompression. Once sharing is active, autosave updates the fragment with
 `history.replaceState`, avoiding a browser-history entry for every edit. Scene-only

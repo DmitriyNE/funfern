@@ -55,6 +55,7 @@ impl Playground {
         let mut toggle = false;
         let mut close = false;
         let mut gallery = false;
+        let mut tour = false;
         let expanded = self.scene_card.expanded;
         let card = egui::Area::new(egui::Id::new("scene_card"))
             .fixed_pos(viewport.left_top() + egui::vec2(CARD_INSET, CARD_INSET))
@@ -95,9 +96,14 @@ impl Playground {
                         ui.small(example.group.label());
                         ui.label(example.description);
                         ui.add_space(2.0);
-                        if ui.button("All examples…").clicked() {
-                            gallery = true;
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("All examples…").clicked() {
+                                gallery = true;
+                            }
+                            if ui.small_button("Guided tour").clicked() {
+                                tour = true;
+                            }
+                        });
                     }
                 });
             });
@@ -110,7 +116,9 @@ impl Playground {
         if gallery {
             self.examples_open = true;
         }
-        if step != 0 {
+        if tour {
+            self.start_guide(true);
+        } else if step != 0 {
             self.step_example(step);
         }
         Some(card.response.rect)
