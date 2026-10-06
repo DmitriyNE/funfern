@@ -684,6 +684,9 @@ impl Playground {
                     self.sim_time_step = dt;
                     self.canonical_event_serial = 0;
                     self.canonical_event_observed = 0;
+                    // The reset medium starts at its authored laws, wherever
+                    // a Switch had sent it.
+                    self.switch_targets.clear();
                     self.restart_probe_traces();
                     self.restart_exposures_after_handoff(true);
                 }
@@ -1282,6 +1285,70 @@ mod tests {
     /// retained generation - mispacing the solver, and making the speed ceiling
     /// see a step it had not asked for and request the rejected revision again,
     /// past the guard that stops a failed revision being retried every frame.
+    /// Reset starts the medium again at its authored laws, so the Switch
+    /// direction last sent no longer says where it is headed: the next press
+    /// heads for the alternate again rather than for the base it is at.
+    #[test]
+    fn reset_forgets_where_a_switch_was_sent() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame = |state: &mut Playground, request: &mut CanonicalGpuRequest| {
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    &display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+            });
+        };
+
+        let mut state = Playground::default();
+        let material = state.editor.document.model.draft.materials[0].clone();
+        let switch = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Switchable medium" && preset.row == LawPresetRow::Mass)
+            .unwrap();
+        state
+            .editor
+            .update_material(apply_law_preset(switch, &material).unwrap())
+            .unwrap();
+        settle(&mut state.editor);
+        activate(&mut state);
+        state.requested_revision = Some(state.editor.revision);
+        state.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut state, &mut request);
+        let installed = request.generation();
+
+        state.request_material_switch();
+        frame(&mut state, &mut request);
+        assert_eq!(state.switch_targets.get(&material.id), Some(&true));
+
+        state.reset_requested = true;
+        frame(&mut state, &mut request);
+        assert!(!state.reset_requested && request.generation() > installed);
+        assert!(state.switch_targets.is_empty());
+
+        state.request_material_switch();
+        frame(&mut state, &mut request);
+        assert_eq!(
+            state.switch_targets.get(&material.id),
+            Some(&true),
+            "the press after Reset heads for the alternate"
+        );
+    }
+
     #[test]
     fn a_rejected_handoff_keeps_the_accepted_step() {
         let mut world = World::new();

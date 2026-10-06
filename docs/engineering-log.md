@@ -19963,3 +19963,16 @@ boundary probe with `contiguous_span_path`, the check the file makes, moved
 beside it. `a_boundary_probe_walks_one_connected_run_of_spans` and
 `a_boundary_selection_across_the_seam_makes_a_probe_that_saves` cover the
 ordering, the refusals and the save.
+
+## 2026-10-07 — Reset forgets where a Switch was sent
+
+The Switch remembers the direction it last sent each material, because the
+running runtime only arrives with a full snapshot and a second press before
+then would read the old direction. A fresh handoff cleared that memory, but
+Reset installs its plan directly and did not: after Switch to the alternate
+and Reset, the medium ran at base while the memory still said alternate, so
+the next press sent base again and nothing happened. The Reset install now
+clears it too; the Switch readout already falls back to the authored runtime
+after a Reset, since the last snapshot is older than the new start.
+`reset_forgets_where_a_switch_was_sent` throws the Switch, resets and checks
+the next press heads for the alternate.
