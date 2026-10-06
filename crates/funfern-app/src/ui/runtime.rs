@@ -322,7 +322,7 @@ impl Playground {
         request.set_grid_scale_filter(self.editor.document.presentation.grid_scale_filter);
         self.finish_source_commit(request);
         self.supervise_solver_fault(request, assets, commands);
-        self.refresh_switch_states(display);
+        self.refresh_switch_states(display, request);
         // Starting another preparation mid-upload clears `runtime.ready`, and
         // would make the accepted GPU generation impossible to publish under
         // its immutable topology token. A later frame picks the edit up.
@@ -969,7 +969,11 @@ impl Playground {
     /// leave the reported real-time rate falsely high for many seconds.
     /// Each Switch material's accepted ramp, read from the runtime bank the
     /// latest full snapshot carries, at that snapshot's clock.
-    fn refresh_switch_states(&mut self, display: &CanonicalGpuDisplay) {
+    fn refresh_switch_states(
+        &mut self,
+        display: &CanonicalGpuDisplay,
+        request: &CanonicalGpuRequest,
+    ) {
         self.switch_states.clear();
         let Some(temporal) = self
             .runtime
@@ -978,10 +982,7 @@ impl Playground {
         else {
             return;
         };
-        let authored = temporal.initial_runtime();
-        let runtime = display
-            .accepted_material_runtime(&authored)
-            .unwrap_or(authored);
+        let runtime = running_material_runtime(display, request, temporal.initial_runtime());
         let time = display.clock.map_or(0.0, |clock| clock.absolute_seconds);
         for material in &self.editor.document.model.accepted.materials {
             if material.mass_law.alternate.is_none() && material.stiffness_law.alternate.is_none() {
@@ -1016,10 +1017,7 @@ impl Playground {
             self.message = "This medium has no Switch to throw".into();
             return;
         };
-        let authored = temporal.initial_runtime();
-        let runtime = display
-            .accepted_material_runtime(&authored)
-            .unwrap_or(authored);
+        let runtime = running_material_runtime(display, request, temporal.initial_runtime());
         let Some(ramp) = self
             .editor
             .document
@@ -1186,6 +1184,23 @@ fn live_event_fallback(error: &str, packable: bool) -> LiveEventFallback {
     }
 }
 
+/// The material runtime the running generation stepped with: the display's
+/// bank once it belongs to that generation, and the authored runtime before.
+/// A Reset installs a new generation while the display still holds the old
+/// one's readbacks, whose Switches may sit at the alternate.
+fn running_material_runtime(
+    display: &CanonicalGpuDisplay,
+    request: &CanonicalGpuRequest,
+    authored: CanonicalMaterialRuntimeState,
+) -> CanonicalMaterialRuntimeState {
+    if display.generation != request.generation() {
+        return authored;
+    }
+    display
+        .accepted_material_runtime(&authored)
+        .unwrap_or(authored)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1280,29 +1295,28 @@ mod tests {
         assert_eq!(state.steps_per_second, 500.0);
     }
 
-    /// Reported: a rejected handoff kept the candidate's step. The upload took
-    /// it when it started, and the rejection left it in place under the
-    /// retained generation - mispacing the solver, and making the speed ceiling
-    /// see a step it had not asked for and request the rejected revision again,
-    /// past the guard that stops a failed revision being retried every frame.
     /// Reset starts the medium again at its authored laws, so the Switch
     /// direction last sent no longer says where it is headed: the next press
-    /// heads for the alternate again rather than for the base it is at.
+    /// heads for the alternate again rather than for the base it is at. Until
+    /// the reset generation's first readback, the display still holds the old
+    /// generation's bank, which says alternate too.
     #[test]
     fn reset_forgets_where_a_switch_was_sent() {
         let mut world = World::new();
         world.init_resource::<Assets<ShaderBuffer>>();
         let mut request = CanonicalGpuRequest::default();
-        let display = CanonicalGpuDisplay::default();
+        let mut display = CanonicalGpuDisplay::default();
         let mut recorders = WaveGpuRequest::default();
         let vector = VectorOverlayDisplay::default();
-        let mut frame = |state: &mut Playground, request: &mut CanonicalGpuRequest| {
+        let mut frame = |state: &mut Playground,
+                         request: &mut CanonicalGpuRequest,
+                         display: &CanonicalGpuDisplay| {
             world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
                 let mut queue = bevy::ecs::world::CommandQueue::default();
                 let mut commands = Commands::new(&mut queue, world);
                 state.refresh_runtime(
                     request,
-                    &display,
+                    display,
                     &mut recorders,
                     &vector,
                     &mut assets,
@@ -1328,27 +1342,46 @@ mod tests {
         state.requested_edge = state.editor.document.presentation.mesh_edge;
         state.reset_requested = true;
         state.wave_running = false;
-        frame(&mut state, &mut request);
+        frame(&mut state, &mut request, &display);
         let installed = request.generation();
 
         state.request_material_switch();
-        frame(&mut state, &mut request);
+        frame(&mut state, &mut request, &display);
         assert_eq!(state.switch_targets.get(&material.id), Some(&true));
+        let records = state
+            .runtime
+            .active()
+            .and_then(|active| active.canonical_temporal_operator.as_ref())
+            .unwrap()
+            .initial_runtime()
+            .records()
+            .len();
+        display.hold_switched_snapshot(installed, records);
 
         state.reset_requested = true;
-        frame(&mut state, &mut request);
+        frame(&mut state, &mut request, &display);
         assert!(!state.reset_requested && request.generation() > installed);
         assert!(state.switch_targets.is_empty());
 
         state.request_material_switch();
-        frame(&mut state, &mut request);
+        frame(&mut state, &mut request, &display);
         assert_eq!(
             state.switch_targets.get(&material.id),
             Some(&true),
             "the press after Reset heads for the alternate"
         );
+        assert_eq!(
+            state.switch_states.first().map(|(_, target, _)| *target),
+            Some(0.0),
+            "the reset medium reads as at its base"
+        );
     }
 
+    /// Reported: a rejected handoff kept the candidate's step. The upload took
+    /// it when it started, and the rejection left it in place under the
+    /// retained generation - mispacing the solver, and making the speed ceiling
+    /// see a step it had not asked for and request the rejected revision again,
+    /// past the guard that stops a failed revision being retried every frame.
     #[test]
     fn a_rejected_handoff_keeps_the_accepted_step() {
         let mut world = World::new();

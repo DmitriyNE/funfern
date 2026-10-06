@@ -19976,3 +19976,17 @@ clears it too; the Switch readout already falls back to the authored runtime
 after a Reset, since the last snapshot is older than the new start.
 `reset_forgets_where_a_switch_was_sent` throws the Switch, resets and checks
 the next press heads for the alternate.
+
+## 2026-10-07 — A Switch after Reset reads the reset generation
+
+The previous entry assumed the Switch readout falls back to the authored
+runtime after a Reset. It does not: Reset installs a new generation, but the
+display keeps the old generation's readbacks until the new one's first
+arrives, and `accepted_material_runtime` decoded that old bank without asking
+whose it was. A press in that window read the Switch as at the alternate and
+sent base again, and the material panel said "At alternate" over a medium at
+base. Both now take the display's bank only when its generation is the
+request's, and the authored runtime before (`running_material_runtime`).
+`reset_forgets_where_a_switch_was_sent` now leaves an old-generation snapshot
+with the Switch at its alternate across the Reset, and checks the press heads
+for the alternate and the panel reads base.

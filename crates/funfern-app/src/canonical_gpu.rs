@@ -4972,6 +4972,38 @@ impl CanonicalGpuDisplay {
         }
         Some(adopted)
     }
+
+    /// Holds a full snapshot of `generation` whose bank has every one of
+    /// `records` Switches settled at its alternate, as the readbacks of an
+    /// earlier generation still do until the next one arrives, for host tests
+    /// that have no render world.
+    #[cfg(test)]
+    pub fn hold_switched_snapshot(&mut self, generation: u64, records: usize) {
+        let settled = GpuCanonicalStateWord {
+            values: Vec4::new(1.0, 1.0, 0.0, 0.0),
+        };
+        self.generation = generation;
+        self.raw_material_runtime = (0..records)
+            .flat_map(|_| {
+                [
+                    GpuCanonicalStateWord::default(),
+                    settled,
+                    GpuCanonicalStateWord::default(),
+                ]
+            })
+            .collect();
+        self.raw_state_completed_steps = 0;
+        self.clock = Some(CanonicalGpuDisplayClock {
+            epoch: 0,
+            epoch_origin_seconds: 0.0,
+            absolute_seconds: 0.0,
+            step_in_epoch: 0,
+            accepted_steps: 0,
+            local_seconds: 0.0,
+            time_step: 1.0e-3,
+            event_serial: 0,
+        });
+    }
 }
 
 #[derive(Resource, Default)]
