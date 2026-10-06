@@ -19841,3 +19841,18 @@ point, 396 moved one and 166 of 168 locations walked.
 `constraint_points_go_in_alike_with_and_without_the_vertex_grid` inserts on a
 lattice edge and diagonal, far from the walk's start, on a vertex and beside
 one, and compares the meshes built with and without the grid.
+
+## 2026-10-06 — Stale field-law passages
+
+Two passages still described the state before Stage 9 closed on 24 September.
+The header of `canonical_temporal.rs` said Kerr and saturable media run only in
+the CPU reference and the device refuses them until Stage 9; it now says the
+reference defines their bracketed solve and the device has run it in f32 since
+Stage 9. The material catalogue listed D4, the short-wave loss, as running
+beside Kerr and saturable responses in its table, then said in its prose that
+it is refused beside a field law, for a reason D3 no longer has either; the
+prose now says what `a_short_wave_loss_composes_with_every_field_law` checks.
+In the same file the stiffness row's field laws said "on the CPU reference"
+alone, and the status legend kept a **CPU reference** status, refused until
+Stage 9, that no row carries any more; the first now names the device too and
+the second is gone.

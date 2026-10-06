@@ -15,8 +15,6 @@ Status is one of:
 - **runs** - authored, compiled and stepped, with a gate in `docs/checks.md`.
 - **authored** - the type and its persistence exist and round-trip, but
   assembly refuses a material carrying it, so a document using it does not run.
-- **CPU reference** - compiled and stepped by the f64 reference with its
-  gates in the Stage 8 report; the app and device refuse it until Stage 9.
 - **gated** - not admitted until the named design gate closes.
 
 ## Slot M — mass multiplier, `m -> m·g`
@@ -83,8 +81,8 @@ now measured: `a_constant_impedance_modulation_sends_nothing_back` sends
 < 1e-3 of a pulse's energy back under the pair against 4.4% under the old,
 impedance-only pairing.
 
-The field-driven half follows slot M's: Kerr and saturable run on the CPU
-reference on this row too. They act on the direct coefficient `s₀` (ε in TE),
+The field-driven half follows slot M's: Kerr and saturable run on this row
+too, on the CPU reference and the device. They act on the direct coefficient `s₀` (ε in TE),
 at quadrature, on the magnitude of the independent complementary field, which
 is the field argument the constitutive map needs. There is no symmetric nodal
 flux argument like `h((u_i + u_j)/2)`. An anisotropic medium refuses a
@@ -150,7 +148,9 @@ its own energy lane (`short_wave_loss`), which the device books as primary
 loss; on a van der Pol node it is that law's gain lane's, as passive channels
 there are. Its energy is exact per step but not signed per step (the stress
 is formed on the drift's midpoint field); over a run it removes energy. Beside
-a field law it is refused, for the same reason D3 is.
+a field law it is the same viscosity: its energy is counted through the law's
+own store, and its cap sees the effective mass and stiffness the law reaches
+(`a_short_wave_loss_composes_with_every_field_law`).
 
 ## Where the refusals live
 

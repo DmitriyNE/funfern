@@ -4,9 +4,9 @@
 //! compiles exact material-frame law samples beside it and evaluates them at
 //! synchronized stage times. Time-driven, field-linear generations run on the
 //! device from this contract (Stage 7). Field-dependent ones (Kerr and
-//! saturable, Stage 8) run here only: each stage inverts the assembled nodal
-//! map and the radial quadrature map with a bracketed solve, and the device
-//! refuses them until Stage 9 ports that solve.
+//! saturable, Stage 8) need each stage to invert the assembled nodal map and
+//! the radial quadrature map with a bracketed solve; this reference defines
+//! it, and the device has run the same solve in f32 since Stage 9.
 
 use std::collections::BTreeSet;
 
