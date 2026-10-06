@@ -409,6 +409,14 @@ fn on_segment(point: Point2, a: Point2, b: Point2) -> bool {
         && point.y <= a.y.max(b.y)
 }
 
+/// What a walk along a requested segment meets.
+enum SegmentWalk {
+    /// The vertex on the open segment nearest its start, at that fraction.
+    Vertex(usize, f64),
+    /// Every edge the segment properly crosses, in order from its start.
+    Crossings(Vec<(usize, usize)>),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SegmentRelation {
     Disjoint,
@@ -1570,6 +1578,22 @@ impl MeshBuilder {
     /// segment has to be split there instead, which is what the legacy
     /// interface recovery does as well.
     fn vertex_inside_segment(&self, requested: [usize; 2]) -> Option<(usize, f64)> {
+        let found = match self.walk_segment(requested) {
+            Some(SegmentWalk::Vertex(vertex, fraction)) => Some((vertex, fraction)),
+            Some(SegmentWalk::Crossings(_)) => None,
+            None => self.vertex_inside_segment_by_scan(requested),
+        };
+        // Every meshing test holds the walk to the scan it replaced.
+        #[cfg(test)]
+        assert_eq!(
+            found,
+            self.vertex_inside_segment_by_scan(requested),
+            "the segment walk found another vertex than the scan"
+        );
+        found
+    }
+
+    fn vertex_inside_segment_by_scan(&self, requested: [usize; 2]) -> Option<(usize, f64)> {
         let start = self.point(requested[0]);
         let end = self.point(requested[1]);
         let delta = end - start;
@@ -1591,6 +1615,118 @@ impl MeshBuilder {
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
+    /// The first edge, in key order, that `requested` properly crosses and
+    /// that one flip can take out of its way, found by scanning every edge.
+    fn crossing_by_scan(&self, requested: [usize; 2]) -> Option<(usize, usize)> {
+        self.adjacency
+            .keys()
+            .find(|edge| self.flippable_crossing(requested, edge))
+            .copied()
+    }
+
+    /// Whether `edge` is unconstrained, properly crosses `requested` away
+    /// from its ends, and bounds a convex quadrilateral whose other diagonal
+    /// does not cross `requested` in turn.
+    fn flippable_crossing(&self, requested: [usize; 2], edge: &(usize, usize)) -> bool {
+        let a = self.point(requested[0]);
+        let b = self.point(requested[1]);
+        !self.boundary_keys.contains(edge)
+            && ![edge.0, edge.1]
+                .iter()
+                .any(|vertex| requested.contains(vertex))
+            && segment_relation(a, b, self.point(edge.0), self.point(edge.1))
+                == SegmentRelation::ProperIntersection
+            && self.adjacency.get(edge).is_some_and(|sides| {
+                if sides.len() != 2 {
+                    return false;
+                }
+                let c = self.point(sides[0].1);
+                let d = self.point(sides[1].1);
+                matches!(
+                    (
+                        orient2d(c, d, self.point(edge.0)),
+                        orient2d(c, d, self.point(edge.1))
+                    ),
+                    (PredicateSign::Positive, PredicateSign::Negative)
+                        | (PredicateSign::Negative, PredicateSign::Positive)
+                ) && segment_relation(a, b, c, d) != SegmentRelation::ProperIntersection
+            })
+    }
+
+    /// Walks the triangles `requested` passes through, from its start to its
+    /// end, meeting only the edges it crosses and the vertex it would run
+    /// into. Recovering a segment used to scan every edge of the mesh for
+    /// each flip, which held a preparation slice for over a second when a
+    /// baffle was recovered through a fine mesh. `None` when the walk cannot
+    /// stay inside the mesh, and the callers scan as before.
+    fn walk_segment(&self, requested: [usize; 2]) -> Option<SegmentWalk> {
+        let [start, end] = requested;
+        let (a, b) = (self.point(start), self.point(end));
+        let delta = b - a;
+        let inside = |vertex: usize| {
+            let point = self.point(vertex);
+            if vertex == start || vertex == end || !on_segment(point, a, b) {
+                return None;
+            }
+            let fraction = (point - a).dot(delta) / delta.dot(delta);
+            (fraction > 0.0 && fraction < 1.0).then_some((vertex, fraction))
+        };
+        if self.adjacency.contains_key(&edge_key(start, end)) {
+            return Some(SegmentWalk::Crossings(vec![]));
+        }
+        // A fan vertex on the segment is the nearest one: nothing lies on an
+        // edge between it and the start.
+        let mut exit = None;
+        for &triangle in self.incident.get(start)? {
+            let vertices = self.triangles[triangle].vertices;
+            let corner = vertices.iter().position(|vertex| *vertex == start)?;
+            let [p, q] = [vertices[(corner + 1) % 3], vertices[(corner + 2) % 3]];
+            for vertex in [p, q] {
+                if let Some((vertex, fraction)) = inside(vertex) {
+                    return Some(SegmentWalk::Vertex(vertex, fraction));
+                }
+            }
+            if segment_relation(a, b, self.point(p), self.point(q))
+                == SegmentRelation::ProperIntersection
+            {
+                exit = Some((triangle, edge_key(p, q)));
+            }
+        }
+        let (mut triangle, mut edge) = exit?;
+        let mut crossings = vec![edge];
+        for _ in 0..self.triangles.len() {
+            let [(first, first_opposite), (second, second_opposite)] =
+                self.adjacency.get(&edge)?.as_slice()
+            else {
+                return None;
+            };
+            let (next, opposite) = if *first == triangle {
+                (*second, *second_opposite)
+            } else {
+                (*first, *first_opposite)
+            };
+            if opposite == end {
+                return Some(SegmentWalk::Crossings(crossings));
+            }
+            if let Some((vertex, fraction)) = inside(opposite) {
+                return Some(SegmentWalk::Vertex(vertex, fraction));
+            }
+            let side = orient2d(a, b, self.point(opposite));
+            if side == PredicateSign::Zero {
+                return None;
+            }
+            // Out through the edge whose ends lie on either side of the line.
+            edge = if orient2d(a, b, self.point(edge.0)) == side {
+                edge_key(edge.1, opposite)
+            } else {
+                edge_key(edge.0, opposite)
+            };
+            triangle = next;
+            crossings.push(edge);
+        }
+        None
+    }
+
     /// Recovers one constrained segment by flipping one intersecting diagonal.
     /// Returns true once the requested edge exists.
     fn recover_constraint_edge(&mut self, requested: [usize; 2]) -> Result<bool, MeshError> {
@@ -1599,31 +1735,19 @@ impl MeshBuilder {
             self.repair_constraint_edge_slivers(requested);
             return Ok(true);
         }
-        let a = self.point(requested[0]);
-        let b = self.point(requested[1]);
-        let crossing = self.adjacency.keys().copied().find(|edge| {
-            !self.boundary_keys.contains(edge)
-                && ![edge.0, edge.1]
-                    .iter()
-                    .any(|vertex| requested.contains(vertex))
-                && segment_relation(a, b, self.point(edge.0), self.point(edge.1))
-                    == SegmentRelation::ProperIntersection
-                && self.adjacency.get(edge).is_some_and(|sides| {
-                    if sides.len() != 2 {
-                        return false;
-                    }
-                    let c = self.point(sides[0].1);
-                    let d = self.point(sides[1].1);
-                    matches!(
-                        (
-                            orient2d(c, d, self.point(edge.0)),
-                            orient2d(c, d, self.point(edge.1))
-                        ),
-                        (PredicateSign::Positive, PredicateSign::Negative)
-                            | (PredicateSign::Negative, PredicateSign::Positive)
-                    ) && segment_relation(a, b, c, d) != SegmentRelation::ProperIntersection
-                })
-        });
+        let crossing = match self.walk_segment(requested) {
+            Some(SegmentWalk::Crossings(edges)) => edges
+                .into_iter()
+                .filter(|edge| self.flippable_crossing(requested, edge))
+                .min(),
+            _ => self.crossing_by_scan(requested),
+        };
+        #[cfg(test)]
+        assert_eq!(
+            crossing,
+            self.crossing_by_scan(requested),
+            "the segment walk chose another edge to flip than the scan"
+        );
         let Some(edge) = crossing else {
             return Err(MeshError::Topology(
                 "could not recover an internal-boundary segment",
@@ -2977,27 +3101,7 @@ impl MeshingJob {
                         b.internal_chains[boundary][segment].0,
                         b.internal_chains[boundary][segment + 1].0,
                     ];
-                    let requested_start = b.point(requested[0]);
-                    let requested_end = b.point(requested[1]);
-                    let requested_delta = requested_end - requested_start;
-                    if let Some((vertex, fraction)) = b
-                        .vertices
-                        .iter()
-                        .enumerate()
-                        .filter(|(vertex, _)| !requested.contains(vertex))
-                        .filter(|(_, candidate)| {
-                            orient2d(requested_start, requested_end, candidate.point)
-                                == PredicateSign::Zero
-                                && on_segment(candidate.point, requested_start, requested_end)
-                        })
-                        .map(|(vertex, candidate)| {
-                            let fraction = (candidate.point - requested_start).dot(requested_delta)
-                                / requested_delta.dot(requested_delta);
-                            (vertex, fraction)
-                        })
-                        .filter(|(_, fraction)| *fraction > 0.0 && *fraction < 1.0)
-                        .min_by(|a, b| a.1.total_cmp(&b.1))
-                    {
+                    if let Some((vertex, fraction)) = b.vertex_inside_segment(requested) {
                         let start = b.internal_chains[boundary][segment].1;
                         let end = b.internal_chains[boundary][segment + 1].1;
                         b.internal_chains[boundary]

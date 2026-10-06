@@ -3397,9 +3397,11 @@ above:
   (2026-10-04: a late frame cuts only when the solver's steady share of the
   interval, the median of its last six GPU passes, reaches 0.75; see that day's
   entry and `docs/spikes/funfern-drawn-pacing.md`).
-- [ ] "Recovering separated curves" holds one preparation slice for 1.4 s
-  when a hole with a baffle through it is deleted at 137k triangles (2026-10-06,
-  seen while timing the extensions' sight rule; meshing, not the transfer).
+- [x] "Recovering separated curves" holds one preparation slice for 1.4 s
+  when a hole with a baffle through it is deleted at 137k triangles (2026-10-06:
+  each flip of the chain recovery scanned every edge; a walk along the segment
+  now finds them, 1,256 ms to 41 ms, see that day's entry). The 37 ms left is
+  `insert_constraint_point` scanning every vertex for each chain point.
 - [ ] The budget's 60 Hz and Low Power Mode measurements (postponed
   2026-10-05; the machine has one panel and the mode is the user's to
   toggle). Quiet host and overlay scene are measured, see the spike doc.
@@ -19792,3 +19794,23 @@ without the change; `the_donor_index_answers_as_the_filtered_whole_mesh_scan`
 holds the index to a limited, filtered scan, and
 `extensions_into_a_filled_or_deleted_hole_pick_the_scans_donors` now checks
 both extensions against the rule written out as a scan.
+
+## 2026-10-06 — A baffle's recovery walks instead of scanning
+
+Timing the sight rule turned up a 1.4 s slice in "Recovering separated curves"
+on the deleted-hole scene at 137k triangles, 305 ms already in its first full
+build at 58k vertices. Nearly all of it was the chain recovery that forces a
+baffle's segments into the refined mesh: `recover_constraint_edge` found each
+diagonal to flip by testing every edge of the mesh, 154 flips at about
+200k edges, 1,152 ms, and `vertex_inside_segment` tested every vertex for each
+segment, 65 ms. Both now walk the triangles the segment passes through from
+its start, meeting only the edges it crosses and, first, the vertex it would
+run into. The flip is still the lowest-keyed crossing edge a flip can clear,
+which is the one the scan over the ordered edge map found, so meshes are
+unchanged; a walk that would leave the mesh falls back to the scans. The older
+meshing job's own copy of the vertex scan uses the same walk. The slice falls
+to 41 ms with the same 154 flips, the first build's to 22 ms; what is left is
+`insert_constraint_point` scanning every vertex for each chain point. Under
+`cfg(test)` both functions assert that the walk answers as the scan, so every
+meshing test in the core suite checks the identity: 521 recoveries with
+crossings, 560 already present and 19 that ran into a vertex on the segment.
