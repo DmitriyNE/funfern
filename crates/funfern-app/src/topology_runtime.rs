@@ -357,6 +357,7 @@ pub struct TopologyPreparationJob {
     volume_sources: Option<Arc<CompiledVolumeSources>>,
     canonical_forcing: Option<Arc<CanonicalForcing>>,
     canonical_primary_transfer: Option<Arc<CanonicalPrimaryTransferMap>>,
+    canonical_primary_job: Option<CanonicalPrimaryTransferJob>,
     canonical_vector_job: Option<CanonicalVectorTransferJob>,
     canonical_vector_transfer: Option<Arc<CanonicalVectorTransferMap>>,
     canonical_gap_transfer: Option<Arc<CanonicalThinGapHistoryTransferMap>>,
@@ -629,6 +630,7 @@ impl TopologyPreparationJob {
             volume_sources,
             canonical_forcing,
             canonical_primary_transfer: None,
+            canonical_primary_job: None,
             canonical_vector_job: None,
             canonical_vector_transfer: None,
             canonical_gap_transfer: None,
@@ -696,6 +698,7 @@ impl TopologyPreparationJob {
             volume_sources: None,
             canonical_forcing: None,
             canonical_primary_transfer: None,
+            canonical_primary_job: None,
             canonical_vector_job: None,
             canonical_vector_transfer: None,
             canonical_gap_transfer: None,
@@ -728,6 +731,8 @@ impl TopologyPreparationJob {
         } else if let Some(job) = &self.canonical_assembly_job {
             job.phase()
         } else if let Some(job) = &self.transfer_job {
+            job.phase()
+        } else if let Some(job) = &self.canonical_primary_job {
             job.phase()
         } else if let Some(job) = &self.canonical_vector_job {
             job.phase()
@@ -1037,19 +1042,14 @@ impl TopologyPreparationJob {
                 }
             };
             let previous = self.previous.as_ref().unwrap();
-            if self.canonical_primary_transfer.is_none() {
-                let primary = CanonicalPrimaryTransferMap::prepare_with_meshes(
-                    &interpolation,
-                    &previous.mesh,
-                    &previous.canonical_operator,
-                    self.mesh.as_ref().unwrap(),
-                    self.canonical_operator.as_ref().unwrap(),
-                );
-                let primary = match primary {
-                    Ok(primary) => Arc::new(primary),
-                    Err(error) => return Some(Err(self.fail(error.to_string()))),
-                };
-                self.canonical_primary_transfer = Some(primary);
+            if self.canonical_primary_transfer.is_none() && self.canonical_primary_job.is_none() {
+                self.canonical_primary_job = Some(CanonicalPrimaryTransferJob::new(
+                    interpolation.clone(),
+                    previous.mesh.clone(),
+                    previous.canonical_operator.clone(),
+                    self.mesh.as_ref().unwrap().clone(),
+                    self.canonical_operator.as_ref().unwrap().clone(),
+                ));
                 self.canonical_vector_job = Some(CanonicalVectorTransferJob::new(
                     previous.mesh.clone(),
                     previous.canonical_operator.clone(),
@@ -1076,6 +1076,19 @@ impl TopologyPreparationJob {
                     previous.canonical_operator.clone(),
                     self.canonical_operator.as_ref().unwrap().clone(),
                 ));
+                return None;
+            }
+            if let Some(job) = &mut self.canonical_primary_job {
+                let started = Instant::now();
+                let result = job.advance(budget);
+                self.timing.transfer_ms += elapsed_ms(started);
+                if let Some(result) = result {
+                    self.canonical_primary_job = None;
+                    match result {
+                        Ok(map) => self.canonical_primary_transfer = Some(Arc::new(map)),
+                        Err(error) => return Some(Err(self.fail(error.to_string()))),
+                    }
+                }
                 return None;
             }
             if let Some(job) = &mut self.canonical_vector_job {
@@ -2693,6 +2706,175 @@ mod tests {
         merged.remove_curve(curve, Some(RegionId(1))).unwrap();
         settle(&mut merged);
         check(&split, &merged);
+    }
+
+    /// Filling a hole and deleting one leave target values the old mesh does
+    /// not cover. Both extensions once found their donors by scanning whole
+    /// meshes, which held a preparation slice for seconds on a large mesh;
+    /// they now search a donor grid and the primary map is built across
+    /// slices. Here they choose what the scans chose: the primary extension
+    /// against the old scan written out again, the complementary one against
+    /// the nearest same-region centroid.
+    #[test]
+    fn extensions_into_a_filled_or_deleted_hole_pick_the_scans_donors() {
+        fn centroid(mesh: &TriMesh, element: usize) -> Point2 {
+            mesh.triangles[element]
+                .vertices
+                .iter()
+                .fold(Point2::default(), |sum, vertex| {
+                    sum + mesh.vertices[*vertex].point
+                })
+                / 3.0
+        }
+        fn scan(mesh: &TriMesh, region: RegionId, point: Point2) -> Option<usize> {
+            (0..mesh.triangles.len())
+                .filter(|element| mesh.triangles[*element].region == region)
+                .min_by(|left, right| {
+                    let left = centroid(mesh, *left) - point;
+                    let right = centroid(mesh, *right) - point;
+                    left.dot(left).total_cmp(&right.dot(right))
+                })
+        }
+        fn hole(editor: &mut TopologyEditor) -> CurveId {
+            let curve = editor
+                .create_closed_curve(
+                    PeriodicCubicSpline::rounded(Point2::default(), 0.5),
+                    ClosedCurvePurpose::Hole,
+                )
+                .unwrap();
+            settle(editor);
+            curve
+        }
+        let check = |before: &TopologyEditor, after: &TopologyEditor| -> usize {
+            let mut runtime = TopologyRuntime::default();
+            let first = runtime
+                .request(
+                    1,
+                    &before.document,
+                    before.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            prepare(&mut runtime).unwrap();
+            let old = runtime.commit_ready(first).unwrap();
+            let second = runtime
+                .request(
+                    2,
+                    &after.document,
+                    after.compiled_accepted.clone(),
+                    options(),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(prepare(&mut runtime).unwrap(), second);
+            let new = runtime.ready().unwrap();
+            let interpolation = new.transfer.as_ref().unwrap();
+            let canonical = new.canonical_transfer.as_ref().unwrap();
+            let (source, target) = (&old.canonical_operator, &new.canonical_operator);
+
+            // The primary extension as it was written before the job.
+            let mut distance = vec![usize::MAX; new.mesh.triangles.len()];
+            for (element, nodes) in target.element_nodes().iter().enumerate() {
+                if nodes
+                    .iter()
+                    .any(|node| interpolation.samples()[*node as usize].is_some())
+                {
+                    distance[element] = 0;
+                }
+            }
+            let mut sides = std::collections::BTreeMap::<(usize, usize), Vec<usize>>::new();
+            for (element, triangle) in new.mesh.triangles.iter().enumerate() {
+                let [a, b, c] = triangle.vertices;
+                for (left, right) in [(a, b), (b, c), (c, a)] {
+                    sides
+                        .entry((left.min(right), left.max(right)))
+                        .or_default()
+                        .push(element);
+                }
+            }
+            for ring in 0..2 {
+                for elements in sides.values() {
+                    for &left in elements {
+                        for &right in elements {
+                            if distance[left] == ring && distance[right] > ring + 1 {
+                                distance[right] = ring + 1;
+                            }
+                        }
+                    }
+                }
+            }
+            let mut extended = 0;
+            for node in 0..target.degrees_of_freedom() {
+                let expected = if interpolation.samples()[node].is_some() {
+                    None
+                } else {
+                    let elements = (0..new.mesh.triangles.len())
+                        .filter(|element| target.element_nodes()[*element].contains(&(node as u32)))
+                        .collect::<Vec<_>>();
+                    if elements.iter().all(|element| distance[*element] > 2) {
+                        None
+                    } else {
+                        let nearest = *elements
+                            .iter()
+                            .min_by_key(|element| distance[**element])
+                            .unwrap();
+                        scan(
+                            &old.mesh,
+                            new.mesh.triangles[nearest].region,
+                            target.node_points()[node],
+                        )
+                        .map(|element| source.element_nodes()[element])
+                    }
+                };
+                assert_eq!(canonical.primary.extension(node), expected, "node {node}");
+                extended += usize::from(expected.is_some());
+            }
+
+            let (_, report) = canonical
+                .complementary
+                .transfer(&vec![
+                    Point2::new(1.0, 0.5);
+                    canonical.complementary.source_sample_count()
+                ])
+                .unwrap();
+            let mut constant = 0;
+            for (entry, sample) in canonical
+                .complementary
+                .targets()
+                .iter()
+                .zip(target.constitutive_samples())
+            {
+                if entry.source_count == 6
+                    && entry.weights.iter().all(|weight| *weight == 1.0 / 6.0)
+                {
+                    constant += 1;
+                    let region = new.mesh.triangles[sample.element as usize].region;
+                    assert_eq!(
+                        Some(entry.source_samples[0] as usize / 6),
+                        scan(&old.mesh, region, sample.point)
+                    );
+                }
+            }
+            assert_eq!(constant, report.extended_values);
+            extended + constant
+        };
+
+        let mut before = TopologyEditor::default();
+        let curve = hole(&mut before);
+        let mut filled = TopologyEditor::default();
+        hole(&mut filled);
+        let face = filled.enclosed_assignment(curve).unwrap();
+        filled
+            .set_face_disposition(face, Some(DEFAULT_MATERIAL))
+            .unwrap();
+        settle(&mut filled);
+        check(&before, &filled);
+        let mut deleted = TopologyEditor::default();
+        hole(&mut deleted);
+        deleted.remove_curve(curve, None).unwrap();
+        settle(&mut deleted);
+        assert!(check(&before, &deleted) > 0);
     }
 
     #[test]

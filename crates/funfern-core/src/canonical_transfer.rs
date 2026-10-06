@@ -129,6 +129,7 @@ impl CanonicalPrimaryTransferMap {
     /// Adds the agreed bounded constant-preserving initialization for target
     /// support outside the old domain but connected within two element rings.
     /// The already prepared quadratic map supplies all side restrictions.
+    /// [`CanonicalPrimaryTransferJob`] runs the same steps across frames.
     pub fn prepare_with_meshes(
         interpolation: &QuadraticTransferMap,
         source_mesh: &TriMesh,
@@ -136,63 +137,12 @@ impl CanonicalPrimaryTransferMap {
         target_mesh: &TriMesh,
         target: &CanonicalWaveOperator,
     ) -> Result<Self, WaveError> {
-        if source_mesh.triangles.len() != source.element_nodes().len()
-            || target_mesh.triangles.len() != target.element_nodes().len()
-        {
-            return Err(WaveError::InvalidMesh(
-                "the scalar extension meshes do not match their canonical operators",
-            ));
-        }
-        let mut map = Self::prepare(interpolation, source, target)?;
-        if map.identity {
-            return Ok(map);
-        }
-        let mut distance = vec![usize::MAX; target_mesh.triangles.len()];
-        for (element, nodes) in target.element_nodes().iter().enumerate() {
-            if nodes
-                .iter()
-                .any(|node| interpolation.samples()[*node as usize].is_some())
-            {
-                distance[element] = 0;
+        let mut work = CanonicalPrimaryTransferWork::new();
+        loop {
+            if let Some(map) = work.step(interpolation, source_mesh, source, target_mesh, target)? {
+                return Ok(map);
             }
         }
-        extend_element_distances(target_mesh, &mut distance, 2);
-        for node in 0..map.samples.len() {
-            if map.samples[node].is_some() {
-                continue;
-            }
-            let target_elements = target
-                .element_nodes()
-                .iter()
-                .enumerate()
-                .filter(|(_, nodes)| nodes.contains(&(node as u32)))
-                .map(|(element, _)| element)
-                .collect::<Vec<_>>();
-            if target_elements.is_empty()
-                || target_elements.iter().all(|element| distance[*element] > 2)
-            {
-                continue;
-            }
-            let target_region = target_elements
-                .iter()
-                .min_by_key(|element| distance[**element])
-                .map(|element| target_mesh.triangles[*element].region)
-                .ok_or(WaveError::InvalidState)?;
-            let point = target.node_points()[node];
-            let donor = source_mesh
-                .triangles
-                .iter()
-                .enumerate()
-                .filter(|(_, triangle)| triangle.region == target_region)
-                .min_by(|(_, left), (_, right)| {
-                    let left = triangle_centroid(source_mesh, left.vertices) - point;
-                    let right = triangle_centroid(source_mesh, right.vertices) - point;
-                    left.dot(left).total_cmp(&right.dot(right))
-                })
-                .map(|(element, _)| source.element_nodes()[element]);
-            map.extensions[node] = donor;
-        }
-        Ok(map)
     }
 
     /// The quadratic interpolation rows the map was prepared from, one per
@@ -412,6 +362,354 @@ impl CanonicalPrimaryTransferMap {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanonicalPrimaryTransferPhase {
+    Interpolate,
+    Reach,
+    Index,
+    Extend(usize),
+    Done,
+}
+
+impl CanonicalPrimaryTransferPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Interpolate => "Preparing primary transfer",
+            Self::Reach => "Finding the primary extension's reach",
+            Self::Index => "Indexing primary donors",
+            Self::Extend(_) => "Extending primary values",
+            Self::Done => "Finished",
+        }
+    }
+}
+
+/// Resumable construction of a `CanonicalPrimaryTransferMap` with its
+/// extension: the interpolation rows in one step, the uncovered nodes within
+/// reach in one, the donor index in one, then one node per step. The extension
+/// once ran in a single call that looked up every uncovered node's elements
+/// by scanning the whole target mesh and its donor by scanning the whole
+/// source mesh, which held a preparation slice for seconds when a hole was
+/// filled or deleted on a large mesh.
+struct CanonicalPrimaryTransferWork {
+    phase: CanonicalPrimaryTransferPhase,
+    map: Option<CanonicalPrimaryTransferMap>,
+    /// Uncovered target nodes within reach, each with the region of its
+    /// nearest element, in node order.
+    pending: Vec<(u32, crate::RegionId)>,
+    donors: Option<RegionCentroidIndex>,
+}
+
+impl CanonicalPrimaryTransferWork {
+    fn new() -> Self {
+        Self {
+            phase: CanonicalPrimaryTransferPhase::Interpolate,
+            map: None,
+            pending: Vec::new(),
+            donors: None,
+        }
+    }
+
+    fn step(
+        &mut self,
+        interpolation: &QuadraticTransferMap,
+        source_mesh: &TriMesh,
+        source: &CanonicalWaveOperator,
+        target_mesh: &TriMesh,
+        target: &CanonicalWaveOperator,
+    ) -> Result<Option<CanonicalPrimaryTransferMap>, WaveError> {
+        match self.phase {
+            CanonicalPrimaryTransferPhase::Interpolate => {
+                if source_mesh.triangles.len() != source.element_nodes().len()
+                    || target_mesh.triangles.len() != target.element_nodes().len()
+                {
+                    return Err(WaveError::InvalidMesh(
+                        "the scalar extension meshes do not match their canonical operators",
+                    ));
+                }
+                let map = CanonicalPrimaryTransferMap::prepare(interpolation, source, target)?;
+                if map.identity {
+                    self.phase = CanonicalPrimaryTransferPhase::Done;
+                    return Ok(Some(map));
+                }
+                self.map = Some(map);
+                self.phase = CanonicalPrimaryTransferPhase::Reach;
+            }
+            CanonicalPrimaryTransferPhase::Reach => {
+                let samples = &self.map.as_ref().unwrap().samples;
+                let mut distance = vec![usize::MAX; target_mesh.triangles.len()];
+                for (element, nodes) in target.element_nodes().iter().enumerate() {
+                    if nodes.iter().any(|node| samples[*node as usize].is_some()) {
+                        distance[element] = 0;
+                    }
+                }
+                extend_element_distances(target_mesh, &mut distance, 2);
+                // Each uncovered node takes the region of its nearest element
+                // within reach, the lowest-numbered of equals.
+                let mut nearest = vec![None::<(usize, usize)>; samples.len()];
+                for (element, nodes) in target.element_nodes().iter().enumerate() {
+                    if distance[element] > 2 {
+                        continue;
+                    }
+                    for node in nodes {
+                        let node = *node as usize;
+                        if samples[node].is_none()
+                            && nearest[node].is_none_or(|(closest, _)| distance[element] < closest)
+                        {
+                            nearest[node] = Some((distance[element], element));
+                        }
+                    }
+                }
+                self.pending = nearest
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(node, nearest)| {
+                        nearest.map(|(_, element)| {
+                            (node as u32, target_mesh.triangles[element].region)
+                        })
+                    })
+                    .collect();
+                if self.pending.is_empty() {
+                    self.phase = CanonicalPrimaryTransferPhase::Done;
+                    return Ok(self.map.take());
+                }
+                self.phase = CanonicalPrimaryTransferPhase::Index;
+            }
+            CanonicalPrimaryTransferPhase::Index => {
+                self.donors = Some(RegionCentroidIndex::new(source_mesh)?);
+                self.phase = CanonicalPrimaryTransferPhase::Extend(0);
+            }
+            CanonicalPrimaryTransferPhase::Extend(index) => {
+                let Some(&(node, region)) = self.pending.get(index) else {
+                    self.phase = CanonicalPrimaryTransferPhase::Done;
+                    return Ok(self.map.take());
+                };
+                let point = target.node_points()[node as usize];
+                let donor = self.donors.as_ref().unwrap().nearest(region, point);
+                self.map.as_mut().unwrap().extensions[node as usize] =
+                    donor.map(|element| source.element_nodes()[element]);
+                self.phase = CanonicalPrimaryTransferPhase::Extend(index + 1);
+            }
+            CanonicalPrimaryTransferPhase::Done => {}
+        }
+        Ok(None)
+    }
+}
+
+/// Builds a `CanonicalPrimaryTransferMap` across frames. It owns both
+/// generations so a preparation can yield without borrowing application
+/// state.
+pub struct CanonicalPrimaryTransferJob {
+    interpolation: Arc<QuadraticTransferMap>,
+    source_mesh: Arc<TriMesh>,
+    source: Arc<CanonicalWaveOperator>,
+    target_mesh: Arc<TriMesh>,
+    target: Arc<CanonicalWaveOperator>,
+    work: CanonicalPrimaryTransferWork,
+    done: bool,
+}
+
+impl CanonicalPrimaryTransferJob {
+    pub fn new(
+        interpolation: Arc<QuadraticTransferMap>,
+        source_mesh: Arc<TriMesh>,
+        source: Arc<CanonicalWaveOperator>,
+        target_mesh: Arc<TriMesh>,
+        target: Arc<CanonicalWaveOperator>,
+    ) -> Self {
+        Self {
+            interpolation,
+            source_mesh,
+            source,
+            target_mesh,
+            target,
+            work: CanonicalPrimaryTransferWork::new(),
+            done: false,
+        }
+    }
+
+    pub fn phase(&self) -> &'static str {
+        self.work.phase.label()
+    }
+
+    pub fn advance(
+        &mut self,
+        budget: usize,
+    ) -> Option<Result<CanonicalPrimaryTransferMap, WaveError>> {
+        for _ in 0..budget {
+            if self.done {
+                return None;
+            }
+            match self.work.step(
+                &self.interpolation,
+                &self.source_mesh,
+                &self.source,
+                &self.target_mesh,
+                &self.target,
+            ) {
+                Ok(Some(map)) => {
+                    self.done = true;
+                    return Some(Ok(map));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.done = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Source triangle centroids grouped by region, each region on its own
+/// uniform grid, for the extensions' nearest same-region donor. Both
+/// extensions once scanned every source triangle for every value they
+/// extended; an expanding ring search over the region's own grid visits only
+/// the cells near the answer, and a region the source does not hold answers
+/// at once. The answer is the scan's: the nearest centroid, the
+/// lowest-numbered of equals.
+struct RegionCentroidIndex {
+    regions: BTreeMap<crate::RegionId, CentroidGrid>,
+}
+
+struct CentroidGrid {
+    minimum: Point2,
+    cell: Point2,
+    dimension: usize,
+    cells: Vec<Vec<(u32, Point2)>>,
+}
+
+impl RegionCentroidIndex {
+    fn new(source: &TriMesh) -> Result<Self, WaveError> {
+        let mut grouped = BTreeMap::<crate::RegionId, Vec<(u32, Point2)>>::new();
+        for (element, triangle) in source.triangles.iter().enumerate() {
+            if triangle
+                .vertices
+                .iter()
+                .any(|vertex| *vertex >= source.vertices.len())
+            {
+                return Err(WaveError::InvalidMesh(
+                    "the extension source has invalid triangles",
+                ));
+            }
+            let element = u32::try_from(element)
+                .map_err(|_| WaveError::InvalidMesh("too many extension donor elements"))?;
+            grouped
+                .entry(triangle.region)
+                .or_default()
+                .push((element, triangle_centroid(source, triangle.vertices)));
+        }
+        Ok(Self {
+            regions: grouped
+                .into_iter()
+                .map(|(region, centroids)| (region, CentroidGrid::new(centroids)))
+                .collect(),
+        })
+    }
+
+    /// The source element of `region` whose centroid is nearest `point`.
+    fn nearest(&self, region: crate::RegionId, point: Point2) -> Option<usize> {
+        self.regions.get(&region)?.nearest(point)
+    }
+}
+
+impl CentroidGrid {
+    fn new(centroids: Vec<(u32, Point2)>) -> Self {
+        let mut minimum = Point2::new(f64::INFINITY, f64::INFINITY);
+        let mut maximum = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for (_, centroid) in &centroids {
+            minimum.x = minimum.x.min(centroid.x);
+            minimum.y = minimum.y.min(centroid.y);
+            maximum.x = maximum.x.max(centroid.x);
+            maximum.y = maximum.y.max(centroid.y);
+        }
+        let dimension = (centroids.len() as f64).sqrt().ceil().clamp(1.0, 512.0) as usize;
+        // A flat extent keeps every centroid in the first cell of that axis.
+        let width = |extent: f64| {
+            if extent > 0.0 {
+                extent / dimension as f64
+            } else {
+                1.0
+            }
+        };
+        let mut grid = Self {
+            minimum,
+            cell: Point2::new(width(maximum.x - minimum.x), width(maximum.y - minimum.y)),
+            dimension,
+            cells: vec![Vec::new(); dimension * dimension],
+        };
+        for (element, centroid) in centroids {
+            let [x, y] = grid.bin(centroid);
+            grid.cells[y * dimension + x].push((element, centroid));
+        }
+        grid
+    }
+
+    fn bin(&self, point: Point2) -> [usize; 2] {
+        let index = |value: f64, minimum: f64, width: f64| {
+            (((value - minimum) / width).floor() as isize).clamp(0, self.dimension as isize - 1)
+                as usize
+        };
+        [
+            index(point.x, self.minimum.x, self.cell.x),
+            index(point.y, self.minimum.y, self.cell.y),
+        ]
+    }
+
+    /// Searches square rings of cells outward from `point`'s cell and stops
+    /// once the best centroid is nearer than anything outside the cells
+    /// searched. The slack covers a centroid binned a rounding error past its
+    /// cell's edge.
+    fn nearest(&self, point: Point2) -> Option<usize> {
+        let [cx, cy] = self.bin(point);
+        let last = self.dimension - 1;
+        let slack = 1.0e-9 * (self.cell.x + self.cell.y);
+        let mut best = None::<(f64, u32)>;
+        for ring in 0..=last {
+            let (x0, x1) = (cx.saturating_sub(ring), (cx + ring).min(last));
+            let (y0, y1) = (cy.saturating_sub(ring), (cy + ring).min(last));
+            for y in y0..=y1 {
+                let edge_row = y.abs_diff(cy) == ring;
+                for x in x0..=x1 {
+                    if !edge_row && x.abs_diff(cx) != ring {
+                        continue;
+                    }
+                    for &(element, centroid) in &self.cells[y * self.dimension + x] {
+                        let offset = centroid - point;
+                        let distance = offset.dot(offset);
+                        if best.is_none_or(|(nearest, holder)| {
+                            distance < nearest || (distance == nearest && element < holder)
+                        }) {
+                            best = Some((distance, element));
+                        }
+                    }
+                }
+            }
+            let mut outside = f64::INFINITY;
+            if x0 > 0 {
+                outside = outside.min(point.x - (self.minimum.x + x0 as f64 * self.cell.x));
+            }
+            if x1 < last {
+                outside = outside.min(self.minimum.x + (x1 + 1) as f64 * self.cell.x - point.x);
+            }
+            if y0 > 0 {
+                outside = outside.min(point.y - (self.minimum.y + y0 as f64 * self.cell.y));
+            }
+            if y1 < last {
+                outside = outside.min(self.minimum.y + (y1 + 1) as f64 * self.cell.y - point.y);
+            }
+            if outside == f64::INFINITY {
+                break;
+            }
+            let reach = outside - slack;
+            if best.is_some_and(|(nearest, _)| reach > 0.0 && nearest < reach * reach) {
+                break;
+            }
+        }
+        best.map(|(_, element)| element as usize)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum VectorTarget {
     Reconstruct {
@@ -447,6 +745,7 @@ enum CanonicalVectorTransferPhase {
     Bins(usize),
     Locate(usize),
     PrepareExtension,
+    IndexDonors,
     Extend(usize),
     Done,
 }
@@ -458,6 +757,7 @@ impl CanonicalVectorTransferPhase {
             Self::Bins(_) => "Indexing complementary transfer",
             Self::Locate(_) => "Locating complementary samples",
             Self::PrepareExtension => "Indexing complementary extension",
+            Self::IndexDonors => "Indexing complementary donors",
             Self::Extend(_) => "Extending complementary samples",
             Self::Done => "Finished",
         }
@@ -598,6 +898,7 @@ struct CanonicalVectorTransferWork {
     /// donor and zeroed its field.
     same_region: bool,
     bins: Option<CanonicalSourceBins>,
+    donors: Option<RegionCentroidIndex>,
     targets: Vec<VectorTarget>,
     distance: Vec<usize>,
 }
@@ -609,6 +910,7 @@ impl CanonicalVectorTransferWork {
             identity: false,
             same_region: true,
             bins: None,
+            donors: None,
             targets: Vec::new(),
             distance: Vec::new(),
         }
@@ -725,6 +1027,16 @@ impl CanonicalVectorTransferWork {
                     }
                 }
                 extend_element_distances(target_mesh, &mut self.distance, 2);
+                self.phase = CanonicalVectorTransferPhase::IndexDonors;
+            }
+            CanonicalVectorTransferPhase::IndexDonors => {
+                let reachable = self.targets.iter().enumerate().any(|(index, entry)| {
+                    matches!(entry, VectorTarget::Exposed)
+                        && self.distance[index / QUADRATURE_SAMPLES] <= 2
+                });
+                if reachable {
+                    self.donors = Some(RegionCentroidIndex::new(source_mesh)?);
+                }
                 self.phase = CanonicalVectorTransferPhase::Extend(0);
             }
             CanonicalVectorTransferPhase::Extend(target_index) => {
@@ -742,18 +1054,11 @@ impl CanonicalVectorTransferWork {
                 {
                     let sample = &target.constitutive_samples()[target_index];
                     let target_region = target_mesh.triangles[sample.element as usize].region;
-                    let donor = source_mesh
-                        .triangles
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, triangle)| triangle.region == target_region)
-                        .min_by(|(_, left), (_, right)| {
-                            let left = triangle_centroid(source_mesh, left.vertices) - sample.point;
-                            let right =
-                                triangle_centroid(source_mesh, right.vertices) - sample.point;
-                            left.dot(left).total_cmp(&right.dot(right))
-                        })
-                        .map(|(element, _)| element as u32);
+                    let donor = self
+                        .donors
+                        .as_ref()
+                        .and_then(|donors| donors.nearest(target_region, sample.point))
+                        .map(|element| element as u32);
                     if let Some(source_element) = donor {
                         *entry = VectorTarget::ExtendConstant { source_element };
                     }
@@ -2850,5 +3155,139 @@ mod tests {
         );
         assert_eq!(report.target_energy, 0.0);
         assert!(report.new_samples > 0);
+    }
+
+    /// The donor index answers as the scan it replaced: the nearest
+    /// same-region centroid, the lowest-numbered of equals. The lattice puts
+    /// many centroids at equal distances from its vertices, a region of one
+    /// triangle has a single cell, and a region the source does not hold has
+    /// no donor.
+    #[test]
+    fn the_donor_index_answers_as_the_whole_mesh_scan() {
+        let n = 24;
+        let mut points = Vec::new();
+        for y in 0..=n {
+            for x in 0..=n {
+                points.push([x as f64 * 0.1, y as f64 * 0.1]);
+            }
+        }
+        let vertex = |x: usize, y: usize| y * (n + 1) + x;
+        let mut triangles = Vec::new();
+        for y in 0..n {
+            for x in 0..n {
+                triangles.push([vertex(x, y), vertex(x + 1, y), vertex(x + 1, y + 1)]);
+                triangles.push([vertex(x, y), vertex(x + 1, y + 1), vertex(x, y + 1)]);
+            }
+        }
+        let mut source = mesh(1, &points, &triangles);
+        for (index, triangle) in source.triangles.iter_mut().enumerate() {
+            let cell = index / 2;
+            let (x, y) = (cell % n, cell / n);
+            triangle.region = crate::RegionId(1 + ((x / 5 + 2 * (y / 7)) % 3) as u64);
+        }
+        source.triangles[301].region = crate::RegionId(4);
+        let index = RegionCentroidIndex::new(&source).unwrap();
+        let scan = |region: crate::RegionId, point: Point2| {
+            source
+                .triangles
+                .iter()
+                .enumerate()
+                .filter(|(_, triangle)| triangle.region == region)
+                .min_by(|(_, left), (_, right)| {
+                    let left = triangle_centroid(&source, left.vertices) - point;
+                    let right = triangle_centroid(&source, right.vertices) - point;
+                    left.dot(left).total_cmp(&right.dot(right))
+                })
+                .map(|(element, _)| element)
+        };
+        let mut queries = points
+            .iter()
+            .map(|point| Point2::new(point[0], point[1]))
+            .collect::<Vec<_>>();
+        queries.extend(
+            source
+                .triangles
+                .iter()
+                .map(|triangle| triangle_centroid(&source, triangle.vertices)),
+        );
+        queries.extend([
+            Point2::new(-3.0, 1.2),
+            Point2::new(9.0, -4.0),
+            Point2::new(1.2, 40.0),
+        ]);
+        let mut seed = 0x2545_f491_u64;
+        for _ in 0..500 {
+            let mut next = || {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (seed >> 11) as f64 / (1_u64 << 53) as f64
+            };
+            queries.push(Point2::new(next() * 3.4 - 0.5, next() * 3.4 - 0.5));
+        }
+        for region in [1, 2, 3, 4, 9].map(crate::RegionId) {
+            for point in &queries {
+                assert_eq!(
+                    index.nearest(region, *point),
+                    scan(region, *point),
+                    "{region:?} at {point:?}"
+                );
+            }
+        }
+    }
+
+    /// Run a node a slice, the primary job prepares the map the one call
+    /// does, extension included.
+    #[test]
+    fn the_primary_job_prepares_the_one_call_map_across_slices() {
+        let source_mesh = mesh(1, &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], &[[0, 1, 2]]);
+        let target_mesh = mesh(
+            2,
+            &[
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [3.0, 0.0],
+                [4.0, 0.0],
+                [3.0, 1.0],
+            ],
+            &[[0, 1, 2], [1, 3, 2], [4, 5, 6]],
+        );
+        let (source_quadratic, source) = compile(&source_mesh);
+        let (target_quadratic, target) = compile(&target_mesh);
+        let interpolation = QuadraticTransferMap::build(
+            &source_mesh,
+            &source_quadratic,
+            &target_mesh,
+            &target_quadratic,
+        )
+        .unwrap();
+        let map = CanonicalPrimaryTransferMap::prepare_with_meshes(
+            &interpolation,
+            &source_mesh,
+            &source,
+            &target_mesh,
+            &target,
+        )
+        .unwrap();
+        assert!((0..target.degrees_of_freedom()).any(|node| map.extension(node).is_some()));
+        let mut job = CanonicalPrimaryTransferJob::new(
+            Arc::new(interpolation),
+            Arc::new(source_mesh),
+            Arc::new(source),
+            Arc::new(target_mesh),
+            Arc::new(target),
+        );
+        let mut slices = 0;
+        let prepared = loop {
+            slices += 1;
+            if let Some(result) = job.advance(1) {
+                break result.unwrap();
+            }
+        };
+        assert!(slices > 4);
+        assert_eq!(job.phase(), "Finished");
+        assert_eq!(prepared, map);
     }
 }

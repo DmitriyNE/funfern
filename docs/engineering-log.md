@@ -19707,3 +19707,34 @@ not the bulk field's alone: it adds the thin-gap baffles' spring energy and
 the second-order outgoing boundaries' pole memory, as
 `canonical_energy_breakdown` and the temporal path in `ui/runtime.rs` do.
 "Field energy" was tried first and dropped for hiding those terms.
+
+## 2026-10-06 — The extensions stop scanning whole meshes
+
+Both transfer extensions, which seed target values the old mesh does not
+cover from a nearby old element, found their donors by scanning whole meshes.
+The primary one ran in a single call at a preparation transition, looked up
+every uncovered node's elements by scanning the target mesh before checking
+whether the node was within two rings at all, then scanned the source mesh
+for the nearest same-region centroid; the complementary one, a sample a work
+unit, scanned the source mesh in each unit. On the default scene with a hole
+of radius 0.5, filling the hole held one slice for 88 ms, 1.4 s and 5.5 s at
+11k, 45k and 92k triangles, and deleting it 245 ms, 2.7 s and 9.6 s; a filled
+hole's new region has no old donors, so all of that found nothing. The
+complementary units summed to 6.6 s on the largest deletion.
+
+The primary map is now built by `CanonicalPrimaryTransferJob` across slices:
+the interpolation rows, then the uncovered nodes within reach from one pass
+over the elements within two rings, then a node a slice. Both extensions take
+their donor from a per-region centroid grid searched in expanding rings, which
+answers as the scan did, nearest centroid and the lowest-numbered of equals.
+On the same edits the primary extension's largest slice is now its 41 ms
+reach pass at 92k triangles, each node under a millisecond, the complementary
+extension sums to 77 ms, and the whole preparation of the deletion falls from
+30.5 s to 13.6 s. The largest slices left are linear single units, the
+canonical constitutive state at 100 ms and the extension reach passes at
+about 40 ms; chunking those is a separate change.
+`the_donor_index_answers_as_the_whole_mesh_scan` holds the grid to the scan,
+including ties and absent regions; `the_primary_job_prepares_the_one_call_map_across_slices`
+holds the job to the one call; and
+`extensions_into_a_filled_or_deleted_hole_pick_the_scans_donors` checks both
+extensions against the old scans on real edits.
