@@ -4385,6 +4385,11 @@ fn remap_removed_span_dependencies(
             }
         }
         target.spans.dedup();
+        // A whole loop runs from the merged span back to it across the seam;
+        // it is walked once.
+        if target.spans.len() > 1 && target.spans.first() == target.spans.last() {
+            target.spans.pop();
+        }
     }
 }
 
@@ -5555,6 +5560,55 @@ mod tests {
         assert_eq!(reordered.id, id);
         reordered.target = probe(ordered(&[0, last]));
         assert!(editor.update_probe(reordered).is_err());
+        crate::topology_persistence::save(&editor.document).unwrap();
+    }
+
+    /// Deleting a loop's seam control merges its first span into its last, so
+    /// a probe around the whole loop named the merged span at both ends: the
+    /// two are not adjacent, `dedup` kept both, and the file refused the probe.
+    #[test]
+    fn deleting_the_seam_control_keeps_a_whole_loop_probe_saveable() {
+        let mut editor = TopologyEditor::default();
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.4),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let spans = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(loop_id)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<Vec<_>>();
+        editor
+            .create_probe(
+                "Boundary".into(),
+                [1, 2, 3],
+                TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                    curve: loop_id,
+                    spans: spans.clone(),
+                    side: CurveTraceSide::Left,
+                    reversed: false,
+                    preset: ProbeSamplingPreset::Medium,
+                }),
+            )
+            .unwrap();
+        editor.remove_control(loop_id, 0).unwrap();
+        settle(&mut editor);
+        let TopologyProbeTarget::Boundary(target) = &editor.document.model.probes[0].target else {
+            panic!("the probe is still a boundary probe");
+        };
+        let curve = editor.document.model.draft.geometry.curve(loop_id).unwrap();
+        assert_eq!(target.spans.len(), spans.len() - 1, "{:?}", target.spans);
+        assert_eq!(target.spans.len(), curve.spans.len());
+        assert!(contiguous_span_path(curve, &target.spans));
         crate::topology_persistence::save(&editor.document).unwrap();
     }
 

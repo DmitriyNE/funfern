@@ -19990,3 +19990,13 @@ request's, and the authored runtime before (`running_material_runtime`).
 `reset_forgets_where_a_switch_was_sent` now leaves an old-generation snapshot
 with the Switch at its alternate across the Reset, and checks the press heads
 for the alternate and the panel reads base.
+
+## 2026-10-07 — A whole-loop probe survives its seam control
+
+Deleting a closed curve's seam control merges its first span into its last.
+A boundary probe around the whole loop then named the merged span at both
+ends, which are not adjacent, so `dedup` kept both and Save refused the scene
+as holding an invalid boundary probe. The merged span can only repeat across
+the seam: anywhere else the two spans it replaces are neighbours on the path.
+The remap now drops the trailing repeat, leaving the loop walked once from the
+span that holds its old start. `deleting_the_seam_control_keeps_a_whole_loop_probe_saveable`.
