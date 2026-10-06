@@ -21279,11 +21279,11 @@
           "kind": "segment",
           "start": [
             0.75,
-            -0.95
+            0.95
           ],
           "end": [
             0.75,
-            0.95
+            -0.95
           ],
           "preset": "medium"
         }
@@ -21589,11 +21589,11 @@
           "line": [
             {
               "quantity": "mean_flux",
-              "view": "integral"
+              "view": "arclength"
             },
             {
-              "quantity": "mean_energy",
-              "view": "arclength"
+              "quantity": "mean_flux",
+              "view": "integral"
             }
           ],
           "mean_window": 1.0,

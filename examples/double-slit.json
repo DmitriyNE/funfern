@@ -667,11 +667,11 @@
           "kind": "segment",
           "start": [
             0.85,
-            -0.85
+            0.85
           ],
           "end": [
             0.85,
-            0.85
+            -0.85
           ],
           "preset": "high"
         }
@@ -767,7 +767,7 @@
           },
           "line": [
             {
-              "quantity": "mean_energy",
+              "quantity": "mean_flux",
               "view": "arclength"
             }
           ],

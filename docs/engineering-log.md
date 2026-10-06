@@ -20053,3 +20053,26 @@ case 1.9383 for 1.2922. `CanonicalGpuDisplay::full_snapshot_seconds` moves the
 clock's time back to the snapshot's step, as the AMR estimator already did, and
 both readouts use it; the painted picture keeps the latest clock, which a
 played-out copy lags by a frame. `a_pumped_snapshot_stores_the_energy_of_its_own_step`.
+
+## 2026-10-07 — Gallery cuts read the power through them
+
+With line probes reading flux along their normals, the gallery's cuts across a
+beam now show it: the Double slit's screen, the GRIN collimator's beam
+profile, the Spatial soliton's plane behind the slab, the Fresnel zone plate's
+focal plane and both Talbot planes plot the mean flux along their length in
+place of the mean energy density, the intensity a screen there would record.
+Each runs downward, so its left normal points away from the source and the
+power arriving reads positive. The Disordered crystal's cut already plotted
+its transmitted power, and ran upward: since the normals fix it read that power
+negative. It runs downward too, and plots the flux profile beside the total.
+
+Maxwell's fisheye plots the mean flux out of its rim, whose compiled normals
+point out of the disk. A harmonic run at edge 0.08 put it at 4.6e-5 at the
+image, 89 times what leaves 45° away and as much as the source's own leak
+beside it; without the lens the image point lets out 2.7e-6, no more than the
+rim either side of it. The probes along a path - the soliton's beam, the
+amplifier's fiber, the bent fiber's core, the crystal bend's channel, the
+slab channels - keep the energy density, since flux across them is nothing by
+construction; the whispering gallery keeps it for its lobes, and the Brewster
+arc for its fringes. `every_flux_probe_reads_its_claimed_power_positive`
+checks every gallery probe that plots flux reads its claim's power positive.

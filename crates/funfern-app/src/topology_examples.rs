@@ -1212,6 +1212,16 @@ fn profile_readout() -> ProbeReadout {
     )
 }
 
+/// A line probe across a beam: the power crossing it, averaged over the mean
+/// window, along its length. Its ends run so that the positive normal, to the
+/// left of the run, points away from the source.
+fn flux_profile_readout() -> ProbeReadout {
+    ProbeReadout::blank().with_line_plot(
+        LineProbeQuantity::MeanFlux,
+        LineProbeRepresentation::Arclength,
+    )
+}
+
 /// An area probe: the total energy it holds, or its mean energy density.
 fn area_readout(total: bool, span: f64) -> ProbeReadout {
     ProbeReadout {
@@ -1365,13 +1375,16 @@ fn double_slit_with(half_width: f64, back: f64, source_x: f64) -> TopologyDocume
         name: "Screen".into(),
         color: [91, 220, 194],
         enabled: true,
+        // Run downward, so the power leaving the slits crosses it positive.
         target: TopologyProbeTarget::Segment {
-            start: Point2::new(0.85, -0.85),
-            end: Point2::new(0.85, 0.85),
+            start: Point2::new(0.85, 0.85),
+            end: Point2::new(0.85, -0.85),
             preset: ProbeSamplingPreset::High,
         },
     });
-    document.readouts.set_probe(ProbeId(1), profile_readout());
+    document
+        .readouts
+        .set_probe(ProbeId(1), flux_profile_readout());
     document.readouts.far_field = polar_readout();
     // The energy bunching into the bright fringes and skirting the dark.
     streamlines(&mut document.presentation);
@@ -1531,9 +1544,10 @@ fn grin_rod_with(dn: f64) -> TopologyDocument {
         name: "Beam profile".into(),
         color: [91, 220, 194],
         enabled: true,
+        // Run downward, so the power leaving the rod crosses it positive.
         target: TopologyProbeTarget::Segment {
-            start: Point2::new(0.75, -0.9),
-            end: Point2::new(0.75, 0.9),
+            start: Point2::new(0.75, 0.9),
+            end: Point2::new(0.75, -0.9),
             preset: ProbeSamplingPreset::High,
         },
     });
@@ -1543,7 +1557,9 @@ fn grin_rod_with(dn: f64) -> TopologyDocument {
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::Density);
     document.presentation.material_overlay_opacity = 0.45;
     streamlines(&mut document.presentation);
-    document.readouts.set_probe(ProbeId(1), profile_readout());
+    document
+        .readouts
+        .set_probe(ProbeId(1), flux_profile_readout());
     document
 }
 
@@ -2039,14 +2055,17 @@ fn spatial_soliton_with(amplitude: f64) -> TopologyDocument {
         name: "Behind the slab".into(),
         color: [91, 220, 194],
         enabled: true,
+        // Run downward, so the beam leaving the slab crosses it positive.
         target: TopologyProbeTarget::Segment {
-            start: Point2::new(0.65, -0.9),
-            end: Point2::new(0.65, 0.9),
+            start: Point2::new(0.65, 0.9),
+            end: Point2::new(0.65, -0.9),
             preset: ProbeSamplingPreset::High,
         },
     });
     document.readouts.set_probe(ProbeId(1), profile_readout());
-    document.readouts.set_probe(ProbeId(2), profile_readout());
+    document
+        .readouts
+        .set_probe(ProbeId(2), flux_profile_readout());
     // The beam's energy held in the channel it makes for itself.
     streamlines(&mut document.presentation);
     document
@@ -3749,7 +3768,10 @@ fn fisheye_with(lens: bool) -> TopologyDocument {
     // The permittivity, 1 at the rim and 4 at the centre.
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::Density);
     document.presentation.material_overlay_opacity = 0.36;
-    document.readouts.set_probe(ProbeId(1), profile_readout());
+    // The power leaving the disk, which leaves at the image.
+    document
+        .readouts
+        .set_probe(ProbeId(1), flux_profile_readout());
     document
 }
 
@@ -3779,8 +3801,8 @@ fn zone_plate() -> TopologyDocument {
 /// `plate`, a screen of reflecting baffles at `x = 0` over the even Fresnel
 /// zones for a focus 0.4 behind it, open over the odd ones, whose waves
 /// arrive there in step; a last zone cut by the wall is closed out to it when
-/// it is even. A point probe sits on the focus and a line probe runs along
-/// the axis behind the screen. Every wall is outgoing.
+/// it is even. A point probe sits on the focus and a line probe across the
+/// axis reads half the focal plane. Every wall is outgoing.
 fn zone_plate_with(plate: bool) -> TopologyDocument {
     let mut builder = Builder::new();
     builder.launcher(-0.85, ZONE_HZ, 40.0);
@@ -3829,22 +3851,25 @@ fn zone_plate_with(plate: bool) -> TopologyDocument {
         enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(ZONE_FOCUS, 0.0)),
     });
-    // Half the focal plane, from beside the focus out to the wall, so it
-    // stays clear of the focus probe: the plate is symmetric about the axis,
-    // and this half shows the spot falling away to the claim's 0.4 aside.
+    // Half the focal plane, from the wall in to beside the focus, so it stays
+    // clear of the focus probe: the plate is symmetric about the axis, and
+    // this half shows the spot rising from the claim's 0.4 aside. Run
+    // downward, the power arriving through the plate crosses it positive.
     document.model.probes.push(TopologyProbeDefinition {
         id: ProbeId(2),
         name: "Focal plane".into(),
         color: [248, 196, 112],
         enabled: true,
         target: TopologyProbeTarget::Segment {
-            start: Point2::new(ZONE_FOCUS, 0.08),
-            end: Point2::new(ZONE_FOCUS, 0.9),
+            start: Point2::new(ZONE_FOCUS, 0.9),
+            end: Point2::new(ZONE_FOCUS, 0.08),
             preset: ProbeSamplingPreset::Medium,
         },
     });
     document.readouts.set_probe(ProbeId(1), field_readout(2.0));
-    document.readouts.set_probe(ProbeId(2), profile_readout());
+    document
+        .readouts
+        .set_probe(ProbeId(2), flux_profile_readout());
     // The energy through the open zones converging on the focus.
     streamlines(&mut document.presentation);
     document
@@ -4122,15 +4147,21 @@ fn talbot_with(grating: bool) -> TopologyDocument {
             name: name.into(),
             color,
             enabled: true,
+            // Run downward, so the power through the grating crosses it
+            // positive.
             target: TopologyProbeTarget::Segment {
-                start: Point2::new(x, -0.95),
-                end: Point2::new(x, 0.95),
+                start: Point2::new(x, 0.95),
+                end: Point2::new(x, -0.95),
                 preset: ProbeSamplingPreset::Medium,
             },
         });
     }
-    document.readouts.set_probe(ProbeId(1), profile_readout());
-    document.readouts.set_probe(ProbeId(2), profile_readout());
+    document
+        .readouts
+        .set_probe(ProbeId(1), flux_profile_readout());
+    document
+        .readouts
+        .set_probe(ProbeId(2), flux_profile_readout());
     document
 }
 
@@ -4393,19 +4424,20 @@ fn rods_with(sites: &[Point2]) -> TopologyDocument {
         name: "Across the channel".into(),
         color: [248, 196, 112],
         enabled: true,
+        // Run downward, so the power through the rods crosses it positive.
         target: TopologyProbeTarget::Segment {
-            start: Point2::new(0.75, -0.95),
-            end: Point2::new(0.75, 0.95),
+            start: Point2::new(0.75, 0.95),
+            end: Point2::new(0.75, -0.95),
             preset: ProbeSamplingPreset::Medium,
         },
     });
     // Fifty rods' control polygons and handles would hide the scatterers.
     document.presentation.control_polygons = false;
     document.presentation.handles = false;
-    // The profile, and the power through the cut: the average flux across it.
+    // The power through the cut, along it and in all: the average flux.
     document.readouts.set_probe(
         ProbeId(1),
-        profile_readout().with_line_plot(
+        flux_profile_readout().with_line_plot(
             LineProbeQuantity::MeanFlux,
             LineProbeRepresentation::Integral,
         ),
@@ -4949,6 +4981,77 @@ mod tests {
     use crate::topology_editor::TopologyEditor;
     use crate::topology_runtime::TopologyRuntime;
     use std::sync::Arc;
+
+    /// Every gallery probe that plots flux reads the power its claim is about
+    /// as positive. The cuts across a beam are all lit from the left, by a
+    /// launcher or a point source left of them, so their positive normal - to
+    /// the left of the run from start to end - points right; a probe round a
+    /// closed rim reads the power leaving what it encloses. The rods' cut ran
+    /// upward and read its transmitted power negative.
+    #[test]
+    fn every_flux_probe_reads_its_claimed_power_positive() {
+        use crate::topology_runtime::{TopologyProbeCompilation, TopologyProbeStencil};
+        let mut checked = 0;
+        for example in catalog() {
+            let document = &example.document;
+            let plots_flux = |probe: &TopologyProbeDefinition| {
+                let readout = document.readouts.probe(probe.id);
+                LineProbeRepresentation::ALL.into_iter().any(|view| {
+                    readout.line_plot(LineProbeQuantity::Flux, view)
+                        || readout.line_plot(LineProbeQuantity::MeanFlux, view)
+                })
+            };
+            let probes = document
+                .model
+                .probes
+                .iter()
+                .filter(|probe| plots_flux(probe));
+            for probe in probes.clone() {
+                let what = format!("{} / {}", example.name, probe.name);
+                match &probe.target {
+                    TopologyProbeTarget::Segment { start, end, .. } => {
+                        let run = *end - *start;
+                        let normal = Point2::new(-run.y, run.x) / run.norm();
+                        assert!(normal.x > 0.99, "{what}: positive normal {normal:?}");
+                        if document.model.source.enabled {
+                            assert!(document.model.source.position.x < start.x, "{what}");
+                        }
+                    }
+                    TopologyProbeTarget::Boundary(_) => {
+                        let prepared = prepare(document, 0.08);
+                        let compiled = prepared
+                            .probes
+                            .iter()
+                            .find(|compiled| compiled.id == probe.id)
+                            .unwrap();
+                        let TopologyProbeCompilation::Ready(stencil) = &compiled.result else {
+                            panic!("{what}: does not compile");
+                        };
+                        let TopologyProbeStencil::Boundary(samples) = stencil.as_ref() else {
+                            panic!("{what}: not a boundary stencil");
+                        };
+                        let centre = samples
+                            .iter()
+                            .fold(Point2::new(0.0, 0.0), |sum, sample| sum + sample.point)
+                            / samples.len() as f64;
+                        for sample in samples {
+                            let away = sample.point - centre;
+                            assert!(
+                                sample.outward_normal.dot(away) > 0.9 * away.norm(),
+                                "{what}: inward at {:?}",
+                                sample.point
+                            );
+                        }
+                    }
+                    _ => panic!("{what}: only line probes plot flux"),
+                }
+                checked += 1;
+            }
+        }
+        // Screen, beam profile, behind the slab, focal plane, both Talbot
+        // planes, the rods' cut and the fisheye's rim.
+        assert_eq!(checked, 8, "flux probes");
+    }
 
     /// Prepares a document as the application does, at a given mesh edge.
     fn prepare(

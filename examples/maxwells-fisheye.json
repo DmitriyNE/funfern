@@ -956,7 +956,7 @@
           },
           "line": [
             {
-              "quantity": "mean_energy",
+              "quantity": "mean_flux",
               "view": "arclength"
             }
           ],
