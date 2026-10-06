@@ -374,43 +374,8 @@ impl Playground {
                     TopologyProbeStencil::Point(stencil) => {
                         points.push((compiled.id.0, Some(*stencil)))
                     }
-                    TopologyProbeStencil::Segment(stencils) => {
-                        if let TopologyProbeTarget::Segment { start, end, preset } =
-                            definition.target
-                        {
-                            let count = stencils.len();
-                            curves.push(CurveProbeInput {
-                                id: compiled.id.0,
-                                sample_rate: preset.sample_rate(),
-                                samples: stencils
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(index, stencil)| {
-                                        Some((
-                                            *stencil,
-                                            start.lerp(
-                                                end,
-                                                index as f64 / (count - 1).max(1) as f64,
-                                            ),
-                                        ))
-                                    })
-                                    .collect(),
-                            });
-                        }
-                    }
-                    TopologyProbeStencil::Boundary(stencils) => {
-                        let rate = match &definition.target {
-                            TopologyProbeTarget::Boundary(target) => target.preset.sample_rate(),
-                            _ => 60.0,
-                        };
-                        curves.push(CurveProbeInput {
-                            id: compiled.id.0,
-                            sample_rate: rate,
-                            samples: stencils
-                                .iter()
-                                .map(|sample| Some((sample.stencil, sample.point)))
-                                .collect(),
-                        });
+                    TopologyProbeStencil::Segment(_) | TopologyProbeStencil::Boundary(_) => {
+                        curves.extend(line_probe_input(compiled.id.0, stencil, &definition.target))
                     }
                     TopologyProbeStencil::Area(stencil) => areas.push(AreaProbeInput {
                         id: compiled.id.0,
@@ -715,6 +680,45 @@ impl Playground {
     }
 }
 
+/// A line or boundary probe's recorder input: each sample's stencil and the
+/// unit normal its flux is read along. A segment's positive flux crosses it to
+/// the left of its run from start to end, where the scene draws its arrow, so
+/// Swap ends turns it; a boundary's leaves the sampled trace.
+fn line_probe_input(
+    id: u64,
+    stencil: &TopologyProbeStencil,
+    target: &TopologyProbeTarget,
+) -> Option<CurveProbeInput> {
+    match (stencil, target) {
+        (
+            TopologyProbeStencil::Segment(stencils),
+            TopologyProbeTarget::Segment { start, end, preset },
+        ) => {
+            let run = *end - *start;
+            let normal = Point2::new(-run.y, run.x) / run.norm();
+            Some(CurveProbeInput {
+                id,
+                sample_rate: preset.sample_rate(),
+                samples: stencils
+                    .iter()
+                    .map(|stencil| Some((*stencil, normal)))
+                    .collect(),
+            })
+        }
+        (TopologyProbeStencil::Boundary(stencils), TopologyProbeTarget::Boundary(target)) => {
+            Some(CurveProbeInput {
+                id,
+                sample_rate: target.preset.sample_rate(),
+                samples: stencils
+                    .iter()
+                    .map(|sample| Some((sample.stencil, sample.outward_normal)))
+                    .collect(),
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,6 +733,107 @@ mod tests {
             curve_revision: revision,
             area_revision: revision,
             far_field_revision: revision,
+        }
+    }
+
+    /// Reported: the recorders read flux along each sample's position, not a
+    /// normal, so a horizontal probe on `y = 0` saw no vertical flow at all,
+    /// and one elsewhere read it scaled by its height.
+    /// A segment's samples share its left normal, which Swap ends turns; a
+    /// boundary's take the compiled outward normals of the trace it reads.
+    #[test]
+    fn line_probes_read_flux_along_their_normals() {
+        let mut state = Playground::default();
+        let segment = |start: Point2, end: Point2| TopologyProbeTarget::Segment {
+            start,
+            end,
+            preset: ProbeSamplingPreset::Low,
+        };
+        let line = state
+            .editor
+            .create_probe(
+                "Line".into(),
+                [1, 2, 3],
+                segment(Point2::new(-0.5, 0.7), Point2::new(0.5, 0.7)),
+            )
+            .unwrap();
+        let loop_id = state
+            .editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.4),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        let spans = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(loop_id)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect();
+        let boundary = state
+            .editor
+            .create_probe(
+                "Boundary".into(),
+                [1, 2, 3],
+                TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                    curve: loop_id,
+                    spans,
+                    side: CurveTraceSide::Right,
+                    reversed: false,
+                    preset: ProbeSamplingPreset::Low,
+                }),
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        let compiled = |id: ProbeId| {
+            let compiled = active.probes.iter().find(|probe| probe.id == id).unwrap();
+            let TopologyProbeCompilation::Ready(stencil) = &compiled.result else {
+                panic!("the probe compiles: {:?}", compiled.result);
+            };
+            stencil.clone()
+        };
+
+        let stencil = compiled(line);
+        let input = |target| line_probe_input(line.0, &stencil, &target).unwrap();
+        let forward = input(segment(Point2::new(-0.5, 0.7), Point2::new(0.5, 0.7)));
+        let swapped = input(segment(Point2::new(0.5, 0.7), Point2::new(-0.5, 0.7)));
+        assert_eq!(forward.samples.len(), 32);
+        for (forward, swapped) in forward.samples.iter().zip(&swapped.samples) {
+            assert_eq!(forward.unwrap().1, Point2::new(0.0, 1.0));
+            assert_eq!(swapped.unwrap().1, Point2::new(0.0, -1.0));
+        }
+
+        let stencil = compiled(boundary);
+        let TopologyProbeStencil::Boundary(samples) = stencil.as_ref() else {
+            panic!("a boundary probe compiles boundary samples");
+        };
+        let target = state
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .find(|probe| probe.id == boundary)
+            .unwrap()
+            .target
+            .clone();
+        let input = line_probe_input(boundary.0, &stencil, &target).unwrap();
+        assert_eq!(input.samples.len(), samples.len());
+        for (uploaded, sample) in input.samples.iter().zip(samples) {
+            let normal = uploaded.unwrap().1;
+            assert_eq!(normal, sample.outward_normal);
+            assert!((normal.norm() - 1.0).abs() < 1.0e-9);
+            // On a loop, the normal is radial.
+            let radial = sample.point - Point2::new(0.0, 0.0);
+            assert!(normal.cross(radial).abs() < 0.2 * radial.norm());
         }
     }
 

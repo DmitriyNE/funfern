@@ -20015,3 +20015,18 @@ fixed medium paints as before. The time-varying linear picture now builds its
 mass at the clock, one pass over the mass contributions per picture.
 `a_switched_medium_paints_the_field_at_its_current_mass` and
 `a_switched_medium_stores_the_energy_of_its_current_mass`.
+
+## 2026-10-07 — Line probes read flux along their normals
+
+The curve recorders take each sample's stencil and the normal its flux is read
+along, and `dot(flow, normal)` is the reading. Since line probes arrived, the
+app handed them a position instead: a segment's sample coordinates, a boundary's
+`sample.point`. A horizontal probe on `y = 0` read no vertical flow at all, one
+at another height read it scaled by that height, and horizontal flow read as
+its `x` and changed sign at the origin. Boundary stencils already carried their
+`outward_normal`; segments now take the unit left normal of their run, which is
+where the scene draws their arrow and which Swap ends turns. The input is built
+by `line_probe_input`, and `line_probes_read_flux_along_their_normals` checks
+both kinds. Every normal-flux reading recorded before this - the flux plots,
+its average, normal power - was wrong, and only the field and energy-density
+readouts were right.
