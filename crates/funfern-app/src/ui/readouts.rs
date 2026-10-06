@@ -277,23 +277,6 @@ impl Playground {
             LineProbeQuantity::Energy | LineProbeQuantity::MeanEnergy => &frame.energy_density,
         }
     }
-    /// A causal trailing mean of the recorded normal flux and energy density:
-    /// every frame carries the average of the `window` seconds ending at its
-    /// own time, sample point by sample point. The instantaneous flux of a
-    /// standing wave swings symmetrically about zero at twice the driven
-    /// frequency, so only this average says how much power a path actually
-    /// carries; the energy density swings with it, and its average says how
-    /// much a wave holds along the path, which is what shows it gaining or
-    /// losing power over the distance.
-    ///
-    /// The window is fixed rather than taken from the visible one, so panning
-    /// and zooming move over the same numbers instead of rewriting them. A
-    /// frame whose window the record does not cover in full yields a row of
-    /// NaN, which keeps the series one row per recorded frame: every
-    /// representation then holds the raw series' time alignment, and the
-    /// renderers already skip what is not finite. The second return is how much
-    /// of the window the newest frame holds, for the readout to report while it
-    /// is still filling.
     /// The longest trailing window the trace can ever cover.
     ///
     /// The ring holds a fixed number of frames, so how much time it spans
@@ -323,6 +306,30 @@ impl Playground {
         };
         interval * (CURVE_TRACE_FRAMES - 2) as f64
     }
+    /// A causal trailing mean of the recorded normal flux and energy density:
+    /// every frame carries the average of the `window` seconds ending at its
+    /// own time, sample point by sample point. The instantaneous flux of a
+    /// standing wave swings symmetrically about zero at twice the driven
+    /// frequency, so only this average says how much power a path actually
+    /// carries; the energy density swings with it, and its average says how
+    /// much a wave holds along the path, which is what shows it gaining or
+    /// losing power over the distance.
+    ///
+    /// The average is over time, not over frames: each interval between
+    /// neighbouring frames weighs what it spans, by the trapezoid rule. The
+    /// recorder's cadence changes with the time step and a dropped readback
+    /// leaves a gap, and counting frames tilted the average towards the
+    /// densely recorded stretch - a ramp recorded at 60 Hz and then 120 Hz
+    /// averaged 0.58 over a second where it is 0.5.
+    ///
+    /// The window is fixed rather than taken from the visible one, so panning
+    /// and zooming move over the same numbers instead of rewriting them. A
+    /// frame whose window the record does not cover in full yields a row of
+    /// NaN, which keeps the series one row per recorded frame: every
+    /// representation then holds the raw series' time alignment, and the
+    /// renderers already skip what is not finite. The second return is how much
+    /// of the window the newest frame holds, for the readout to report while it
+    /// is still filling.
     pub(super) fn curve_probe_running_mean(
         frames: &[CurveProbeRecord],
         window: f64,
@@ -334,13 +341,15 @@ impl Playground {
         let mut flux = RunningRow::default();
         let mut energy = RunningRow::default();
         // The first frame of the run of equal-width records the accumulator was
-        // built for, and the oldest frame still inside the window.
+        // built for, and the oldest frame still inside the window: the
+        // intervals from it to the newest are what the window holds.
         let mut run = 0;
         let mut oldest = 0;
         let mut filled = 0.0;
         for (index, frame) in frames.iter().enumerate() {
-            if frame.normal_flux.len() != flux.sums.len()
-                || frame.energy_density.len() != energy.sums.len()
+            if index == 0
+                || frame.normal_flux.len() != flux.len()
+                || frame.energy_density.len() != energy.len()
             {
                 // A sampling-preset change or a boundary remesh leaves rows of
                 // another length in the same trace, and two layouts have no
@@ -349,13 +358,15 @@ impl Playground {
                 energy = RunningRow::sized(frame.energy_density.len());
                 run = index;
                 oldest = index;
+            } else {
+                flux.add(&frames[index - 1], frame, |row| &row.normal_flux, 1.0);
+                energy.add(&frames[index - 1], frame, |row| &row.energy_density, 1.0);
             }
-            flux.add(&frame.normal_flux, 1.0);
-            energy.add(&frame.energy_density, 1.0);
             let begin = frame.time - window;
             while oldest < index && frames[oldest].time < begin {
-                flux.add(&frames[oldest].normal_flux, -1.0);
-                energy.add(&frames[oldest].energy_density, -1.0);
+                let (earlier, later) = (&frames[oldest], &frames[oldest + 1]);
+                flux.add(earlier, later, |row| &row.normal_flux, -1.0);
+                energy.add(earlier, later, |row| &row.energy_density, -1.0);
                 oldest += 1;
             }
             // Either a frame has already left the window, or the run itself
@@ -371,8 +382,8 @@ impl Playground {
             means.push(CurveProbeRecord {
                 probe_id: frame.probe_id,
                 time: frame.time,
-                normal_flux: flux.mean(covered),
-                energy_density: energy.mean(covered),
+                normal_flux: flux.mean(covered, &frame.normal_flux),
+                energy_density: energy.mean(covered, &frame.energy_density),
                 ..Default::default()
             });
         }
@@ -1672,47 +1683,69 @@ impl Playground {
     }
 }
 
-/// The sums and counts of one recorded row over a trailing window, point by
-/// point; a non-finite sample counts for nothing.
+/// The time integral of one recorded row over a trailing window, point by
+/// point, by the trapezoid rule between neighbouring frames, with the time it
+/// covers. An interval with a non-finite end counts for nothing at that point.
 #[derive(Default)]
 struct RunningRow {
-    sums: Vec<f64>,
-    counts: Vec<u32>,
+    integrals: Vec<f64>,
+    durations: Vec<f64>,
+    /// The intervals each point holds, so an emptied window reads as empty
+    /// rather than as whatever rounding left in its duration.
+    intervals: Vec<u32>,
 }
 
 impl RunningRow {
     fn sized(length: usize) -> Self {
         Self {
-            sums: vec![0.0; length],
-            counts: vec![0; length],
+            integrals: vec![0.0; length],
+            durations: vec![0.0; length],
+            intervals: vec![0; length],
         }
     }
 
-    /// Adds a row (`sign` 1) or takes one out (`sign` −1).
-    fn add(&mut self, row: &[f32], sign: f64) {
-        for (point, value) in row.iter().enumerate() {
-            if value.is_finite() {
-                self.sums[point] += sign * *value as f64;
+    fn len(&self) -> usize {
+        self.integrals.len()
+    }
+
+    /// Adds the interval between two neighbouring frames (`sign` 1) or takes
+    /// it out (`sign` −1), reading each frame's row through `row`.
+    fn add(
+        &mut self,
+        earlier: &CurveProbeRecord,
+        later: &CurveProbeRecord,
+        row: impl Fn(&CurveProbeRecord) -> &Vec<f32>,
+        sign: f64,
+    ) {
+        let span = later.time - earlier.time;
+        if !span.is_finite() || span <= 0.0 {
+            return;
+        }
+        for (point, (a, b)) in row(earlier).iter().zip(row(later)).enumerate() {
+            if a.is_finite() && b.is_finite() {
+                self.integrals[point] += sign * 0.5 * (*a as f64 + *b as f64) * span;
+                self.durations[point] += sign * span;
                 if sign > 0.0 {
-                    self.counts[point] += 1;
+                    self.intervals[point] += 1;
                 } else {
-                    self.counts[point] -= 1;
+                    self.intervals[point] -= 1;
                 }
             }
         }
     }
 
-    /// The mean at every point, or NaN where the window is not yet covered
-    /// or held nothing finite.
-    fn mean(&self, covered: bool) -> Vec<f32> {
-        self.counts
-            .iter()
-            .zip(&self.sums)
-            .map(|(count, sum)| {
-                if covered && *count > 0 {
-                    (sum / *count as f64) as f32
-                } else {
+    /// The mean at every point, or NaN where the window is not yet covered.
+    /// A window shorter than the gap between two frames holds no interval,
+    /// and reads the newest frame's own value.
+    fn mean(&self, covered: bool, newest: &[f32]) -> Vec<f32> {
+        (0..self.len())
+            .map(|point| {
+                if !covered {
                     f32::NAN
+                } else if self.intervals[point] > 0 {
+                    (self.integrals[point] / self.durations[point]) as f32
+                } else {
+                    newest[point]
                 }
             })
             .collect()
@@ -1986,6 +2019,51 @@ mod tests {
         assert_eq!(coverage, 1.0);
         let (constant, _) = net(&profile(&|_| 1.5));
         assert!((constant - 1.5 * length).abs() < 1.0e-6, "{constant}");
+    }
+
+    /// Reported: the mean counted frames, so a stretch recorded more densely
+    /// weighed more. A ramp over a second, recorded at 60 Hz and then at
+    /// 120 Hz, averaged 0.5824 where it is 0.5; a dropped readback tilted it
+    /// the same way.
+    #[test]
+    fn the_averaged_flux_row_weighs_time_not_frames() {
+        let mut times = (0..30).map(|index| index as f64 / 60.0).collect::<Vec<_>>();
+        times.extend((0..=60).map(|index| 0.5 + index as f64 / 120.0));
+        let frames = |times: &[f64]| {
+            times
+                .iter()
+                .map(|&time| CurveProbeRecord {
+                    probe_id: 1,
+                    time,
+                    normal_flux: vec![time as f32],
+                    energy_density: vec![2.0 * time as f32],
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        };
+        let (means, filled) = Playground::curve_probe_running_mean(&frames(&times), 1.0);
+        assert_eq!(filled, 1.0);
+        let newest = means.last().unwrap();
+        assert!(
+            (newest.normal_flux[0] - 0.5).abs() < 1.0e-6,
+            "{:?}",
+            newest.normal_flux
+        );
+        assert!(
+            (newest.energy_density[0] - 1.0).abs() < 1.0e-6,
+            "{:?}",
+            newest.energy_density
+        );
+
+        // A dropped readback, in the dense half.
+        times.remove(70);
+        let (means, _) = Playground::curve_probe_running_mean(&frames(&times), 1.0);
+        let newest = means.last().unwrap();
+        assert!(
+            (newest.normal_flux[0] - 0.5).abs() < 1.0e-6,
+            "{:?}",
+            newest.normal_flux
+        );
     }
 
     #[test]

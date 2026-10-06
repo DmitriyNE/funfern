@@ -20088,3 +20088,14 @@ the profile plots, which place the samples over `count − 1` intervals, already
 had it right. The integral now runs over the sampled intervals for every path,
 and the probe's length no longer adds the zero closing segment either; `closed`
 only labels the probe. `a_closed_loop_integrates_over_the_intervals_it_samples`.
+
+## 2026-10-07 — The trailing mean weighs time
+
+The averaged flux and energy rows took the mean of the frames in their window,
+so a stretch recorded more densely weighed more. The recorder's cadence moves
+with the time step, and a dropped readback leaves a gap: a ramp over a second
+recorded at 60 Hz and then 120 Hz averaged 0.5824 where it is 0.5. The window
+now integrates in time by the trapezoid rule between neighbouring frames and
+divides by the time it covers, point by point, an interval counting only where
+both its ends are finite. A window shorter than one gap reads the newest
+frame. `the_averaged_flux_row_weighs_time_not_frames`.
