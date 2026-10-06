@@ -468,7 +468,7 @@ impl CanonicalVectorTransferPhase {
 /// samples are much more numerous than scalar nodes, so scanning every source
 /// triangle for every target sample made an adaptive handoff quadratic in mesh
 /// size. The grid is constructed cooperatively, one triangle per work unit,
-/// and keeps the existing region-side restriction at lookup time.
+/// and restricts a lookup to one region when the caller names one.
 struct CanonicalSourceBins {
     minimum: Point2,
     maximum: Point2,
@@ -553,7 +553,7 @@ impl CanonicalSourceBins {
         &self,
         source: &TriMesh,
         point: Point2,
-        region: crate::RegionId,
+        region: Option<crate::RegionId>,
     ) -> Option<(usize, [f64; 3])> {
         if point.x < self.minimum.x
             || point.x > self.maximum.x
@@ -567,7 +567,7 @@ impl CanonicalSourceBins {
             .iter()
             .find_map(|element| {
                 let triangle = source.triangles[*element as usize];
-                if triangle.region != region {
+                if region.is_some_and(|region| triangle.region != region) {
                     return None;
                 }
                 barycentric(source, triangle.vertices, point)
@@ -591,6 +591,12 @@ impl CanonicalSourceBins {
 struct CanonicalVectorTransferWork {
     phase: CanonicalVectorTransferPhase,
     identity: bool,
+    /// Whether a sample's donor must share its region. Unified topology meshes
+    /// gain and lose region IDs when a divider splits a face or a removal
+    /// merges two, so there the ground's position decides, as it does for the
+    /// scalar transfer; requiring the ID left a new region's samples with no
+    /// donor and zeroed its field.
+    same_region: bool,
     bins: Option<CanonicalSourceBins>,
     targets: Vec<VectorTarget>,
     distance: Vec<usize>,
@@ -601,6 +607,7 @@ impl CanonicalVectorTransferWork {
         Self {
             phase: CanonicalVectorTransferPhase::Validate,
             identity: false,
+            same_region: true,
             bins: None,
             targets: Vec::new(),
             distance: Vec::new(),
@@ -647,6 +654,8 @@ impl CanonicalVectorTransferWork {
                 if self.identity {
                     self.phase = CanonicalVectorTransferPhase::Locate(0);
                 } else {
+                    self.same_region = !crate::transfer::has_unified_topology(source_mesh)
+                        && !crate::transfer::has_unified_topology(target_mesh);
                     self.targets = Vec::with_capacity(target.complementary_degrees_of_freedom());
                     self.bins = Some(CanonicalSourceBins::new(source_mesh)?);
                     self.phase = CanonicalVectorTransferPhase::Bins(0);
@@ -687,7 +696,9 @@ impl CanonicalVectorTransferWork {
                     self.phase = CanonicalVectorTransferPhase::Locate(target_index + 1);
                     return Ok(None);
                 }
-                let target_region = target_mesh.triangles[sample.element as usize].region;
+                let target_region = self
+                    .same_region
+                    .then(|| target_mesh.triangles[sample.element as usize].region);
                 let donor = self
                     .bins
                     .as_ref()

@@ -19680,3 +19680,20 @@ gallery's `LINE_SPACING` is gone: its scenes take the default. A saved scene
 keeps the spacing it stored, and a file from before the key takes the new
 default, as a file missing any presentation key does. A saved arrow scene
 draws denser all the same, on the finer ladder.
+
+## 2026-10-06 — A new region keeps its complementary field
+
+A topology edit that gave ground a region ID it did not have zeroed the
+complementary flux there while the primary field carried over. The
+complementary transfer looked for a sample's donor only among old triangles
+of the sample's own region, and its near-edge extension did the same, so a
+sample with none arrived as zero. On the default scene a divider drawn top to
+bottom zeroed the whole new half, 2.0 of 4.0 units of area; a subdomain disc
+of radius 0.4 zeroed the disc; removing the divider again zeroed 1.6 of the
+retired half, the extension filling only the two rings beside it. The scalar
+transfer had met the same case and stopped requiring the region on unified
+topology meshes, where a split or a merge legitimately mints or retires IDs;
+the complementary transfer now locates by position there too. Changing a
+face's material keeps its ID and a filled hole had no field, so neither was
+affected. `a_new_or_retired_region_keeps_its_complementary_field` carries a
+uniform field through all three edits with nothing exposed.

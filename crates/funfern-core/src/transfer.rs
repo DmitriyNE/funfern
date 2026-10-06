@@ -720,7 +720,7 @@ fn source_trace_triangles(mesh: &TriMesh) -> Result<SourceTraceTriangles, Transf
     Ok(traces)
 }
 
-fn has_unified_topology(mesh: &TriMesh) -> bool {
+pub(crate) fn has_unified_topology(mesh: &TriMesh) -> bool {
     mesh.vertices.iter().any(|vertex| vertex.trace.is_some())
         || mesh
             .boundary_edges

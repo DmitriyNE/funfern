@@ -2597,6 +2597,104 @@ mod tests {
         runtime.commit_ready(second).unwrap();
     }
 
+    /// A divider splitting the scene, a subdomain drawn over it and the
+    /// divider's removal each give ground a region ID it did not have. The
+    /// complementary flux there used to find no donor of the same region and
+    /// arrive as zero while the primary field carried over; now a uniform
+    /// field arrives whole everywhere.
+    #[test]
+    fn a_new_or_retired_region_keeps_its_complementary_field() {
+        fn separator(editor: &mut TopologyEditor) -> CurveId {
+            let edit = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![
+                        Point2::new(0.0, -0.8),
+                        Point2::new(0.0, 0.0),
+                        Point2::new(0.0, 0.8),
+                    ])
+                    .unwrap(),
+                    OpenCurvePurpose::SubdomainSeparator {
+                        material: DEFAULT_MATERIAL,
+                    },
+                    Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                        side: OuterSide::Bottom,
+                        fraction: 0.5,
+                    })),
+                    Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                        side: OuterSide::Top,
+                        fraction: 0.5,
+                    })),
+                )
+                .unwrap();
+            settle(editor);
+            edit.curve
+        }
+        fn regions(mesh: &TriMesh) -> std::collections::BTreeSet<RegionId> {
+            mesh.triangles
+                .iter()
+                .map(|triangle| triangle.region)
+                .collect()
+        }
+        let check = |before: &TopologyEditor, after: &TopologyEditor| {
+            let mut runtime = TopologyRuntime::default();
+            let first = runtime
+                .request(
+                    1,
+                    &before.document,
+                    before.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            prepare(&mut runtime).unwrap();
+            let original = runtime.commit_ready(first).unwrap();
+            let second = runtime
+                .request(
+                    2,
+                    &after.document,
+                    after.compiled_accepted.clone(),
+                    options(),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(prepare(&mut runtime).unwrap(), second);
+            let candidate = runtime.ready().unwrap();
+            assert_ne!(regions(&original.mesh), regions(&candidate.mesh));
+            let map = &candidate.canonical_transfer.as_ref().unwrap().complementary;
+            let uniform = Point2::new(1.0, 0.5);
+            let (moved, report) = map
+                .transfer(&vec![uniform; map.source_sample_count()])
+                .unwrap();
+            assert_eq!(report.exposed_values, 0);
+            assert_eq!(report.extended_values, 0);
+            for value in moved {
+                assert!((value - uniform).norm() < 1.0e-12, "{value:?}");
+            }
+        };
+
+        let before = TopologyEditor::default();
+        let mut split = TopologyEditor::default();
+        let curve = separator(&mut split);
+        check(&before, &split);
+
+        let mut disc = TopologyEditor::default();
+        disc.create_closed_curve(
+            PeriodicCubicSpline::rounded(Point2::default(), 0.4),
+            ClosedCurvePurpose::Subdomain {
+                material: DEFAULT_MATERIAL,
+            },
+        )
+        .unwrap();
+        settle(&mut disc);
+        check(&before, &disc);
+
+        let mut merged = TopologyEditor::default();
+        separator(&mut merged);
+        merged.remove_curve(curve, Some(RegionId(1))).unwrap();
+        settle(&mut merged);
+        check(&split, &merged);
+    }
+
     #[test]
     fn adapted_mesh_gets_a_distinct_token_and_waits_for_gpu_acknowledgement() {
         let editor = TopologyEditor::default();
