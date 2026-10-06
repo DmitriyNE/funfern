@@ -20042,3 +20042,14 @@ mesh refined around a wave no longer there. Reset now stops that work
 (`stop_adaptation_work`) and forgets the last step estimated, its start and
 the peak. The mesh and its adaptation history stay, since Reset does not
 change them. `reset_starts_adaptation_again`.
+
+## 2026-10-07 — A snapshot's energy at the snapshot's time
+
+The stored energy and the nonlinear strength read a full snapshot's fields
+through coefficients evaluated at the latest clock. A time-driven medium has
+moved on by then, so a snapshot behind the clock reported an energy it never
+held: in a pumped medium 37 steps behind, 1.6225 for 1.6153, and the reviewer's
+case 1.9383 for 1.2922. `CanonicalGpuDisplay::full_snapshot_seconds` moves the
+clock's time back to the snapshot's step, as the AMR estimator already did, and
+both readouts use it; the painted picture keeps the latest clock, which a
+played-out copy lags by a frame. `a_pumped_snapshot_stores_the_energy_of_its_own_step`.

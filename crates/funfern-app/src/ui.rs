@@ -2358,10 +2358,11 @@ fn aligned_indicator_auxiliary(
 /// The maps a generation's readbacks are read through, when `departs` says
 /// they are not the fixed ones: its time-driven operator, the runtime the
 /// solver stepped with (the authored one until a snapshot and a clock agree),
-/// and the readback's accepted time.
+/// and `time`, the readback's.
 fn temporal_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
+    time: Option<f64>,
     departs: impl Fn(&funfern_core::CanonicalTemporalWaveOperator) -> bool,
 ) -> Option<(
     std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
@@ -2376,13 +2377,13 @@ fn temporal_view(
     let runtime = canonical
         .accepted_material_runtime(&authored)
         .unwrap_or(authored);
-    let time = canonical.clock.map_or(0.0, |clock| clock.absolute_seconds);
-    Some((operator.clone(), runtime, time))
+    Some((operator.clone(), runtime, time.unwrap_or(0.0)))
 }
 
-/// The maps stored energy is read through, when a coefficient varies in time,
-/// follows its field, or a restoring law holds energy: each stores what the
-/// fixed breakdown, built on the authored coefficients, does not know.
+/// The maps a full snapshot's stored energy is read through, at the
+/// snapshot's time, when a coefficient varies in time, follows its field, or
+/// a restoring law holds energy: each stores what the fixed breakdown, built
+/// on the authored coefficients, does not know.
 pub(crate) fn stored_energy_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
@@ -2391,9 +2392,14 @@ pub(crate) fn stored_energy_view(
     funfern_core::CanonicalMaterialRuntimeState,
     f64,
 )> {
-    temporal_view(active, canonical, |operator| {
-        operator.has_temporal_laws() || operator.has_field_laws() || operator.has_restoring()
-    })
+    temporal_view(
+        active,
+        canonical,
+        canonical.full_snapshot_seconds(),
+        |operator| {
+            operator.has_temporal_laws() || operator.has_field_laws() || operator.has_restoring()
+        },
+    )
 }
 
 /// The maps the painted field is read through, when a coefficient varies in
@@ -2407,13 +2413,14 @@ fn primary_field_view(
     funfern_core::CanonicalMaterialRuntimeState,
     f64,
 )> {
-    temporal_view(active, canonical, |operator| {
+    let time = canonical.clock.map(|clock| clock.absolute_seconds);
+    temporal_view(active, canonical, time, |operator| {
         operator.has_temporal_laws() || operator.has_field_laws()
     })
 }
 
-/// The maps of a generation whose coefficients follow their own field, for
-/// the readouts only such a medium has.
+/// The maps of a generation whose coefficients follow their own field, at a
+/// full snapshot's time, for the readouts only such a medium has.
 pub(crate) fn field_law_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
@@ -2422,7 +2429,12 @@ pub(crate) fn field_law_view(
     funfern_core::CanonicalMaterialRuntimeState,
     f64,
 )> {
-    temporal_view(active, canonical, |operator| operator.has_field_laws())
+    temporal_view(
+        active,
+        canonical,
+        canonical.full_snapshot_seconds(),
+        |operator| operator.has_field_laws(),
+    )
 }
 
 fn refresh_canonical_wave_display(

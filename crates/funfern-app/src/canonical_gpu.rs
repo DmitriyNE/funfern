@@ -5122,6 +5122,19 @@ impl CanonicalGpuDisplay {
         self.raw_state_completed_steps
     }
 
+    /// The simulated time of the latest full snapshot: the clock's, moved
+    /// back by the steps the clock has run past it. Coefficients a full
+    /// snapshot is read through are evaluated here, not at the clock, which a
+    /// time-driven medium has moved on from. Exact while both share an epoch,
+    /// as [`Self::accepted_material_runtime`] requires before it decodes.
+    pub fn full_snapshot_seconds(&self) -> Option<f64> {
+        self.clock.map(|clock| {
+            clock.absolute_seconds
+                + (self.raw_state_completed_steps as f64 - f64::from(clock.accepted_steps))
+                    * f64::from(clock.time_step)
+        })
+    }
+
     /// Bit-exact accepted physical state plus the accepted force cache. This is
     /// intentionally narrow and exists for transaction rollback verification.
     pub fn accepted_storage_bits(&self) -> Vec<u32> {

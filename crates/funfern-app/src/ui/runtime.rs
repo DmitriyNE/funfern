@@ -1442,6 +1442,56 @@ mod tests {
         );
     }
 
+    /// Reported: the stored energy read a full snapshot's fields through the
+    /// coefficients at the latest clock. A pumped medium's mass has moved on
+    /// by then, so a snapshot that lagged the clock reported an energy it
+    /// never held.
+    #[test]
+    fn a_pumped_snapshot_stores_the_energy_of_its_own_step() {
+        let mut state = Playground::default();
+        let material = state.editor.document.model.draft.materials[0].clone();
+        let pump = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Parametric pump" && preset.row == LawPresetRow::Mass)
+            .unwrap();
+        state
+            .editor
+            .update_material(apply_law_preset(pump, &material).unwrap())
+            .unwrap();
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        let temporal = active.canonical_temporal_operator.as_ref().unwrap();
+        let mut display = CanonicalGpuDisplay::default();
+        display.hold_switched_snapshot(1, temporal.initial_runtime().records().len());
+        // The snapshot is of step 0; the clock has run 37 steps on.
+        let mut clock = display.clock.unwrap();
+        clock.accepted_steps = 37;
+        clock.step_in_epoch = 37;
+        clock.absolute_seconds = 37.0 * f64::from(clock.time_step);
+        display.clock = Some(clock);
+
+        let operator = &active.canonical_operator;
+        let primary = operator.primary_mass().to_vec();
+        let complementary = vec![Point2::default(); operator.complementary_degrees_of_freedom()];
+        let (temporal, runtime, time) = super::super::stored_energy_view(&active, &display)
+            .expect("a pumped medium's energy is read through its runtime");
+        assert!(time.abs() < 1.0e-12, "read at {time}");
+        let reported = temporal
+            .energy_at(&primary, &complementary, time, &runtime)
+            .unwrap();
+        let at_snapshot = temporal
+            .energy_at(&primary, &complementary, 0.0, &runtime)
+            .unwrap();
+        let at_clock = temporal
+            .energy_at(&primary, &complementary, clock.absolute_seconds, &runtime)
+            .unwrap();
+        assert_eq!(reported, at_snapshot);
+        assert!(
+            (at_clock - at_snapshot).abs() > 1.0e-3 * at_snapshot,
+            "the pump moved the mass between the two: {at_snapshot} and {at_clock}"
+        );
+    }
+
     /// A medium switched to twice its mass, with the snapshot that says so.
     fn doubled_mass_medium() -> (Arc<PreparedTopology>, CanonicalGpuDisplay) {
         let mut state = Playground::default();
