@@ -19878,3 +19878,19 @@ the device's generation as it uploads. `a_rejected_handoff_keeps_the_accepted_st
 drives `refresh_runtime` through the handoff and a rejection, settled by a
 test-only `CanonicalGpuRequest::reject_handoff`; it failed before on the step
 under the pending handoff.
+
+## 2026-10-06 — A boundary probe on a driven medium
+
+Reported: a material drive broke boundary probes. `compile_probe` is handed the
+law-stripped model and gives it to point, segment and area probes, but its
+boundary arm called `compile_boundary_probe` without it, and that built each
+stencil from `bundle.model()` - the authored model, whose law-carrying material
+the stencil builder refuses. Reproduced with a circular subdomain and a
+boundary probe on its rim: `Ready` on the linear scene, `Failed("probe cannot
+use the current mesh")` once its material carried a parametric pump. The
+boundary path now takes the same model as the others.
+`a_boundary_probe_compiles_on_a_driven_medium` prepares the scene both ways;
+it failed before on the pumped one. The other authored-model readers stay as
+they are on purpose: the temporal operator needs the laws, the far-field
+projection has to see a drive on the exterior to refuse it, and the AMR
+indicator takes the whole model and runs on the pumped fibre example.

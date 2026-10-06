@@ -1766,7 +1766,7 @@ fn compile_probe(
                 .map(TopologyProbeStencil::Segment)
         }
         TopologyProbeTarget::Boundary(target) => {
-            compile_boundary_probe(target, mesh, operator, bundle)
+            compile_boundary_probe(target, mesh, operator, bundle, model)
                 .map(TopologyProbeStencil::Boundary)
         }
         TopologyProbeTarget::AreaDisk { center, radius } => QuadraticAreaStencil::build_topology(
@@ -1798,6 +1798,7 @@ fn compile_boundary_probe(
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
     bundle: &AcceptedTopology,
+    model: TopologyWaveModel<'_>,
 ) -> Result<Vec<QuadraticBoundaryStencil>, String> {
     let curve = bundle
         .authored
@@ -1872,7 +1873,7 @@ fn compile_boundary_probe(
                 mesh,
                 operator,
                 &bundle.plan,
-                bundle.model(),
+                model,
                 BoundaryStencilTarget {
                     label: BoundaryLabel::Curve {
                         curve: target.curve,
@@ -2023,6 +2024,95 @@ mod tests {
         ));
         // And the drive is really in it, with the tighter trajectory bound.
         assert!(temporal.maximum_time_step() < driven.canonical_operator.maximum_time_step());
+    }
+
+    /// Reported: a material drive broke boundary probes. Point, segment and
+    /// area probes were compiled against the law-stripped model, but the
+    /// boundary path took the authored one, whose law-carrying material the
+    /// stencil builder refuses - so a circular boundary probe that read Ready
+    /// on a linear scene failed with "probe cannot use the current mesh" once
+    /// the material was pumped.
+    #[test]
+    fn a_boundary_probe_compiles_on_a_driven_medium() {
+        let mut editor = TopologyEditor::default();
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.4),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let spans = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(loop_id)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<Vec<_>>();
+        let boundary = editor
+            .create_probe(
+                "Rim".into(),
+                [200, 160, 90],
+                TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                    curve: loop_id,
+                    spans,
+                    side: CurveTraceSide::Left,
+                    reversed: false,
+                    preset: crate::document::ProbeSamplingPreset::default(),
+                }),
+            )
+            .unwrap();
+        settle(&mut editor);
+
+        let compiled = |document: crate::topology_editor::TopologyDocument| {
+            let editor = TopologyEditor::from_document(document).unwrap();
+            let mut runtime = TopologyRuntime::default();
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            prepare(&mut runtime).unwrap();
+            let active = runtime.commit_ready(token).unwrap();
+            let probe = active
+                .probes
+                .iter()
+                .find(|compiled| compiled.id == boundary)
+                .expect("the probe was compiled")
+                .clone();
+            (active.driven(), probe.result)
+        };
+        let ready = |result: &TopologyProbeCompilation| {
+            matches!(result, TopologyProbeCompilation::Ready(stencil)
+                if matches!(stencil.as_ref(), TopologyProbeStencil::Boundary(points)
+                    if !points.is_empty()))
+        };
+
+        let (driven, linear) = compiled(editor.document.clone());
+        assert!(!driven);
+        assert!(ready(&linear), "the linear scene's probe: {linear:?}");
+
+        let mut document = editor.document.clone();
+        let drive = funfern_core::TimeDrive::ParametricPump {
+            depth: funfern_core::ScalarField::constant(0.2),
+            frequency_hz: funfern_core::ScalarField::constant(1.0),
+            phase_radians: funfern_core::ScalarField::constant(0.25),
+        };
+        document.model.draft.materials[0].mass_law.drive = drive.clone();
+        document.model.accepted.materials[0].mass_law.drive = drive;
+        let (driven, pumped) = compiled(document);
+        assert!(driven, "the pump must reach the generation");
+        assert!(ready(&pumped), "the pumped scene's probe: {pumped:?}");
     }
 
     #[test]
