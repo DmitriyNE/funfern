@@ -1111,17 +1111,11 @@ fn power_flow(presentation: &mut PresentationSettings) {
     presentation.vector_overlay_gain = ARROW_GAIN;
 }
 
-/// The distance between a gallery scene's streamlines, in screen pixels. The
-/// application's default spacing is on the sparse side for a scene judged at
-/// its own launch; the defaults are due a retuning of their own.
-const LINE_SPACING: f32 = 40.0;
-
 /// Streamlines of the power flow: the route it takes, through a lens, round a
 /// corner or across a gap, is what the scene is about.
 fn streamlines(presentation: &mut PresentationSettings) {
     power_flow(presentation);
     presentation.vector_overlay_style = VectorOverlayStyle::Streamlines;
-    presentation.vector_overlay_density = LINE_SPACING;
 }
 
 /// The seconds a readout keeps: a probe on a mode that takes that long to

@@ -2059,10 +2059,13 @@ fn highest_forcing(
     frequency
 }
 
-/// A world-anchored 1/2/5 lattice whose projected spacing is at least the
-/// requested arrow spacing. Bounds include a one-cell apron so panning inside
-/// the current boundary cells needs no GPU resampling; the painter clips the
-/// temporarily off-screen arrows.
+/// A world-anchored lattice whose projected spacing is at least the
+/// requested arrow spacing. The ladder is √2, as the streamlines' is, so the
+/// arrows stand within 1.4 of the spacing asked for: a 1/2/5 ladder let them
+/// drift to 2.5 times it with the zoom, sparse and short against their
+/// gaps. Bounds include a one-cell apron so panning inside the current
+/// boundary cells needs no GPU resampling; the painter clips the temporarily
+/// off-screen arrows.
 fn vector_overlay_lattice(
     scale: f64,
     pixel_spacing: f32,
@@ -2074,8 +2077,8 @@ fn vector_overlay_lattice(
         pixel_spacing,
         center,
         viewport,
-        10.0,
-        &[1.0, 2.0, 5.0],
+        2.0,
+        &[1.0, std::f64::consts::SQRT_2],
     )
 }
 

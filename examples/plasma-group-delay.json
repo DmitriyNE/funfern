@@ -1782,7 +1782,7 @@
     "vector_overlay_ac_coupled": true,
     "vector_overlay_lowpass": true,
     "vector_overlay_lowpass_hz": 0.5,
-    "vector_overlay_density": 54.0,
+    "vector_overlay_density": 40.0,
     "vector_overlay_gain": 1.0,
     "material_overlay": {
       "kind": "regions"

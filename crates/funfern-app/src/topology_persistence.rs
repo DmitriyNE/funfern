@@ -1666,7 +1666,7 @@ const fn default_vector_overlay_smoothed() -> bool {
     true
 }
 const fn default_vector_overlay_density() -> f32 {
-    54.0
+    40.0
 }
 const fn default_vector_overlay_gain() -> f32 {
     1.0

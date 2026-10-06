@@ -411,7 +411,9 @@ impl Default for PresentationSettings {
             // Four times under the lowest gallery source's ripple; the
             // measurements behind it are with `VECTOR_LOW_PASS_STAGES`.
             vector_overlay_lowpass_hz: 0.5,
-            vector_overlay_density: 54.0,
+            // Judged on the gallery's arrow and line scenes at their launch
+            // zoom: 54 read sparse, and the arrows land 40 to 57 px apart.
+            vector_overlay_density: 40.0,
             vector_overlay_gain: 1.0,
             vector_overlay_style: VectorOverlayStyle::Arrows,
             material_overlay: MaterialOverlay::Regions,

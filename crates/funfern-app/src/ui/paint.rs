@@ -1707,6 +1707,26 @@ mod tests {
     use funfern_app::document::VectorOverlay;
     use funfern_app::topology_editor::TopologyEditor;
 
+    /// The arrows stand within √2 of the spacing asked for at every zoom.
+    #[test]
+    fn arrows_stand_within_root_two_of_their_spacing() {
+        for spacing in [28.0_f32, 40.0, 54.0, 120.0] {
+            for step in 0..64 {
+                let scale = 40.0 * 1.07_f64.powi(step);
+                let (world_spacing, _) =
+                    vector_overlay_lattice(scale, spacing, Point2::new(0.3, -0.2), viewport())
+                        .unwrap();
+                let pixel_spacing = world_spacing * scale;
+                let target = f64::from(spacing);
+                assert!(
+                    pixel_spacing >= target * (1.0 - 1.0e-9)
+                        && pixel_spacing <= target * std::f64::consts::SQRT_2 * (1.0 + 1.0e-9),
+                    "{pixel_spacing} px for {spacing} at scale {scale}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn vector_overlay_layout_is_world_anchored_and_pan_stable() {
         let mut state = Playground {

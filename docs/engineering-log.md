@@ -19657,3 +19657,26 @@ picture wobble barely moves because it reads each copy's step from the
 control readback as it landed, a copy off at times; see the spike doc. The
 unit tests play the measured beat, even arrivals, a stopped stream, a burst
 and a flood.
+
+## 2026-10-06 — The overlay's spacing, retuned
+
+The default overlay spacing read sparse, arrows and lines both, and the
+gallery's line scenes carried 40 px of their own until the defaults were
+retuned. Most of the sparseness was the arrows' lattice, not the number: it
+rounded the spacing up a 1/2/5 ladder, so arrows stood 1 to 2.5 times the
+slider apart as the zoom moved, about 100 px on the anisotropic crystal at
+its launch against a slider at 54, and their length, capped at 0.46 of the
+slider, looked short against the gap. The arrow lattice now climbs the √2
+ladder the streamline lattice already used, so the arrows stand within 1.4 of
+the spacing, and `arrows_stand_within_root_two_of_their_spacing` holds that
+over the zoom range.
+
+The default is 40 px for both styles, picked from a sheet of the five arrow
+scenes (anisotropic crystal, Brewster angle, skin depth, bent fiber, ring
+resonator) and three line scenes at 36, 40 and 46 against the old build.
+At the launch zooms 40 and 46 land on the same rung, about 50 px; 36 drops a
+rung and crowds the quiet field on the fiber and the ring with dots. The
+gallery's `LINE_SPACING` is gone: its scenes take the default. A saved scene
+keeps the spacing it stored, and a file from before the key takes the new
+default, as a file missing any presentation key does. A saved arrow scene
+draws denser all the same, on the finer ladder.
