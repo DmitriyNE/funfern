@@ -470,6 +470,18 @@ impl Playground {
         self.curve_probe_traces.clear();
         self.area_probe_traces.clear();
         self.far_field_trace = FarFieldTrace::default();
+        // What the readouts drew from the old run goes with it: a parked view
+        // keeps its key across the restart, so its spectra were never redrawn,
+        // and its transfer average, which takes no window once it has one,
+        // kept the old run's gain.
+        for view in self
+            .probe_views
+            .values_mut()
+            .chain([&mut self.far_field_view])
+        {
+            view.spectra = Default::default();
+            view.transfer = Default::default();
+        }
         self.probe_clock_restarted = true;
         self.probe_upload_previous = None;
     }

@@ -20099,3 +20099,14 @@ now integrates in time by the trapezoid rule between neighbouring frames and
 divides by the time it covers, point by point, an interval counting only where
 both its ends are finite. A window shorter than one gap reads the newest
 frame. `the_averaged_flux_row_weighs_time_not_frames`.
+
+## 2026-10-07 — A reset clears what the readouts drew
+
+Restarting the probe traces at a reset left each readout's spectra and
+transfer average as they were. A live view moved on with the new run, but a
+parked one keeps its spectra key, end time and all, across the restart, so
+its plots were never redrawn; and a parked transfer adds a window only while
+it holds none, so it read the old run's gain of 2 over new samples of 5.
+`restart_probe_traces` now resets both on every readout view and on the far
+field's, as Clear does for one probe.
+`a_reset_run_forgets_what_a_parked_readout_drew`.

@@ -683,6 +683,53 @@ mod tests {
         assert!(!view.reset);
     }
 
+    /// Reported: a readout parked away from Live kept the old run through a
+    /// reset. Its spectra key, end time and all, was the same afterwards, so
+    /// they were never redrawn, and its transfer average, which a parked view
+    /// adds to only while empty, read the old gain of 2 over new samples of 5.
+    #[test]
+    fn a_reset_run_forgets_what_a_parked_readout_drew() {
+        use super::super::probe_view::SpectrumKey;
+        let reference = recorded(0, 1200, bursts);
+        let input = from_probe(2);
+        let take = |view: &mut ProbeViewState, gain: f64| {
+            let response = recorded(0, 1200, |time| gain * bursts(time));
+            let source = TransferSource::Probe(&reference);
+            view.transfer
+                .update(&response, &input, source, 9.5, 8.0, false);
+            gain_at(&view.transfer.points(0.0, false), 3.0)
+        };
+        let key = SpectrumKey {
+            decibels: false,
+            top_hz: 10.0,
+            span: 8.0,
+            end_time: Some(9.5),
+            transfer: None,
+        };
+        let now = Instant::now();
+        let mut state = Playground::default();
+        let mut view = ProbeViewState::new(Default::default());
+        view.live = false;
+        view.end_time = 9.5;
+        assert!((take(&mut view, 2.0) - 2.0).abs() < 1.0e-9);
+        view.spectra.refresh(key, 9.9, now);
+        view.spectra.plots.insert("Field".into(), vec![[3.0, 2.0]]);
+        state.probe_views.insert(ProbeId(1), view);
+        state.far_field_view.spectra = state.probe_views[&ProbeId(1)].spectra.clone();
+
+        state.restart_probe_traces();
+        let view = state.probe_views.get_mut(&ProbeId(1)).unwrap();
+        view.spectra.refresh(key, 9.9, now);
+        assert!(
+            view.spectra.plots.is_empty(),
+            "the old run's spectra are drawn"
+        );
+        let gain = take(view, 5.0);
+        assert!((gain - 5.0).abs() < 1.0e-9, "the transfer reads {gain}");
+        state.far_field_view.spectra.refresh(key, 9.9, now);
+        assert!(state.far_field_view.spectra.plots.is_empty());
+    }
+
     /// A source reference is its signal evaluated at the response's own
     /// sample times, through the same window.
     #[test]
