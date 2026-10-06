@@ -405,30 +405,28 @@ impl Playground {
                                 .max(request.stats().processed_event())
                                 .saturating_add(1)
                                 .max(1);
-                            let event = match candidate.solver_update {
-                                PreparedSolverUpdate::SourceWeightsOnly => self
-                                    .runtime
-                                    .active()
-                                    .ok_or_else(|| "Canonical source generation is missing".into())
-                                    .and_then(|active| {
-                                        CanonicalGpuLiveEvent::source_weight_patch(
-                                            &active.canonical_forcing,
-                                            &candidate.canonical_forcing,
-                                            dt,
-                                            serial,
-                                        )
-                                        .map_err(|error| format!("{error:?}"))
-                                    }),
-                                PreparedSolverUpdate::SourceDrivesOnly => {
-                                    CanonicalGpuLiveEvent::source_patch(
-                                        &candidate.canonical_forcing,
-                                        dt,
-                                        serial,
-                                    )
+                            let event = self
+                                .runtime
+                                .active()
+                                .ok_or_else(|| "Canonical source generation is missing".into())
+                                .and_then(|active| {
+                                    let current = &active.canonical_forcing;
+                                    let target = &candidate.canonical_forcing;
+                                    match candidate.solver_update {
+                                        PreparedSolverUpdate::SourceWeightsOnly => {
+                                            CanonicalGpuLiveEvent::source_weight_patch(
+                                                current, target, dt, serial,
+                                            )
+                                        }
+                                        PreparedSolverUpdate::SourceDrivesOnly => {
+                                            CanonicalGpuLiveEvent::source_patch(
+                                                current, target, dt, serial,
+                                            )
+                                        }
+                                        _ => unreachable!("matched source-only update"),
+                                    }
                                     .map_err(|error| format!("{error:?}"))
-                                }
-                                _ => unreachable!("matched source-only update"),
-                            };
+                                });
                             match event.and_then(|event| {
                                 request
                                     .queue_live_event(assets, event)

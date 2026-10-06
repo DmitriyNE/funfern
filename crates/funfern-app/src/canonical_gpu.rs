@@ -99,15 +99,17 @@ const EVENT_TEMPORAL_SWITCH: u32 = 7;
 const EVENT_TEMPORAL_LAW_PATCH: u32 = 8;
 const RESIDENT_FILTER_DISPATCHES: u64 = 7;
 const RESIDENT_FILTER_ACCOUNTING_DISPATCHES: u64 = 1;
-const TRANSFER_LAYOUT_VERSION: u32 = 3;
-/// The tenth word locates the integrated-field rows (Gate O).
-const TRANSFER_HEADER_WORDS: usize = 10;
+const TRANSFER_LAYOUT_VERSION: u32 = 4;
+/// The tenth word locates the integrated-field rows (Gate O), the eleventh
+/// the edited carriers' phase steps.
+const TRANSFER_HEADER_WORDS: usize = 11;
 const HANDOFF_RECEIPT_MAGIC: u32 = 0x4841_4e44;
 const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
 const DRIVE_INDEX_MASK: u32 = !DRIVE_TARGET_PARAMETERS;
 /// A drive record: carrier, runtime and pulse window for each of the two
 /// runtime slots. The runtime word is the kind, the integrated-rate anchor,
-/// the pulse shape and, in a patch upload, the low half of a pulse's start.
+/// the pulse shape and, in a patch upload, the low half of a pulse's start;
+/// in a patch upload a harmonic's carrier phase is the edit's phase step.
 const DRIVE_WORDS: usize = 6;
 const DRIVE_HARMONIC: u32 = 0;
 const DRIVE_INTEGRATED: u32 = 1;
@@ -638,23 +640,32 @@ impl CanonicalGpuLiveEvent {
         Ok(event)
     }
 
+    /// Rewrites the running drives of `current` as `target` authors them.
+    /// A harmonic's carrier runs on through the edit, and its phase steps by
+    /// as much as the authored phase did.
     pub fn source_patch(
-        forcing: &CanonicalForcing,
+        current: &CanonicalForcing,
+        target: &CanonicalForcing,
         time_step: f64,
         serial: u32,
     ) -> Result<Self, CanonicalGpuBuildError> {
         Self::validate_serial(serial)?;
+        if current.sources().len() != target.sources().len() {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a live source patch must keep the generation's drives",
+            ));
+        }
         let clock = CanonicalGpuClock::initial(time_step)?;
         let mut upload = vec![GpuCanonicalTableWord {
             data: UVec4::new(
                 EVENT_SOURCE_PATCH,
                 serial,
-                usize_u32(forcing.sources().len())?,
+                usize_u32(target.sources().len())?,
                 0,
             ),
         }];
-        for source in forcing.sources() {
-            upload.extend(gpu_drive(source.drive(), clock)?);
+        for (current, target) in current.sources().iter().zip(target.sources()) {
+            upload.extend(patched_drive(current.drive(), target.drive(), clock)?);
         }
         Ok(Self {
             kind: EVENT_SOURCE_PATCH,
@@ -706,8 +717,8 @@ impl CanonicalGpuLiveEvent {
                 usize_u32(weight_count)?,
             ),
         }];
-        for source in target.sources() {
-            upload.extend(gpu_drive(source.drive(), clock)?);
+        for (current, target) in current.sources().iter().zip(target.sources()) {
+            upload.extend(patched_drive(current.drive(), target.drive(), clock)?);
         }
         let node_count = target.prescribed().len();
         for node in 0..node_count {
@@ -2596,6 +2607,63 @@ impl CanonicalGpuTransferPlan {
             }
             words.push(transfer_word(packed[0], packed[1], packed[2], packed[3]));
         }
+        // An edited carrier runs on from the phase it has reached and then
+        // steps by as much as its authored phase moved; kept continuous
+        // alone, a phase edit across a handoff changed nothing. Packed four
+        // to a word, the drives' steps and then the pinned nodes', each
+        // section only when it holds a step.
+        let drive_steps = runtime
+            .drive_sources
+            .iter()
+            .enumerate()
+            .map(|(target, mapping)| {
+                let target = target_forcing.sources()[target].drive();
+                mapping.map_or(0.0, |source| {
+                    let source = source_forcing.sources()[source as usize].drive();
+                    let harmonic = |drive| !drive_signal(drive).is_pulsed();
+                    if source != target && harmonic(source) && harmonic(target) {
+                        carrier_phase_step(source, target)
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let prescribed_steps = runtime
+            .prescribed_sources
+            .iter()
+            .enumerate()
+            .map(|(target, mapping)| {
+                let target = target_forcing.prescribed()[target];
+                let source =
+                    mapping.and_then(|source| source_forcing.prescribed()[source as usize]);
+                match (source, target) {
+                    (Some(source), Some(target))
+                        if source != target && !source.is_pulsed() && !target.is_pulsed() =>
+                    {
+                        carrier_phase_step(
+                            CanonicalRateDrive::Direct(source),
+                            CanonicalRateDrive::Direct(target),
+                        )
+                    }
+                    _ => 0.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut phase_step_offsets = [0_usize; 2];
+        for (offset, steps) in phase_step_offsets
+            .iter_mut()
+            .zip([&drive_steps, &prescribed_steps])
+        {
+            if steps.iter().any(|step| *step != 0.0) {
+                *offset = words.len();
+                for chunk in steps.chunks(4) {
+                    let mut packed = [0.0; 4];
+                    packed[..chunk.len()].copy_from_slice(chunk);
+                    words.push(transfer_float_word(packed)?);
+                }
+            }
+        }
         let source_gap_energy_offset = words.len();
         pack_transfer_scalars(&mut words, &thin_gap.source_energy_weights())?;
         let word_count = words.len();
@@ -2646,6 +2714,12 @@ impl CanonicalGpuTransferPlan {
             u32::from(primary_identity),
             u32::from(vector_identity),
             u32::from(outgoing.identity),
+        );
+        words[10] = transfer_word(
+            usize_u32(phase_step_offsets[0])?,
+            usize_u32(phase_step_offsets[1])?,
+            0,
+            0,
         );
         // Once every transfer stage has consumed the packed map, the GPU
         // reuses its prefix as one atomic admission-and-display receipt. Keep
@@ -3497,6 +3571,41 @@ fn gpu_drive(
     };
     let window = float_word(pulse.map_or(Vec4::ZERO, |pulse| pulse.window));
     Ok([parameters, runtime, window, parameters, runtime, window])
+}
+
+/// The signal a drive's carrier follows.
+fn drive_signal(drive: CanonicalRateDrive) -> TimeSignal {
+    match drive {
+        CanonicalRateDrive::Direct(signal) => signal,
+        CanonicalRateDrive::LegacyIntegratedHarmonic { acceleration, .. } => acceleration,
+    }
+}
+
+/// How far an edit moves a carrier's authored phase, in `(-π, π]`. A
+/// running carrier is kept continuous through an edit and then stepped by
+/// this, so a phase edit moves the wave as authored while a frequency edit
+/// alone does not jump it.
+fn carrier_phase_step(current: CanonicalRateDrive, target: CanonicalRateDrive) -> f64 {
+    let step = drive_signal(target).carrier()[3] - drive_signal(current).carrier()[3];
+    step.sin().atan2(step.cos())
+}
+
+/// `target`'s drive as a live patch uploads it: a harmonic's phase word
+/// holds the step from `current`'s authored phase, which the device adds to
+/// the phase its carrier has reached; a pulse is as authored.
+fn patched_drive(
+    current: CanonicalRateDrive,
+    target: CanonicalRateDrive,
+    clock: CanonicalGpuClock,
+) -> Result<[GpuCanonicalTableWord; DRIVE_WORDS], CanonicalGpuBuildError> {
+    let mut words = gpu_drive(target, clock)?;
+    if !drive_signal(target).is_pulsed() {
+        let step = finite_f32(carrier_phase_step(current, target), "carrier phase step")?;
+        // The carrier word of each of the record's two slots.
+        words[0].data.w = step.to_bits();
+        words[3].data.w = step.to_bits();
+    }
+    Ok(words)
 }
 
 /// The drive kind a coefficient record carries in its metadata word.
@@ -9501,6 +9610,42 @@ mod tests {
         );
     }
 
+    /// Reported: a live edit of a continuous source's phase changed nothing.
+    /// The device keeps a carrier continuous through an edit, and the phase
+    /// it was sent was replaced by that; the patch now sends the edit's step
+    /// of authored phase in its place, reduced to (-π, π], and a pulse as
+    /// authored.
+    #[test]
+    fn a_live_patch_carries_the_edits_step_of_phase() {
+        let clock = CanonicalGpuClock::initial(1.0e-3).unwrap();
+        let harmonic =
+            |phase| CanonicalRateDrive::Direct(TimeSignal::harmonic(0.0, 1.0, 2.0, phase));
+        let step = |from, to| {
+            let words = patched_drive(harmonic(from), harmonic(to), clock).unwrap();
+            assert_eq!(words[0].data.w, words[3].data.w);
+            f32::from_bits(words[0].data.w)
+        };
+        assert!((step(0.1, 0.4) - 0.3).abs() < 1.0e-6);
+        assert_eq!(step(0.4, 0.4), 0.0);
+        let wrapped = step(3.0, -3.0) - (std::f32::consts::TAU - 6.0);
+        assert!(wrapped.abs() < 1.0e-6, "{wrapped}");
+        let pulse = CanonicalRateDrive::Direct(TimeSignal::pulsed(
+            [0.0, 1.0, 2.0, 0.4],
+            PulseEnvelope::Gaussian { width: 0.1 },
+            0.5,
+            0.0,
+        ));
+        let words = |drive: [GpuCanonicalTableWord; DRIVE_WORDS]| drive.map(|word| word.data);
+        assert_eq!(
+            words(patched_drive(harmonic(0.1), pulse, clock).unwrap()),
+            words(gpu_drive(pulse, clock).unwrap())
+        );
+        let shader = include_str!("canonical_wave.wgsl");
+        assert!(
+            shader.contains("current_phase + parameters.w - parameters.z * control.clock_f32.y")
+        );
+    }
+
     #[test]
     fn edited_source_handoff_selects_target_parameters_with_old_runtime_anchor() {
         let scene = Scene::initial();
@@ -9566,8 +9711,16 @@ mod tests {
         .unwrap();
         let drive_offset = transfer.words[4].data.w as usize;
         assert_eq!(transfer.words[drive_offset].data.x, DRIVE_TARGET_PARAMETERS);
+        // The edit's step of authored phase travels with it, and nothing for
+        // the pinned nodes, which were not edited.
+        let steps = transfer.words[10].data;
+        assert_ne!(steps.x, 0);
+        assert_eq!(steps.y, 0);
+        let step = f32::from_bits(transfer.words[steps.x as usize].data.x);
+        assert!((step - 0.3).abs() < 1.0e-6, "step {step}");
         let shader = include_str!("canonical_transfer_runtime.wgsl");
-        assert!(shader.contains("replace_drive(old_base, new_base, old_control.clock_f32.y);"));
+        assert!(shader.contains("old_parameters.w + old_parameters.z * old_elapsed + step"));
+        assert!(shader.contains("phase_step(transfer[10].data.x, i)"));
         assert!(shader.contains("runtime.y = bitcast<u32>(old_drive(old_base, old_elapsed));"));
         assert!(shader.contains("start_drive(new_base, preparation_delta);"));
     }

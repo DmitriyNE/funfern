@@ -1,5 +1,5 @@
 // Runtime/clock half of canonical generation handoff.
-const TRANSFER_LAYOUT_VERSION: u32 = 3u;
+const TRANSFER_LAYOUT_VERSION: u32 = 4u;
 const NO_INDEX: u32 = 0xffffffffu;
 const DRIVE_TARGET_PARAMETERS: u32 = 0x80000000u;
 const DRIVE_INDEX_MASK: u32 = 0x7fffffffu;
@@ -84,6 +84,12 @@ fn new_float(word: u32, lane: u32) -> f32 {
 fn mapped_index(offset: u32, index: u32) -> u32 {
     return transfer[offset + index / 4u].data[index % 4u];
 }
+// The step an edit moved a carrier's authored phase by, from the section at
+// `offset`; none at all when the transfer packed no section there.
+fn phase_step(offset: u32, index: u32) -> f32 {
+    if offset == 0u { return 0.0; }
+    return bitcast<f32>(transfer[offset + index / 4u].data[index % 4u]);
+}
 fn write_material_runtime(
     root: u32,
     phase: vec4<f32>,
@@ -159,7 +165,7 @@ fn retain_drive(old_base: u32, new_base: u32, elapsed: f32) {
     parameters.w = reduced_phase(parameters.w + parameters.z * elapsed);
     write_drive(new_base, parameters, runtime, old_tables[old_base + 2u].data);
 }
-fn replace_drive(old_base: u32, new_base: u32, old_elapsed: f32) {
+fn replace_drive(old_base: u32, new_base: u32, old_elapsed: f32, step: f32) {
     var parameters = vec4<f32>(
         new_float(new_base, 0u), new_float(new_base, 1u),
         new_float(new_base, 2u), new_float(new_base, 3u));
@@ -167,7 +173,8 @@ fn replace_drive(old_base: u32, new_base: u32, old_elapsed: f32) {
     let old_parameters = vec4<f32>(
         old_float(old_base, 0u), old_float(old_base, 1u),
         old_float(old_base, 2u), old_float(old_base, 3u));
-    parameters.w = reduced_phase(old_parameters.w + old_parameters.z * old_elapsed);
+    // The old carrier's phase where it has got to, then the edit's step.
+    parameters.w = reduced_phase(old_parameters.w + old_parameters.z * old_elapsed + step);
     if runtime.x == DRIVE_INTEGRATED {
         runtime.y = bitcast<u32>(old_drive(old_base, old_elapsed));
     }
@@ -229,7 +236,8 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
             let old_signal = old_nodes[source].prescribed;
             if (mapping & DRIVE_TARGET_PARAMETERS) != 0u {
                 new_nodes[i].prescribed.w = reduced_phase(
-                    old_signal.w + old_signal.z * old_control.clock_f32.y);
+                    old_signal.w + old_signal.z * old_control.clock_f32.y
+                        + phase_step(transfer[10].data.y, i));
             } else {
                 var signal = old_signal;
                 signal.w = reduced_phase(signal.w + signal.z * old_control.clock_f32.y);
@@ -255,7 +263,8 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
                 // A harmonic taking over from a pulse starts as a new one would.
                 start_drive(new_base, preparation_delta);
             } else if (mapping & DRIVE_TARGET_PARAMETERS) != 0u {
-                replace_drive(old_base, new_base, old_control.clock_f32.y);
+                replace_drive(
+                    old_base, new_base, old_control.clock_f32.y, phase_step(transfer[10].data.x, i));
             } else {
                 retain_drive(old_base, new_base, old_control.clock_f32.y);
             }

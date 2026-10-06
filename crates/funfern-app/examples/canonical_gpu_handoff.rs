@@ -3,6 +3,12 @@
 //! `--pulse` makes the `--source` drive a Hann burst and the `--prescribed`
 //! pin a Gaussian flash, both under way at the handoff, whose starts the
 //! device moves onto the new epoch while their carriers stay put.
+//!
+//! `--edit` gives the target generation's harmonic `--source` and
+//! `--prescribed` other numbers, phase included. Each carrier runs on from the
+//! phase it has reached and then steps by as much as its authored phase moved;
+//! the gate also checks that a carrier kept running without the step lands
+//! far from the oracle.
 
 use std::{
     sync::Arc,
@@ -99,6 +105,11 @@ fn main() -> AppExit {
     let prescribed = std::env::args().any(|argument| argument == "--prescribed");
     let pulse = std::env::args().any(|argument| argument == "--pulse");
     let standard = std::env::args().any(|argument| argument == "--standard");
+    let edit = std::env::args().any(|argument| argument == "--edit");
+    assert!(
+        !(edit && pulse),
+        "--edit gives harmonic carriers other numbers; a pulse's carrier counts from its centre"
+    );
     let requested_edge =
         std::env::args().find_map(|argument| argument.strip_prefix("--edge=")?.parse::<f64>().ok());
     let source_edge = requested_edge.unwrap_or(if standard { 0.08 } else { 0.16 });
@@ -213,9 +224,17 @@ fn main() -> AppExit {
     };
     let mut source_prescribed = vec![None; source_operator.degrees_of_freedom()];
     let mut target_prescribed = vec![None; target_operator.degrees_of_freedom()];
+    // Strong enough that a carrier landing on the wrong phase is seen in the
+    // whole state.
+    let edited_prescribed = TimeSignal::harmonic(0.06, 0.5, 1.3, -2.2);
+    let target_prescribed_signal = if edit {
+        edited_prescribed
+    } else {
+        prescribed_signal
+    };
     if prescribed {
         source_prescribed[0] = Some(prescribed_signal);
-        target_prescribed[0] = Some(prescribed_signal);
+        target_prescribed[0] = Some(target_prescribed_signal);
     }
     let mut source_forcing = CanonicalForcing::from_prescribed(&source_operator, source_prescribed)
         .expect("source forcing");
@@ -235,6 +254,11 @@ fn main() -> AppExit {
         )
     } else {
         TimeSignal::harmonic(0.012, 0.035, 1.1, -0.37)
+    };
+    let target_source_signal = if edit {
+        TimeSignal::harmonic(0.02, 3.5, 1.6, 1.9)
+    } else {
+        source_signal
     };
     let target_source_weights = target_operator
         .primary_mass()
@@ -264,7 +288,7 @@ fn main() -> AppExit {
                 funfern_core::CanonicalSource::direct(
                     &target_operator,
                     target_source_weights.clone(),
-                    source_signal,
+                    target_source_signal,
                 )
                 .expect("target generation drive"),
             )
@@ -453,29 +477,76 @@ fn main() -> AppExit {
             )
         }
     };
-    let mut target_oracle_forcing = if prescribed {
-        let mut signals = vec![None; target_operator.degrees_of_freedom()];
-        signals[0] = Some(shifted(prescribed_signal));
-        CanonicalForcing::from_prescribed(&target_operator, signals).expect("target oracle forcing")
-    } else {
-        CanonicalForcing::none(&target_operator)
+    // An edited carrier takes the target's numbers and runs on from the phase
+    // the old one reached, stepped, if `stepped`, by the change of authored
+    // phase: on the target's clock, the new phase plus the old frequency's
+    // turn to the handoff.
+    let carried = |old: TimeSignal, new: TimeSignal, stepped: bool| {
+        if old == new {
+            return shifted(old);
+        }
+        let [_, _, old_frequency, old_phase] = old.carrier();
+        let [offset, amplitude, frequency, new_phase] = new.carrier();
+        TimeSignal::harmonic(
+            offset,
+            amplitude,
+            frequency,
+            if stepped { new_phase } else { old_phase }
+                + std::f64::consts::TAU * old_frequency * handoff_time,
+        )
     };
-    if source_drive {
-        target_oracle_forcing
-            .push_source(
-                funfern_core::CanonicalSource::direct(
-                    &target_operator,
-                    target_source_weights,
-                    shifted(source_signal),
+    let oracle_forcing = |stepped: bool| {
+        let mut forcing = if prescribed {
+            let mut signals = vec![None; target_operator.degrees_of_freedom()];
+            signals[0] = Some(carried(
+                prescribed_signal,
+                target_prescribed_signal,
+                stepped,
+            ));
+            CanonicalForcing::from_prescribed(&target_operator, signals)
+                .expect("target oracle forcing")
+        } else {
+            CanonicalForcing::none(&target_operator)
+        };
+        if source_drive {
+            forcing
+                .push_source(
+                    funfern_core::CanonicalSource::direct(
+                        &target_operator,
+                        target_source_weights.clone(),
+                        carried(source_signal, target_source_signal, stepped),
+                    )
+                    .expect("shifted target drive"),
                 )
-                .expect("shifted target drive"),
-            )
-            .expect("shifted target forcing");
-    }
+                .expect("shifted target forcing");
+        }
+        forcing
+    };
+    let mut unstepped = edit.then(|| target_state.clone());
+    let target_oracle_forcing = oracle_forcing(true);
     for _ in 0..settlement_steps + measured_steps {
         target_state
             .step_with_forcing(&target_operator, &target_oracle_forcing)
             .expect("target oracle step");
+    }
+    if let Some(unstepped) = unstepped.as_mut() {
+        let forcing = oracle_forcing(false);
+        for _ in 0..settlement_steps + measured_steps {
+            unstepped
+                .step_with_forcing(&target_operator, &forcing)
+                .expect("unstepped oracle step");
+        }
+        let separation = relative_l2(
+            unstepped.primary_flux().iter().copied(),
+            target_state.primary_flux().iter().copied(),
+        );
+        println!(
+            "edited carriers without their phase steps stand {separation:.3e} from the oracle"
+        );
+        assert!(
+            separation > 10.0 * 3.0e-5,
+            "the fixture cannot tell a stepped carrier from one that is not"
+        );
     }
     let target_placeholder = CanonicalWaveState::zero(&target_operator, time_step).unwrap();
     let target_plan_started = Instant::now();

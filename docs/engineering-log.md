@@ -20144,3 +20144,22 @@ key, or starts as a new one. A face whose signal is edited in the same
 handoff starts fresh, since its signal is what names it. `push_source` without
 a key keeps the position as before.
 `a_drive_carries_on_from_the_source_that_authored_it`.
+
+## 2026-10-07 — An edit's phase reaches the running carrier
+
+An edit to a harmonic drive keeps its carrier running from the phase it has
+reached, so changing the frequency does not jump the wave. That was all an
+edit did with the phase: the live patch replaced the phase it was sent with
+the continuous one, and a handoff that replaced an edited drive or an edited
+pin did the same, so an edit of the phase alone matched the unchanged
+waveform to about 1e-6 on the device. The carrier now runs on and then steps
+by as much as the authored phase moved. A live patch takes the running
+forcing as well as the target and uploads that step, reduced to (-π, π], in
+the carrier's phase word (`patched_drive`); a handoff packs the steps of
+edited drives and pins in their own section of the transfer, which the
+eleventh header word locates (transfer layout 4). The temporal live-source
+gate now expects each edit's step, and fails a carrier kept running without
+it at 1.78 against 3e-4; the handoff gate's `--edit` gives the target's source
+and pin other numbers and passed at Q 2.1e-7, where a carrier without its
+step stands 1e-2 to 2.8e-2 off. `a_live_patch_carries_the_edits_step_of_phase`,
+`edited_source_handoff_selects_target_parameters_with_old_runtime_anchor`.

@@ -8,14 +8,19 @@
 //! a time-driven medium exactly as it does with a fixed one. This gate checks
 //! that on the device.
 //!
+//! An edit keeps a harmonic carrier running from the phase it has reached
+//! and then steps it by as much as the authored phase moved, so a frequency
+//! edit does not jump the wave and a phase edit moves it.
+//!
 //! The generation starts at a nonzero epoch origin, which is where a clock
 //! rebase leaves it, so the preserved carrier phase is anchored to an origin
 //! that is not zero. Two edits land at the same boundary - weights and drive
 //! first, then the drive alone - followed by a pulse, and the medium keeps
 //! moving through all of it. The oracle carries each edit's phase forward from
 //! the one before, as the device does. The gate first checks that an unedited
-//! run and one that restarts the carrier at its authored phase both land far
-//! from the oracle, so it cannot pass by measuring nothing.
+//! run, one that restarts the carrier at its authored phase, and one that
+//! keeps it running but drops the phase steps all land far from the oracle, so
+//! it cannot pass by measuring nothing.
 
 use std::{
     collections::VecDeque,
@@ -41,6 +46,9 @@ const EPOCH_ORIGIN: f64 = 37.25;
 /// Device f32 against the f64 oracle. The discrimination checks keep this
 /// far below what a wrong edit would cost.
 const TOLERANCE: f64 = 3.0e-4;
+/// The authored phases of the two edits, apart from the first's 0.35.
+const MIDDLE_PHASE: f64 = -1.7;
+const FINAL_PHASE: f64 = 2.4;
 
 #[derive(Resource)]
 struct Pending {
@@ -141,16 +149,17 @@ fn main() -> AppExit {
         TimeSignal::harmonic(0.01, 0.04, old_frequency, old_phase),
     );
     // The authored phases are deliberately different: a live edit keeps the
-    // carrier running rather than restarting it.
+    // carrier running rather than restarting it, and steps it by each edit's
+    // change of phase.
     let middle_authored = source(
         base,
         &new_weights,
-        TimeSignal::harmonic(0.015, 0.03, middle_frequency, -1.7),
+        TimeSignal::harmonic(0.015, 0.03, middle_frequency, MIDDLE_PHASE),
     );
     let final_authored = source(
         base,
         &new_weights,
-        TimeSignal::harmonic(0.012, 0.05, final_frequency, 2.4),
+        TimeSignal::harmonic(0.012, 0.05, final_frequency, FINAL_PHASE),
     );
 
     // A zero state, so everything the readback holds came from the source and
@@ -180,7 +189,7 @@ fn main() -> AppExit {
     let events = VecDeque::from([
         CanonicalGpuLiveEvent::source_weight_patch(&old_forcing, &middle_authored, time_step, 1)
             .expect("live source-weight event"),
-        CanonicalGpuLiveEvent::source_patch(&final_authored, time_step, 2)
+        CanonicalGpuLiveEvent::source_patch(&middle_authored, &final_authored, time_step, 2)
             .expect("live source-drive event"),
         CanonicalGpuLiveEvent::primary_pulse(base, &pulse, 3).expect("live pulse event"),
     ]);
@@ -191,14 +200,21 @@ fn main() -> AppExit {
             .expect("old-source oracle step");
     }
     let edit_time = warm.time();
-    // Each edit keeps the carrier's phase at the instant it lands.
+    // Each edit keeps the carrier's phase at the instant it lands, then steps
+    // it by the change of authored phase.
     let tau = std::f64::consts::TAU;
-    let middle_anchor = old_phase + tau * (old_frequency - middle_frequency) * edit_time;
-    let final_anchor = middle_anchor + tau * (middle_frequency - final_frequency) * edit_time;
+    let continuous_middle = old_phase + tau * (old_frequency - middle_frequency) * edit_time;
+    let continuous = continuous_middle + tau * (middle_frequency - final_frequency) * edit_time;
+    let final_anchor = continuous + (MIDDLE_PHASE - old_phase) + (FINAL_PHASE - MIDDLE_PHASE);
     let accepted = source(
         base,
         &new_weights,
         TimeSignal::harmonic(0.012, 0.05, final_frequency, final_anchor),
+    );
+    let unstepped = source(
+        base,
+        &new_weights,
+        TimeSignal::harmonic(0.012, 0.05, final_frequency, continuous),
     );
     let run = |forcing: &CanonicalForcing| {
         let mut state = warm.clone();
@@ -215,19 +231,24 @@ fn main() -> AppExit {
     let oracle = run(&accepted);
     let unedited = run(&old_forcing);
     let restarted = run(&final_authored);
+    let unstepped = run(&unstepped);
     let separation = |other: &CanonicalTemporalWaveState| {
         relative_l2(
             other.primary_flux().iter().copied(),
             oracle.primary_flux().iter().copied(),
         )
     };
-    let (unedited, restarted) = (separation(&unedited), separation(&restarted));
+    let (unedited, restarted, unstepped) = (
+        separation(&unedited),
+        separation(&restarted),
+        separation(&unstepped),
+    );
     println!(
-        "temporal live source gate: an unedited run stands {unedited:.3e} from the oracle and a \
-         restarted carrier {restarted:.3e}"
+        "temporal live source gate: an unedited run stands {unedited:.3e} from the oracle, a \
+         restarted carrier {restarted:.3e} and one without the phase steps {unstepped:.3e}"
     );
     assert!(
-        unedited > 50.0 * TOLERANCE && restarted > 50.0 * TOLERANCE,
+        unedited > 50.0 * TOLERANCE && restarted > 50.0 * TOLERANCE && unstepped > 50.0 * TOLERANCE,
         "the fixture cannot tell a correct edit from a wrong one"
     );
 

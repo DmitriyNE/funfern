@@ -1508,8 +1508,10 @@ classification admits two narrower transactions on the current generation:
   generation;
 - source-drive-only changes use a staged GPU table event and publish the CPU
   candidate only after that serial is accepted. This path requires unchanged
-  spatial weights, prescribed data, drive count and timestep; it preserves the
-  instantaneous carrier phase and integrated-rate anchor.
+  spatial weights, prescribed data, drive count and timestep; it keeps the
+  carrier running from its instantaneous phase, then steps it by the edit's
+  change of authored phase, and preserves the integrated-rate anchor. A
+  handoff that replaces an edited drive or pin does the same.
 - source-weight changes with identical explicit structural support stage
   candidate weights in unused table lanes, validate them, and atomically promote
   weights and drive runtime together. Point-source support is its selected

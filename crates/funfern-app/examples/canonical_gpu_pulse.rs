@@ -228,9 +228,11 @@ fn main() -> AppExit {
     let plan =
         CanonicalGpuPlan::compile_with_quadratic(&operator, &scalar, &initial, &device, clock)
             .expect("pulse GPU plan");
-    let events = VecDeque::from([
-        CanonicalGpuLiveEvent::source_patch(&edit, time_step, 1).expect("live pulse edit")
-    ]);
+    let events =
+        VecDeque::from([
+            CanonicalGpuLiveEvent::source_patch(&device, &edit, time_step, 1)
+                .expect("live pulse edit"),
+        ]);
 
     let mut warm = initial;
     for _ in 0..warmup_steps {

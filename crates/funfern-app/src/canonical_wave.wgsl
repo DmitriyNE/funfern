@@ -1484,10 +1484,14 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
             let old_parameters = vec4<f32>(
                 table_float(accepted_base, 0u), table_float(accepted_base, 1u),
                 table_float(accepted_base, 2u), table_float(accepted_base, 3u));
+            // The carrier runs on through the edit, from the phase it has
+            // reached, and then steps by as much as the authored phase did,
+            // which the upload carries in the phase's place. Kept continuous
+            // alone, a phase edit changed nothing.
             let current_phase = reduced_phase(
                 old_parameters.w + old_parameters.z * control.clock_f32.y);
             parameters.w = reduced_phase(
-                current_phase - parameters.z * control.clock_f32.y);
+                current_phase + parameters.w - parameters.z * control.clock_f32.y);
             if runtime.x == DRIVE_INTEGRATED {
                 let elapsed = control.clock_f32.y;
                 let half_phase = 0.5 * parameters.z * elapsed;
