@@ -528,10 +528,20 @@ impl TopologySnapshot {
         self.faces.iter().find(|face| face.id == id)
     }
 
+    /// The face holding `point`: inside its outer cycle and outside every
+    /// hole. Testing the outer cycle alone let a ring claim the disc it
+    /// encloses whenever the ring's net area was the smaller, and an
+    /// incremental repair then relabeled the kept disc as ring. The smallest
+    /// area still settles a point on a shared edge.
     pub fn face_at(&self, point: Point2) -> Option<FaceId> {
         self.faces
             .iter()
-            .filter(|face| point_in_polygon(point, &face.cycles[0]))
+            .filter(|face| {
+                point_in_polygon(point, &face.cycles[0])
+                    && face.cycles[1..]
+                        .iter()
+                        .all(|hole| !point_in_polygon(point, hole))
+            })
             .min_by(|left, right| left.area.total_cmp(&right.area))
             .map(|face| face.id)
     }
@@ -1821,6 +1831,43 @@ mod tests {
             assert!(!edges.is_empty());
             assert!(edges.iter().all(|edge| edge.left != edge.right));
         }
+    }
+
+    /// A thin ring's net area is smaller than the disc it encloses, and the
+    /// disc lies inside the ring's outer cycle; a point in the disc is still
+    /// the disc's.
+    #[test]
+    fn a_point_in_a_disc_is_not_the_thin_ring_around_it() {
+        let outer = closed(
+            1,
+            1,
+            &[[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+            SpanBehavior::Transmitting,
+        );
+        let inner = closed(
+            2,
+            5,
+            &[[-0.45, -0.45], [0.45, -0.45], [0.45, 0.45], [-0.45, 0.45]],
+            SpanBehavior::Transmitting,
+        );
+        let snapshot = compile_topology(
+            &TopologyGeometry {
+                curves: vec![outer, inner],
+                ..TopologyGeometry::default()
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(snapshot.faces.len(), 3);
+        let disc = snapshot.face_at(Point2::new(0.0, 0.0)).unwrap();
+        let ring = snapshot.face_at(Point2::new(0.0, 0.475)).unwrap();
+        let outside = snapshot.face_at(Point2::new(0.8, 0.0)).unwrap();
+        assert!(snapshot.face(ring).unwrap().area < snapshot.face(disc).unwrap().area);
+        assert_eq!(snapshot.face(disc).unwrap().cycles.len(), 1);
+        assert_eq!(snapshot.face(ring).unwrap().cycles.len(), 2);
+        assert_ne!(disc, ring);
+        assert_ne!(ring, outside);
+        assert_ne!(disc, outside);
     }
 
     /// A closed curve's seam is node zero, and the span that ends there arrives

@@ -19738,3 +19738,24 @@ including ties and absent regions; `the_primary_job_prepares_the_one_call_map_ac
 holds the job to the one call; and
 `extensions_into_a_filled_or_deleted_hole_pick_the_scans_donors` checks both
 extensions against the old scans on real edits.
+
+## 2026-10-06 — A disc is not the thin ring around it
+
+A split ring resonator with its gap closed, the outer loop thinned, faulted on
+any move of a control of its outer loop or of the strip lines below it:
+"a transmitting topology edge has inconsistent adjacency" at assembly. Moving
+the inner loop seemed to work, but only because its repair failed ("cavity
+boundary is not a closed walk") and fell back to a full rebuild. A full mesh
+of the moved scene was sound; the repair was not. `TopologySnapshot::face_at`
+took the smallest face whose outer cycle held the point and never looked at
+its holes, so a ring, whose outer cycle holds the disc it encloses, claimed
+the disc whenever its net area was the smaller: 0.44 against 0.93 here. The
+carve labels each kept component by `face_at` at its largest triangle, so the
+kept disc came back as ring and the inner loop had ring on both sides. A
+point inside any of a face's holes is now not that face's. On the autosaved
+scene all 100 moves tried, every control of both loops in three directions
+and the strip lines, repair by carving with no fallback.
+`a_point_in_a_disc_is_not_the_thin_ring_around_it` and
+`moving_either_loop_of_a_thin_ring_repairs_the_mesh` fail without the change.
+The editor's other callers, a loose end's attachment and the face an open
+curve is drawn in, had the same blind spot inside such a disc.

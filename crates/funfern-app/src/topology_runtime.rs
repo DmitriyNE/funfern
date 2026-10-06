@@ -2877,6 +2877,76 @@ mod tests {
         assert!(check(&before, &deleted) > 0);
     }
 
+    /// A closed ring thinner than the disc it encloses, as a split ring
+    /// resonator with its gap closed. Point location once gave the disc to
+    /// the ring, so a repair after moving the outer loop relabeled the kept
+    /// disc as ring and assembly refused the mesh, and one after moving the
+    /// inner loop fell back to a full rebuild. Each move is now a carve.
+    #[test]
+    fn moving_either_loop_of_a_thin_ring_repairs_the_mesh() {
+        let mut editor = TopologyEditor::default();
+        let mut loops = vec![];
+        for radius in [0.5, 0.42] {
+            loops.push(
+                editor
+                    .create_closed_curve(
+                        PeriodicCubicSpline::rounded(Point2::default(), radius),
+                        ClosedCurvePurpose::Subdomain {
+                            material: DEFAULT_MATERIAL,
+                        },
+                    )
+                    .unwrap(),
+            );
+            settle(&mut editor);
+        }
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        runtime.commit_ready(token).unwrap();
+        for curve in loops {
+            let CurveSpline::Closed(spline) = &editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(curve)
+                .unwrap()
+                .spline
+            else {
+                unreachable!("a subdomain loop is closed");
+            };
+            let control = spline.controls()[0];
+            editor
+                .set_control(curve, 0, control + Point2::new(0.01, 0.0))
+                .unwrap();
+            settle(&mut editor);
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(prepare(&mut runtime).unwrap(), token);
+            let moved = runtime.commit_ready(token).unwrap();
+            assert!(
+                moved.carve.is_some(),
+                "moving {curve:?} fell back: {:?}",
+                moved.repair_fallback
+            );
+        }
+    }
+
     #[test]
     fn adapted_mesh_gets_a_distinct_token_and_waits_for_gpu_acknowledgement() {
         let editor = TopologyEditor::default();
