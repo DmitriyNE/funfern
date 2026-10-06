@@ -19894,3 +19894,25 @@ it failed before on the pumped one. The other authored-model readers stay as
 they are on purpose: the temporal operator needs the laws, the far-field
 projection has to see a drive on the exterior to refuse it, and the AMR
 indicator takes the whole model and runs on the pumped fibre example.
+
+## 2026-10-06 — A diagnostic snapshot no longer rewinds the picture
+
+Reported: a delayed diagnostic snapshot could take the painted field back.
+`apply_canonical_state` queued every state copy for the painter, the full
+snapshots the app asks for every quarter second among them, though
+`request_full_state_readback` promises to leave the display stream alone. The
+snapshot receiver decodes a snapshot only once the clock has reached its step,
+so it is never newer than the live copies already queued and is usually behind
+them. Reproduced through `receive_canonical_snapshot`: with step 100 painted, a
+snapshot of step 90 mapped late, and the next frame painted step 90.
+
+Each copy now says which stream it came on. A snapshot still updates the raw
+state, the primary flux and the serials AMR and the energy diagnostics read,
+but only the continuous stream - the light one, or the full one validation
+harnesses select - feeds the playout. Rejecting stale copies in the playout
+was the alternative, but a live copy's step is the latest clock reading, not
+the copy's own, so ordering by it would be approximate.
+`a_delayed_snapshot_does_not_rewind_the_picture` checks both halves, and failed
+before on the painted step. Each snapshot also put a surplus copy into the
+playout queue four times a second, so the drawn wobble measured on 2026-10-05
+may be worth measuring again.

@@ -5299,7 +5299,13 @@ fn receive_canonical_snapshot(
                 data,
             }
             .to_shader_type();
-            apply_canonical_state(&tag, words, &request, &mut display);
+            apply_canonical_state(
+                &tag,
+                words,
+                &request,
+                &mut display,
+                CanonicalStateCopy::Snapshot,
+            );
         }
     }
 }
@@ -5394,7 +5400,24 @@ fn receive_canonical_state(
     let Ok(tag) = tags.get(event.entity) else {
         return;
     };
-    apply_canonical_state(tag, event.to_shader_type(), &request, &mut display);
+    apply_canonical_state(
+        tag,
+        event.to_shader_type(),
+        &request,
+        &mut display,
+        CanonicalStateCopy::Live,
+    );
+}
+
+/// Which stream a state copy came on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CanonicalStateCopy {
+    /// The continuous readback, one copy a frame: the painted picture.
+    Live,
+    /// A diagnostic snapshot. It is decoded once the clock has reached its
+    /// step, so it is never newer than the live copies already queued and is
+    /// usually behind them; queued for the painter, it took the field back.
+    Snapshot,
 }
 
 fn apply_canonical_state(
@@ -5402,6 +5425,7 @@ fn apply_canonical_state(
     mut words: Vec<GpuCanonicalStateWord>,
     request: &CanonicalGpuRequest,
     display: &mut CanonicalGpuDisplay,
+    copy: CanonicalStateCopy,
 ) {
     if tag.generation != request.generation {
         return;
@@ -5448,18 +5472,17 @@ fn apply_canonical_state(
     }
     refresh_canonical_display(display);
     display.readbacks = display.readbacks.saturating_add(1);
-    if display.primary_flux.len() == display.node_count {
+    if copy == CanonicalStateCopy::Live && display.primary_flux.len() == display.node_count {
         let step = if tag.full {
             display.raw_state_completed_steps
         } else {
             display.accepted_steps()
         };
-        let copy = PictureCopy {
+        display.picture.push(PictureCopy {
             serial: display.readbacks,
             step,
             values: display.primary_flux.clone(),
-        };
-        display.picture.push(copy);
+        });
     }
     if tag.full {
         display.full_readbacks = display.full_readbacks.saturating_add(1);
@@ -7766,6 +7789,94 @@ mod tests {
         assert_eq!(stats.retired_steps(), 40);
         stats.completed_steps.store(50, Ordering::Relaxed);
         assert_eq!(stats.retired_steps(), 50);
+    }
+
+    /// Reported: a delayed diagnostic snapshot rewound the painted field. A
+    /// snapshot is decoded once the clock has reached its step, so it is never
+    /// newer than the live copies, and it went into the picture queue behind
+    /// them: after step 100 was painted, the next frame painted step 90.
+    #[test]
+    fn a_delayed_snapshot_does_not_rewind_the_picture() {
+        use bevy::ecs::system::RunSystemOnce;
+        let nodes = 3_u32;
+        let tag = |full: bool| CanonicalStateReadback {
+            generation: 1,
+            node_count: nodes,
+            sample_count: 0,
+            state_count: if full { nodes + 1 } else { nodes },
+            material_runtime_count: 0,
+            integrated_count: 0,
+            full,
+        };
+        let word = |value: f32| GpuCanonicalStateWord {
+            values: Vec4::new(value, 0.0, 0.0, 0.0),
+        };
+        let mut request = CanonicalGpuRequest {
+            generation: 1,
+            ..Default::default()
+        };
+        let mut display = CanonicalGpuDisplay {
+            generation: 1,
+            clock: Some(CanonicalGpuDisplayClock {
+                epoch: 0,
+                epoch_origin_seconds: 0.0,
+                absolute_seconds: 0.1,
+                step_in_epoch: 100,
+                accepted_steps: 100,
+                local_seconds: 0.1,
+                time_step: 1.0e-3,
+                event_serial: 0,
+            }),
+            ..Default::default()
+        };
+
+        // The live stream's copy of step 100, painted.
+        apply_canonical_state(
+            &tag(false),
+            vec![word(100.0); nodes as usize],
+            &request,
+            &mut display,
+            CanonicalStateCopy::Live,
+        );
+        display.release_pictures();
+        display.release_pictures();
+        assert_eq!(display.picture().map(|copy| copy.step), Some(100));
+
+        // A snapshot of step 90, its copy mapped only now.
+        let mut snapshot = vec![word(90.0); nodes as usize];
+        snapshot.push(GpuCanonicalStateWord {
+            values: Vec4::new(SNAPSHOT_METADATA_MAGIC, 0.0, 90.0, 0.0),
+        });
+        let bytes = snapshot
+            .iter()
+            .flat_map(|word| word.values.to_array())
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        request.snapshot = Some(CanonicalSnapshotRequest {
+            serial: 1,
+            tag: tag(true),
+            result: Arc::new(Mutex::new(CanonicalSnapshotResult::Ready(bytes))),
+        });
+        let mut world = World::new();
+        world.insert_resource(request);
+        world.insert_resource(display);
+        world.run_system_once(receive_canonical_snapshot).unwrap();
+        let mut display = world.remove_resource::<CanonicalGpuDisplay>().unwrap();
+        assert!(world.resource::<CanonicalGpuRequest>().snapshot.is_none());
+
+        // The diagnostics have it.
+        assert_eq!(display.full_snapshot_completed_steps(), 90);
+        assert_eq!(display.full_readbacks, 1);
+        assert_eq!(display.full_readback_at, display.readbacks);
+        // The painter does not.
+        for _ in 0..4 {
+            display.release_pictures();
+            assert_eq!(
+                display.picture().map(|copy| copy.step),
+                Some(100),
+                "the picture went back to an older step"
+            );
+        }
     }
 
     /// The bank comes with the state snapshot and the epoch origin with the
