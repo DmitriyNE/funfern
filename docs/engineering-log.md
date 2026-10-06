@@ -19697,3 +19697,13 @@ the complementary transfer now locates by position there too. Changing a
 face's material keeps its ID and a filled hole had no field, so neither was
 affected. `a_new_or_retired_region_keeps_its_complementary_field` carries a
 uniform field through all three edits with nothing exposed.
+
+## 2026-10-06 — "Stored energy"
+
+The simulation panel's "Canonical stored energy" reads "Stored energy" now:
+"canonical" named the solver's discretization, which means nothing to someone
+watching the wave. The hover answers what the label cannot, that the sum is
+not the bulk field's alone: it adds the thin-gap baffles' spring energy and
+the second-order outgoing boundaries' pole memory, as
+`canonical_energy_breakdown` and the temporal path in `ui/runtime.rs` do.
+"Field energy" was tried first and dropped for hiding those terms.

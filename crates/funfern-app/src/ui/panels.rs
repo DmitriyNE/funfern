@@ -538,9 +538,13 @@ impl Playground {
         if self.runtime.active().is_some() {
             ui.separator();
             ui.label(format!(
-                "Canonical stored energy: {}",
-                self.wave_energy.map_or("—".into(), |v| format!("{v:.4e}"))
-            ));
+                "Stored energy: {}",
+                self.wave_energy.map_or("—".into(), |v| format!("{v:.3e}"))
+            ))
+            .on_hover_text(
+                "Bulk field, plus thin-gap baffles and the memory of \
+                 second-order outgoing boundaries",
+            );
         }
         ui.separator();
         self.advanced_settings(ui);
