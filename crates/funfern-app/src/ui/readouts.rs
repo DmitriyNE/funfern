@@ -379,19 +379,16 @@ impl Playground {
         (means, filled)
     }
     /// Trapezoidal integral along the sampled path, plus the fraction of the
-    /// intervals that carried finite values.
+    /// intervals that carried finite values. The samples run end to end, and
+    /// round a closed loop both ends sit on its seam, so a loop has no
+    /// closing interval beyond them.
     pub(super) fn curve_probe_integral(
         frame: &CurveProbeRecord,
         length: f64,
         quantity: LineProbeQuantity,
-        closed: bool,
     ) -> (f64, f64) {
         let samples = Self::curve_probe_values(frame, quantity);
-        let intervals = if closed {
-            samples.len()
-        } else {
-            samples.len().saturating_sub(1)
-        };
+        let intervals = samples.len().saturating_sub(1);
         if intervals == 0 || !length.is_finite() {
             return (f64::NAN, 0.0);
         }
@@ -399,7 +396,7 @@ impl Playground {
         let mut valid = 0usize;
         for index in 0..intervals {
             let a = samples[index] as f64;
-            let b = samples[(index + 1) % samples.len()] as f64;
+            let b = samples[index + 1] as f64;
             if a.is_finite() && b.is_finite() {
                 integral += 0.5 * (a + b);
                 valid += 1;
@@ -908,7 +905,10 @@ impl Playground {
                 probe.target,
                 TopologyProbeTarget::AreaDisk { .. } | TopologyProbeTarget::AreaRegion(_)
             );
-            let (length, closed) = self.probe_metrics.get(&id).copied().unwrap_or((0.0, false));
+            let length = self
+                .probe_metrics
+                .get(&id)
+                .map_or(0.0, |(length, _)| *length);
             // The averaged flux row can only look back as far as the trace
             // reaches, which at the faster presets is well short of the history
             // slider. Offering more than that would be a setting that shows
@@ -1224,12 +1224,8 @@ impl Playground {
                     }
                     if is_curve {
                         if let Some(frame) = curve_frames.last() {
-                            let (_, coverage) = Self::curve_probe_integral(
-                                frame,
-                                length,
-                                LineProbeQuantity::Field,
-                                closed,
-                            );
+                            let (_, coverage) =
+                                Self::curve_probe_integral(frame, length, LineProbeQuantity::Field);
                             if coverage < 0.999 {
                                 ui.small(format!("Valid coverage {:.0}%", coverage * 100.0));
                             }
@@ -1304,7 +1300,7 @@ impl Playground {
                                         probe_id: frame.probe_id,
                                         time: frame.time,
                                         displacement: Self::curve_probe_integral(
-                                            frame, length, quantity, closed,
+                                            frame, length, quantity,
                                         )
                                         .0,
                                         ..Default::default()
@@ -1961,6 +1957,35 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    /// Reported: round a closed loop the integral added an interval from the
+    /// last sample back to the first, which already share the seam, and
+    /// spaced the samples a loop's length over their count rather than over
+    /// the intervals between them. A cosine once round a loop of length 2.26
+    /// netted 0.0706, not zero.
+    #[test]
+    fn a_closed_loop_integrates_over_the_intervals_it_samples() {
+        let count = 32;
+        let profile = |value: &dyn Fn(f64) -> f64| CurveProbeRecord {
+            probe_id: 1,
+            normal_flux: (0..count)
+                .map(|index| value(index as f64 / (count - 1) as f64) as f32)
+                .collect(),
+            ..Default::default()
+        };
+        let length = 2.26;
+        let net = |frame: &CurveProbeRecord| {
+            Playground::curve_probe_integral(frame, length, LineProbeQuantity::Flux)
+        };
+        let (cosine, coverage) = net(&profile(&|s| (std::f64::consts::TAU * s).cos()));
+        assert!(
+            cosine.abs() < 1.0e-6,
+            "a cosine round the loop nets {cosine}"
+        );
+        assert_eq!(coverage, 1.0);
+        let (constant, _) = net(&profile(&|_| 1.5));
+        assert!((constant - 1.5 * length).abs() < 1.0e-6, "{constant}");
     }
 
     #[test]

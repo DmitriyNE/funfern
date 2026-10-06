@@ -20076,3 +20076,15 @@ slab channels - keep the energy density, since flux across them is nothing by
 construction; the whispering gallery keeps it for its lobes, and the Brewster
 arc for its fringes. `every_flux_probe_reads_its_claimed_power_positive`
 checks every gallery probe that plots flux reads its claim's power positive.
+
+## 2026-10-07 — A loop's integral has no closing interval
+
+A boundary probe samples its path end to end, and round a whole loop its
+first and last samples both sit on the seam. The integral treated a closed
+probe as wrapping, adding an interval from the last sample back to the first
+and spacing the samples over their count rather than over the intervals
+between them: a cosine once round a loop of length 2.26 netted 0.0706, where
+the profile plots, which place the samples over `count − 1` intervals, already
+had it right. The integral now runs over the sampled intervals for every path,
+and the probe's length no longer adds the zero closing segment either; `closed`
+only labels the probe. `a_closed_loop_integrates_over_the_intervals_it_samples`.

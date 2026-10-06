@@ -299,14 +299,11 @@ impl Playground {
                     self.probe_status.remove(&compiled.id);
                     if let TopologyProbeStencil::Boundary(samples) = stencil.as_ref() {
                         let closed = self.boundary_probe_is_closed(compiled.id);
+                        // A loop's samples start and end on its seam, so the
+                        // path between them is the whole loop.
                         let mut length = 0.0;
                         for pair in samples.windows(2) {
                             length += (pair[1].point - pair[0].point).norm();
-                        }
-                        if closed
-                            && let (Some(first), Some(last)) = (samples.first(), samples.last())
-                        {
-                            length += (first.point - last.point).norm();
                         }
                         self.probe_metrics.insert(compiled.id, (length, closed));
                     }
