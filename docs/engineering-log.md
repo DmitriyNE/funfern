@@ -19916,3 +19916,22 @@ the copy's own, so ordering by it would be approximate.
 before on the painted step. Each snapshot also put a surplus copy into the
 playout queue four times a second, so the drawn wobble measured on 2026-10-05
 may be worth measuring again.
+
+## 2026-10-07 — A material lens shaped like a lens
+
+The material lens was a disk of index 1.67 (ε = 2.78, μ = 1) with its source
+at x = -0.72, and on the axis behind it the 3.5 Hz field only brightened broadly
+from 0.6 to the wall. It is now a biconvex lens: two circular surfaces of
+radius 0.55 meeting at sharp edges 0.4 above and below the axis, 0.35 thick,
+each surface three cubic Bézier pieces with C0 knots as `arc` builds them,
+so the Polygon tool and its handles can draw it. Measured with the harmonic
+harness, index 1.67 left a lens that thin focusing too weakly to read inside
+the domain: R 0.5 and 0.42 at that index kept the axis flat, and the spot's
+flank 0.15 off the axis held 0.43-0.51 of its peak. At index 2 (ε = 4), with
+the source at -0.8, the light converges at x = 0.44 to 2.85 times what the
+bare source leaves there, the flanks at 0.15 holding 0.15-0.16 of the peak; at
+edge 0.05 the focus sits at 0.47. The thick-lens formula puts the image near
+0.55; with an aperture under three wavelengths it forms nearer. The material is
+named Glass rather than Slow lens. `the_material_lens_focuses_its_source_behind_it`
+checks the focus against `material_lens_with(false)`, the same scene with a
+vacuum lens, and `examples/material-lens.json` is regenerated.

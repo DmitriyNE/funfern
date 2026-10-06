@@ -174,7 +174,8 @@ pub fn catalog() -> &'static [TopologyExample] {
             example(
                 ExampleGroup::LensesAndImaging,
                 "Material lens",
-                "A TM electric-field source illuminates a slower dielectric region with absorbing edges.",
+                "A TM point source and a biconvex glass lens of index 2: the light it gathers \
+                 converges to a spot behind it, with the power flow drawn in.",
                 material_lens(),
             ),
             example(
@@ -1377,7 +1378,24 @@ fn double_slit_with(half_width: f64, back: f64, source_x: f64) -> TopologyDocume
     document
 }
 
+/// The biconvex lens: two circular surfaces of `LENS_RADIUS` meeting at sharp
+/// edges `LENS_HALF_APERTURE` above and below the axis, 0.35 thick. Glass of
+/// index 2 in the E_z skin, `ε = 4` and `μ = 1`. The thick-lens formula puts
+/// its focal length near 0.33, so a source 0.8 in front images about 0.55
+/// behind; with an aperture under three wavelengths the focus forms nearer,
+/// at 0.43-0.47 on meshes of edge 0.08 and 0.05. Index 1.67 left a lens this
+/// thin focusing too weakly to read inside the domain.
+const LENS_RADIUS: f64 = 0.55;
+const LENS_HALF_APERTURE: f64 = 0.4;
+const LENS_SOURCE: Point2 = Point2 { x: -0.8, y: 0.0 };
+
 fn material_lens() -> TopologyDocument {
+    material_lens_with(true)
+}
+
+/// The material lens, or with `lens` false the same scene whose lens is
+/// vacuum.
+fn material_lens_with(lens: bool) -> TopologyDocument {
     let mut builder = Builder::new();
     builder.scene.physics = PhysicsModel::Electromagnetic {
         polarization: ElectromagneticPolarization::Tm,
@@ -1386,8 +1404,8 @@ fn material_lens() -> TopologyDocument {
         OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
     builder.scene.materials.push(Material {
         id: MaterialId(2),
-        name: "Slow lens".into(),
-        mass_density: ScalarField::constant(1.0 / 0.36),
+        name: "Glass".into(),
+        mass_density: ScalarField::constant(if lens { 4.0 } else { 1.0 }),
         stiffness: ScalarField::constant(1.0),
         damping: ScalarField::constant(0.0),
         axis_ratio: ScalarField::constant(1.0),
@@ -1396,7 +1414,7 @@ fn material_lens() -> TopologyDocument {
         ..Material::default_medium()
     });
     let lens = builder.subdomain(
-        PeriodicCubicSpline::rounded(Point2::default(), 0.45),
+        biconvex(LENS_RADIUS, LENS_HALF_APERTURE),
         MaterialId(2),
         MaterialFrame {
             attachment: MaterialFrameAttachment::FollowRegion,
@@ -1405,10 +1423,49 @@ fn material_lens() -> TopologyDocument {
     );
     builder.name(lens, "Lens");
     let mut document = builder.document();
-    document.model.source = source(Point2::new(-0.72, 0.0), 3.5, 16.0, 0.045);
+    document.model.source = source(LENS_SOURCE, 3.5, 16.0, 0.045);
     // The power converging behind the lens.
     streamlines(&mut document.presentation);
     document
+}
+
+/// A symmetric biconvex lens about the origin, its axis along `x`: two
+/// circular surfaces of `radius` meeting at sharp edges `half_aperture` above
+/// and below the axis. Each surface is three cubic Bézier pieces, as `arc`
+/// builds one, and every knot is C0.
+fn biconvex(radius: f64, half_aperture: f64) -> PeriodicCubicSpline {
+    const PIECES: usize = 3;
+    let offset = (radius * radius - half_aperture * half_aperture).sqrt();
+    let half_angle = half_aperture.atan2(offset);
+    let step = 2.0 * half_angle / PIECES as f64;
+    let reach = 4.0 / 3.0 * portable_tan(step / 4.0) * radius;
+    let mut controls = Vec::with_capacity(6 * PIECES);
+    // The right surface, centred behind the axis' origin, from the lower edge
+    // up; then the left, from the upper edge down.
+    for (center, from) in [
+        (Point2::new(-offset, 0.0), -half_angle),
+        (Point2::new(offset, 0.0), std::f64::consts::PI - half_angle),
+    ] {
+        let at = |angle: f64| center + direction(angle) * radius;
+        let tangent = |angle: f64| {
+            let along = direction(angle);
+            Point2::new(-along.y, along.x)
+        };
+        for piece in 0..PIECES {
+            let (a, b) = (from + step * piece as f64, from + step * (piece + 1) as f64);
+            controls.extend([
+                at(a) + tangent(a) * reach,
+                at(b) - tangent(b) * reach,
+                at(b),
+            ]);
+        }
+    }
+    PeriodicCubicSpline::new_with_multiplicities(
+        controls,
+        vec![radius * step; 2 * PIECES],
+        vec![3; 2 * PIECES],
+    )
+    .unwrap()
 }
 
 /// Quarter-pitch GRIN collimator: `n = 1 + dn (1 − (y/H)²)` has paraxial
@@ -6305,6 +6362,39 @@ mod tests {
             assert!(
                 flank < 0.5 * peak,
                 "the spot's flank holds {flank:.3} of {peak:.3}"
+            );
+        }
+    }
+
+    /// The material lens's claim: behind the lens, on its axis, the light
+    /// converges to a spot - brighter than the bare source leaves there, and
+    /// brighter than either side of it.
+    #[test]
+    fn the_material_lens_focuses_its_source_behind_it() {
+        let lens = Harmonic::run(&material_lens(), 0.08, 6.0, 3.5, 3.0);
+        let bare = Harmonic::run(&material_lens_with(false), 0.08, 6.0, 3.5, 3.0);
+        let (focus, peak) = (0..=50)
+            .map(|index| {
+                let point = Point2::new(0.25 + 0.6 * f64::from(index) / 50.0, 0.0);
+                (point, lens.at(point))
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        assert!(
+            (0.3..=0.6).contains(&focus.x),
+            "the brightest point behind the lens is at {:.3}",
+            focus.x
+        );
+        let unfocused = bare.at(focus);
+        assert!(
+            peak > 2.0 * unfocused,
+            "{peak:.4} with the lens, {unfocused:.4} without"
+        );
+        for side in [1.0, -1.0] {
+            let flank = lens.at(focus + Point2::new(0.0, 0.15 * side));
+            assert!(
+                flank < 0.5 * peak,
+                "the spot's flank holds {flank:.4} of {peak:.4}"
             );
         }
     }
