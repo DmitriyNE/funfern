@@ -20030,3 +20030,15 @@ by `line_probe_input`, and `line_probes_read_flux_along_their_normals` checks
 both kinds. Every normal-flux reading recorded before this - the flux plots,
 its average, normal power - was wrong, and only the field and energy-density
 readouts were right.
+
+## 2026-10-07 — Reset starts adaptation again
+
+Reset restarts the solver's step counter, but kept the AMR history of the run it
+discarded: after an estimate at step 50,000 the new run waited for step 50,008
+before the next, under the old run's energy peak and coarsening streak. An
+estimate or an adaptation still computing from the discarded field also
+survived, and could land after the Reset to restore the old step or install a
+mesh refined around a wave no longer there. Reset now stops that work
+(`stop_adaptation_work`) and forgets the last step estimated, its start and
+the peak. The mesh and its adaptation history stay, since Reset does not
+change them. `reset_starts_adaptation_again`.

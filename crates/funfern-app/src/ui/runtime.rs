@@ -687,6 +687,15 @@ impl Playground {
                     // The reset medium starts at its authored laws, wherever
                     // a Switch had sent it.
                     self.switch_targets.clear();
+                    // Adaptation starts the run again too: an estimate or a
+                    // mesh still computing is of the field Reset discarded,
+                    // and the last step estimated and the energy peak belong
+                    // to a step counter that now starts at zero. The mesh and
+                    // its adaptation history stay; Reset did not change them.
+                    self.stop_adaptation_work();
+                    self.amr_last_analyzed_step = None;
+                    self.amr_last_started = None;
+                    self.amr_energy_peak = 0.0;
                     self.restart_probe_traces();
                     self.restart_exposures_after_handoff(true);
                 }
@@ -1374,6 +1383,62 @@ mod tests {
             state.switch_states.first().map(|(_, target, _)| *target),
             Some(0.0),
             "the reset medium reads as at its base"
+        );
+    }
+
+    /// Reported: Reset restarted the solver's step counter but kept the AMR
+    /// history of the run it discarded. After an estimate at step 50,000 the
+    /// new run waited for step 50,008 before another, under the old run's
+    /// energy peak.
+    #[test]
+    fn reset_starts_adaptation_again() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame = |state: &mut Playground, request: &mut CanonicalGpuRequest| {
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    &display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+            });
+        };
+        let mut state = Playground::default();
+        let active = activate(&mut state);
+        state.requested_revision = Some(state.editor.revision);
+        state.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut state, &mut request);
+        let installed = request.generation();
+
+        state.amr_last_analyzed_step = Some(50_000);
+        state.amr_last_started = Some(Instant::now());
+        state.amr_energy_peak = 5.0;
+        state.amr_coarsen_streak = 2;
+        let history = MeshAdaptationState::from_mesh(&active.mesh);
+        state.amr_adaptation_state = Some(history.clone());
+        state.reset_requested = true;
+        frame(&mut state, &mut request);
+        assert!(!state.reset_requested && request.generation() > installed);
+        assert_eq!(state.amr_last_analyzed_step, None);
+        assert!(state.amr_last_started.is_none());
+        assert_eq!(state.amr_energy_peak, 0.0);
+        assert_eq!(state.amr_coarsen_streak, 0);
+        assert_eq!(
+            state.amr_adaptation_state.map(|state| state.mesh_revision),
+            Some(history.mesh_revision),
+            "the mesh Reset kept keeps its history"
         );
     }
 
