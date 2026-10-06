@@ -30,7 +30,7 @@
 
 * **Incremental meshing and mesh repair** for boundary motion and topology changes, replacing only the affected part of the constrained mesh.
 
-* **Time-domain field solver over one canonical formulation** covering scalar/mechanical waves and both scalar electromagnetic polarizations, TM and TE, advanced by a time-reversible symplectic step that preserves the phase-space structure of the lossless dynamics, nonlinear media included: numerical error shows up as a small phase error rather than artificial damping or growth.
+* **Time-domain field solver over one canonical formulation** covering scalar/mechanical waves and both scalar electromagnetic polarizations, TM and TE. The lossless dynamics are advanced by an explicit symplectic integrator, a modified-equation Störmer step whose phase is fourth-order accurate on the linear bulk; it stays exactly symplectic unless a medium carries field laws on both its mass and its stiffness. Material drives, physical losses, numerical filtering and remeshing act outside that step and are accounted for separately.
 
 * **Rich boundary-condition model**: reflecting and prescribed boundaries, first- and higher-order absorbing boundaries, impedance conditions, internal two-sided boundaries and conservative thin-gap coupling.
 
@@ -110,10 +110,10 @@ application framework. The crate has no external dependencies, including
 numerical libraries.
 
 The current discretization is seven-node enriched quadratic, mass-lumped
-triangles, advanced by an explicit symplectic kick–drift–kick step, on both the
-f64 CPU reference and an f32 WebGPU gather kernel. An isogeometric
-discretization is planned, so the element family is not a fixed property of the
-project.
+triangles, advanced by an explicit kick–drift–kick step with a fourth-order
+modified-equation correction, on both the f64 CPU reference and an f32 WebGPU
+gather kernel. An isogeometric discretization is planned, so the element family
+is not a fixed property of the project.
 
 ## Build and run
 
