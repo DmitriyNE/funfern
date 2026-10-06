@@ -4031,6 +4031,10 @@ pub(crate) struct CanonicalGpuBufferHandles {
     pub(crate) tables: Handle<ShaderBuffer>,
     pub(crate) scratch: Handle<ShaderBuffer>,
     pub(crate) boundary: Handle<ShaderBuffer>,
+    /// What the continuous readbacks map, copied out of the state each frame
+    /// (`copy_canonical_live`): the primary words and then the metadata word,
+    /// and with an integrated field its words and the metadata word again.
+    live: Handle<ShaderBuffer>,
     pub(crate) node_count: u32,
     pub(crate) sample_count: u32,
     gap_count: u32,
@@ -4072,6 +4076,11 @@ impl CanonicalGpuBufferHandles {
             &self.scratch,
             &self.boundary,
         ]
+    }
+
+    /// Every buffer the generation owns: its bindings and the live copy.
+    fn owned(&self) -> impl Iterator<Item = &Handle<ShaderBuffer>> {
+        self.all().into_iter().chain([&self.live])
     }
 }
 
@@ -4193,9 +4202,9 @@ fn spawn_canonical_state_readback(
         Readback::buffer(handles.state.clone())
     } else {
         Readback::buffer_range(
-            handles.state.clone(),
+            handles.live.clone(),
             0,
-            u64::from(handles.node_count) * size_of::<GpuCanonicalStateWord>() as u64,
+            u64::from(handles.node_count + 1) * size_of::<GpuCanonicalStateWord>() as u64,
         )
     };
     commands
@@ -4206,7 +4215,8 @@ fn spawn_canonical_state_readback(
         .id()
 }
 
-/// What a state readback holds: the whole state or the primary node prefix.
+/// What a state readback holds: the whole state, or the primary nodes and the
+/// metadata word from the live buffer.
 fn canonical_state_tag(
     handles: &CanonicalGpuBufferHandles,
     generation: u64,
@@ -4223,7 +4233,7 @@ fn canonical_state_tag(
                 + 1
                 + handles.material_runtime_count * TEMPORAL_RUNTIME_WORDS_PER_SLOT as u32
         } else {
-            handles.node_count
+            handles.node_count + 1
         },
         full,
     }
@@ -4234,6 +4244,17 @@ struct AddedCanonicalBuffers {
     manifest: CanonicalGpuLayoutManifest,
     initial_step: u64,
     local_step: u32,
+}
+
+/// The live buffer's words: the primary nodes and a metadata word, then the
+/// integrated field and a metadata word when there is one.
+fn live_word_count(node_count: u32, integrated_count: u32) -> u32 {
+    let integrated = if integrated_count == 0 {
+        0
+    } else {
+        integrated_count + 1
+    };
+    node_count + 1 + integrated
 }
 
 fn add_canonical_buffers(
@@ -4270,6 +4291,13 @@ fn add_canonical_buffers(
         tables: add_shader_buffer!(assets, plan.tables),
         scratch: add_shader_buffer!(assets, plan.scratch),
         boundary: add_shader_buffer!(assets, plan.boundary),
+        live: add_shader_buffer!(
+            assets,
+            vec![
+                GpuCanonicalStateWord::default();
+                live_word_count(node_count, plan.integrated_count as u32) as usize
+            ]
+        ),
         node_count,
         sample_count,
         gap_count,
@@ -4367,7 +4395,7 @@ impl CanonicalGpuRequest {
 
     pub fn clear(&mut self, assets: &mut Assets<ShaderBuffer>, commands: &mut Commands) {
         if let Some(handoff) = self.handoff.take() {
-            for handle in handoff.target.all() {
+            for handle in handoff.target.owned() {
                 assets.remove(handle.id());
             }
             assets.remove(handoff.transfer.id());
@@ -4377,7 +4405,7 @@ impl CanonicalGpuRequest {
             assets.remove(event.upload.id());
         }
         if let Some(handles) = self.buffers.take() {
-            for handle in handles.all() {
+            for handle in handles.owned() {
                 assets.remove(handle.id());
             }
         }
@@ -4466,7 +4494,8 @@ impl CanonicalGpuRequest {
 
     /// Validation harnesses need every physical lane on every readback. The
     /// interactive app leaves this disabled and continuously reads only the
-    /// primary node prefix, requesting full snapshots at diagnostic cadence.
+    /// primary nodes and their metadata word, requesting full snapshots at
+    /// diagnostic cadence.
     pub fn set_continuous_full_state_readback(
         &mut self,
         enabled: bool,
@@ -4517,13 +4546,12 @@ impl CanonicalGpuRequest {
             return;
         }
         let word = size_of::<GpuCanonicalStateWord>() as u64;
-        let first = u64::from(handles.state_count - handles.integrated_count);
         let entity = commands
             .spawn((
                 PacedReadback::continuous(Readback::buffer_range(
-                    handles.state.clone(),
-                    first * word,
-                    u64::from(handles.integrated_count) * word,
+                    handles.live.clone(),
+                    u64::from(handles.node_count + 1) * word,
+                    u64::from(handles.integrated_count + 1) * word,
                 )),
                 CanonicalIntegratedReadback {
                     generation: self.generation,
@@ -5047,12 +5075,14 @@ pub struct CanonicalGpuDisplay {
     node_count: usize,
     sample_count: usize,
     integrated_count: usize,
-    accepted_slot: u32,
     raw_state_slot: u32,
     /// Absolute accepted step captured inside the state buffer itself. Unlike
     /// the continuously read control buffer, it describes this exact snapshot.
     raw_state_completed_steps: u64,
-    raw_primary_self_describing: bool,
+    /// The accepted lane and step of `raw_primary`, from the metadata word
+    /// of the copy it came in.
+    raw_primary_slot: u32,
+    raw_primary_step: u64,
     /// The primary flux of every state copy as it lands, played out to the
     /// painter one a frame (`picture_playout`).
     picture: PicturePlayout<Vec<f32>>,
@@ -5077,11 +5107,6 @@ impl CanonicalGpuDisplay {
         self.integrated_picture.shown()
     }
 
-    /// The step the control stream reported last.
-    fn accepted_steps(&self) -> u64 {
-        self.clock
-            .map_or(0, |clock| u64::from(clock.accepted_steps))
-    }
     /// Gate O: the accepted integrated field `r` from the latest full
     /// snapshot, the tail of the auxiliary lanes. Empty without a restoring
     /// law.
@@ -5282,6 +5307,56 @@ fn copy_canonical_snapshot(
     staging.busy.store(true, Ordering::Release);
 }
 
+/// Copies the accepted primary words into the live buffer the continuous
+/// readbacks map, and the integrated field's when that view is on, each
+/// followed by the state's metadata word, which every commit writes with the
+/// accepted lane and step. A continuous copy then says itself which lane is
+/// the accepted one and which step it holds. Read against the control
+/// stream instead, which is mapped on its own, a state copy landing before
+/// the control copy of its frame was decoded through the previous frame's
+/// lane and painted the step before. It runs after the frame's steps, as
+/// copying straight from the state would.
+fn copy_canonical_live(
+    mut render_context: RenderContext,
+    request: Option<Res<CanonicalGpuRequest>>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+) {
+    let Some(request) = request else { return };
+    let Some(handles) = request.buffers.as_ref() else {
+        return;
+    };
+    let (Some(state), Some(live)) = (
+        gpu_buffers.get(&handles.state),
+        gpu_buffers.get(&handles.live),
+    ) else {
+        return;
+    };
+    let word = size_of::<GpuCanonicalStateWord>() as u64;
+    let metadata = u64::from(handles.state_count) * word;
+    let nodes = u64::from(handles.node_count) * word;
+    let encoder = render_context.command_encoder();
+    encoder.copy_buffer_to_buffer(&state.buffer, 0, &live.buffer, 0, nodes);
+    encoder.copy_buffer_to_buffer(&state.buffer, metadata, &live.buffer, nodes, word);
+    let integrated = u64::from(handles.integrated_count) * word;
+    if request.integrated_display && integrated > 0 {
+        let into = nodes + word;
+        encoder.copy_buffer_to_buffer(
+            &state.buffer,
+            metadata - integrated,
+            &live.buffer,
+            into,
+            integrated,
+        );
+        encoder.copy_buffer_to_buffer(
+            &state.buffer,
+            metadata,
+            &live.buffer,
+            into + integrated,
+            word,
+        );
+    }
+}
+
 /// Maps the copy encoded this frame, once the frame is submitted.
 fn map_canonical_snapshot(mut staging: ResMut<CanonicalSnapshotStaging>) {
     let Some(result) = staging.encoded.take() else {
@@ -5374,14 +5449,15 @@ fn receive_canonical_integrated(
     if tag.generation != request.generation || display.generation != tag.generation {
         return;
     }
-    let words: Vec<GpuCanonicalStateWord> = event.to_shader_type();
-    if words.len() != tag.integrated_count as usize {
+    let mut words: Vec<GpuCanonicalStateWord> = event.to_shader_type();
+    if words.len() != tag.integrated_count as usize + 1 {
         return;
     }
-    // Read against the accepted slot the control stream reports, as the
-    // primary display stream is.
-    let slot = display.accepted_slot;
-    set_live_integrated(&mut display, &words, slot);
+    // Read in the lane its own copy names, as the primary stream is.
+    let Some((slot, step)) = words.pop().and_then(snapshot_metadata) else {
+        return;
+    };
+    set_live_integrated(&mut display, &words, slot, step);
 }
 
 /// The integrated field from its state words, in the given accepted slot.
@@ -5389,6 +5465,7 @@ fn set_live_integrated(
     display: &mut CanonicalGpuDisplay,
     words: &[GpuCanonicalStateWord],
     slot: u32,
+    step: u64,
 ) {
     display.live_integrated.clear();
     display.live_integrated.extend(words.iter().map(|word| {
@@ -5401,7 +5478,7 @@ fn set_live_integrated(
     display.live_integrated_readbacks = display.live_integrated_readbacks.wrapping_add(1);
     let copy = PictureCopy {
         serial: display.live_integrated_readbacks,
-        step: display.accepted_steps(),
+        step,
         values: display.live_integrated.clone(),
     };
     display.integrated_picture.push(copy);
@@ -5434,6 +5511,25 @@ fn snapshot_step(tag: &CanonicalStateReadback, data: &[u8]) -> Option<u32> {
     let bytes = data.get(index * word..(index + 1) * word)?;
     let lane = |lane: usize| f32::from_le_bytes(bytes[4 * lane..4 * lane + 4].try_into().unwrap());
     (lane(0) == SNAPSHOT_METADATA_MAGIC).then(|| lane(2) as u32 | (lane(3) as u32) << 16)
+}
+
+/// The accepted lane and completed steps a metadata word carries, `None`
+/// when the word is not one.
+fn snapshot_metadata(word: GpuCanonicalStateWord) -> Option<(u32, u64)> {
+    let metadata = word.values.to_array();
+    if metadata[0] != SNAPSHOT_METADATA_MAGIC
+        || (metadata[1] != 0.0 && metadata[1] != 1.0)
+        || !(0.0..=65_535.0).contains(&metadata[2])
+        || !(0.0..=65_535.0).contains(&metadata[3])
+        || metadata[2].fract() != 0.0
+        || metadata[3].fract() != 0.0
+    {
+        return None;
+    }
+    Some((
+        metadata[1] as u32,
+        u64::from(metadata[2] as u32 | (metadata[3] as u32) << 16),
+    ))
 }
 
 fn receive_canonical_state(
@@ -5490,42 +5586,33 @@ fn apply_canonical_state(
             return;
         }
         let runtime = words.split_off(words.len() - runtime_words);
-        let Some(metadata) = words.pop() else { return };
-        let metadata = metadata.values.to_array();
-        if metadata[0] != SNAPSHOT_METADATA_MAGIC
-            || (metadata[1] != 0.0 && metadata[1] != 1.0)
-            || !(0.0..=65_535.0).contains(&metadata[2])
-            || !(0.0..=65_535.0).contains(&metadata[3])
-            || metadata[2].fract() != 0.0
-            || metadata[3].fract() != 0.0
-        {
+        let Some((slot, step)) = words.pop().and_then(snapshot_metadata) else {
             return;
-        }
+        };
         display.raw_material_runtime = runtime;
-        display.raw_state_slot = metadata[1] as u32;
-        display.raw_state_completed_steps =
-            u64::from(metadata[2] as u32 | (metadata[3] as u32) << 16);
-        display.raw_primary_self_describing = true;
+        display.raw_state_slot = slot;
+        display.raw_state_completed_steps = step;
+        display.raw_primary_slot = slot;
+        display.raw_primary_step = step;
         display.raw_primary.clear();
         display
             .raw_primary
             .extend(words.iter().take(tag.node_count as usize).copied());
         display.raw_state = words;
     } else {
+        let Some((slot, step)) = words.pop().and_then(snapshot_metadata) else {
+            return;
+        };
+        display.raw_primary_slot = slot;
+        display.raw_primary_step = step;
         display.raw_primary = words;
-        display.raw_primary_self_describing = false;
     }
     refresh_canonical_display(display);
     display.readbacks = display.readbacks.saturating_add(1);
     if copy == CanonicalStateCopy::Live && display.primary_flux.len() == display.node_count {
-        let step = if tag.full {
-            display.raw_state_completed_steps
-        } else {
-            display.accepted_steps()
-        };
         display.picture.push(PictureCopy {
             serial: display.readbacks,
-            step,
+            step: display.raw_primary_step,
             values: display.primary_flux.clone(),
         });
     }
@@ -5555,7 +5642,8 @@ fn begin_canonical_display_generation(display: &mut CanonicalGpuDisplay, generat
     display.raw_material_runtime.clear();
     display.raw_state_slot = 0;
     display.raw_state_completed_steps = 0;
-    display.raw_primary_self_describing = false;
+    display.raw_primary_slot = 0;
+    display.raw_primary_step = 0;
     display.full_readback_at = u64::MAX;
     display.live_integrated.clear();
     display.picture.clear();
@@ -5608,7 +5696,6 @@ fn receive_canonical_control(
     display.active_gain = value.accepted_accounting_c.x;
     display.runtime_serials = value.runtime_serials.to_array();
     display.event_result = value.event_result.to_array();
-    display.accepted_slot = value.event.z & 1;
     refresh_canonical_display(&mut display);
 }
 
@@ -5618,11 +5705,7 @@ fn refresh_canonical_display(display: &mut CanonicalGpuDisplay) {
     if display.raw_primary.len() != nodes {
         return;
     }
-    let second = if display.raw_primary_self_describing {
-        display.raw_state_slot != 0
-    } else {
-        display.accepted_slot != 0
-    };
+    let second = display.raw_primary_slot != 0;
     display.primary_flux.clear();
     display.primary_flux.extend(
         display.raw_primary[..nodes]
@@ -5764,7 +5847,7 @@ fn settle_canonical_handoff(
     assets.remove(handoff.transfer.id());
     let failure = handoff.stats.failure.load(Ordering::Relaxed);
     if failure != 0 {
-        for handle in handoff.target.all() {
+        for handle in handoff.target.owned() {
             assets.remove(handle.id());
         }
         request.handoff_outcome = CanonicalGpuHandoffOutcome::Rejected(failure);
@@ -5773,7 +5856,7 @@ fn settle_canonical_handoff(
     }
 
     if let Some(old) = request.buffers.take() {
-        for handle in old.all() {
+        for handle in old.owned() {
             assets.remove(handle.id());
         }
     }
@@ -5842,16 +5925,21 @@ fn settle_canonical_handoff(
     begin_canonical_display_generation(&mut display, generation);
     display.node_count = target_node_count;
     display.sample_count = target_sample_count;
-    display.accepted_slot = receipt.accepted_slot;
     display.raw_state_slot = receipt.accepted_slot;
     display.raw_state_completed_steps = completed_steps;
-    display.raw_primary_self_describing = true;
+    display.raw_primary_slot = receipt.accepted_slot;
+    display.raw_primary_step = completed_steps;
     display.raw_primary = receipt.primary;
     refresh_canonical_display(&mut display);
     display.readbacks = display.readbacks.saturating_add(1);
     // Gate O: `r` from the same receipt, so the first target frame can paint
     // it rather than falling back to the field until a snapshot arrives.
-    set_live_integrated(&mut display, &receipt.integrated, receipt.accepted_slot);
+    set_live_integrated(
+        &mut display,
+        &receipt.integrated,
+        receipt.accepted_slot,
+        completed_steps,
+    );
     request.spawn_integrated_readback(&mut commands);
     request.handoff_outcome = CanonicalGpuHandoffOutcome::Accepted;
 }
@@ -5933,7 +6021,8 @@ impl Plugin for CanonicalWaveGpuPlugin {
                 (
                     compute_canonical_wave,
                     compute_canonical_handoff.after(compute_canonical_wave),
-                    copy_canonical_snapshot.after(compute_canonical_handoff),
+                    copy_canonical_live.after(compute_canonical_handoff),
+                    copy_canonical_snapshot.after(copy_canonical_live),
                     record_drawn_frame.after(copy_canonical_snapshot),
                 )
                     .before(camera_driver),
@@ -7848,7 +7937,7 @@ mod tests {
             generation: 1,
             node_count: nodes,
             sample_count: 0,
-            state_count: if full { nodes + 1 } else { nodes },
+            state_count: nodes + 1,
             material_runtime_count: 0,
             integrated_count: 0,
             full,
@@ -7856,6 +7945,10 @@ mod tests {
         let word = |value: f32| GpuCanonicalStateWord {
             values: Vec4::new(value, 0.0, 0.0, 0.0),
         };
+        let mut live = vec![word(100.0); nodes as usize];
+        live.push(GpuCanonicalStateWord {
+            values: Vec4::new(SNAPSHOT_METADATA_MAGIC, 0.0, 100.0, 0.0),
+        });
         let mut request = CanonicalGpuRequest {
             generation: 1,
             ..Default::default()
@@ -7878,7 +7971,7 @@ mod tests {
         // The live stream's copy of step 100, painted.
         apply_canonical_state(
             &tag(false),
-            vec![word(100.0); nodes as usize],
+            live,
             &request,
             &mut display,
             CanonicalStateCopy::Live,
@@ -7922,6 +8015,94 @@ mod tests {
                 "the picture went back to an older step"
             );
         }
+    }
+
+    /// Reported: a picture could paint the wrong lane. A live copy held both
+    /// lanes and was read through the lane of the last control copy, which is
+    /// mapped on its own and often landed after the state copy of its frame:
+    /// a step flipped the accepted lane to the new field 20, and the picture
+    /// queued the old 10 as step 100 while control then read 20. Each copy
+    /// now carries the metadata word and is read by it, the integrated
+    /// field's as well.
+    #[test]
+    fn a_live_copy_is_read_in_the_lane_it_names() {
+        let nodes = 3_u32;
+        let request = CanonicalGpuRequest {
+            generation: 1,
+            ..Default::default()
+        };
+        // Control last said lane 0 at step 100; one more step has gone into
+        // lane 1 since.
+        let mut display = CanonicalGpuDisplay {
+            generation: 1,
+            clock: Some(CanonicalGpuDisplayClock {
+                epoch: 0,
+                epoch_origin_seconds: 0.0,
+                absolute_seconds: 0.1,
+                step_in_epoch: 100,
+                accepted_steps: 100,
+                local_seconds: 0.1,
+                time_step: 1.0e-3,
+                event_serial: 0,
+            }),
+            ..Default::default()
+        };
+        let lanes = GpuCanonicalStateWord {
+            values: Vec4::new(10.0, 20.0, 0.0, 0.0),
+        };
+        let metadata = GpuCanonicalStateWord {
+            values: Vec4::new(SNAPSHOT_METADATA_MAGIC, 1.0, 101.0, 0.0),
+        };
+        let mut words = vec![lanes; nodes as usize];
+        words.push(metadata);
+        let tag = CanonicalStateReadback {
+            generation: 1,
+            node_count: nodes,
+            sample_count: 0,
+            state_count: nodes + 1,
+            material_runtime_count: 0,
+            integrated_count: 0,
+            full: false,
+        };
+        apply_canonical_state(
+            &tag,
+            words,
+            &request,
+            &mut display,
+            CanonicalStateCopy::Live,
+        );
+        display.release_pictures();
+        display.release_pictures();
+        let picture = display.picture().unwrap();
+        assert_eq!((picture.values[0], picture.step), (20.0, 101));
+        assert_eq!(display.primary_flux[0], 20.0);
+
+        // The integrated field's copy reads its own lane and step too.
+        let mut world = World::new();
+        let entity = world
+            .spawn(CanonicalIntegratedReadback {
+                generation: 1,
+                integrated_count: 2,
+            })
+            .id();
+        world.insert_resource(request);
+        world.insert_resource(display);
+        world.add_observer(receive_canonical_integrated);
+        let data = [lanes, lanes, metadata]
+            .iter()
+            .flat_map(|word| word.values.to_array())
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        world.trigger(ReadbackComplete { entity, data });
+        world.flush();
+        let mut display = world.remove_resource::<CanonicalGpuDisplay>().unwrap();
+        display.release_pictures();
+        display.release_pictures();
+        let integrated = display.integrated_picture().unwrap();
+        assert_eq!(
+            (integrated.values.clone(), integrated.step),
+            (vec![20.0; 2], 101)
+        );
     }
 
     /// The bank comes with the state snapshot and the epoch origin with the

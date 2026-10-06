@@ -20110,3 +20110,21 @@ it holds none, so it read the old run's gain of 2 over new samples of 5.
 `restart_probe_traces` now resets both on every readout view and on the far
 field's, as Clear does for one probe.
 `a_reset_run_forgets_what_a_parked_readout_drew`.
+
+## 2026-10-07 — A live copy names its own lane
+
+The painted picture is queued from the continuous state readback, which held
+both lanes of the primary words and was read through the accepted lane and
+step of the last control readback. The two are separate paced readbacks,
+mapped on their own, and a state copy often landed before the control copy of
+its frame: after a step flipped the lane to the new field 20, the picture
+queued the old 10 as the step before, and the control copy that followed set
+the field right but not the queued picture. The integrated field's stream read
+the same way. Each frame now copies the primary words, and the integrated
+field's when that view is on, out of the state into a live buffer, each
+followed by the metadata word every commit writes with the accepted lane and
+step (`copy_canonical_live`, after the steps, before the readbacks are
+encoded); the continuous readbacks map that buffer, and every copy is read by
+its own metadata. The control stream no longer decides how a state copy is
+read. A run on the starter scene read the metadata from every copy, the steps
+advancing from 19 to 3,095. `a_live_copy_is_read_in_the_lane_it_names`.
