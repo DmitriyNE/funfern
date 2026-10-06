@@ -2708,33 +2708,78 @@ mod tests {
         check(&split, &merged);
     }
 
+    fn centroid(mesh: &TriMesh, element: usize) -> Point2 {
+        mesh.triangles[element]
+            .vertices
+            .iter()
+            .fold(Point2::default(), |sum, vertex| {
+                sum + mesh.vertices[*vertex].point
+            })
+            / 3.0
+    }
+
+    /// The extensions' donor rule written out as a scan: the nearest source
+    /// centroid of the target element's region within eight of its longest
+    /// edges that the element's centroid sees without crossing an edge only
+    /// one new element owns.
+    fn donor_in_sight(
+        old: &TriMesh,
+        new: &TriMesh,
+        element: usize,
+        point: Point2,
+    ) -> Option<usize> {
+        let mut owners = std::collections::BTreeMap::<(usize, usize), usize>::new();
+        for triangle in &new.triangles {
+            let [a, b, c] = triangle.vertices;
+            for (left, right) in [(a, b), (b, c), (c, a)] {
+                *owners
+                    .entry((left.min(right), left.max(right)))
+                    .or_default() += 1;
+            }
+        }
+        let walls = owners
+            .iter()
+            .filter(|(_, owners)| **owners == 1)
+            .map(|((left, right), _)| [new.vertices[*left].point, new.vertices[*right].point])
+            .collect::<Vec<_>>();
+        let cross = |a: Point2, b: Point2, c: Point2| (b - a).cross(c - a).signum();
+        let eye = centroid(new, element);
+        let corners = new.triangles[element]
+            .vertices
+            .map(|vertex| new.vertices[vertex].point);
+        let edge = (0..3)
+            .map(|corner| (corners[(corner + 1) % 3] - corners[corner]).norm())
+            .fold(0.0, f64::max);
+        let region = new.triangles[element].region;
+        (0..old.triangles.len())
+            .filter(|donor| old.triangles[*donor].region == region)
+            .filter(|donor| {
+                let offset = centroid(old, *donor) - point;
+                offset.dot(offset) <= (8.0 * edge).powi(2)
+            })
+            .filter(|donor| {
+                let target = centroid(old, *donor);
+                !walls.iter().any(|[start, end]| {
+                    cross(*start, *end, eye) * cross(*start, *end, target) < 0.0
+                        && cross(eye, target, *start) * cross(eye, target, *end) <= 0.0
+                })
+            })
+            .min_by(|left, right| {
+                let left = centroid(old, *left) - point;
+                let right = centroid(old, *right) - point;
+                left.dot(left).total_cmp(&right.dot(right))
+            })
+    }
+
     /// Filling a hole and deleting one leave target values the old mesh does
     /// not cover. Both extensions once found their donors by scanning whole
     /// meshes, which held a preparation slice for seconds on a large mesh;
     /// they now search a donor grid and the primary map is built across
-    /// slices. Here they choose what the scans chose: the primary extension
-    /// against the old scan written out again, the complementary one against
-    /// the nearest same-region centroid.
+    /// slices. Here they choose what the scans choose: the primary extension
+    /// against the old reach written out again, both against the donor rule
+    /// written out as a scan.
     #[test]
     fn extensions_into_a_filled_or_deleted_hole_pick_the_scans_donors() {
-        fn centroid(mesh: &TriMesh, element: usize) -> Point2 {
-            mesh.triangles[element]
-                .vertices
-                .iter()
-                .fold(Point2::default(), |sum, vertex| {
-                    sum + mesh.vertices[*vertex].point
-                })
-                / 3.0
-        }
-        fn scan(mesh: &TriMesh, region: RegionId, point: Point2) -> Option<usize> {
-            (0..mesh.triangles.len())
-                .filter(|element| mesh.triangles[*element].region == region)
-                .min_by(|left, right| {
-                    let left = centroid(mesh, *left) - point;
-                    let right = centroid(mesh, *right) - point;
-                    left.dot(left).total_cmp(&right.dot(right))
-                })
-        }
         fn hole(editor: &mut TopologyEditor) -> CurveId {
             let curve = editor
                 .create_closed_curve(
@@ -2819,12 +2864,8 @@ mod tests {
                             .iter()
                             .min_by_key(|element| distance[**element])
                             .unwrap();
-                        scan(
-                            &old.mesh,
-                            new.mesh.triangles[nearest].region,
-                            target.node_points()[node],
-                        )
-                        .map(|element| source.element_nodes()[element])
+                        donor_in_sight(&old.mesh, &new.mesh, nearest, target.node_points()[node])
+                            .map(|element| source.element_nodes()[element])
                     }
                 };
                 assert_eq!(canonical.primary.extension(node), expected, "node {node}");
@@ -2849,10 +2890,9 @@ mod tests {
                     && entry.weights.iter().all(|weight| *weight == 1.0 / 6.0)
                 {
                     constant += 1;
-                    let region = new.mesh.triangles[sample.element as usize].region;
                     assert_eq!(
                         Some(entry.source_samples[0] as usize / 6),
-                        scan(&old.mesh, region, sample.point)
+                        donor_in_sight(&old.mesh, &new.mesh, sample.element as usize, sample.point)
                     );
                 }
             }
@@ -2875,6 +2915,164 @@ mod tests {
         deleted.remove_curve(curve, None).unwrap();
         settle(&mut deleted);
         assert!(check(&before, &deleted) > 0);
+    }
+
+    /// A baffle meets a hole's rim and goes on inside it; deleting the hole
+    /// leaves new ground with the baffle running through it. Its extensions
+    /// once took the nearest same-region donor, and the two sides of a
+    /// baffle share a region, so values beside it took the field from across
+    /// it. Each now takes a donor from its own side.
+    #[test]
+    fn an_extension_takes_no_donor_across_a_baffle() {
+        let build = |delete_hole: bool| {
+            let mut editor = TopologyEditor::default();
+            let hole = editor
+                .create_closed_curve(
+                    PeriodicCubicSpline::polygon(vec![
+                        Point2::new(-0.4, -0.4),
+                        Point2::new(0.4, -0.4),
+                        Point2::new(0.4, 0.4),
+                        Point2::new(-0.4, 0.4),
+                    ])
+                    .unwrap(),
+                    ClosedCurvePurpose::Hole,
+                )
+                .unwrap();
+            settle(&mut editor);
+            let rim = editor.document.model.draft.geometry.curve(hole).unwrap();
+            let CurveSpline::Closed(spline) = &rim.spline else {
+                unreachable!("a hole is closed");
+            };
+            let (span, parameter) = (0..rim.spans.len())
+                .find_map(|index| {
+                    let [start, end] = spline.span_bounds(index)?;
+                    let middle = (start + end) * 0.5;
+                    ((spline.evaluate(middle) - Point2::new(-0.4, 0.0)).norm() < 1.0e-9)
+                        .then_some((rim.spans[index].id, middle))
+                })
+                .unwrap();
+            let outside = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![Point2::new(-0.9, 0.0), Point2::new(-0.4, 0.0)])
+                        .unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    None,
+                    Some(TopologyAttachment::Boundary(FaceAnchor::Curve {
+                        curve: hole,
+                        span,
+                        side: CurveTraceSide::Left,
+                        parameter,
+                    })),
+                )
+                .unwrap()
+                .curve;
+            settle(&mut editor);
+            let vertex = editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(outside)
+                .unwrap()
+                .nodes
+                .last()
+                .unwrap()
+                .vertex
+                .unwrap();
+            let face = editor
+                .compiled_accepted
+                .topology
+                .face_at(Point2::default())
+                .unwrap();
+            editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![Point2::new(-0.4, 0.0), Point2::new(0.2, 0.0)])
+                        .unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    Some(TopologyAttachment::Junction { vertex, face }),
+                    None,
+                )
+                .unwrap();
+            settle(&mut editor);
+            if delete_hole {
+                editor.remove_curve(hole, None).unwrap();
+                settle(&mut editor);
+            }
+            editor
+        };
+        let (before, after) = (build(false), build(true));
+        let mut runtime = TopologyRuntime::default();
+        let first = runtime
+            .request(
+                1,
+                &before.document,
+                before.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        let old = runtime.commit_ready(first).unwrap();
+        let second = runtime
+            .request(
+                2,
+                &after.document,
+                after.compiled_accepted.clone(),
+                options(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), second);
+        let new = runtime.ready().unwrap();
+        let canonical = new.canonical_transfer.as_ref().unwrap();
+        let (source, target) = (&old.canonical_operator, &new.canonical_operator);
+        // Between the baffles' tips, a side is above or below y = 0.
+        let between = |point: Point2| point.x > -0.85 && point.x < 0.15;
+        let side = |mesh: &TriMesh, element: usize| centroid(mesh, element).y > 0.0;
+
+        let mut beside = 0;
+        for node in 0..target.degrees_of_freedom() {
+            let Some(donor) = canonical.primary.extension(node) else {
+                continue;
+            };
+            let point = target.node_points()[node];
+            if !between(point) {
+                continue;
+            }
+            let owner = (0..new.mesh.triangles.len())
+                .find(|element| target.element_nodes()[*element].contains(&(node as u32)))
+                .unwrap();
+            let donor = (0..old.mesh.triangles.len())
+                .find(|element| source.element_nodes()[*element] == donor)
+                .unwrap();
+            assert_eq!(
+                side(&old.mesh, donor),
+                side(&new.mesh, owner),
+                "node {node} at {point:?}"
+            );
+            beside += usize::from(point.y.abs() < 0.02);
+        }
+        assert!(beside > 0);
+
+        // A flux of +x above the baffles and -x below them keeps its sign.
+        let flux = (0..canonical.complementary.source_sample_count())
+            .map(|sample| {
+                let above = side(&old.mesh, sample / 6);
+                Point2::new(if above { 1.0 } else { -1.0 }, 0.0)
+            })
+            .collect::<Vec<_>>();
+        let (moved, report) = canonical.complementary.transfer(&flux).unwrap();
+        assert!(report.extended_values > 0);
+        let mut beside = 0;
+        for (value, sample) in moved.iter().zip(target.constitutive_samples()) {
+            if !between(sample.point) || *value == Point2::default() {
+                continue;
+            }
+            let above = side(&new.mesh, sample.element as usize);
+            assert_eq!(value.x > 0.0, above, "sample at {:?}", sample.point);
+            beside += usize::from(sample.point.y.abs() < 0.02);
+        }
+        assert!(beside > 0);
     }
 
     /// A closed ring thinner than the disc it encloses, as a split ring

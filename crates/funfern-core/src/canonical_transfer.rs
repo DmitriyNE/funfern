@@ -11,12 +11,17 @@ use std::{
 
 use crate::{
     CanonicalOutgoingBoundary, CanonicalOutgoingPhysicalMemory, CanonicalTemporalWaveOperator,
-    CanonicalThinGapMemory, CanonicalWaveOperator, Point2, QuadraticTransferMap,
-    QuadraticTransferSample, ThinGapSample, ThinGapTraceKey, TriMesh, WaveError,
+    CanonicalThinGapMemory, CanonicalWaveOperator, Point2, PredicateSign, QuadraticTransferMap,
+    QuadraticTransferSample, ThinGapSample, ThinGapTraceKey, TriMesh, WaveError, orient2d,
 };
 
 const QUADRATURE_SAMPLES: usize = 6;
 const CORRECTION_LIMIT: f64 = 0.05;
+/// How far an extension looks for its donor, in longest edges of the element
+/// the extended value belongs to. A value within the two-ring reach has its
+/// covered neighbours' donors a few edges away even across graded elements;
+/// a donor further off is unrelated ground, and the value stays unextended.
+const DONOR_REACH: f64 = 8.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CanonicalTransferReport {
@@ -393,10 +398,12 @@ impl CanonicalPrimaryTransferPhase {
 struct CanonicalPrimaryTransferWork {
     phase: CanonicalPrimaryTransferPhase,
     map: Option<CanonicalPrimaryTransferMap>,
-    /// Uncovered target nodes within reach, each with the region of its
-    /// nearest element, in node order.
-    pending: Vec<(u32, crate::RegionId)>,
+    /// Uncovered target nodes within reach, each with its nearest element,
+    /// in node order.
+    pending: Vec<(u32, u32)>,
+    walls: Vec<[usize; 2]>,
     donors: Option<RegionCentroidIndex>,
+    sight: Option<WallGrid>,
 }
 
 impl CanonicalPrimaryTransferWork {
@@ -405,7 +412,9 @@ impl CanonicalPrimaryTransferWork {
             phase: CanonicalPrimaryTransferPhase::Interpolate,
             map: None,
             pending: Vec::new(),
+            walls: Vec::new(),
             donors: None,
+            sight: None,
         }
     }
 
@@ -442,9 +451,9 @@ impl CanonicalPrimaryTransferWork {
                         distance[element] = 0;
                     }
                 }
-                extend_element_distances(target_mesh, &mut distance, 2);
-                // Each uncovered node takes the region of its nearest element
-                // within reach, the lowest-numbered of equals.
+                self.walls = extend_element_distances(target_mesh, &mut distance, 2);
+                // Each uncovered node takes its nearest element within reach,
+                // the lowest-numbered of equals.
                 let mut nearest = vec![None::<(usize, usize)>; samples.len()];
                 for (element, nodes) in target.element_nodes().iter().enumerate() {
                     if distance[element] > 2 {
@@ -463,9 +472,7 @@ impl CanonicalPrimaryTransferWork {
                     .iter()
                     .enumerate()
                     .filter_map(|(node, nearest)| {
-                        nearest.map(|(_, element)| {
-                            (node as u32, target_mesh.triangles[element].region)
-                        })
+                        nearest.map(|(_, element)| (node as u32, element as u32))
                     })
                     .collect();
                 if self.pending.is_empty() {
@@ -476,15 +483,21 @@ impl CanonicalPrimaryTransferWork {
             }
             CanonicalPrimaryTransferPhase::Index => {
                 self.donors = Some(RegionCentroidIndex::new(source_mesh)?);
+                self.sight = Some(WallGrid::new(target_mesh, &self.walls));
                 self.phase = CanonicalPrimaryTransferPhase::Extend(0);
             }
             CanonicalPrimaryTransferPhase::Extend(index) => {
-                let Some(&(node, region)) = self.pending.get(index) else {
+                let Some(&(node, element)) = self.pending.get(index) else {
                     self.phase = CanonicalPrimaryTransferPhase::Done;
                     return Ok(self.map.take());
                 };
-                let point = target.node_points()[node as usize];
-                let donor = self.donors.as_ref().unwrap().nearest(region, point);
+                let donor = nearest_donor_in_sight(
+                    self.donors.as_ref().unwrap(),
+                    self.sight.as_ref().unwrap(),
+                    target_mesh,
+                    element as usize,
+                    target.node_points()[node as usize],
+                );
                 self.map.as_mut().unwrap().extensions[node as usize] =
                     donor.map(|element| source.element_nodes()[element]);
                 self.phase = CanonicalPrimaryTransferPhase::Extend(index + 1);
@@ -566,8 +579,8 @@ impl CanonicalPrimaryTransferJob {
 /// extensions once scanned every source triangle for every value they
 /// extended; an expanding ring search over the region's own grid visits only
 /// the cells near the answer, and a region the source does not hold answers
-/// at once. The answer is the scan's: the nearest centroid, the
-/// lowest-numbered of equals.
+/// at once. The answer is the nearest accepted centroid within the limit,
+/// the lowest-numbered of equals.
 struct RegionCentroidIndex {
     regions: BTreeMap<crate::RegionId, CentroidGrid>,
 }
@@ -607,9 +620,16 @@ impl RegionCentroidIndex {
         })
     }
 
-    /// The source element of `region` whose centroid is nearest `point`.
-    fn nearest(&self, region: crate::RegionId, point: Point2) -> Option<usize> {
-        self.regions.get(&region)?.nearest(point)
+    /// The source element of `region` whose centroid is nearest `point`
+    /// among those no further than `limit` (squared) that `accept` takes.
+    fn nearest(
+        &self,
+        region: crate::RegionId,
+        point: Point2,
+        limit: f64,
+        accept: impl FnMut(Point2) -> bool,
+    ) -> Option<usize> {
+        self.regions.get(&region)?.nearest(point, limit, accept)
     }
 }
 
@@ -657,10 +677,16 @@ impl CentroidGrid {
     }
 
     /// Searches square rings of cells outward from `point`'s cell and stops
-    /// once the best centroid is nearer than anything outside the cells
-    /// searched. The slack covers a centroid binned a rounding error past its
-    /// cell's edge.
-    fn nearest(&self, point: Point2) -> Option<usize> {
+    /// once the best centroid, or the limit before one is found, is nearer
+    /// than anything outside the cells searched. The slack covers a centroid
+    /// binned a rounding error past its cell's edge. `accept` is asked only
+    /// about a centroid that would become the best.
+    fn nearest(
+        &self,
+        point: Point2,
+        limit: f64,
+        mut accept: impl FnMut(Point2) -> bool,
+    ) -> Option<usize> {
         let [cx, cy] = self.bin(point);
         let last = self.dimension - 1;
         let slack = 1.0e-9 * (self.cell.x + self.cell.y);
@@ -677,9 +703,12 @@ impl CentroidGrid {
                     for &(element, centroid) in &self.cells[y * self.dimension + x] {
                         let offset = centroid - point;
                         let distance = offset.dot(offset);
-                        if best.is_none_or(|(nearest, holder)| {
-                            distance < nearest || (distance == nearest && element < holder)
-                        }) {
+                        if distance <= limit
+                            && best.is_none_or(|(nearest, holder)| {
+                                distance < nearest || (distance == nearest && element < holder)
+                            })
+                            && accept(centroid)
+                        {
                             best = Some((distance, element));
                         }
                     }
@@ -702,12 +731,139 @@ impl CentroidGrid {
                 break;
             }
             let reach = outside - slack;
-            if best.is_some_and(|(nearest, _)| reach > 0.0 && nearest < reach * reach) {
+            let bound = best.map_or(limit, |(nearest, _)| nearest);
+            if reach > 0.0 && bound < reach * reach {
                 break;
             }
         }
         best.map(|(_, element)| element as usize)
     }
+}
+
+/// A mesh's walls on a uniform grid, so an extension can ask whether a donor
+/// is in sight without crossing the outer boundary, a hole or either side of
+/// a curve.
+struct WallGrid {
+    minimum: Point2,
+    cell: Point2,
+    dimension: usize,
+    cells: Vec<Vec<u32>>,
+    walls: Vec<[Point2; 2]>,
+}
+
+impl WallGrid {
+    fn new(mesh: &TriMesh, walls: &[[usize; 2]]) -> Self {
+        let walls = walls
+            .iter()
+            .map(|wall| wall.map(|vertex| mesh.vertices[vertex].point))
+            .collect::<Vec<_>>();
+        let mut minimum = Point2::new(f64::INFINITY, f64::INFINITY);
+        let mut maximum = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for point in walls.iter().flatten() {
+            minimum.x = minimum.x.min(point.x);
+            minimum.y = minimum.y.min(point.y);
+            maximum.x = maximum.x.max(point.x);
+            maximum.y = maximum.y.max(point.y);
+        }
+        let dimension = (walls.len() as f64).sqrt().ceil().clamp(1.0, 512.0) as usize;
+        let width = |extent: f64| {
+            if extent > 0.0 {
+                extent / dimension as f64
+            } else {
+                1.0
+            }
+        };
+        let mut grid = Self {
+            minimum,
+            cell: Point2::new(width(maximum.x - minimum.x), width(maximum.y - minimum.y)),
+            dimension,
+            cells: vec![Vec::new(); dimension * dimension],
+            walls,
+        };
+        for (index, [start, end]) in grid.walls.iter().enumerate() {
+            let ([x0, y0], [x1, y1]) = grid.span(*start, *end);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    grid.cells[y * dimension + x].push(index as u32);
+                }
+            }
+        }
+        grid
+    }
+
+    /// The cells covering the box of a segment.
+    fn span(&self, start: Point2, end: Point2) -> ([usize; 2], [usize; 2]) {
+        let index = |value: f64, minimum: f64, width: f64| {
+            (((value - minimum) / width).floor() as isize).clamp(0, self.dimension as isize - 1)
+                as usize
+        };
+        let [low, high] = [
+            Point2::new(start.x.min(end.x), start.y.min(end.y)),
+            Point2::new(start.x.max(end.x), start.y.max(end.y)),
+        ];
+        (
+            [
+                index(low.x, self.minimum.x, self.cell.x),
+                index(low.y, self.minimum.y, self.cell.y),
+            ],
+            [
+                index(high.x, self.minimum.x, self.cell.x),
+                index(high.y, self.minimum.y, self.cell.y),
+            ],
+        )
+    }
+
+    /// Whether the segment from `eye` to `target` crosses a wall: its ends
+    /// lie strictly on opposite sides of the wall's line and the wall meets
+    /// the segment. Passing through a wall's endpoint counts, so a sight line
+    /// through a vertex between two edges of one curve stays blocked.
+    fn blocks(&self, eye: Point2, target: Point2) -> bool {
+        fn sign(sign: PredicateSign) -> i8 {
+            match sign {
+                PredicateSign::Negative => -1,
+                PredicateSign::Zero => 0,
+                PredicateSign::Positive => 1,
+            }
+        }
+        if self.walls.is_empty() {
+            return false;
+        }
+        let ([x0, y0], [x1, y1]) = self.span(eye, target);
+        (y0..=y1).any(|y| {
+            (x0..=x1).any(|x| {
+                self.cells[y * self.dimension + x].iter().any(|wall| {
+                    let [start, end] = self.walls[*wall as usize];
+                    sign(orient2d(start, end, eye)) * sign(orient2d(start, end, target)) < 0
+                        && sign(orient2d(eye, target, start)) * sign(orient2d(eye, target, end))
+                            <= 0
+                })
+            })
+        })
+    }
+}
+
+/// The donor of a value extended at `point` for target `element`: the
+/// nearest source centroid of the element's region within [`DONOR_REACH`]
+/// that the element's centroid sees without crossing a wall of the new mesh.
+/// The centroid rather than `point` looks, because a node on a curve sits on
+/// a wall and a curved element's point can lie past its straight edge.
+fn nearest_donor_in_sight(
+    donors: &RegionCentroidIndex,
+    sight: &WallGrid,
+    mesh: &TriMesh,
+    element: usize,
+    point: Point2,
+) -> Option<usize> {
+    let triangle = &mesh.triangles[element];
+    let corners = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+    let eye = (corners[0] + corners[1] + corners[2]) / 3.0;
+    let edge = (0..3)
+        .map(|corner| (corners[(corner + 1) % 3] - corners[corner]).norm())
+        .fold(0.0, f64::max);
+    let limit = (DONOR_REACH * edge).powi(2);
+    donors.nearest(triangle.region, point, limit, |centroid| {
+        !sight.blocks(eye, centroid)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -899,8 +1055,10 @@ struct CanonicalVectorTransferWork {
     same_region: bool,
     bins: Option<CanonicalSourceBins>,
     donors: Option<RegionCentroidIndex>,
+    sight: Option<WallGrid>,
     targets: Vec<VectorTarget>,
     distance: Vec<usize>,
+    walls: Vec<[usize; 2]>,
 }
 
 impl CanonicalVectorTransferWork {
@@ -911,8 +1069,10 @@ impl CanonicalVectorTransferWork {
             same_region: true,
             bins: None,
             donors: None,
+            sight: None,
             targets: Vec::new(),
             distance: Vec::new(),
+            walls: Vec::new(),
         }
     }
 
@@ -1026,7 +1186,7 @@ impl CanonicalVectorTransferWork {
                         self.distance[sample_index / QUADRATURE_SAMPLES] = 0;
                     }
                 }
-                extend_element_distances(target_mesh, &mut self.distance, 2);
+                self.walls = extend_element_distances(target_mesh, &mut self.distance, 2);
                 self.phase = CanonicalVectorTransferPhase::IndexDonors;
             }
             CanonicalVectorTransferPhase::IndexDonors => {
@@ -1036,6 +1196,7 @@ impl CanonicalVectorTransferWork {
                 });
                 if reachable {
                     self.donors = Some(RegionCentroidIndex::new(source_mesh)?);
+                    self.sight = Some(WallGrid::new(target_mesh, &self.walls));
                 }
                 self.phase = CanonicalVectorTransferPhase::Extend(0);
             }
@@ -1053,12 +1214,14 @@ impl CanonicalVectorTransferWork {
                     && self.distance[target_index / QUADRATURE_SAMPLES] <= 2
                 {
                     let sample = &target.constitutive_samples()[target_index];
-                    let target_region = target_mesh.triangles[sample.element as usize].region;
-                    let donor = self
-                        .donors
-                        .as_ref()
-                        .and_then(|donors| donors.nearest(target_region, sample.point))
-                        .map(|element| element as u32);
+                    let donor = nearest_donor_in_sight(
+                        self.donors.as_ref().unwrap(),
+                        self.sight.as_ref().unwrap(),
+                        target_mesh,
+                        sample.element as usize,
+                        sample.point,
+                    )
+                    .map(|element| element as u32);
                     if let Some(source_element) = donor {
                         *entry = VectorTarget::ExtendConstant { source_element };
                     }
@@ -2035,7 +2198,15 @@ fn triangle_centroid(mesh: &TriMesh, vertices: [usize; 3]) -> Point2 {
     }) / 3.0
 }
 
-fn extend_element_distances(mesh: &TriMesh, distance: &mut [usize], rings: usize) {
+/// Grows `distance` by up to `rings` element rings across shared edges and
+/// returns the mesh's walls, the edges only one element owns: the outer
+/// boundary, hole rims and each side of a curve. The two sides of a curve are
+/// separate vertices, so no ring crosses one.
+fn extend_element_distances(
+    mesh: &TriMesh,
+    distance: &mut [usize],
+    rings: usize,
+) -> Vec<[usize; 2]> {
     let mut sides = BTreeMap::<(usize, usize), Vec<usize>>::new();
     for (triangle, element) in mesh.triangles.iter().enumerate() {
         for [left, right] in [
@@ -2071,6 +2242,11 @@ fn extend_element_distances(mesh: &TriMesh, distance: &mut [usize], rings: usize
             }
         }
     }
+    sides
+        .into_iter()
+        .filter(|(_, triangles)| triangles.len() == 1)
+        .map(|((left, right), _)| [left, right])
+        .collect()
 }
 
 fn barycentric(mesh: &TriMesh, vertices: [usize; 3], point: Point2) -> Option<[f64; 3]> {
@@ -3157,13 +3333,13 @@ mod tests {
         assert!(report.new_samples > 0);
     }
 
-    /// The donor index answers as the scan it replaced: the nearest
-    /// same-region centroid, the lowest-numbered of equals. The lattice puts
-    /// many centroids at equal distances from its vertices, a region of one
-    /// triangle has a single cell, and a region the source does not hold has
-    /// no donor.
+    /// The donor index answers as a scan: the nearest same-region centroid
+    /// within the limit that the filter accepts, the lowest-numbered of
+    /// equals. The lattice puts many centroids at equal distances from its
+    /// vertices, a region of one triangle has a single cell, and a region the
+    /// source does not hold has no donor.
     #[test]
-    fn the_donor_index_answers_as_the_whole_mesh_scan() {
+    fn the_donor_index_answers_as_the_filtered_whole_mesh_scan() {
         let n = 24;
         let mut points = Vec::new();
         for y in 0..=n {
@@ -3187,12 +3363,19 @@ mod tests {
         }
         source.triangles[301].region = crate::RegionId(4);
         let index = RegionCentroidIndex::new(&source).unwrap();
-        let scan = |region: crate::RegionId, point: Point2| {
+        // Every third column of centroids is out of sight, as behind a wall.
+        let accept = |centroid: Point2| (centroid.x * 10.0).floor() as i64 % 3 != 0;
+        let scan = |region: crate::RegionId, point: Point2, limit: f64, filtered: bool| {
             source
                 .triangles
                 .iter()
                 .enumerate()
                 .filter(|(_, triangle)| triangle.region == region)
+                .filter(|(_, triangle)| {
+                    let centroid = triangle_centroid(&source, triangle.vertices);
+                    let offset = centroid - point;
+                    offset.dot(offset) <= limit && (!filtered || accept(centroid))
+                })
                 .min_by(|(_, left), (_, right)| {
                     let left = triangle_centroid(&source, left.vertices) - point;
                     let right = triangle_centroid(&source, right.vertices) - point;
@@ -3227,11 +3410,16 @@ mod tests {
         }
         for region in [1, 2, 3, 4, 9].map(crate::RegionId) {
             for point in &queries {
-                assert_eq!(
-                    index.nearest(region, *point),
-                    scan(region, *point),
-                    "{region:?} at {point:?}"
-                );
+                for limit in [f64::INFINITY, 0.3 * 0.3, 0.12 * 0.12] {
+                    for filtered in [false, true] {
+                        assert_eq!(
+                            index.nearest(region, *point, limit, |centroid| !filtered
+                                || accept(centroid)),
+                            scan(region, *point, limit, filtered),
+                            "{region:?} at {point:?} within {limit}, filtered {filtered}"
+                        );
+                    }
+                }
             }
         }
     }

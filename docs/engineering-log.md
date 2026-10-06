@@ -3397,6 +3397,9 @@ above:
   (2026-10-04: a late frame cuts only when the solver's steady share of the
   interval, the median of its last six GPU passes, reaches 0.75; see that day's
   entry and `docs/spikes/funfern-drawn-pacing.md`).
+- [ ] "Recovering separated curves" holds one preparation slice for 1.4 s
+  when a hole with a baffle through it is deleted at 137k triangles (2026-10-06,
+  seen while timing the extensions' sight rule; meshing, not the transfer).
 - [ ] The budget's 60 Hz and Low Power Mode measurements (postponed
   2026-10-05; the machine has one panel and the mode is the user's to
   toggle). Quiet host and overlay scene are measured, see the spike doc.
@@ -19759,3 +19762,33 @@ and the strip lines, repair by carving with no fallback.
 `moving_either_loop_of_a_thin_ring_repairs_the_mesh` fail without the change.
 The editor's other callers, a loose end's attachment and the face an open
 curve is drawn in, had the same blind spot inside such a disc.
+
+## 2026-10-06 — An extension takes no donor across a baffle
+
+The extensions seed values the old mesh does not cover from the nearest old
+centroid of the same region, and the two sides of an open baffle share a
+region. Their two-ring reach never crosses a curve, since its sides are
+separate vertices, but the donor search was plain distance. Where a baffle
+runs through new ground, as when a baffle goes on into a hole that is then
+deleted, values beside it took the field from its other side: 5 of 162
+extended primary nodes and 4 of 236 complementary samples in a square hole
+of half-width 0.4, all within 0.01 of the baffle, the samples arriving with
+the other side's sign. Old ground is not affected: the old mesh had its own
+sides there, and the band a moved baffle sweeps is interpolated.
+
+A donor must now be in sight: the straight path from the centroid of the
+target element the value belongs to, which lies on its side even for a node
+on the curve or a curved element's point past its chord, to the donor's
+centroid crosses no edge only one new element owns, so no curve side, hole
+rim or outer boundary. The walls come out of the reach pass, which already
+collects every edge's owners, and go on a grid beside the donor index; the
+index asks only about a centroid that would become the best. The search also
+stops at eight longest edges of that element, where it used to run to
+anything of the region however far, so a value with no donor in sight stays
+unextended and is counted as exposed. On the same scene at 137k triangles
+every extension slice and total is within noise of before and the extended
+counts are unchanged. `an_extension_takes_no_donor_across_a_baffle` fails
+without the change; `the_donor_index_answers_as_the_filtered_whole_mesh_scan`
+holds the index to a limited, filtered scan, and
+`extensions_into_a_filled_or_deleted_hole_pick_the_scans_donors` now checks
+both extensions against the rule written out as a scan.
