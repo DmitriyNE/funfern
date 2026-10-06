@@ -2355,16 +2355,14 @@ fn aligned_indicator_auxiliary(
     )
 }
 
-/// The maps a field-dependent generation's readbacks are read through: its
-/// operator, the runtime the solver stepped with (the authored one until a
-/// snapshot and a clock agree), and the readback's accepted time. `None`
-/// where the maps are linear and `Q/M` is exact.
-/// A generation's time-driven operator, its accepted runtime and the
-/// snapshot's time, when it carries a field law or a restoring law: both store
-/// energy the fixed breakdown does not know.
-pub(crate) fn stored_energy_view(
+/// The maps a generation's readbacks are read through, when `departs` says
+/// they are not the fixed ones: its time-driven operator, the runtime the
+/// solver stepped with (the authored one until a snapshot and a clock agree),
+/// and the readback's accepted time.
+fn temporal_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
+    departs: impl Fn(&funfern_core::CanonicalTemporalWaveOperator) -> bool,
 ) -> Option<(
     std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
     funfern_core::CanonicalMaterialRuntimeState,
@@ -2373,7 +2371,7 @@ pub(crate) fn stored_energy_view(
     let operator = active
         .canonical_temporal_operator
         .as_ref()
-        .filter(|operator| operator.has_field_laws() || operator.has_restoring())?;
+        .filter(|operator| departs(operator))?;
     let authored = operator.initial_runtime();
     let runtime = canonical
         .accepted_material_runtime(&authored)
@@ -2382,6 +2380,40 @@ pub(crate) fn stored_energy_view(
     Some((operator.clone(), runtime, time))
 }
 
+/// The maps stored energy is read through, when a coefficient varies in time,
+/// follows its field, or a restoring law holds energy: each stores what the
+/// fixed breakdown, built on the authored coefficients, does not know.
+pub(crate) fn stored_energy_view(
+    active: &PreparedTopology,
+    canonical: &CanonicalGpuDisplay,
+) -> Option<(
+    std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
+    funfern_core::CanonicalMaterialRuntimeState,
+    f64,
+)> {
+    temporal_view(active, canonical, |operator| {
+        operator.has_temporal_laws() || operator.has_field_laws() || operator.has_restoring()
+    })
+}
+
+/// The maps the painted field is read through, when a coefficient varies in
+/// time or follows its field. `None` where the maps are the authored ones and
+/// `Q/M` is exact.
+fn primary_field_view(
+    active: &PreparedTopology,
+    canonical: &CanonicalGpuDisplay,
+) -> Option<(
+    std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
+    funfern_core::CanonicalMaterialRuntimeState,
+    f64,
+)> {
+    temporal_view(active, canonical, |operator| {
+        operator.has_temporal_laws() || operator.has_field_laws()
+    })
+}
+
+/// The maps of a generation whose coefficients follow their own field, for
+/// the readouts only such a medium has.
 pub(crate) fn field_law_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
@@ -2390,16 +2422,7 @@ pub(crate) fn field_law_view(
     funfern_core::CanonicalMaterialRuntimeState,
     f64,
 )> {
-    let operator = active
-        .canonical_temporal_operator
-        .as_ref()
-        .filter(|operator| operator.has_field_laws())?;
-    let authored = operator.initial_runtime();
-    let runtime = canonical
-        .accepted_material_runtime(&authored)
-        .unwrap_or(authored);
-    let time = canonical.clock.map_or(0.0, |clock| clock.absolute_seconds);
-    Some((operator.clone(), runtime, time))
+    temporal_view(active, canonical, |operator| operator.has_field_laws())
 }
 
 fn refresh_canonical_wave_display(
@@ -2484,22 +2507,23 @@ fn refresh_canonical_wave_display(
 /// The primary field of a copy's flux. A field-dependent medium's field is
 /// the inverse of its map, not `Q/M`: read at 30% amplitude departure, the
 /// linear division would paint a different field from the one the solver
-/// steps. The map is read at the latest clock, which a played-out copy lags
-/// by a frame or so.
+/// steps. A switched or pumped medium divides by its mass at that time, not
+/// the authored one. The map is read at the latest clock, which a played-out
+/// copy lags by a frame or so.
 fn primary_field(
     active: &Arc<PreparedTopology>,
     canonical: &CanonicalGpuDisplay,
     flux: &[f32],
 ) -> Vec<f32> {
-    let nonlinear_field =
-        field_law_view(active, canonical).and_then(|(temporal, runtime, time)| {
+    let mapped_field =
+        primary_field_view(active, canonical).and_then(|(temporal, runtime, time)| {
             let flux = flux
                 .iter()
                 .map(|value| f64::from(*value))
                 .collect::<Vec<_>>();
             temporal.primary_field_at(&flux, time, &runtime).ok()
         });
-    match nonlinear_field {
+    match mapped_field {
         Some(field) => field.into_iter().map(|value| value as f32).collect(),
         None => flux
             .iter()

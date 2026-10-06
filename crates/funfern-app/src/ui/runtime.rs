@@ -1377,6 +1377,69 @@ mod tests {
         );
     }
 
+    /// A medium switched to twice its mass, with the snapshot that says so.
+    fn doubled_mass_medium() -> (Arc<PreparedTopology>, CanonicalGpuDisplay) {
+        let mut state = Playground::default();
+        let mut material = state.editor.document.model.draft.materials[0].clone();
+        material.mass_law.alternate = Some(ScalarField::constant(2.0));
+        state.editor.update_material(material).unwrap();
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        let temporal = active.canonical_temporal_operator.as_ref().unwrap();
+        assert!(!temporal.has_field_laws() && !temporal.has_restoring());
+        let mut display = CanonicalGpuDisplay::default();
+        display.hold_switched_snapshot(1, temporal.initial_runtime().records().len());
+        (active, display)
+    }
+
+    /// Reported: a switched or pumped linear medium was painted through its
+    /// authored mass, since only a field law sent the picture through the
+    /// time-driven maps. At twice the mass, the authored unit field is 0.5.
+    #[test]
+    fn a_switched_medium_paints_the_field_at_its_current_mass() {
+        let (active, display) = doubled_mass_medium();
+        let flux = active
+            .canonical_operator
+            .primary_mass()
+            .iter()
+            .map(|mass| *mass as f32)
+            .collect::<Vec<_>>();
+        let field = super::super::primary_field(&active, &display, &flux);
+        assert!(!field.is_empty());
+        for value in field {
+            assert!((value - 0.5).abs() < 1.0e-6, "painted {value}");
+        }
+    }
+
+    /// Reported: the stored energy of a switched or pumped linear medium was
+    /// the authored quadratic form, which also fed the AMR energy peak. The
+    /// authored unit field at twice the mass is half the field, and half the
+    /// energy.
+    #[test]
+    fn a_switched_medium_stores_the_energy_of_its_current_mass() {
+        let (active, display) = doubled_mass_medium();
+        let operator = &active.canonical_operator;
+        let primary = operator.primary_mass().to_vec();
+        let complementary = vec![Point2::default(); operator.complementary_degrees_of_freedom()];
+        let auxiliary = operator.thin_gap_samples().len()
+            + operator
+                .outgoing_boundary()
+                .map_or(0, |boundary| boundary.auxiliary_count());
+        let authored =
+            canonical_energy_breakdown(operator, &primary, &complementary, &vec![0.0; auxiliary])
+                .unwrap()
+                .total();
+        let (temporal, runtime, time) = super::super::stored_energy_view(&active, &display)
+            .expect("a switched medium's energy is read through its runtime");
+        let energy = temporal
+            .energy_at(&primary, &complementary, time, &runtime)
+            .unwrap();
+        assert!(
+            (energy - 0.5 * authored).abs() <= 1.0e-9 * authored,
+            "stored {energy}, authored {authored}"
+        );
+    }
+
     /// Reported: a rejected handoff kept the candidate's step. The upload took
     /// it when it started, and the rejection left it in place under the
     /// retained generation - mispacing the solver, and making the speed ceiling

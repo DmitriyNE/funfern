@@ -20000,3 +20000,18 @@ as holding an invalid boundary probe. The merged span can only repeat across
 the seam: anywhere else the two spans it replaces are neighbours on the path.
 The remap now drops the trailing repeat, leaving the loop walked once from the
 span that holds its old start. `deleting_the_seam_control_keeps_a_whole_loop_probe_saveable`.
+
+## 2026-10-07 — Switched and pumped media painted and weighed at their current mass
+
+The painted field and the stored energy went through the time-driven maps
+only for a field law (and, for energy, a restoring law). A linear medium whose
+coefficients are switched or pumped fell back to its authored mass: at twice
+the mass the picture painted 1.0 for a field of 0.5, and the energy read
+1.9383 for 0.9692, which also set the AMR energy peak. Both views now take the
+maps whenever a coefficient varies in time (`has_temporal_laws`), through one
+`temporal_view`; the nonlinear-strength readout keeps `field_law_view`.
+`primary_field_at` falls back to the base division when nothing varies, so a
+fixed medium paints as before. The time-varying linear picture now builds its
+mass at the clock, one pass over the mass contributions per picture.
+`a_switched_medium_paints_the_field_at_its_current_mass` and
+`a_switched_medium_stores_the_energy_of_its_current_mass`.
