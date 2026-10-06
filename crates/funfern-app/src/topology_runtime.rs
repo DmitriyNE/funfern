@@ -1671,9 +1671,10 @@ fn compile_canonical_forcing(
         .map(|triangle| triangle.region == point.region)
         .collect::<Vec<_>>();
     forcing
-        .push_source(
+        .push_keyed_source(
             CanonicalForcing::point_source(canonical, point, &elements, SOURCE_ANCHOR_TIME)
                 .map_err(|error| error.to_string())?,
+            CanonicalSourceKey::Point,
         )
         .map_err(|error| error.to_string())?;
     forcing

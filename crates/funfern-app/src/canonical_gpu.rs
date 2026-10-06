@@ -501,8 +501,18 @@ impl CanonicalGpuRuntimeTransfer {
                     .map(|(node, _)| node)
             })
             .collect();
-        let drive_sources = (0..target_forcing.sources().len())
-            .map(|drive| (drive < source_forcing.sources().len()).then_some(drive as u32))
+        // A drive carries on the one its source authored; by position, a
+        // driven side added ahead of the point source took over its phase.
+        let drive_sources = target_forcing
+            .keys()
+            .iter()
+            .map(|key| {
+                source_forcing
+                    .keys()
+                    .iter()
+                    .position(|candidate| candidate == key)
+                    .map(|drive| drive as u32)
+            })
             .collect();
         Ok(Self {
             components,

@@ -928,6 +928,70 @@ mod tests {
         assert!(!corrects_component_totals(&refilled, &refined));
     }
 
+    /// Reported: a drive took over the runtime of whichever drive had its
+    /// position. Boundaries compile ahead of the point source, so a driven
+    /// side added before it took the point source's phase and integrated-rate
+    /// anchor, `[Some(0), None]`, and the point source started over.
+    #[test]
+    fn a_drive_carries_on_from_the_source_that_authored_it() {
+        fn prepare(state: &mut Playground, fresh: bool) -> Arc<PreparedTopology> {
+            let token = state
+                .runtime
+                .request(
+                    state.editor.revision,
+                    &state.editor.document,
+                    state.editor.compiled_accepted.clone(),
+                    MeshingOptions::default(),
+                    fresh,
+                )
+                .unwrap();
+            for _ in 0..1_000_000 {
+                if let Some(result) = state.runtime.advance(4096) {
+                    result.unwrap();
+                    let prepared = Arc::new(state.runtime.ready().unwrap().clone());
+                    state.runtime.commit_ready(token).unwrap();
+                    return prepared;
+                }
+            }
+            panic!("topology preparation did not finish");
+        }
+        fn drive_sources(before: &PreparedTopology, after: &PreparedTopology) -> Vec<Option<u32>> {
+            let transfer = after.canonical_transfer.as_ref().unwrap();
+            CanonicalGpuRuntimeTransfer::from_primary_transfer(
+                &before.canonical_operator,
+                &after.canonical_operator,
+                &before.canonical_forcing,
+                &after.canonical_forcing,
+                &transfer.primary,
+                [0; 4],
+            )
+            .unwrap()
+            .drive_sources
+        }
+        let mut state = Playground {
+            editor: funfern_app::topology_editor::TopologyEditor::default(),
+            ..Playground::default()
+        };
+        test_support::settle(&mut state.editor);
+        let set_left = |state: &mut Playground, condition| {
+            let left = [funfern_core::OuterSide::Left].into_iter().collect();
+            state.editor.set_outer_condition(&left, condition).unwrap();
+            test_support::settle(&mut state.editor);
+        };
+        let plain = prepare(&mut state, true);
+        set_left(
+            &mut state,
+            funfern_core::OuterBoundaryCondition::Neumann {
+                signal: funfern_core::TimeSignal::default(),
+            },
+        );
+        let driven = prepare(&mut state, false);
+        assert_eq!(drive_sources(&plain, &driven), [None, Some(0)]);
+        set_left(&mut state, funfern_core::OuterBoundaryCondition::Reflecting);
+        let undriven = prepare(&mut state, false);
+        assert_eq!(drive_sources(&driven, &undriven), [Some(1)]);
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn background_worker_returns_a_candidate_to_the_runtime_transaction() {

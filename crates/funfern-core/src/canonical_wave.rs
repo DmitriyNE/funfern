@@ -231,11 +231,32 @@ impl CanonicalSource {
     }
 }
 
+/// What authored a source channel, so a handoff can tell which channel of
+/// the next generation carries on which of this one's. Channels are compiled
+/// boundaries first, and a position alone shifted with every driven side
+/// added or taken away ahead of the point source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CanonicalSourceKey {
+    /// A driven outer side.
+    Side(OuterSide),
+    /// A face's loads on one side of its curves, gathered by signal: faces
+    /// sharing a signal share a channel.
+    Face { slot: u8, signal: TimeSignal },
+    /// The scene's point source.
+    Point,
+    /// An authored volume source, by its slot.
+    Volume(u32),
+    /// A channel pushed without a key, known only by its position.
+    Unkeyed(u32),
+}
+
 /// CPU reference forcing. Source and prescribed-primary data remain distinct
 /// because their units, event ownership, and energy exchange are different.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalForcing {
     sources: Vec<CanonicalSource>,
+    /// What authored each of `sources`, in step with it.
+    keys: Vec<CanonicalSourceKey>,
     prescribed: Vec<Option<TimeSignal>>,
 }
 
@@ -243,6 +264,7 @@ impl CanonicalForcing {
     pub fn none(operator: &CanonicalWaveOperator) -> Self {
         Self {
             sources: Vec::new(),
+            keys: Vec::new(),
             prescribed: vec![None; operator.degrees_of_freedom()],
         }
     }
@@ -260,12 +282,18 @@ impl CanonicalForcing {
         }
         Ok(Self {
             sources: Vec::new(),
+            keys: Vec::new(),
             prescribed,
         })
     }
 
     pub fn sources(&self) -> &[CanonicalSource] {
         &self.sources
+    }
+
+    /// What authored each source channel, in the order of [`Self::sources`].
+    pub fn keys(&self) -> &[CanonicalSourceKey] {
+        &self.keys
     }
 
     /// Whether anything here puts energy in or takes it out. A composition
@@ -278,7 +306,18 @@ impl CanonicalForcing {
         &self.prescribed
     }
 
+    /// Adds a channel known only by its position.
     pub fn push_source(&mut self, source: CanonicalSource) -> Result<(), WaveError> {
+        let position = u32::try_from(self.sources.len()).map_err(|_| WaveError::InvalidState)?;
+        self.push_keyed_source(source, CanonicalSourceKey::Unkeyed(position))
+    }
+
+    /// Adds a channel and what authored it.
+    pub fn push_keyed_source(
+        &mut self,
+        source: CanonicalSource,
+        key: CanonicalSourceKey,
+    ) -> Result<(), WaveError> {
         if source.weights.len() != self.prescribed.len() {
             return Err(WaveError::SizeMismatch {
                 expected: self.prescribed.len(),
@@ -286,6 +325,7 @@ impl CanonicalForcing {
             });
         }
         self.sources.push(source);
+        self.keys.push(key);
         Ok(())
     }
 
@@ -344,7 +384,7 @@ impl CanonicalForcing {
             return Err(WaveError::InvalidState);
         }
         let mut enabled_channel = 0_usize;
-        for source in authored {
+        for (slot, source) in authored.iter().enumerate() {
             let channel = source.enabled.then_some(enabled_channel);
             enabled_channel += usize::from(source.enabled);
             let mut weights = vec![0.0; operator.degrees_of_freedom()];
@@ -357,12 +397,11 @@ impl CanonicalForcing {
                     }
                 }
             }
-            self.push_source(CanonicalSource::authored(
-                operator,
-                weights,
-                source.signal,
-                anchor_time,
-            )?)?;
+            let slot = u32::try_from(slot).map_err(|_| WaveError::InvalidState)?;
+            self.push_keyed_source(
+                CanonicalSource::authored(operator, weights, source.signal, anchor_time)?,
+                CanonicalSourceKey::Volume(slot),
+            )?;
         }
         Ok(())
     }
@@ -393,17 +432,15 @@ impl CanonicalForcing {
                 .zip(operator.primary_mass())
                 .map(|(by_side, mass)| by_side[side.index()] * mass)
                 .collect();
-            forcing.push_source(CanonicalSource::authored(
-                operator,
-                weights,
-                signal,
-                anchor_time,
-            )?)?;
+            forcing.push_keyed_source(
+                CanonicalSource::authored(operator, weights, signal, anchor_time)?,
+                CanonicalSourceKey::Side(side),
+            )?;
         }
-        for slot in 0..2 {
+        for slot in 0..2_u8 {
             let mut by_signal = Vec::<(TimeSignal, Vec<f64>)>::new();
             for (node, loads) in quadratic.face_neumann_loads().iter().enumerate() {
-                let load = loads[slot];
+                let load = loads[usize::from(slot)];
                 if load.normalized_weight == 0.0 {
                     continue;
                 }
@@ -419,12 +456,10 @@ impl CanonicalForcing {
                 by_signal[channel].1[node] += load.normalized_weight * operator.primary_mass[node];
             }
             for (signal, weights) in by_signal {
-                forcing.push_source(CanonicalSource::authored(
-                    operator,
-                    weights,
-                    signal,
-                    anchor_time,
-                )?)?;
+                forcing.push_keyed_source(
+                    CanonicalSource::authored(operator, weights, signal, anchor_time)?,
+                    CanonicalSourceKey::Face { slot, signal },
+                )?;
             }
         }
         Ok(forcing)

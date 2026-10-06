@@ -20128,3 +20128,19 @@ encoded); the continuous readbacks map that buffer, and every copy is read by
 its own metadata. The control stream no longer decides how a state copy is
 read. A run on the starter scene read the metadata from every copy, the steps
 advancing from 19 to 3,095. `a_live_copy_is_read_in_the_lane_it_names`.
+
+## 2026-10-07 — A drive carries on from the source that authored it
+
+A handoff paired each drive of the new generation with the old drive at its
+position, and channels compile boundaries first: driven outer sides, then
+face loads, then the point source, then the volume slots. Setting the left
+side to Neumann on a scene driven by its point source gave `[Some(0), None]`:
+the new side took the point source's phase and integrated-rate anchor, and the
+point source started over at its authored phase. Each channel of a
+`CanonicalForcing` now carries a `CanonicalSourceKey` - its outer side, a
+face's slot and signal (faces sharing a signal share a channel), the point
+source, or a volume slot - and a drive carries on from the old drive with its
+key, or starts as a new one. A face whose signal is edited in the same
+handoff starts fresh, since its signal is what names it. `push_source` without
+a key keeps the position as before.
+`a_drive_carries_on_from_the_source_that_authored_it`.
