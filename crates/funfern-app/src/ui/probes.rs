@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use bevy_egui::egui::{self};
 use funfern_app::document::{ProbeId, ProbeSamplingPreset};
-use funfern_app::topology_editor::{TopologyBoundaryProbeTarget, TopologyProbeTarget};
+use funfern_app::topology_editor::{TopologyBoundaryProbeTarget, TopologyProbeTarget, span_path};
 use funfern_app::topology_runtime::{
     PreparedTopology, TopologyProbeCompilation, TopologyProbeStencil,
 };
@@ -47,15 +47,9 @@ impl Playground {
         if matching.next().is_some() {
             return None;
         }
-        let spans = curve
-            .spans
-            .iter()
-            .filter(|span| span_ids.contains(&span.id))
-            .map(|span| span.id)
-            .collect::<Vec<_>>();
-        (spans.len() == span_ids.len()).then_some(TopologyBoundaryProbeTarget {
+        Some(TopologyBoundaryProbeTarget {
             curve: curve.id,
-            spans,
+            spans: span_path(curve, &span_ids)?,
             side: self.selected_side,
             reversed: false,
             preset: ProbeSamplingPreset::Medium,
@@ -107,7 +101,7 @@ impl Playground {
                 boundary_target.is_some(),
                 egui::Button::new("+ Selected boundary"),
             )
-            .on_hover_text("Create a boundary probe from one span selection on one curve")
+            .on_hover_text("Create a boundary probe from a connected run of spans on one curve")
             .clicked()
             && let Some(target) = boundary_target
         {
@@ -725,6 +719,7 @@ impl Playground {
 mod tests {
     use super::*;
     use crate::wave_gpu::PointProbeRecord;
+    use funfern_app::topology_editor::ClosedCurvePurpose;
 
     fn probe_upload(token: TopologyToken, generation: u64, revision: u64) -> ProbeUpload {
         ProbeUpload {
@@ -735,6 +730,60 @@ mod tests {
             area_revision: revision,
             far_field_revision: revision,
         }
+    }
+
+    /// A selection across a loop's seam becomes the path the probe walks,
+    /// last span first, and a selection with a gap offers no probe at all.
+    #[test]
+    fn a_boundary_selection_across_the_seam_makes_a_probe_that_saves() {
+        let mut state = Playground::default();
+        let loop_id = state
+            .editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.4),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        let ids = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == loop_id)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<Vec<_>>();
+        let last = *ids.last().unwrap();
+        let select = |state: &mut Playground, spans: &[CurveSpanId]| {
+            state.selection = TopologySelection::Spans(
+                spans
+                    .iter()
+                    .map(|span| TopologySpanTarget::Curve(*span))
+                    .collect(),
+            );
+        };
+
+        select(&mut state, &[ids[0], ids[2]]);
+        assert_eq!(state.selected_boundary_probe_target(), None);
+
+        select(&mut state, &[ids[0], last]);
+        let target = state.selected_boundary_probe_target().unwrap();
+        assert_eq!(target.spans, vec![last, ids[0]]);
+        state
+            .editor
+            .create_probe(
+                "Boundary".into(),
+                [1, 2, 3],
+                TopologyProbeTarget::Boundary(target),
+            )
+            .unwrap();
+        funfern_app::topology_persistence::save(&state.editor.document).unwrap();
     }
 
     /// A driven plan records nothing through a stencil that does not address

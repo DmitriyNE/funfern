@@ -3115,11 +3115,7 @@ fn probe_definition_valid(probe: &TopologyProbeDefinition, scene: &TopologyScene
             .iter()
             .find(|curve| curve.id == target.curve)
             .is_some_and(|curve| {
-                !target.spans.is_empty()
-                    && target
-                        .spans
-                        .iter()
-                        .all(|span| curve.spans.iter().any(|candidate| candidate.id == *span))
+                !target.spans.is_empty() && contiguous_span_path(curve, &target.spans)
             }),
         TopologyProbeTarget::AreaDisk { center, radius } => {
             center.finite()
@@ -3129,6 +3125,56 @@ fn probe_definition_valid(probe: &TopologyProbeDefinition, scene: &TopologyScene
         }
         TopologyProbeTarget::AreaRegion(region) => scene.region(*region).is_some(),
     }
+}
+
+/// Whether `spans` are distinct spans of `curve` walked in order, each
+/// following the last; on a closed curve the walk may cross from the last
+/// span to the first. A boundary probe samples its spans in this order.
+pub fn contiguous_span_path(curve: &TopologyCurve, spans: &[CurveSpanId]) -> bool {
+    let indices = spans
+        .iter()
+        .map(|span| {
+            curve
+                .spans
+                .iter()
+                .position(|candidate| candidate.id == *span)
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(indices) = indices else { return false };
+    let mut unique = BTreeSet::new();
+    indices.iter().all(|index| unique.insert(*index))
+        && indices.windows(2).all(|pair| {
+            pair[1] == pair[0] + 1
+                || matches!(curve.spline, CurveSpline::Closed(_))
+                    && pair[0] + 1 == curve.spans.len()
+                    && pair[1] == 0
+        })
+}
+
+/// A set of `curve`'s spans as the path a boundary probe walks: in curve
+/// order, and on a closed curve starting after the gap, so a run across the
+/// seam reads last span first. `None` if the spans do not form one connected
+/// run of this curve.
+pub fn span_path(curve: &TopologyCurve, spans: &BTreeSet<CurveSpanId>) -> Option<Vec<CurveSpanId>> {
+    let selected = curve
+        .spans
+        .iter()
+        .map(|span| spans.contains(&span.id))
+        .collect::<Vec<_>>();
+    let count = selected.iter().filter(|chosen| **chosen).count();
+    if count == 0 || count != spans.len() {
+        return None;
+    }
+    let len = selected.len();
+    let start = if matches!(curve.spline, CurveSpline::Closed(_)) && count < len {
+        (0..len).find(|&index| selected[index] && !selected[(index + len - 1) % len])?
+    } else {
+        selected.iter().position(|chosen| *chosen)?
+    };
+    let path = (start..start + count)
+        .map(|index| selected[index % len].then_some(curve.spans[index % len].id))
+        .collect::<Option<Vec<_>>>()?;
+    contiguous_span_path(curve, &path).then_some(path)
 }
 
 fn next_id(ids: impl Iterator<Item = u64>) -> Result<u64, String> {
@@ -5443,6 +5489,72 @@ mod tests {
             line_probe_points(&editor.document.model.probes),
             MAX_SEGMENT_PROBE_POINTS
         );
+        crate::topology_persistence::save(&editor.document).unwrap();
+    }
+
+    /// A boundary probe walks its spans in order, so the file keeps only a
+    /// connected run, crossing a loop's seam from its last span to its first.
+    /// The editor refuses any other order, and `span_path` puts a selection
+    /// in the one the file keeps.
+    #[test]
+    fn a_boundary_probe_walks_one_connected_run_of_spans() {
+        let mut editor = TopologyEditor::default();
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.4),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let curve = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == loop_id)
+            .unwrap()
+            .clone();
+        let ids = curve.spans.iter().map(|span| span.id).collect::<Vec<_>>();
+        let last = ids.len() - 1;
+        assert!(last >= 3);
+        let path = |chosen: &[usize]| span_path(&curve, &chosen.iter().map(|&i| ids[i]).collect());
+        let ordered = |chosen: &[usize]| chosen.iter().map(|&i| ids[i]).collect::<Vec<_>>();
+        assert_eq!(path(&[0, last]), Some(ordered(&[last, 0])));
+        assert_eq!(
+            path(&[0, 1, last - 1, last]),
+            Some(ordered(&[last - 1, last, 0, 1]))
+        );
+        assert_eq!(path(&[1, 2]), Some(ordered(&[1, 2])));
+        assert_eq!(path(&(0..=last).collect::<Vec<_>>()), Some(ids.clone()));
+        assert_eq!(path(&[0, 2]), None);
+        assert_eq!(path(&[]), None);
+
+        let probe = |spans: Vec<CurveSpanId>| {
+            TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                curve: loop_id,
+                spans,
+                side: CurveTraceSide::Left,
+                reversed: false,
+                preset: ProbeSamplingPreset::Medium,
+            })
+        };
+        for refused in [ordered(&[0, last]), ordered(&[0, 2]), ordered(&[1, 1])] {
+            assert!(
+                editor
+                    .create_probe("Boundary".into(), [1, 2, 3], probe(refused))
+                    .is_err()
+            );
+        }
+        let id = editor
+            .create_probe("Boundary".into(), [1, 2, 3], probe(ordered(&[last, 0])))
+            .unwrap();
+        crate::topology_persistence::save(&editor.document).unwrap();
+        let mut reordered = editor.document.model.probes[0].clone();
+        assert_eq!(reordered.id, id);
+        reordered.target = probe(ordered(&[0, last]));
+        assert!(editor.update_probe(reordered).is_err());
         crate::topology_persistence::save(&editor.document).unwrap();
     }
 

@@ -19948,3 +19948,18 @@ notice naming it; `line_probe_points` is the one count the editor and the file
 share. `line_probes_keep_to_the_shared_sampling_budget` fills the budget,
 checks that adding a probe or raising a preset is refused while the document
 still saves, and that points given up are free again.
+
+## 2026-10-07 — A boundary probe across a loop's seam
+
+A boundary probe walks its spans in the order it lists them, and the file
+keeps only a connected run, crossing a closed curve's seam from its last span
+to its first. The "+ Selected boundary" button listed the selected spans in
+curve order instead, so a selection of a loop's last and first spans became
+`[first, last]`, and a selection with a gap was taken as it stood: both were
+created and both made saving report an invalid boundary probe. `span_path`
+now orders a selection as the walk goes, starting after the gap on a closed
+curve, and offers nothing for spans that do not join; the editor checks every
+boundary probe with `contiguous_span_path`, the check the file makes, moved
+beside it. `a_boundary_probe_walks_one_connected_run_of_spans` and
+`a_boundary_selection_across_the_seam_makes_a_probe_that_saves` cover the
+ordering, the refusals and the save.

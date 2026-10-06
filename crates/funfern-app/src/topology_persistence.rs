@@ -19,7 +19,7 @@ use crate::document::{
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
-    TopologyProbeTarget, line_probe_points,
+    TopologyProbeTarget, contiguous_span_path, line_probe_points,
 };
 use funfern_core::*;
 use serde::{Deserialize, Serialize};
@@ -1368,27 +1368,6 @@ fn validate_probes(
         ));
     }
     Ok(())
-}
-
-fn contiguous_span_path(curve: &TopologyCurve, spans: &[CurveSpanId]) -> bool {
-    let indices = spans
-        .iter()
-        .map(|span| {
-            curve
-                .spans
-                .iter()
-                .position(|candidate| candidate.id == *span)
-        })
-        .collect::<Option<Vec<_>>>();
-    let Some(indices) = indices else { return false };
-    let mut unique = BTreeSet::new();
-    indices.iter().all(|index| unique.insert(*index))
-        && indices.windows(2).all(|pair| {
-            pair[1] == pair[0] + 1
-                || matches!(curve.spline, CurveSpline::Closed(_))
-                    && pair[0] + 1 == curve.spans.len()
-                    && pair[1] == 0
-        })
 }
 
 fn anchor_structure_valid(anchor: FaceAnchor, scene: &TopologyScene) -> bool {
