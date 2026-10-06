@@ -2412,6 +2412,23 @@ fn refresh_canonical_wave_display(
     {
         return;
     }
+    if display.generation != canonical.generation {
+        display.picture.clear();
+        display.picture_serial = 0;
+    }
+    if let Some(copy) = canonical.picture()
+        && copy.values.len() == operator.degrees_of_freedom()
+        && copy.serial != display.picture_serial
+    {
+        display.picture = primary_field(active, canonical, &copy.values);
+        display.picture_serial = copy.serial;
+    }
+    display.picture_integrated.clear();
+    if let Some(copy) = canonical.integrated_picture() {
+        display
+            .picture_integrated
+            .extend(copy.values.iter().copied());
+    }
     // Gate O: `r` arrives on a stream of its own, and the first copy of a new
     // generation may come with its handoff receipt before any other readback.
     if display.generation != canonical.generation
@@ -2438,31 +2455,7 @@ fn refresh_canonical_wave_display(
     }
     display.generation = canonical.generation;
     display.completed_steps = request.stats().completed_steps();
-    display.current.clear();
-    // A field-dependent medium's field is the inverse of its map, not `Q/M`:
-    // read at 30% amplitude departure, the linear division would paint a
-    // different field from the one the solver steps.
-    let nonlinear_field =
-        field_law_view(active, canonical).and_then(|(temporal, runtime, time)| {
-            let flux = canonical
-                .primary_flux
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect::<Vec<_>>();
-            temporal.primary_field_at(&flux, time, &runtime).ok()
-        });
-    match nonlinear_field {
-        Some(field) => display
-            .current
-            .extend(field.into_iter().map(|value| value as f32)),
-        None => display.current.extend(
-            canonical
-                .primary_flux
-                .iter()
-                .zip(operator.primary_mass())
-                .map(|(flux, mass)| (f64::from(*flux) / mass) as f32),
-        ),
-    }
+    display.current = primary_field(active, canonical, &canonical.primary_flux);
     if canonical.full_readback_at == canonical.readbacks {
         display.snapshot_current.clear();
         display
@@ -2483,6 +2476,34 @@ fn refresh_canonical_wave_display(
     display.readbacks = canonical.readbacks;
 }
 
+/// The primary field of a copy's flux. A field-dependent medium's field is
+/// the inverse of its map, not `Q/M`: read at 30% amplitude departure, the
+/// linear division would paint a different field from the one the solver
+/// steps. The map is read at the latest clock, which a played-out copy lags
+/// by a frame or so.
+fn primary_field(
+    active: &Arc<PreparedTopology>,
+    canonical: &CanonicalGpuDisplay,
+    flux: &[f32],
+) -> Vec<f32> {
+    let nonlinear_field =
+        field_law_view(active, canonical).and_then(|(temporal, runtime, time)| {
+            let flux = flux
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect::<Vec<_>>();
+            temporal.primary_field_at(&flux, time, &runtime).ok()
+        });
+    match nonlinear_field {
+        Some(field) => field.into_iter().map(|value| value as f32).collect(),
+        None => flux
+            .iter()
+            .zip(active.canonical_operator.primary_mass())
+            .map(|(flux, mass)| (f64::from(*flux) / mass) as f32)
+            .collect(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn frame(
     mut contexts: EguiContexts,
@@ -2490,7 +2511,7 @@ pub fn frame(
     time: Res<Time>,
     mut recorders: ResMut<WaveGpuRequest>,
     mut request: ResMut<CanonicalGpuRequest>,
-    canonical_display: Res<CanonicalGpuDisplay>,
+    mut canonical_display: ResMut<CanonicalGpuDisplay>,
     mut display: ResMut<WaveDisplay>,
     probe_display: Res<ProbeDisplay>,
     curve_display: Res<CurveProbeDisplay>,
@@ -2527,6 +2548,7 @@ pub fn frame(
         );
     }
     state.editor.validate_frame(12000);
+    canonical_display.release_pictures();
     state.refresh_runtime(
         &mut request,
         &canonical_display,

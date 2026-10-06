@@ -47,6 +47,7 @@ use funfern_core::{
 use crate::drawn_pacing::{DrawnFrame, DrawnPacingTrace, PacingNote};
 use crate::gpu_frame_timer::{GpuFrameReadings, GpuFrameTimer};
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
+use crate::picture_playout::{PictureCopy, PicturePlayout};
 use crate::wave_gpu::{
     AreaProbeBindGroup, CurveProbeBindGroup, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS,
     FarFieldBindGroup, ProbeBindGroup, VectorOverlayBindGroup, WaveGpuRequest, WavePipeline,
@@ -5011,9 +5012,35 @@ pub struct CanonicalGpuDisplay {
     /// the continuously read control buffer, it describes this exact snapshot.
     raw_state_completed_steps: u64,
     raw_primary_self_describing: bool,
+    /// The primary flux of every state copy as it lands, played out to the
+    /// painter one a frame (`picture_playout`).
+    picture: PicturePlayout<Vec<f32>>,
+    /// The integrated field's copies, played out the same way.
+    integrated_picture: PicturePlayout<Vec<f32>>,
 }
 
 impl CanonicalGpuDisplay {
+    /// Once a frame: the next copy of each stream becomes the one painted.
+    pub fn release_pictures(&mut self) {
+        self.picture.release();
+        self.integrated_picture.release();
+    }
+
+    /// The primary flux the frame paints, with its serial and step.
+    pub fn picture(&self) -> Option<&PictureCopy<Vec<f32>>> {
+        self.picture.shown()
+    }
+
+    /// The integrated field the frame paints, when that view is chosen.
+    pub fn integrated_picture(&self) -> Option<&PictureCopy<Vec<f32>>> {
+        self.integrated_picture.shown()
+    }
+
+    /// The step the control stream reported last.
+    fn accepted_steps(&self) -> u64 {
+        self.clock
+            .map_or(0, |clock| u64::from(clock.accepted_steps))
+    }
     /// Gate O: the accepted integrated field `r` from the latest full
     /// snapshot, the tail of the auxiliary lanes. Empty without a restoring
     /// law.
@@ -5312,6 +5339,12 @@ fn set_live_integrated(
         }
     }));
     display.live_integrated_readbacks = display.live_integrated_readbacks.wrapping_add(1);
+    let copy = PictureCopy {
+        serial: display.live_integrated_readbacks,
+        step: display.accepted_steps(),
+        values: display.live_integrated.clone(),
+    };
+    display.integrated_picture.push(copy);
 }
 
 #[derive(Component)]
@@ -5406,6 +5439,19 @@ fn apply_canonical_state(
     }
     refresh_canonical_display(display);
     display.readbacks = display.readbacks.saturating_add(1);
+    if display.primary_flux.len() == display.node_count {
+        let step = if tag.full {
+            display.raw_state_completed_steps
+        } else {
+            display.accepted_steps()
+        };
+        let copy = PictureCopy {
+            serial: display.readbacks,
+            step,
+            values: display.primary_flux.clone(),
+        };
+        display.picture.push(copy);
+    }
     if tag.full {
         display.full_readbacks = display.full_readbacks.saturating_add(1);
         display.full_readback_at = display.readbacks;
@@ -5435,6 +5481,8 @@ fn begin_canonical_display_generation(display: &mut CanonicalGpuDisplay, generat
     display.raw_primary_self_describing = false;
     display.full_readback_at = u64::MAX;
     display.live_integrated.clear();
+    display.picture.clear();
+    display.integrated_picture.clear();
 }
 
 fn receive_canonical_control(

@@ -774,10 +774,8 @@ impl Playground {
                 ceiling: self.step_budget.ceiling,
                 running: self.wave_running,
                 withheld,
-                picture: display.readbacks,
-                picture_step: display
-                    .clock
-                    .map_or(0, |clock| u64::from(clock.accepted_steps)),
+                picture: display.picture().map_or(0, |copy| copy.serial),
+                picture_step: display.picture().map_or(0, |copy| copy.step),
                 picture_generation: display.generation,
                 solver_share: self.solver_share.unwrap_or(f64::NAN),
                 step_seconds: self.step_seconds.unwrap_or(f64::NAN),

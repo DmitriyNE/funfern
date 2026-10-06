@@ -4,6 +4,7 @@ pub mod document;
 pub mod drawn_pacing;
 pub mod gpu_frame_timer;
 mod paced_readback;
+pub mod picture_playout;
 pub mod topology_editor;
 pub mod topology_examples;
 pub mod topology_persistence;

@@ -16,6 +16,7 @@ mod files;
 mod gpu_frame_timer;
 mod material_overlay;
 mod paced_readback;
+mod picture_playout;
 mod recording;
 mod recovery;
 #[allow(dead_code)]

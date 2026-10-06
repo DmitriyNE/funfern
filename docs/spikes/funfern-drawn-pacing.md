@@ -389,14 +389,57 @@ under the old rule), where at 105 fps it stands still less. The depth of
 three in flight does not cover the round trip at 120 Hz, as the runs under
 load already showed, and the budget, by reaching the cadence, exposes it.
 
-## Left for the pacing work
+## The readback's delivery
 
-- The readback depth at 120 Hz, first. The picture is three frames behind
-  the solver and stood still on 16 to 26 % of frames on the heavy scene in
-  every run on this panel, old rule and budget, loaded host and quiet; at
-  the cadence the budget reaches it is what the eye sees. Shortening the
-  lag is a readback-path change, not a pacing one; the depth may be a
-  one-line one.
+6 October, quiet host, 120 Hz panel, the budget. The depth was the
+suspect, and it is not the cause. Three, four and five copies in flight,
+alternated 3-4-5-5-4-3, 60 s a run:
+
+| scene | depth 3 | depth 4 | depth 5 |
+| --- | --- | --- | --- |
+| heavy, picture still | 27.8 / 25.0 % | 24.9 / 25.9 % | 26.7 / 24.9 % |
+| overlay, picture still | 25.7 / 25.2 % | 25.3 / 24.4 % | 24.0 / 26.1 % |
+
+The solver and the copies are even: every frame encodes its steps and
+takes a copy, and no copy is refused. The deliveries are not. The new
+copies a frame received ran `1 0 2 1` over and over on both scenes: each
+four frames got their four copies, one frame none and the next two. The
+frame with none painted the old copy, the one with two painted only the
+second and jumped two copies' worth. Most likely a copy finishes on the
+device just after the frame polls for it and lands with the next; no
+depth changes that.
+
+So the picture plays its copies out (`picture_playout.rs`): every copy is
+queued as it lands, the state's and the integrated field's, and the
+painter takes one a frame. A lone copy waits a frame for a second, which
+builds a reserve; the queue holds four at most and drops one when two or
+more have stood after the release for 60 frames, so the lag a burst
+builds does not last. Only the painter reads the played-out copy; the
+snapshots, arrows and readouts keep the latest. The same pairs against
+the main build:
+
+| scene | build | still | serial a frame |
+| --- | --- | --- | --- |
+| heavy | main | 29.4 / 28.4 % | 0, 1, 2 and 3 |
+| heavy | playout | 0.0 / 0.0 % | 1 |
+| overlay | main | 23.4 / 25.5 % | 0, 1, 2 and 3 |
+| overlay | playout | 1.5 / 1.5 % | 1, but at a handoff |
+
+The overlay scene's remaining still frames are its adaptation's handoffs:
+98 of 102 in one run fall within six frames of a new generation or a
+frame that withheld stepping, where the queue starts again.
+
+The cost is lag: the painted copy is 16 steps behind the newest control
+readback at the median on the heavy scene, against 5 before, about two
+frames more, 17 ms at 120 Hz. Against `1 0 2 1` that is the least a
+playout can hold: one copy in reserve before the empty frame. The
+summary's picture wobble barely moved (10.9 and 12.9 % against 13.1 and
+14.0 on heavy) because it reads the copies' steps from the control
+readback as each landed, which can be a copy off; the copies themselves
+now advance one a frame, so the picture follows the encoded series, whose
+own wobble is the budget's 4 or 5 steps a frame.
+
+## Left for the pacing work
 - The 60 Hz case and Low Power Mode, postponed (5 October): the machine
   has one panel and the mode is the user's to toggle.
 - The integer step at a 2 ms step leaves a quarter of a 120 Hz interval

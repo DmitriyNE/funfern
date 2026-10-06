@@ -1173,6 +1173,12 @@ pub struct WaveDisplay {
     /// receipt, for the view that paints it, and that stream's serial.
     pub live_integrated: Vec<f32>,
     pub live_integrated_readbacks: u64,
+    /// The field the painter shows: the played-out copy
+    /// (`picture_playout`), a frame or so behind `current`, and the serial it
+    /// was made from. The integrated field's played-out copy beside it.
+    pub picture: Vec<f32>,
+    pub picture_serial: u64,
+    pub picture_integrated: Vec<f32>,
     pub completed_steps: u64,
     pub readbacks: u64,
 }

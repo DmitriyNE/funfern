@@ -3400,13 +3400,11 @@ above:
 - [ ] The budget's 60 Hz and Low Power Mode measurements (postponed
   2026-10-05; the machine has one panel and the mode is the user's to
   toggle). Quiet host and overlay scene are measured, see the spike doc.
-- [ ] The picture is three frames behind the solver: a readback is encoded after
-  the frame's drawing, mapped at a later submission and delivered at the
-  extraction after that. Shortening it is a readback-path change.
-  On a quiet host (2026-10-05) the budget reaches 119 fps and the picture
-  stands still on a fifth of the frames, wobble 21 % against the old rule's
-  14 at 105 fps: the next pacing item, see `docs/spikes/funfern-drawn-pacing.md`
-  "On a quiet host".
+- [x] The picture stood still on a quarter of the frames at 120 Hz
+  (2026-10-06, see that day's entry and `docs/spikes/funfern-drawn-pacing.md`,
+  "The readback's delivery"): not the depth, which made no difference from
+  three to five, but the copies arriving `1 0 2 1` a frame. The painter plays
+  them out one a frame; still frames 25-29 % to 0, two frames more lag.
 - [x] A feed-forward step budget from the GPU timer (2026-10-05, see that
   day's entry and `docs/spikes/funfern-drawn-pacing.md`, "The budget from
   the measured cost"): the ceiling is the target share of the interval over
@@ -19633,3 +19631,29 @@ and they return with the valid scene.
 for two crossing transmitting circles with the layer on: teal before the
 crossing, red and no teal after it (it fails without the fix). The user
 guide's Drafts line said green and amber; the curves are teal either way.
+
+## 2026-10-06 — The picture plays its copies out
+
+The readback depth was next on the pacing list: at 120 Hz the picture stood
+still on a fifth to a quarter of the frames. Measured on a quiet host, it is
+not the depth. Three, four and five copies in flight, alternated, all left
+the heavy and overlay scenes still on 24 to 28 % of frames. Every frame takes
+its copy and none is refused; the copies arrive `1 0 2 1` a frame, so one
+frame in four paints nothing new and the next skips a copy. The depth stays
+at three.
+
+`picture_playout.rs` queues every copy of the state, and of the integrated
+field, as it lands, and `frame()` releases one a frame to the painter
+(`WaveDisplay::picture`, `picture_integrated`). A lone copy waits a frame
+for a second, so a reserve builds; four at most are held, and a reserve of
+two or more that stands 60 frames loses one. Snapshots, arrows and readouts
+keep reading the latest copy; a new generation clears the queues. The
+pacing trace notes the copy painted. Against the main build, alternated,
+60 s a run: still frames 29.4 / 28.4 % to 0.0 / 0.0 on the heavy scene and
+23.4 / 25.5 % to 1.5 / 1.5 on the overlay scene, whose remainder sits at its
+adaptation's handoffs (98 of 102). The cost is about two frames of lag, 17
+ms at 120 Hz, the least a playout holds against that beat. The summary's
+picture wobble barely moves because it reads each copy's step from the
+control readback as it landed, a copy off at times; see the spike doc. The
+unit tests play the measured beat, even arrivals, a stopped stream, a burst
+and a flood.

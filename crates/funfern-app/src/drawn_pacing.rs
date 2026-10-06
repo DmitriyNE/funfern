@@ -55,9 +55,10 @@ pub struct PacingNote {
     /// Whether a handoff withheld stepping this frame.
     pub withheld: bool,
     /// The state readback the frame painted: its serial, and the step the
-    /// control readback carried at the time. The field a frame shows is the
-    /// latest readback's, uploaded to the painter, not the state the frame
-    /// encoded.
+    /// control readback carried when it landed, which can be a copy off. The
+    /// field a frame shows is a readback played out a frame or so after it
+    /// landed (`picture_playout`), uploaded to the painter, not the state the
+    /// frame encoded.
     pub picture: u64,
     pub picture_step: u64,
     /// The generation the painted readback belongs to; it lags the drawn

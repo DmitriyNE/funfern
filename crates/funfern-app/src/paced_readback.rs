@@ -32,7 +32,9 @@ use bevy::{
 /// with one in flight the picture changed every other frame on every scene,
 /// a 30 Hz picture; with two, on 92 % of frames; with three, on 97 %, and on
 /// 92 % of a scene whose solver takes the whole frame, where the round trip
-/// is three to four frames. The cost is a staging buffer a copy.
+/// is three to four frames. The cost is a staging buffer a copy. At 120 Hz
+/// four and five did no better than three: there the copies all arrive, but
+/// unevenly, which `picture_playout` smooths.
 const IN_FLIGHT_DEPTH: u8 = 3;
 
 /// Shares the count in flight between the main and render worlds. The render

@@ -149,6 +149,8 @@ impl Playground {
             && display.generation > 0
             && display.current.len() == active.operator.degrees_of_freedom()
         {
+            // The painted field is the played-out copy (`picture_playout`),
+            // and the latest copy only until the first is played out.
             // The canonical primary field is authoritative. Display no longer
             // removes a component mean or reconstructs a gauge-dependent
             // scalar before exposure. On an oscillator, the integrated field
@@ -160,13 +162,18 @@ impl Playground {
             self.follow_field_quantity(integrated_shown);
             let integrated = integrated_shown
                 .then(|| {
-                    [&display.live_integrated, &display.snapshot_integrated]
-                        .into_iter()
-                        .find(|values| values.len() == nodes)
+                    [
+                        &display.picture_integrated,
+                        &display.live_integrated,
+                        &display.snapshot_integrated,
+                    ]
+                    .into_iter()
+                    .find(|values| values.len() == nodes)
                 })
                 .flatten();
             let field_values: Arc<[f32]> = match integrated {
                 Some(values) => values.clone().into(),
+                None if display.picture.len() == nodes => display.picture.clone().into(),
                 None => display.current.clone().into(),
             };
             let level = exposure_level(
