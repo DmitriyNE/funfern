@@ -19,7 +19,7 @@ use crate::document::{
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
-    TopologyProbeTarget,
+    TopologyProbeTarget, line_probe_points,
 };
 use funfern_core::*;
 use serde::{Deserialize, Serialize};
@@ -1316,7 +1316,6 @@ fn validate_probes(
         return Err(format!("Scene contains more than {MAX_PROBES} probes"));
     }
     let mut ids = BTreeSet::new();
-    let mut sampling_points = 0;
     for probe in probes {
         if probe.id.0 == 0
             || !ids.insert(probe.id)
@@ -1330,11 +1329,10 @@ fn validate_probes(
             TopologyProbeTarget::Point(point) if !point.finite() => {
                 return Err("Point probe is not finite".into());
             }
-            TopologyProbeTarget::Segment { start, end, preset } => {
+            TopologyProbeTarget::Segment { start, end, .. } => {
                 if !start.finite() || !end.finite() || start == end {
                     return Err("Scene contains an invalid segment probe".into());
                 }
-                sampling_points += preset.spatial_points();
             }
             TopologyProbeTarget::Boundary(target) => {
                 let curve = scene
@@ -1352,7 +1350,6 @@ fn validate_probes(
                 {
                     return Err("Scene contains an invalid boundary probe".into());
                 }
-                sampling_points += target.preset.spatial_points();
             }
             TopologyProbeTarget::AreaDisk { center, radius }
                 if !center.finite() || !radius.is_finite() || *radius <= 0.0 =>
@@ -1365,7 +1362,7 @@ fn validate_probes(
             _ => {}
         }
     }
-    if sampling_points > MAX_SEGMENT_PROBE_POINTS {
+    if line_probe_points(probes) > MAX_SEGMENT_PROBE_POINTS {
         return Err(format!(
             "Line probes exceed the {MAX_SEGMENT_PROBE_POINTS}-point sampling budget"
         ));

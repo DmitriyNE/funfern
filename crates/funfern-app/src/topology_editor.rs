@@ -4,7 +4,8 @@
 //! commands; no legacy object-role adapter belongs here.
 
 use crate::document::{
-    FarFieldSettings, MAX_PROBES, PresentationSettings, ProbeId, ProbeReadouts, ProbeSamplingPreset,
+    FarFieldSettings, MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, PresentationSettings, ProbeId,
+    ProbeReadouts, ProbeSamplingPreset,
 };
 use crate::topology_viewport::TopologyTransformUpdate;
 use funfern_core::*;
@@ -35,6 +36,35 @@ pub enum TopologyProbeTarget {
         radius: f64,
     },
     AreaRegion(RegionId),
+}
+
+impl TopologyProbeTarget {
+    /// The points a line or boundary probe samples along its path; the other
+    /// probes sample none.
+    pub fn line_points(&self) -> usize {
+        match self {
+            Self::Segment { preset, .. } => preset.spatial_points(),
+            Self::Boundary(target) => target.preset.spatial_points(),
+            Self::Point(_) | Self::AreaDisk { .. } | Self::AreaRegion(_) => 0,
+        }
+    }
+}
+
+/// The line and boundary probes' points together. The curve recorders share
+/// `MAX_SEGMENT_PROBE_POINTS` of them, and a scene asking for more is refused
+/// by the file and by the device alike.
+pub fn line_probe_points(probes: &[TopologyProbeDefinition]) -> usize {
+    probes.iter().map(|probe| probe.target.line_points()).sum()
+}
+
+fn line_probe_budget(points: usize) -> Result<(), String> {
+    if points > MAX_SEGMENT_PROBE_POINTS {
+        return Err(format!(
+            "Line and boundary probes share {MAX_SEGMENT_PROBE_POINTS} sample points; lower a \
+             probe's sampling or delete one"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -811,6 +841,9 @@ impl TopologyEditor {
         if !probe_definition_valid(&probe, &self.document.model.draft) {
             return Err("Probe settings are invalid".into());
         }
+        line_probe_budget(
+            line_probe_points(&self.document.model.probes) + probe.target.line_points(),
+        )?;
         self.begin();
         self.document.model.probes.push(probe);
         self.changed();
@@ -845,6 +878,11 @@ impl TopologyEditor {
         if self.document.model.probes[index] == probe {
             return Ok(());
         }
+        line_probe_budget(
+            line_probe_points(&self.document.model.probes)
+                - self.document.model.probes[index].target.line_points()
+                + probe.target.line_points(),
+        )?;
         self.document.model.probes[index] = probe;
         self.changed();
         Ok(())
@@ -5336,6 +5374,76 @@ mod tests {
         assert!(editor.redo_replaces_scene());
         assert!(editor.redo());
         assert!(editor.undo_replaces_scene());
+    }
+
+    /// The line and boundary probes share the curve recorders' points, which
+    /// the file refuses to exceed; the editor refuses to exceed them first,
+    /// whether a probe is added or its sampling raised.
+    #[test]
+    fn line_probes_keep_to_the_shared_sampling_budget() {
+        let mut editor = TopologyEditor::default();
+        let line = |index: usize, preset| TopologyProbeTarget::Segment {
+            start: Point2::new(-0.5, -0.8 + 0.1 * index as f64),
+            end: Point2::new(0.5, -0.8 + 0.1 * index as f64),
+            preset,
+        };
+        let budget = MAX_SEGMENT_PROBE_POINTS / ProbeSamplingPreset::Medium.spatial_points();
+        for index in 0..budget {
+            editor
+                .create_probe(
+                    format!("Line {index}"),
+                    [1, 2, 3],
+                    line(index, ProbeSamplingPreset::Medium),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            line_probe_points(&editor.document.model.probes),
+            MAX_SEGMENT_PROBE_POINTS
+        );
+        crate::topology_persistence::save(&editor.document).unwrap();
+
+        let history = editor.history_len();
+        assert!(
+            editor
+                .create_probe(
+                    "One too many".into(),
+                    [1, 2, 3],
+                    line(budget, ProbeSamplingPreset::Low),
+                )
+                .is_err()
+        );
+        let mut raised = editor.document.model.probes[0].clone();
+        raised.target = line(0, ProbeSamplingPreset::High);
+        assert!(editor.update_probe(raised).is_err());
+        assert_eq!(editor.history_len(), history, "a refusal leaves no history");
+        crate::topology_persistence::save(&editor.document).unwrap();
+
+        // Points other probes give up are free again; a point probe takes none.
+        for index in 0..2 {
+            let mut lowered = editor.document.model.probes[index].clone();
+            lowered.target = line(index, ProbeSamplingPreset::Low);
+            editor.update_probe(lowered).unwrap();
+        }
+        editor
+            .create_probe(
+                "Low line".into(),
+                [1, 2, 3],
+                line(budget, ProbeSamplingPreset::Medium),
+            )
+            .unwrap();
+        editor
+            .create_probe(
+                "Point".into(),
+                [1, 2, 3],
+                TopologyProbeTarget::Point(Point2::new(0.0, 0.0)),
+            )
+            .unwrap();
+        assert_eq!(
+            line_probe_points(&editor.document.model.probes),
+            MAX_SEGMENT_PROBE_POINTS
+        );
+        crate::topology_persistence::save(&editor.document).unwrap();
     }
 
     #[test]

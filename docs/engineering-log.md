@@ -19935,3 +19935,16 @@ edge 0.05 the focus sits at 0.47. The thick-lens formula puts the image near
 named Glass rather than Slow lens. `the_material_lens_focuses_its_source_behind_it`
 checks the focus against `material_lens_with(false)`, the same scene with a
 vacuum lens, and `examples/material-lens.json` is regenerated.
+
+## 2026-10-07 — Line probes keep to their shared budget
+
+The line and boundary probes share the curve recorders' 512 sample points, and
+the file refuses a scene that asks for more - but the editor only checked each
+probe alone, so a ninth Medium line probe, or a preset raised past the budget,
+was accepted. Save and autosave then failed and the device refused the line
+recorders. `create_probe` and `update_probe_during_edit` now count the probe
+list as the edit would leave it and refuse an edit past the budget, with a
+notice naming it; `line_probe_points` is the one count the editor and the file
+share. `line_probes_keep_to_the_shared_sampling_budget` fills the budget,
+checks that adding a probe or raising a preset is refused while the document
+still saves, and that points given up are free again.
