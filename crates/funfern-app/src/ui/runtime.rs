@@ -531,10 +531,15 @@ impl Playground {
             });
             match upload {
                 Ok(()) => {
-                    self.uploaded_time_step = dt;
                     // An install starts its clock at zero, and publishes at
-                    // once: its first steps are the new generation's.
+                    // once: its first steps are the new generation's. A
+                    // handoff's are not until it publishes, and one that is
+                    // rejected leaves the accepted generation stepping at its
+                    // own step - taking the candidate's here kept it after a
+                    // rejection, mispaced the solver, and made the speed
+                    // ceiling request the rejected revision again.
                     if !handed_off {
+                        self.uploaded_time_step = dt;
                         self.sim_time_offset = 0.0;
                         self.sim_time_step = dt;
                     }
@@ -559,6 +564,7 @@ impl Playground {
                         },
                         fresh: candidate.fresh,
                         degrees_of_freedom: candidate.canonical_operator.degrees_of_freedom(),
+                        time_step: dt,
                     });
                 }
                 Err(error) => {
@@ -597,6 +603,8 @@ impl Playground {
                 )
             {
                 let upload = self.uploading.take().unwrap();
+                // The device has published the candidate.
+                self.uploaded_time_step = upload.time_step;
                 match self.runtime.commit_ready(upload.token) {
                     Ok(active) => {
                         if upload.fresh {
@@ -1178,6 +1186,7 @@ fn live_event_fallback(error: &str, packable: bool) -> LiveEventFallback {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical_gpu::CANONICAL_FAILURE_NON_FINITE;
 
     /// The reported regression: moving a continuous source on a pumped medium
     /// reported "this event has not passed its Stage 7 temporal composition
@@ -1266,5 +1275,91 @@ mod tests {
         state.accumulate_step_rate(10, 0, 0.1);
         state.accumulate_step_rate(10, 250, 0.5);
         assert_eq!(state.steps_per_second, 500.0);
+    }
+
+    /// Reported: a rejected handoff kept the candidate's step. The upload took
+    /// it when it started, and the rejection left it in place under the
+    /// retained generation - mispacing the solver, and making the speed ceiling
+    /// see a step it had not asked for and request the rejected revision again,
+    /// past the guard that stops a failed revision being retried every frame.
+    #[test]
+    fn a_rejected_handoff_keeps_the_accepted_step() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame = |state: &mut Playground, request: &mut CanonicalGpuRequest| {
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    &display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+            });
+        };
+
+        // A running generation, installed by Reset. Paused, so that no steps
+        // are owed and the handoff finds the complete-step boundary it needs.
+        let mut state = with_baffles(&[]);
+        let accepted = activate(&mut state).bundle.token;
+        state.requested_revision = Some(state.editor.revision);
+        state.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut state, &mut request);
+        let step = state.uploaded_time_step;
+        assert!(step > 0.0);
+
+        // A finer mesh wants a smaller step, so its candidate hands off.
+        state.editor.document.presentation.mesh_edge *= 0.5;
+        for _ in 0..100_000 {
+            if state.uploading.is_some() {
+                break;
+            }
+            frame(&mut state, &mut request);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let candidate = state
+            .uploading
+            .as_ref()
+            .expect("the handoff began")
+            .time_step;
+        assert_eq!(
+            request.handoff_outcome(),
+            CanonicalGpuHandoffOutcome::Pending
+        );
+        assert!(
+            (candidate / step - 1.0).abs() > TIME_STEP_HYSTERESIS,
+            "the candidate must want a different step: {candidate:e} against {step:e}"
+        );
+        assert_eq!(
+            state.solver_time_step(),
+            step,
+            "until the device publishes it, the accepted generation is stepping"
+        );
+
+        request.reject_handoff(CANONICAL_FAILURE_NON_FINITE);
+        frame(&mut state, &mut request);
+        assert!(state.uploading.is_none());
+        assert_eq!(state.runtime.active().unwrap().bundle.token, accepted);
+        assert_eq!(state.solver_time_step(), step);
+
+        frame(&mut state, &mut request);
+        assert!(
+            !state.preparation_in_progress()
+                && state
+                    .runtime
+                    .last_error()
+                    .is_some_and(|failure| failure.message.contains("handoff rejected")),
+            "the rejected revision is not prepared again"
+        );
     }
 }

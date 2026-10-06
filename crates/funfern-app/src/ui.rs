@@ -448,6 +448,8 @@ struct Uploading {
     generation: u64,
     fresh: bool,
     degrees_of_freedom: usize,
+    /// The step the candidate runs at once the device publishes it.
+    time_step: f64,
 }
 
 struct PendingSourceCommit {

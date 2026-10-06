@@ -4561,6 +4561,15 @@ impl CanonicalGpuRequest {
         self.handoff_outcome
     }
 
+    /// Settles the pending handoff as the device does when the target fails
+    /// validation, for host tests that have no render world.
+    #[cfg(test)]
+    pub fn reject_handoff(&mut self, failure: u32) {
+        self.handoff = None;
+        self.handoff_outcome = CanonicalGpuHandoffOutcome::Rejected(failure);
+        self.revision = self.revision.wrapping_add(1).max(1);
+    }
+
     pub fn handoff_manifest(&self) -> Option<&CanonicalGpuTransferManifest> {
         self.handoff
             .as_ref()

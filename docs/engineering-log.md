@@ -19856,3 +19856,25 @@ In the same file the stiffness row's field laws said "on the CPU reference"
 alone, and the status legend kept a **CPU reference** status, refused until
 Stage 9, that no row carries any more; the first now names the device too and
 the second is gone.
+
+## 2026-10-06 — A rejected handoff keeps the accepted step
+
+Reported: a rejected handoff left the candidate's time step behind. The upload
+set `uploaded_time_step` to the candidate's step as soon as it started, and a
+rejection retained the accepted generation without restoring it. Reproduced
+headlessly on a one-baffle scene running at the speed ceiling's 0.008333: a
+halved mesh edge asked for 0.003260, the handoff began, a forced rejection kept
+the accepted generation, and the host went on pricing its steps at 0.003260.
+On the next frame `retime_for_speed` compared that against the accepted
+generation's step, cleared the requested revision and prepared the rejected
+revision again, clearing its failure - the retry-every-frame loop the guard in
+`request_runtime` exists to stop.
+
+A handoff now changes the step when the device publishes the candidate, which is
+when its steps start; until then the accepted generation is the one stepping,
+so pacing, signal fire times and the AMR indicator price its steps right
+through the window too. An install still takes it at once, since it replaces
+the device's generation as it uploads. `a_rejected_handoff_keeps_the_accepted_step`
+drives `refresh_runtime` through the handoff and a rejection, settled by a
+test-only `CanonicalGpuRequest::reject_handoff`; it failed before on the step
+under the pending handoff.

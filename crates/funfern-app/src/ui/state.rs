@@ -163,9 +163,12 @@ pub struct Playground {
     /// Whether the speed row reads short, which takes a clear recovery to
     /// undo; see [`super::pacing::speed_short`].
     pub(super) speed_short: bool,
-    /// The step the GPU was last uploaded with. Not the active operator's
+    /// The step the device's generation runs at. Not the active operator's
     /// recommendation: the speed ceiling can ask for a smaller one, and between
-    /// a speed change and the republish that carries it the two differ.
+    /// a speed change and the republish that carries it the two differ. A
+    /// handoff changes it when the device publishes the candidate, not when the
+    /// upload starts: until then the accepted generation is the one stepping,
+    /// and a rejected handoff keeps it.
     pub(super) uploaded_time_step: f64,
     /// The accepted-step total at the previous observation. Ordinary handovers
     /// preserve it; a fresh install may reset it, so every new generation first
