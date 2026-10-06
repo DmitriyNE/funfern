@@ -362,6 +362,106 @@ struct MeshBuilder {
     /// Local edge-length targets sampled from triangles that a repair removed,
     /// so a rebuilt band keeps the density it had.
     size_field: Option<Arc<carve::LocalSizeField>>,
+    /// Vertex positions on a grid while an open constraint's points go in,
+    /// between [`MeshBuilder::begin_constraint_points`] and
+    /// [`MeshBuilder::end_constraint_points`]; nothing else moves or adds a
+    /// vertex meanwhile, and the insertion keeps it current.
+    vertex_grid: Option<VertexGrid>,
+}
+
+/// Vertex indices binned by position on a uniform grid over the vertices'
+/// extent. Positions outside it fall in the edge cells, so a query box
+/// clamped the same way still finds them.
+struct VertexGrid {
+    minimum: Point2,
+    cell: Point2,
+    dimension: usize,
+    cells: Vec<Vec<usize>>,
+}
+
+impl VertexGrid {
+    fn new(vertices: &[MeshVertex]) -> Self {
+        let mut minimum = Point2::new(f64::INFINITY, f64::INFINITY);
+        let mut maximum = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for vertex in vertices {
+            minimum.x = minimum.x.min(vertex.point.x);
+            minimum.y = minimum.y.min(vertex.point.y);
+            maximum.x = maximum.x.max(vertex.point.x);
+            maximum.y = maximum.y.max(vertex.point.y);
+        }
+        let dimension = (vertices.len() as f64).sqrt().ceil().clamp(1.0, 1024.0) as usize;
+        let width = |extent: f64| {
+            if extent > 0.0 {
+                extent / dimension as f64
+            } else {
+                1.0
+            }
+        };
+        let mut grid = Self {
+            minimum: if minimum.x.is_finite() {
+                minimum
+            } else {
+                Point2::default()
+            },
+            cell: Point2::new(width(maximum.x - minimum.x), width(maximum.y - minimum.y)),
+            dimension,
+            cells: vec![Vec::new(); dimension * dimension],
+        };
+        for (index, vertex) in vertices.iter().enumerate() {
+            grid.insert(index, vertex.point);
+        }
+        grid
+    }
+
+    fn bin(&self, point: Point2) -> [usize; 2] {
+        let index = |value: f64, minimum: f64, width: f64| {
+            (((value - minimum) / width).floor() as isize).clamp(0, self.dimension as isize - 1)
+                as usize
+        };
+        [
+            index(point.x, self.minimum.x, self.cell.x),
+            index(point.y, self.minimum.y, self.cell.y),
+        ]
+    }
+
+    fn insert(&mut self, vertex: usize, point: Point2) {
+        let [x, y] = self.bin(point);
+        self.cells[y * self.dimension + x].push(vertex);
+    }
+
+    fn moved(&mut self, vertex: usize, from: Point2, to: Point2) {
+        let [x, y] = self.bin(from);
+        self.cells[y * self.dimension + x].retain(|candidate| *candidate != vertex);
+        self.insert(vertex, to);
+    }
+
+    /// Every vertex binned in a cell the box of half-width `radius` around
+    /// `point` touches, a superset of those within `radius`.
+    fn near(&self, point: Point2, radius: f64) -> impl Iterator<Item = usize> + '_ {
+        let [x0, y0] = self.bin(Point2::new(point.x - radius, point.y - radius));
+        let [x1, y1] = self.bin(Point2::new(point.x + radius, point.y + radius));
+        (y0..=y1).flat_map(move |y| {
+            (x0..=x1).flat_map(move |x| self.cells[y * self.dimension + x].iter().copied())
+        })
+    }
+
+    /// A vertex binned nearest `point`'s cell, searching square rings of
+    /// cells outward; a start for a walk, not the nearest vertex.
+    fn any_near(&self, point: Point2) -> Option<usize> {
+        let [cx, cy] = self.bin(point);
+        for ring in 0..self.dimension {
+            let (x0, x1) = (cx.saturating_sub(ring), (cx + ring).min(self.dimension - 1));
+            let (y0, y1) = (cy.saturating_sub(ring), (cy + ring).min(self.dimension - 1));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    if let Some(vertex) = self.cells[y * self.dimension + x].first() {
+                        return Some(*vertex);
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -623,6 +723,7 @@ impl MeshBuilder {
             frozen_triangles: 0,
             frozen_vertices: 0,
             size_field: None,
+            vertex_grid: None,
         }
     }
 
@@ -1377,16 +1478,151 @@ impl MeshBuilder {
         }
     }
 
+    /// Holds vertex positions on a grid while an open constraint's points
+    /// go in, so each point finds its neighbours without scanning every
+    /// vertex; that held a preparation slice for tens of milliseconds when a
+    /// baffle went into a fine mesh.
+    fn begin_constraint_points(&mut self) {
+        self.vertex_grid = Some(VertexGrid::new(&self.vertices));
+    }
+
+    fn end_constraint_points(&mut self) {
+        self.vertex_grid = None;
+    }
+
+    /// The lowest-numbered vertex within a tenth of the curve tolerance of
+    /// `point`, found by scanning every vertex.
+    fn coincident_vertex_by_scan(&self, point: Point2) -> Option<usize> {
+        self.vertices
+            .iter()
+            .position(|vertex| (vertex.point - point).norm() <= self.options.curve_tolerance * 0.1)
+    }
+
+    /// Chain vertices and trace vertices, which a constraint point never moves.
+    fn protected_constraint_vertices(&self) -> BTreeSet<usize> {
+        self.internal_chains
+            .iter()
+            .flat_map(|chain| chain.iter().map(|(vertex, _)| *vertex))
+            .chain(self.internal_trace_vertices.iter().copied())
+            .collect()
+    }
+
+    /// Whether `vertex` is free and moving it onto `point` keeps its whole fan
+    /// oriented and in the constraint's region. The distance is the caller's.
+    fn relocatable_onto(
+        &self,
+        boundary: usize,
+        protected: &BTreeSet<usize>,
+        vertex: usize,
+        point: Point2,
+    ) -> bool {
+        let target_region = self.constraint_target_regions[boundary];
+        self.vertices[vertex].boundary.is_none()
+            && !protected.contains(&vertex)
+            && !self.incident[vertex].is_empty()
+            && self.incident[vertex].iter().all(|triangle_index| {
+                let triangle = self.triangles[*triangle_index];
+                if triangle.region != target_region {
+                    return false;
+                }
+                let points = triangle.vertices.map(|corner| {
+                    if corner == vertex {
+                        point
+                    } else {
+                        self.point(corner)
+                    }
+                });
+                orient2d(points[0], points[1], points[2]) == PredicateSign::Positive
+            })
+    }
+
+    /// The nearest relocatable vertex within the snap distance, the
+    /// lowest-numbered of equals, found by scanning every vertex.
+    fn relocatable_vertex_by_scan(&self, boundary: usize, point: Point2) -> Option<usize> {
+        let protected = self.protected_constraint_vertices();
+        let snap_distance = self.options.target_edge_length * 0.3;
+        self.vertices
+            .iter()
+            .enumerate()
+            .filter(|(index, vertex)| {
+                (vertex.point - point).norm() <= snap_distance
+                    && self.relocatable_onto(boundary, &protected, *index, point)
+            })
+            .min_by(|(_, left), (_, right)| {
+                (left.point - point)
+                    .norm()
+                    .total_cmp(&(right.point - point).norm())
+            })
+            .map(|(index, _)| index)
+    }
+
+    /// The triangle holding `point`, as [`Self::containing_triangle`] answers
+    /// it, found by walking from a triangle around `start` towards the point.
+    /// The point is not at a vertex, so it lies inside one triangle or on
+    /// the edge of two, and the scan takes the lower-numbered of those.
+    /// `None` when the walk leaves the mesh, meets a frozen triangle or
+    /// runs too long, and the caller scans.
+    fn walk_to_point(&self, start: usize, point: Point2) -> Option<(usize, PolygonLocation)> {
+        let mut triangle = *self.incident.get(start)?.first()?;
+        for _ in 0..self.triangles.len() {
+            if triangle < self.frozen_triangles {
+                return None;
+            }
+            let vertices = self.triangles[triangle].vertices;
+            let corners = self.triangle_points(self.triangles[triangle]);
+            match point_in_triangle(point, corners) {
+                PolygonLocation::Inside => return Some((triangle, PolygonLocation::Inside)),
+                PolygonLocation::Boundary => {
+                    let edge = (0..3).find(|index| {
+                        orient2d(corners[*index], corners[(index + 1) % 3], point)
+                            == PredicateSign::Zero
+                    })?;
+                    let key = edge_key(vertices[edge], vertices[(edge + 1) % 3]);
+                    let lowest = self
+                        .adjacency
+                        .get(&key)?
+                        .iter()
+                        .map(|(candidate, _)| *candidate)
+                        .filter(|candidate| *candidate >= self.frozen_triangles)
+                        .min()?;
+                    return Some((lowest, PolygonLocation::Boundary));
+                }
+                PolygonLocation::Outside => {
+                    let edge = (0..3).find(|index| {
+                        orient2d(corners[*index], corners[(index + 1) % 3], point)
+                            == PredicateSign::Negative
+                    })?;
+                    let key = edge_key(vertices[edge], vertices[(edge + 1) % 3]);
+                    triangle = self
+                        .adjacency
+                        .get(&key)?
+                        .iter()
+                        .map(|(candidate, _)| *candidate)
+                        .find(|candidate| *candidate != triangle)?;
+                }
+            }
+        }
+        None
+    }
+
     fn insert_constraint_point(
         &mut self,
         boundary: usize,
         point: Point2,
     ) -> Result<usize, MeshError> {
-        if let Some((index, _)) =
-            self.vertices.iter().enumerate().find(|(_, vertex)| {
-                (vertex.point - point).norm() <= self.options.curve_tolerance * 0.1
-            })
-        {
+        let coincident = match &self.vertex_grid {
+            Some(grid) => {
+                let tolerance = self.options.curve_tolerance * 0.1;
+                grid.near(point, tolerance)
+                    .filter(|vertex| (self.point(*vertex) - point).norm() <= tolerance)
+                    .min()
+            }
+            None => self.coincident_vertex_by_scan(point),
+        };
+        // Every meshing test holds the grid to the scans it replaced.
+        #[cfg(test)]
+        assert_eq!(coincident, self.coincident_vertex_by_scan(point));
+        if let Some(index) = coincident {
             return Ok(index);
         }
         // Inserting a constraint point just beside a free bulk vertex creates a
@@ -1394,46 +1630,38 @@ impl MeshBuilder {
         // the free vertex onto the exact curve sample when its complete triangle
         // fan remains oriented and belongs to this material region. Constraint
         // vertices and points already used by another open chain stay fixed.
-        let protected = self
-            .internal_chains
-            .iter()
-            .flat_map(|chain| chain.iter().map(|(vertex, _)| *vertex))
-            .chain(self.internal_trace_vertices.iter().copied())
-            .collect::<BTreeSet<_>>();
-        let target_region = self.constraint_target_regions[boundary];
-        let snap_distance = self.options.target_edge_length * 0.3;
-        let relocatable = self
-            .vertices
-            .iter()
-            .enumerate()
-            .filter(|(index, vertex)| {
-                vertex.boundary.is_none()
-                    && !protected.contains(index)
-                    && (vertex.point - point).norm() <= snap_distance
-                    && !self.incident[*index].is_empty()
-                    && self.incident[*index].iter().all(|triangle_index| {
-                        let triangle = self.triangles[*triangle_index];
-                        if triangle.region != target_region {
-                            return false;
-                        }
-                        let points = triangle.vertices.map(|vertex| {
-                            if vertex == *index {
-                                point
-                            } else {
-                                self.point(vertex)
-                            }
-                        });
-                        orient2d(points[0], points[1], points[2]) == PredicateSign::Positive
-                    })
-            })
-            .min_by(|(_, left), (_, right)| {
-                (left.point - point)
-                    .norm()
-                    .total_cmp(&(right.point - point).norm())
-            })
-            .map(|(index, _)| index);
+        let relocatable = match &self.vertex_grid {
+            Some(grid) => {
+                let snap_distance = self.options.target_edge_length * 0.3;
+                let mut nearby = grid
+                    .near(point, snap_distance)
+                    .map(|vertex| ((self.point(vertex) - point).norm(), vertex))
+                    .filter(|(distance, _)| *distance <= snap_distance)
+                    .collect::<Vec<_>>();
+                nearby.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
+                let protected = if nearby.is_empty() {
+                    BTreeSet::new()
+                } else {
+                    self.protected_constraint_vertices()
+                };
+                nearby
+                    .into_iter()
+                    .map(|(_, vertex)| vertex)
+                    .find(|vertex| self.relocatable_onto(boundary, &protected, *vertex, point))
+            }
+            None => self.relocatable_vertex_by_scan(boundary, point),
+        };
+        #[cfg(test)]
+        assert_eq!(
+            relocatable,
+            self.relocatable_vertex_by_scan(boundary, point)
+        );
         if let Some(vertex) = relocatable {
             let incident = self.incident[vertex].iter().copied().collect::<Vec<_>>();
+            let from = self.vertices[vertex].point;
+            if let Some(grid) = &mut self.vertex_grid {
+                grid.moved(vertex, from, point);
+            }
             self.vertices[vertex].point = point;
             for triangle in incident {
                 let unchanged = self.triangles[triangle];
@@ -1441,9 +1669,16 @@ impl MeshBuilder {
             }
             return Ok(vertex);
         }
-        let (triangle_index, location) = self.containing_triangle(point).ok_or(
-            MeshError::Topology("internal boundary leaves its material region"),
-        )?;
+        let located = self
+            .vertex_grid
+            .as_ref()
+            .and_then(|grid| self.walk_to_point(grid.any_near(point)?, point))
+            .or_else(|| self.containing_triangle(point));
+        #[cfg(test)]
+        assert_eq!(located, self.containing_triangle(point));
+        let (triangle_index, location) = located.ok_or(MeshError::Topology(
+            "internal boundary leaves its material region",
+        ))?;
         let triangle = self.triangles[triangle_index];
         if triangle.region != self.constraint_target_regions[boundary] {
             return Err(MeshError::Topology(
@@ -1451,6 +1686,9 @@ impl MeshBuilder {
             ));
         }
         let vertex = self.add_vertex(point, None)?;
+        if let Some(grid) = &mut self.vertex_grid {
+            grid.insert(vertex, point);
+        }
         if location == PolygonLocation::Boundary {
             let edge = (0..3)
                 .map(|index| [triangle.vertices[index], triangle.vertices[(index + 1) % 3]])
@@ -3043,6 +3281,7 @@ impl MeshingJob {
                 }
                 if b.refine_once()? {
                     b.internal_chains.push(Vec::new());
+                    b.begin_constraint_points();
                     MeshingJobState::InsertInternalPoints {
                         boundary: 0,
                         sample: 0,
@@ -3066,6 +3305,7 @@ impl MeshingJob {
             }
             MeshingJobState::InsertInternalPoints { boundary, sample } => {
                 if sample == b.internal_samples[boundary].len() {
+                    b.end_constraint_points();
                     MeshingJobState::RecoverInternalEdges {
                         boundary,
                         segment: 0,
@@ -3091,6 +3331,7 @@ impl MeshingJob {
                         MeshingJobState::CutInternalBoundary { boundary: 0 }
                     } else {
                         b.internal_chains.push(Vec::new());
+                        b.begin_constraint_points();
                         MeshingJobState::InsertInternalPoints {
                             boundary: boundary + 1,
                             sample: 0,
@@ -3320,5 +3561,87 @@ impl MeshingJob {
             MeshingJobState::Done => MeshingJobState::Done,
         };
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A constraint's points go in the same with the vertex grid as by the
+    /// scans: on a lattice edge and a diagonal, where the walk ends on an
+    /// edge shared by two triangles, inside one far from the walk's start,
+    /// on an existing vertex, and beside a free vertex that moves onto it.
+    #[test]
+    fn constraint_points_go_in_alike_with_and_without_the_vertex_grid() {
+        let lattice = || {
+            let mut b = MeshBuilder::new(MeshingOptions::default(), crate::DomainRect::default());
+            let n = 8;
+            for y in 0..=n {
+                for x in 0..=n {
+                    let at = |i: usize| -1.0 + 2.0 * i as f64 / n as f64;
+                    b.add_vertex(Point2::new(at(x), at(y)), None).unwrap();
+                }
+            }
+            let vertex = |x: usize, y: usize| y * (n + 1) + x;
+            for y in 0..n {
+                for x in 0..n {
+                    for corners in [
+                        [vertex(x, y), vertex(x + 1, y), vertex(x + 1, y + 1)],
+                        [vertex(x, y), vertex(x + 1, y + 1), vertex(x, y + 1)],
+                    ] {
+                        b.push_triangle(b.ccw_triangle(corners, BACKGROUND_REGION).unwrap())
+                            .unwrap();
+                    }
+                }
+            }
+            b.constraint_target_regions.push(BACKGROUND_REGION);
+            b.internal_chains.push(vec![]);
+            b
+        };
+        let points = [
+            Point2::new(0.125, 0.0),
+            Point2::new(0.375, 0.375),
+            Point2::new(-0.9, 0.85),
+            Point2::new(0.5, 0.5),
+            Point2::new(0.28, -0.48),
+            Point2::new(0.6, 0.35),
+        ];
+        let insert = |grid: bool| {
+            let mut b = lattice();
+            if grid {
+                b.begin_constraint_points();
+            }
+            let inserted = points
+                .iter()
+                .map(|point| b.insert_constraint_point(0, *point).unwrap())
+                .collect::<Vec<_>>();
+            b.end_constraint_points();
+            (inserted, b)
+        };
+        let (with_grid, gridded) = insert(true);
+        let (by_scan, scanned) = insert(false);
+        assert_eq!(with_grid, by_scan);
+        assert_eq!(gridded.triangles, scanned.triangles);
+        assert_eq!(
+            gridded
+                .vertices
+                .iter()
+                .map(|vertex| vertex.point)
+                .collect::<Vec<_>>(),
+            scanned
+                .vertices
+                .iter()
+                .map(|vertex| vertex.point)
+                .collect::<Vec<_>>()
+        );
+        // The vertex at (0.5, 0.5) is reused and the one at (0.25, -0.5) moved.
+        assert_eq!(with_grid[3], 6 * 9 + 6);
+        assert_eq!(with_grid[4], 2 * 9 + 5);
+        assert_eq!(gridded.vertices.len(), 81 + 4);
+        for triangle in &gridded.triangles {
+            let [a, b, c] = gridded.triangle_points(*triangle);
+            assert_eq!(orient2d(a, b, c), PredicateSign::Positive);
+        }
     }
 }

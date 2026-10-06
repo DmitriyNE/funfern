@@ -3400,8 +3400,8 @@ above:
 - [x] "Recovering separated curves" holds one preparation slice for 1.4 s
   when a hole with a baffle through it is deleted at 137k triangles (2026-10-06:
   each flip of the chain recovery scanned every edge; a walk along the segment
-  now finds them, 1,256 ms to 41 ms, see that day's entry). The 37 ms left is
-  `insert_constraint_point` scanning every vertex for each chain point.
+  now finds them, 1,256 ms to 41 ms, and a vertex grid the chain's points,
+  41 ms to 6.6 ms; see that day's entries).
 - [ ] The budget's 60 Hz and Low Power Mode measurements (postponed
   2026-10-05; the machine has one panel and the mode is the user's to
   toggle). Quiet host and overlay scene are measured, see the spike doc.
@@ -19814,3 +19814,30 @@ to 41 ms with the same 154 flips, the first build's to 22 ms; what is left is
 `cfg(test)` both functions assert that the walk answers as the scan, so every
 meshing test in the core suite checks the identity: 521 recoveries with
 crossings, 560 already present and 19 that ran into a vertex on the segment.
+
+## 2026-10-06 — A baffle's points find their neighbours on a grid
+
+The 37 ms left in that slice was `insert_constraint_point`, run for each of the
+chain's 98 points: 31.5 ms looking for a free vertex within 0.3 edge lengths to
+move onto the point, a scan of every vertex that consulted a protected set,
+rebuilt on each call, before the cheap distance test; 5.1 ms looking for a
+vertex already at the point, another scan; and 1.0 ms locating the containing
+triangle, a scan in triangle order that happened to stop early here. While a
+constraint's points go in, the builder now holds the vertices on a uniform
+grid, built once per chain and kept current by the insertion, which is the
+only thing adding or moving a vertex then. Both vertex lookups take the grid's
+candidates with the scans' rules, the lowest-numbered vertex at the point and
+the nearest movable one with the lowest number among equals, and the
+protected set is built only when a candidate is in reach. The triangle is
+found by walking from one around a vertex near the point: the point is never
+at a vertex there, so it lies inside one triangle or on an edge, where the
+scan's answer is the lower-numbered of the two; a walk that leaves the mesh,
+meets a frozen triangle or runs long falls back to the scan. The older meshing
+job's insertion phase holds the grid the same way across its slices. The
+insertion falls to 3.2 ms, most of it building the grid, and the slice to
+6.6 ms. Under `cfg(test)` all three lookups assert they answer as the scans;
+over the core suite 604 insertions used the grid, 40 found a vertex at the
+point, 396 moved one and 166 of 168 locations walked.
+`constraint_points_go_in_alike_with_and_without_the_vertex_grid` inserts on a
+lattice edge and diagonal, far from the walk's start, on a vertex and beside
+one, and compares the meshes built with and without the grid.

@@ -1053,14 +1053,22 @@ fn recover_slit_chain(
         region,
     });
     builder.internal_chains.push(vec![]);
+    builder.begin_constraint_points();
     for (sample, trace) in samples {
         let vertex = if let Some(vertex) = trace.and_then(|trace| trace_vertices.get(&trace)) {
             *vertex
         } else {
-            builder.insert_constraint_point(constraint, sample.point)?
+            match builder.insert_constraint_point(constraint, sample.point) {
+                Ok(vertex) => vertex,
+                Err(error) => {
+                    builder.end_constraint_points();
+                    return Err(error);
+                }
+            }
         };
         builder.internal_chains[constraint].push((vertex, sample.t));
     }
+    builder.end_constraint_points();
     let mut segment = 0;
     let mut attempts = 0usize;
     while segment + 1 < builder.internal_chains[constraint].len() {
