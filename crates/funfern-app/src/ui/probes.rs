@@ -90,8 +90,7 @@ impl Playground {
                     self.spotlights.record(Spotlight::ProbePoint, response.rect);
                 }
                 if response.clicked() {
-                    self.probe_mode = (!selected).then_some(mode);
-                    self.pulse_mode = false;
+                    self.toggle_probe_mode(mode);
                 }
             }
         });

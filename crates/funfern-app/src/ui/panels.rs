@@ -530,8 +530,7 @@ impl Playground {
             .on_hover_text("Click in the scene to drop a pulse; click here again to stop")
             .clicked()
         {
-            self.pulse_mode = !self.pulse_mode;
-            self.probe_mode = None;
+            self.toggle_pulse_mode();
         }
         ui.add(egui::Slider::new(&mut self.pulse_amplitude, -5.0..=5.0).text("Pulse amplitude"));
         ui.add(egui::Slider::new(&mut self.pulse_width, 0.01..=0.25).text("Pulse width"));

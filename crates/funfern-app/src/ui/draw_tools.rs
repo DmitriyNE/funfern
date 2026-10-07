@@ -1194,6 +1194,48 @@ mod tests {
         );
     }
 
+    /// Reported: arming "+ Point" after a rectangle's first corner left the
+    /// rectangle under way, and the next click finished it rather than
+    /// placing the probe. The other way round, a drawing started with a probe
+    /// tool armed left it armed for the first click after the drawing.
+    #[test]
+    fn one_tool_owns_the_viewport() {
+        let probes = |state: &Playground| state.editor.document.model.probes.len();
+        let curves = |state: &Playground| state.editor.document.model.draft.geometry.curves.len();
+        let mut state = with_baffles(&[]);
+        super::super::test_support::activate(&mut state);
+        let context = viewport_context(&mut state);
+        let (before_probes, before_curves) = (probes(&state), curves(&state));
+        state.begin_draw(DrawTool::Rectangle);
+        let corner = state.screen(Point2::new(-0.6, 0.3), viewport());
+        let time = viewport_click(&mut state, &context, 1.0, egui::Modifiers::NONE, corner);
+        state.toggle_probe_mode(super::super::ProbePlacement::Point);
+        assert!(state.draw.is_none());
+        let at = state.screen(Point2::new(-0.4, 0.2), viewport());
+        let time = viewport_click(&mut state, &context, time + 1.0, egui::Modifiers::NONE, at);
+        assert_eq!(probes(&state), before_probes + 1, "{}", state.message);
+        assert_eq!(curves(&state), before_curves);
+
+        state.toggle_probe_mode(super::super::ProbePlacement::Point);
+        state.toggle_pulse_mode();
+        state.begin_draw(DrawTool::Rectangle);
+        assert!(!state.pulse_mode && state.probe_mode.is_none());
+        state.toggle_probe_mode(super::super::ProbePlacement::Point);
+        state.begin_draw(DrawTool::Rectangle);
+        assert!(state.probe_mode.is_none());
+        let far = state.screen(Point2::new(-0.3, -0.2), viewport());
+        let time = viewport_click(
+            &mut state,
+            &context,
+            time + 1.0,
+            egui::Modifiers::NONE,
+            corner,
+        );
+        viewport_click(&mut state, &context, time + 1.0, egui::Modifiers::NONE, far);
+        assert_eq!(curves(&state), before_curves + 1, "{}", state.message);
+        assert_eq!(probes(&state), before_probes + 1);
+    }
+
     /// A drawing owns the viewport. A double click beside a curve while
     /// drawing a loop places the drawing's points and leaves the curve
     /// alone, and a double click whose first click ends an open curve on a

@@ -773,7 +773,13 @@ impl Playground {
     fn notify(&mut self, message: impl Into<String>) {
         self.message = message.into();
     }
+    /// One tool owns the viewport at a time. A drawing takes every click
+    /// first, so a probe or pulse tool armed beside an unfinished one lost
+    /// its clicks to it; and a placement left armed through a drawing took
+    /// the first click after it.
     fn begin_draw(&mut self, tool: DrawTool) {
+        self.pulse_mode = false;
+        self.probe_mode = None;
         self.draw = Some(DrawGesture {
             tool,
             points: vec![],
@@ -781,6 +787,28 @@ impl Playground {
             refused: None,
         });
         self.selection = TopologySelection::None;
+    }
+    /// Arms probe placement `mode`, or disarms it when that kind is the one
+    /// armed, ending a drawing and the pulse tool.
+    fn toggle_probe_mode(&mut self, mode: ProbePlacement) {
+        let armed = self
+            .probe_mode
+            .is_some_and(|active| std::mem::discriminant(&active) == std::mem::discriminant(&mode));
+        self.probe_mode = (!armed).then_some(mode);
+        self.pulse_mode = false;
+        self.end_draw();
+    }
+    /// Arms the pulse tool, or disarms it, ending a drawing and probe
+    /// placement.
+    fn toggle_pulse_mode(&mut self) {
+        self.pulse_mode = !self.pulse_mode;
+        self.probe_mode = None;
+        self.end_draw();
+    }
+    fn end_draw(&mut self) {
+        if self.draw.take().is_some() {
+            self.invalidate_samples();
+        }
     }
     /// Whether a gesture or a placement is under way: anything Escape would
     /// cancel.

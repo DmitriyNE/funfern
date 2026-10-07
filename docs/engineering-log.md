@@ -20217,3 +20217,14 @@ pulse went into its cleared field in that same frame. Dropping a generation
 cleared the queue; Reset's install did not. It now clears the waiting pulses
 and a waiting Switch press too, which was meant for the medium Reset puts
 back at its authored laws. `reset_drops_what_waits_for_the_old_run`.
+
+## 2026-10-07 — One tool owns the viewport
+
+The probe tools and Place pulse armed their placement without ending a
+drawing under way, and a drawing takes every viewport click first: after a
+rectangle's first corner, "+ Point" and a click finished the rectangle and
+placed no probe. Starting a drawing likewise left a placement armed, which
+took the first click after the drawing ended. Arming a probe tool or the
+pulse tool now ends an unfinished drawing (`toggle_probe_mode`,
+`toggle_pulse_mode`), and starting a drawing disarms both.
+`one_tool_owns_the_viewport`.
