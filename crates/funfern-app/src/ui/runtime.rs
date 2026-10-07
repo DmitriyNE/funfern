@@ -728,34 +728,26 @@ impl Playground {
             .then(|| self.pending_pulse.take())
             .flatten()
             {
-                let mut increment = vec![0.0; active.canonical_operator.degrees_of_freedom()];
-                for (triangle, nodes) in active
-                    .mesh
-                    .triangles
-                    .iter()
-                    .zip(active.canonical_operator.element_nodes())
-                {
-                    if triangle.region != region {
-                        continue;
-                    }
-                    for node in nodes {
-                        let delta =
-                            active.canonical_operator.node_points()[*node as usize] - position;
-                        increment[*node as usize] = f64::from(self.pulse_amplitude)
-                            * (-0.5 * delta.dot(delta) / f64::from(self.pulse_width).powi(2)).exp();
-                    }
-                }
                 self.canonical_event_serial = self
                     .canonical_event_serial
                     .max(request.stats().processed_event())
                     .saturating_add(1)
                     .max(1);
-                match CanonicalGpuLiveEvent::primary_pulse(
-                    &active.canonical_operator,
-                    &increment,
-                    self.canonical_event_serial,
+                match pulse_increment(
+                    active,
+                    position,
+                    region,
+                    f64::from(self.pulse_amplitude),
+                    f64::from(self.pulse_width),
                 )
-                .map_err(|error| format!("{error:?}"))
+                .and_then(|increment| {
+                    CanonicalGpuLiveEvent::primary_pulse(
+                        &active.canonical_operator,
+                        &increment,
+                        self.canonical_event_serial,
+                    )
+                    .map_err(|error| format!("{error:?}"))
+                })
                 .and_then(|event| {
                     request
                         .queue_live_event(assets, event)
@@ -1208,6 +1200,29 @@ fn running_material_runtime(
         .unwrap_or(authored)
 }
 
+/// The field a pulse of `amplitude` and `width` at `position` adds, over the
+/// elements of `region`: the point source's carrier there, so it reaches
+/// only what a source at that spot would. Spread by straight-line distance,
+/// a pulse beside a baffle went straight through it.
+fn pulse_increment(
+    active: &PreparedTopology,
+    position: Point2,
+    region: RegionId,
+    amplitude: f64,
+    width: f64,
+) -> Result<Vec<f64>, String> {
+    let elements = active
+        .mesh
+        .triangles
+        .iter()
+        .map(|triangle| triangle.region == region)
+        .collect::<Vec<_>>();
+    let profile =
+        CanonicalForcing::point_profile(&active.canonical_operator, &elements, position, width)
+            .map_err(|error| error.to_string())?;
+    Ok(profile.into_iter().map(|value| amplitude * value).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1559,6 +1574,55 @@ mod tests {
             at_snapshot[0],
             at_clock[0]
         );
+    }
+
+    /// Reported: a pulse went straight through a baffle. It was spread by
+    /// straight-line distance over its region, and a unit pulse 0.03 from a
+    /// reflecting baffle put 0.39 on its far side, where a point source at
+    /// the same spot puts nothing.
+    #[test]
+    fn a_pulse_reaches_what_a_point_source_there_would() {
+        let mut state = super::super::test_support::with_baffles(&[]);
+        let active = activate(&mut state);
+        let position = Point2::new(-0.03, 0.0);
+        let region = state.region_at(position).unwrap();
+        let width = f64::from(state.pulse_width);
+        let increment = pulse_increment(&active, position, region, 1.0, width).unwrap();
+        let operator = &active.canonical_operator;
+        let elements = active
+            .mesh
+            .triangles
+            .iter()
+            .map(|triangle| triangle.region == region)
+            .collect::<Vec<_>>();
+        let source = funfern_core::PointSource {
+            position,
+            width,
+            region,
+            enabled: true,
+            ..Default::default()
+        };
+        let weights = CanonicalForcing::point_source(operator, source, &elements, 0.0).unwrap();
+        let points = operator.node_points();
+        // Behind the baffle within the pulse's reach, and in front of it.
+        let far = (0..points.len())
+            .filter(|node| points[*node].x > 0.0 && points[*node].y.abs() < 0.4)
+            .map(|node| increment[node])
+            .fold(0.0, f64::max);
+        let near = (0..points.len())
+            .filter(|node| points[*node].x < 0.0)
+            .map(|node| increment[node])
+            .fold(0.0, f64::max);
+        assert_eq!(far, 0.0, "the pulse reached behind the baffle");
+        assert!(near > 0.5, "the pulse reached {near} on its own side");
+        for (node, (pulse, weight)) in increment.iter().zip(weights.weights()).enumerate() {
+            assert_eq!(
+                *pulse > 0.0,
+                *weight > 0.0,
+                "node {node} at {:?}",
+                points[node]
+            );
+        }
     }
 
     /// A medium switched to twice its mass, with the snapshot that says so.

@@ -490,18 +490,11 @@ impl CanonicalForcing {
             }
         }
         let weights = if source.enabled {
-            let variance = source.width * source.width;
-            point_source_squared_distances(
-                operator.node_points(),
-                operator.element_nodes(),
-                elements,
-                source.position,
-                source.width,
-            )
-            .iter()
-            .zip(operator.primary_mass())
-            .map(|(squared, mass)| mass * (-0.5 * squared / variance).exp())
-            .collect()
+            Self::point_profile(operator, elements, source.position, source.width)?
+                .iter()
+                .zip(operator.primary_mass())
+                .map(|(profile, mass)| mass * profile)
+                .collect()
         } else {
             vec![0.0; operator.degrees_of_freedom()]
         };
@@ -511,6 +504,35 @@ impl CanonicalForcing {
             support,
             CanonicalRateDrive::authored(source.signal, anchor_time)?,
         )
+    }
+
+    /// A peak-one Gaussian of `width` about `position`, at each node a point
+    /// source there drives over `elements`: nothing behind a wall, nothing of
+    /// another region and nothing beyond its reach, where it is zero. The
+    /// point source's carrier, and a pulse's shape, so neither reaches a node
+    /// the other does not.
+    pub fn point_profile(
+        operator: &CanonicalWaveOperator,
+        elements: &[bool],
+        position: Point2,
+        width: f64,
+    ) -> Result<Vec<f64>, WaveError> {
+        if elements.len() != operator.element_nodes().len() || !width.is_finite() || width <= 0.0 {
+            return Err(WaveError::Unsupported(
+                "a point profile does not match the generation it reaches",
+            ));
+        }
+        let variance = width * width;
+        Ok(point_source_squared_distances(
+            operator.node_points(),
+            operator.element_nodes(),
+            elements,
+            position,
+            width,
+        )
+        .iter()
+        .map(|squared| (-0.5 * squared / variance).exp())
+        .collect())
     }
 
     /// Integrated nodal source rate at one physical time. Exposed for

@@ -20174,3 +20174,14 @@ read 1.193 where the snapshot held 0.833. `primary_field` now takes the time
 to read the maps at; the live field keeps the latest clock and the snapshot's
 field is read at `full_snapshot_seconds`, as its stored energy is. Media whose
 maps do not move are read as before. `a_snapshot_field_is_read_at_the_snapshots_step`.
+
+## 2026-10-07 — A pulse stops at a wall
+
+A pulse was a Gaussian spread by straight-line distance over every node of
+the region it was placed in, so it went straight through a baffle: a unit
+pulse 0.03 from a reflecting baffle put 0.39 on the far side, where a point
+source at the same spot puts nothing, its carrier reaching only the nodes it
+sees (`point_source_squared_distances`). The carrier is now
+`CanonicalForcing::point_profile`, which the point source scales by the mass
+and a pulse by its amplitude, so the two reach the same nodes.
+`a_pulse_reaches_what_a_point_source_there_would`.
