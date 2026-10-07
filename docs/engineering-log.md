@@ -20238,3 +20238,13 @@ ever being touched. It now follows the document while it is not being typed
 in, as the region name field does, and commits only when it lets go, which
 Enter in the field does. `an_undone_rename_shows_at_once_and_stays_undone`,
 which also renames through the field.
+
+## 2026-10-07 — A picked colour stays picked
+
+The material colour picker commits to the document at once, and the panel's
+unapplied edits kept the colour from before it: Apply, for any other edit,
+wrote the old colour back, and with nothing else changed the colour alone read
+as an edit not applied, which also held a click on a subdomain back from
+selecting its material. A committed colour now goes into the panel's edits as
+well, as Fire now's committed drive does, and the other edits stay pending.
+`a_picked_colour_survives_apply`.

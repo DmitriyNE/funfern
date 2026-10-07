@@ -435,8 +435,21 @@ impl Playground {
                     if staged != material.color {
                         let mut updated = material.clone();
                         updated.color = staged;
-                        if let Err(error) = self.editor.update_material(updated) {
-                            self.notify(error);
+                        match self.editor.update_material(updated) {
+                            // The panel's unapplied edits take the committed
+                            // colour, as they take what Fire now commits.
+                            // Left out, Apply wrote the old colour back, and
+                            // the colour alone read as an edit not applied.
+                            Ok(_) => {
+                                if let Some(edit) = self
+                                    .material_edit
+                                    .as_mut()
+                                    .filter(|edit| edit.id == material.id)
+                                {
+                                    edit.color = staged;
+                                }
+                            }
+                            Err(error) => self.notify(error),
                         }
                     }
                 }
@@ -1942,6 +1955,54 @@ mod tests {
         state.material_edit = None;
         state.select_region(region);
         assert_eq!(state.material_selection, DEFAULT_MATERIAL);
+    }
+
+    /// Reported: Apply put a material's old colour back. The picker commits
+    /// its colour to the document at once, and the panel's unapplied edits
+    /// kept the colour from before, so Apply, for any other edit, wrote it
+    /// back; with no other edit, the colour alone read as one not applied.
+    #[test]
+    fn a_picked_colour_survives_apply() {
+        let context = egui::Context::default();
+        let render = |state: &mut Playground| {
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                state.materials_panel(ui);
+            });
+        };
+        let picked = [10, 200, 30];
+        let mut state = Playground::default();
+        let id = state.material_selection;
+        render(&mut state);
+        state.material_color_edit = Some((id, picked));
+        render(&mut state);
+        assert_eq!(
+            state
+                .editor
+                .document
+                .model
+                .draft
+                .material(id)
+                .unwrap()
+                .color,
+            picked
+        );
+        assert!(
+            !state.material_edits_pending(),
+            "the colour alone is applied"
+        );
+
+        let mut state = Playground::default();
+        let id = state.material_selection;
+        render(&mut state);
+        state.material_edit.as_mut().unwrap().name = "Pending".into();
+        state.material_color_edit = Some((id, picked));
+        render(&mut state);
+        assert!(state.material_edits_pending());
+        let edit = state.material_edit.clone().unwrap();
+        state.editor.update_material(edit).unwrap();
+        let applied = state.editor.document.model.draft.material(id).unwrap();
+        assert_eq!(applied.color, picked);
+        assert_eq!(applied.name, "Pending");
     }
 
     /// A scene that comes in keeps none of the outgoing one's materials open.
