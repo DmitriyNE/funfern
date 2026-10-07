@@ -20450,3 +20450,17 @@ drags now hand their start to `apply_transform_updates_from_during_edit`,
 which compares the result with the draft as it stands, and a frame that does
 not follow takes the one it began the edit with.
 `a_moved_subdomain_carries_its_frame`.
+
+## 2026-10-08 — A refused clipboard is a notice, not a stopped app
+
+Copy scene link wrote the browser clipboard itself and dropped the promise,
+on top of the write egui makes for `copy_text`. A browser that refused the
+write rejected that promise with nobody waiting for it, and the page's
+`unhandledrejection` handler put "funfern stopped. Reload the page" over the
+running app; the status line had already said "Scene link copied". On the
+web the copy is now one write, awaited, whose outcome comes back as
+`FileEvent::LinkCopied`: success on the status line, a refusal in a notice
+that names the browser's reason and points to the link in the address bar.
+It leaves a save or capture under way alone. Checked on a scratch build in
+Chrome with `writeText` made to reject, as a denied write does.
+`a_refused_copy_is_told_and_leaves_a_save_alone`.

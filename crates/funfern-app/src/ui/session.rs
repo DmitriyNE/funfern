@@ -193,6 +193,16 @@ impl Playground {
                     self.snapshot_state = SnapshotState::Idle;
                     self.raise_notice(title, error);
                 }
+                // A copy settles on its own, whatever save or capture is under
+                // way, so it leaves their state alone.
+                FileEvent::LinkCopied(Ok(())) => self.notify("Scene link copied"),
+                FileEvent::LinkCopied(Err(error)) => self.raise_notice(
+                    "Scene link not copied",
+                    format!(
+                        "The browser refused the clipboard ({error}). The link is in the \
+                         address bar; copy it from there."
+                    ),
+                ),
             }
         }
         if let Some(result) = self.load.as_mut().and_then(|load| load.advance(1)) {
@@ -486,13 +496,19 @@ impl Playground {
         {
             Ok(link) => {
                 self.link_in_address = true;
-                context.copy_text(link.clone());
-                let _ = &link;
-                #[cfg(target_arch = "wasm32")]
-                if let Some(clipboard) = web_sys::window().map(|w| w.navigator().clipboard()) {
-                    let _ = clipboard.write_text(&link);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    context.copy_text(link);
+                    self.notify("Scene link copied");
                 }
-                self.notify("Scene link copied");
+                // The browser can refuse the clipboard, so the outcome is told
+                // when the write settles. egui's own copy is not used there: it
+                // writes too, and would try a second time what was refused.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = context;
+                    files::copy_link(self.sender.clone(), link);
+                }
             }
             Err(error) => self.notify(error),
         }
@@ -1285,6 +1301,35 @@ mod tests {
         state.refresh_link();
         let expected = &funfern_app::topology_examples::catalog()[4].document;
         assert_eq!(&scene_in(&address().unwrap()), expected);
+    }
+
+    /// Reported: a browser that refused the clipboard covered the running
+    /// app with "funfern stopped". The refusal is a notice now, and a copy
+    /// settling during a save leaves the save's state alone.
+    #[test]
+    fn a_refused_copy_is_told_and_leaves_a_save_alone() {
+        let mut state = Playground {
+            file_busy: true,
+            ..Default::default()
+        };
+        state
+            .sender
+            .send(FileEvent::LinkCopied(Err(
+                "NotAllowedError: Write permission denied.".into(),
+            )))
+            .unwrap();
+        state.update_files();
+        assert!(state.file_busy);
+        assert!(
+            matches!(&notices(&state)[..], [("Scene link not copied", text)]
+                if text.contains("NotAllowedError") && text.contains("address bar")),
+            "{:?}",
+            notices(&state)
+        );
+        state.sender.send(FileEvent::LinkCopied(Ok(()))).unwrap();
+        state.update_files();
+        assert_eq!(state.message, "Scene link copied");
+        assert!(state.file_busy);
     }
 
     #[test]

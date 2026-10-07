@@ -7,6 +7,10 @@ pub enum FileEvent {
     Cancelled,
     /// What did not happen, as a notice's title, and why.
     Error(&'static str, String),
+    /// Whether the browser took the scene link onto the clipboard, and if not,
+    /// why. A native copy cannot be refused, so only the browser sends it.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    LinkCopied(Result<(), String>),
 }
 
 const NOT_OPENED: &str = "Scene not opened";
@@ -136,6 +140,30 @@ pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>, kind: SaveKind) {
             FileEvent::Cancelled
         };
         let _ = sender.send(result);
+    });
+}
+
+/// Writes `text` to the clipboard and reports how that went. The browser can
+/// refuse the write, and a refusal nobody waits for reaches the page's failure
+/// handler, which takes it for the app having stopped.
+#[cfg(target_arch = "wasm32")]
+pub fn copy_link(sender: Sender<FileEvent>, text: String) {
+    use wasm_bindgen::JsCast;
+
+    wasm_bindgen_futures::spawn_local(async move {
+        let result = match web_sys::window() {
+            Some(window) => wasm_bindgen_futures::JsFuture::from(
+                window.navigator().clipboard().write_text(&text),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| match error.dyn_ref::<js_sys::Error>() {
+                Some(error) => format!("{}: {}", error.name(), error.message()),
+                None => format!("{error:?}"),
+            }),
+            None => Err("The page has no window".into()),
+        };
+        let _ = sender.send(FileEvent::LinkCopied(result));
     });
 }
 
