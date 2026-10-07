@@ -114,6 +114,11 @@ impl Playground {
     /// next runtime update so none of it runs on under the new geometry.
     pub(super) fn scene_replaced(&mut self, fresh: bool) {
         self.selection = TopologySelection::None;
+        // A pivot moved by hand is kept for the selection it was moved for,
+        // and the incoming scene numbers its spans from the same small ids:
+        // selecting a span there turned the gizmo about the outgoing scene's
+        // pivot.
+        self.gizmo_pivot = None;
         self.selected_probe = None;
         self.draw = None;
         // A drag under way is of the outgoing scene: a load finishing during
@@ -577,6 +582,79 @@ mod tests {
         assert_eq!(state.editor.document.model.draft.geometry.domain, domain);
         assert_eq!(state.editor.history_len(), (0, 0));
         assert!(!state.editor.editing());
+    }
+
+    /// Reported: a pivot moved by hand on one scene's span came back on the
+    /// span sharing its id in the next scene opened, so rotation and scaling
+    /// turned about a point of the outgoing scene.
+    #[test]
+    fn a_moved_pivot_stays_with_its_scene() {
+        let mut state = with_baffles(&[]);
+        let context = viewport_context(&mut state);
+        let none = egui::Modifiers::NONE;
+        let on_baffle = state.screen(Point2::new(0.0, 0.25), viewport());
+        let mut time = viewport_click(&mut state, &context, 1.0, none, on_baffle);
+        let (pivot, from, ..) = state.transform_gizmo(viewport()).unwrap();
+        let to = from + egui::vec2(100.0, -50.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: none,
+        };
+        let events = vec![egui::Event::PointerMoved(from), button(from, true)];
+        viewport_frame(&mut state, &context, time, none, events);
+        for step in 1..=8 {
+            let at = from + (to - from) * (step as f32 / 8.0);
+            time += 0.02;
+            viewport_frame(
+                &mut state,
+                &context,
+                time,
+                none,
+                vec![egui::Event::PointerMoved(at)],
+            );
+        }
+        viewport_frame(
+            &mut state,
+            &context,
+            time + 0.1,
+            none,
+            vec![button(to, false)],
+        );
+        let moved = state.transform_gizmo(viewport()).unwrap().0;
+        assert!((moved - pivot).norm() > 0.3, "{pivot:?} to {moved:?}");
+        let moved_for = state.selection.spans().cloned().unwrap();
+
+        // Its curve's spans are numbered as the outgoing baffle's were.
+        let mut other = TopologyEditor::default();
+        other
+            .create_boundary_baffle(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.9, -0.6),
+                    Point2::new(-0.3, -0.6),
+                    Point2::new(0.3, -0.6),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        settle(&mut other);
+        state.set_document(other.document, true, true).unwrap();
+        settle(&mut state.editor);
+        viewport_frame(&mut state, &context, time + 1.0, none, vec![]);
+        let on_new = state.screen(Point2::new(0.0, -0.6), viewport());
+        viewport_click(&mut state, &context, time + 2.0, none, on_new);
+        let selected = state.selection.spans().cloned().unwrap();
+        assert_eq!(selected, moved_for, "the same ids selected");
+        let span = selected
+            .iter()
+            .map(|target| match target {
+                TopologySpanTarget::Curve(span) => *span,
+                TopologySpanTarget::Outer(_) => unreachable!(),
+            })
+            .collect();
+        let own = state.selection_pivot(&span).unwrap();
+        assert_eq!(state.transform_gizmo(viewport()).unwrap().0, own);
     }
 
     /// A scene that replaces the whole document opens framed, as launch

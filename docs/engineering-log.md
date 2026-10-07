@@ -20391,3 +20391,14 @@ curve 5 px inside it and opened its readout, where the baffle should have
 gained a control (7 stayed 7). Drawing and the double click now take the
 contour's rectangle from one place, `far_field_contour`, which has none while
 it is hidden. `a_hidden_far_field_contour_leaves_a_double_click_to_the_curve`.
+
+## 2026-10-07 — A moved pivot stays with its scene
+
+A transform pivot moved by hand is kept with the selection it was moved for,
+and came back whenever that selection did. A scene coming in cleared the
+selection and kept the pivot, and numbers its spans from the same small ids:
+a baffle's span 2 with its pivot moved to (0.35, 0.425), then another scene
+opened and its span 2 selected, had the gizmo turn about (0.35, 0.425) rather
+than the span's own centre at (0, −0.6). `scene_replaced` now drops the moved
+pivot, Undo and Redo across a scene included.
+`a_moved_pivot_stays_with_its_scene`.
