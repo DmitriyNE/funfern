@@ -20372,3 +20372,13 @@ became −1 to 1.4, with history `(0, 0)` and nothing to undo. Undo cancels a
 gesture before it steps, so only a load or an opened example reached this.
 `scene_replaced` now drops the drag; its pending edit left with the outgoing
 editor. `a_load_ends_a_drag_under_way`.
+
+## 2026-10-07 — An armed placement takes no drags
+
+Placing a pulse or a probe returned from the viewport only on a click, so a
+press that became a drag fell through to the geometry drags: with + Point
+armed, an 80 px drag over a baffle carried its upper half from x 0 to 0.28,
+added a history step and left the placement armed; a pulse armed did the
+same. A placement now owns the primary button as a drawing does, acting on
+its clicks alone; panning and zoom are taken before it.
+`a_drag_while_placing_leaves_the_geometry_alone`.

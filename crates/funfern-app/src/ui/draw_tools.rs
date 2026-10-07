@@ -1209,6 +1209,49 @@ mod tests {
         assert!(state.draw.is_none(), "opening it again starts nothing");
     }
 
+    /// Reported: with + Point armed, a press and drag over a baffle reshaped
+    /// it, the placement still armed; a pulse armed let it through the same
+    /// way. Only a placement's clicks reach the viewport.
+    #[test]
+    fn a_drag_while_placing_leaves_the_geometry_alone() {
+        for pulse in [false, true] {
+            let mut state = with_baffles(&[]);
+            let context = viewport_context(&mut state);
+            let geometry = state.editor.document.model.draft.geometry.clone();
+            let history = state.editor.history_len();
+            if pulse {
+                state.pulse_mode = true;
+            } else {
+                state.probe_mode = Some(super::super::ProbePlacement::Point);
+            }
+            let from = state.screen(Point2::new(0.0, 0.25), viewport());
+            let none = egui::Modifiers::NONE;
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: none,
+            };
+            let events = vec![egui::Event::PointerMoved(from), button(from, true)];
+            viewport_frame(&mut state, &context, 1.0, none, events);
+            for step in 1..=8 {
+                let at = from + egui::vec2(10.0 * step as f32, 0.0);
+                let moved = vec![egui::Event::PointerMoved(at)];
+                viewport_frame(&mut state, &context, 1.0 + 0.02 * step as f64, none, moved);
+            }
+            let to = from + egui::vec2(80.0, 0.0);
+            viewport_frame(&mut state, &context, 1.3, none, vec![button(to, false)]);
+            assert_eq!(
+                state.editor.document.model.draft.geometry, geometry,
+                "pulse {pulse}"
+            );
+            assert_eq!(state.editor.history_len(), history, "pulse {pulse}");
+            assert!(state.drag.is_none() && !state.editor.editing());
+            assert_eq!(state.pulse_mode, pulse);
+            assert_eq!(state.probe_mode.is_some(), !pulse);
+        }
+    }
+
     /// Reported: two quick clicks beside a baffle placed one pulse, and the
     /// second, a double click, inserted a control into the baffle. Placing a
     /// segment probe the same way kept its start and inserted a control in

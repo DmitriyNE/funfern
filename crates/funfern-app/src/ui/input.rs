@@ -197,14 +197,21 @@ impl Playground {
             let _ = draw;
             return;
         }
-        if self.pulse_mode && response.clicked() {
-            if let Some(pos) = pointer {
+        // An armed placement owns the viewport as a drawing does: only its
+        // clicks act. A press that became a drag used to fall through and
+        // reshape the baffle under it, with the placement still armed.
+        if self.pulse_mode {
+            if response.clicked()
+                && let Some(pos) = pointer
+            {
                 self.place_pulse(self.world(pos, r));
             }
             return;
         }
-        if self.probe_mode.is_some() && response.clicked() {
-            if let Some(pos) = pointer {
+        if self.probe_mode.is_some() {
+            if response.clicked()
+                && let Some(pos) = pointer
+            {
                 self.probe_placement_click(
                     self.world(pos, r),
                     self.snapping(ui.input(|input| input.modifiers.shift)),
