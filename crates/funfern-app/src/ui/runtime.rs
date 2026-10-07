@@ -76,7 +76,7 @@ impl Playground {
         self.canonical_event_serial = 0;
         self.canonical_event_observed = 0;
         self.solver_fault = None;
-        self.pending_pulse = None;
+        self.pending_pulses.clear();
         self.pending_switch = None;
         self.probe_upload = None;
         self.restart_probe_traces();
@@ -723,12 +723,15 @@ impl Playground {
         }
         if let Some(active) = self.runtime.active() {
             let dt = self.solver_time_step();
+            // A pulse leaves the queue once the device has it. A generation
+            // busy with another event takes it a frame or two later; taken off
+            // before it was sent, the second of two quick clicks was lost.
             if let Some((position, region)) = (self.uploading.is_none()
                 && self.source_commit.is_none())
-            .then(|| self.pending_pulse.take())
+            .then(|| self.pending_pulses.front().copied())
             .flatten()
             {
-                self.canonical_event_serial = self
+                let serial = self
                     .canonical_event_serial
                     .max(request.stats().processed_event())
                     .saturating_add(1)
@@ -744,7 +747,7 @@ impl Playground {
                     CanonicalGpuLiveEvent::primary_pulse(
                         &active.canonical_operator,
                         &increment,
-                        self.canonical_event_serial,
+                        serial,
                     )
                     .map_err(|error| format!("{error:?}"))
                 })
@@ -753,16 +756,33 @@ impl Playground {
                         .queue_live_event(assets, event)
                         .map_err(str::to_owned)
                 }) {
-                    Ok(()) => {}
-                    Err(error) => self.message = error,
+                    Ok(()) => {
+                        self.canonical_event_serial = serial;
+                        self.pending_pulses.pop_front();
+                    }
+                    Err(error) => {
+                        if live_event_fallback(&error, false) != LiveEventFallback::Retry {
+                            self.pending_pulses.pop_front();
+                            self.message = error;
+                        }
+                    }
                 }
             }
+            // A Switch press waits for a busy generation as a pulse does.
             if let Some(material) = (self.uploading.is_none() && self.source_commit.is_none())
-                .then(|| self.pending_switch.take())
+                .then_some(self.pending_switch)
                 .flatten()
             {
                 let active = active.clone();
-                self.send_material_switch(&active, display, request, assets, material);
+                match self.send_material_switch(&active, display, request, assets, material) {
+                    Ok(()) => self.pending_switch = None,
+                    Err(error) => {
+                        if live_event_fallback(&error, false) != LiveEventFallback::Retry {
+                            self.pending_switch = None;
+                            self.message = error;
+                        }
+                    }
+                }
             }
             // Drain once the packed candidate is ready so begin_handoff gets a
             // complete requested-step boundary. After that, keep advancing the
@@ -1011,10 +1031,9 @@ impl Playground {
         request: &mut CanonicalGpuRequest,
         assets: &mut Assets<ShaderBuffer>,
         material: MaterialId,
-    ) {
+    ) -> Result<(), String> {
         let Some(temporal) = &active.canonical_temporal_operator else {
-            self.message = "This medium has no Switch to throw".into();
-            return;
+            return Err("This medium has no Switch to throw".into());
         };
         let runtime = running_material_runtime(display, request, temporal.initial_runtime());
         let Some(ramp) = self
@@ -1027,7 +1046,7 @@ impl Playground {
             .find(|candidate| candidate.id == material)
             .map(|found| found.switch_ramp)
         else {
-            return;
+            return Ok(());
         };
         let heading = self.switch_targets.get(&material).copied().or_else(|| {
             runtime
@@ -1037,32 +1056,22 @@ impl Playground {
                 .map(|record| record.switch().target_blend() >= 0.5)
         });
         let Some(heading) = heading else {
-            self.message = "This material has no Switch in the running generation".into();
-            return;
+            return Err("This material has no Switch in the running generation".into());
         };
-        self.canonical_event_serial = self
+        let serial = self
             .canonical_event_serial
             .max(request.stats().processed_event())
             .saturating_add(1)
             .max(1);
-        match CanonicalGpuLiveEvent::temporal_switch_in(
-            &runtime,
-            material,
-            !heading,
-            ramp,
-            self.canonical_event_serial,
-        )
-        .map_err(|error| format!("{error:?}"))
-        .and_then(|event| {
-            request
-                .queue_live_event(assets, event)
-                .map_err(str::to_owned)
-        }) {
-            Ok(()) => {
-                self.switch_targets.insert(material, !heading);
-            }
-            Err(error) => self.message = error,
-        }
+        let event =
+            CanonicalGpuLiveEvent::temporal_switch_in(&runtime, material, !heading, ramp, serial)
+                .map_err(|error| format!("{error:?}"))?;
+        request
+            .queue_live_event(assets, event)
+            .map_err(str::to_owned)?;
+        self.canonical_event_serial = serial;
+        self.switch_targets.insert(material, !heading);
+        Ok(())
     }
 
     /// A device failure during a run pauses it at the last accepted step,
@@ -1623,6 +1632,79 @@ mod tests {
                 points[node]
             );
         }
+    }
+
+    /// Reported: a pulse placed while the device was still taking another
+    /// event was lost. It came off its slot before it was sent, and the
+    /// refusal of a busy generation dropped it. A Switch pressed then went
+    /// the same way. Both now wait for the generation to take them.
+    #[test]
+    fn a_pulse_or_switch_waits_for_a_busy_generation() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame =
+            |state: &mut Playground, request: &mut CanonicalGpuRequest, processed: bool| {
+                world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                    if processed {
+                        request.process_live_event(&mut assets);
+                    }
+                    let mut queue = bevy::ecs::world::CommandQueue::default();
+                    let mut commands = Commands::new(&mut queue, world);
+                    state.refresh_runtime(
+                        request,
+                        &display,
+                        &mut recorders,
+                        &vector,
+                        &mut assets,
+                        &mut commands,
+                        1.0 / 60.0,
+                    );
+                });
+            };
+        let mut state = Playground::default();
+        let material = state.editor.document.model.draft.materials[0].clone();
+        let switch = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Switchable medium" && preset.row == LawPresetRow::Mass)
+            .unwrap();
+        state
+            .editor
+            .update_material(apply_law_preset(switch, &material).unwrap())
+            .unwrap();
+        settle(&mut state.editor);
+        activate(&mut state);
+        state.requested_revision = Some(state.editor.revision);
+        state.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut state, &mut request, false);
+
+        state.place_pulse(Point2::new(-0.2, 0.1));
+        state.place_pulse(Point2::new(-0.1, 0.1));
+        frame(&mut state, &mut request, false);
+        assert!(request.live_event_pending());
+        assert_eq!(state.pending_pulses.len(), 1, "the second waits");
+        frame(&mut state, &mut request, false);
+        assert_eq!(state.pending_pulses.len(), 1, "{}", state.message);
+        state.request_material_switch();
+        frame(&mut state, &mut request, false);
+        assert_eq!(state.pending_switch, Some(material.id), "{}", state.message);
+
+        frame(&mut state, &mut request, true);
+        assert!(state.pending_pulses.is_empty(), "the second pulse went");
+        assert_eq!(
+            state.pending_switch,
+            Some(material.id),
+            "the Switch waits for it"
+        );
+        frame(&mut state, &mut request, true);
+        assert_eq!(state.pending_switch, None, "{}", state.message);
+        assert_eq!(state.switch_targets.get(&material.id), Some(&true));
+        assert!(request.live_event_pending());
     }
 
     /// A medium switched to twice its mass, with the snapshot that says so.

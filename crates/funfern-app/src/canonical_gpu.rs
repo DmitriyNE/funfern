@@ -4733,6 +4733,21 @@ impl CanonicalGpuRequest {
             .is_some_and(|handoff| handoff.stats.submitted.load(Ordering::Acquire) != 0)
     }
 
+    /// Settles the queued live event as the device's acknowledgement and
+    /// `settle_canonical_live_event` would, for host tests that have no
+    /// render world.
+    #[cfg(test)]
+    pub fn process_live_event(&mut self, assets: &mut Assets<ShaderBuffer>) {
+        let Some(event) = self.live_event.take() else {
+            return;
+        };
+        self.stats
+            .processed_event
+            .store(event.serial, Ordering::Relaxed);
+        assets.remove(event.upload.id());
+        self.revision = self.revision.wrapping_add(1).max(1);
+    }
+
     pub fn queue_live_event(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,

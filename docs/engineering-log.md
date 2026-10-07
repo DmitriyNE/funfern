@@ -20196,3 +20196,15 @@ placing a segment probe the same way kept its start and lost its end to the
 same insertion. A drawing already owned the viewport against this; placing a
 pulse or a probe now does too, and each click of a double click places.
 `a_double_click_while_placing_places_twice`.
+
+## 2026-10-07 — A pulse waits for a busy generation
+
+A placed pulse came off its slot before it was sent, so when the generation
+was still taking another event the refusal - "another canonical transaction
+is pending" - dropped it: the second of two quick pulses never reached the
+device. The slot was single too, so a click while a generation uploaded
+replaced the one before. Pulses now wait in a queue and leave it once the
+device has them; a busy generation keeps the front one for a later frame, and
+any other refusal drops it with its message. A Switch pressed while an event
+was pending was lost the same way, and now waits the same way.
+`a_pulse_or_switch_waits_for_a_busy_generation`.

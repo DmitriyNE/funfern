@@ -184,7 +184,10 @@ pub struct Playground {
     pub(super) pulse_preview: PulsePreview,
     pub(super) pulse_amplitude: f32,
     pub(super) pulse_width: f32,
-    pub(super) pending_pulse: Option<(Point2, RegionId)>,
+    /// Pulses placed and not yet taken by the device, oldest first. One
+    /// waits while the generation is busy with another event; a single slot
+    /// lost the second of two quick clicks.
+    pub(super) pending_pulses: VecDeque<(Point2, RegionId)>,
     /// A material Switch asked for by its button or hotkey, sent at the next
     /// frame that can queue a live event.
     pub(super) pending_switch: Option<MaterialId>,
@@ -459,7 +462,7 @@ impl Default for Playground {
             pulse_preview: PulsePreview::default(),
             pulse_amplitude: 1.0,
             pulse_width: 0.06,
-            pending_pulse: None,
+            pending_pulses: VecDeque::new(),
             pending_switch: None,
             switch_targets: std::collections::BTreeMap::new(),
             switch_states: Vec::new(),
