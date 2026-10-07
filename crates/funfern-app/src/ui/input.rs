@@ -393,6 +393,9 @@ impl Playground {
                         }
                     });
                 } else {
+                    // A marquee selects spans, as a click on empty canvas
+                    // clears, so a selected probe goes either way.
+                    self.selected_probe = None;
                     let base = self.selection.spans().cloned().unwrap_or_default();
                     self.drag = Some(DragGesture::Marquee {
                         start: pos,

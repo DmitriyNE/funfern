@@ -20317,3 +20317,13 @@ also drop what the name fields held, as they drop the Materials panel's
 edits. Either alone keeps the reported sequence undone.
 `deselecting_keeps_an_undone_rename_undone`,
 `moving_the_selection_keeps_an_undone_region_rename_undone`.
+
+## 2026-10-07 — A new selection replaces a selected probe
+
+A probe selected before a shape was drawn stayed selected under the new
+curve's highlight, and Delete, which takes a selected probe first, removed the
+probe and left the rectangle: probes 1 to 0, curves 2 to 2. Finishing a
+drawing selects the curve through `select_curve`, which now drops the probe as
+a click on a curve does; so do the Edit panel's Features entries and a
+marquee, which selected spans with the probe still selected.
+`a_new_shape_replaces_a_selected_probe_for_delete`.

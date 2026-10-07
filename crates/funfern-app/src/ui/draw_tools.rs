@@ -256,6 +256,8 @@ impl Playground {
             .create_open_curve(spline, purpose, start, end)
             .map(|edit| edit.curve)
     }
+    /// Selects every span of a curve, and nothing else: a probe left
+    /// selected outranked the curve for Delete.
     pub(super) fn select_curve(&mut self, id: CurveId) {
         if let Some(curve) = self
             .editor
@@ -267,6 +269,7 @@ impl Playground {
             .iter()
             .find(|curve| curve.id == id)
         {
+            self.selected_probe = None;
             self.selection = TopologySelection::Spans(
                 curve
                     .spans
@@ -738,6 +741,77 @@ mod tests {
             "one undo brings all three back"
         );
     }
+    /// Reported: a probe selected before a rectangle was drawn stayed
+    /// selected under the new curve's highlight, and Delete took the probe
+    /// and left the rectangle. A curve selected from the Edit panel's
+    /// Features list did the same.
+    #[test]
+    fn a_new_shape_replaces_a_selected_probe_for_delete() {
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        // A hole, so its deletion merges no subdomains and asks nothing.
+        let mut state = Playground {
+            closed_purpose: ClosedPurpose::Hole,
+            ..Playground::default()
+        };
+        let probe = state.editor.document.model.probes[0].id;
+        state.selected_probe = Some(probe);
+        let curves = state.editor.document.model.draft.geometry.curves.len();
+        state.begin_draw(DrawTool::Rectangle);
+        for point in [Point2::new(0.537, 0.562), Point2::new(0.873, 0.818)] {
+            state.draw_click(point, ScreenPoint::new(0.0, 0.0), viewport, true);
+        }
+        assert_eq!(
+            state.editor.document.model.draft.geometry.curves.len(),
+            curves + 1,
+            "the rectangle was refused: {}",
+            state.message
+        );
+        assert_eq!(state.selected_probe, None);
+        assert_eq!(
+            state.deletion_offer().map(|offer| offer.label),
+            Some("Delete curve")
+        );
+        settle(&mut state.editor);
+        state.delete_selection();
+        assert!(state.pending_merge.is_none(), "{}", state.message);
+        assert_eq!(
+            state.editor.document.model.draft.geometry.curves.len(),
+            curves
+        );
+        assert_eq!(state.editor.document.model.probes.len(), 1);
+
+        // From the Features list.
+        state.selected_probe = Some(probe);
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut time = 0.0;
+        let mut pass = |state: &mut Playground, events| {
+            time += 1.0;
+            let input = egui::RawInput {
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let output = context.run_ui(input, |ui| state.edit_panel(ui));
+            super::super::test_support::laid_out(&output)
+        };
+        let widgets = pass(&mut state, vec![]);
+        let features = widgets
+            .iter()
+            .find(|widget| widget.label == "Features")
+            .expect("the Features fold");
+        pass(&mut state, super::super::test_support::click(features));
+        pass(&mut state, vec![]);
+        let widgets = pass(&mut state, vec![]);
+        let curve = widgets
+            .iter()
+            .find(|widget| widget.label.starts_with("Closed curve"))
+            .expect("the scene's loop is listed");
+        pass(&mut state, super::super::test_support::click(curve));
+        assert_eq!(state.selected_probe, None);
+        assert!(matches!(state.selection, TopologySelection::Spans(_)));
+    }
+
     /// Shift places a point on the same 0.05 grid every drag snaps to. A
     /// default editor has compiled nothing, so no attachment can outrank it and
     /// this is the grid path.
