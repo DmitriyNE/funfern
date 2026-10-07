@@ -402,6 +402,41 @@ mod tests {
         ClosedCurvePurpose, TopologyAcceptance, TopologyBoundaryProbeTarget, TopologyProbeTarget,
     };
 
+    /// Reported: a Region probe placed in a subdomain just drawn attached to
+    /// the one around it. Placement read the running generation, which has
+    /// the new subdomain only once its mesh is ready.
+    #[test]
+    fn a_region_probe_takes_the_subdomain_as_drawn() {
+        let mut state = Playground::default();
+        super::super::test_support::activate(&mut state);
+        let material = state.editor.document.model.draft.materials[0].id;
+        state
+            .editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(-0.5, 0.3), 0.15),
+                ClosedCurvePurpose::Subdomain { material },
+            )
+            .unwrap();
+        super::super::test_support::settle(&mut state.editor);
+        let inside = Point2::new(-0.5, 0.3);
+        let drawn = state.draft_region_at(inside).unwrap();
+        assert_ne!(Some(drawn), state.region_at(inside), "not meshed yet");
+        state.probe_mode = Some(ProbePlacement::Region);
+        state.probe_placement_click(inside, false);
+        assert_eq!(
+            state
+                .editor
+                .document
+                .model
+                .probes
+                .last()
+                .map(|probe| probe.target.clone()),
+            Some(TopologyProbeTarget::AreaRegion(drawn)),
+            "{}",
+            state.message
+        );
+    }
+
     /// Dragging an endpoint must move only that endpoint, and a body drag must
     /// translate the whole probe.
     #[test]

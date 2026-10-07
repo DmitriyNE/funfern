@@ -89,17 +89,12 @@ impl Playground {
                 })
             }
             // A region is picked by the face under the pointer, which
-            // the grid has nothing to say about.
-            ProbePlacement::Region => self.runtime.active().and_then(|active| {
-                let face = active.bundle.snapshot.face_at(raw)?;
-                active
-                    .bundle
-                    .plan
-                    .domains
-                    .iter()
-                    .find(|domain| domain.face == face)
-                    .map(|domain| TopologyProbeTarget::AreaRegion(domain.region))
-            }),
+            // the grid has nothing to say about, in the scene as edited: the
+            // running generation has a subdomain just drawn only once its
+            // mesh is ready, and until then answered with the one around it.
+            ProbePlacement::Region => self
+                .draft_region_at(raw)
+                .map(TopologyProbeTarget::AreaRegion),
         };
         if let Some(target) = target {
             match self.editor.create_probe(

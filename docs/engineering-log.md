@@ -20257,3 +20257,13 @@ clicked centre while it waits for the rim, so after File > New the first click
 on the new canvas made a disk about the old scene's centre. `scene_replaced`,
 which New, Open, the examples and an undo across a scene all go through, now
 disarms both. `a_new_scene_keeps_no_placement_armed`.
+
+## 2026-10-07 — A Region probe takes the subdomain as drawn
+
+Placing a Region probe looked the face under the pointer up in the running
+generation, which has a subdomain just drawn only once its mesh is ready:
+until then a probe placed inside the new subdomain attached to the one around
+it, and before any mesh it placed nothing. It now takes the region from the
+editor's own compile of the scene as edited (`draft_region_at`), as selecting
+a subdomain does. A pulse still takes the running generation's region, since
+it goes into the running field. `a_region_probe_takes_the_subdomain_as_drawn`.
