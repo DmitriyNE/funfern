@@ -1406,13 +1406,10 @@ impl Playground {
             }
         }
         self.draw_probes(painter, r);
-        if p.far_field_contour && self.editor.document.model.far_field.enabled {
-            let d = self.editor.document.model.draft.geometry.domain;
-            let inset = self.editor.document.model.far_field.inset;
-            let min = self.screen(Point2::new(d.min_x + inset, d.max_y - inset), r);
-            let max = self.screen(Point2::new(d.max_x - inset, d.min_y + inset), r);
+        if let Some(contour) = self.far_field_contour(r) {
+            let min = contour.min;
             painter.rect_stroke(
-                Rect::from_min_max(min, max),
+                contour,
                 0.0,
                 Stroke::new(1.0, GOLD),
                 egui::StrokeKind::Middle,

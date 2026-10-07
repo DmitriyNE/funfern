@@ -20382,3 +20382,12 @@ added a history step and left the placement armed; a pulse armed did the
 same. A placement now owns the primary button as a drawing does, acting on
 its clicks alone; panning and zoom are taken before it.
 `a_drag_while_placing_leaves_the_geometry_alone`.
+
+## 2026-10-07 — A hidden far-field contour is not hit
+
+The far-field contour was drawn only with its View toggle on, and hit-tested
+whenever the far field was enabled: hidden, it still took a double click on a
+curve 5 px inside it and opened its readout, where the baffle should have
+gained a control (7 stayed 7). Drawing and the double click now take the
+contour's rectangle from one place, `far_field_contour`, which has none while
+it is hidden. `a_hidden_far_field_contour_leaves_a_double_click_to_the_curve`.

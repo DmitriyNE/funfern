@@ -1209,6 +1209,40 @@ mod tests {
         assert!(state.draw.is_none(), "opening it again starts nothing");
     }
 
+    /// Reported: with the far-field contour hidden in View, a double click on
+    /// a curve beside it opened the contour's readout in place of inserting a
+    /// control. A shown contour still takes it.
+    #[test]
+    fn a_hidden_far_field_contour_leaves_a_double_click_to_the_curve() {
+        for shown in [false, true] {
+            let mut state = with_baffles(&[[Point2::new(0.86, -0.3), Point2::new(0.86, 0.3)]]);
+            state.editor.document.model.far_field.enabled = true;
+            state.editor.document.presentation.far_field_contour = shown;
+            let context = viewport_context(&mut state);
+            let controls =
+                |state: &Playground| match &state.editor.document.model.draft.geometry.curves[1]
+                    .spline
+                {
+                    CurveSpline::Open(spline) => spline.controls().len(),
+                    CurveSpline::Closed(spline) => spline.controls().len(),
+                };
+            let before = controls(&state);
+            // 5 px inside the contour, at x 0.88.
+            let at = state.screen(Point2::new(0.86, 0.1), viewport());
+            let mut time = 1.0;
+            for _ in 0..2 {
+                time = viewport_click(&mut state, &context, time, egui::Modifiers::NONE, at);
+            }
+            assert_eq!(state.far_field_window, shown, "shown {shown}");
+            assert_eq!(
+                controls(&state),
+                before + usize::from(!shown),
+                "shown {shown}: {}",
+                state.message
+            );
+        }
+    }
+
     /// Reported: with + Point armed, a press and drag over a baffle reshaped
     /// it, the placement still armed; a pulse armed let it through the same
     /// way. Only a placement's clicks reach the viewport.

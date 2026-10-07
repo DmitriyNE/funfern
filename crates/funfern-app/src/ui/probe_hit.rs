@@ -34,6 +34,25 @@ impl Playground {
             }
         }
     }
+    /// Where the far-field contour is drawn, if it is: drawing and hit-testing
+    /// both take it from here, so a contour hidden in View is not hit either.
+    pub(super) fn far_field_contour(&self, viewport: Rect) -> Option<Rect> {
+        let model = &self.editor.document.model;
+        if !(self.editor.document.presentation.far_field_contour && model.far_field.enabled) {
+            return None;
+        }
+        let domain = model.draft.geometry.domain;
+        let inset = model.far_field.inset;
+        let min = self.screen(
+            Point2::new(domain.min_x + inset, domain.max_y - inset),
+            viewport,
+        );
+        let max = self.screen(
+            Point2::new(domain.max_x - inset, domain.min_y + inset),
+            viewport,
+        );
+        Some(Rect::from_min_max(min, max))
+    }
     /// Colour rule shared by markers and labels: a probe that failed to compile
     /// reads red, one that is not recording reads grey.
     pub(super) fn probe_color(&self, probe: &TopologyProbeDefinition) -> Color32 {

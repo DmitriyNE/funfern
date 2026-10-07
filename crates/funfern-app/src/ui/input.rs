@@ -140,12 +140,9 @@ impl Playground {
                 self.probe_windows.insert(hit.id());
                 return;
             }
-            if self.editor.document.model.far_field.enabled {
-                let domain = self.editor.document.model.draft.geometry.domain;
-                let inset = self.editor.document.model.far_field.inset;
-                let min = self.screen(Point2::new(domain.min_x + inset, domain.max_y - inset), r);
-                let max = self.screen(Point2::new(domain.max_x - inset, domain.min_y + inset), r);
-                let contour = Rect::from_min_max(min, max);
+            // Only as drawn: a contour hidden in View took a double click
+            // meant for the curve beside it.
+            if let Some(contour) = self.far_field_contour(r) {
                 let distance = [
                     (pos.x - contour.left()).abs(),
                     (pos.x - contour.right()).abs(),
