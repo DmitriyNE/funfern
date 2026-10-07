@@ -113,6 +113,11 @@ impl Playground {
         self.selected_probe = None;
         self.draw = None;
         self.pending_merge = None;
+        // A placement under way keeps its first point in the outgoing
+        // scene's coordinates: a disk's centre clicked there anchored the
+        // first disk clicked in the new one.
+        self.probe_mode = None;
+        self.pulse_mode = false;
         // The incoming scene numbers its materials and subdomains from the
         // same small ids, so none of the outgoing ones carries over: a copy
         // left open in the Materials panel would pass for unapplied edits to
@@ -480,6 +485,25 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reported: a disk probe whose centre was clicked, then File > New, and
+    /// the first click on the new canvas made a disk about the old scene's
+    /// centre. The pulse tool stayed armed through it the same way.
+    #[test]
+    fn a_new_scene_keeps_no_placement_armed() {
+        let mut state = Playground::default();
+        state.toggle_probe_mode(ProbePlacement::Disk { center: None });
+        state.probe_mode = Some(ProbePlacement::Disk {
+            center: Some(Point2::new(-0.4, 0.3)),
+        });
+        state.new_scene();
+        assert_eq!(state.probe_mode, None);
+
+        state.toggle_pulse_mode();
+        state.new_scene();
+        assert!(!state.pulse_mode);
+    }
+
     use crate::ui::test_support::*;
     use funfern_app::topology_editor::TopologyEditor;
     use funfern_app::topology_viewport::TopologySpanTarget;

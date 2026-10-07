@@ -20248,3 +20248,12 @@ as an edit not applied, which also held a click on a subdomain back from
 selecting its material. A committed colour now goes into the panel's edits as
 well, as Fire now's committed drive does, and the other edits stay pending.
 `a_picked_colour_survives_apply`.
+
+## 2026-10-07 — A new scene keeps no placement armed
+
+A whole scene coming in cleared the drawing, the selection and a merge
+question, but not probe placement or the pulse tool. A disk probe keeps its
+clicked centre while it waits for the rim, so after File > New the first click
+on the new canvas made a disk about the old scene's centre. `scene_replaced`,
+which New, Open, the examples and an undo across a scene all go through, now
+disarms both. `a_new_scene_keeps_no_placement_armed`.
