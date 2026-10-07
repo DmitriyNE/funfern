@@ -20208,3 +20208,12 @@ device has them; a busy generation keeps the front one for a later frame, and
 any other refusal drops it with its message. A Switch pressed while an event
 was pending was lost the same way, and now waits the same way.
 `a_pulse_or_switch_waits_for_a_busy_generation`.
+
+## 2026-10-07 — Reset drops what waits for the old run
+
+Since pulses wait for a busy generation, Reset could replay one: with a pulse
+sent and another waiting, Reset installed the new generation and the waiting
+pulse went into its cleared field in that same frame. Dropping a generation
+cleared the queue; Reset's install did not. It now clears the waiting pulses
+and a waiting Switch press too, which was meant for the medium Reset puts
+back at its authored laws. `reset_drops_what_waits_for_the_old_run`.

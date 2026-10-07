@@ -685,6 +685,11 @@ impl Playground {
                     // The reset medium starts at its authored laws, wherever
                     // a Switch had sent it.
                     self.switch_targets.clear();
+                    // A pulse or a Switch press still waiting was meant for
+                    // the run Reset discarded; sent on, it went into the
+                    // cleared field in the frame Reset installed it.
+                    self.pending_pulses.clear();
+                    self.pending_switch = None;
                     // Adaptation starts the run again too: an estimate or a
                     // mesh still computing is of the field Reset discarded,
                     // and the last step estimated and the energy peak belong
@@ -1705,6 +1710,58 @@ mod tests {
         assert_eq!(state.pending_switch, None, "{}", state.message);
         assert_eq!(state.switch_targets.get(&material.id), Some(&true));
         assert!(request.live_event_pending());
+    }
+
+    /// Reported: Reset replayed a waiting pulse. With one pulse sent and one
+    /// waiting, Reset installed the new generation and the waiting pulse
+    /// went into its cleared field in the same frame.
+    #[test]
+    fn reset_drops_what_waits_for_the_old_run() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame = |state: &mut Playground, request: &mut CanonicalGpuRequest| {
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    &display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+            });
+        };
+        let mut state = Playground::default();
+        activate(&mut state);
+        state.requested_revision = Some(state.editor.revision);
+        state.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut state, &mut request);
+        state.place_pulse(Point2::new(-0.2, 0.1));
+        state.place_pulse(Point2::new(-0.1, 0.1));
+        frame(&mut state, &mut request);
+        assert_eq!(state.pending_pulses.len(), 1, "the second waits");
+        let material = state.editor.document.model.draft.materials[0].id;
+        state.pending_switch = Some(material);
+
+        let before = request.generation();
+        state.reset_requested = true;
+        frame(&mut state, &mut request);
+        assert!(request.generation() > before, "{}", state.message);
+        assert!(
+            !request.live_event_pending(),
+            "a waiting pulse reached the reset run"
+        );
+        assert!(state.pending_pulses.is_empty());
+        assert_eq!(state.pending_switch, None);
     }
 
     /// A medium switched to twice its mass, with the snapshot that says so.
