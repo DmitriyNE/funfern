@@ -20349,3 +20349,16 @@ end, which `rename_parameter` refused until the formula-text rewrite read the
 old name by index and panicked; with three, `p3` was renamed and `p2` kept its
 name. Renames now apply before the deletion, and a rename whose row is gone is
 skipped. `deleting_a_parameter_keeps_a_rename_left_in_another`.
+
+## 2026-10-07 — ID allocators survive Undo over a replaced scene
+
+New, an opened example and a load build a fresh editor from the incoming
+document, whose ID allocators start after that document's highest IDs, and
+keep the history so Undo can bring the outgoing scene back. Undo restored the
+scene and not the allocators: after a probe and a material, New and Undo, the
+next probe was `ProbeId(1)` beside the restored `ProbeId(1)` and the next
+material `MaterialId(2)` beside the restored one, and the scene refused to save
+("Scene contains an invalid probe"). A history-keeping replacement now carries
+each of the six allocators on from the outgoing editor where that is higher,
+so they stay past every ID the history can restore.
+`undoing_a_new_scene_hands_out_unused_ids`.

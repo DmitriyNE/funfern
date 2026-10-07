@@ -487,6 +487,15 @@ impl TopologyEditor {
         document: TopologyDocument,
     ) -> Result<(), String> {
         let mut loaded = Self::from_document(document)?;
+        // The allocators carry on from the outgoing scene's, because Undo can
+        // bring it back: started over from the new scene's IDs, they handed
+        // out ones the restored scene already used.
+        loaded.next_curve = loaded.next_curve.max(self.next_curve);
+        loaded.next_span = loaded.next_span.max(self.next_span);
+        loaded.next_region = loaded.next_region.max(self.next_region);
+        loaded.next_vertex = loaded.next_vertex.max(self.next_vertex);
+        loaded.next_material = loaded.next_material.max(self.next_material);
+        loaded.next_probe = loaded.next_probe.max(self.next_probe);
         let previous = self.document.model.clone();
         let mut undo = std::mem::take(&mut self.undo);
         undo.push(HistoryStep {
@@ -5425,6 +5434,96 @@ mod tests {
         assert!(editor.redo_replaces_scene());
         assert!(editor.redo());
         assert!(editor.undo_replaces_scene());
+    }
+
+    /// Reported: after New and Undo, a new probe took the ID of one already in
+    /// the restored scene, which then failed to save. The allocators started
+    /// over from the empty scene's IDs.
+    #[test]
+    fn undoing_a_new_scene_hands_out_unused_ids() {
+        let mut editor = TopologyEditor::default();
+        let point = |x| TopologyProbeTarget::Point(Point2::new(x, 0.0));
+        editor
+            .create_probe("A".into(), [1, 2, 3], point(0.1))
+            .unwrap();
+        let material = editor.add_material().unwrap();
+        editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(-0.4, 0.0), 0.2),
+                ClosedCurvePurpose::Subdomain { material },
+            )
+            .unwrap();
+        settle(&mut editor);
+        editor
+            .replace_validated_with_history(TopologyDocument::default())
+            .unwrap();
+        settle(&mut editor);
+        assert!(editor.undo());
+        settle(&mut editor);
+
+        let model = &editor.document.model;
+        let unused = |next: u64, ids: Vec<u64>| ids.iter().all(|id| *id < next);
+        let curves = || model.draft.geometry.curves.iter();
+        assert!(unused(
+            editor.next_curve,
+            curves().map(|curve| curve.id.0).collect()
+        ));
+        assert!(unused(
+            editor.next_span,
+            curves()
+                .flat_map(|curve| curve.spans.iter().map(|span| span.id.0))
+                .collect()
+        ));
+        assert!(unused(
+            editor.next_region,
+            model
+                .draft
+                .regions
+                .iter()
+                .map(|region| region.id.0)
+                .collect()
+        ));
+        assert!(unused(
+            editor.next_vertex,
+            model
+                .draft
+                .geometry
+                .vertices
+                .iter()
+                .map(|vertex| vertex.id.0)
+                .collect()
+        ));
+        assert!(unused(
+            editor.next_material,
+            model
+                .draft
+                .materials
+                .iter()
+                .map(|material| material.id.0)
+                .collect()
+        ));
+        assert!(unused(
+            editor.next_probe,
+            model.probes.iter().map(|probe| probe.id.0).collect()
+        ));
+
+        editor
+            .create_probe("B".into(), [1, 2, 3], point(0.3))
+            .unwrap();
+        let material = editor.add_material().unwrap();
+        editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.4, 0.0), 0.2),
+                ClosedCurvePurpose::Subdomain { material },
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(
+            editor.document.model.draft.regions.len(),
+            3,
+            "the background and two subdomains"
+        );
+        crate::topology_persistence::save(&editor.document).unwrap();
     }
 
     /// The line and boundary probes share the curve recorders' points, which
