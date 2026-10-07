@@ -191,9 +191,10 @@ pub struct Playground {
     /// waits while the generation is busy with another event; a single slot
     /// lost the second of two quick clicks.
     pub(super) pending_pulses: VecDeque<(Point2, RegionId)>,
-    /// A material Switch asked for by its button or hotkey, sent at the next
-    /// frame that can queue a live event.
-    pub(super) pending_switch: Option<MaterialId>,
+    /// Material Switches asked for by button or hotkey and not yet taken by
+    /// the device, oldest first, each material once. A single slot kept only
+    /// the last of two materials switched while the generation was busy.
+    pub(super) pending_switches: VecDeque<MaterialId>,
     /// The Switch direction last sent for each material. The accepted runtime
     /// only arrives with a full snapshot, so a second press before then would
     /// otherwise read the old direction and send the same one again.
@@ -470,7 +471,7 @@ impl Default for Playground {
             pulse_amplitude: 1.0,
             pulse_width: 0.06,
             pending_pulses: VecDeque::new(),
-            pending_switch: None,
+            pending_switches: VecDeque::new(),
             switch_targets: std::collections::BTreeMap::new(),
             switch_states: Vec::new(),
             canonical_event_serial: 0,

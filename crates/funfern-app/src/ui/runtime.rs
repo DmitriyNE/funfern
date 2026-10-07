@@ -77,7 +77,7 @@ impl Playground {
         self.canonical_event_observed = 0;
         self.solver_fault = None;
         self.pending_pulses.clear();
-        self.pending_switch = None;
+        self.pending_switches.clear();
         self.probe_upload = None;
         self.restart_probe_traces();
         self.clear_exposures();
@@ -689,7 +689,7 @@ impl Playground {
                     // the run Reset discarded; sent on, it went into the
                     // cleared field in the frame Reset installed it.
                     self.pending_pulses.clear();
-                    self.pending_switch = None;
+                    self.pending_switches.clear();
                     // Adaptation starts the run again too: an estimate or a
                     // mesh still computing is of the field Reset discarded,
                     // and the last step estimated and the energy peak belong
@@ -775,15 +775,17 @@ impl Playground {
             }
             // A Switch press waits for a busy generation as a pulse does.
             if let Some(material) = (self.uploading.is_none() && self.source_commit.is_none())
-                .then_some(self.pending_switch)
+                .then(|| self.pending_switches.front().copied())
                 .flatten()
             {
                 let active = active.clone();
                 match self.send_material_switch(&active, display, request, assets, material) {
-                    Ok(()) => self.pending_switch = None,
+                    Ok(()) => {
+                        self.pending_switches.pop_front();
+                    }
                     Err(error) => {
                         if live_event_fallback(&error, false) != LiveEventFallback::Retry {
-                            self.pending_switch = None;
+                            self.pending_switches.pop_front();
                             self.message = error;
                         }
                     }
@@ -1697,19 +1699,104 @@ mod tests {
         assert_eq!(state.pending_pulses.len(), 1, "{}", state.message);
         state.request_material_switch();
         frame(&mut state, &mut request, false);
-        assert_eq!(state.pending_switch, Some(material.id), "{}", state.message);
+        assert_eq!(state.pending_switches, [material.id], "{}", state.message);
 
         frame(&mut state, &mut request, true);
         assert!(state.pending_pulses.is_empty(), "the second pulse went");
         assert_eq!(
-            state.pending_switch,
-            Some(material.id),
+            state.pending_switches,
+            [material.id],
             "the Switch waits for it"
         );
         frame(&mut state, &mut request, true);
-        assert_eq!(state.pending_switch, None, "{}", state.message);
+        assert!(state.pending_switches.is_empty(), "{}", state.message);
         assert_eq!(state.switch_targets.get(&material.id), Some(&true));
         assert!(request.live_event_pending());
+    }
+
+    /// Reported: Switch pressed on one material and then on another while
+    /// the device was busy sent only the second. Each waited in the same
+    /// slot, so the later press replaced the earlier one. Both now wait their
+    /// turn, and a second press of a material already waiting is the same
+    /// request.
+    #[test]
+    fn switches_on_two_materials_both_wait_for_a_busy_generation() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame =
+            |state: &mut Playground, request: &mut CanonicalGpuRequest, processed: bool| {
+                world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                    if processed {
+                        request.process_live_event(&mut assets);
+                    }
+                    let mut queue = bevy::ecs::world::CommandQueue::default();
+                    let mut commands = Commands::new(&mut queue, world);
+                    state.refresh_runtime(
+                        request,
+                        &display,
+                        &mut recorders,
+                        &vector,
+                        &mut assets,
+                        &mut commands,
+                        1.0 / 60.0,
+                    );
+                });
+            };
+        let mut state = Playground::default();
+        let switch = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Switchable medium" && preset.row == LawPresetRow::Mass)
+            .unwrap();
+        let first = state.editor.document.model.draft.materials[0].clone();
+        state
+            .editor
+            .update_material(apply_law_preset(switch, &first).unwrap())
+            .unwrap();
+        let second = state.editor.add_material().unwrap();
+        let added = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(second)
+            .unwrap()
+            .clone();
+        state
+            .editor
+            .update_material(apply_law_preset(switch, &added).unwrap())
+            .unwrap();
+        state
+            .editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(-0.5, 0.3), 0.15),
+                funfern_app::topology_editor::ClosedCurvePurpose::Subdomain { material: second },
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        activate(&mut state);
+        state.requested_revision = Some(state.editor.revision);
+        state.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut state, &mut request, false);
+
+        state.place_pulse(Point2::new(-0.2, 0.1));
+        frame(&mut state, &mut request, false);
+        assert!(request.live_event_pending(), "the pulse holds the device");
+        state.queue_switch(first.id);
+        state.queue_switch(second);
+        state.queue_switch(first.id);
+        assert_eq!(state.pending_switches, [first.id, second]);
+
+        frame(&mut state, &mut request, true);
+        frame(&mut state, &mut request, true);
+        assert!(state.pending_switches.is_empty(), "{}", state.message);
+        assert_eq!(state.switch_targets.get(&first.id), Some(&true));
+        assert_eq!(state.switch_targets.get(&second), Some(&true));
     }
 
     /// Reported: Reset replayed a waiting pulse. With one pulse sent and one
@@ -1750,7 +1837,7 @@ mod tests {
         frame(&mut state, &mut request);
         assert_eq!(state.pending_pulses.len(), 1, "the second waits");
         let material = state.editor.document.model.draft.materials[0].id;
-        state.pending_switch = Some(material);
+        state.queue_switch(material);
 
         let before = request.generation();
         state.reset_requested = true;
@@ -1761,7 +1848,7 @@ mod tests {
             "a waiting pulse reached the reset run"
         );
         assert!(state.pending_pulses.is_empty());
-        assert_eq!(state.pending_switch, None);
+        assert!(state.pending_switches.is_empty());
     }
 
     /// A medium switched to twice its mass, with the snapshot that says so.

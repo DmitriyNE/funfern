@@ -20411,3 +20411,14 @@ than at (0.2, 0.1). It now snaps as the endpoint, pivot and probe drags do,
 Shift inverting the setting. The source sits under the pointer, with no grab
 offset, so the pointer is what snaps.
 `a_dragged_source_snaps_as_other_drags_do`.
+
+## 2026-10-07 — Switches on two materials both wait
+
+A Switch pressed while the device was taking another event waited in a single
+slot, so pressing it on A and then on B kept only B: with a pulse holding the
+generation, B ramped and A never did. Presses now queue, oldest first, as
+pulses do, and go one a frame once the device is free. A material already
+waiting is not queued again; its button still shows the old direction until
+the press is sent, so a second press is the same request. Reset and a
+replaced scene clear the queue.
+`switches_on_two_materials_both_wait_for_a_busy_generation`.

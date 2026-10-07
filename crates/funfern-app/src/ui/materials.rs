@@ -831,7 +831,7 @@ impl Playground {
                         .on_disabled_hover_text("Runs once the medium is running")
                         .clicked()
                     {
-                        self.pending_switch = Some(material.id);
+                        self.queue_switch(material.id);
                     }
                     if let Some((_, target, now)) = state {
                         ui.small(switch_state_text(target, now));
@@ -1163,6 +1163,15 @@ fn switch_state_text(target: f64, now: f64) -> String {
 }
 
 impl Playground {
+    /// Queues a Switch press for the next frame that can send it. A material
+    /// already waiting is not queued again: its button still shows the
+    /// direction it had, so a second press is the same request.
+    pub(super) fn queue_switch(&mut self, material: MaterialId) {
+        if !self.pending_switches.contains(&material) {
+            self.pending_switches.push_back(material);
+        }
+    }
+
     /// The Switch the hotkey throws: the material open in the editor if it
     /// has one, otherwise the document's only Switch material.
     pub(super) fn request_material_switch(&mut self) {
@@ -1185,7 +1194,7 @@ impl Playground {
             .filter(|id| switchable.contains(id))
             .or_else(|| (switchable.len() == 1).then(|| switchable[0]));
         match chosen {
-            Some(material) => self.pending_switch = Some(material),
+            Some(material) => self.queue_switch(material),
             None if switchable.is_empty() => {
                 self.message = "No material here has a Switch".into();
             }
@@ -2529,7 +2538,10 @@ mod tests {
         let mut state = Playground::default();
         activate(&mut state);
         state.request_material_switch();
-        assert_eq!(state.pending_switch, None, "nothing here has a Switch");
+        assert!(
+            state.pending_switches.is_empty(),
+            "nothing here has a Switch"
+        );
 
         let material = state.editor.document.model.draft.materials[0].clone();
         let switch = law_presets()
@@ -2543,7 +2555,7 @@ mod tests {
         settle(&mut state.editor);
         let active = activate(&mut state);
         state.request_material_switch();
-        assert_eq!(state.pending_switch, Some(material.id));
+        assert_eq!(state.pending_switches, [material.id]);
 
         let temporal = active
             .canonical_temporal_operator
