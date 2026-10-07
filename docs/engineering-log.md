@@ -20163,3 +20163,14 @@ it at 1.78 against 3e-4; the handoff gate's `--edit` gives the target's source
 and pin other numbers and passed at Q 2.1e-7, where a carrier without its
 step stands 1e-2 to 2.8e-2 off. `a_live_patch_carries_the_edits_step_of_phase`,
 `edited_source_handoff_selects_target_parameters_with_old_runtime_anchor`.
+
+## 2026-10-07 — A snapshot's field is read at its own step
+
+When a full snapshot landed, the field AMR estimates from was a copy of the
+live field: the snapshot's flux read through the maps at the latest clock.
+Everything else in the estimate is taken at the snapshot's step, and a pumped
+medium's mass moves on over the snapshot's lag - 400 steps behind, its field
+read 1.193 where the snapshot held 0.833. `primary_field` now takes the time
+to read the maps at; the live field keeps the latest clock and the snapshot's
+field is read at `full_snapshot_seconds`, as its stored energy is. Media whose
+maps do not move are read as before. `a_snapshot_field_is_read_at_the_snapshots_step`.

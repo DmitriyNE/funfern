@@ -2402,18 +2402,18 @@ pub(crate) fn stored_energy_view(
     )
 }
 
-/// The maps the painted field is read through, when a coefficient varies in
+/// The maps a field is read through at `time`, when a coefficient varies in
 /// time or follows its field. `None` where the maps are the authored ones and
 /// `Q/M` is exact.
 fn primary_field_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
+    time: Option<f64>,
 ) -> Option<(
     std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
     funfern_core::CanonicalMaterialRuntimeState,
     f64,
 )> {
-    let time = canonical.clock.map(|clock| clock.absolute_seconds);
     temporal_view(active, canonical, time, |operator| {
         operator.has_temporal_laws() || operator.has_field_laws()
     })
@@ -2460,7 +2460,7 @@ fn refresh_canonical_wave_display(
         && copy.values.len() == operator.degrees_of_freedom()
         && copy.serial != display.picture_serial
     {
-        display.picture = primary_field(active, canonical, &copy.values);
+        display.picture = primary_field(active, canonical, &copy.values, latest_clock(canonical));
         display.picture_serial = copy.serial;
     }
     display.picture_integrated.clear();
@@ -2495,12 +2495,23 @@ fn refresh_canonical_wave_display(
     }
     display.generation = canonical.generation;
     display.completed_steps = request.stats().completed_steps();
-    display.current = primary_field(active, canonical, &canonical.primary_flux);
+    display.current = primary_field(
+        active,
+        canonical,
+        &canonical.primary_flux,
+        latest_clock(canonical),
+    );
     if canonical.full_readback_at == canonical.readbacks {
-        display.snapshot_current.clear();
-        display
-            .snapshot_current
-            .extend(display.current.iter().copied());
+        // The snapshot's own field, through the maps at its own step, as
+        // the rest of its AMR estimate is read; the live field above is
+        // read at the latest clock, which a pumped medium's mass has moved
+        // on from by a snapshot's lag.
+        display.snapshot_current = primary_field(
+            active,
+            canonical,
+            &canonical.primary_flux,
+            canonical.full_snapshot_seconds(),
+        );
         display.auxiliary.clear();
         display.auxiliary.resize(operator.degrees_of_freedom(), 0.0);
         display.snapshot_completed_steps = canonical.full_snapshot_completed_steps();
@@ -2516,19 +2527,25 @@ fn refresh_canonical_wave_display(
     display.readbacks = canonical.readbacks;
 }
 
-/// The primary field of a copy's flux. A field-dependent medium's field is
-/// the inverse of its map, not `Q/M`: read at 30% amplitude departure, the
-/// linear division would paint a different field from the one the solver
-/// steps. A switched or pumped medium divides by its mass at that time, not
-/// the authored one. The map is read at the latest clock, which a played-out
-/// copy lags by a frame or so.
+/// The latest clock's time, at which the live field is read: a played-out
+/// copy lags it by a frame or so.
+fn latest_clock(canonical: &CanonicalGpuDisplay) -> Option<f64> {
+    canonical.clock.map(|clock| clock.absolute_seconds)
+}
+
+/// The primary field of a copy's flux, through the maps at `time`. A
+/// field-dependent medium's field is the inverse of its map, not `Q/M`: read
+/// at 30% amplitude departure, the linear division would paint a different
+/// field from the one the solver steps. A switched or pumped medium divides
+/// by its mass at that time, not the authored one.
 fn primary_field(
     active: &Arc<PreparedTopology>,
     canonical: &CanonicalGpuDisplay,
     flux: &[f32],
+    time: Option<f64>,
 ) -> Vec<f32> {
     let mapped_field =
-        primary_field_view(active, canonical).and_then(|(temporal, runtime, time)| {
+        primary_field_view(active, canonical, time).and_then(|(temporal, runtime, time)| {
             let flux = flux
                 .iter()
                 .map(|value| f64::from(*value))

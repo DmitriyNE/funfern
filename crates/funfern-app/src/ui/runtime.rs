@@ -1490,6 +1490,77 @@ mod tests {
         );
     }
 
+    /// Reported: the field AMR estimates from was the snapshot's flux read
+    /// through the maps at the latest clock. A pumped medium's mass moves on
+    /// over a snapshot's lag: 400 steps behind, its field read 1.193 where the
+    /// snapshot held 0.833, while the rest of the estimate was taken at the
+    /// snapshot's own step.
+    #[test]
+    fn a_snapshot_field_is_read_at_the_snapshots_step() {
+        let mut state = Playground::default();
+        let material = state.editor.document.model.draft.materials[0].clone();
+        let pump = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Parametric pump" && preset.row == LawPresetRow::Mass)
+            .unwrap();
+        state
+            .editor
+            .update_material(apply_law_preset(pump, &material).unwrap())
+            .unwrap();
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        let temporal = active.canonical_temporal_operator.as_ref().unwrap();
+        let request = CanonicalGpuRequest::default();
+        let mut canonical = CanonicalGpuDisplay::default();
+        canonical.hold_switched_snapshot(
+            request.generation(),
+            temporal.initial_runtime().records().len(),
+        );
+        // The snapshot is of step 0; the clock has run 400 steps on.
+        let mut clock = canonical.clock.unwrap();
+        clock.accepted_steps = 400;
+        clock.step_in_epoch = 400;
+        clock.absolute_seconds = 400.0 * f64::from(clock.time_step);
+        canonical.clock = Some(clock);
+        let flux = active
+            .canonical_operator
+            .primary_mass()
+            .iter()
+            .map(|mass| *mass as f32)
+            .collect::<Vec<_>>();
+        canonical.hold_full_snapshot_flux(&flux);
+
+        let mut display = WaveDisplay::default();
+        super::super::refresh_canonical_wave_display(
+            Some(&active),
+            &canonical,
+            &request,
+            &mut display,
+        );
+        let runtime = canonical
+            .accepted_material_runtime(&temporal.initial_runtime())
+            .unwrap();
+        let flux = flux
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect::<Vec<_>>();
+        let at = |time| temporal.primary_field_at(&flux, time, &runtime).unwrap();
+        let (at_snapshot, at_clock) = (at(0.0), at(clock.absolute_seconds));
+        assert_eq!(display.snapshot_current.len(), at_snapshot.len());
+        for (read, held) in display.snapshot_current.iter().zip(&at_snapshot) {
+            assert!(
+                (f64::from(*read) - held).abs() < 1.0e-5,
+                "{read} for {held}"
+            );
+        }
+        assert!(
+            (at_clock[0] - at_snapshot[0]).abs() > 0.1,
+            "the pump moved the mass between the two: {} and {}",
+            at_snapshot[0],
+            at_clock[0]
+        );
+    }
+
     /// A medium switched to twice its mass, with the snapshot that says so.
     fn doubled_mass_medium() -> (Arc<PreparedTopology>, CanonicalGpuDisplay) {
         let mut state = Playground::default();
@@ -1517,7 +1588,8 @@ mod tests {
             .iter()
             .map(|mass| *mass as f32)
             .collect::<Vec<_>>();
-        let field = super::super::primary_field(&active, &display, &flux);
+        let clock = super::super::latest_clock(&display);
+        let field = super::super::primary_field(&active, &display, &flux, clock);
         assert!(!field.is_empty());
         for value in field {
             assert!((value - 0.5).abs() < 1.0e-6, "painted {value}");

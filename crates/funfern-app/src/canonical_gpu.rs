@@ -5120,6 +5120,23 @@ impl CanonicalGpuDisplay {
         Some(adopted)
     }
 
+    /// Holds a full snapshot whose primary flux is `flux`, as the latest
+    /// readback, for host tests that have no render world.
+    #[cfg(test)]
+    pub fn hold_full_snapshot_flux(&mut self, flux: &[f32]) {
+        self.node_count = flux.len();
+        self.raw_primary = flux
+            .iter()
+            .map(|value| GpuCanonicalStateWord {
+                values: Vec4::new(*value, *value, 0.0, 0.0),
+            })
+            .collect();
+        self.raw_primary_slot = 0;
+        refresh_canonical_display(self);
+        self.readbacks = self.readbacks.saturating_add(1);
+        self.full_readback_at = self.readbacks;
+    }
+
     /// Holds a full snapshot of `generation` whose bank has every one of
     /// `records` Switches settled at its alternate, as the readbacks of an
     /// earlier generation still do until the next one arrives, for host tests
