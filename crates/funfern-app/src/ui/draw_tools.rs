@@ -1209,6 +1209,64 @@ mod tests {
         assert!(state.draw.is_none(), "opening it again starts nothing");
     }
 
+    /// Reported: dragging the point source left it at the raw pointer with
+    /// Snap to grid on or Shift held, where every other drag lands on the
+    /// grid. Shift inverts the setting for it as for the rest.
+    #[test]
+    fn a_dragged_source_snaps_as_other_drags_do() {
+        for (setting, modifiers, snapped) in [
+            (true, egui::Modifiers::NONE, true),
+            (false, egui::Modifiers::SHIFT, true),
+            (false, egui::Modifiers::NONE, false),
+            (true, egui::Modifiers::SHIFT, false),
+        ] {
+            let mut state = with_baffles(&[]);
+            state.snap_to_grid = setting;
+            state.editor.document.model.source.enabled = true;
+            let context = viewport_context(&mut state);
+            assert_eq!(state.snap_step(), 0.1);
+            let from = state.screen(state.editor.document.model.source.position, viewport());
+            let to = state.screen(Point2::new(0.237, 0.133), viewport());
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
+            let events = vec![egui::Event::PointerMoved(from), button(from, true)];
+            viewport_frame(&mut state, &context, 1.0, modifiers, events);
+            for step in 1..=8 {
+                let at = from + (to - from) * (step as f32 / 8.0);
+                let moved = vec![egui::Event::PointerMoved(at)];
+                viewport_frame(
+                    &mut state,
+                    &context,
+                    1.0 + 0.02 * step as f64,
+                    modifiers,
+                    moved,
+                );
+            }
+            viewport_frame(
+                &mut state,
+                &context,
+                1.3,
+                modifiers,
+                vec![button(to, false)],
+            );
+            let position = state.editor.document.model.source.position;
+            let expected = if snapped {
+                Point2::new(0.2, 0.1)
+            } else {
+                state.world(to, viewport())
+            };
+            assert!(
+                (position - expected).norm() < 1.0e-12,
+                "setting {setting}, shift {}: {position:?}",
+                modifiers.shift
+            );
+        }
+    }
+
     /// Reported: with the far-field contour hidden in View, a double click on
     /// a curve beside it opened the contour's readout in place of inserting a
     /// control. A shown contour still takes it.

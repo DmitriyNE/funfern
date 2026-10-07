@@ -636,8 +636,14 @@ impl Playground {
                     DragGesture::Source => {
                         // Only the position: preparation reads the region off
                         // the mesh it prepares, which the active one may not be.
+                        // The source sits under the pointer, so the pointer is
+                        // what snaps.
                         let mut source = self.editor.document.model.source;
-                        source.position = point;
+                        source.position = if snap {
+                            Self::snap_point(point, step)
+                        } else {
+                            point
+                        };
                         self.editor.set_point_source_during_edit(source)
                     }
                     DragGesture::Probe {

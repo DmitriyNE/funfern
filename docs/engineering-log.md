@@ -20402,3 +20402,12 @@ opened and its span 2 selected, had the gizmo turn about (0.35, 0.425) rather
 than the span's own centre at (0, −0.6). `scene_replaced` now drops the moved
 pivot, Undo and Redo across a scene included.
 `a_moved_pivot_stays_with_its_scene`.
+
+## 2026-10-07 — A dragged source snaps
+
+The point source was the one drag that never read the snap: with a 0.1 grid,
+Snap to grid on or Shift held, a drag to (0.237, 0.133) left it there rather
+than at (0.2, 0.1). It now snaps as the endpoint, pivot and probe drags do,
+Shift inverting the setting. The source sits under the pointer, with no grab
+offset, so the pointer is what snaps.
+`a_dragged_source_snaps_as_other_drags_do`.
