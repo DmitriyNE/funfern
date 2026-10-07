@@ -307,9 +307,11 @@ impl Playground {
                     "EM · TE",
                 );
             });
-        if physics != self.editor.document.model.draft.physics {
-            if let Err(error) = self.editor.set_physics(physics) {
-                self.notify(error)
+        let previous = self.editor.document.model.draft.physics;
+        if physics != previous {
+            match self.editor.set_physics(physics) {
+                Ok(()) => self.convert_material_edits(previous, physics),
+                Err(error) => self.notify(error),
             }
         }
         ui.separator();

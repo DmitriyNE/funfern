@@ -20292,3 +20292,14 @@ the viewport's own and held there ran from 1.9 to 67 in a second with the
 pointer still, and while it moved it did not stay under it. Fit now holds the
 view while a gesture is under way and frames the result once it ends
 (`refit`). `a_held_domain_edge_stays_under_the_pointer_with_fit_on`.
+
+## 2026-10-07 — A physics switch converts the open material too
+
+Switching physics converts every material in the document, and left the
+Materials panel's unapplied edits as they were: a material of density 2 read
+as edited after Mechanical to EM, and Apply wrote the mechanical values over
+the converted ones as electromagnetic properties. The panel's edits now go
+through the same `convert_material` after a switch, staying pending in the
+new physics; one that will not convert is dropped for the document's, and
+half-typed formula text goes as an Undo drops it.
+`a_physics_switch_converts_the_open_material_too`.

@@ -103,6 +103,22 @@ impl Playground {
         })
     }
 
+    /// The Materials panel's unapplied edits, through the conversion a
+    /// physics switch put the document's materials through, so they stay
+    /// pending in the new physics. Left as they were, they read as edits of
+    /// the converted material, and Apply wrote the old physics' values over
+    /// it. One that will not convert goes, and the panel takes the
+    /// document's; half-typed formula text, in the old physics' numbers,
+    /// goes as an Undo drops it.
+    pub(super) fn convert_material_edits(&mut self, from: PhysicsModel, to: PhysicsModel) {
+        self.material_edit = self
+            .material_edit
+            .take()
+            .and_then(|edit| from.convert_material(to, &edit).ok());
+        self.material_formula_edits.clear();
+        self.material_formula_errors.clear();
+    }
+
     /// Drops the half-typed formula and parameter-name text of one material.
     fn forget_material_edits(&mut self, material: MaterialId) {
         self.material_formula_edits
@@ -2089,6 +2105,84 @@ mod tests {
             Some(&"Typed".to_owned())
         );
         assert_eq!(state.editor.document.model.region_names.get(&second), None);
+    }
+
+    /// Reported: Apply after a switch of physics wrote the old physics'
+    /// values over the converted material. The switch converted the
+    /// document's materials and left the panel's unapplied edits as they
+    /// were, which then read as edits pending.
+    #[test]
+    fn a_physics_switch_converts_the_open_material_too() {
+        let context = egui::Context::default();
+        let render = |state: &mut Playground| {
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                state.materials_panel(ui);
+            });
+        };
+        let em = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let dense = |state: &mut Playground| {
+            let id = state.material_selection;
+            let mut dense = state
+                .editor
+                .document
+                .model
+                .draft
+                .material(id)
+                .unwrap()
+                .clone();
+            dense.mass_density = ScalarField::constant(2.0);
+            state.editor.update_material(dense).unwrap();
+            id
+        };
+        let switch = |state: &mut Playground| {
+            let previous = state.editor.document.model.draft.physics;
+            state.editor.set_physics(em).unwrap();
+            state.convert_material_edits(previous, em);
+        };
+
+        let mut state = Playground::default();
+        let id = dense(&mut state);
+        render(&mut state);
+        let mechanical = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(id)
+            .unwrap()
+            .clone();
+        switch(&mut state);
+        render(&mut state);
+        let converted = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(id)
+            .unwrap()
+            .clone();
+        assert_ne!(
+            converted, mechanical,
+            "the fixture converts to something else"
+        );
+        assert!(!state.material_edits_pending());
+        assert_eq!(state.material_edit.as_ref(), Some(&converted));
+
+        // An edit pending through the switch stays pending, converted.
+        let mut state = Playground::default();
+        let id = dense(&mut state);
+        render(&mut state);
+        state.material_edit.as_mut().unwrap().name = "Pending".into();
+        switch(&mut state);
+        render(&mut state);
+        assert!(state.material_edits_pending());
+        let edit = state.material_edit.clone().unwrap();
+        state.editor.update_material(edit).unwrap();
+        let applied = state.editor.document.model.draft.material(id).unwrap();
+        assert_eq!(applied.name, "Pending");
+        assert_eq!(applied.mass_density, converted.mass_density);
     }
 
     /// A scene that comes in keeps none of the outgoing one's materials open.
