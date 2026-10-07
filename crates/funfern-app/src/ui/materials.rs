@@ -2032,6 +2032,106 @@ mod tests {
         );
     }
 
+    /// Reported: "Fire now" on a pump at `rate`, with `rate` edited from 1
+    /// to 4 and not applied, fired at 1 Hz, the drive's formula going without
+    /// the parameter it reads. A drive at a parameter the edit had just added
+    /// was refused as invalid. Both fire as edited now, and the material's
+    /// other edits stay pending.
+    #[test]
+    fn fire_now_takes_the_parameters_its_drive_reads() {
+        for added in [false, true] {
+            let mut state = Playground::default();
+            let selection = state.resolved_material_selection();
+            let mut applied = state
+                .editor
+                .document
+                .model
+                .draft
+                .material(selection)
+                .unwrap()
+                .clone();
+            applied.parameters.push(MaterialParameter {
+                name: "rate".into(),
+                value: 1.0,
+            });
+            applied.mass_law.drive = TimeDrive::ParametricPump {
+                depth: ScalarField::constant(0.2),
+                frequency_hz: ScalarField::formula("rate").unwrap(),
+                phase_radians: ScalarField::constant(0.0),
+            };
+            applied.mass_law.gate = Some(PulseTrain {
+                envelope: PulseEnvelope::FlatTop {
+                    duration: 1.0,
+                    edge: 0.25,
+                },
+                start: 1.0,
+                repeat: 0.0,
+            });
+            state.editor.update_material(applied).unwrap();
+            state.set_material_advanced(selection, true);
+            let context = egui::Context::default();
+            theme::apply(&context);
+            context.enable_accesskit();
+            let pass = |state: &mut Playground, events: Vec<egui::Event>| {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(480.0, 6000.0),
+                    )),
+                    events,
+                    ..egui::RawInput::default()
+                };
+                let output = context.run_ui(input, |ui| state.materials_panel(ui));
+                laid_out(&output)
+            };
+            pass(&mut state, vec![]);
+            let edit = state.material_edit.as_mut().unwrap();
+            if added {
+                edit.parameters.push(MaterialParameter {
+                    name: "boost".into(),
+                    value: 4.0,
+                });
+                let TimeDrive::ParametricPump { frequency_hz, .. } = &mut edit.mass_law.drive
+                else {
+                    unreachable!()
+                };
+                *frequency_hz = ScalarField::formula("boost").unwrap();
+            } else {
+                edit.parameters[0].value = 4.0;
+            }
+            edit.mass_density = ScalarField::constant(2.0);
+            let widgets = pass(&mut state, vec![]);
+            let fire = widgets
+                .iter()
+                .find(|widget| widget.label == "Fire now")
+                .unwrap_or_else(|| panic!("no Fire now among {widgets:?}"));
+            pass(&mut state, click(fire));
+
+            let applied = state
+                .editor
+                .document
+                .model
+                .draft
+                .material(selection)
+                .unwrap();
+            let TimeDrive::ParametricPump { frequency_hz, .. } = &applied.mass_law.drive else {
+                panic!("the pump went")
+            };
+            assert_eq!(
+                frequency_hz.evaluate_constant(&applied.parameters),
+                Ok(4.0),
+                "added {added}: {}",
+                state.message
+            );
+            assert_eq!(
+                applied.mass_law.gate.unwrap().start,
+                state.fire_times().handoff
+            );
+            assert_eq!(applied.mass_density, ScalarField::constant(1.0));
+            assert!(state.material_edits_pending());
+        }
+    }
+
     /// Switching a material's view with edits pending leaves them pending,
     /// and switching it back to the simple view leaves a composition the
     /// simple view cannot name exactly as it was.

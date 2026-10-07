@@ -8,7 +8,7 @@
 //! offered: a slot that already holds one it does not run is shown as such and
 //! left alone, never converted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bevy_egui::egui;
 use funfern_core::*;
@@ -97,7 +97,10 @@ pub(super) enum FiredDrive {
 /// otherwise decide when the pulse runs. The drive goes with its gate as its
 /// editor shows them, so what fires is what is on screen; the material's
 /// other edits stay pending. A loss drive goes with its channel, which the
-/// edit may have just made out of a legacy damping.
+/// edit may have just made out of a legacy damping. The parameters those
+/// formulas name go with them at their edited values: kept at the applied
+/// ones, a pump at `rate` edited from 1 to 4 fired at 1 Hz, and one at a
+/// parameter the edit had just added was refused as invalid.
 pub(super) fn with_fired_drive(
     applied: &Material,
     edited: &Material,
@@ -105,20 +108,42 @@ pub(super) fn with_fired_drive(
     fired: FiredDrive,
 ) -> Material {
     let mut material = applied.clone();
-    match fired {
-        FiredDrive::Coefficient(LawPresetRow::Stiffness) => {
-            material.stiffness_law.drive = edited.stiffness_law.drive.clone();
-            material.stiffness_law.gate = edited.stiffness_law.gate;
-        }
-        FiredDrive::Coefficient(_) => {
-            material.mass_law.drive = edited.mass_law.drive.clone();
-            material.mass_law.gate = edited.mass_law.gate;
+    let mut edited = edited.clone();
+    let names: BTreeSet<String> = match fired {
+        FiredDrive::Coefficient(row) => {
+            let (target, source) = match row {
+                LawPresetRow::Stiffness => (&mut material.stiffness_law, &edited.stiffness_law),
+                _ => (&mut material.mass_law, &edited.mass_law),
+            };
+            target.drive = source.drive.clone();
+            target.gate = source.gate;
+            source.drive.parameter_names().map(str::to_owned).collect()
         }
         FiredDrive::Loss(row) => {
-            let mut edited = edited.clone();
             material.damping = edited.damping.clone();
-            *row_channel(&mut material, physics, row) =
-                row_channel(&mut edited, physics, row).clone();
+            let channel = row_channel(&mut edited, physics, row).clone();
+            let names = edited
+                .damping
+                .parameter_names()
+                .chain(channel.iter().flat_map(LossChannel::parameter_names))
+                .map(str::to_owned)
+                .collect();
+            *row_channel(&mut material, physics, row) = channel;
+            names
+        }
+    };
+    for parameter in edited
+        .parameters
+        .iter()
+        .filter(|parameter| names.contains(&parameter.name))
+    {
+        match material
+            .parameters
+            .iter_mut()
+            .find(|applied| applied.name == parameter.name)
+        {
+            Some(applied) => applied.value = parameter.value,
+            None => material.parameters.push(parameter.clone()),
         }
     }
     material
@@ -1163,6 +1188,60 @@ mod tests {
                 law_slots_editor(ui, material, row, sources, formulas, &mut timing);
             }
         }
+    }
+
+    /// A fired loss drive takes the parameters its channel reads at their
+    /// edited values, and leaves a parameter only another law reads alone.
+    #[test]
+    fn a_fired_loss_takes_the_parameters_its_channel_reads() {
+        let physics = PhysicsModel::Mechanical;
+        let mut applied = Scene::initial().materials[0].clone();
+        applied.parameters = vec![
+            MaterialParameter {
+                name: "rate".into(),
+                value: 1.0,
+            },
+            MaterialParameter {
+                name: "other".into(),
+                value: 1.0,
+            },
+        ];
+        let channel = LossChannel {
+            base_rate: ScalarField::constant(0.5),
+            law: DampingLaw {
+                rate: RateLaw::Constant,
+                drive: TimeDrive::ParametricPump {
+                    depth: ScalarField::constant(0.2),
+                    frequency_hz: ScalarField::formula("rate").unwrap(),
+                    phase_radians: ScalarField::constant(0.0),
+                },
+                gate: None,
+            },
+        };
+        *row_channel(&mut applied, physics, LawPresetRow::Stiffness) = Some(channel);
+        let mut edited = applied.clone();
+        for parameter in &mut edited.parameters {
+            parameter.value = 4.0;
+        }
+        let fired = with_fired_drive(
+            &applied,
+            &edited,
+            physics,
+            FiredDrive::Loss(LawPresetRow::Stiffness),
+        );
+        assert_eq!(
+            fired.parameters,
+            [
+                MaterialParameter {
+                    name: "rate".into(),
+                    value: 4.0,
+                },
+                MaterialParameter {
+                    name: "other".into(),
+                    value: 1.0,
+                },
+            ]
+        );
     }
 
     /// Firing a loss drive that the edit made out of a legacy damping takes

@@ -412,6 +412,12 @@ impl TimeDrive {
         matches!(self, Self::None)
     }
 
+    pub fn parameter_names(&self) -> impl Iterator<Item = &str> {
+        self.fields()
+            .into_iter()
+            .flat_map(ScalarField::parameter_names)
+    }
+
     pub fn uses_frame(&self) -> bool {
         matches!(self, Self::TravellingModulation { .. })
     }

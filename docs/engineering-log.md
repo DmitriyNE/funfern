@@ -20422,3 +20422,17 @@ waiting is not queued again; its button still shows the old direction until
 the press is sent, so a second press is the same request. Reset and a
 replaced scene clear the queue.
 `switches_on_two_materials_both_wait_for_a_busy_generation`.
+
+## 2026-10-07 — Fire now takes the parameters its drive reads
+
+"Fire now" committed the drive's formulas from the edit but kept the applied
+parameter table, so a pump at `rate`, with `rate` edited from 1 to 4 and not
+applied, fired at 1 Hz while its editor read 4 Hz; a drive at a parameter the
+edit had just added was refused as invalid and nothing fired. The parameters
+the fired formulas read (the drive's, or for a loss its channel's and the
+damping's) now go with them at their edited values, added where the applied
+material lacks them. A pending law that reads the same parameter takes that
+value at once, the one the editor already shows; the material's other edits
+stay pending. `TimeDrive::parameter_names` joins those of the other laws.
+`fire_now_takes_the_parameters_its_drive_reads`,
+`a_fired_loss_takes_the_parameters_its_channel_reads`.
