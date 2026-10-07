@@ -850,8 +850,8 @@ impl Playground {
             // two controls for one number.
             let material_id = material.id.0;
             let mut renames = Vec::new();
+            let mut remove = None;
             ui.collapsing("Parameters", |ui| {
-                let mut remove = None;
                 let referenced_names = material
                     .parameter_names()
                     .map(str::to_owned)
@@ -901,12 +901,6 @@ impl Playground {
                         }
                     });
                 }
-                if let Some(index) = remove
-                    && let Err(error) =
-                        delete_parameter(&mut material, index, &mut self.parameter_name_edits)
-                {
-                    self.notify(format!("Cannot delete the parameter: {error}"));
-                }
                 if material.parameters.len() < MAX_MATERIAL_PARAMETERS
                     && ui.button("+ Parameter").clicked()
                 {
@@ -924,9 +918,15 @@ impl Playground {
                         .push(MaterialParameter { name, value: 1.0 });
                 }
             });
+            // Renames before a deletion: both name a row by its place as
+            // drawn, and a click on − is where a name field lets go, so the
+            // two come in one frame; deleting first moved the rename onto the
+            // row below, or past the end.
             for (index, name) in renames {
                 self.parameter_name_edits.remove(&(material_id, index));
-                let old = material.parameters[index].name.clone();
+                let Some(old) = material.parameters.get(index).map(|p| p.name.clone()) else {
+                    continue;
+                };
                 if material.rename_parameter(index, name.clone()).is_err() {
                     self.notify(format!(
                         "Cannot rename to {name:?}: it must be a new, non-reserved identifier"
@@ -942,6 +942,12 @@ impl Playground {
                 {
                     *text = replace_identifier(text, &old, &name);
                 }
+            }
+            if let Some(index) = remove
+                && let Err(error) =
+                    delete_parameter(&mut material, index, &mut self.parameter_name_edits)
+            {
+                self.notify(format!("Cannot delete the parameter: {error}"));
             }
             let stored = self
                 .editor
@@ -1630,6 +1636,80 @@ mod tests {
             state.material_formula_errors
         );
         assert_eq!(state.material_edit.as_ref().unwrap().mass_density, renamed);
+    }
+
+    /// Reported: a parameter renamed in its field and left by a click on −
+    /// beside one above it crashed the app. The click let the field go, so
+    /// the rename and the deletion came in one frame, and the deletion went
+    /// first: with two parameters the rename's place was past the end, and
+    /// with three it renamed the one below.
+    #[test]
+    fn deleting_a_parameter_keeps_a_rename_left_in_another() {
+        for count in [2usize, 3] {
+            let mut state = Playground::default();
+            let id = state.material_selection;
+            let mut material = state
+                .editor
+                .document
+                .model
+                .draft
+                .material(id)
+                .unwrap()
+                .clone();
+            material.parameters = (1..=count)
+                .map(|index| MaterialParameter {
+                    name: format!("p{index}"),
+                    value: index as f64,
+                })
+                .collect();
+            state.editor.update_material(material).unwrap();
+            state.set_material_advanced(id, true);
+            let context = egui::Context::default();
+            context.enable_accesskit();
+            let find = |widgets: &[super::super::test_support::LaidOut], label: &str| {
+                widgets
+                    .iter()
+                    .find(|widget| widget.label == label)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("no {label:?} in {:?}", labels(widgets)))
+            };
+            let widgets = roster_pass(&mut state, &context, vec![]);
+            roster_pass(&mut state, &context, click(&find(&widgets, "Parameters")));
+            // Past the fold's opening, so a click lands where it was aimed.
+            for _ in 0..20 {
+                roster_pass(&mut state, &context, vec![]);
+            }
+            let widgets = roster_pass(&mut state, &context, vec![]);
+            roster_pass(&mut state, &context, click(&find(&widgets, "p2")));
+            let end = |pressed| egui::Event::Key {
+                key: egui::Key::End,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            };
+            roster_pass(&mut state, &context, vec![end(true), end(false)]);
+            roster_pass(&mut state, &context, vec![egui::Event::Text("x".into())]);
+            let widgets = roster_pass(&mut state, &context, vec![]);
+            let first = widgets
+                .iter()
+                .filter(|widget| widget.label == "−")
+                .min_by(|a, b| a.rect.min.y.total_cmp(&b.rect.min.y))
+                .cloned()
+                .expect("a − per parameter");
+            roster_pass(&mut state, &context, click(&first));
+            roster_pass(&mut state, &context, vec![]);
+            let parameters = state
+                .material_edit
+                .as_ref()
+                .unwrap()
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.name.as_str(), parameter.value))
+                .collect::<Vec<_>>();
+            let expected = [("p2x", 2.0), ("p3", 3.0)];
+            assert_eq!(parameters, expected[..count - 1], "{count} parameters");
+        }
     }
 
     /// Deleting a parameter removes it, in every build, and a parameter a

@@ -20338,3 +20338,14 @@ rename now rewrites that material's field text with the same identifier
 replacement the core rename uses (`replace_identifier`, made public), half-typed
 text included, rather than dropping it.
 `a_renamed_parameter_is_renamed_in_its_formula_fields`.
+
+## 2026-10-07 — Renames before a parameter's deletion
+
+A click on − beside a parameter is also where a name field being typed in lets
+go, so its rename and the deletion arrive in one frame, each naming a row by
+its place. The deletion went first and moved the rows up: with two
+parameters, `p2` renamed `p2x` while `p1` was deleted had its place past the
+end, which `rename_parameter` refused until the formula-text rewrite read the
+old name by index and panicked; with three, `p3` was renamed and `p2` kept its
+name. Renames now apply before the deletion, and a rename whose row is gone is
+skipped. `deleting_a_parameter_keeps_a_rename_left_in_another`.
