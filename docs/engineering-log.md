@@ -20436,3 +20436,17 @@ value at once, the one the editor already shows; the material's other edits
 stay pending. `TimeDrive::parameter_names` joins those of the other laws.
 `fire_now_takes_the_parameters_its_drive_reads`,
 `a_fired_loss_takes_the_parameters_its_channel_reads`.
+
+## 2026-10-08 — A drag brought back to its start restores the simulation geometry
+
+A move, turn or scale drag wrote the geometry it began with straight into the
+draft every frame and then applied its transform so far, which the editor
+compared with that reset draft. At zero offset the two matched and the editor
+returned early: a subdomain taken 0.3 across and back showed its outline home
+while the accepted geometry and its material frame stayed 0.3 across, called
+Valid. The frame rule had the same hole: a boundary back where it began had
+no motion, so its frame kept what the previous drag frame gave it. Those
+drags now hand their start to `apply_transform_updates_from_during_edit`,
+which compares the result with the draft as it stands, and a frame that does
+not follow takes the one it began the edit with.
+`a_moved_subdomain_carries_its_frame`.

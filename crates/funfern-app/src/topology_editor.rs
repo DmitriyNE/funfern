@@ -2460,10 +2460,31 @@ impl TopologyEditor {
         &mut self,
         updates: &[TopologyTransformUpdate],
     ) -> Result<(), String> {
+        let geometry = self.document.model.draft.geometry.clone();
+        self.apply_transform_updates_to_during_edit(geometry, updates)
+    }
+
+    /// Applies a transform to `start` rather than to the draft, for a drag that
+    /// applies its whole transform so far to the geometry it began with every
+    /// frame. The result is compared with the draft as it stands, so a drag
+    /// brought back to its start still restores the geometry, revalidates and
+    /// puts the frames back.
+    pub fn apply_transform_updates_from_during_edit(
+        &mut self,
+        start: &TopologyGeometry,
+        updates: &[TopologyTransformUpdate],
+    ) -> Result<(), String> {
+        self.apply_transform_updates_to_during_edit(start.clone(), updates)
+    }
+
+    fn apply_transform_updates_to_during_edit(
+        &mut self,
+        mut geometry: TopologyGeometry,
+        updates: &[TopologyTransformUpdate],
+    ) -> Result<(), String> {
         if updates.is_empty() {
             return Err("Transform has no geometry to update".into());
         }
-        let mut geometry = self.document.model.draft.geometry.clone();
         for update in updates {
             match *update {
                 TopologyTransformUpdate::Control {
@@ -2534,9 +2555,12 @@ impl TopologyEditor {
     /// have to move with it.
     ///
     /// Both the motion and the frame are taken from where the edit began. A
-    /// drag puts the geometry back to its start every frame and applies the
-    /// whole transform again, but it does not put the frames back, so a frame
-    /// moved from where it had got to would be moved once per frame.
+    /// drag applies its whole transform so far to the geometry it began with
+    /// every frame, so a frame moved from where it had got to would be moved
+    /// once per frame. For the same reason a frame that does not follow is
+    /// given the one it began with: a drag brought back to its start, or on to
+    /// a shape that is no similarity, must not keep a frame an earlier drag
+    /// frame moved.
     fn followed_frames(&self, moved: &TopologyGeometry) -> Vec<(RegionId, MaterialFrame)> {
         let topology = &self
             .compiled_draft
@@ -2602,10 +2626,12 @@ impl TopologyEditor {
                 old.extend(before);
                 new.extend(after);
             }
-            if old.is_empty() || old == new {
+            if old.is_empty() {
                 continue;
             }
-            let Some((old_center, new_center, a, b)) = similarity(&old, &new) else {
+            let motion = (old != new).then(|| similarity(&old, &new)).flatten();
+            let Some((old_center, new_center, a, b)) = motion else {
+                followed.push((region.id, region.frame));
                 continue;
             };
             let relative = region.frame.origin - old_center;
@@ -9281,27 +9307,27 @@ mod tests {
         assert!((moved.angle_radians - (authored.angle_radians + turn)).abs() < 1.0e-9);
         assert_eq!(moved.attachment, MaterialFrameAttachment::FollowRegion);
 
-        // A drag puts the geometry back to its start every frame and applies
-        // the whole transform so far. The frame must land where one transform
-        // puts it, not be moved once per frame.
+        // A drag applies its whole transform so far to the geometry it began
+        // with every frame. The frame must land where one transform puts it,
+        // not be moved once per frame.
         let start = editor.document.model.draft.geometry.clone();
         let base = controls(&editor);
         let origin = frame(&editor).origin;
-        editor.begin();
-        for step in 1..=5 {
-            editor.document.model.draft.geometry = start.clone();
-            let offset = Point2::new(0.02 * step as f64, 0.01 * step as f64);
-            let updates = base
-                .iter()
+        let shifted = |offset: Point2| {
+            base.iter()
                 .enumerate()
                 .map(|(control, point)| TopologyTransformUpdate::Control {
                     curve,
                     control,
                     point: *point + offset,
                 })
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        };
+        editor.begin();
+        for step in 1..=5 {
+            let offset = Point2::new(0.02 * step as f64, 0.01 * step as f64);
             editor
-                .apply_transform_updates_during_edit(&updates)
+                .apply_transform_updates_from_during_edit(&start, &shifted(offset))
                 .unwrap();
         }
         editor.commit();
@@ -9311,7 +9337,28 @@ mod tests {
             frame(&editor).origin
         );
         editor.undo();
+        settle(&mut editor);
         let moved = frame(&editor);
+
+        // Reported: a drag taken 0.3 across and back to its start, each frame
+        // validated, left the outline home but the accepted geometry and the
+        // frame 0.3 across, and called that Valid.
+        editor.begin();
+        for offset in [Point2::new(0.3, 0.0), Point2::default()] {
+            editor
+                .apply_transform_updates_from_during_edit(&start, &shifted(offset))
+                .unwrap();
+            settle(&mut editor);
+        }
+        editor.commit();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(editor.document.model.accepted.geometry, start);
+        assert_eq!(frame(&editor), moved);
+        assert_eq!(
+            editor.document.model.accepted.region(region).unwrap().frame,
+            moved
+        );
 
         // Reshaping moves one control only: nothing to follow.
         let nudged = controls(&editor)[0] + Point2::new(0.03, 0.0);

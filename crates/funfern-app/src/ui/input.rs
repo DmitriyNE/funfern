@@ -500,8 +500,8 @@ impl Playground {
                         )
                         .map_err(|e| e.to_string())
                         .and_then(|updates| {
-                            self.editor.document.model.draft.geometry = geometry;
-                            self.editor.apply_transform_updates_during_edit(&updates)?;
+                            self.editor
+                                .apply_transform_updates_from_during_edit(&geometry, &updates)?;
                             if custom_pivot {
                                 self.gizmo_pivot = Some((selected, pivot + translation));
                             }
@@ -532,8 +532,8 @@ impl Playground {
                         )
                         .map_err(|e| e.to_string())
                         .and_then(|updates| {
-                            self.editor.document.model.draft.geometry = geometry;
-                            self.editor.apply_transform_updates_during_edit(&updates)
+                            self.editor
+                                .apply_transform_updates_from_during_edit(&geometry, &updates)
                         })
                     }
                     DragGesture::Scale {
@@ -567,8 +567,8 @@ impl Playground {
                         )
                         .map_err(|e| e.to_string())
                         .and_then(|updates| {
-                            self.editor.document.model.draft.geometry = geometry;
-                            self.editor.apply_transform_updates_during_edit(&updates)
+                            self.editor
+                                .apply_transform_updates_from_during_edit(&geometry, &updates)
                         })
                     }
                     DragGesture::Pivot { offset, .. } => {
