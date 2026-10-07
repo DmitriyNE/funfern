@@ -116,6 +116,11 @@ impl Playground {
         self.selection = TopologySelection::None;
         self.selected_probe = None;
         self.draw = None;
+        // A drag under way is of the outgoing scene: a load finishing during
+        // a domain-edge drag had the rest of it resize the loaded domain from
+        // the old rectangle, with no history step to undo it. Its pending
+        // edit left with the outgoing editor.
+        self.drag = None;
         self.pending_merge = None;
         // A placement under way keeps its first point in the outgoing
         // scene's coordinates: a disk's centre clicked there anchored the
@@ -514,6 +519,65 @@ mod tests {
     use crate::ui::test_support::*;
     use funfern_app::topology_editor::TopologyEditor;
     use funfern_app::topology_viewport::TopologySpanTarget;
+
+    /// Reported: a load that finished during a domain-edge drag left the
+    /// drag on, and the rest of it resized the loaded domain from the old
+    /// rectangle, with nothing in the history to undo.
+    #[test]
+    fn a_load_ends_a_drag_under_way() {
+        let mut state = with_baffles(&[]);
+        let context = viewport_context(&mut state);
+        let none = egui::Modifiers::NONE;
+        let from = state.screen(Point2::new(1.0, 0.0), viewport());
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: none,
+        };
+        let mut time = 1.0;
+        let mut move_to = |state: &mut Playground, dx: f32, events: Vec<egui::Event>| {
+            time += 0.02;
+            let mut all = vec![egui::Event::PointerMoved(from + egui::vec2(dx, 0.0))];
+            all.extend(events);
+            viewport_frame(state, &context, time, none, all);
+        };
+        move_to(&mut state, 0.0, vec![button(from, true)]);
+        for dx in [10.0, 20.0, 30.0] {
+            move_to(&mut state, dx, vec![]);
+        }
+        assert!(state.drag.is_some(), "the edge drag is under way");
+
+        let loaded = funfern_app::topology_examples::catalog()[2]
+            .document
+            .clone();
+        state
+            .sender
+            .send(FileEvent::Loaded(
+                persistence::save(&loaded).unwrap().into_bytes(),
+            ))
+            .unwrap();
+        state.update_files();
+        while state.load.is_some() {
+            state.update_files();
+        }
+        assert_eq!(state.message, "Scene loaded; history cleared");
+        let domain = state.editor.document.model.draft.geometry.domain;
+        assert_eq!(domain, loaded.model.draft.geometry.domain);
+        assert!(state.drag.is_none());
+
+        for dx in [50.0, 70.0, 100.0] {
+            move_to(&mut state, dx, vec![]);
+        }
+        move_to(
+            &mut state,
+            100.0,
+            vec![button(from + egui::vec2(100.0, 0.0), false)],
+        );
+        assert_eq!(state.editor.document.model.draft.geometry.domain, domain);
+        assert_eq!(state.editor.history_len(), (0, 0));
+        assert!(!state.editor.editing());
+    }
 
     /// A scene that replaces the whole document opens framed, as launch
     /// does: its domain need not be where, or as large as, the last one's.

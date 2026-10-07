@@ -20362,3 +20362,13 @@ material `MaterialId(2)` beside the restored one, and the scene refused to save
 each of the six allocators on from the outgoing editor where that is higher,
 so they stay past every ID the history can restore.
 `undoing_a_new_scene_hands_out_unused_ids`.
+
+## 2026-10-07 — A replaced scene ends a drag under way
+
+A scene coming in drops the outgoing selection, drawing and placements, and
+left a drag going. A load finishing during a domain-edge drag had the rest of
+the drag resize the loaded scene from the outgoing rectangle: its x −1 to 1
+became −1 to 1.4, with history `(0, 0)` and nothing to undo. Undo cancels a
+gesture before it steps, so only a load or an opened example reached this.
+`scene_replaced` now drops the drag; its pending edit left with the outgoing
+editor. `a_load_ends_a_drag_under_way`.
