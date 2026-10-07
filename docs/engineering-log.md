@@ -20185,3 +20185,14 @@ sees (`point_source_squared_distances`). The carrier is now
 `CanonicalForcing::point_profile`, which the point source scales by the mass
 and a pulse by its amplitude, so the two reach the same nodes.
 `a_pulse_reaches_what_a_point_source_there_would`.
+
+## 2026-10-07 — A placement owns its double clicks
+
+The viewport's double-click handler - open the probe under the pointer, the
+far-field window, or insert a control into the curve beside it - ran before
+the pulse and probe placement modes looked at the click. Two quick clicks
+beside a baffle placed one pulse and inserted a control into the baffle, and
+placing a segment probe the same way kept its start and lost its end to the
+same insertion. A drawing already owned the viewport against this; placing a
+pulse or a probe now does too, and each click of a double click places.
+`a_double_click_while_placing_places_twice`.

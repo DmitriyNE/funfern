@@ -124,8 +124,13 @@ impl Playground {
                 return;
             }
         }
+        // Placing a pulse or a probe owns the viewport too: each click of a
+        // double click is a placement, where a double click beside a baffle
+        // used to insert a control into it in place of the second.
         if response.double_clicked()
             && self.draw.is_none()
+            && !self.pulse_mode
+            && self.probe_mode.is_none()
             && let Some(pos) = pointer
         {
             // The same lookup a single click uses, so a double click honours the

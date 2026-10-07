@@ -1135,6 +1135,65 @@ mod tests {
         assert!(state.draw.is_none(), "opening it again starts nothing");
     }
 
+    /// Reported: two quick clicks beside a baffle placed one pulse, and the
+    /// second, a double click, inserted a control into the baffle. Placing a
+    /// segment probe the same way kept its start and inserted a control in
+    /// place of its end. A placement owns the viewport as a drawing does.
+    #[test]
+    fn a_double_click_while_placing_places_twice() {
+        let controls =
+            |state: &Playground| match &state.editor.document.model.draft.geometry.curves[0].spline
+            {
+                CurveSpline::Open(spline) => spline.controls().len(),
+                CurveSpline::Closed(spline) => spline.controls().len(),
+            };
+        let mut state = with_baffles(&[]);
+        super::super::test_support::activate(&mut state);
+        let context = viewport_context(&mut state);
+        let before = controls(&state);
+        let near_baffle = state.screen(Point2::new(-0.01, 0.1), viewport());
+        state.pulse_mode = true;
+        let mut time = 1.0;
+        let mut pulses = 0;
+        for _ in 0..2 {
+            time = viewport_click(
+                &mut state,
+                &context,
+                time,
+                egui::Modifiers::NONE,
+                near_baffle,
+            );
+            pulses += usize::from(state.pending_pulse.take().is_some());
+        }
+        assert_eq!(pulses, 2, "{}", state.message);
+        assert_eq!(controls(&state), before);
+
+        let mut state = with_baffles(&[]);
+        super::super::test_support::activate(&mut state);
+        let context = viewport_context(&mut state);
+        state.probe_mode = Some(super::super::ProbePlacement::Segment { start: None });
+        let start = state.screen(Point2::new(-0.3, 0.1), viewport());
+        let time = viewport_click(&mut state, &context, 1.0, egui::Modifiers::NONE, start);
+        let mut time = time + 1.0;
+        let near_baffle = state.screen(Point2::new(-0.01, 0.1), viewport());
+        for _ in 0..2 {
+            time = viewport_click(
+                &mut state,
+                &context,
+                time,
+                egui::Modifiers::NONE,
+                near_baffle,
+            );
+        }
+        assert_eq!(controls(&state), before, "{}", state.message);
+        assert_eq!(
+            state.editor.document.model.probes.len(),
+            1,
+            "{}",
+            state.message
+        );
+    }
+
     /// A drawing owns the viewport. A double click beside a curve while
     /// drawing a loop places the drawing's points and leaves the curve
     /// alone, and a double click whose first click ends an open curve on a
