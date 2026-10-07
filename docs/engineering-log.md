@@ -20228,3 +20228,13 @@ took the first click after the drawing ended. Arming a probe tool or the
 pulse tool now ends an unfinished drawing (`toggle_probe_mode`,
 `toggle_pulse_mode`), and starting a drawing disarms both.
 `one_tool_owns_the_viewport`.
+
+## 2026-10-07 — A probe's name field follows the document
+
+The probe name field kept what was typed until another probe was selected,
+so an Undo of a rename left the renamed text there; and it committed on any
+Enter pressed anywhere, which put the undone rename back without the field
+ever being touched. It now follows the document while it is not being typed
+in, as the region name field does, and commits only when it lets go, which
+Enter in the field does. `an_undone_rename_shows_at_once_and_stays_undone`,
+which also renames through the field.

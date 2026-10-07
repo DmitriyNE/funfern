@@ -238,19 +238,26 @@ impl Playground {
             TopologyProbeTarget::AreaDisk { .. } => "Selected disk probe",
             TopologyProbeTarget::AreaRegion(_) => "Selected region probe",
         });
-        if !matches!(self.probe_name_edit.as_ref(), Some((candidate, _)) if *candidate == id) {
+        // While the field is not being typed in it follows the document, as
+        // the region name does, so an Undo shows at once; it commits when it
+        // lets go, which Enter does. Kept until another probe was selected,
+        // the text an Undo had taken back went in again at the next Enter
+        // pressed anywhere, which the field also took as its own.
+        let field = egui::Id::new(("probe-name", id.0));
+        let focused = ui.memory(|memory| memory.has_focus(field));
+        if !focused
+            || !matches!(self.probe_name_edit.as_ref(), Some((candidate, _)) if *candidate == id)
+        {
             self.probe_name_edit = Some((id, probe.name.clone()));
         }
         let mut commit_name = None;
         if let Some((_, name)) = self.probe_name_edit.as_mut() {
-            let response = ui.add(egui::TextEdit::singleline(name).hint_text("Probe name"));
-            if (response.lost_focus()
-                || response
-                    .ctx
-                    .input(|input| input.key_pressed(egui::Key::Enter)))
-                && !name.trim().is_empty()
-                && name.len() <= 64
-            {
+            let response = ui.add(
+                egui::TextEdit::singleline(name)
+                    .id(field)
+                    .hint_text("Probe name"),
+            );
+            if response.lost_focus() && !name.trim().is_empty() && name.len() <= 64 {
                 commit_name = Some(name.trim().to_owned());
             }
         }
@@ -752,6 +759,88 @@ mod tests {
     /// and one elsewhere read it scaled by its height.
     /// A segment's samples share its left normal, which Swap ends turns; a
     /// boundary's take the compiled outward normals of the trace it reads.
+    /// Reported: an Undo of a probe's rename left the renamed text in its
+    /// field, which was kept until another probe was selected, and it went
+    /// in again at the next Enter - pressed anywhere, since the field took
+    /// every Enter as its own.
+    #[test]
+    fn an_undone_rename_shows_at_once_and_stays_undone() {
+        use bevy_egui::egui;
+        let mut state = Playground::default();
+        let id = state
+            .editor
+            .create_probe(
+                "Probe 1".into(),
+                [1, 2, 3],
+                TopologyProbeTarget::Point(Point2::new(-0.2, 0.1)),
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        let name = |state: &Playground| {
+            state
+                .editor
+                .document
+                .model
+                .probes
+                .iter()
+                .find(|probe| probe.id == id)
+                .unwrap()
+                .name
+                .clone()
+        };
+        let context = egui::Context::default();
+        let frame = |state: &mut Playground, events: Vec<egui::Event>, time: f64| {
+            let input = egui::RawInput {
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let _ = context.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| state.selected_probe_editor(ui, id));
+            });
+        };
+        frame(&mut state, vec![], 0.0);
+        // Typed and committed.
+        state.probe_name_edit = Some((id, "Renamed".into()));
+        let mut probe = state
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .find(|probe| probe.id == id)
+            .unwrap()
+            .clone();
+        probe.name = "Renamed".into();
+        state.editor.update_probe(probe).unwrap();
+        settle(&mut state.editor);
+        assert!(state.editor.undo());
+        settle(&mut state.editor);
+        frame(&mut state, vec![], 0.1);
+        assert_eq!(name(&state), "Probe 1");
+        assert_eq!(state.probe_name_edit, Some((id, "Probe 1".to_owned())));
+        let enter = |pressed| egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut state, vec![enter(true), enter(false)], 0.2);
+        assert_eq!(
+            name(&state),
+            "Probe 1",
+            "an Enter elsewhere renamed it again"
+        );
+
+        // Typed in the field, Enter renames it.
+        context.memory_mut(|memory| memory.request_focus(egui::Id::new(("probe-name", id.0))));
+        frame(&mut state, vec![], 0.3);
+        frame(&mut state, vec![egui::Event::Text(" A".into())], 0.4);
+        frame(&mut state, vec![enter(true), enter(false)], 0.5);
+        assert_eq!(name(&state), "Probe 1 A");
+    }
+
     #[test]
     fn line_probes_read_flux_along_their_normals() {
         let mut state = Playground::default();
