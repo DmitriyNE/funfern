@@ -20267,3 +20267,18 @@ it, and before any mesh it placed nothing. It now takes the region from the
 editor's own compile of the scene as edited (`draft_region_at`), as selecting
 a subdomain does. A pulse still takes the running generation's region, since
 it goes into the running field. `a_region_probe_takes_the_subdomain_as_drawn`.
+
+## 2026-10-07 — A typed name survives the selection moving
+
+A probe's or a region's name, typed but not yet committed, was lost when the
+selection moved. The probe and subdomain lists sit above their name fields, so
+a click in one moved the selection first and the field was drawn for the new
+choice, never letting go for the old; a click in the scene did the same. A
+field's typing now goes to what it was typed for once the field shows
+something else, as letting go would have put it: before the field takes up
+another probe or region, and once a frame after the panels for a field no
+longer drawn (`commit_typed_names`). The fields follow the document while not
+typed in, so only typing commits this way; a scene coming in drops a probe's
+typing, since its ids start again.
+`a_typed_probe_name_survives_the_selection_moving`,
+`a_typed_region_name_survives_the_selection_moving`.

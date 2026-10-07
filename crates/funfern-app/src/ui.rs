@@ -2664,6 +2664,7 @@ pub fn frame(
     );
     let logical_canvas = ctx.viewport_rect();
     let logical_viewport = state.show(&mut root, &display, &vector_display);
+    state.commit_typed_names();
     if state.snapshot_state == SnapshotState::Armed {
         state.snapshot_state = SnapshotState::Capturing;
         let sender = state.sender.clone();

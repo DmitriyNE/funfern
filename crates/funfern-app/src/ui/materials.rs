@@ -968,6 +968,7 @@ impl Playground {
     /// the field lets go, as one undoable edit; while the field is not being
     /// typed in it follows the document, so an Undo shows at once.
     fn region_name_field(&mut self, ui: &mut egui::Ui, region: RegionId) {
+        self.commit_typed_region_name(Some(region));
         let id = egui::Id::new(("region-name", region.0));
         let stored = self
             .editor
@@ -1000,6 +1001,33 @@ impl Playground {
         if let Some(name) = commit
             && let Err(error) = self.editor.rename_region(region, &name)
         {
+            self.notify(error);
+        }
+    }
+}
+
+impl Playground {
+    /// The region name field's typing, when the field now shows `showing`
+    /// rather than the region it was typed for (`commit_typed_names`).
+    pub(super) fn commit_typed_region_name(&mut self, showing: Option<RegionId>) {
+        let Some((typed_for, name)) = self
+            .region_name_edit
+            .take_if(|(typed_for, _)| Some(*typed_for) != showing)
+        else {
+            return;
+        };
+        let stored = self
+            .editor
+            .document
+            .model
+            .region_names
+            .get(&typed_for)
+            .cloned()
+            .unwrap_or_default();
+        if self.editor.document.model.draft.region(typed_for).is_none() || name.trim() == stored {
+            return;
+        }
+        if let Err(error) = self.editor.rename_region(typed_for, &name) {
             self.notify(error);
         }
     }
@@ -2003,6 +2031,64 @@ mod tests {
         let applied = state.editor.document.model.draft.material(id).unwrap();
         assert_eq!(applied.color, picked);
         assert_eq!(applied.name, "Pending");
+    }
+
+    /// Reported: a region's new name, typed but not yet committed, was lost
+    /// when another region was picked from the subdomain list above it.
+    #[test]
+    fn a_typed_region_name_survives_the_selection_moving() {
+        let mut state = Playground::default();
+        let material = state.editor.document.model.draft.materials[0].id;
+        state
+            .editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(-0.5, 0.3), 0.15),
+                funfern_app::topology_editor::ClosedCurvePurpose::Subdomain { material },
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        let regions = state
+            .editor
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .map(|region| region.id)
+            .collect::<Vec<_>>();
+        let (first, second) = (regions[0], regions[1]);
+        state.select_region(first);
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut time = 0.0;
+        let mut frame = |state: &mut Playground, events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(480.0, 6000.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let output = context.run_ui(input, |ui| state.materials_panel(ui));
+            state.commit_typed_names();
+            laid_out(&output)
+        };
+        frame(&mut state, vec![]);
+        context.memory_mut(|memory| memory.request_focus(egui::Id::new(("region-name", first.0))));
+        frame(&mut state, vec![]);
+        let widgets = frame(&mut state, vec![egui::Event::Text("Typed".into())]);
+        let label = state.region_name(second);
+        let other = widgets.iter().find(|widget| widget.label == label).unwrap();
+        frame(&mut state, click(other));
+        assert_eq!(state.region_selection, second);
+        assert_eq!(
+            state.editor.document.model.region_names.get(&first),
+            Some(&"Typed".to_owned())
+        );
+        assert_eq!(state.editor.document.model.region_names.get(&second), None);
     }
 
     /// A scene that comes in keeps none of the outgoing one's materials open.

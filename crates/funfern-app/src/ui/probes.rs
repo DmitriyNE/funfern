@@ -216,7 +216,50 @@ impl Playground {
     /// Name, color, and target settings for the selected probe. The name is
     /// committed when the field loses focus so every keystroke is not a
     /// separate document revision.
+    /// A name typed into a field that is no longer shown goes to what it was
+    /// typed for, as the field letting go would have put it: a selection
+    /// moved by a click in a list above the field, or in the scene, took the
+    /// field away first and the typing with it. The fields follow the
+    /// document while they are not typed in, so nothing else differs. Once a
+    /// frame, after the panels, for a field that was not drawn at all.
+    pub(super) fn commit_typed_names(&mut self) {
+        self.commit_typed_probe_name(self.selected_probe);
+        let showing = (!self.hole_selected).then_some(self.region_selection);
+        self.commit_typed_region_name(showing);
+    }
+
+    /// The probe name field's typing, when the field now shows `showing`
+    /// rather than the probe it was typed for.
+    fn commit_typed_probe_name(&mut self, showing: Option<ProbeId>) {
+        let Some((typed_for, name)) = self
+            .probe_name_edit
+            .take_if(|(typed_for, _)| Some(*typed_for) != showing)
+        else {
+            return;
+        };
+        let name = name.trim();
+        let Some(mut probe) = self
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .find(|probe| probe.id == typed_for)
+            .cloned()
+        else {
+            return;
+        };
+        if name.is_empty() || name.len() > 64 || probe.name == name {
+            return;
+        }
+        probe.name = name.to_owned();
+        if let Err(error) = self.editor.update_probe(probe) {
+            self.notify(error);
+        }
+    }
+
     pub(super) fn selected_probe_editor(&mut self, ui: &mut egui::Ui, id: ProbeId) {
+        self.commit_typed_probe_name(Some(id));
         let Some(mut probe) = self
             .editor
             .document
@@ -839,6 +882,83 @@ mod tests {
         frame(&mut state, vec![egui::Event::Text(" A".into())], 0.4);
         frame(&mut state, vec![enter(true), enter(false)], 0.5);
         assert_eq!(name(&state), "Probe 1 A");
+    }
+
+    /// Reported: a probe's new name, typed but not yet committed, was lost
+    /// when another probe was picked from the list: the list sits above the
+    /// field, so the selection moved first and the field never let go. A
+    /// selection cleared with the field not drawn again lost it too.
+    #[test]
+    fn a_typed_probe_name_survives_the_selection_moving() {
+        use super::super::test_support::{click, laid_out};
+        use bevy_egui::egui;
+        let mut state = Playground::default();
+        let first = state.editor.document.model.probes[0].id;
+        let second = state
+            .editor
+            .create_probe(
+                "Second".into(),
+                [1, 2, 3],
+                TopologyProbeTarget::Point(Point2::new(-0.2, 0.1)),
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        let name = |state: &Playground, id| {
+            state
+                .editor
+                .document
+                .model
+                .probes
+                .iter()
+                .find(|probe| probe.id == id)
+                .unwrap()
+                .name
+                .clone()
+        };
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut time = 0.0;
+        let mut frame = |state: &mut Playground, events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(480.0, 2000.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let output = context.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| state.probes_panel(ui));
+            });
+            state.commit_typed_names();
+            laid_out(&output)
+        };
+        let focus = |id: ProbeId| {
+            context.memory_mut(|memory| memory.request_focus(egui::Id::new(("probe-name", id.0))))
+        };
+
+        state.selected_probe = Some(first);
+        frame(&mut state, vec![]);
+        focus(first);
+        frame(&mut state, vec![]);
+        let widgets = frame(&mut state, vec![egui::Event::Text(" typed".into())]);
+        let other = widgets
+            .iter()
+            .find(|widget| widget.label == "Second")
+            .unwrap();
+        frame(&mut state, click(other));
+        assert_eq!(state.selected_probe, Some(second));
+        assert_eq!(name(&state, first), "Receiver typed");
+        assert_eq!(name(&state, second), "Second");
+
+        focus(second);
+        frame(&mut state, vec![]);
+        frame(&mut state, vec![egui::Event::Text(" too".into())]);
+        state.selected_probe = None;
+        frame(&mut state, vec![]);
+        assert_eq!(name(&state, second), "Second too");
     }
 
     #[test]

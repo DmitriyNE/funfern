@@ -127,6 +127,9 @@ impl Playground {
         self.region_selection = BACKGROUND_REGION;
         self.hole_selected = false;
         self.region_name_edit = None;
+        // Probe ids start again in the incoming scene, so text typed for an
+        // outgoing probe would land on the new one sharing its id.
+        self.probe_name_edit = None;
         self.face_selection = 0;
         self.material_edit = None;
         self.material_formula_edits.clear();
