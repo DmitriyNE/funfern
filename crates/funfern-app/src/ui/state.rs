@@ -82,6 +82,9 @@ pub struct Playground {
     pub(super) hole_selected: bool,
     /// The selected region's name while its field is being typed in.
     pub(super) region_name_edit: Option<(RegionId, String)>,
+    /// Whether `region_name_edit` was typed into since it was last taken
+    /// from the document: only typing is committed when the field goes.
+    pub(super) region_name_typed: bool,
     pub(super) material_edit: Option<Material>,
     pub(super) material_formula_edits: BTreeMap<(u64, u8), String>,
     pub(super) material_formula_errors: BTreeMap<(u64, u8), String>,
@@ -211,6 +214,9 @@ pub struct Playground {
     pub(super) probe_anchors: BTreeMap<ProbeId, Point2>,
     pub(super) probe_metadata_token: Option<(Option<TopologyToken>, u64)>,
     pub(super) probe_name_edit: Option<(ProbeId, String)>,
+    /// Whether `probe_name_edit` was typed into since it was last taken from
+    /// the document, as `region_name_typed`.
+    pub(super) probe_name_typed: bool,
     pub(super) probe_history_seconds: f64,
     pub(super) far_field_view: ProbeViewState,
     pub(super) probe_readback: u64,
@@ -413,6 +419,7 @@ impl Default for Playground {
             face_selection: 0,
             hole_selected: false,
             region_name_edit: None,
+            region_name_typed: false,
             material_edit: None,
             material_formula_edits: BTreeMap::new(),
             material_formula_errors: BTreeMap::new(),
@@ -479,6 +486,7 @@ impl Default for Playground {
             probe_anchors: BTreeMap::new(),
             probe_metadata_token: None,
             probe_name_edit: None,
+            probe_name_typed: false,
             probe_history_seconds: 10.0,
             far_field_view: ProbeViewState::new(funfern_app::document::ProbeReadout::default()),
             probe_readback: 0,

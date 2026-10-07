@@ -997,6 +997,7 @@ impl Playground {
         let focused = ui.memory(|memory| memory.has_focus(id));
         if !focused || !matches!(&self.region_name_edit, Some((edited, _)) if *edited == region) {
             self.region_name_edit = Some((region, stored.clone()));
+            self.region_name_typed = false;
         }
         let hint = default_region_name(region);
         let mut commit = None;
@@ -1009,6 +1010,7 @@ impl Playground {
                         .hint_text(hint)
                         .char_limit(REGION_NAME_LIMIT),
                 );
+                self.region_name_typed |= response.changed();
                 if response.lost_focus() && name.trim() != stored {
                     commit = Some(name.clone());
                 }
@@ -1032,6 +1034,9 @@ impl Playground {
         else {
             return;
         };
+        if !std::mem::take(&mut self.region_name_typed) {
+            return;
+        }
         let stored = self
             .editor
             .document
@@ -2183,6 +2188,83 @@ mod tests {
         let applied = state.editor.document.model.draft.material(id).unwrap();
         assert_eq!(applied.name, "Pending");
         assert_eq!(applied.mass_density, converted.mass_density);
+    }
+
+    /// A region's undone rename stays undone when the selection moves on with
+    /// its field not drawn, as a probe's does.
+    #[test]
+    fn moving_the_selection_keeps_an_undone_region_rename_undone() {
+        let mut state = Playground::default();
+        let material = state.editor.document.model.draft.materials[0].id;
+        state
+            .editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(-0.5, 0.3), 0.15),
+                funfern_app::topology_editor::ClosedCurvePurpose::Subdomain { material },
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        let regions = state
+            .editor
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .map(|region| region.id)
+            .collect::<Vec<_>>();
+        let (first, second) = (regions[0], regions[1]);
+        state.select_region(first);
+        let context = egui::Context::default();
+        let mut time = 0.0;
+        let mut frame = |state: &mut Playground, events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let _ = context.run_ui(input, |ui| state.materials_panel(ui));
+            state.commit_typed_names();
+        };
+        let enter = |pressed| egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut state, vec![]);
+        context.memory_mut(|memory| memory.request_focus(egui::Id::new(("region-name", first.0))));
+        frame(&mut state, vec![]);
+        frame(&mut state, vec![egui::Event::Text("Named".into())]);
+        frame(&mut state, vec![enter(true), enter(false)]);
+        frame(&mut state, vec![]);
+        let name = |state: &Playground| {
+            state
+                .editor
+                .document
+                .model
+                .region_names
+                .get(&first)
+                .cloned()
+        };
+        assert_eq!(name(&state), Some("Named".to_owned()));
+
+        // The Materials panel left, so its field is not drawn.
+        state.undo();
+        settle(&mut state.editor);
+        assert_eq!(name(&state), None);
+        state.select_region(second);
+        state.commit_typed_names();
+        assert_eq!(name(&state), None);
+        state.redo();
+        settle(&mut state.editor);
+        assert_eq!(
+            name(&state),
+            Some("Named".to_owned()),
+            "Redo is still there"
+        );
     }
 
     /// A scene that comes in keeps none of the outgoing one's materials open.

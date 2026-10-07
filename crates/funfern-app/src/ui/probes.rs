@@ -219,9 +219,10 @@ impl Playground {
     /// A name typed into a field that is no longer shown goes to what it was
     /// typed for, as the field letting go would have put it: a selection
     /// moved by a click in a list above the field, or in the scene, took the
-    /// field away first and the typing with it. The fields follow the
-    /// document while they are not typed in, so nothing else differs. Once a
-    /// frame, after the panels, for a field that was not drawn at all.
+    /// field away first and the typing with it. Only typing goes: a field
+    /// follows the document only while it is drawn, so one not drawn through
+    /// an Undo held the name the Undo took back, and committing that undid
+    /// the Undo. Once a frame, after the panels, for a field not drawn.
     pub(super) fn commit_typed_names(&mut self) {
         self.commit_typed_probe_name(self.selected_probe);
         let showing = (!self.hole_selected).then_some(self.region_selection);
@@ -237,6 +238,9 @@ impl Playground {
         else {
             return;
         };
+        if !std::mem::take(&mut self.probe_name_typed) {
+            return;
+        }
         let name = name.trim();
         let Some(mut probe) = self
             .editor
@@ -292,6 +296,7 @@ impl Playground {
             || !matches!(self.probe_name_edit.as_ref(), Some((candidate, _)) if *candidate == id)
         {
             self.probe_name_edit = Some((id, probe.name.clone()));
+            self.probe_name_typed = false;
         }
         let mut commit_name = None;
         if let Some((_, name)) = self.probe_name_edit.as_mut() {
@@ -300,6 +305,7 @@ impl Playground {
                     .id(field)
                     .hint_text("Probe name"),
             );
+            self.probe_name_typed |= response.changed();
             if response.lost_focus() && !name.trim().is_empty() && name.len() <= 64 {
                 commit_name = Some(name.trim().to_owned());
             }
@@ -959,6 +965,59 @@ mod tests {
         state.selected_probe = None;
         frame(&mut state, vec![]);
         assert_eq!(name(&state, second), "Second too");
+    }
+
+    /// Reported: a click on empty canvas undid an Undo of a probe's rename.
+    /// The name field, not drawn once the Probes panel was left, still held
+    /// the rename the Undo took back, and deselecting committed it as typing,
+    /// which also cleared Redo. Only typing commits, and Undo and Redo drop
+    /// what a name field held.
+    #[test]
+    fn deselecting_keeps_an_undone_rename_undone() {
+        use bevy_egui::egui;
+        let mut state = Playground::default();
+        let id = state.editor.document.model.probes[0].id;
+        state.selected_probe = Some(id);
+        let context = egui::Context::default();
+        let mut time = 0.0;
+        let mut frame = |state: &mut Playground, events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let _ = context.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| state.probes_panel(ui));
+            });
+            state.commit_typed_names();
+        };
+        let enter = |pressed| egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut state, vec![]);
+        context.memory_mut(|memory| memory.request_focus(egui::Id::new(("probe-name", id.0))));
+        frame(&mut state, vec![]);
+        frame(&mut state, vec![egui::Event::Text(" renamed".into())]);
+        frame(&mut state, vec![enter(true), enter(false)]);
+        frame(&mut state, vec![]);
+        let name = |state: &Playground| state.editor.document.model.probes[0].name.clone();
+        assert_eq!(name(&state), "Receiver renamed");
+
+        // The Probes panel left, so its field is not drawn.
+        state.undo();
+        settle(&mut state.editor);
+        assert_eq!(name(&state), "Receiver");
+        state.selected_probe = None;
+        state.commit_typed_names();
+        assert_eq!(name(&state), "Receiver");
+        state.redo();
+        settle(&mut state.editor);
+        assert_eq!(name(&state), "Receiver renamed", "Redo is still there");
     }
 
     #[test]

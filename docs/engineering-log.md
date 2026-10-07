@@ -20303,3 +20303,17 @@ through the same `convert_material` after a switch, staying pending in the
 new physics; one that will not convert is dropped for the document's, and
 half-typed formula text goes as an Undo drops it.
 `a_physics_switch_converts_the_open_material_too`.
+
+## 2026-10-07 — Only typing commits a name field
+
+The commit added for a typed name the selection left behind took any
+difference from the document as typing. A name field follows the document
+only while it is drawn: with the Probes panel left, an Undo of a rename left
+the field holding the rename, and a click on empty canvas committed it, undoing
+the Undo and clearing Redo; a region's field did the same. Each field now
+records whether it was typed in since it last took the document's name, and
+only that commits (`probe_name_typed`, `region_name_typed`); Undo and Redo
+also drop what the name fields held, as they drop the Materials panel's
+edits. Either alone keeps the reported sequence undone.
+`deselecting_keeps_an_undone_rename_undone`,
+`moving_the_selection_keeps_an_undone_region_rename_undone`.

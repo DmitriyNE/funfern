@@ -94,6 +94,10 @@ impl Playground {
 
     fn history_moved(&mut self, replaced_scene: bool) {
         self.material_edit = None;
+        // A name field takes the document's name again; what it held is of
+        // the step the history left.
+        self.probe_name_edit = None;
+        self.region_name_edit = None;
         self.material_formula_edits.clear();
         self.material_formula_errors.clear();
         if replaced_scene {
