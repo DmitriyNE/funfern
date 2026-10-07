@@ -20327,3 +20327,14 @@ drawing selects the curve through `select_curve`, which now drops the probe as
 a click on a curve does; so do the Edit panel's Features entries and a
 marquee, which selected spans with the probe still selected.
 `a_new_shape_replaces_a_selected_probe_for_delete`.
+
+## 2026-10-07 — A parameter rename reaches the formula fields
+
+Renaming a material parameter rewrites every formula that uses it, and left
+the formula fields' text as it was: `rho_base` renamed `rho_base_new` showed
+`rho_base + x*x` in the field over the rewritten formula, and Enter in it
+refused a missing `rho_base`. The field keeps its text once drawn, so the
+rename now rewrites that material's field text with the same identifier
+replacement the core rename uses (`replace_identifier`, made public), half-typed
+text included, rather than dropping it.
+`a_renamed_parameter_is_renamed_in_its_formula_fields`.

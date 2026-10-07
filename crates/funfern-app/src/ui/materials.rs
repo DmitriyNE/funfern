@@ -926,10 +926,21 @@ impl Playground {
             });
             for (index, name) in renames {
                 self.parameter_name_edits.remove(&(material_id, index));
+                let old = material.parameters[index].name.clone();
                 if material.rename_parameter(index, name.clone()).is_err() {
                     self.notify(format!(
                         "Cannot rename to {name:?}: it must be a new, non-reserved identifier"
                     ));
+                    continue;
+                }
+                // The formula fields' text, rewritten as the formulas were:
+                // left, it showed the old name and committed it as missing.
+                for (_, text) in self
+                    .material_formula_edits
+                    .iter_mut()
+                    .filter(|((owner, _), _)| *owner == material_id)
+                {
+                    *text = replace_identifier(text, &old, &name);
                 }
             }
             let stored = self
@@ -1553,6 +1564,72 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// Reported: renaming `rho_base` to `density` rewrote the formula that
+    /// used it but not the formula field's text, which still showed
+    /// `rho_base + x*x`, and Enter in it refused a missing `rho_base`.
+    #[test]
+    fn a_renamed_parameter_is_renamed_in_its_formula_fields() {
+        let mut state = Playground::default();
+        let id = state.material_selection;
+        let mut material = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(id)
+            .unwrap()
+            .clone();
+        material.parameters = vec![MaterialParameter {
+            name: "rho_base".into(),
+            value: 1.0,
+        }];
+        material.mass_density = ScalarField::formula("rho_base + x*x").unwrap();
+        state.editor.update_material(material).unwrap();
+        state.set_material_advanced(id, true);
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let press = |key| {
+            [true, false]
+                .map(|pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .to_vec()
+        };
+        let find = |widgets: &[super::super::test_support::LaidOut], label: &str| {
+            widgets
+                .iter()
+                .find(|widget| widget.label == label)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {label:?} in {:?}", labels(widgets)))
+        };
+        let widgets = roster_pass(&mut state, &context, vec![]);
+        roster_pass(&mut state, &context, click(&find(&widgets, "Parameters")));
+        let widgets = roster_pass(&mut state, &context, vec![]);
+        roster_pass(&mut state, &context, click(&find(&widgets, "rho_base")));
+        roster_pass(&mut state, &context, press(egui::Key::End));
+        roster_pass(&mut state, &context, vec![egui::Event::Text("_new".into())]);
+        roster_pass(&mut state, &context, press(egui::Key::Enter));
+        let widgets = roster_pass(&mut state, &context, vec![]);
+        let renamed = ScalarField::formula("rho_base_new + x*x").unwrap();
+        assert_eq!(state.material_edit.as_ref().unwrap().mass_density, renamed);
+
+        // The field shows the rename, and Enter in it commits it.
+        let field = find(&widgets, "rho_base_new + x*x");
+        roster_pass(&mut state, &context, click(&field));
+        roster_pass(&mut state, &context, press(egui::Key::Enter));
+        roster_pass(&mut state, &context, vec![]);
+        assert!(
+            state.material_formula_errors.is_empty(),
+            "{:?}",
+            state.material_formula_errors
+        );
+        assert_eq!(state.material_edit.as_ref().unwrap().mass_density, renamed);
     }
 
     /// Deleting a parameter removes it, in every build, and a parameter a

@@ -1167,7 +1167,9 @@ pub fn reserved_identifier(name: &str) -> bool {
     matches!(name, "x" | "y" | "r" | "theta" | "pi" | "e") || Function::named(name).is_ok()
 }
 
-fn replace_identifier(source: &str, old: &str, new: &str) -> String {
+/// `source` with every identifier `old` written `new`, as a parameter
+/// rename rewrites a formula; any text, whether or not it parses.
+pub fn replace_identifier(source: &str, old: &str, new: &str) -> String {
     let mut result = String::with_capacity(source.len() + new.len().saturating_sub(old.len()));
     let mut offset = 0;
     while offset < source.len() {
