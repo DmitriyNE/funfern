@@ -27,9 +27,7 @@ impl Playground {
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
         let viewport = response.rect;
         self.viewport_rect = viewport;
-        if self.fit {
-            self.fit_view(viewport);
-        }
+        self.refit(viewport);
         self.refresh_samples(viewport);
         let transform = self.transform(viewport);
         self.draw_solution(&painter, viewport, display, vector_display);

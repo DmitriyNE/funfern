@@ -743,6 +743,16 @@ impl Playground {
     /// actually shown in rather than to the first frame's: a window tiler
     /// resizes a new window after it appears, and fitted once on that first
     /// frame the scene opened at twice the zoom, or more, by desktop.
+    /// Fit's framing for this frame. A gesture under way holds the view
+    /// still, and Fit frames the result once it ends: refit while a domain
+    /// edge was dragged, the camera moved the pointer's world point every
+    /// frame, and an edge held still near the viewport's own ran away, 1.9 to
+    /// 67 in a second.
+    fn refit(&mut self, viewport: Rect) {
+        if self.fit && self.drag.is_none() {
+            self.fit_view(viewport);
+        }
+    }
     fn fit_view(&mut self, viewport: Rect) {
         let domain = self.editor.document.model.draft.geometry.domain;
         self.center = domain.center();

@@ -20282,3 +20282,13 @@ typed in, so only typing commits this way; a scene coming in drops a probe's
 typing, since its ids start again.
 `a_typed_probe_name_survives_the_selection_moving`,
 `a_typed_region_name_survives_the_selection_moving`.
+
+## 2026-10-07 — Fit holds still during a gesture
+
+With Fit on, the view was refitted every frame, a drag included. Dragging a
+domain edge puts the edge under the pointer each frame the button is held,
+and the refit then moved the pointer's world point: an edge dragged towards
+the viewport's own and held there ran from 1.9 to 67 in a second with the
+pointer still, and while it moved it did not stay under it. Fit now holds the
+view while a gesture is under way and frames the result once it ends
+(`refit`). `a_held_domain_edge_stays_under_the_pointer_with_fit_on`.

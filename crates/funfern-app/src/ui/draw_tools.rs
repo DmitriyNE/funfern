@@ -1236,6 +1236,64 @@ mod tests {
         assert_eq!(probes(&state), before_probes + 1);
     }
 
+    /// Reported: with Fit on, a domain edge dragged towards the viewport's
+    /// edge and held there went on growing, 1.9 to 67 in a second, the
+    /// pointer still: each frame set the edge under the pointer and Fit then
+    /// reframed, moving the pointer's world point. Fit holds the view during
+    /// a gesture and frames its result when it ends.
+    #[test]
+    fn a_held_domain_edge_stays_under_the_pointer_with_fit_on() {
+        let mut state = Playground {
+            fit: true,
+            ..Playground::default()
+        };
+        let context = viewport_context(&mut state);
+        let frame = |state: &mut Playground, time: f64, events: Vec<egui::Event>| {
+            state.refit(viewport());
+            viewport_frame(state, &context, time, egui::Modifiers::NONE, events);
+        };
+        frame(&mut state, 0.5, vec![]);
+        let domain = state.editor.document.model.draft.geometry.domain;
+        let middle = 0.5 * (domain.min_y + domain.max_y);
+        let edge = state.screen(Point2::new(domain.max_x, middle), viewport());
+        let button = |pressed, pos| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut time = 1.0;
+        frame(
+            &mut state,
+            time,
+            vec![egui::Event::PointerMoved(edge), button(true, edge)],
+        );
+        let target = egui::pos2(viewport().right() - 10.0, edge.y);
+        for step in 1..=10 {
+            time += 1.0 / 60.0;
+            let at = edge + (target - edge) * (step as f32 / 10.0);
+            frame(&mut state, time, vec![egui::Event::PointerMoved(at)]);
+        }
+        let max_x = |state: &Playground| state.editor.document.model.draft.geometry.domain.max_x;
+        let stopped = max_x(&state);
+        assert!(
+            (stopped - state.world(target, viewport()).x).abs() < 1.0e-9,
+            "the edge is under the pointer"
+        );
+        for _ in 0..60 {
+            time += 1.0 / 60.0;
+            frame(&mut state, time, vec![]);
+        }
+        assert_eq!(max_x(&state), stopped, "held still, the domain moved");
+
+        time += 1.0 / 60.0;
+        frame(&mut state, time, vec![button(false, target)]);
+        frame(&mut state, time + 1.0 / 60.0, vec![]);
+        assert!(state.drag.is_none() && state.fit);
+        let framed = state.screen(Point2::new(max_x(&state), middle), viewport());
+        assert!(framed.x < target.x, "Fit framed the result: {framed:?}");
+    }
+
     /// A drawing owns the viewport. A double click beside a curve while
     /// drawing a loop places the drawing's points and leaves the curve
     /// alone, and a double click whose first click ends an open curve on a
