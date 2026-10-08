@@ -644,7 +644,8 @@ impl Panel {
     }
 
     /// The shadow history's step for `action`, from what it was observed to do.
-    fn record(&mut self, action: &Action, before: TopologyDocumentModel) {
+    fn record(&mut self, action: &Action, whole: TopologyDocumentModel) {
+        let before = authored(&whole);
         let after = authored(&self.state.editor.document.model);
         match action {
             Action::Undo => match self.undo.pop() {
@@ -675,11 +676,14 @@ impl Panel {
                     "Redo with nothing to redo changed the document"
                 ),
             },
-            // FINDING 2 (temporary tolerance): a scene replacement takes an
-            // undo step even when the scene it replaces is the same.
+            // A replacement is a step unless it brings the same document,
+            // accepted scene and all, which is what an edit's commit weighs
+            // too; validation moves the accepted scene, not an action.
             Action::New => {
-                self.undo.push(before);
-                self.redo.clear();
+                if self.state.editor.document.model != whole {
+                    self.undo.push(before);
+                    self.redo.clear();
+                }
             }
             _ => {
                 if after != before {
@@ -723,7 +727,7 @@ impl StateMachineTest for MaterialPanel {
     }
 
     fn apply(mut panel: Panel, _: &Steps, action: Action) -> Panel {
-        let before = authored(&panel.state.editor.document.model);
+        let before = panel.state.editor.document.model.clone();
         panel.state.message.clear();
         panel.act(&action);
         panel.record(&action, before);

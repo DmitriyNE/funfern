@@ -496,14 +496,21 @@ impl TopologyEditor {
         loaded.next_vertex = loaded.next_vertex.max(self.next_vertex);
         loaded.next_material = loaded.next_material.max(self.next_material);
         loaded.next_probe = loaded.next_probe.max(self.next_probe);
-        let previous = self.document.model.clone();
         let mut undo = std::mem::take(&mut self.undo);
-        undo.push(HistoryStep {
-            model: previous,
-            replaces_scene: true,
-        });
-        if undo.len() > HISTORY_LIMIT {
-            undo.remove(0);
+        if loaded.document.model == self.document.model {
+            // The same scene again, as a second New, is no step, as an edit
+            // that changes nothing is none, and a redo waiting stays. Taken,
+            // its Undo brought back what was there and, as a scene
+            // replacement, restarted the run besides.
+            loaded.redo = std::mem::take(&mut self.redo);
+        } else {
+            undo.push(HistoryStep {
+                model: self.document.model.clone(),
+                replaces_scene: true,
+            });
+            if undo.len() > HISTORY_LIMIT {
+                undo.remove(0);
+            }
         }
         loaded.undo = undo;
         *self = loaded;
@@ -5442,9 +5449,10 @@ mod tests {
     #[test]
     fn history_knows_which_steps_replace_the_scene() {
         let mut editor = TopologyEditor::default();
-        editor
-            .replace_validated_with_history(TopologyDocument::default())
-            .unwrap();
+        // Another scene: the same one again is no step at all.
+        let mut other = TopologyDocument::default();
+        other.model.source.enabled = true;
+        editor.replace_validated_with_history(other).unwrap();
         assert!(editor.undo_replaces_scene());
         editor
             .set_domain(DomainRect {
@@ -5460,6 +5468,44 @@ mod tests {
         assert!(editor.redo_replaces_scene());
         assert!(editor.redo());
         assert!(editor.undo_replaces_scene());
+    }
+
+    /// Found by the generated sequences as `[New, New]`: a scene replacing an
+    /// identical one took a history step, so the next Undo changed nothing in
+    /// the scene and, as a scene replacement, restarted the run. Now it leaves
+    /// both stacks as they were, as an edit that changes nothing does; one
+    /// that differs is still a step.
+    #[test]
+    fn replacing_a_scene_with_the_same_one_takes_no_history_step() {
+        let mut editor = TopologyEditor::default();
+        // New's scene, which runs: the default one has its source off.
+        let mut new = TopologyDocument::default();
+        new.model.source.enabled = true;
+        editor.replace_validated_with_history(new.clone()).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.history_len(), (1, 0), "a different scene is a step");
+
+        editor.replace_validated_with_history(new.clone()).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.history_len(), (1, 0), "the same scene is not");
+        assert!(editor.undo_replaces_scene());
+
+        // A redo waiting survives it too.
+        editor
+            .set_domain(DomainRect {
+                max_x: 1.4,
+                ..DomainRect::UNIT
+            })
+            .unwrap();
+        settle(&mut editor);
+        assert!(editor.undo());
+        settle(&mut editor);
+        assert_eq!(editor.history_len(), (1, 1));
+        editor.replace_validated_with_history(new).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.history_len(), (1, 1));
+        assert!(editor.redo());
+        assert_eq!(editor.document.model.draft.geometry.domain.max_x, 1.4);
     }
 
     /// Reported: after New and Undo, a new probe took the ID of one already in

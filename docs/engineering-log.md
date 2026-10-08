@@ -20547,3 +20547,20 @@ tolerance for this is gone.
   shrinks back to the same two steps with the fix cut out. A seed names its
   sequence only through the generator, so each finding keeps a focused test,
   and `docs/checks.md` and the harness say so.
+
+## 2026-10-08 — The same scene opened again is no history step
+
+Found by the Materials panel sequences as `[New, New]`. A scene replacement
+pushed the outgoing model unconditionally, so New over New, or an example
+opened over itself, took a step whose Undo brought back the same scene and,
+being a scene replacement, dropped the generation and restarted the run with
+nothing else to show. `replace_validated_with_history` now leaves both stacks
+as they were when the incoming model equals the outgoing one, accepted scene
+included, as `commit` does for an edit that changes nothing; a redo waiting
+survives it. The replacement itself still happens, so New still starts its
+run afresh. `replacing_a_scene_with_the_same_one_takes_no_history_step`; and
+`history_knows_which_steps_replace_the_scene`, which replaced the default
+editor's scene with the default scene, now opens another one. The harness's
+tolerance is gone, its expected step for New weighs the whole model as the
+editor does, and the seed file gained this finding's seed, which shrinks back
+to the two News with the fix cut out. The user guide's History line says so.

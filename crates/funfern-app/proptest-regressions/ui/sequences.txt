@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 3efa0fbadbfe473d0a0f51384426bbbefe5421fddaf87e750c5fd830fa337e16 # shrinks to (initial_state, transitions, seen_counter) = (Steps { taken: 0 }, [Press(AddMaterial), Undo], None)
+cc 411948a8e96e3d6766c720d39b6ce1b8fb531e4eb72b2fb30c052f100a182939 # shrinks to (initial_state, transitions, seen_counter) = (Steps { taken: 0 }, [New, New], None)

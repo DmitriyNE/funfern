@@ -531,7 +531,8 @@ names or with every expression evaluated at the material frame's origin. Each ro
   Escape does, and so do the Undo and Redo buttons. The buttons show the
   shortcuts on hover.
   Each drag, coordinate edit, insertion, removal, creation, or deletion is one
-  action. History keeps up to 100 actions, including invalid drafts.
+  action. History keeps up to 100 actions, including invalid drafts. A scene
+  opened over the same scene, as a second New, is no action.
 - **Files:** New starts an empty scene: the Ambient material, every wall
   second-order outgoing, and the point source on, so it runs as soon as it
   opens. Save scene downloads JSON in the browser or opens a native save
