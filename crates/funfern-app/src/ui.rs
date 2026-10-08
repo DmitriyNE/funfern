@@ -26,6 +26,7 @@ use funfern_app::topology_viewport::{
     SampledTopologyGeometry, ScreenPoint, TopologySelection, ViewportTransform,
 };
 use funfern_core::*;
+use funfern_protocol::decisions::starts_from_zero;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
 use std::sync::atomic::AtomicBool;
@@ -471,16 +472,18 @@ enum ProtocolNote {
     Requested(TopologyToken),
     /// A preparation settled, prepared or failed.
     Prepared(bool),
-    /// A ready candidate committed without the device.
-    InPlace,
-    /// A ready candidate went to a live patch: whether the patch was built,
-    /// and whether the candidate could be packed instead.
+    /// A ready candidate is carried: whether its step is the one the device
+    /// runs, and what it changes of what the solver runs.
+    Carry {
+        same_step: bool,
+        update: funfern_protocol::decisions::Update,
+    },
+    /// A ready candidate's live patch: whether it was built, and whether the
+    /// candidate could be packed instead.
     Patch {
         built: bool,
         packable: bool,
     },
-    /// A ready candidate went to be packed.
-    Pack,
     /// A packed candidate's upload: an install or a handoff, begun or
     /// refused.
     Begin {
@@ -1711,17 +1714,6 @@ fn grid_lines(minimum: f64, maximum: f64, step: f64) -> Vec<f64> {
         value += step;
     }
     lines
-}
-
-/// Whether the next preparation starts the field at zero instead of carrying
-/// the running one into it.
-///
-/// `reset_requested` is spent earlier in the frame by the GPU reset, so a
-/// document load cannot rely on it and raises `fresh_requested` instead; this
-/// has to honour that even when a topology is already active and the reset flag
-/// has been cleared.
-const fn starts_from_zero(active: bool, reset_requested: bool, fresh_requested: bool) -> bool {
-    !active || reset_requested || fresh_requested
 }
 
 /// A fraction in `[0, 1)` without a random-number dependency: the wall clock's

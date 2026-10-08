@@ -20961,3 +20961,26 @@ nothing is carried while one is. The model now answers as the runtime does.
 The fallback's documentation had come to sit on `fixed_batch`, the spike's
 switch below it; it is the function's again, and its test, which named the
 refusals by their strings, is the decision's in the protocol crate.
+
+## 2026-10-09 — How a ready candidate is carried, by the protocol's decision
+
+The last of the runtime's decisions the model made apart from it.
+`decisions::carry` routes a ready candidate: in place when only measurements
+changed, by a live patch when only sources did, and as a whole generation
+otherwise, and always as one when no step runs or the candidate's step is not
+the running one's. The model took the route the runtime chose as an input;
+now it takes what the runtime found of the candidate - what it changes, whether
+its step is the running one's, and for a patch whether it was built and
+whether the candidate could be packed instead - and routes it itself, so the
+proofs explore the routing too. `Frame::route` is `Frame::carried`, and
+`settle` takes the candidates the fair suffix meets as one of those. The
+runtime's notes say what it found in place of the route it took.
+`starts_from_zero`, which says whether a request starts the field from zero,
+and `steps_withheld`, which holds a frame's steps back while a packed
+candidate waits or a fresh upload runs, were one-line functions the runtime
+called and the model wrote out again; both are the protocol's now, called by
+both, and the second's test went with it. `time_step_unchanged` is
+`same_time_step` and no longer answers for whether a step runs at all, which
+`carry` asks separately. Nothing changes in what the app does. The proofs
+explore a frame of more inputs and take a little longer for it, the first
+about three minutes rather than two and a half.

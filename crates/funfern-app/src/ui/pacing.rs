@@ -36,16 +36,6 @@ pub(super) fn paced_time_step(recommended: f64, speed: f64) -> f64 {
     recommended.min(PACING_FRAME_SECONDS * speed)
 }
 
-/// The two short boundaries at which it is unsafe to publish more work.
-/// Preparing and uploading a replacement generation are deliberately absent:
-/// the accepted generation can keep advancing through both. We drain just
-/// before `begin_handoff`. Once the transfer is encoded, later source steps
-/// remain visible while validation is in flight and are replayed by the target
-/// from its exact transferred clock before its first visible readback.
-pub(super) fn canonical_steps_withheld(packed_candidate_waiting: bool, fresh_upload: bool) -> bool {
-    packed_candidate_waiting || fresh_upload
-}
-
 /// Steps to ask the solver for this frame, spending `accumulator` at
 /// `time_step` a step.
 ///
@@ -1280,19 +1270,6 @@ mod tests {
             accumulator <= 4.0 * step + 1.0e-12,
             "backlog beyond the budget: {accumulator}"
         );
-    }
-
-    #[test]
-    fn handoff_withholds_steps_only_when_the_source_cannot_advance() {
-        assert!(!canonical_steps_withheld(false, false));
-        // A packed candidate drains the requests already published before the
-        // UI calls begin_handoff.
-        assert!(canonical_steps_withheld(true, false));
-        // A fresh install has no accepted source generation to advance.
-        assert!(canonical_steps_withheld(false, true));
-        // Ordinary target upload and validation are not solver pauses. Later
-        // requests become a target catch-up backlog after admission.
-        assert!(!canonical_steps_withheld(false, false));
     }
 
     /// Below a ceiling of `recommended / PACING_FRAME_SECONDS`, pacing by step

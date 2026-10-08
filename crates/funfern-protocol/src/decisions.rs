@@ -8,6 +8,71 @@
 
 use crate::Acceptance;
 
+/// What a ready candidate changes of what the solver runs, as its preparation
+/// found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
+pub enum Update {
+    /// Measurements alone, which the solver does not read.
+    Measurements,
+    /// The sources alone.
+    Sources,
+    /// Anything else the solver runs.
+    Full,
+}
+
+/// How a ready candidate is carried to the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// Nothing the solver runs changed: commit without the device.
+    InPlace,
+    /// Only the sources changed: a live patch on the running generation.
+    Patch,
+    /// A whole generation: packed, then installed or handed off.
+    Pack,
+}
+
+/// How a ready candidate is carried. The running generation takes a change
+/// without a whole generation only at the step it runs, a step being packed
+/// into a generation, and only a change that leaves what it runs alone or
+/// touches its sources alone. Without a step running nothing can stay
+/// unchanged, and so nothing is carried without a whole generation.
+pub fn carry(running: bool, same_step: bool, update: Update) -> Route {
+    if !running || !same_step {
+        return Route::Pack;
+    }
+    match update {
+        Update::Measurements => Route::InPlace,
+        Update::Sources => Route::Patch,
+        Update::Full => Route::Pack,
+    }
+}
+
+/// Whether the next preparation starts the field at zero instead of carrying
+/// the running one into it: with nothing running, after a Reset, or for a
+/// whole document come in.
+///
+/// `reset_requested` is spent earlier in the frame by the GPU reset, so a
+/// document load cannot rely on it and raises `fresh_requested` instead; this
+/// has to honour that even when a topology is already active and the reset
+/// flag has been cleared.
+pub const fn starts_from_zero(active: bool, reset_requested: bool, fresh_requested: bool) -> bool {
+    !active || reset_requested || fresh_requested
+}
+
+/// Whether the steps a frame asks for are held back, at the two short
+/// boundaries at which it is unsafe to publish more work. Preparing and
+/// uploading a replacement generation are deliberately absent: the accepted
+/// generation can keep advancing through both. Steps drain just before a
+/// handoff begins, while a packed candidate waits for it; once the transfer
+/// is encoded, later source steps remain visible while validation is in
+/// flight and are replayed by the target from its exact transferred clock
+/// before its first visible readback. A fresh upload has no accepted
+/// generation to advance.
+pub const fn steps_withheld(packed_waiting: bool, fresh_upload: bool) -> bool {
+    packed_waiting || fresh_upload
+}
+
 /// What the host sees of the upload in flight, in a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UploadSeen {
@@ -223,6 +288,19 @@ pub fn live_event_fallback(busy: bool, packable: bool) -> LiveEventFallback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_withholds_steps_only_when_the_source_cannot_advance() {
+        assert!(!steps_withheld(false, false));
+        // A packed candidate drains the requests already published before the
+        // UI calls begin_handoff.
+        assert!(steps_withheld(true, false));
+        // A fresh install has no accepted source generation to advance.
+        assert!(steps_withheld(false, true));
+        // Ordinary target upload and validation are not solver pauses. Later
+        // requests become a target catch-up backlog after admission.
+        assert!(!steps_withheld(false, false));
+    }
 
     /// The reported regression: moving a continuous source on a pumped medium
     /// reported "this event has not passed its Stage 7 temporal composition

@@ -6,8 +6,8 @@
 //! the device answers in an order of its own. This crate holds that protocol
 //! and nothing else: tokens are small numbers, a generation is a counter, and
 //! what the app computes from geometry - whether a preparation finished this
-//! frame, how a ready candidate is carried, whether a pulse lands in a region
-//! - is an input of the step that needs it.
+//! frame, what a ready candidate changes, whether a pulse lands in a region -
+//! is an input of the step that needs it.
 //!
 //! The decisions the protocol makes are functions of what the host has seen,
 //! and the app's runtime makes them by calling the same functions the model
@@ -29,8 +29,9 @@
 pub mod decisions;
 
 use decisions::{
-    FaultSeen, LiveEventFallback, RequestSeen, Settlement, Supervision, UploadSeen,
-    live_event_fallback, request_due, settle_upload, standing, supervise_fault,
+    FaultSeen, LiveEventFallback, RequestSeen, Route, Settlement, Supervision, Update, UploadSeen,
+    carry, live_event_fallback, request_due, settle_upload, standing, starts_from_zero,
+    steps_withheld, supervise_fault,
 };
 
 /// A candidate, named by the order of its request.
@@ -57,19 +58,29 @@ pub enum Prepared {
     Failed,
 }
 
-/// How a ready candidate is carried to the device, as the app decides it from
-/// what changed and whether the step did.
+/// What the app finds of a candidate ready for the device, which decides how
+/// it is carried.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(kani, derive(kani::Arbitrary))]
-pub enum Route {
-    /// Nothing the solver runs changed: commit without the device.
-    InPlace,
-    /// Only the sources changed: a live patch on the running generation.
-    /// `built` is whether the patch could be built for it, `packable`
-    /// whether the candidate carries what a whole generation needs.
-    Patch { built: bool, packable: bool },
-    /// A whole generation: packed, then installed or handed off.
-    Pack,
+pub struct Carried {
+    /// What it changes of what the solver runs.
+    pub update: Update,
+    /// Its step is the one the device runs.
+    pub same_step: bool,
+    /// A live patch of its sources could be built for the running generation.
+    pub built: bool,
+    /// It carries what a whole generation needs, should a patch be refused.
+    pub packable: bool,
+}
+
+impl Carried {
+    /// A candidate only a whole generation carries.
+    pub const WHOLE: Self = Self {
+        update: Update::Full,
+        same_step: true,
+        built: true,
+        packable: true,
+    };
 }
 
 /// The device's live event in flight.
@@ -91,8 +102,8 @@ pub struct Frame {
     pub inputs: u8,
     /// What the preparation in flight comes to.
     pub prepared: Prepared,
-    /// How a candidate ready for the device is carried.
-    pub route: Route,
+    /// What a candidate ready for the device is found to be.
+    pub carried: Carried,
     /// A packed candidate installs rather than hands off, its medium having
     /// started or stopped being driven.
     pub install: bool,
@@ -505,28 +516,24 @@ impl Protocol {
             && self.packed.is_none()
             && let Some(token) = self.ready
         {
-            // Without a step running nothing can stay unchanged, and so
-            // nothing is carried without a whole generation.
-            let route = if self.uploaded.is_some() {
-                frame.route
-            } else {
-                Route::Pack
-            };
-            match route {
+            let carried = frame.carried;
+            match carry(self.uploaded.is_some(), carried.same_step, carried.update) {
                 Route::InPlace => self.commit_in_place(token),
-                Route::Patch { built, packable } => {
+                Route::Patch => {
                     if self.event.is_none() {
-                        match self.queue(built, Event::Patch(token)) {
+                        match self.queue(carried.built, Event::Patch(token)) {
                             Queued::Taken => {
                                 self.patched = None;
                                 self.source_commit = Some(token);
                             }
-                            refusal => match live_event_fallback(refusal == Queued::Busy, packable)
-                            {
-                                LiveEventFallback::Retry => {}
-                                LiveEventFallback::Pack => self.packed = Some(token),
-                                LiveEventFallback::Refuse => self.reject(token),
-                            },
+                            refusal => {
+                                match live_event_fallback(refusal == Queued::Busy, carried.packable)
+                                {
+                                    LiveEventFallback::Retry => {}
+                                    LiveEventFallback::Pack => self.packed = Some(token),
+                                    LiveEventFallback::Refuse => self.reject(token),
+                                }
+                            }
                         }
                     }
                 }
@@ -661,7 +668,10 @@ impl Protocol {
             let fresh_upload = self
                 .uploading
                 .is_some_and(|upload| self.fresh_tokens[upload.token as usize % TOKENS]);
-            let withheld = (self.uploading.is_none() && self.packed.is_some()) || fresh_upload;
+            let withheld = steps_withheld(
+                self.uploading.is_none() && self.packed.is_some(),
+                fresh_upload,
+            );
             if !withheld
                 && (self.running || std::mem::take(&mut self.stepping))
                 && let Some(device) = &mut self.device
@@ -692,7 +702,8 @@ impl Protocol {
         let token = self.next;
         self.next += 1;
         self.requests[token as usize] = (self.revision, self.inputs);
-        self.fresh_tokens[token as usize] = self.active.is_none() || self.reset || self.fresh;
+        self.fresh_tokens[token as usize] =
+            starts_from_zero(self.active.is_some(), self.reset, self.fresh);
         self.requested = Some(token);
         self.preparing = Some(token);
         self.ready = None;
@@ -843,12 +854,12 @@ impl Protocol {
     /// what it can, the device completes and admits what it is given, and a
     /// paused run is resumed, as its message asks. Answers whether it came to
     /// rest within `rounds`.
-    pub fn settle(&mut self, rounds: usize, route: Route) -> bool {
+    pub fn settle(&mut self, rounds: usize, carried: Carried) -> bool {
         let fair = Frame {
             validated: true,
             inputs: self.inputs,
             prepared: Prepared::Done,
-            route,
+            carried,
             install: false,
             begun: true,
             pulse: true,
@@ -903,7 +914,7 @@ mod tests {
                 validates: valid,
                 ..Protocol::default()
             };
-            assert!(protocol.settle(8, Route::Pack), "{protocol:#?}");
+            assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
             assert!(protocol.active.is_some());
         }
     }
@@ -912,7 +923,7 @@ mod tests {
     #[test]
     fn edits_resets_and_faults_come_to_rest() {
         let mut protocol = Protocol::default();
-        assert!(protocol.settle(8, Route::Pack));
+        assert!(protocol.settle(8, Carried::WHOLE));
         for step in [
             Step::Edit {
                 inputs: 1,
@@ -925,6 +936,6 @@ mod tests {
             protocol.step(step);
             protocol.check();
         }
-        assert!(protocol.settle(8, Route::Pack), "{protocol:#?}");
+        assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
     }
 }

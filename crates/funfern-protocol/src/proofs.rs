@@ -1,6 +1,6 @@
 //! The protocol's properties for every sequence of steps and inputs, to a
 //! bounded depth, from a scene just opened. `cargo kani -p funfern-protocol`
-//! checks both, in about half a minute and two and a half minutes here.
+//! checks both, in about half a minute and three minutes here.
 
 use super::*;
 

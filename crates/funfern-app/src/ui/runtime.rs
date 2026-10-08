@@ -19,8 +19,9 @@ use funfern_app::topology_runtime::{
 use funfern_core::*;
 use funfern_protocol::Acceptance;
 use funfern_protocol::decisions::{
-    FaultSeen, LiveEventFallback, RequestSeen, Settlement, Supervision, UploadSeen,
-    live_event_fallback, request_due, settle_upload, standing, supervise_fault,
+    FaultSeen, LiveEventFallback, RequestSeen, Route, Settlement, Supervision, Update, UploadSeen,
+    carry, live_event_fallback, request_due, settle_upload, standing, steps_withheld,
+    supervise_fault,
 };
 use std::sync::{
     Arc, Mutex,
@@ -347,10 +348,8 @@ impl Playground {
         }
     }
 
-    pub(super) fn time_step_unchanged(&self, candidate: &PreparedTopology) -> bool {
-        if self.coordinator.uploaded_time_step <= 0.0 {
-            return false;
-        }
+    /// Whether `candidate`, paced, steps at the step the device runs.
+    pub(super) fn same_time_step(&self, candidate: &PreparedTopology) -> bool {
         let wanted = paced_time_step(
             candidate.recommended_time_step(),
             self.editor.document.presentation.simulation_speed,
@@ -452,100 +451,88 @@ impl Playground {
                 self.editor.document.presentation.simulation_speed,
             );
             let token = candidate.bundle.token;
-            let mut needs_gpu_pack = true;
-            let unchanged = self.time_step_unchanged(&candidate);
+            let update = match candidate.solver_update {
+                PreparedSolverUpdate::MeasurementsOnly => Update::Measurements,
+                PreparedSolverUpdate::SourceWeightsOnly
+                | PreparedSolverUpdate::SourceDrivesOnly => Update::Sources,
+                PreparedSolverUpdate::FullHandoff => Update::Full,
+            };
+            let same_step = self.same_time_step(&candidate);
             #[cfg(test)]
-            if !unchanged {
-                self.protocol_log.push(ProtocolNote::Pack);
-            }
-            if unchanged {
-                match candidate.solver_update {
-                    PreparedSolverUpdate::MeasurementsOnly => {
-                        #[cfg(test)]
-                        self.protocol_log.push(ProtocolNote::InPlace);
-                        self.handoff_packed = self.handoff_ready;
-                        self.handoff_upload = self.handoff_ready;
-                        self.commit_in_place(token, "Simulation measurements committed");
-                        needs_gpu_pack = false;
-                    }
-                    PreparedSolverUpdate::SourceWeightsOnly
-                    | PreparedSolverUpdate::SourceDrivesOnly => {
-                        needs_gpu_pack = false;
-                        #[cfg(test)]
-                        if request.live_event_pending() {
-                            self.protocol_log.push(ProtocolNote::Patch {
-                                built: true,
-                                packable: true,
-                            });
-                        }
-                        if !request.live_event_pending() {
-                            let serial = self
-                                .coordinator
-                                .canonical_event_serial
-                                .max(request.stats().processed_event())
-                                .saturating_add(1)
-                                .max(1);
-                            let event = self
-                                .runtime
-                                .active()
-                                .ok_or_else(|| "Canonical source generation is missing".into())
-                                .and_then(|active| {
-                                    let current = &active.canonical_forcing;
-                                    let target = &candidate.canonical_forcing;
-                                    match candidate.solver_update {
-                                        PreparedSolverUpdate::SourceWeightsOnly => {
-                                            CanonicalGpuLiveEvent::source_weight_patch(
-                                                current, target, dt, serial,
-                                            )
-                                        }
-                                        PreparedSolverUpdate::SourceDrivesOnly => {
-                                            CanonicalGpuLiveEvent::source_patch(
-                                                current, target, dt, serial,
-                                            )
-                                        }
-                                        _ => unreachable!("matched source-only update"),
+            self.protocol_log
+                .push(ProtocolNote::Carry { same_step, update });
+            let mut needs_gpu_pack = false;
+            match carry(self.coordinator.uploaded_time_step > 0.0, same_step, update) {
+                Route::InPlace => {
+                    self.handoff_packed = self.handoff_ready;
+                    self.handoff_upload = self.handoff_ready;
+                    self.commit_in_place(token, "Simulation measurements committed");
+                }
+                Route::Patch => {
+                    if !request.live_event_pending() {
+                        let serial = self
+                            .coordinator
+                            .canonical_event_serial
+                            .max(request.stats().processed_event())
+                            .saturating_add(1)
+                            .max(1);
+                        let event = self
+                            .runtime
+                            .active()
+                            .ok_or_else(|| "Canonical source generation is missing".into())
+                            .and_then(|active| {
+                                let current = &active.canonical_forcing;
+                                let target = &candidate.canonical_forcing;
+                                match candidate.solver_update {
+                                    PreparedSolverUpdate::SourceWeightsOnly => {
+                                        CanonicalGpuLiveEvent::source_weight_patch(
+                                            current, target, dt, serial,
+                                        )
                                     }
-                                    .map_err(|error| format!("{error:?}"))
-                                });
-                            #[cfg(test)]
-                            self.protocol_log.push(ProtocolNote::Patch {
-                                built: event.is_ok(),
-                                packable: candidate.canonical_transfer.is_some(),
-                            });
-                            match event
-                                .map_err(LiveEventRefusal::Refused)
-                                .and_then(|event| request.queue_live_event(assets, event))
-                            {
-                                Ok(()) => {
-                                    self.coordinator.canonical_event_serial = serial;
-                                    self.handoff_packed = self.handoff_ready;
-                                    self.handoff_upload = Some(Instant::now());
-                                    self.coordinator.source_commit =
-                                        Some(PendingSourceCommit { token, serial });
+                                    PreparedSolverUpdate::SourceDrivesOnly => {
+                                        CanonicalGpuLiveEvent::source_patch(
+                                            current, target, dt, serial,
+                                        )
+                                    }
+                                    _ => unreachable!("a patch carries a source-only update"),
                                 }
-                                Err(refusal) => match live_event_fallback(
-                                    refusal.busy(),
-                                    candidate.canonical_transfer.is_some(),
-                                ) {
-                                    LiveEventFallback::Retry => {}
-                                    LiveEventFallback::Pack => needs_gpu_pack = true,
-                                    LiveEventFallback::Refuse => {
-                                        let refusal = format!(
-                                            "{refusal}, and this edit was prepared without the \
-                                             handoff maps a packed generation needs"
-                                        );
-                                        self.runtime.reject_ready(token, refusal.clone());
-                                        self.message = refusal;
-                                    }
-                                },
-                            }
-                        }
-                    }
-                    PreparedSolverUpdate::FullHandoff => {
+                                .map_err(|error| format!("{error:?}"))
+                            });
                         #[cfg(test)]
-                        self.protocol_log.push(ProtocolNote::Pack);
+                        self.protocol_log.push(ProtocolNote::Patch {
+                            built: event.is_ok(),
+                            packable: candidate.canonical_transfer.is_some(),
+                        });
+                        match event
+                            .map_err(LiveEventRefusal::Refused)
+                            .and_then(|event| request.queue_live_event(assets, event))
+                        {
+                            Ok(()) => {
+                                self.coordinator.canonical_event_serial = serial;
+                                self.handoff_packed = self.handoff_ready;
+                                self.handoff_upload = Some(Instant::now());
+                                self.coordinator.source_commit =
+                                    Some(PendingSourceCommit { token, serial });
+                            }
+                            Err(refusal) => match live_event_fallback(
+                                refusal.busy(),
+                                candidate.canonical_transfer.is_some(),
+                            ) {
+                                LiveEventFallback::Retry => {}
+                                LiveEventFallback::Pack => needs_gpu_pack = true,
+                                LiveEventFallback::Refuse => {
+                                    let refusal = format!(
+                                        "{refusal}, and this edit was prepared without the \
+                                         handoff maps a packed generation needs"
+                                    );
+                                    self.runtime.reject_ready(token, refusal.clone());
+                                    self.message = refusal;
+                                }
+                            },
+                        }
                     }
                 }
+                Route::Pack => needs_gpu_pack = true,
             }
             if needs_gpu_pack {
                 let active = self.runtime.active().cloned();
@@ -902,7 +889,7 @@ impl Playground {
                 .uploading
                 .as_ref()
                 .is_some_and(|upload| upload.fresh);
-            let withheld = canonical_steps_withheld(packed_candidate_waiting, fresh_upload);
+            let withheld = steps_withheld(packed_candidate_waiting, fresh_upload);
             let mut note = PacingNote {
                 frame_seconds: delta,
                 speed: self.editor.document.presentation.simulation_speed,

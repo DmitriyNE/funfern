@@ -359,12 +359,12 @@ impl Session {
         let state = &self.state;
         Some(match act {
             Act::Frame(_) => {
-                let route = log.iter().rev().find_map(|note| match *note {
-                    ProtocolNote::InPlace => Some(model::Route::InPlace),
-                    ProtocolNote::Patch { built, packable } => {
-                        Some(model::Route::Patch { built, packable })
-                    }
-                    ProtocolNote::Pack => Some(model::Route::Pack),
+                let carry = log.iter().find_map(|note| match *note {
+                    ProtocolNote::Carry { same_step, update } => Some((same_step, update)),
+                    _ => None,
+                });
+                let patch = log.iter().find_map(|note| match *note {
+                    ProtocolNote::Patch { built, packable } => Some((built, packable)),
                     _ => None,
                 });
                 let begin = log.iter().find_map(|note| match *note {
@@ -383,7 +383,12 @@ impl Session {
                             _ => None,
                         })
                         .unwrap_or(model::Prepared::NotYet),
-                    route: route.unwrap_or(model::Route::Pack),
+                    carried: model::Carried {
+                        update: carry.map_or(model::decisions::Update::Full, |(_, update)| update),
+                        same_step: carry.is_some_and(|(same_step, _)| same_step),
+                        built: patch.is_none_or(|(built, _)| built),
+                        packable: patch.is_none_or(|(_, packable)| packable),
+                    },
                     install: begin.is_some_and(|(install, _)| install),
                     begun: begin.is_none_or(|(_, ok)| ok),
                     pulse: log
