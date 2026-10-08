@@ -20782,3 +20782,24 @@ until it was decided, is gone, and both Kani proofs hold without it.
 `a_scene_opened_after_a_fault_takes_none_of_it`, both failing with the fix cut
 out, as the runtime machine does, which shrinks it to those five steps.
 2,000 runtime sequences agree with the model at every step.
+
+## 2026-10-08 — The Materials panel's editing session has one owner
+
+Phase 5 of the verification plan, first half, a refactor with no change of
+behaviour. The panel's open material, the copy staged for Apply, the formula
+and error text typed into its fields (a volume source's profile among them),
+the parameter names being typed and the colour being picked were six fields of
+the playground, cleared in part at six places and in part at two more, and
+several of this week's defects were one of those places missing a field.
+They are `MaterialSession` now (`ui/material_session.rs`), with one method to
+a transition: `open` for a Library row or a new material, `reload` after an
+undo, a redo or a removal, `scene_replaced`, `forget` for one material's text
+after a preset or Revert, `convert` through a physics switch, and the queries
+`pending`, `resolved` and `stage`. Every site keeps what it did. Two
+differences between them stay as they were, for a decision rather than a
+refactor: `reload` and `open` keep a parameter name being typed and a colour
+being picked, which only `scene_replaced` drops. The reopening and runtime
+machines pass 2,000 sequences each over it, the runtime one in lockstep with
+the protocol model. The panel machine's sweep stopped on an expectation of the
+harness's own, which fails the same way on the code before this change and is
+corrected in the next entry.

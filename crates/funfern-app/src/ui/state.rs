@@ -79,7 +79,9 @@ pub struct Playground {
     pub(super) transform_scale: f64,
     pub(super) gizmo_pivot: Option<(BTreeSet<TopologySpanTarget>, Point2)>,
     pub(super) pending_merge: Option<PendingMerge>,
-    pub(super) material_selection: MaterialId,
+    /// The Materials panel's open material and what is staged or typed for
+    /// it.
+    pub(super) material_session: MaterialSession,
     pub(super) region_selection: RegionId,
     /// Whether a widget held keyboard focus when the previous frame ended. egui
     /// clears focus on Escape before any app code runs, so the live predicate is
@@ -98,12 +100,6 @@ pub struct Playground {
     /// Whether `region_name_edit` was typed into since it was last taken
     /// from the document: only typing is committed when the field goes.
     pub(super) region_name_typed: bool,
-    pub(super) material_edit: Option<Material>,
-    pub(super) material_formula_edits: BTreeMap<(u64, u8), String>,
-    pub(super) material_formula_errors: BTreeMap<(u64, u8), String>,
-    /// A parameter name being typed, keyed by material and position, with the
-    /// name it was opened on.
-    pub(super) parameter_name_edits: BTreeMap<(u64, usize), (String, String)>,
     /// Whether the formula reference is showing. It is a window rather than a
     /// menu so it stays readable while a formula is being typed.
     pub(super) formula_help_open: bool,
@@ -120,7 +116,6 @@ pub struct Playground {
     /// frame.
     pub(super) guide: Guide,
     pub(super) spotlights: Spotlights,
-    pub(super) material_color_edit: Option<(MaterialId, [u8; 3])>,
     pub(super) new_separator_material: MaterialId,
     /// The slider produces a value per frame; the rebuild waits for release.
     pub(super) mesh_edge_dragging: bool,
@@ -435,7 +430,7 @@ impl Default for Playground {
             transform_scale: 1.0,
             gizmo_pivot: None,
             pending_merge: None,
-            material_selection: DEFAULT_MATERIAL,
+            material_session: MaterialSession::default(),
             region_selection: BACKGROUND_REGION,
             keyboard_focus_previous: false,
             hide_holes: false,
@@ -443,10 +438,6 @@ impl Default for Playground {
             hole_selected: false,
             region_name_edit: None,
             region_name_typed: false,
-            material_edit: None,
-            material_formula_edits: BTreeMap::new(),
-            material_formula_errors: BTreeMap::new(),
-            parameter_name_edits: BTreeMap::new(),
             formula_help_open: false,
             examples_open: false,
             example_previews: funfern_app::topology_examples::catalog()
@@ -457,7 +448,6 @@ impl Default for Playground {
             scene_card: SceneCard::default(),
             guide: Guide::default(),
             spotlights: Spotlights::default(),
-            material_color_edit: None,
             new_separator_material: DEFAULT_MATERIAL,
             mesh_edge_dragging: false,
             remesh_requested: false,

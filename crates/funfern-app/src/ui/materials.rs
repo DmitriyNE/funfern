@@ -76,7 +76,7 @@ impl Playground {
         else {
             return;
         };
-        if assigned == self.material_selection {
+        if assigned == self.material_session.selection {
             return;
         }
         if self.material_edits_pending() {
@@ -87,61 +87,31 @@ impl Playground {
             );
             return;
         }
-        self.material_selection = assigned;
+        self.material_session.selection = assigned;
     }
 
     /// Whether the material editor holds edits the draft does not have yet.
     pub(super) fn material_edits_pending(&self) -> bool {
-        self.material_edit.as_ref().is_some_and(|edit| {
-            edit.id == self.material_selection
-                && self.editor.document.model.draft.material(edit.id) != Some(edit)
-        })
+        self.material_session
+            .pending(&self.editor.document.model.draft)
     }
 
-    /// The Materials panel's unapplied edits, through the conversion a
-    /// physics switch put the document's materials through, so they stay
-    /// pending in the new physics. Left as they were, they read as edits of
-    /// the converted material, and Apply wrote the old physics' values over
-    /// it. One that will not convert goes, and the panel takes the
-    /// document's; half-typed formula text, in the old physics' numbers,
-    /// goes as an Undo drops it.
+    /// The Materials panel's unapplied edits through a physics switch; see
+    /// `MaterialSession::convert`.
     pub(super) fn convert_material_edits(&mut self, from: PhysicsModel, to: PhysicsModel) {
-        self.material_edit = self
-            .material_edit
-            .take()
-            .and_then(|edit| from.convert_material(to, &edit).ok());
-        self.material_formula_edits.clear();
-        self.material_formula_errors.clear();
+        self.material_session.convert(from, to);
     }
 
     /// Drops the half-typed formula and parameter-name text of one material.
     fn forget_material_edits(&mut self, material: MaterialId) {
-        self.material_formula_edits
-            .retain(|(owner, _), _| *owner != material.0);
-        self.material_formula_errors
-            .retain(|(owner, _), _| *owner != material.0);
-        self.parameter_name_edits
-            .retain(|(owner, _), _| *owner != material.0);
+        self.material_session.forget(material);
     }
 
-    /// The open material, which a drawn subdomain is given too. The selection
-    /// outlives the document it was made in - a scene load, an undo past the
-    /// material's creation - so it is resolved against the draft each time it
-    /// is used rather than trusted: the default material if the draft has it,
-    /// otherwise its first.
+    /// The open material, resolved against the draft; see
+    /// `MaterialSession::resolved`.
     pub(super) fn resolved_material_selection(&mut self) -> MaterialId {
-        let materials = &self.editor.document.model.draft.materials;
-        if !materials
-            .iter()
-            .any(|material| material.id == self.material_selection)
-        {
-            self.material_selection = materials
-                .iter()
-                .find(|material| material.id == DEFAULT_MATERIAL)
-                .or_else(|| materials.first())
-                .map_or(DEFAULT_MATERIAL, |material| material.id);
-        }
-        self.material_selection
+        self.material_session
+            .resolved(&self.editor.document.model.draft)
     }
 
     pub(super) fn materials_panel(&mut self, ui: &mut egui::Ui) {
@@ -325,8 +295,8 @@ impl Playground {
                     &mut source.profile,
                     &source.parameters,
                     0.0,
-                    &mut self.material_formula_edits,
-                    &mut self.material_formula_errors,
+                    &mut self.material_session.formulas,
+                    &mut self.material_session.errors,
                 );
                 source_changed |= source.profile != before;
                 ui.label("Signal");
@@ -422,12 +392,7 @@ impl Playground {
             self.formula_help_toggle(ui);
             if ui.button("+").clicked() {
                 match self.editor.add_material() {
-                    Ok(id) => {
-                        self.material_selection = id;
-                        self.material_edit = None;
-                        self.material_formula_edits.clear();
-                        self.material_formula_errors.clear();
-                    }
+                    Ok(id) => self.material_session.open(id),
                     Err(error) => self.notify(error),
                 }
             }
@@ -438,20 +403,21 @@ impl Playground {
                 // drag inside its popup, so stage the value and commit it once
                 // the pointer is released.
                 let mut color = self
-                    .material_color_edit
+                    .material_session
+                    .colour
                     .filter(|(id, _)| *id == material.id)
                     .map_or(material.color, |(_, color)| color);
                 let response = ui
                     .color_edit_button_srgb(&mut color)
                     .on_hover_text("Colour used by the Materials overlay");
                 if response.changed() {
-                    self.material_color_edit = Some((material.id, color));
+                    self.material_session.colour = Some((material.id, color));
                 }
-                if let Some((id, staged)) = self.material_color_edit
+                if let Some((id, staged)) = self.material_session.colour
                     && id == material.id
                     && !ui.ctx().egui_is_using_pointer()
                 {
-                    self.material_color_edit = None;
+                    self.material_session.colour = None;
                     if staged != material.color {
                         let mut updated = material.clone();
                         updated.color = staged;
@@ -462,7 +428,8 @@ impl Playground {
                             // the colour alone read as an edit not applied.
                             Ok(_) => {
                                 if let Some(edit) = self
-                                    .material_edit
+                                    .material_session
+                                    .staged
                                     .as_mut()
                                     .filter(|edit| edit.id == material.id)
                                 {
@@ -474,32 +441,19 @@ impl Playground {
                     }
                 }
                 if ui
-                    .selectable_label(self.material_selection == material.id, &material.name)
+                    .selectable_label(
+                        self.material_session.selection == material.id,
+                        &material.name,
+                    )
                     .clicked()
                 {
-                    self.material_selection = material.id;
-                    self.material_edit = None;
-                    self.material_formula_edits.clear();
-                    self.material_formula_errors.clear();
+                    self.material_session.open(material.id);
                 }
             });
         }
-        if self
-            .material_edit
-            .as_ref()
-            .is_none_or(|material| material.id != self.material_selection)
-        {
-            self.material_edit = self
-                .editor
-                .document
-                .model
-                .draft
-                .materials
-                .iter()
-                .find(|item| item.id == self.material_selection)
-                .cloned();
-        }
-        if let Some(mut material) = self.material_edit.take() {
+        self.material_session
+            .stage(&self.editor.document.model.draft);
+        if let Some(mut material) = self.material_session.staged.take() {
             ui.separator();
             ui.text_edit_singleline(&mut material.name);
             // Each material keeps its own view, on a line of its own because
@@ -630,8 +584,11 @@ impl Playground {
                 },
                 2,
             ] {
-                self.material_formula_edits.remove(&(material.id.0, hidden));
-                self.material_formula_errors
+                self.material_session
+                    .formulas
+                    .remove(&(material.id.0, hidden));
+                self.material_session
+                    .errors
                     .remove(&(material.id.0, hidden));
             }
             // Advanced can write each row's law by its names or with every
@@ -663,8 +620,8 @@ impl Playground {
                         // compose it.
                         law_editor::row_formula(ui, &material, physics, row, numbers);
                         let mut formulas = law_editor::FormulaEdits {
-                            edits: &mut self.material_formula_edits,
-                            errors: &mut self.material_formula_errors,
+                            edits: &mut self.material_session.formulas,
+                            errors: &mut self.material_session.errors,
                         };
                         match row {
                             LawPresetRow::Stiffness if reciprocal => {
@@ -763,8 +720,8 @@ impl Playground {
                     .default_open(!material.restoring.is_none())
                     .show(ui, |ui| {
                         let mut formulas = law_editor::FormulaEdits {
-                            edits: &mut self.material_formula_edits,
-                            errors: &mut self.material_formula_errors,
+                            edits: &mut self.material_session.formulas,
+                            errors: &mut self.material_session.errors,
                         };
                         if let Some(error) = law_editor::restoring_editor(
                             ui,
@@ -798,8 +755,8 @@ impl Playground {
                         &mut material.axis_ratio,
                         &material.parameters,
                         1.0,
-                        &mut self.material_formula_edits,
-                        &mut self.material_formula_errors,
+                        &mut self.material_session.formulas,
+                        &mut self.material_session.errors,
                     );
                 });
             // A Switch's ramp is one number on the material rather than a slot
@@ -878,10 +835,10 @@ impl Playground {
                         // text typed against a name that has since changed
                         // (an undo, a preset) is dropped, not committed.
                         let key = (material_id, index);
-                        let entry = self
-                            .parameter_name_edits
-                            .entry(key)
-                            .or_insert_with(|| (parameter.name.clone(), parameter.name.clone()));
+                        let entry =
+                            self.material_session.names.entry(key).or_insert_with(|| {
+                                (parameter.name.clone(), parameter.name.clone())
+                            });
                         if entry.0 != parameter.name {
                             *entry = (parameter.name.clone(), parameter.name.clone());
                         }
@@ -933,7 +890,7 @@ impl Playground {
             // two come in one frame; deleting first moved the rename onto the
             // row below, or past the end.
             for (index, name) in renames {
-                self.parameter_name_edits.remove(&(material_id, index));
+                self.material_session.names.remove(&(material_id, index));
                 let Some(old) = material.parameters.get(index).map(|p| p.name.clone()) else {
                     continue;
                 };
@@ -946,7 +903,8 @@ impl Playground {
                 // The formula fields' text, rewritten as the formulas were:
                 // left, it showed the old name and committed it as missing.
                 for (_, text) in self
-                    .material_formula_edits
+                    .material_session
+                    .formulas
                     .iter_mut()
                     .filter(|((owner, _), _)| *owner == material_id)
                 {
@@ -955,7 +913,7 @@ impl Playground {
             }
             if let Some(index) = remove
                 && let Err(error) =
-                    delete_parameter(&mut material, index, &mut self.parameter_name_edits)
+                    delete_parameter(&mut material, index, &mut self.material_session.names)
             {
                 self.notify(format!("Cannot delete the parameter: {error}"));
             }
@@ -983,7 +941,7 @@ impl Playground {
                     self.forget_material_edits(material.id);
                 }
             });
-            if self.material_selection != DEFAULT_MATERIAL
+            if self.material_session.selection != DEFAULT_MATERIAL
                 && !self
                     .editor
                     .document
@@ -991,15 +949,15 @@ impl Playground {
                     .draft
                     .regions
                     .iter()
-                    .any(|region| region.material == self.material_selection)
+                    .any(|region| region.material == self.material_session.selection)
                 && ui.button("Delete material").clicked()
             {
-                match self.editor.delete_material(self.material_selection) {
-                    Ok(()) => self.material_selection = DEFAULT_MATERIAL,
+                match self.editor.delete_material(self.material_session.selection) {
+                    Ok(()) => self.material_session.selection = DEFAULT_MATERIAL,
                     Err(error) => self.notify(error),
                 }
             }
-            self.material_edit = Some(material);
+            self.material_session.staged = Some(material);
         }
     }
 }
@@ -1198,7 +1156,8 @@ impl Playground {
             .map(|material| material.id)
             .collect::<Vec<_>>();
         let chosen = self
-            .material_edit
+            .material_session
+            .staged
             .as_ref()
             .map(|material| material.id)
             .filter(|id| switchable.contains(id))
@@ -1602,7 +1561,7 @@ mod tests {
     #[test]
     fn a_renamed_parameter_is_renamed_in_its_formula_fields() {
         let mut state = Playground::default();
-        let id = state.material_selection;
+        let id = state.material_session.selection;
         let mut material = state
             .editor
             .document
@@ -1647,7 +1606,10 @@ mod tests {
         roster_pass(&mut state, &context, press(egui::Key::Enter));
         let widgets = roster_pass(&mut state, &context, vec![]);
         let renamed = ScalarField::formula("rho_base_new + x*x").unwrap();
-        assert_eq!(state.material_edit.as_ref().unwrap().mass_density, renamed);
+        assert_eq!(
+            state.material_session.staged.as_ref().unwrap().mass_density,
+            renamed
+        );
 
         // The field shows the rename, and Enter in it commits it.
         let field = find(&widgets, "rho_base_new + x*x");
@@ -1655,11 +1617,14 @@ mod tests {
         roster_pass(&mut state, &context, press(egui::Key::Enter));
         roster_pass(&mut state, &context, vec![]);
         assert!(
-            state.material_formula_errors.is_empty(),
+            state.material_session.errors.is_empty(),
             "{:?}",
-            state.material_formula_errors
+            state.material_session.errors
         );
-        assert_eq!(state.material_edit.as_ref().unwrap().mass_density, renamed);
+        assert_eq!(
+            state.material_session.staged.as_ref().unwrap().mass_density,
+            renamed
+        );
     }
 
     /// Reported: a parameter renamed in its field and left by a click on −
@@ -1671,7 +1636,7 @@ mod tests {
     fn deleting_a_parameter_keeps_a_rename_left_in_another() {
         for count in [2usize, 3] {
             let mut state = Playground::default();
-            let id = state.material_selection;
+            let id = state.material_session.selection;
             let mut material = state
                 .editor
                 .document
@@ -1724,7 +1689,8 @@ mod tests {
             roster_pass(&mut state, &context, click(&first));
             roster_pass(&mut state, &context, vec![]);
             let parameters = state
-                .material_edit
+                .material_session
+                .staged
                 .as_ref()
                 .unwrap()
                 .parameters
@@ -2019,7 +1985,7 @@ mod tests {
             laid_out(&output)
         };
         pass(&mut state, vec![]);
-        let edit = state.material_edit.as_mut().unwrap();
+        let edit = state.material_session.staged.as_mut().unwrap();
         edit.mass_law.gate.as_mut().unwrap().envelope = PulseEnvelope::Gaussian { width: 0.1 };
         edit.mass_density = ScalarField::constant(2.0);
         let widgets = pass(&mut state, vec![]);
@@ -2042,7 +2008,7 @@ mod tests {
         assert_eq!(applied.mass_density, ScalarField::constant(1.0));
         assert!(state.material_edits_pending());
         assert_eq!(
-            state.material_edit.as_ref().unwrap().mass_density,
+            state.material_session.staged.as_ref().unwrap().mass_density,
             ScalarField::constant(2.0)
         );
     }
@@ -2202,7 +2168,7 @@ mod tests {
                 laid_out(&output)
             };
             pass(&mut state, vec![]);
-            let edit = state.material_edit.as_mut().unwrap();
+            let edit = state.material_session.staged.as_mut().unwrap();
             if added {
                 edit.parameters.push(MaterialParameter {
                     name: "boost".into(),
@@ -2263,12 +2229,15 @@ mod tests {
             });
         };
         render(&mut state);
-        state.material_edit.as_mut().unwrap().name = "Pending".into();
+        state.material_session.staged.as_mut().unwrap().name = "Pending".into();
         state.set_material_advanced(selection, true);
         render(&mut state);
         state.set_material_advanced(selection, false);
         render(&mut state);
-        assert_eq!(state.material_edit.as_ref().unwrap().name, "Pending");
+        assert_eq!(
+            state.material_session.staged.as_ref().unwrap().name,
+            "Pending"
+        );
         assert!(state.material_edits_pending());
     }
 
@@ -2342,7 +2311,7 @@ mod tests {
                         });
                     }
                     assert_eq!(
-                        state.material_edit.as_ref(),
+                        state.material_session.staged.as_ref(),
                         Some(&stored),
                         "{physics:?}, advanced {advanced}"
                     );
@@ -2360,10 +2329,10 @@ mod tests {
         let region = state.editor.document.model.draft.regions[0].id;
         let added = state.editor.add_material().unwrap();
         state.editor.set_region_material(region, added).unwrap();
-        state.material_selection = DEFAULT_MATERIAL;
+        state.material_session.selection = DEFAULT_MATERIAL;
         state.select_region(region);
         assert_eq!(state.region_selection, region);
-        assert_eq!(state.material_selection, added);
+        assert_eq!(state.material_session.selection, added);
 
         // An unapplied edit on the open material holds it.
         state
@@ -2379,14 +2348,14 @@ mod tests {
             .unwrap()
             .clone();
         edit.name.push_str(" (edited)");
-        state.material_edit = Some(edit);
+        state.material_session.staged = Some(edit);
         state.select_region(region);
-        assert_eq!(state.material_selection, added);
+        assert_eq!(state.material_session.selection, added);
 
         // Once the edit is gone the selection follows.
-        state.material_edit = None;
+        state.material_session.staged = None;
         state.select_region(region);
-        assert_eq!(state.material_selection, DEFAULT_MATERIAL);
+        assert_eq!(state.material_session.selection, DEFAULT_MATERIAL);
     }
 
     /// Reported: Apply put a material's old colour back. The picker commits
@@ -2403,9 +2372,9 @@ mod tests {
         };
         let picked = [10, 200, 30];
         let mut state = Playground::default();
-        let id = state.material_selection;
+        let id = state.material_session.selection;
         render(&mut state);
-        state.material_color_edit = Some((id, picked));
+        state.material_session.colour = Some((id, picked));
         render(&mut state);
         assert_eq!(
             state
@@ -2424,13 +2393,13 @@ mod tests {
         );
 
         let mut state = Playground::default();
-        let id = state.material_selection;
+        let id = state.material_session.selection;
         render(&mut state);
-        state.material_edit.as_mut().unwrap().name = "Pending".into();
-        state.material_color_edit = Some((id, picked));
+        state.material_session.staged.as_mut().unwrap().name = "Pending".into();
+        state.material_session.colour = Some((id, picked));
         render(&mut state);
         assert!(state.material_edits_pending());
-        let edit = state.material_edit.clone().unwrap();
+        let edit = state.material_session.staged.clone().unwrap();
         state.editor.update_material(edit).unwrap();
         let applied = state.editor.document.model.draft.material(id).unwrap();
         assert_eq!(applied.color, picked);
@@ -2511,7 +2480,7 @@ mod tests {
             polarization: ElectromagneticPolarization::Tm,
         };
         let dense = |state: &mut Playground| {
-            let id = state.material_selection;
+            let id = state.material_session.selection;
             let mut dense = state
                 .editor
                 .document
@@ -2556,17 +2525,17 @@ mod tests {
             "the fixture converts to something else"
         );
         assert!(!state.material_edits_pending());
-        assert_eq!(state.material_edit.as_ref(), Some(&converted));
+        assert_eq!(state.material_session.staged.as_ref(), Some(&converted));
 
         // An edit pending through the switch stays pending, converted.
         let mut state = Playground::default();
         let id = dense(&mut state);
         render(&mut state);
-        state.material_edit.as_mut().unwrap().name = "Pending".into();
+        state.material_session.staged.as_mut().unwrap().name = "Pending".into();
         switch(&mut state);
         render(&mut state);
         assert!(state.material_edits_pending());
-        let edit = state.material_edit.clone().unwrap();
+        let edit = state.material_session.staged.clone().unwrap();
         state.editor.update_material(edit).unwrap();
         let applied = state.editor.document.model.draft.material(id).unwrap();
         assert_eq!(applied.name, "Pending");
@@ -2685,19 +2654,19 @@ mod tests {
 
         let mut state = Playground::default();
         state.open_example(first);
-        state.material_selection = picked;
+        state.material_session.selection = picked;
         render(&mut state);
         assert_eq!(
-            state.material_edit.as_ref().map(|edit| edit.id),
+            state.material_session.staged.as_ref().map(|edit| edit.id),
             Some(picked)
         );
 
         state.open_example(second);
         render(&mut state);
         let draft = &state.editor.document.model.draft;
-        assert_eq!(state.material_selection, DEFAULT_MATERIAL);
+        assert_eq!(state.material_session.selection, DEFAULT_MATERIAL);
         assert_eq!(
-            state.material_edit.as_ref(),
+            state.material_session.staged.as_ref(),
             draft.material(DEFAULT_MATERIAL),
             "the panel shows the new scene's own material"
         );
@@ -2709,7 +2678,7 @@ mod tests {
             .expect("a subdomain of another material");
         let (region, material) = (region.id, region.material);
         state.select_region(region);
-        assert_eq!(state.material_selection, material);
+        assert_eq!(state.material_session.selection, material);
     }
 
     /// Found by the generated sequences as `[Press(AddMaterial), Undo]`: a
@@ -2727,16 +2696,16 @@ mod tests {
             .find(|widget| widget.label == "+")
             .expect("the Library's +");
         driver.pass(click(add), |ui| state.materials_panel(ui));
-        let added = state.material_selection;
+        let added = state.material_session.selection;
         assert_ne!(added, DEFAULT_MATERIAL, "the new material opened");
 
         state.undo();
         let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
         let draft = &state.editor.document.model.draft;
         assert!(draft.material(added).is_none(), "the creation was undone");
-        assert_eq!(state.material_selection, DEFAULT_MATERIAL);
+        assert_eq!(state.material_session.selection, DEFAULT_MATERIAL);
         assert_eq!(
-            state.material_edit.as_ref(),
+            state.material_session.staged.as_ref(),
             draft.material(DEFAULT_MATERIAL)
         );
         assert!(
@@ -2784,12 +2753,20 @@ mod tests {
             .update_material(apply_law_preset(pump, &material).unwrap())
             .unwrap();
         // Opened afresh, as a click on it in the Library opens it.
-        state.material_edit = None;
+        state.material_session.staged = None;
         let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
         let offered = divide(&widgets);
         assert_eq!(offered.len(), 1, "offered on the pumped row alone");
         driver.pass(click(&offered[0]), |ui| state.materials_panel(ui));
-        assert!(state.material_edit.as_ref().unwrap().mass_law.inverted);
+        assert!(
+            state
+                .material_session
+                .staged
+                .as_ref()
+                .unwrap()
+                .mass_law
+                .inverted
+        );
 
         // The pump taken off leaves nothing to divide.
         let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
@@ -2806,7 +2783,7 @@ mod tests {
         driver.pass(click(none), |ui| state.materials_panel(ui));
         let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
         assert_eq!(
-            state.material_edit.as_ref().unwrap().mass_law,
+            state.material_session.staged.as_ref().unwrap().mass_law,
             CoefficientLaw::linear()
         );
         assert!(divide(&widgets).is_empty());

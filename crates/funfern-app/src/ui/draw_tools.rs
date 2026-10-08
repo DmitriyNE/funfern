@@ -389,9 +389,7 @@ impl Playground {
         match self.editor.remove(&target, choices.first().copied()) {
             Ok(removal) => {
                 self.selection = TopologySelection::None;
-                self.material_edit = None;
-                self.material_formula_edits.clear();
-                self.material_formula_errors.clear();
+                self.material_session.reload();
                 self.invalidate_samples();
                 self.report_removal(&target, &removal);
             }
@@ -512,7 +510,7 @@ mod tests {
             ..Playground::default()
         };
         let added = state.editor.add_material().unwrap();
-        state.material_selection = added;
+        state.material_session.selection = added;
         assert!(state.editor.undo(), "the material's creation is undone");
         assert!(state.editor.document.model.draft.material(added).is_none());
 
@@ -530,14 +528,14 @@ mod tests {
                 .iter()
                 .all(|material| draft.material(*material).is_some())
         );
-        assert_eq!(state.material_selection, DEFAULT_MATERIAL);
+        assert_eq!(state.material_session.selection, DEFAULT_MATERIAL);
 
         let kept = state.editor.add_material().unwrap();
-        state.material_selection = kept;
+        state.material_session.selection = kept;
         state
             .create_closed(PeriodicCubicSpline::rounded(Point2::new(-0.5, -0.5), 0.1))
             .unwrap();
-        assert_eq!(state.material_selection, kept);
+        assert_eq!(state.material_session.selection, kept);
         assert!(
             state
                 .editor

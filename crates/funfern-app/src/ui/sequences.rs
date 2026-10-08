@@ -361,8 +361,8 @@ impl Panel {
     fn observe(&self) -> Observed {
         Observed {
             model: authored(&self.state.editor.document.model),
-            staged: self.state.material_edit.clone(),
-            selection: self.state.material_selection,
+            staged: self.state.material_session.staged.clone(),
+            selection: self.state.material_session.selection,
         }
     }
 
@@ -518,7 +518,7 @@ impl Panel {
                     "Revert edited the document"
                 );
                 assert_eq!(
-                    self.state.material_edit,
+                    self.state.material_session.staged,
                     self.committed(before.selection),
                     "Revert left the staged copy different from the document's"
                 );
@@ -538,21 +538,24 @@ impl Panel {
                 assert_eq!(materials.len(), count + 1);
                 let added = materials.last().unwrap().id;
                 assert_eq!(
-                    self.state.material_selection, added,
+                    self.state.material_session.selection, added,
                     "the new material opens"
                 );
-                assert_eq!(self.state.material_edit, self.committed(added));
+                assert_eq!(self.state.material_session.staged, self.committed(added));
             }
             Action::Press(Button::DeleteMaterial) => {
                 let Some(delete) = self.button("Delete material") else {
                     return;
                 };
-                let doomed = self.state.material_selection;
+                let doomed = self.state.material_session.selection;
                 self.pass(click(&delete));
                 self.pass(vec![]);
                 assert!(self.committed(doomed).is_none(), "the material stayed");
-                assert_eq!(self.state.material_selection, DEFAULT_MATERIAL);
-                assert_eq!(self.state.material_edit, self.committed(DEFAULT_MATERIAL));
+                assert_eq!(self.state.material_session.selection, DEFAULT_MATERIAL);
+                assert_eq!(
+                    self.state.material_session.staged,
+                    self.committed(DEFAULT_MATERIAL)
+                );
             }
             Action::Press(Button::AddParameter) => {
                 let Some(add) = self.button("+ Parameter") else {
@@ -568,7 +571,13 @@ impl Panel {
                     "a parameter is staged, not committed"
                 );
                 assert_eq!(
-                    self.state.material_edit.as_ref().unwrap().parameters.len(),
+                    self.state
+                        .material_session
+                        .staged
+                        .as_ref()
+                        .unwrap()
+                        .parameters
+                        .len(),
                     count + 1
                 );
             }
@@ -591,7 +600,14 @@ impl Panel {
                     before.model,
                     "a deletion is staged, not committed"
                 );
-                let after = self.state.material_edit.as_ref().unwrap().parameters.len();
+                let after = self
+                    .state
+                    .material_session
+                    .staged
+                    .as_ref()
+                    .unwrap()
+                    .parameters
+                    .len();
                 if minus.enabled {
                     assert_eq!(after, count - 1, "the parameter stayed");
                 } else {
@@ -666,8 +682,11 @@ impl Panel {
                     before.model,
                     "selecting edited the document"
                 );
-                assert_eq!(self.state.material_selection, target.id);
-                assert_eq!(self.state.material_edit, self.committed(target.id));
+                assert_eq!(self.state.material_session.selection, target.id);
+                assert_eq!(
+                    self.state.material_session.staged,
+                    self.committed(target.id)
+                );
             }
             Action::SelectRegion(nth) => {
                 let regions = self.state.editor.document.model.draft.regions.clone();
@@ -688,11 +707,11 @@ impl Panel {
                         self.noticed(),
                         "a selection away from pending edits was not refused"
                     );
-                    assert_eq!(self.state.material_selection, before.selection);
-                    assert_eq!(self.state.material_edit, before.staged);
+                    assert_eq!(self.state.material_session.selection, before.selection);
+                    assert_eq!(self.state.material_session.staged, before.staged);
                 } else {
                     assert_eq!(self.state.region_selection, target.id);
-                    assert_eq!(self.state.material_selection, target.material);
+                    assert_eq!(self.state.material_session.selection, target.material);
                     // Following to another material opens it as the document
                     // has it; staying on the open one keeps what was staged.
                     let expected = if target.material == before.selection {
@@ -700,7 +719,7 @@ impl Panel {
                     } else {
                         self.committed(target.material)
                     };
-                    assert_eq!(self.state.material_edit, expected);
+                    assert_eq!(self.state.material_session.staged, expected);
                 }
             }
             Action::Undo => {
@@ -769,7 +788,7 @@ impl Panel {
                     })
                     .flatten()
                     .or_else(|| self.committed(before.selection));
-                assert_eq!(self.state.material_edit, expected);
+                assert_eq!(self.state.material_session.staged, expected);
             }
             Action::New => {
                 self.state.new_scene();
@@ -778,8 +797,11 @@ impl Panel {
                     self.materials(),
                     TopologyDocument::default().model.draft.materials
                 );
-                assert_eq!(self.state.material_selection, DEFAULT_MATERIAL);
-                assert_eq!(self.state.material_edit, self.committed(DEFAULT_MATERIAL));
+                assert_eq!(self.state.material_session.selection, DEFAULT_MATERIAL);
+                assert_eq!(
+                    self.state.material_session.staged,
+                    self.committed(DEFAULT_MATERIAL)
+                );
             }
             Action::Settle => {
                 let before = self.observe();
@@ -1169,10 +1191,11 @@ impl Panel {
             "the history is not as deep as the commits observed"
         );
         // The open material is in the draft, and the staged copy is of it.
-        let open = state.material_selection;
+        let open = state.material_session.selection;
         assert!(draft.material(open).is_some(), "the open material is gone");
         let staged = state
-            .material_edit
+            .material_session
+            .staged
             .as_ref()
             .expect("a pass leaves a staged copy");
         assert_eq!(staged.id, open, "the staged copy is of another material");

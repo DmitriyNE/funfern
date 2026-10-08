@@ -334,7 +334,7 @@ impl Playground {
                 .selected_text(selected_name)
                 .show_ui(ui, |ui| {
                     for (id, name) in &materials {
-                        ui.selectable_value(&mut self.material_selection, *id, name);
+                        ui.selectable_value(&mut self.material_session.selection, *id, name);
                     }
                 });
         }

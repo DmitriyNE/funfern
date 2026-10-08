@@ -93,13 +93,11 @@ impl Playground {
     }
 
     fn history_moved(&mut self, replaced_scene: bool) {
-        self.material_edit = None;
+        self.material_session.reload();
         // A name field takes the document's name again; what it held is of
         // the step the history left.
         self.probe_name_edit = None;
         self.region_name_edit = None;
-        self.material_formula_edits.clear();
-        self.material_formula_errors.clear();
         if replaced_scene {
             self.example_opened = None;
             self.scene_replaced(true);
@@ -137,7 +135,7 @@ impl Playground {
         // left open in the Materials panel would pass for unapplied edits to
         // the material sharing its id, show it as the old one, and hold a
         // click on a subdomain back from selecting its material.
-        self.material_selection = DEFAULT_MATERIAL;
+        self.material_session.scene_replaced();
         self.region_selection = BACKGROUND_REGION;
         self.hole_selected = false;
         self.region_name_edit = None;
@@ -145,11 +143,6 @@ impl Playground {
         // outgoing probe would land on the new one sharing its id.
         self.probe_name_edit = None;
         self.face_selection = 0;
-        self.material_edit = None;
-        self.material_formula_edits.clear();
-        self.material_formula_errors.clear();
-        self.parameter_name_edits.clear();
-        self.material_color_edit = None;
         self.requested_revision = None;
         self.fresh_requested = fresh;
         self.drop_requested = true;
