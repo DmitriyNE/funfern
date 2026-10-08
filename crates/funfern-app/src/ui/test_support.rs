@@ -215,6 +215,12 @@ impl PanelDriver {
         Self { context }
     }
 
+    /// Whether a widget holds the keyboard focus, as a text field being
+    /// typed in does.
+    pub(super) fn focused(&self) -> bool {
+        self.context.memory(|memory| memory.focused().is_some())
+    }
+
     /// One pass of `show` with `events`, on a screen tall enough that nothing
     /// scrolls out of reach. Answers the widgets laid out, top to bottom and
     /// left to right, so the nth of a kind is the same widget pass to pass.
@@ -264,7 +270,11 @@ pub(super) fn typed(text: &str) -> Vec<egui::Event> {
 
 /// A primary click at the centre of `widget`, as the events of one pass.
 pub(super) fn click(widget: &LaidOut) -> Vec<egui::Event> {
-    let at = widget.rect.center();
+    click_at(widget.rect.center())
+}
+
+/// A primary click at `at`, pressed and released in one pass.
+pub(super) fn click_at(at: Pos2) -> Vec<egui::Event> {
     [true, false]
         .map(|pressed| egui::Event::PointerButton {
             pos: at,
@@ -275,4 +285,18 @@ pub(super) fn click(widget: &LaidOut) -> Vec<egui::Event> {
         .into_iter()
         .chain([egui::Event::PointerMoved(at)])
         .collect()
+}
+
+/// The primary button pressed at `at`, or released there, as the events of
+/// one pass: a click whose press and release come in frames of their own.
+pub(super) fn pointer_at(at: Pos2, pressed: bool) -> Vec<egui::Event> {
+    vec![
+        egui::Event::PointerMoved(at),
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]
 }

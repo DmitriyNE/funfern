@@ -25,9 +25,11 @@
 //! of findings drawn by the generator as it stands.
 //!
 //! `reopening` runs the same panel with the document's other edits among its
-//! actions, saved and opened again between any two. `generations` runs the
-//! runtime under interleavings of host frames, device completions and user
-//! actions, against what it has watched the device come to run.
+//! actions, saved and opened again between any two. `unfinished` runs it with
+//! text typed and colours picked that something overtakes before they are
+//! let go. `generations` runs the runtime under interleavings of host frames,
+//! device completions and user actions, against what it has watched the
+//! device come to run.
 
 use super::test_support::*;
 use super::*;
@@ -43,6 +45,7 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state
 
 mod generations;
 mod reopening;
+mod unfinished;
 
 /// One action on the panel, as a user takes it. Ordinals count the widgets
 /// of a kind top to bottom and wrap, so every value is legal in every state
@@ -75,6 +78,22 @@ enum Action {
     SelectRegion(u8),
     Undo,
     Redo,
+    /// Click the `field`th text field, select its text and type `text`
+    /// without Enter, then let go of the field by `leave`. With `split`, that
+    /// click's press and release come in frames of their own.
+    Draft {
+        field: u8,
+        text: String,
+        leave: Leave,
+        split: bool,
+    },
+    /// Drag a colour in the picker of the `nth` material in the Library and,
+    /// the pointer still held, step the history by `during` from the
+    /// keyboard, then let go.
+    HeldPick {
+        nth: u8,
+        during: History,
+    },
     /// Switch the document to the `nth` physics model.
     Physics(u8),
     New,
@@ -131,6 +150,27 @@ enum Action {
     },
     /// Resize the domain about its centre, the `nth` of four ways.
     Domain(u8),
+}
+
+/// How a field being typed in is let go: by a click on the `nth` material in
+/// the Library, on the toolbar's Undo or Redo, or on nothing.
+#[derive(Clone, Copy, Debug)]
+enum Leave {
+    Library(u8),
+    History(History),
+    Elsewhere,
+}
+
+/// A step of the history.
+#[derive(Clone, Copy, Debug)]
+enum History {
+    Undo,
+    Redo,
+}
+
+/// Where a click lands on nothing: below everything the panel lays out.
+fn elsewhere() -> egui::Pos2 {
+    egui::Pos2::new(240.0, 5990.0)
 }
 
 /// How a saved document comes back.
@@ -404,6 +444,50 @@ impl Panel {
         self.state.editor.document.model.draft.materials.clone()
     }
 
+    /// The Library's row of its `nth` material, wrapping, and that material.
+    /// The rows are the buttons below its heading named as a material is, in
+    /// the materials' order: a region row of the roster above may carry the
+    /// same name, and so may another material.
+    fn library_row(&self, nth: u8) -> Option<(LaidOut, MaterialId)> {
+        let materials = self.materials();
+        let index = nth as usize % materials.len();
+        let heading = self
+            .widgets
+            .iter()
+            .find(|widget| widget.role == Role::Label && widget.label == "Library")?;
+        let rows = self
+            .widgets
+            .iter()
+            .filter(|widget| {
+                widget.role == Role::Button
+                    && widget.rect.min.y > heading.rect.min.y
+                    && materials
+                        .iter()
+                        .any(|material| material.name == widget.label)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.get(index)
+            .cloned()
+            .map(|row| (row, materials[index].id))
+    }
+
+    /// Whether `history` moves the document: whether the shadow history has
+    /// a step that way.
+    fn moves(&self, history: History) -> bool {
+        match history {
+            History::Undo => !self.undo.is_empty(),
+            History::Redo => !self.redo.is_empty(),
+        }
+    }
+
+    fn step_history(&mut self, history: History) {
+        match history {
+            History::Undo => self.state.undo(),
+            History::Redo => self.state.redo(),
+        }
+    }
+
     fn act(&mut self, action: &Action) {
         match action {
             Action::Type { field, text } => {
@@ -653,33 +737,7 @@ impl Panel {
                 assert_eq!(self.observe(), before, "the Advanced view edited something");
             }
             Action::SelectMaterial(nth) => {
-                let materials = self.materials();
-                let index = *nth as usize % materials.len();
-                let target = materials[index].clone();
-                // The Library's rows, in the materials' order: the buttons
-                // below its heading named as a material is. A region row of
-                // the roster above may carry the same name, and so may
-                // another material.
-                let Some(heading) = self
-                    .widgets
-                    .iter()
-                    .find(|widget| widget.role == Role::Label && widget.label == "Library")
-                else {
-                    return;
-                };
-                let rows = self
-                    .widgets
-                    .iter()
-                    .filter(|widget| {
-                        widget.role == Role::Button
-                            && widget.rect.min.y > heading.rect.min.y
-                            && materials
-                                .iter()
-                                .any(|material| material.name == widget.label)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let Some(entry) = rows.get(index).cloned() else {
+                let Some((entry, target)) = self.library_row(*nth) else {
                     return;
                 };
                 let before = self.observe();
@@ -690,11 +748,8 @@ impl Panel {
                     before.model,
                     "selecting edited the document"
                 );
-                assert_eq!(self.state.material_session.selection, target.id);
-                assert_eq!(
-                    self.state.material_session.staged,
-                    self.committed(target.id)
-                );
+                assert_eq!(self.state.material_session.selection, target);
+                assert_eq!(self.state.material_session.staged, self.committed(target));
             }
             Action::SelectRegion(nth) => {
                 let regions = self.state.editor.document.model.draft.regions.clone();
@@ -750,6 +805,107 @@ impl Panel {
                     assert!(
                         !self.state.material_edits_pending(),
                         "Redo kept pending edits"
+                    );
+                }
+            }
+            Action::Draft {
+                field,
+                text,
+                leave,
+                split,
+            } => {
+                let fields = self.of_role(Role::TextInput);
+                let Some(target) = Self::nth(&fields, *field) else {
+                    return;
+                };
+                self.pass(click(&target));
+                self.pass(vec![
+                    key(egui::Key::A, egui::Modifiers::COMMAND),
+                    egui::Event::Text(text.clone()),
+                ]);
+                let before = self.observe();
+                let row = match leave {
+                    Leave::Library(nth) => self.library_row(*nth),
+                    _ => None,
+                };
+                let at = row
+                    .as_ref()
+                    .map_or_else(elsewhere, |(row, _)| row.rect.center());
+                let history = match leave {
+                    Leave::History(history) => Some(*history),
+                    _ => None,
+                };
+                let moves = history.is_some_and(|history| self.moves(history));
+                // A toolbar button acts on the click, which is the release,
+                // and the top bar is shown before the panel; the field lets
+                // go of that same click when the panel is shown after it.
+                if *split {
+                    self.pass(pointer_at(at, true));
+                    if let Some(history) = history {
+                        self.step_history(history);
+                    }
+                    self.pass(pointer_at(at, false));
+                } else {
+                    if let Some(history) = history {
+                        self.step_history(history);
+                    }
+                    self.pass(click_at(at));
+                }
+                self.pass(vec![]);
+                assert!(
+                    !self.driver.focused(),
+                    "the field held on through {leave:?}"
+                );
+                if let Some((_, opened)) = row {
+                    // Opening another material drops what was typed for the
+                    // one left, as it drops what was staged. A region name
+                    // is not a material's, and commits as its field lets go.
+                    assert_eq!(self.state.material_session.selection, opened);
+                    assert_eq!(self.state.material_session.staged, self.committed(opened));
+                    let mut model = self.observe().model;
+                    model.region_names = before.model.region_names.clone();
+                    assert_eq!(
+                        model, before.model,
+                        "opening another material committed what was typed for the one left"
+                    );
+                } else if moves {
+                    // A step of the history drops what was typed against the
+                    // step left, as it drops what was staged.
+                    assert!(
+                        !self.state.material_edits_pending(),
+                        "{leave:?} staged what was typed against the step left"
+                    );
+                } else {
+                    // Let go with nothing moved, it commits as Enter does.
+                    let fields = self.of_role(Role::TextInput);
+                    assert!(
+                        fields.iter().any(|shown| shown.label == *text) || self.noticed(),
+                        "typed {text:?} into {target:?} and let go: no field shows it and nothing was said"
+                    );
+                }
+            }
+            Action::HeldPick { nth, during } => {
+                let materials = self.materials();
+                let material = &materials[*nth as usize % materials.len()];
+                let picked = if material.color == [10, 200, 30] {
+                    [200, 30, 10]
+                } else {
+                    [10, 200, 30]
+                };
+                let moves = self.moves(*during);
+                // What the picker stages on a frame of the drag; the commit
+                // waits for the pointer to let go. No text field holds the
+                // keyboard, so Cmd+Z steps the history meanwhile.
+                self.state.material_session.colour = Some((material.id, picked));
+                self.step_history(*during);
+                self.pass(vec![]);
+                self.pass(vec![]);
+                if !moves {
+                    // Nothing moved under the pick: it commits as any does.
+                    assert_eq!(
+                        self.committed(material.id).map(|material| material.color),
+                        Some(picked),
+                        "a pick let go with nothing moved committed nothing"
                     );
                 }
             }
@@ -1054,6 +1210,21 @@ impl Panel {
     fn record(&mut self, action: &Action, whole: TopologyDocumentModel) {
         let before = authored(&whole);
         let after = authored(&self.state.editor.document.model);
+        // A step of the history taken amid another action is recorded as
+        // that step.
+        let action = match action {
+            Action::Draft {
+                leave: Leave::History(history),
+                ..
+            }
+            | Action::HeldPick {
+                during: history, ..
+            } if self.moves(*history) => match history {
+                History::Undo => &Action::Undo,
+                History::Redo => &Action::Redo,
+            },
+            _ => action,
+        };
         match action {
             Action::Undo => match self.undo.pop() {
                 Some(expected) => {
@@ -1145,7 +1316,15 @@ impl Panel {
         // replacement bring ids back rather than hand them out.
         if !matches!(
             action,
-            Action::Undo | Action::Redo | Action::New | Action::Reopen(_)
+            Action::Undo
+                | Action::Redo
+                | Action::New
+                | Action::Reopen(_)
+                | Action::Draft {
+                    leave: Leave::History(_),
+                    ..
+                }
+                | Action::HeldPick { .. }
         ) {
             let held = ids(&before, true)
                 .into_iter()
@@ -1207,6 +1386,24 @@ impl Panel {
             .as_ref()
             .expect("a pass leaves a staged copy");
         assert_eq!(staged.id, open, "the staged copy is of another material");
+        // Typed text lives in a field only while it is being typed in: once
+        // the field lets go, a parameter name is committed, refused or
+        // dropped. Kept, it showed when its material opened again, over the
+        // name the material has.
+        if !self.driver.focused() {
+            for (key, (opened, typed)) in &state.material_session.names {
+                assert_eq!(
+                    typed, opened,
+                    "a parameter name typed for {key:?} outlived its field"
+                );
+            }
+        }
+        // No pointer is held between actions, so no colour pick is either.
+        // Kept, it committed when its material next showed, a Redo say.
+        assert_eq!(
+            state.material_session.colour, None,
+            "a colour pick outlived the pointer"
+        );
         // Apply is offered exactly while the staged copy differs.
         let apply = self
             .widgets

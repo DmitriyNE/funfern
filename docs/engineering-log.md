@@ -20858,3 +20858,32 @@ in one frame: egui surrenders a field's focus on the click, the release, after
 the row or the toolbar's button has acted. A drag still held after an Undo
 picks again as the pointer moves, and that lands as a new edit. The user
 guide says what opening a material, Undo and Redo drop.
+
+## 2026-10-08 — Unfinished edits, generated
+
+A machine of its own for edits overtaken before they are let go
+(`ui/sequences/unfinished.rs`,
+`unfinished_edits_land_on_their_own_document_or_nowhere`), sharing the panel
+harness as the reopening machine does. Besides the panel's actions it types
+into any field without Enter and lets the field go by a click on a Library
+row, on the toolbar's Undo or Redo, or on nothing, the click in one frame or
+its press and release in two; and it drags a colour in a picker while the
+keyboard steps the history. What was begun must land on the document it was
+begun in when nothing moved, and go when something did. An Undo or a Redo
+taken amid such an action goes into the shadow history as itself. Two
+invariants join every panel machine: no parameter name typed outlives its
+field, and no colour pick outlives the pointer. The machine starts with a
+parameter applied to the open material and its row unfolded, and adds
+parameters more often than the panel machine does: a tally of 300 sequences
+without that put 6 of some 1,700 drafts into a name field, and about one in
+eight with it. Run against the code before the previous entry, it stopped at
+once on `[HeldPick { nth: 0, during: Undo }]`, and, with the colour half of
+the fix in, on `[Pick, Press(AddParameter), Draft "q4" into the first name
+field, then Library(0)]`: the open material's own row, which staged the typed
+name back onto the copy it had just dropped. Both seeds are drawn by the
+generator as committed and kept in the machine's own file. With the fix, this
+machine, the panel machine and the reopening machine pass 2,000 sequences
+each. The plan had expected a third case, a region name, which commits to the
+document rather than to the staged copy, coming out differently for a click
+split across frames. It does not: egui lets a field go of the click, the
+release, which is also when the toolbar's button and the Library's row act.

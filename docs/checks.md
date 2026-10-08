@@ -118,10 +118,23 @@ and opens the document again between any two: by Save and Open, by a shared
 link and by the browser's autosave, each through the handler the app has for
 it. A reopened document must equal what a file keeps of the saved one, and
 validation must bring it where the session would have come. After every
-action, in both machines, the document must save, and a Valid acceptance must
-mean the accepted scene is the draft. Its seeds have a file of their own.
+action, in every panel machine, the document must save, and a Valid
+acceptance must mean the accepted scene is the draft. Its seeds have a file
+of their own.
 
-A third machine (`ui/sequences/generations.rs`,
+A third machine (`ui/sequences/unfinished.rs`,
+`unfinished_edits_land_on_their_own_document_or_nowhere`) runs the panel with
+edits overtaken before they are let go: text typed without Enter and let go
+by a click on a Library row, on the toolbar's Undo or Redo or on nothing, the
+click in one frame or its press and release in two, and a colour dragged in a
+picker while Cmd+Z or Cmd+Shift+Z steps the history. What was begun must land
+on the document it was begun in when nothing moved, and go when something did.
+It starts with a parameter on the open material, so a name field is there to
+type into. After every action, in all three panel machines, no parameter name
+typed may outlive its field and no colour pick the pointer. Its seeds have a
+file of their own.
+
+A fourth machine (`ui/sequences/generations.rs`,
 `the_host_and_the_device_agree_on_what_runs`) runs the runtime itself under
 interleavings of host frames, device completions and user actions: edits,
 mesh edge and speed changes, source edits, Reset, Run and Step, pulses,
