@@ -4181,6 +4181,10 @@ pub(crate) struct CanonicalGpuBufferHandles {
     event_kind: u32,
     event_serial: u32,
     event_dispatches: u64,
+    /// The step the generation was packed for, which host tests compare with
+    /// the step the host believes is running.
+    #[cfg(test)]
+    time_step: f64,
 }
 
 impl CanonicalGpuBufferHandles {
@@ -4444,6 +4448,8 @@ fn add_canonical_buffers(
         event_kind: plan.event_kind,
         event_serial: plan.control.event.y,
         event_dispatches: plan.manifest.event_dispatches as u64,
+        #[cfg(test)]
+        time_step: plan.time_step,
     };
     AddedCanonicalBuffers {
         handles,
@@ -4738,14 +4744,138 @@ impl CanonicalGpuRequest {
     /// render world.
     #[cfg(test)]
     pub fn process_live_event(&mut self, assets: &mut Assets<ShaderBuffer>) {
+        self.settle_live_event(assets, 0);
+    }
+
+    /// Settles the queued live event as the device does one it refuses with
+    /// `failure`, leaving the accepted state as it was, for host tests that
+    /// have no render world.
+    #[cfg(test)]
+    pub fn reject_live_event(&mut self, assets: &mut Assets<ShaderBuffer>, failure: u32) {
+        self.settle_live_event(assets, failure);
+    }
+
+    /// The control readback reports the latest event's serial and its
+    /// rejection, zero for one taken, and the settle system releases it.
+    #[cfg(test)]
+    fn settle_live_event(&mut self, assets: &mut Assets<ShaderBuffer>, failure: u32) {
         let Some(event) = self.live_event.take() else {
             return;
         };
         self.stats
             .processed_event
             .store(event.serial, Ordering::Relaxed);
+        self.stats.event_rejection.store(failure, Ordering::Relaxed);
         assets.remove(event.upload.id());
         self.revision = self.revision.wrapping_add(1).max(1);
+    }
+
+    /// The step the running generation was packed for.
+    #[cfg(test)]
+    pub fn running_time_step(&self) -> Option<f64> {
+        self.buffers.as_ref().map(|handles| handles.time_step)
+    }
+
+    /// Nodes of the running generation.
+    #[cfg(test)]
+    pub fn running_node_count(&self) -> Option<usize> {
+        self.buffers
+            .as_ref()
+            .map(|handles| handles.node_count as usize)
+    }
+
+    /// One frame's readbacks arriving, for host tests that have no render
+    /// world, as the control and state readbacks bring them: the status reads
+    /// ready unless the run has failed, up to `steps` more of the requested
+    /// steps have completed, and the display takes this generation's primary
+    /// nodes.
+    #[cfg(test)]
+    pub fn deliver_readbacks(&mut self, display: &mut CanonicalGpuDisplay, steps: u64) {
+        let Some(handles) = self.buffers.as_ref() else {
+            return;
+        };
+        let node_count = handles.node_count as usize;
+        let sample_count = handles.sample_count as usize;
+        if self.stats.failure() == 0 {
+            self.stats.status.store(GPU_STATUS_READY, Ordering::Relaxed);
+            let completed = self.stats.completed_steps();
+            let reached = completed
+                .saturating_add(steps)
+                .min(self.desired_steps)
+                .max(completed);
+            self.stats.completed_steps.store(reached, Ordering::Relaxed);
+            self.stats.retire(reached);
+        }
+        begin_canonical_display_generation(display, self.generation);
+        display.node_count = node_count;
+        display.sample_count = sample_count;
+        display.raw_primary = vec![GpuCanonicalStateWord::default(); node_count];
+        display.raw_primary_slot = 0;
+        display.raw_primary_step = self.stats.completed_steps();
+        refresh_canonical_display(display);
+        display.readbacks = display.readbacks.saturating_add(1);
+    }
+
+    /// Admits the pending handoff as `settle_canonical_handoff` does once the
+    /// device has validated the transfer, for host tests that have no render
+    /// world: the target becomes the running generation, ready, at the step
+    /// the source had reached, and the display takes it from the receipt.
+    /// Keep it in step with that system's host-visible effects.
+    #[cfg(test)]
+    pub fn accept_handoff(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        display: &mut CanonicalGpuDisplay,
+    ) {
+        let Some(handoff) = self.handoff.take() else {
+            return;
+        };
+        assets.remove(handoff.transfer.id());
+        if let Some(old) = self.buffers.take() {
+            for handle in old.owned() {
+                assets.remove(handle.id());
+            }
+        }
+        self.readback_entities.clear();
+        let generation = self.generation.wrapping_add(1).max(1);
+        let completed_steps = self.stats.completed_steps();
+        let stats = Arc::new(CanonicalGpuStats::default());
+        stats
+            .completed_steps
+            .store(completed_steps, Ordering::Relaxed);
+        stats.status.store(GPU_STATUS_READY, Ordering::Relaxed);
+        let target = handoff.target;
+        begin_canonical_display_generation(display, generation);
+        display.node_count = target.node_count as usize;
+        display.sample_count = target.sample_count as usize;
+        display.raw_state_completed_steps = completed_steps;
+        display.raw_primary = vec![GpuCanonicalStateWord::default(); target.node_count as usize];
+        display.raw_primary_slot = 0;
+        display.raw_primary_step = completed_steps;
+        refresh_canonical_display(display);
+        display.readbacks = display.readbacks.saturating_add(1);
+        self.generation = generation;
+        self.revision = self.revision.wrapping_add(1).max(1);
+        self.desired_steps = self.desired_steps.max(completed_steps);
+        self.buffers = Some(target);
+        self.manifest = Some(handoff.manifest);
+        self.stats = stats;
+        self.status_readback_entity = None;
+        self.snapshot = None;
+        self.integrated_readback_entity = None;
+        self.handoff_outcome = CanonicalGpuHandoffOutcome::Accepted;
+    }
+
+    /// The run failing at its last accepted step, as the status readback
+    /// reports a latched failure, for host tests that have no render world.
+    #[cfg(test)]
+    pub fn fail(&mut self, failure: u32) {
+        if self.buffers.is_some() {
+            self.stats.failure.store(failure, Ordering::Relaxed);
+            self.stats
+                .status
+                .store(GPU_STATUS_FAILED, Ordering::Relaxed);
+        }
     }
 
     pub fn queue_live_event(

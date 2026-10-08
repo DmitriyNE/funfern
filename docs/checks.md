@@ -121,6 +121,21 @@ validation must bring it where the session would have come. After every
 action, in both machines, the document must save, and a Valid acceptance must
 mean the accepted scene is the draft. Its seeds have a file of their own.
 
+A third machine (`ui/sequences/generations.rs`,
+`the_host_and_the_device_agree_on_what_runs`) runs the runtime itself under
+interleavings of host frames, device completions and user actions: edits,
+mesh edge and speed changes, source edits, Reset, Run and Step, pulses,
+Switch, scenes opened, Undo and Redo, while the device delivers readbacks,
+admits or refuses a handoff, takes or refuses a live event, or faults. The
+device is the request's test transitions, preparation advances by the slices
+each frame is granted and packing happens on the frame, so the order is the
+sequence's alone. While nothing uploads, the host's active topology must be
+the one the device runs, at the step it was packed for; a topology is only
+prepared from a scene the editor has held since its last replacement; a
+commit without a new generation must be one that needs none; and with the
+device fair at the end, the runtime must come to rest on the accepted
+revision or with an error naming it.
+
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,
 nested material inclusions,

@@ -25,7 +25,9 @@
 //! of findings drawn by the generator as it stands.
 //!
 //! `reopening` runs the same panel with the document's other edits among its
-//! actions, saved and opened again between any two.
+//! actions, saved and opened again between any two. `generations` runs the
+//! runtime under interleavings of host frames, device completions and user
+//! actions, against what it has watched the device come to run.
 
 use super::test_support::*;
 use super::*;
@@ -39,6 +41,7 @@ use funfern_app::topology_viewport::{TopologyHandle, plan_handle_drag};
 use proptest::prelude::*;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 
+mod generations;
 mod reopening;
 
 /// One action on the panel, as a user takes it. Ordinals count the widgets

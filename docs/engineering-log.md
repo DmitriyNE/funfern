@@ -20626,3 +20626,46 @@ with the fix cut out at its first assertion; the harness's tolerance is gone,
 and the reopening machine's seed file holds this finding, which it found
 again after 29 passing sequences with the fix cut out and shrank to the same
 four steps. 2,000 reopening sequences pass with the fix.
+
+## 2026-10-08 — The host and the device under any interleaving
+
+Phase 3 of the action-sequence harness: the runtime. `ui/sequences/generations.rs`
+draws interleavings of host frames, device completions and user actions and
+runs them through `refresh_runtime`, the app's own frame, against a device
+made of the request's test transitions: `deliver_readbacks` (the status ready,
+steps completed, the display taking the generation), `accept_handoff`, which
+keeps in step with `settle_canonical_handoff`'s host-visible effects,
+`reject_handoff`, `process_live_event`, `reject_live_event` and `fail`. Two
+test seams make the order the sequence's alone: `preparation_grant`, the
+slices of 4096 units each frame lends preparation in place of the 4 ms wall
+clock and the worker thread, and `pack_inline`, which packs a candidate on the
+frame that asks for it. Each device generation records the step it was packed
+for.
+
+- The harness follows what the device runs, the generation and the host token
+  it carries, from the upload or Reset that installed it or the handoff that
+  published it, and holds every change to what may cause it: a generation
+  appears only by an upload, a Reset or an admitted handoff, and a commit with
+  no new generation is a measurement or source update. While nothing uploads,
+  the host's active topology must be the device's, on the same mesh and at
+  the step it was packed for; a topology is only prepared from an accepted
+  scene held since the last replacement; Reset and a replacement leave nothing
+  queued. At the end, with preparation and the device fair, the runtime must
+  come to rest on the accepted revision, or with an error naming it.
+- Over 256 sequences of up to 120 steps: 368 installs and 136 handoffs begun,
+  122 admitted and 6 refused, 442 uploads published and 17 commits in place,
+  170 live events taken and 15 refused, 93 faults, 410 Resets, 536 scene
+  drops. The gate runs 64 sequences in a few seconds; 2,000 passed.
+- Two findings, left as tolerances marked `FINDING` until decided. While the
+  draft is not valid nothing is prepared: an edit made before the scene's
+  first validation that leaves the draft invalid means the scene never starts,
+  so neither would an autosave restored with an invalid draft, and a running
+  scene keeps its point source on after it is switched off while the draft is
+  invalid. And a fault while an upload waits makes the host drop the candidate
+  and keep its old topology while the device keeps the candidate: an
+  installed one already runs (revision 2 installed at a 6.41e-3 step, the host
+  left on revision 1 still pacing 6.41e-3), and a pending handoff can still
+  be admitted (the device on 1,519 nodes at 2.0e-3, the host on 1,579 at
+  6.08e-3, and its next frame failing "Temporal reconstruction does not match
+  the GPU table layout"). Until then the device faults only while nothing
+  uploads, and the rest test accepts a held draft's runtime as it stands.

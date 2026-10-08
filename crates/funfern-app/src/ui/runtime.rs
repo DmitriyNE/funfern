@@ -93,6 +93,18 @@ impl Playground {
     /// builds hand the immutable job to one long-lived worker; failed worker
     /// bootstrap or channels use the existing bounded cooperative runner.
     pub(super) fn advance_runtime_preparation(&mut self) {
+        #[cfg(test)]
+        if let Some(slices) = self.preparation_grant {
+            for _ in 0..slices {
+                if self.runtime.preparing_timing().is_none() {
+                    break;
+                }
+                if let Some(Ok(_)) = self.runtime.advance(4096) {
+                    self.handoff_ready = Some(Instant::now());
+                }
+            }
+            return;
+        }
         let events = self
             .background_preparation
             .as_ref()
@@ -206,6 +218,29 @@ impl Playground {
             Err(error) => self.message = error,
         }
     }
+    /// Packs `candidate` for the device off the frame, and in tests that ask
+    /// for it on the frame, so that when the device sees it is theirs to say.
+    fn dispatch_pack(
+        &self,
+        sender: mpsc::Sender<Result<PreparedGpuUpload, String>>,
+        candidate: PreparedTopology,
+        active: Option<Arc<PreparedTopology>>,
+        time_step: f64,
+        runtime_serials: [u32; 4],
+    ) {
+        #[cfg(test)]
+        if self.pack_inline {
+            let _ = sender.send(compile_gpu_upload(
+                candidate,
+                active,
+                time_step,
+                runtime_serials,
+            ));
+            return;
+        }
+        dispatch_gpu_upload_preparation(sender, candidate, active, time_step, runtime_serials);
+    }
+
     pub(super) fn begin_handoff_timeline(&mut self) {
         self.handoff_requested = Some(Instant::now());
         self.handoff_ready = None;
@@ -464,7 +499,7 @@ impl Playground {
                 let active = self.runtime.active().cloned();
                 let runtime_serials = display.runtime_serials;
                 let (sender, receiver) = mpsc::channel();
-                dispatch_gpu_upload_preparation(sender, candidate, active, dt, runtime_serials);
+                self.dispatch_pack(sender, candidate, active, dt, runtime_serials);
                 self.gpu_upload_preparation = Some(GpuUploadPreparation {
                     token,
                     time_step: dt,

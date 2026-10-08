@@ -37,6 +37,15 @@ pub struct Playground {
     pub(super) runtime: TopologyRuntime,
     pub(super) background_preparation: Option<BackgroundPreparationWorker>,
     pub(super) background_amr: Option<BackgroundAmrWorker>,
+    /// Slices of 4096 work units each frame lends preparation, for tests that
+    /// decide when a candidate is ready; none, the frame's wall-clock budget,
+    /// as in the app.
+    #[cfg(test)]
+    pub(super) preparation_grant: Option<usize>,
+    /// Packs a candidate on the frame that asks for it rather than on a
+    /// thread, for tests that decide when the device sees it.
+    #[cfg(test)]
+    pub(super) pack_inline: bool,
     pub(super) selection: TopologySelection,
     pub(super) inspector: Option<InspectorPanel>,
     pub(super) draw_open: bool,
@@ -389,6 +398,10 @@ impl Default for Playground {
             runtime: TopologyRuntime::default(),
             background_preparation: BackgroundPreparationWorker::spawn(),
             background_amr: BackgroundAmrWorker::spawn(),
+            #[cfg(test)]
+            preparation_grant: None,
+            #[cfg(test)]
+            pack_inline: false,
             selection: TopologySelection::None,
             inspector: Some(InspectorPanel::Edit),
             draw_open: false,
