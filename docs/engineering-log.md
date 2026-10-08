@@ -20835,3 +20835,26 @@ defects were a subset missing a field. They are `Coordinator` now
 other modules read the fields where they were. The runtime machine, in
 lockstep with the unchanged protocol model, and the two others pass 2,000
 sequences each over it.
+
+## 2026-10-08 — A name being typed and a colour being dragged go with their step
+
+The two differences the material session kept are gone: Undo, Redo, opening a
+material and a removal now drop a parameter name being typed and a colour
+being picked, as they drop formula text and the staged copy, and a whole scene
+coming in differs from them only in opening the default material. Both were
+found by the unfinished-edit machine of the next entry and are written down as
+focused tests. A colour dragged in a picker when Cmd+Z stepped the history -
+the shortcut runs, since no text field holds the keyboard - committed on
+release to the step the history came to; with the material's creation undone
+it waited instead, and committed when a Redo brought the material back, as an
+edit that cleared the rest of the Redo. A parameter name typed and not yet
+committed, then a material opened from the Library: the row acts on the click,
+and egui lets a field go of a click only where the field is shown, so with
+another material open the name stayed in the session and showed in the field
+when its material opened again, over the name it has, for the next click away
+to commit; opening the same material afresh, which drops what was staged,
+staged it straight back. Any click reaches this, not only a press and release
+in one frame: egui surrenders a field's focus on the click, the release, after
+the row or the toolbar's button has acted. A drag still held after an Undo
+picks again as the pointer moves, and that lands as a new edit. The user
+guide says what opening a material, Undo and Redo drop.

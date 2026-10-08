@@ -2993,6 +2993,188 @@ mod tests {
             );
         }
     }
+
+    /// Found by the generated unfinished-edit sequences as `[HeldPick { nth:
+    /// 0, during: Undo }]`. Cmd+Z runs while a colour is dragged in a picker,
+    /// since no text field holds the keyboard, and the pick, committed when
+    /// the pointer lets go, then landed on the step the history came to. With
+    /// the material's creation undone, it waited for the material instead and
+    /// committed when a Redo brought it back, as an edit that cleared the
+    /// rest of the Redo. A step of the history drops a pick under way.
+    #[test]
+    fn a_colour_dragged_across_an_undo_is_dropped() {
+        let mut state = Playground::default();
+        let driver = PanelDriver::new();
+        let add = |state: &mut Playground| {
+            let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
+            let plus = widgets
+                .iter()
+                .find(|widget| widget.label == "+")
+                .expect("the Library's +");
+            driver.pass(click(plus), |ui| state.materials_panel(ui));
+            state.material_session.selection
+        };
+        let first = add(&mut state);
+        add(&mut state);
+        assert_eq!(state.editor.history_len(), (2, 0));
+        let picked = [10, 200, 30];
+        let colour = |state: &Playground, id| {
+            state
+                .editor
+                .document
+                .model
+                .draft
+                .material(id)
+                .map(|material| material.color)
+        };
+
+        // The default material is there before and after.
+        state.material_session.colour = Some((DEFAULT_MATERIAL, picked));
+        state.undo();
+        driver.pass(vec![], |ui| state.materials_panel(ui));
+        assert_eq!(state.editor.history_len(), (1, 1), "the release committed");
+        assert_ne!(colour(&state, DEFAULT_MATERIAL), Some(picked));
+
+        // The first added is undone under the drag and redone after it.
+        state.material_session.colour = Some((first, picked));
+        state.undo();
+        driver.pass(vec![], |ui| state.materials_panel(ui));
+        assert_eq!(
+            state.material_session.colour, None,
+            "the pick outlived the pointer"
+        );
+        state.redo();
+        driver.pass(vec![], |ui| state.materials_panel(ui));
+        assert_eq!(
+            state.editor.history_len(),
+            (1, 1),
+            "the Redo was followed by an edit"
+        );
+        assert_ne!(colour(&state, first), Some(picked));
+    }
+
+    /// Found by the generated unfinished-edit sequences: a parameter's name
+    /// typed and not yet committed, then a material opened from the Library.
+    /// The row acts on the click and the field lets go of it when it is next
+    /// shown, so opening another material left the field unshown and the
+    /// text in the session; it showed in the field when the material opened
+    /// again, over the name the material has, for the next click away to
+    /// commit. Opening the same material afresh, which drops what was staged,
+    /// staged the typed name straight back. Opening a material drops what
+    /// was typed, as it drops what was staged.
+    #[test]
+    fn a_name_typed_and_left_for_another_material_is_dropped() {
+        let mut state = Playground::default();
+        let driver = PanelDriver::new();
+        let find = |widgets: &[LaidOut], role: egui::accesskit::Role, label: &str| {
+            widgets
+                .iter()
+                .find(|widget| widget.role == role && widget.label == label)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {role:?} {label:?}"))
+        };
+        let row = |widgets: &[LaidOut], name: &str| {
+            let heading = find(widgets, egui::accesskit::Role::Label, "Library");
+            widgets
+                .iter()
+                .find(|widget| {
+                    widget.role == egui::accesskit::Role::Button
+                        && widget.rect.min.y > heading.rect.min.y
+                        && widget.label == name
+                })
+                .cloned()
+                .expect("the material's Library row")
+        };
+        let pass =
+            |state: &mut Playground, events| driver.pass(events, |ui| state.materials_panel(ui));
+        let button = egui::accesskit::Role::Button;
+        let widgets = pass(&mut state, vec![]);
+        pass(&mut state, click(&find(&widgets, button, "+")));
+        let added = state.material_session.selection;
+        let widgets = pass(&mut state, vec![]);
+        pass(&mut state, click(&find(&widgets, button, "Parameters")));
+        let widgets = pass(&mut state, vec![]);
+        pass(&mut state, click(&find(&widgets, button, "+ Parameter")));
+        let widgets = pass(&mut state, vec![]);
+        pass(&mut state, click(&find(&widgets, button, "Apply")));
+        let name = |state: &Playground| {
+            state
+                .editor
+                .document
+                .model
+                .draft
+                .material(added)
+                .unwrap()
+                .parameters[0]
+                .name
+                .clone()
+        };
+        assert_eq!(name(&state), "p1");
+        let names = |widgets: &[LaidOut]| {
+            widgets
+                .iter()
+                .filter(|widget| widget.role == egui::accesskit::Role::TextInput)
+                .map(|widget| widget.label.clone())
+                .collect::<Vec<_>>()
+        };
+        let type_name = |state: &mut Playground| {
+            let widgets = pass(state, vec![]);
+            pass(
+                state,
+                click(&find(&widgets, egui::accesskit::Role::TextInput, "p1")),
+            );
+            pass(
+                state,
+                vec![
+                    key(egui::Key::A, egui::Modifiers::COMMAND),
+                    egui::Event::Text("q9".into()),
+                ],
+            );
+            pass(state, vec![])
+        };
+
+        // Away to the default material, and back.
+        let default_name = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(DEFAULT_MATERIAL)
+            .unwrap()
+            .name
+            .clone();
+        let widgets = type_name(&mut state);
+        assert!(names(&widgets).contains(&"q9".to_owned()));
+        pass(&mut state, click(&row(&widgets, &default_name)));
+        let widgets = pass(&mut state, vec![]);
+        let added_name = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(added)
+            .unwrap()
+            .name
+            .clone();
+        pass(&mut state, click(&row(&widgets, &added_name)));
+        let widgets = pass(&mut state, vec![]);
+        assert!(
+            !names(&widgets).contains(&"q9".to_owned()),
+            "the typed name came back: {:?}",
+            names(&widgets)
+        );
+        assert!(names(&widgets).contains(&"p1".to_owned()));
+
+        // The same material opened afresh.
+        let widgets = type_name(&mut state);
+        pass(&mut state, click(&row(&widgets, &added_name)));
+        pass(&mut state, vec![]);
+        assert!(
+            !state.material_edits_pending(),
+            "opening the material afresh staged the typed name"
+        );
+        assert_eq!(name(&state), "p1");
+    }
 }
 
 #[cfg(test)]

@@ -49,13 +49,20 @@ impl MaterialSession {
         self.reload();
     }
 
-    /// The open material is read from the document again, and the formula
-    /// text typed against the one it replaces goes: after an undo or a redo,
-    /// and after a removal that may have taken what the material was for.
+    /// The open material is read from the document again, and what was
+    /// typed or picked against the one it replaces goes: after an undo or a
+    /// redo, when a material is opened, and after a removal that may have
+    /// taken what the material was for. A parameter name being typed went on
+    /// to show when its material next opened, over the name the material
+    /// has, and a colour being dragged when Cmd+Z stepped the history landed
+    /// on the step it came to, or, its material undone, on the material a
+    /// Redo brought back, as an edit that cleared the rest of the Redo.
     pub(super) fn reload(&mut self) {
         self.staged = None;
         self.formulas.clear();
         self.errors.clear();
+        self.names.clear();
+        self.colour = None;
     }
 
     /// A whole scene came in: nothing of the outgoing scene's materials
@@ -64,8 +71,6 @@ impl MaterialSession {
     pub(super) fn scene_replaced(&mut self) {
         self.selection = DEFAULT_MATERIAL;
         self.reload();
-        self.names.clear();
-        self.colour = None;
     }
 
     /// Drops the formula, error and parameter-name text of one material, whose

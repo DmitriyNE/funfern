@@ -272,7 +272,10 @@ running; this file covers using it.
   `log`, `min`, `max`, `clamp`, and `smoothstep`. For example, a radial profile can
   define parameter `R = 0.35` and stiffness `2 - clamp(0, 1, r / R)^2`. The `?`
   beside Library, and the one beside an enabled volume source, open a compact
-  syntax reference that stays up while a formula is typed.
+  syntax reference that stays up while a formula is typed. A material's edits
+  wait for Apply; opening another material, Undo and Redo drop them, with any
+  text still being typed into a field and a colour still being dragged in a
+  picker.
   Coordinates are measured in world units in a rigid orthonormal frame: origin and
   angle set placement, with no hidden coordinate scaling. A new subdomain's frame starts at the
   centre of the face it owns, so a local profile is usable before touching the
