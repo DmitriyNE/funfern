@@ -2538,17 +2538,15 @@ mod tests {
 
     #[test]
     fn arrow_ac_coupling_preserves_an_ordinary_source_frequency() {
-        let mut state = Playground {
-            uploaded_time_step: 1.0 / 600.0,
-            ..Playground::default()
-        };
+        let mut state = Playground::default();
+        state.coordinator.uploaded_time_step = 1.0 / 600.0;
         let frequency = 3.0;
         let mut input_square = 0.0;
         let mut output_square = 0.0;
         // The solver advances ten small steps between display-rate samples.
         for frame in 0..600_u64 {
             let step = frame * 10;
-            let time = step as f64 * state.uploaded_time_step;
+            let time = step as f64 * state.coordinator.uploaded_time_step;
             let scalar = (std::f64::consts::TAU * frequency * time).sin();
             let value = Point2::new(scalar, 0.0);
             let mut samples = vec![(0, Pos2::ZERO, value, value)];

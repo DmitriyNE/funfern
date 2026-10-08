@@ -893,7 +893,6 @@ mod tests {
             sim_time_offset: 3.0,
             sim_time_step: 1.0e-3,
             completed_steps: 500,
-            uploaded_time_step: 2.0e-3,
             step_backlog: 40,
             wave_running: false,
             last_handoff: Some(HandoffRecord {
@@ -915,6 +914,7 @@ mod tests {
             }),
             ..Playground::default()
         };
+        state.coordinator.uploaded_time_step = 2.0e-3;
         assert_eq!(
             state.fire_times(),
             FireTimes {

@@ -335,8 +335,8 @@ impl Session {
             revision: self.state.editor.revision,
             acceptance: self.state.editor.acceptance,
             mesh_edge: document.presentation.mesh_edge,
-            pulses: self.state.pending_pulses.len(),
-            switches: self.state.pending_switches.len(),
+            pulses: self.state.coordinator.pending_pulses.len(),
+            switches: self.state.coordinator.pending_switches.len(),
             history: self.state.editor.history_len(),
             undo_replaces: self.state.editor.undo_replaces_scene(),
             redo_replaces: self.state.editor.redo_replaces_scene(),
@@ -415,13 +415,13 @@ impl Session {
             Act::Run(on) => model::Step::Run(*on),
             Act::Step => model::Step::StepOnce,
             Act::Pulse(_) => {
-                if state.pending_pulses.len() <= was.pulses {
+                if state.coordinator.pending_pulses.len() <= was.pulses {
                     return None;
                 }
                 model::Step::Pulse
             }
             Act::Switch => model::Step::Switch {
-                queued: state.pending_switches.len() > was.switches,
+                queued: state.coordinator.pending_switches.len() > was.switches,
             },
             Act::Edge(_) => {
                 if state.editor.document.presentation.mesh_edge == was.mesh_edge {
@@ -472,23 +472,33 @@ impl Session {
         Projection {
             active: state.runtime.active().map(|active| active.bundle.token),
             uploading: state
+                .coordinator
                 .uploading
                 .as_ref()
                 .map(|upload| (upload.token, upload.generation as u8)),
-            source_commit: state.source_commit.as_ref().map(|commit| commit.token),
-            packed: state.gpu_upload_preparation.as_ref().map(|pack| pack.token),
+            source_commit: state
+                .coordinator
+                .source_commit
+                .as_ref()
+                .map(|commit| commit.token),
+            packed: state
+                .coordinator
+                .gpu_upload_preparation
+                .as_ref()
+                .map(|pack| pack.token),
             ready: state.runtime.ready().map(|ready| ready.bundle.token),
             preparing: state.runtime.preparing_timing().is_some(),
             last_error: state.runtime.last_error().map(|error| error.token),
             request_stands: state
+                .coordinator
                 .requested_inputs
                 .as_ref()
                 .is_some_and(|inputs| inputs.read(&state.editor.document)),
-            reset: state.reset_requested,
-            drop: state.drop_requested,
-            pulses: state.pending_pulses.len(),
-            switches: state.pending_switches.len(),
-            fault: state.solver_fault.is_some(),
+            reset: state.coordinator.reset_requested,
+            drop: state.coordinator.drop_requested,
+            pulses: state.coordinator.pending_pulses.len(),
+            switches: state.coordinator.pending_switches.len(),
+            fault: state.coordinator.solver_fault.is_some(),
             running: state.wave_running,
             stepping: state.wave_step,
             generation: self.request.generation() as u8,
@@ -592,11 +602,12 @@ impl Session {
                 .map(|active| active.bundle.token),
             uploading: self
                 .state
+                .coordinator
                 .uploading
                 .as_ref()
                 .map(|upload| (upload.token, upload.generation)),
-            reset: self.state.reset_requested,
-            drop: self.state.drop_requested,
+            reset: self.state.coordinator.reset_requested,
+            drop: self.state.coordinator.drop_requested,
         }
     }
 
@@ -726,7 +737,7 @@ impl Session {
                 source.signal = TimeSignal::harmonic(0.0, 1.0, if *high { 3.5 } else { 2.5 }, 0.0);
                 let _ = self.state.editor.set_point_source(source);
             }
-            Act::Reset => self.state.reset_requested = true,
+            Act::Reset => self.state.coordinator.reset_requested = true,
             Act::Run(on) => self.state.wave_running = *on,
             Act::Step => self.state.wave_step = true,
             Act::Pulse(cell) => self.state.place_pulse(cell_point(domain, *cell)),
@@ -765,17 +776,18 @@ impl Session {
                 Act::Frame(_) => {
                     if let Some(upload) = self
                         .state
+                        .coordinator
                         .uploading
                         .as_ref()
                         .filter(|upload| upload.generation == generation)
                     {
                         self.running = Some((generation, upload.token));
-                    } else if before.reset && !self.state.reset_requested {
+                    } else if before.reset && !self.state.coordinator.reset_requested {
                         let token = active.expect("Reset installed a generation with none active");
                         self.running = Some((generation, token));
                         assert!(
-                            self.state.pending_pulses.is_empty()
-                                && self.state.pending_switches.is_empty()
+                            self.state.coordinator.pending_pulses.is_empty()
+                                && self.state.coordinator.pending_switches.is_empty()
                                 && !self.request.live_event_pending(),
                             "Reset left a pulse or a Switch for the run it cleared"
                         );
@@ -815,14 +827,14 @@ impl Session {
         }
         if before.drop && matches!(act, Act::Frame(_)) {
             assert!(
-                self.state.pending_pulses.is_empty()
-                    && self.state.pending_switches.is_empty()
-                    && self.state.source_commit.is_none(),
+                self.state.coordinator.pending_pulses.is_empty()
+                    && self.state.coordinator.pending_switches.is_empty()
+                    && self.state.coordinator.source_commit.is_none(),
                 "work for the replaced scene survived its drop"
             );
         }
         let accepted = &self.state.editor.document.model.accepted;
-        if self.state.drop_requested && !before.drop {
+        if self.state.coordinator.drop_requested && !before.drop {
             self.scenes = vec![accepted.clone()];
         } else if !self.scenes.contains(accepted) {
             self.scenes.push(accepted.clone());
@@ -846,11 +858,11 @@ impl Session {
     fn check(&self) {
         let state = &self.state;
         // A replacement waits for its frame to drop what ran.
-        if state.drop_requested {
+        if state.coordinator.drop_requested {
             return;
         }
         if let (Some((generation, token)), Some(active)) = (self.running, state.runtime.active())
-            && state.uploading.is_none()
+            && state.coordinator.uploading.is_none()
             && self.request.generation() == generation
         {
             assert_eq!(
@@ -864,7 +876,7 @@ impl Session {
             );
             assert_eq!(
                 self.request.running_time_step(),
-                Some(state.uploaded_time_step),
+                Some(state.coordinator.uploaded_time_step),
                 "the host paces a step the device does not run"
             );
         }
@@ -888,15 +900,15 @@ impl Session {
     fn unsettled(&self) -> Option<String> {
         let state = &self.state;
         let waits = [
-            ("a Reset", state.reset_requested),
-            ("a drop", state.drop_requested),
-            ("an upload", state.uploading.is_some()),
-            ("a pack", state.gpu_upload_preparation.is_some()),
-            ("a source commit", state.source_commit.is_some()),
+            ("a Reset", state.coordinator.reset_requested),
+            ("a drop", state.coordinator.drop_requested),
+            ("an upload", state.coordinator.uploading.is_some()),
+            ("a pack", state.coordinator.gpu_upload_preparation.is_some()),
+            ("a source commit", state.coordinator.source_commit.is_some()),
             ("a preparation", state.preparation_in_progress()),
             ("a candidate", state.runtime.ready().is_some()),
-            ("a pulse", !state.pending_pulses.is_empty()),
-            ("a Switch", !state.pending_switches.is_empty()),
+            ("a pulse", !state.coordinator.pending_pulses.is_empty()),
+            ("a Switch", !state.coordinator.pending_switches.is_empty()),
             ("a live event", self.request.live_event_pending()),
             (
                 "a handoff",
@@ -917,11 +929,12 @@ impl Session {
         let held = state.editor.acceptance != TopologyAcceptance::Valid;
         let refused = if held {
             state
+                .coordinator
                 .requested_inputs
                 .as_ref()
                 .is_some_and(|inputs| inputs.read(&state.editor.document))
                 && state.runtime.last_error().is_some_and(|error| {
-                    Some(error.token.document_revision) == state.requested_revision
+                    Some(error.token.document_revision) == state.coordinator.requested_revision
                 })
         } else {
             state
@@ -959,10 +972,10 @@ impl Session {
             active.recommended_time_step(),
             state.editor.document.presentation.simulation_speed,
         );
-        if (wanted / state.uploaded_time_step - 1.0).abs() > TIME_STEP_HYSTERESIS {
+        if (wanted / state.coordinator.uploaded_time_step - 1.0).abs() > TIME_STEP_HYSTERESIS {
             return Some(format!(
                 "the step {:e} is not the speed's {wanted:e}",
-                state.uploaded_time_step
+                state.coordinator.uploaded_time_step
             ));
         }
         None
@@ -1068,6 +1081,7 @@ fn a_fault_on_an_installed_candidate_publishes_what_the_device_runs() {
     }
     let upload = session
         .state
+        .coordinator
         .uploading
         .as_ref()
         .expect("an install uploads");
@@ -1076,7 +1090,7 @@ fn a_fault_on_an_installed_candidate_publishes_what_the_device_runs() {
     session.step(&Act::Fault);
     session.step(&Act::Readbacks(0));
     session.step(&Act::Frame(Some(0)));
-    assert!(session.state.uploading.is_none());
+    assert!(session.state.coordinator.uploading.is_none());
     assert_eq!(
         session
             .state
@@ -1125,7 +1139,7 @@ fn a_fault_while_a_handoff_waits_withdraws_it() {
     let active = session.state.runtime.active().unwrap().bundle.token;
     session.step(&Act::Fault);
     session.step(&Act::Frame(Some(0)));
-    assert!(session.state.uploading.is_none());
+    assert!(session.state.coordinator.uploading.is_none());
     assert_ne!(
         session.request.handoff_outcome(),
         CanonicalGpuHandoffOutcome::Pending,
@@ -1189,7 +1203,7 @@ fn an_invalid_draft_holds_back_nothing_outside_it() {
     session.step(&Act::Validate);
     session.step(&Act::Frame(None));
     assert!(
-        !session.state.preparation_in_progress() && session.state.uploading.is_none(),
+        !session.state.preparation_in_progress() && session.state.coordinator.uploading.is_none(),
         "an edit of the invalid draft prepared the same scene again"
     );
     assert_eq!(
@@ -1212,7 +1226,10 @@ fn a_scene_opened_after_a_fault_takes_none_of_it() {
     for act in [Act::Validate, Act::Frame(None)] {
         session.step(&act);
     }
-    assert!(session.state.uploading.is_some(), "an install uploads");
+    assert!(
+        session.state.coordinator.uploading.is_some(),
+        "an install uploads"
+    );
     for act in [Act::Fault, Act::Open(false), Act::Frame(Some(0))] {
         session.step(&act);
     }
@@ -1231,7 +1248,10 @@ fn a_scene_opened_after_a_fault_takes_none_of_it() {
     for act in [Act::Fault, Act::Frame(Some(0))] {
         session.step(&act);
     }
-    assert!(session.state.solver_fault.is_some(), "paused for the fault");
+    assert!(
+        session.state.coordinator.solver_fault.is_some(),
+        "paused for the fault"
+    );
     for act in [Act::Open(true), Act::Frame(Some(0))] {
         session.step(&act);
     }

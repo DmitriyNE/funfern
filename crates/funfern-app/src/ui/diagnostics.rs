@@ -610,17 +610,17 @@ impl Playground {
         egui::CollapsingHeader::new("Handoff")
             .default_open(true)
             .show(ui, |ui| {
-                if self.uploading.is_some() {
+                if self.coordinator.uploading.is_some() {
                     ui.label("Uploading the candidate to the GPU");
-                } else if self.source_commit.is_some() {
+                } else if self.coordinator.source_commit.is_some() {
                     ui.label("Applying source parameters at a solver boundary");
                 } else if self
-                    .gpu_upload_preparation
+                    .coordinator.gpu_upload_preparation
                     .as_ref()
                     .is_some_and(|job| job.result.is_none())
                 {
                     ui.label("Packing candidate GPU buffers in the background");
-                } else if self.gpu_upload_preparation.is_some() {
+                } else if self.coordinator.gpu_upload_preparation.is_some() {
                     ui.label(format!(
                         "GPU buffers ready · draining {} requested steps",
                         self.step_backlog
@@ -748,7 +748,8 @@ impl Playground {
                         ui.small("Waiting for an accepted mesh and wave operator.");
                     }
                 }
-                let withheld = self.runtime.ready().is_some() || self.uploading.is_some();
+                let withheld =
+                    self.runtime.ready().is_some() || self.coordinator.uploading.is_some();
                 ui.small(format!(
                     "Backlog {} steps · {} per frame ceiling · scheduling {}",
                     self.step_backlog,

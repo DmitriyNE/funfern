@@ -38,6 +38,7 @@ use std::sync::{Arc, Mutex, mpsc::Receiver};
 
 mod amr;
 mod chrome;
+mod coordinator;
 mod diagnostics;
 mod domain;
 mod draw_tools;
@@ -82,6 +83,7 @@ pub use state::Playground;
 // The shared vocabulary every submodule reaches through `use super::*`. A
 // submodule's own business stays private to it; only what more than one of them
 // needs is re-exported here.
+use coordinator::Coordinator;
 use events::*;
 use exposure::*;
 use gesture::*;

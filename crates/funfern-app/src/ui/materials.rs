@@ -782,6 +782,7 @@ impl Playground {
                     .find(|(id, _, _)| *id == material.id)
                     .copied();
                 let heading = self
+                    .coordinator
                     .switch_targets
                     .get(&material.id)
                     .copied()
@@ -1135,9 +1136,7 @@ impl Playground {
     /// already waiting is not queued again: its button still shows the
     /// direction it had, so a second press is the same request.
     pub(super) fn queue_switch(&mut self, material: MaterialId) {
-        if !self.pending_switches.contains(&material) {
-            self.pending_switches.push_back(material);
-        }
+        self.coordinator.queue_switch(material);
     }
 
     /// The Switch the hotkey throws: the material open in the editor if it
@@ -2846,7 +2845,7 @@ mod tests {
         activate(&mut state);
         state.request_material_switch();
         assert!(
-            state.pending_switches.is_empty(),
+            state.coordinator.pending_switches.is_empty(),
             "nothing here has a Switch"
         );
 
@@ -2862,7 +2861,7 @@ mod tests {
         settle(&mut state.editor);
         let active = activate(&mut state);
         state.request_material_switch();
-        assert_eq!(state.pending_switches, [material.id]);
+        assert_eq!(state.coordinator.pending_switches, [material.id]);
 
         let temporal = active
             .canonical_temporal_operator
@@ -3059,12 +3058,12 @@ mod second_preset_reproduction {
              {driven:e} against {base:e}"
         );
 
-        state.uploaded_time_step =
+        state.coordinator.uploaded_time_step =
             paced_time_step(driven, state.editor.document.presentation.simulation_speed);
-        state.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_revision = Some(state.editor.revision);
         state.retime_for_speed();
         assert_eq!(
-            state.requested_revision,
+            state.coordinator.requested_revision,
             Some(state.editor.revision),
             "a generation already running at its own step must not be re-requested"
         );

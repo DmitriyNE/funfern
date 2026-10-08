@@ -186,7 +186,10 @@ impl Playground {
             self.amr_status = "paused".into();
             return;
         }
-        if self.uploading.is_some() || self.preparation_in_progress() || self.editor.editing() {
+        if self.coordinator.uploading.is_some()
+            || self.preparation_in_progress()
+            || self.editor.editing()
+        {
             self.amr_status = if adaptation_in_progress {
                 "adapting mesh"
             } else {

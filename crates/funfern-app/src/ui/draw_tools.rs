@@ -487,7 +487,7 @@ impl Playground {
             self.message = "Pulse must be inside an active subdomain".into();
             return;
         };
-        self.pending_pulses.push_back((point, region));
+        self.coordinator.pending_pulses.push_back((point, region));
         self.message = format!("Pulse queued in region {}", region.0);
     }
 }
@@ -1370,7 +1370,7 @@ mod tests {
                 egui::Modifiers::NONE,
                 near_baffle,
             );
-            pulses = state.pending_pulses.len();
+            pulses = state.coordinator.pending_pulses.len();
         }
         assert_eq!(pulses, 2, "{}", state.message);
         assert_eq!(controls(&state), before);

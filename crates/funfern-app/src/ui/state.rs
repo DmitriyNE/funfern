@@ -35,6 +35,8 @@ use super::*;
 pub struct Playground {
     pub(super) editor: TopologyEditor,
     pub(super) runtime: TopologyRuntime,
+    /// The runtime's bookkeeping between the host and the device.
+    pub(super) coordinator: Coordinator,
     pub(super) background_preparation: Option<BackgroundPreparationWorker>,
     pub(super) background_amr: Option<BackgroundAmrWorker>,
     /// Slices of 4096 work units each frame lends preparation, for tests that
@@ -119,33 +121,8 @@ pub struct Playground {
     pub(super) new_separator_material: MaterialId,
     /// The slider produces a value per frame; the rebuild waits for release.
     pub(super) mesh_edge_dragging: bool,
-    /// The Remesh button: rebuild at the current resolution even though
-    /// nothing changed, which also leaves an adapted mesh.
-    pub(super) remesh_requested: bool,
-    pub(super) requested_edge: f64,
-    pub(super) requested_revision: Option<u64>,
-    /// What the latest request read, which accounts for it while the draft
-    /// is invalid and its revision moves with every edit.
-    pub(super) requested_inputs: Option<PreparedInputs>,
-    pub(super) uploading: Option<Uploading>,
-    pub(super) source_commit: Option<PendingSourceCommit>,
-    pub(super) gpu_upload_preparation: Option<GpuUploadPreparation>,
     pub(super) wave_running: bool,
     pub(super) wave_step: bool,
-    pub(super) reset_requested: bool,
-    /// Set when a whole document is replaced: the next preparation must start
-    /// the field from zero rather than transfer the outgoing scene's into it.
-    /// Separate from `reset_requested` because that one is spent by the GPU
-    /// reset below, which runs earlier in the frame and against the topology
-    /// still active — the scene being replaced. Sharing one flag let the load
-    /// reset the outgoing scene, which then ran on for the seconds its
-    /// replacement took to prepare and handed over a full-amplitude field.
-    pub(super) fresh_requested: bool,
-    /// Set when a whole document is replaced, spent by the next runtime
-    /// update: the outgoing scene's generation is dropped on the device and
-    /// the host, as at launch, so nothing of it runs or shows while the new
-    /// one prepares. See `drop_generation`.
-    pub(super) drop_requested: bool,
     pub(super) accumulator: f64,
     /// Largest solver batch a frame may ask for, so the display is never held
     /// behind one. Starts at the floor rather than the ceiling so the first
@@ -177,13 +154,6 @@ pub struct Playground {
     /// Whether the speed row reads short, which takes a clear recovery to
     /// undo; see [`super::pacing::speed_short`].
     pub(super) speed_short: bool,
-    /// The step the device's generation runs at. Not the active operator's
-    /// recommendation: the speed ceiling can ask for a smaller one, and between
-    /// a speed change and the republish that carries it the two differ. A
-    /// handoff changes it when the device publishes the candidate, not when the
-    /// upload starts: until then the accepted generation is the one stepping,
-    /// and a rejected handoff keeps it.
-    pub(super) uploaded_time_step: f64,
     /// The accepted-step total at the previous observation. Ordinary handovers
     /// preserve it; a fresh install may reset it, so every new generation first
     /// establishes a baseline before its increments are counted.
@@ -198,23 +168,9 @@ pub struct Playground {
     pub(super) pulse_preview: PulsePreview,
     pub(super) pulse_amplitude: f32,
     pub(super) pulse_width: f32,
-    /// Pulses placed and not yet taken by the device, oldest first. One
-    /// waits while the generation is busy with another event; a single slot
-    /// lost the second of two quick clicks.
-    pub(super) pending_pulses: VecDeque<(Point2, RegionId)>,
-    /// Material Switches asked for by button or hotkey and not yet taken by
-    /// the device, oldest first, each material once. A single slot kept only
-    /// the last of two materials switched while the generation was busy.
-    pub(super) pending_switches: VecDeque<MaterialId>,
-    /// The Switch direction last sent for each material. The accepted runtime
-    /// only arrives with a full snapshot, so a second press before then would
-    /// otherwise read the old direction and send the same one again.
-    pub(super) switch_targets: std::collections::BTreeMap<MaterialId, bool>,
     /// Each Switch material's accepted ramp from the latest snapshot:
     /// `(material, target blend, blend now)`.
     pub(super) switch_states: Vec<(MaterialId, f64, f64)>,
-    pub(super) canonical_event_serial: u32,
-    pub(super) canonical_event_observed: u32,
     pub(super) probe_mode: Option<ProbePlacement>,
     pub(super) selected_probe: Option<ProbeId>,
     pub(super) probe_windows: BTreeSet<ProbeId>,
@@ -358,9 +314,6 @@ pub struct Playground {
     /// The grid filter is asked for but the running generation does not admit
     /// it; see [`funfern_app::canonical_gpu::CanonicalGpuRequest::grid_scale_filter_refused`].
     pub(super) grid_filter_refused: bool,
-    /// The device failure the run is paused on, if any. Run, Step or an edit
-    /// resumes from the last accepted step; the failure itself never commits.
-    pub(super) solver_fault: Option<u32>,
     pub(super) gpu_dispatches: u64,
     pub(super) canonical_gpu_bytes: Option<usize>,
     pub(super) step_backlog: u64,
@@ -398,6 +351,7 @@ impl Default for Playground {
         Self {
             editor,
             runtime: TopologyRuntime::default(),
+            coordinator: Coordinator::default(),
             background_preparation: BackgroundPreparationWorker::spawn(),
             background_amr: BackgroundAmrWorker::spawn(),
             #[cfg(test)]
@@ -450,18 +404,8 @@ impl Default for Playground {
             spotlights: Spotlights::default(),
             new_separator_material: DEFAULT_MATERIAL,
             mesh_edge_dragging: false,
-            remesh_requested: false,
-            requested_edge: f64::NAN,
-            requested_revision: None,
-            requested_inputs: None,
-            uploading: None,
-            source_commit: None,
-            gpu_upload_preparation: None,
             wave_running: true,
             wave_step: false,
-            reset_requested: false,
-            fresh_requested: false,
-            drop_requested: false,
             accumulator: 0.0,
             step_budget: StepBudget::default(),
             step_seconds: None,
@@ -474,7 +418,6 @@ impl Default for Playground {
             steps_per_second: 0.0,
             speed_reached: 0.0,
             speed_short: false,
-            uploaded_time_step: 0.0,
             rate_steps: 0,
             rate_generation: 0,
             rate_window_steps: 0,
@@ -483,12 +426,7 @@ impl Default for Playground {
             pulse_preview: PulsePreview::default(),
             pulse_amplitude: 1.0,
             pulse_width: 0.06,
-            pending_pulses: VecDeque::new(),
-            pending_switches: VecDeque::new(),
-            switch_targets: std::collections::BTreeMap::new(),
             switch_states: Vec::new(),
-            canonical_event_serial: 0,
-            canonical_event_observed: 0,
             probe_mode: None,
             selected_probe: None,
             probe_windows: BTreeSet::new(),
@@ -582,7 +520,6 @@ impl Default for Playground {
             amr_report: None,
             gpu_status: "loading",
             grid_filter_refused: false,
-            solver_fault: None,
             gpu_dispatches: 0,
             canonical_gpu_bytes: None,
             step_backlog: 0,

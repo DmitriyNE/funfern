@@ -20816,3 +20816,22 @@ field holding refused text for one nobody typed into. The check that Enter in
 an untouched field changes nothing now holds only while no refusal stands.
 The case passes, its seed was not kept, being the harness's own, and 2,000
 sequences pass.
+
+## 2026-10-08 — The runtime's bookkeeping has one owner
+
+Phase 5 of the verification plan, second half, a refactor with no change of
+behaviour. Seventeen fields of the playground were the runtime's bookkeeping
+between the host and the device: what was asked for (the requested revision,
+edge and inputs, and the Reset, replacement and remesh requests), what is in
+flight (the pack, the upload, the source commit), what waits for the device
+(pulses and Switch presses) and what the running generation runs at (its
+step, the Switch directions sent, the event serials, the fault latch). The
+runtime's transitions each moved a subset by hand, and three of this week's
+defects were a subset missing a field. They are `Coordinator` now
+(`ui/coordinator.rs`), with a method to a transition: `requested`,
+`scene_replaced`, `dropped`, `reset_installed`, `published` and
+`started_afresh` for a published generation that started from zero, and
+`queue_switch`. `refresh_runtime` still runs the frame and calls them; the
+other modules read the fields where they were. The runtime machine, in
+lockstep with the unchanged protocol model, and the two others pass 2,000
+sequences each over it.

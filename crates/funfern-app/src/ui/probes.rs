@@ -549,8 +549,8 @@ impl Playground {
     }
 
     pub(super) fn solver_time_step(&self) -> f64 {
-        if self.uploaded_time_step > 0.0 {
-            return self.uploaded_time_step;
+        if self.coordinator.uploaded_time_step > 0.0 {
+            return self.coordinator.uploaded_time_step;
         }
         // The generation's own step, which for a driven one is the tighter step
         // its coefficient trajectory demands rather than what its authored
@@ -570,8 +570,8 @@ impl Playground {
     /// time it runs. Clearing the requested revision is the lever a document
     /// load pulls.
     pub(super) fn retime_for_speed(&mut self) {
-        if self.uploaded_time_step <= 0.0
-            || self.uploading.is_some()
+        if self.coordinator.uploaded_time_step <= 0.0
+            || self.coordinator.uploading.is_some()
             || self.preparation_in_progress()
             || self.runtime.ready().is_some()
         {
@@ -591,10 +591,10 @@ impl Playground {
             active.recommended_time_step(),
             self.editor.document.presentation.simulation_speed,
         );
-        if (wanted / self.uploaded_time_step - 1.0).abs() > TIME_STEP_HYSTERESIS {
+        if (wanted / self.coordinator.uploaded_time_step - 1.0).abs() > TIME_STEP_HYSTERESIS {
             #[cfg(test)]
             self.protocol_log.push(ProtocolNote::Retimed);
-            self.requested_revision = None;
+            self.coordinator.requested_revision = None;
         }
     }
 
@@ -1219,10 +1219,10 @@ mod tests {
         let old_step = 1.692_918_7e-3_f32;
         let new_step = 1.183_126_4e-3_f32;
         let mut state = Playground {
-            uploaded_time_step: f64::from(old_step),
             completed_steps: 7223,
             ..Playground::default()
         };
+        state.coordinator.uploaded_time_step = f64::from(old_step);
         state.read_device_clock(CanonicalGpuDisplayClock {
             absolute_seconds: 15.723_040,
             accepted_steps: 7223,
@@ -1233,7 +1233,7 @@ mod tests {
         assert!(close(state.simulated_time(), 15.723_040));
         // The handoff begins: the candidate's step is uploaded and the running
         // generation holds its step count.
-        state.uploaded_time_step = f64::from(new_step);
+        state.coordinator.uploaded_time_step = f64::from(new_step);
         assert!(close(state.simulated_time(), 15.723_040));
         // It completes two steps later, taken on the old mesh, and the new
         // generation starts from that count before its first readback.

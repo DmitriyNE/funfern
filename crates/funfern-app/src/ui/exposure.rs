@@ -460,7 +460,7 @@ mod tests {
         let held = state.field_exposure.update(residue, 0.016).unwrap();
         assert!(residue / held < 0.01, "the residue was not already dark");
 
-        state.reset_requested = true;
+        state.coordinator.reset_requested = true;
         let document = state.editor.document.clone();
         state.set_document(document, false, true).unwrap();
         let after = state.field_exposure.update(residue, 0.016).unwrap();

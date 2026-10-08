@@ -400,7 +400,7 @@ impl Playground {
                 )
                 .clicked()
             {
-                self.remesh_requested = true;
+                self.coordinator.remesh_requested = true;
             }
             if let Some(active) = self.runtime.active()
                 && (active.meshing.target_edge_length - self.editor.document.presentation.mesh_edge)

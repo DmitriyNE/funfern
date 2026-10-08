@@ -143,9 +143,7 @@ impl Playground {
         // outgoing probe would land on the new one sharing its id.
         self.probe_name_edit = None;
         self.face_selection = 0;
-        self.requested_revision = None;
-        self.fresh_requested = fresh;
-        self.drop_requested = true;
+        self.coordinator.scene_replaced(fresh);
         // Framed as at launch: the new domain need not be where, or as
         // large as, the old one.
         self.fit = true;
@@ -700,7 +698,7 @@ mod tests {
         };
         settle(&mut state.editor);
         activate(&mut state);
-        state.uploaded_time_step = 0.01;
+        state.coordinator.uploaded_time_step = 0.01;
         state.sim_time_offset = 3.0;
         state.sim_time_step = 0.01;
         state.amr_status = "monitoring solution".into();
@@ -708,13 +706,13 @@ mod tests {
         state
             .set_document(example.document.clone(), true, true)
             .unwrap();
-        assert!(state.drop_requested && state.fresh_requested);
-        state.drop_requested = false;
+        assert!(state.coordinator.drop_requested && state.coordinator.fresh_requested);
+        state.coordinator.drop_requested = false;
         state.drop_generation();
         assert!(state.runtime.active().is_none());
         assert_eq!(
             (
-                state.uploaded_time_step,
+                state.coordinator.uploaded_time_step,
                 state.sim_time_offset,
                 state.sim_time_step
             ),
@@ -742,7 +740,7 @@ mod tests {
         state
             .set_document(example.document.clone(), true, true)
             .unwrap();
-        state.drop_requested = false;
+        state.coordinator.drop_requested = false;
         state.drop_generation();
         let quiet = 5.0e-3;
         assert_eq!(state.field_exposure.update(quiet, 0.016), Some(quiet));
@@ -879,8 +877,8 @@ mod tests {
             .set_document(example.document.clone(), true, true)
             .unwrap();
         settle(&mut state.editor);
-        state.drop_requested = false;
-        state.fresh_requested = false;
+        state.coordinator.drop_requested = false;
+        state.coordinator.fresh_requested = false;
 
         state
             .editor
@@ -890,23 +888,26 @@ mod tests {
             })
             .unwrap();
         settle(&mut state.editor);
-        assert!(!state.drop_requested, "a live edit dropped the generation");
+        assert!(
+            !state.coordinator.drop_requested,
+            "a live edit dropped the generation"
+        );
         state.undo();
         assert!(
-            !state.drop_requested,
+            !state.coordinator.drop_requested,
             "undoing an edit dropped the generation"
         );
 
         state.undo();
         assert!(
-            state.drop_requested && state.fresh_requested,
+            state.coordinator.drop_requested && state.coordinator.fresh_requested,
             "undoing the opened scene kept its generation"
         );
-        state.drop_requested = false;
-        state.fresh_requested = false;
+        state.coordinator.drop_requested = false;
+        state.coordinator.fresh_requested = false;
         state.redo();
         assert!(
-            state.drop_requested && state.fresh_requested,
+            state.coordinator.drop_requested && state.coordinator.fresh_requested,
             "redoing the opened scene kept the other one's generation"
         );
     }
@@ -973,11 +974,11 @@ mod tests {
             .set_document(example.document.clone(), false, true)
             .unwrap();
         assert!(
-            state.fresh_requested,
+            state.coordinator.fresh_requested,
             "the load did not ask to start at zero"
         );
         assert!(
-            !state.reset_requested,
+            !state.coordinator.reset_requested,
             "the load armed the flag the GPU reset spends against the outgoing scene"
         );
         // The shape of the bug: a topology is already active and the GPU reset
@@ -1176,7 +1177,7 @@ mod tests {
         ] {
             let mut state = Playground::default();
             state.open_example(2);
-            state.fresh_requested = false;
+            state.coordinator.fresh_requested = false;
             let document = state.editor.document.clone();
             let history = state.editor.history_len();
             state.sender.send(FileEvent::Loaded(bytes)).unwrap();
@@ -1184,7 +1185,10 @@ mod tests {
             assert_eq!(state.editor.document, document, "{reason}");
             assert_eq!(state.editor.history_len(), history, "{reason}");
             assert_eq!(state.example_opened, Some(2), "{reason}");
-            assert!(!state.fresh_requested, "{reason}: the run was restarted");
+            assert!(
+                !state.coordinator.fresh_requested,
+                "{reason}: the run was restarted"
+            );
             assert!(!state.file_busy, "{reason}");
             let notices = notices(&state);
             assert!(

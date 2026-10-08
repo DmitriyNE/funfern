@@ -65,19 +65,11 @@ impl Playground {
     /// fresh full build, which is the launch path.
     pub(super) fn drop_generation(&mut self) {
         self.runtime.clear_active();
-        self.uploading = None;
-        self.source_commit = None;
-        self.gpu_upload_preparation = None;
-        self.uploaded_time_step = 0.0;
+        self.coordinator.dropped();
         self.sim_time_offset = 0.0;
         self.sim_time_step = 0.0;
         self.accumulator = 0.0;
         self.step_backlog = 0;
-        self.canonical_event_serial = 0;
-        self.canonical_event_observed = 0;
-        self.solver_fault = None;
-        self.pending_pulses.clear();
-        self.pending_switches.clear();
         self.probe_upload = None;
         self.restart_probe_traces();
         self.clear_exposures();
@@ -159,7 +151,7 @@ impl Playground {
         if self.editor.acceptance == TopologyAcceptance::Pending
             || self.editor.editing()
             || self.mesh_edge_dragging
-            || self.source_commit.is_some()
+            || self.coordinator.source_commit.is_some()
         {
             return;
         }
@@ -186,16 +178,17 @@ impl Playground {
         let standing = if self.editor.acceptance == TopologyAcceptance::Valid {
             Some(self.editor.revision)
         } else {
-            self.requested_revision.filter(|_| {
-                self.requested_inputs
+            self.coordinator.requested_revision.filter(|_| {
+                self.coordinator
+                    .requested_inputs
                     .as_ref()
                     .is_some_and(|inputs| inputs.read(&self.editor.document))
             })
         };
-        if !self.remesh_requested
+        if !self.coordinator.remesh_requested
             && standing.is_some()
-            && self.requested_revision == standing
-            && self.requested_edge == self.editor.document.presentation.mesh_edge
+            && self.coordinator.requested_revision == standing
+            && self.coordinator.requested_edge == self.editor.document.presentation.mesh_edge
             && (self.preparation_in_progress()
                 || self
                     .runtime
@@ -210,22 +203,26 @@ impl Playground {
         }
         let fresh = starts_from_zero(
             self.runtime.active().is_some(),
-            self.reset_requested,
-            self.fresh_requested,
+            self.coordinator.reset_requested,
+            self.coordinator.fresh_requested,
         );
-        if std::mem::take(&mut self.remesh_requested) {
+        if std::mem::take(&mut self.coordinator.remesh_requested) {
             self.runtime.request_full_rebuild();
         }
         self.runtime
             .set_preserve_adaptation(self.editor.document.presentation.adaptation.enabled);
-        let require_solver_handoff = self.uploaded_time_step > 0.0
+        let require_solver_handoff = self.coordinator.uploaded_time_step > 0.0
             && self.runtime.active().is_some_and(|active| {
                 let wanted = paced_time_step(
                     active.recommended_time_step(),
                     self.editor.document.presentation.simulation_speed,
                 );
-                (wanted - self.uploaded_time_step).abs()
-                    > 1.0e-12 * wanted.abs().max(self.uploaded_time_step.abs()).max(1.0)
+                (wanted - self.coordinator.uploaded_time_step).abs()
+                    > 1.0e-12
+                        * wanted
+                            .abs()
+                            .max(self.coordinator.uploaded_time_step.abs())
+                            .max(1.0)
             });
         match self.runtime.request_with_handoff(
             self.editor.revision,
@@ -238,11 +235,11 @@ impl Playground {
             Ok(_token) => {
                 #[cfg(test)]
                 self.protocol_log.push(ProtocolNote::Requested(_token));
-                self.requested_revision = Some(self.editor.revision);
-                self.requested_inputs = Some(PreparedInputs::of(&self.editor.document));
-                self.requested_edge = self.editor.document.presentation.mesh_edge;
-                self.reset_requested = false;
-                self.fresh_requested = false;
+                self.coordinator.requested(
+                    self.editor.revision,
+                    PreparedInputs::of(&self.editor.document),
+                    self.editor.document.presentation.mesh_edge,
+                );
                 self.begin_handoff_timeline();
             }
             Err(error) => self.message = error,
@@ -332,15 +329,15 @@ impl Playground {
     }
 
     pub(super) fn finish_source_commit(&mut self, request: &CanonicalGpuRequest) {
-        let Some(pending) = self.source_commit.as_ref() else {
+        let Some(pending) = self.coordinator.source_commit.as_ref() else {
             return;
         };
         let processed = request.stats().processed_event();
         if processed < pending.serial {
             return;
         }
-        let pending = self.source_commit.take().unwrap();
-        self.canonical_event_observed = processed;
+        let pending = self.coordinator.source_commit.take().unwrap();
+        self.coordinator.canonical_event_observed = processed;
         let rejection = request.stats().event_rejection();
         if rejection != 0 {
             self.runtime.reject_ready(
@@ -357,15 +354,19 @@ impl Playground {
     }
 
     pub(super) fn time_step_unchanged(&self, candidate: &PreparedTopology) -> bool {
-        if self.uploaded_time_step <= 0.0 {
+        if self.coordinator.uploaded_time_step <= 0.0 {
             return false;
         }
         let wanted = paced_time_step(
             candidate.recommended_time_step(),
             self.editor.document.presentation.simulation_speed,
         );
-        (wanted - self.uploaded_time_step).abs()
-            <= 1.0e-12 * wanted.abs().max(self.uploaded_time_step.abs()).max(1.0)
+        (wanted - self.coordinator.uploaded_time_step).abs()
+            <= 1.0e-12
+                * wanted
+                    .abs()
+                    .max(self.coordinator.uploaded_time_step.abs())
+                    .max(1.0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -379,7 +380,7 @@ impl Playground {
         commands: &mut Commands,
         delta: f64,
     ) {
-        if std::mem::take(&mut self.drop_requested) {
+        if std::mem::take(&mut self.coordinator.drop_requested) {
             request.clear(assets, commands);
             recorders.clear_recorders(assets, commands);
             self.drop_generation();
@@ -427,24 +428,29 @@ impl Playground {
             self.solver_share,
             self.step_seconds,
         );
-        if self.uploading.is_none()
-            && self.source_commit.is_none()
-            && self.gpu_upload_preparation.is_none()
+        if self.coordinator.uploading.is_none()
+            && self.coordinator.source_commit.is_none()
+            && self.coordinator.gpu_upload_preparation.is_none()
         {
             self.retime_for_speed();
             self.request_runtime();
         }
         self.advance_runtime_preparation();
-        if self.gpu_upload_preparation.as_ref().is_some_and(|job| {
-            self.runtime
-                .ready()
-                .is_none_or(|candidate| candidate.bundle.token != job.token)
-        }) {
-            self.gpu_upload_preparation = None;
+        if self
+            .coordinator
+            .gpu_upload_preparation
+            .as_ref()
+            .is_some_and(|job| {
+                self.runtime
+                    .ready()
+                    .is_none_or(|candidate| candidate.bundle.token != job.token)
+            })
+        {
+            self.coordinator.gpu_upload_preparation = None;
         }
-        if self.uploading.is_none()
-            && self.source_commit.is_none()
-            && self.gpu_upload_preparation.is_none()
+        if self.coordinator.uploading.is_none()
+            && self.coordinator.source_commit.is_none()
+            && self.coordinator.gpu_upload_preparation.is_none()
             && let Some(candidate) = self.runtime.ready().cloned()
         {
             let dt = paced_time_step(
@@ -480,6 +486,7 @@ impl Playground {
                         }
                         if !request.live_event_pending() {
                             let serial = self
+                                .coordinator
                                 .canonical_event_serial
                                 .max(request.stats().processed_event())
                                 .saturating_add(1)
@@ -517,10 +524,10 @@ impl Playground {
                                     .map_err(str::to_owned)
                             }) {
                                 Ok(()) => {
-                                    self.canonical_event_serial = serial;
+                                    self.coordinator.canonical_event_serial = serial;
                                     self.handoff_packed = self.handoff_ready;
                                     self.handoff_upload = Some(Instant::now());
-                                    self.source_commit =
+                                    self.coordinator.source_commit =
                                         Some(PendingSourceCommit { token, serial });
                                 }
                                 Err(error) => match live_event_fallback(
@@ -552,7 +559,7 @@ impl Playground {
                 let runtime_serials = display.runtime_serials;
                 let (sender, receiver) = mpsc::channel();
                 self.dispatch_pack(sender, candidate, active, dt, runtime_serials);
-                self.gpu_upload_preparation = Some(GpuUploadPreparation {
+                self.coordinator.gpu_upload_preparation = Some(GpuUploadPreparation {
                     token,
                     time_step: dt,
                     receiver: Mutex::new(receiver),
@@ -560,7 +567,7 @@ impl Playground {
                 });
             }
         }
-        if let Some(job) = &mut self.gpu_upload_preparation
+        if let Some(job) = &mut self.coordinator.gpu_upload_preparation
             && job.result.is_none()
         {
             let received = job.receiver.lock().unwrap().try_recv();
@@ -578,14 +585,15 @@ impl Playground {
                 }
             }
         }
-        if self.uploading.is_none()
+        if self.coordinator.uploading.is_none()
             && request.caught_up()
             && self
+                .coordinator
                 .gpu_upload_preparation
                 .as_ref()
                 .is_some_and(|job| job.result.is_some())
         {
-            let mut job = self.gpu_upload_preparation.take().unwrap();
+            let mut job = self.coordinator.gpu_upload_preparation.take().unwrap();
             let token = job.token;
             let dt = job.time_step;
             let Some(candidate) = self
@@ -600,7 +608,7 @@ impl Playground {
             // accepted state, which the failure never touched; the latched
             // status would otherwise reject the new generation as its own.
             if request.failed() && request.clear_failure(assets, commands).is_ok() {
-                self.solver_fault = None;
+                self.coordinator.solver_fault = None;
             }
             let mut handed_off = false;
             let upload = job.result.take().unwrap().and_then(|prepared| {
@@ -629,12 +637,12 @@ impl Playground {
                     // rejection, mispaced the solver, and made the speed
                     // ceiling request the rejected revision again.
                     if !handed_off {
-                        self.uploaded_time_step = dt;
+                        self.coordinator.uploaded_time_step = dt;
                         self.sim_time_offset = 0.0;
                         self.sim_time_step = dt;
                     }
                     self.handoff_upload = Some(Instant::now());
-                    self.uploading = Some(Uploading {
+                    self.coordinator.uploading = Some(Uploading {
                         token,
                         // Which generation to wait for follows the path just
                         // taken, not whether the candidate starts from zero.
@@ -663,7 +671,7 @@ impl Playground {
                 }
             }
         }
-        if let Some(upload) = &self.uploading {
+        if let Some(upload) = &self.coordinator.uploading {
             // Whether the device already runs the candidate: an install
             // replaces the running generation at once, and an admitted
             // handoff has made the target the running one.
@@ -693,7 +701,7 @@ impl Playground {
                 self.runtime.reject_ready(token, failure.clone());
                 self.message = failure;
                 self.unseen_error = true;
-                self.uploading = None;
+                self.coordinator.uploading = None;
             // A fault on a candidate the device already runs is its own, and
             // the generation it replaced is gone: the host publishes what the
             // device runs, and the fault pauses it as any fault does. Kept
@@ -707,20 +715,16 @@ impl Playground {
                     CanonicalGpuHandoffOutcome::Pending
                 )
             {
-                let upload = self.uploading.take().unwrap();
                 // The device has published the candidate.
-                self.uploaded_time_step = upload.time_step;
+                let upload = self.coordinator.published();
                 match self.runtime.commit_ready(upload.token) {
                     Ok(active) => {
                         if upload.fresh {
+                            self.coordinator.started_afresh();
                             self.accumulator = 0.0;
                             self.restart_probe_traces();
-                            self.canonical_event_serial = 0;
-                            self.canonical_event_observed = 0;
                             self.wave_energy = None;
                             self.nonlinear_strength.clear();
-                            // A fresh start begins from the authored runtime.
-                            self.switch_targets.clear();
                             self.amr_energy_peak = 0.0;
                         }
                         self.restart_exposures_after_handoff(upload.fresh);
@@ -748,7 +752,10 @@ impl Playground {
                 }
             }
         }
-        if self.reset_requested && self.uploading.is_none() && self.source_commit.is_none() {
+        if self.coordinator.reset_requested
+            && self.coordinator.uploading.is_none()
+            && self.coordinator.source_commit.is_none()
+        {
             if let Some(active) = self.runtime.active() {
                 let dt = paced_time_step(
                     active.recommended_time_step(),
@@ -783,20 +790,9 @@ impl Playground {
                     });
                 if let Ok(plan) = reset {
                     request.install(assets, commands, plan);
-                    self.reset_requested = false;
-                    self.uploaded_time_step = dt;
+                    self.coordinator.reset_installed(dt);
                     self.sim_time_offset = 0.0;
                     self.sim_time_step = dt;
-                    self.canonical_event_serial = 0;
-                    self.canonical_event_observed = 0;
-                    // The reset medium starts at its authored laws, wherever
-                    // a Switch had sent it.
-                    self.switch_targets.clear();
-                    // A pulse or a Switch press still waiting was meant for
-                    // the run Reset discarded; sent on, it went into the
-                    // cleared field in the frame Reset installed it.
-                    self.pending_pulses.clear();
-                    self.pending_switches.clear();
                     // Adaptation starts the run again too: an estimate or a
                     // mesh still computing is of the field Reset discarded,
                     // and the last step estimated and the energy peak belong
@@ -826,7 +822,7 @@ impl Playground {
                 .and_then(|active| Some((active, RecorderSource::of(active, request)?))),
             request.generation(),
         );
-        if self.uploading.is_none()
+        if self.coordinator.uploading.is_none()
             && let Some(active) = self.runtime.active().cloned()
             && probes_need_upload(self.probe_upload, active.bundle.token, request.generation())
             && let Some(source) = RecorderSource::of(&active, request)
@@ -838,12 +834,13 @@ impl Playground {
             // A pulse leaves the queue once the device has it. A generation
             // busy with another event takes it a frame or two later; taken off
             // before it was sent, the second of two quick clicks was lost.
-            if let Some((position, region)) = (self.uploading.is_none()
-                && self.source_commit.is_none())
-            .then(|| self.pending_pulses.front().copied())
+            if let Some((position, region)) = (self.coordinator.uploading.is_none()
+                && self.coordinator.source_commit.is_none())
+            .then(|| self.coordinator.pending_pulses.front().copied())
             .flatten()
             {
                 let serial = self
+                    .coordinator
                     .canonical_event_serial
                     .max(request.stats().processed_event())
                     .saturating_add(1)
@@ -871,30 +868,31 @@ impl Playground {
                         .map_err(str::to_owned)
                 }) {
                     Ok(()) => {
-                        self.canonical_event_serial = serial;
-                        self.pending_pulses.pop_front();
+                        self.coordinator.canonical_event_serial = serial;
+                        self.coordinator.pending_pulses.pop_front();
                     }
                     Err(error) => {
                         if live_event_fallback(&error, false) != LiveEventFallback::Retry {
-                            self.pending_pulses.pop_front();
+                            self.coordinator.pending_pulses.pop_front();
                             self.message = error;
                         }
                     }
                 }
             }
             // A Switch press waits for a busy generation as a pulse does.
-            if let Some(material) = (self.uploading.is_none() && self.source_commit.is_none())
-                .then(|| self.pending_switches.front().copied())
-                .flatten()
+            if let Some(material) = (self.coordinator.uploading.is_none()
+                && self.coordinator.source_commit.is_none())
+            .then(|| self.coordinator.pending_switches.front().copied())
+            .flatten()
             {
                 let active = active.clone();
                 match self.send_material_switch(&active, display, request, assets, material) {
                     Ok(()) => {
-                        self.pending_switches.pop_front();
+                        self.coordinator.pending_switches.pop_front();
                     }
                     Err(error) => {
                         if live_event_fallback(&error, false) != LiveEventFallback::Retry {
-                            self.pending_switches.pop_front();
+                            self.coordinator.pending_switches.pop_front();
                             self.message = error;
                         }
                     }
@@ -906,12 +904,17 @@ impl Playground {
             // graph snapshots one complete boundary while later requests keep
             // the source display live; the target consumes that short backlog
             // after admission. Fresh installs have no outgoing generation.
-            let packed_candidate_waiting = self.uploading.is_none()
+            let packed_candidate_waiting = self.coordinator.uploading.is_none()
                 && self
+                    .coordinator
                     .gpu_upload_preparation
                     .as_ref()
                     .is_some_and(|job| job.result.is_some());
-            let fresh_upload = self.uploading.as_ref().is_some_and(|upload| upload.fresh);
+            let fresh_upload = self
+                .coordinator
+                .uploading
+                .as_ref()
+                .is_some_and(|upload| upload.fresh);
             let withheld = canonical_steps_withheld(packed_candidate_waiting, fresh_upload);
             let mut note = PacingNote {
                 frame_seconds: delta,
@@ -981,8 +984,8 @@ impl Playground {
         self.grid_filter_refused = request.grid_scale_filter_refused();
         self.gpu_dispatches = request.stats().dispatches();
         let processed_event = request.stats().processed_event();
-        if processed_event != self.canonical_event_observed {
-            self.canonical_event_observed = processed_event;
+        if processed_event != self.coordinator.canonical_event_observed {
+            self.coordinator.canonical_event_observed = processed_event;
             let rejection = request.stats().event_rejection();
             if rejection != 0 {
                 self.unseen_error = true;
@@ -1168,19 +1171,25 @@ impl Playground {
             self.protocol_log.push(ProtocolNote::Switch(false));
             return Ok(());
         };
-        let heading = self.switch_targets.get(&material).copied().or_else(|| {
-            runtime
-                .records()
-                .iter()
-                .find(|record| record.material() == material)
-                .map(|record| record.switch().target_blend() >= 0.5)
-        });
+        let heading = self
+            .coordinator
+            .switch_targets
+            .get(&material)
+            .copied()
+            .or_else(|| {
+                runtime
+                    .records()
+                    .iter()
+                    .find(|record| record.material() == material)
+                    .map(|record| record.switch().target_blend() >= 0.5)
+            });
         let Some(heading) = heading else {
             #[cfg(test)]
             self.protocol_log.push(ProtocolNote::Switch(false));
             return Err("This material has no Switch in the running generation".into());
         };
         let serial = self
+            .coordinator
             .canonical_event_serial
             .max(request.stats().processed_event())
             .saturating_add(1)
@@ -1193,8 +1202,8 @@ impl Playground {
         request
             .queue_live_event(assets, event?)
             .map_err(str::to_owned)?;
-        self.canonical_event_serial = serial;
-        self.switch_targets.insert(material, !heading);
+        self.coordinator.canonical_event_serial = serial;
+        self.coordinator.switch_targets.insert(material, !heading);
         Ok(())
     }
 
@@ -1209,14 +1218,14 @@ impl Playground {
         commands: &mut Commands,
     ) {
         let failure = request.stats().failure();
-        if failure == 0 || self.uploading.is_some() {
+        if failure == 0 || self.coordinator.uploading.is_some() {
             if failure == 0 {
-                self.solver_fault = None;
+                self.coordinator.solver_fault = None;
             }
             return;
         }
-        if self.solver_fault != Some(failure) {
-            self.solver_fault = Some(failure);
+        if self.coordinator.solver_fault != Some(failure) {
+            self.coordinator.solver_fault = Some(failure);
             self.wave_running = false;
             self.wave_step = false;
             self.message = format!(
@@ -1241,7 +1250,7 @@ impl Playground {
         }
         if (self.wave_running || self.wave_step) && request.clear_failure(assets, commands).is_ok()
         {
-            self.solver_fault = None;
+            self.coordinator.solver_fault = None;
             self.message = "Resumed from the last accepted step".into();
         }
     }
@@ -1493,16 +1502,19 @@ mod tests {
             .unwrap();
         settle(&mut state.editor);
         activate(&mut state);
-        state.requested_revision = Some(state.editor.revision);
-        state.requested_edge = state.editor.document.presentation.mesh_edge;
-        state.reset_requested = true;
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
         state.wave_running = false;
         frame(&mut state, &mut request, &display);
         let installed = request.generation();
 
         state.request_material_switch();
         frame(&mut state, &mut request, &display);
-        assert_eq!(state.switch_targets.get(&material.id), Some(&true));
+        assert_eq!(
+            state.coordinator.switch_targets.get(&material.id),
+            Some(&true)
+        );
         let records = state
             .runtime
             .active()
@@ -1513,15 +1525,15 @@ mod tests {
             .len();
         display.hold_switched_snapshot(installed, records);
 
-        state.reset_requested = true;
+        state.coordinator.reset_requested = true;
         frame(&mut state, &mut request, &display);
-        assert!(!state.reset_requested && request.generation() > installed);
-        assert!(state.switch_targets.is_empty());
+        assert!(!state.coordinator.reset_requested && request.generation() > installed);
+        assert!(state.coordinator.switch_targets.is_empty());
 
         state.request_material_switch();
         frame(&mut state, &mut request, &display);
         assert_eq!(
-            state.switch_targets.get(&material.id),
+            state.coordinator.switch_targets.get(&material.id),
             Some(&true),
             "the press after Reset heads for the alternate"
         );
@@ -1561,9 +1573,9 @@ mod tests {
         };
         let mut state = Playground::default();
         let active = activate(&mut state);
-        state.requested_revision = Some(state.editor.revision);
-        state.requested_edge = state.editor.document.presentation.mesh_edge;
-        state.reset_requested = true;
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
         state.wave_running = false;
         frame(&mut state, &mut request);
         let installed = request.generation();
@@ -1574,9 +1586,9 @@ mod tests {
         state.amr_coarsen_streak = 2;
         let history = MeshAdaptationState::from_mesh(&active.mesh);
         state.amr_adaptation_state = Some(history.clone());
-        state.reset_requested = true;
+        state.coordinator.reset_requested = true;
         frame(&mut state, &mut request);
-        assert!(!state.reset_requested && request.generation() > installed);
+        assert!(!state.coordinator.reset_requested && request.generation() > installed);
         assert_eq!(state.amr_last_analyzed_step, None);
         assert!(state.amr_last_started.is_none());
         assert_eq!(state.amr_energy_peak, 0.0);
@@ -1801,9 +1813,9 @@ mod tests {
             .unwrap();
         settle(&mut state.editor);
         activate(&mut state);
-        state.requested_revision = Some(state.editor.revision);
-        state.requested_edge = state.editor.document.presentation.mesh_edge;
-        state.reset_requested = true;
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
         state.wave_running = false;
         frame(&mut state, &mut request, false);
 
@@ -1811,23 +1823,47 @@ mod tests {
         state.place_pulse(Point2::new(-0.1, 0.1));
         frame(&mut state, &mut request, false);
         assert!(request.live_event_pending());
-        assert_eq!(state.pending_pulses.len(), 1, "the second waits");
+        assert_eq!(
+            state.coordinator.pending_pulses.len(),
+            1,
+            "the second waits"
+        );
         frame(&mut state, &mut request, false);
-        assert_eq!(state.pending_pulses.len(), 1, "{}", state.message);
+        assert_eq!(
+            state.coordinator.pending_pulses.len(),
+            1,
+            "{}",
+            state.message
+        );
         state.request_material_switch();
         frame(&mut state, &mut request, false);
-        assert_eq!(state.pending_switches, [material.id], "{}", state.message);
+        assert_eq!(
+            state.coordinator.pending_switches,
+            [material.id],
+            "{}",
+            state.message
+        );
 
         frame(&mut state, &mut request, true);
-        assert!(state.pending_pulses.is_empty(), "the second pulse went");
+        assert!(
+            state.coordinator.pending_pulses.is_empty(),
+            "the second pulse went"
+        );
         assert_eq!(
-            state.pending_switches,
+            state.coordinator.pending_switches,
             [material.id],
             "the Switch waits for it"
         );
         frame(&mut state, &mut request, true);
-        assert!(state.pending_switches.is_empty(), "{}", state.message);
-        assert_eq!(state.switch_targets.get(&material.id), Some(&true));
+        assert!(
+            state.coordinator.pending_switches.is_empty(),
+            "{}",
+            state.message
+        );
+        assert_eq!(
+            state.coordinator.switch_targets.get(&material.id),
+            Some(&true)
+        );
         assert!(request.live_event_pending());
     }
 
@@ -1895,9 +1931,9 @@ mod tests {
             .unwrap();
         settle(&mut state.editor);
         activate(&mut state);
-        state.requested_revision = Some(state.editor.revision);
-        state.requested_edge = state.editor.document.presentation.mesh_edge;
-        state.reset_requested = true;
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
         state.wave_running = false;
         frame(&mut state, &mut request, false);
 
@@ -1907,13 +1943,17 @@ mod tests {
         state.queue_switch(first.id);
         state.queue_switch(second);
         state.queue_switch(first.id);
-        assert_eq!(state.pending_switches, [first.id, second]);
+        assert_eq!(state.coordinator.pending_switches, [first.id, second]);
 
         frame(&mut state, &mut request, true);
         frame(&mut state, &mut request, true);
-        assert!(state.pending_switches.is_empty(), "{}", state.message);
-        assert_eq!(state.switch_targets.get(&first.id), Some(&true));
-        assert_eq!(state.switch_targets.get(&second), Some(&true));
+        assert!(
+            state.coordinator.pending_switches.is_empty(),
+            "{}",
+            state.message
+        );
+        assert_eq!(state.coordinator.switch_targets.get(&first.id), Some(&true));
+        assert_eq!(state.coordinator.switch_targets.get(&second), Some(&true));
     }
 
     /// Reported: Reset replayed a waiting pulse. With one pulse sent and one
@@ -1944,28 +1984,32 @@ mod tests {
         };
         let mut state = Playground::default();
         activate(&mut state);
-        state.requested_revision = Some(state.editor.revision);
-        state.requested_edge = state.editor.document.presentation.mesh_edge;
-        state.reset_requested = true;
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
         state.wave_running = false;
         frame(&mut state, &mut request);
         state.place_pulse(Point2::new(-0.2, 0.1));
         state.place_pulse(Point2::new(-0.1, 0.1));
         frame(&mut state, &mut request);
-        assert_eq!(state.pending_pulses.len(), 1, "the second waits");
+        assert_eq!(
+            state.coordinator.pending_pulses.len(),
+            1,
+            "the second waits"
+        );
         let material = state.editor.document.model.draft.materials[0].id;
         state.queue_switch(material);
 
         let before = request.generation();
-        state.reset_requested = true;
+        state.coordinator.reset_requested = true;
         frame(&mut state, &mut request);
         assert!(request.generation() > before, "{}", state.message);
         assert!(
             !request.live_event_pending(),
             "a waiting pulse reached the reset run"
         );
-        assert!(state.pending_pulses.is_empty());
-        assert!(state.pending_switches.is_empty());
+        assert!(state.coordinator.pending_pulses.is_empty());
+        assert!(state.coordinator.pending_switches.is_empty());
     }
 
     /// A medium switched to twice its mass, with the snapshot that says so.
@@ -2065,24 +2109,25 @@ mod tests {
         // are owed and the handoff finds the complete-step boundary it needs.
         let mut state = with_baffles(&[]);
         let accepted = activate(&mut state).bundle.token;
-        state.requested_revision = Some(state.editor.revision);
-        state.requested_edge = state.editor.document.presentation.mesh_edge;
-        state.reset_requested = true;
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
         state.wave_running = false;
         frame(&mut state, &mut request);
-        let step = state.uploaded_time_step;
+        let step = state.coordinator.uploaded_time_step;
         assert!(step > 0.0);
 
         // A finer mesh wants a smaller step, so its candidate hands off.
         state.editor.document.presentation.mesh_edge *= 0.5;
         for _ in 0..100_000 {
-            if state.uploading.is_some() {
+            if state.coordinator.uploading.is_some() {
                 break;
             }
             frame(&mut state, &mut request);
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let candidate = state
+            .coordinator
             .uploading
             .as_ref()
             .expect("the handoff began")
@@ -2103,7 +2148,7 @@ mod tests {
 
         request.reject_handoff(CANONICAL_FAILURE_NON_FINITE);
         frame(&mut state, &mut request);
-        assert!(state.uploading.is_none());
+        assert!(state.coordinator.uploading.is_none());
         assert_eq!(state.runtime.active().unwrap().bundle.token, accepted);
         assert_eq!(state.solver_time_step(), step);
 

@@ -496,7 +496,7 @@ impl Playground {
             }
             ToolbarItem::Reset => {
                 if named(ui.button(label), "Reset").clicked() {
-                    self.reset_requested = true;
+                    self.coordinator.reset_requested = true;
                 }
             }
             // What the narrowest bars have no room for, by name. Step keeps
