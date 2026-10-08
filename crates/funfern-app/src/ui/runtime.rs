@@ -19,7 +19,8 @@ use funfern_app::topology_runtime::{
 use funfern_core::*;
 use funfern_protocol::Acceptance;
 use funfern_protocol::decisions::{
-    RequestSeen, Settlement, UploadSeen, request_due, settle_upload, standing,
+    FaultSeen, RequestSeen, Settlement, Supervision, UploadSeen, request_due, settle_upload,
+    standing, supervise_fault,
 };
 use std::sync::{
     Arc, Mutex,
@@ -1206,40 +1207,43 @@ impl Playground {
         commands: &mut Commands,
     ) {
         let failure = request.stats().failure();
-        if failure == 0 || self.coordinator.uploading.is_some() {
-            if failure == 0 {
-                self.coordinator.solver_fault = None;
+        match supervise_fault(FaultSeen {
+            failed: failure != 0,
+            uploading: self.coordinator.uploading.is_some(),
+            latched: self.coordinator.solver_fault == Some(failure),
+            resuming: self.wave_running || self.wave_step,
+        }) {
+            Supervision::Clear => self.coordinator.solver_fault = None,
+            Supervision::Pause => {
+                self.coordinator.solver_fault = Some(failure);
+                self.wave_running = false;
+                self.wave_step = false;
+                self.message = format!(
+                    "Paused at the last accepted step: {} (failure code {failure}). Edit the scene, \
+                     or press Run to retry from that step",
+                    canonical_failure_description(failure)
+                );
+                // The run stopped on its own, and the status line keeps the
+                // reason only until the next message.
+                let description = canonical_failure_description(failure);
+                let mut reason = description[..1].to_uppercase();
+                reason.push_str(&description[1..]);
+                self.raise_notice(
+                    "Simulation paused",
+                    format!(
+                        "{reason} (failure code {failure}).\n\nThe field is held at the last accepted step. \
+                         Edit the scene, or press Run to retry from that step."
+                    ),
+                );
+                self.unseen_error = true;
             }
-            return;
-        }
-        if self.coordinator.solver_fault != Some(failure) {
-            self.coordinator.solver_fault = Some(failure);
-            self.wave_running = false;
-            self.wave_step = false;
-            self.message = format!(
-                "Paused at the last accepted step: {} (failure code {failure}). Edit the scene, \
-                 or press Run to retry from that step",
-                canonical_failure_description(failure)
-            );
-            // The run stopped on its own, and the status line keeps the
-            // reason only until the next message.
-            let description = canonical_failure_description(failure);
-            let mut reason = description[..1].to_uppercase();
-            reason.push_str(&description[1..]);
-            self.raise_notice(
-                "Simulation paused",
-                format!(
-                    "{reason} (failure code {failure}).\n\nThe field is held at the last accepted step. \
-                     Edit the scene, or press Run to retry from that step."
-                ),
-            );
-            self.unseen_error = true;
-            return;
-        }
-        if (self.wave_running || self.wave_step) && request.clear_failure(assets, commands).is_ok()
-        {
-            self.coordinator.solver_fault = None;
-            self.message = "Resumed from the last accepted step".into();
+            Supervision::Resume => {
+                if request.clear_failure(assets, commands).is_ok() {
+                    self.coordinator.solver_fault = None;
+                    self.message = "Resumed from the last accepted step".into();
+                }
+            }
+            Supervision::Hold => {}
         }
     }
 

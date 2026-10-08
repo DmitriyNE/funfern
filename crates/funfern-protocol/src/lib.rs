@@ -28,7 +28,10 @@
 
 pub mod decisions;
 
-use decisions::{RequestSeen, Settlement, UploadSeen, request_due, settle_upload, standing};
+use decisions::{
+    FaultSeen, RequestSeen, Settlement, Supervision, UploadSeen, request_due, settle_upload,
+    standing, supervise_fault,
+};
 
 /// A candidate, named by the order of its request.
 pub type Token = u8;
@@ -444,23 +447,27 @@ impl Protocol {
         }
         // A failure with nothing uploading pauses the run; Run or Step
         // clears it, on a device that has a generation to clear it on.
-        if self.failed() {
-            if self.uploading.is_none() {
-                if !self.fault {
-                    self.fault = true;
-                    self.running = false;
-                    self.stepping = false;
-                } else if (self.running || self.stepping)
-                    && let Some(device) = &mut self.device
-                {
+        match supervise_fault(FaultSeen {
+            failed: self.failed(),
+            uploading: self.uploading.is_some(),
+            latched: self.fault,
+            resuming: self.running || self.stepping,
+        }) {
+            Supervision::Clear => self.fault = false,
+            Supervision::Pause => {
+                self.fault = true;
+                self.running = false;
+                self.stepping = false;
+            }
+            Supervision::Resume => {
+                if let Some(device) = &mut self.device {
                     device.failed = false;
                     device.ready = false;
                     device.caught_up = true;
                     self.fault = false;
                 }
             }
-        } else {
-            self.fault = false;
+            Supervision::Hold => {}
         }
         if self.uploading.is_none() && self.source_commit.is_none() && self.packed.is_none() {
             // `retime_for_speed`: a running step the speed no longer asks for

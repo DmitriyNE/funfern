@@ -20924,3 +20924,18 @@ editor's holds - a drag in progress, a mesh edge being dragged, a source patch
 waiting - stay the runtime's, and so does Remesh, which the model passes as
 never pressed. The reasoning the runtime kept in comments is the functions'
 documentation now. Nothing changes in what the app does.
+
+## 2026-10-09 — A device failure is supervised by the protocol's decision
+
+The third decision moved into `funfern-protocol`: what the host does about a
+failure of the running generation. `decisions::supervise_fault` clears the
+latch when there is none, leaves a failure to the upload in flight when there
+is one, pauses the run at the last accepted step for a failure not yet paused
+for, and resumes from that step when Run or Step asks for steps on one that
+is; otherwise it holds. The model's frame and the runtime's
+`supervise_solver_fault` act on the answer. The runtime latches the failure's
+code and the model a flag, so a failure of another code pauses again; that is
+the input `latched`, the latch holding this failure, and not a difference in
+the decision. A Resume the device does not take - `clear_failure` refused for
+a generation not installed - stays paused, as it did. Nothing changes in what
+the app does.

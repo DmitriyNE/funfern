@@ -131,3 +131,45 @@ pub fn request_due<R: Copy + PartialEq>(seen: RequestSeen<R>) -> bool {
         && (seen.in_flight || seen.active == seen.standing || seen.failed == seen.standing);
     seen.remesh || !accounted
 }
+
+/// What the host sees of a failure of the running generation, in a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FaultSeen {
+    /// The running generation has failed.
+    pub failed: bool,
+    /// An upload is in flight; its settlement answers for a failure.
+    pub uploading: bool,
+    /// The host has paused for this failure already.
+    pub latched: bool,
+    /// Run or Step asks for steps.
+    pub resuming: bool,
+}
+
+/// What the host does about a failure of the running generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Supervision {
+    /// There is none, and nothing is paused for one.
+    Clear,
+    /// The run pauses at the last accepted step, and says why. Nothing is
+    /// clipped or reset.
+    Pause,
+    /// Run or Step on a paused failure clears it and retries from the last
+    /// accepted step.
+    Resume,
+    /// Not now: the run stays paused, or the upload in flight settles it.
+    Hold,
+}
+
+pub fn supervise_fault(seen: FaultSeen) -> Supervision {
+    if !seen.failed {
+        Supervision::Clear
+    } else if seen.uploading {
+        Supervision::Hold
+    } else if !seen.latched {
+        Supervision::Pause
+    } else if seen.resuming {
+        Supervision::Resume
+    } else {
+        Supervision::Hold
+    }
+}
