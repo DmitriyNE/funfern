@@ -459,6 +459,38 @@ struct PendingSourceCommit {
     serial: u32,
 }
 
+/// What the runtime decided at the points the protocol model takes as inputs,
+/// for the tests that run the model beside it (`funfern-protocol`).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProtocolNote {
+    Requested(TopologyToken),
+    /// A preparation settled, prepared or failed.
+    Prepared(bool),
+    /// A ready candidate committed without the device.
+    InPlace,
+    /// A ready candidate went to a live patch: whether the patch was built,
+    /// and whether the candidate could be packed instead.
+    Patch {
+        built: bool,
+        packable: bool,
+    },
+    /// A ready candidate went to be packed.
+    Pack,
+    /// A packed candidate's upload: an install or a handoff, begun or
+    /// refused.
+    Begin {
+        install: bool,
+        ok: bool,
+    },
+    /// A waiting pulse's event, built or not.
+    Pulse(bool),
+    /// A waiting Switch's event, built or not.
+    Switch(bool),
+    /// The speed no longer asks for the running step: requested again.
+    Retimed,
+}
+
 /// What a preparation reads of the document: the accepted scene and what
 /// lies outside the draft. While the draft is invalid only these can put the
 /// running scene out of date, since its edits leave the accepted scene alone.

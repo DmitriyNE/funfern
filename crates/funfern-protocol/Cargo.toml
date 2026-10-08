@@ -1,0 +1,10 @@
+[package]
+name = "funfern-protocol"
+description = "The runtime's generation protocol as a small state machine, checked by Kani and held against the app's runtime by its tests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

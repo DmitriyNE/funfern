@@ -20724,3 +20724,43 @@ the far field, the mesh edge and the speed went the same way.
   and its seed file gained both findings. The user guide's Drafts entry says
   what the run does meanwhile. 2,000 runtime sequences pass, and 500 of each
   other machine.
+
+## 2026-10-08 — The runtime's protocol, model-checked and held to the runtime
+
+Phase 4 of the verification plan. `crates/funfern-protocol` is the runtime's
+generation protocol as a small state machine with no dependencies: requests,
+preparation, packing, uploads, handoffs, faults, Reset, scene replacement and
+live events, with tokens as small numbers and a generation as a counter. What
+the app computes from geometry is an input of the step that needs it: whether
+a preparation finished this frame, how a ready candidate is carried, whether
+an upload began, whether a pulse or a Switch event could be built, whether
+the speed retimed the running step. A host frame runs `refresh_runtime`'s
+blocks in its order.
+
+- Kani (`cargo kani -p funfern-protocol`, 0.67.0) checks two proofs: every
+  state reached in nine steps of any kind, with any inputs, keeps the host's
+  active topology on the device while nothing uploads, at the step the device
+  runs, with a handoff only ever one the host awaits; and from any state
+  reached in six, a fair device and preparation bring it to rest within nine
+  rounds. 28 s and 155 s here. A first rest proof at four rounds failed: Kani
+  found four Switch presses left waiting behind an install, and a round
+  settles one live event, so the rounds are now the prefix's length plus
+  three. CI runs both in a job of their own, and the gate runs them.
+- The runtime machine now runs the model in lockstep with the real runtime:
+  each step is given the inputs the runtime met, from a test-only
+  `protocol_log` of its decisions and from what an edit changed, and the two
+  states are compared field by field in the runtime's own tokens after every
+  step. Getting there took the model from versions to names: what a
+  preparation reads and the mesh edge are compared by content, so a change
+  undone counts as none, which a version cannot express; retiming became an
+  input, the paced step depending on the running mesh's own limit; Switch
+  presses queue per material; and a request that changes neither document
+  nor mesh reproduces its predecessor's token, which the runtime cannot tell
+  apart and the comparison therefore does not either. 2,000 sequences agree
+  at every step.
+- One finding, mirrored in the model as `stale_failure` and marked `FINDING`
+  until decided: `CanonicalGpuRequest::clear` keeps the dropped generation's
+  failure count, so after a fault, opening another scene reads that failure
+  as the new scene's. The new scene starts paused, a second "Simulation
+  paused" notice appears, and Run cannot clear it until the new scene
+  installs.

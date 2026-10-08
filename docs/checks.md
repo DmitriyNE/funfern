@@ -136,6 +136,19 @@ commit without a new generation must be one that needs none; and with the
 device fair at the end, the runtime must come to rest on the accepted
 revision or with an error naming it.
 
+The protocol that machine exercises is also a small state machine of its own,
+`crates/funfern-protocol`: requests, preparation, packing, uploads, handoffs,
+faults, Reset, scene replacement and live events, with what the app computes
+from geometry as inputs of each step. `cargo kani -p funfern-protocol` checks
+it with [Kani](https://model-checking.github.io/kani/): every state reached in
+nine steps of any kind keeps the host's active topology on the device while
+nothing uploads, at the step the device runs, and from any state reached in
+six, a fair device and preparation bring it to rest within nine rounds. It
+takes about three minutes; CI runs it in a job of its own, with Kani 0.67.0.
+The runtime machine runs the model in lockstep with the real runtime and
+compares the two after every step, so the proofs speak about the app's
+runtime only while that comparison holds.
+
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,
 nested material inclusions,

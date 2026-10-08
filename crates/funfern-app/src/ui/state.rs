@@ -46,6 +46,10 @@ pub struct Playground {
     /// thread, for tests that decide when the device sees it.
     #[cfg(test)]
     pub(super) pack_inline: bool,
+    /// What the runtime decided, for the tests that run the protocol model
+    /// beside it.
+    #[cfg(test)]
+    pub(super) protocol_log: Vec<ProtocolNote>,
     pub(super) selection: TopologySelection,
     pub(super) inspector: Option<InspectorPanel>,
     pub(super) draw_open: bool,
@@ -405,6 +409,8 @@ impl Default for Playground {
             preparation_grant: None,
             #[cfg(test)]
             pack_inline: false,
+            #[cfg(test)]
+            protocol_log: Vec::new(),
             selection: TopologySelection::None,
             inspector: Some(InspectorPanel::Edit),
             draw_open: false,

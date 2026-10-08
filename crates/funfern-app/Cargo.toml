@@ -58,3 +58,6 @@ ab_glyph = "=0.2.32"
 # the current value, with shrinking that keeps a shortened sequence legal.
 proptest = "1.11"
 proptest-state-machine = "0.8"
+# The runtime's protocol as a small state machine, which Kani checks and the
+# runtime tests hold the real runtime to.
+funfern-protocol = { path = "../funfern-protocol" }

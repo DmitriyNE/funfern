@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/funfern-core", "crates/funfern-app"]
+members = ["crates/funfern-core", "crates/funfern-app", "crates/funfern-protocol"]
 resolver = "3"
 
 [workspace.package]
@@ -10,3 +10,5 @@ publish = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# `cargo kani` builds with `cfg(kani)`; the proofs live behind it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

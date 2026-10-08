@@ -99,8 +99,13 @@ impl Playground {
                 if self.runtime.preparing_timing().is_none() {
                     break;
                 }
-                if let Some(Ok(_)) = self.runtime.advance(4096) {
-                    self.handoff_ready = Some(Instant::now());
+                match self.runtime.advance(4096) {
+                    Some(Ok(_)) => {
+                        self.protocol_log.push(ProtocolNote::Prepared(true));
+                        self.handoff_ready = Some(Instant::now());
+                    }
+                    Some(Err(_)) => self.protocol_log.push(ProtocolNote::Prepared(false)),
+                    None => {}
                 }
             }
             return;
@@ -230,7 +235,9 @@ impl Playground {
             fresh,
             require_solver_handoff,
         ) {
-            Ok(_) => {
+            Ok(_token) => {
+                #[cfg(test)]
+                self.protocol_log.push(ProtocolNote::Requested(_token));
                 self.requested_revision = Some(self.editor.revision);
                 self.requested_inputs = Some(PreparedInputs::of(&self.editor.document));
                 self.requested_edge = self.editor.document.presentation.mesh_edge;
@@ -446,9 +453,16 @@ impl Playground {
             );
             let token = candidate.bundle.token;
             let mut needs_gpu_pack = true;
-            if self.time_step_unchanged(&candidate) {
+            let unchanged = self.time_step_unchanged(&candidate);
+            #[cfg(test)]
+            if !unchanged {
+                self.protocol_log.push(ProtocolNote::Pack);
+            }
+            if unchanged {
                 match candidate.solver_update {
                     PreparedSolverUpdate::MeasurementsOnly => {
+                        #[cfg(test)]
+                        self.protocol_log.push(ProtocolNote::InPlace);
                         self.handoff_packed = self.handoff_ready;
                         self.handoff_upload = self.handoff_ready;
                         self.commit_in_place(token, "Simulation measurements committed");
@@ -457,6 +471,13 @@ impl Playground {
                     PreparedSolverUpdate::SourceWeightsOnly
                     | PreparedSolverUpdate::SourceDrivesOnly => {
                         needs_gpu_pack = false;
+                        #[cfg(test)]
+                        if request.live_event_pending() {
+                            self.protocol_log.push(ProtocolNote::Patch {
+                                built: true,
+                                packable: true,
+                            });
+                        }
                         if !request.live_event_pending() {
                             let serial = self
                                 .canonical_event_serial
@@ -485,6 +506,11 @@ impl Playground {
                                     }
                                     .map_err(|error| format!("{error:?}"))
                                 });
+                            #[cfg(test)]
+                            self.protocol_log.push(ProtocolNote::Patch {
+                                built: event.is_ok(),
+                                packable: candidate.canonical_transfer.is_some(),
+                            });
                             match event.and_then(|event| {
                                 request
                                     .queue_live_event(assets, event)
@@ -515,7 +541,10 @@ impl Playground {
                             }
                         }
                     }
-                    PreparedSolverUpdate::FullHandoff => {}
+                    PreparedSolverUpdate::FullHandoff => {
+                        #[cfg(test)]
+                        self.protocol_log.push(ProtocolNote::Pack);
+                    }
                 }
             }
             if needs_gpu_pack {
@@ -584,6 +613,11 @@ impl Playground {
                     request.install(assets, commands, prepared.plan);
                     Ok(())
                 }
+            });
+            #[cfg(test)]
+            self.protocol_log.push(ProtocolNote::Begin {
+                install: !handed_off,
+                ok: upload.is_ok(),
             });
             match upload {
                 Ok(()) => {
@@ -814,7 +848,7 @@ impl Playground {
                     .max(request.stats().processed_event())
                     .saturating_add(1)
                     .max(1);
-                match pulse_increment(
+                let built = pulse_increment(
                     active,
                     position,
                     region,
@@ -828,8 +862,10 @@ impl Playground {
                         serial,
                     )
                     .map_err(|error| format!("{error:?}"))
-                })
-                .and_then(|event| {
+                });
+                #[cfg(test)]
+                self.protocol_log.push(ProtocolNote::Pulse(built.is_ok()));
+                match built.and_then(|event| {
                     request
                         .queue_live_event(assets, event)
                         .map_err(str::to_owned)
@@ -1113,6 +1149,8 @@ impl Playground {
         material: MaterialId,
     ) -> Result<(), String> {
         let Some(temporal) = &active.canonical_temporal_operator else {
+            #[cfg(test)]
+            self.protocol_log.push(ProtocolNote::Switch(false));
             return Err("This medium has no Switch to throw".into());
         };
         let runtime = running_material_runtime(display, request, temporal.initial_runtime());
@@ -1126,6 +1164,8 @@ impl Playground {
             .find(|candidate| candidate.id == material)
             .map(|found| found.switch_ramp)
         else {
+            #[cfg(test)]
+            self.protocol_log.push(ProtocolNote::Switch(false));
             return Ok(());
         };
         let heading = self.switch_targets.get(&material).copied().or_else(|| {
@@ -1136,6 +1176,8 @@ impl Playground {
                 .map(|record| record.switch().target_blend() >= 0.5)
         });
         let Some(heading) = heading else {
+            #[cfg(test)]
+            self.protocol_log.push(ProtocolNote::Switch(false));
             return Err("This material has no Switch in the running generation".into());
         };
         let serial = self
@@ -1145,9 +1187,11 @@ impl Playground {
             .max(1);
         let event =
             CanonicalGpuLiveEvent::temporal_switch_in(&runtime, material, !heading, ramp, serial)
-                .map_err(|error| format!("{error:?}"))?;
+                .map_err(|error| format!("{error:?}"));
+        #[cfg(test)]
+        self.protocol_log.push(ProtocolNote::Switch(event.is_ok()));
         request
-            .queue_live_event(assets, event)
+            .queue_live_event(assets, event?)
             .map_err(str::to_owned)?;
         self.canonical_event_serial = serial;
         self.switch_targets.insert(material, !heading);

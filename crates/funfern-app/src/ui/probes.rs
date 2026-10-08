@@ -592,6 +592,8 @@ impl Playground {
             self.editor.document.presentation.simulation_speed,
         );
         if (wanted / self.uploaded_time_step - 1.0).abs() > TIME_STEP_HYSTERESIS {
+            #[cfg(test)]
+            self.protocol_log.push(ProtocolNote::Retimed);
             self.requested_revision = None;
         }
     }

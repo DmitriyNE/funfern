@@ -29,12 +29,22 @@
 //!
 //! And at the end, with preparation and the device fair, the runtime comes to
 //! rest running the editor's accepted revision, or with an error naming it.
+//!
+//! Beside the runtime runs the protocol model (`funfern-protocol`), which
+//! Kani checks for every sequence of steps to a bounded depth. Each step is
+//! given to it with the inputs the runtime met, from the runtime's
+//! `protocol_log` and from what an edit changed, and after each the two are
+//! compared field by field in the runtime's own tokens. Where they part,
+//! either the runtime has left the protocol the proofs are about or the model
+//! does not describe it; either way the proofs say nothing until it is
+//! settled.
 
 use super::*;
 use crate::canonical_gpu::{CANONICAL_FAILURE_NON_FINITE, CanonicalGpuHandoffOutcome};
 use bevy::ecs::world::CommandQueue;
 use funfern_app::topology_editor::TopologyEditor;
 use funfern_app::topology_runtime::{PreparedSolverUpdate, TopologyToken};
+use funfern_protocol as model;
 
 /// One step of the interleaving.
 #[derive(Clone, Debug)]
@@ -188,6 +198,60 @@ struct Session {
     /// The revision whose draft was last validated: what the runtime is to
     /// come to run.
     accepted_revision: u64,
+    /// The protocol model, stepped beside the runtime with the inputs it
+    /// met, and the model's token for each real request.
+    model: model::Protocol,
+    /// The real token each of the model's requests produced, by the model's
+    /// token. Two requests that change neither the document nor the mesh
+    /// produce one real token, and the runtime cannot tell them apart.
+    tokens: Vec<TopologyToken>,
+    /// What a preparation reads, each content met so far, by the name the
+    /// model knows it as; the same for mesh edges.
+    inputs: Vec<PreparedInputs>,
+    edges: Vec<f64>,
+}
+
+/// What the model is told an edit changed, read before it.
+struct Was {
+    revision: u64,
+    acceptance: TopologyAcceptance,
+    mesh_edge: f64,
+    pulses: usize,
+    switches: usize,
+    history: (usize, usize),
+    undo_replaces: bool,
+    redo_replaces: bool,
+}
+
+/// The state the model and the runtime are compared on, with tokens as the
+/// runtime knows them.
+#[derive(Debug, PartialEq)]
+struct Projection {
+    active: Option<TopologyToken>,
+    uploading: Option<(TopologyToken, u8)>,
+    source_commit: Option<TopologyToken>,
+    packed: Option<TopologyToken>,
+    ready: Option<TopologyToken>,
+    preparing: bool,
+    last_error: Option<TopologyToken>,
+    request_stands: bool,
+    reset: bool,
+    drop: bool,
+    pulses: usize,
+    switches: usize,
+    fault: bool,
+    running: bool,
+    stepping: bool,
+    generation: u8,
+    installed: bool,
+    carries: Option<TopologyToken>,
+    ready_status: bool,
+    failed: bool,
+    behind: bool,
+    handoff: bool,
+    refused: bool,
+    event: bool,
+    display: u8,
 }
 
 /// What a step is judged against, read before it.
@@ -224,7 +288,298 @@ impl Session {
             running: None,
             scenes,
             accepted_revision: 0,
+            model: model::Protocol::default(),
+            tokens: Vec::new(),
+            inputs: Vec::new(),
+            edges: Vec::new(),
         }
+        .named()
+    }
+
+    /// The model told the scene's inputs by name, as at launch.
+    fn named(mut self) -> Self {
+        self.model.inputs = self.inputs_name();
+        self.model.edge = self.edge_name();
+        self
+    }
+
+    /// The model's name for the mesh edge now.
+    fn edge_name(&mut self) -> u8 {
+        let edge = self.state.editor.document.presentation.mesh_edge;
+        let index = match self.edges.iter().position(|known| *known == edge) {
+            Some(index) => index,
+            None => {
+                self.edges.push(edge);
+                self.edges.len() - 1
+            }
+        };
+        index as u8
+    }
+
+    /// The model's name for what a preparation reads of the document now.
+    fn inputs_name(&mut self) -> u8 {
+        let document = &self.state.editor.document;
+        let index = match self.inputs.iter().position(|known| known.read(document)) {
+            Some(index) => index,
+            None => {
+                self.inputs.push(PreparedInputs::of(document));
+                self.inputs.len() - 1
+            }
+        };
+        index as u8
+    }
+
+    fn was(&self) -> Was {
+        let document = &self.state.editor.document;
+        Was {
+            revision: self.state.editor.revision,
+            acceptance: self.state.editor.acceptance,
+            mesh_edge: document.presentation.mesh_edge,
+            pulses: self.state.pending_pulses.len(),
+            switches: self.state.pending_switches.len(),
+            history: self.state.editor.history_len(),
+            undo_replaces: self.state.editor.undo_replaces_scene(),
+            redo_replaces: self.state.editor.redo_replaces_scene(),
+        }
+    }
+
+    /// The real token the model's `token` names.
+    fn real(&self, token: model::Token) -> TopologyToken {
+        self.tokens[token as usize]
+    }
+
+    /// Whether the draft as it stands would validate.
+    fn draft_valid(&self) -> bool {
+        self.state.editor.document.model.draft.compile(0).is_ok()
+    }
+
+    /// The model's step for `act`, with the inputs the runtime met.
+    fn model_step(&mut self, act: &Act, was: &Was, log: &[ProtocolNote]) -> Option<model::Step> {
+        let inputs = self.inputs_name();
+        let state = &self.state;
+        Some(match act {
+            Act::Frame(_) => {
+                let route = log.iter().rev().find_map(|note| match *note {
+                    ProtocolNote::InPlace => Some(model::Route::InPlace),
+                    ProtocolNote::Patch { built, packable } => {
+                        Some(model::Route::Patch { built, packable })
+                    }
+                    ProtocolNote::Pack => Some(model::Route::Pack),
+                    _ => None,
+                });
+                let begin = log.iter().find_map(|note| match *note {
+                    ProtocolNote::Begin { install, ok } => Some((install, ok)),
+                    _ => None,
+                });
+                model::Step::Frame(model::Frame {
+                    validated: was.acceptance == TopologyAcceptance::Pending
+                        && state.editor.acceptance != TopologyAcceptance::Pending,
+                    inputs,
+                    prepared: log
+                        .iter()
+                        .find_map(|note| match *note {
+                            ProtocolNote::Prepared(true) => Some(model::Prepared::Done),
+                            ProtocolNote::Prepared(false) => Some(model::Prepared::Failed),
+                            _ => None,
+                        })
+                        .unwrap_or(model::Prepared::NotYet),
+                    route: route.unwrap_or(model::Route::Pack),
+                    install: begin.is_some_and(|(install, _)| install),
+                    begun: begin.is_none_or(|(_, ok)| ok),
+                    pulse: log
+                        .iter()
+                        .find_map(|note| match *note {
+                            ProtocolNote::Pulse(built) => Some(built),
+                            _ => None,
+                        })
+                        .unwrap_or(true),
+                    switch: log
+                        .iter()
+                        .find_map(|note| match *note {
+                            ProtocolNote::Switch(built) => Some(built),
+                            _ => None,
+                        })
+                        .unwrap_or(true),
+                    behind: !self.request.caught_up(),
+                    retime: log.contains(&ProtocolNote::Retimed),
+                })
+            }
+            Act::Readbacks(_) => model::Step::Readbacks {
+                caught_up: self.request.caught_up(),
+            },
+            Act::Handoff(admit) => model::Step::Handoff { admit: *admit },
+            Act::Event(take) => model::Step::Settle { take: *take },
+            Act::Fault => model::Step::Fault,
+            Act::Validate => model::Step::Validate { inputs },
+            Act::Reset => model::Step::Reset,
+            Act::Run(on) => model::Step::Run(*on),
+            Act::Step => model::Step::StepOnce,
+            Act::Pulse(_) => {
+                if state.pending_pulses.len() <= was.pulses {
+                    return None;
+                }
+                model::Step::Pulse
+            }
+            Act::Switch => model::Step::Switch {
+                queued: state.pending_switches.len() > was.switches,
+            },
+            Act::Edge(_) => {
+                if state.editor.document.presentation.mesh_edge == was.mesh_edge {
+                    return None;
+                }
+                let edge = self.edge_name();
+                model::Step::Edge { edge }
+            }
+            // The speed reaches the model through the frames that retime.
+            Act::Speed(_) => return None,
+            Act::Material { .. }
+            | Act::Nudge(_)
+            | Act::Source { .. }
+            | Act::Open(_)
+            | Act::Undo
+            | Act::Redo => {
+                // A scene opened replaces this one, and so does a step of the
+                // history that crosses a replacement.
+                let moved = state.editor.history_len() != was.history;
+                let replaced = match act {
+                    Act::Open(_) => true,
+                    Act::Undo => moved && was.undo_replaces,
+                    Act::Redo => moved && was.redo_replaces,
+                    _ => false,
+                };
+                if replaced {
+                    let edge = self.edge_name();
+                    model::Step::Replace {
+                        inputs,
+                        edge,
+                        valid: self.draft_valid(),
+                    }
+                } else if state.editor.revision != was.revision {
+                    model::Step::Edit {
+                        inputs,
+                        valid: self.draft_valid(),
+                    }
+                } else {
+                    return None;
+                }
+            }
+        })
+    }
+
+    /// The runtime in the model's terms.
+    fn projection(&self) -> Projection {
+        let state = &self.state;
+        Projection {
+            active: state.runtime.active().map(|active| active.bundle.token),
+            uploading: state
+                .uploading
+                .as_ref()
+                .map(|upload| (upload.token, upload.generation as u8)),
+            source_commit: state.source_commit.as_ref().map(|commit| commit.token),
+            packed: state.gpu_upload_preparation.as_ref().map(|pack| pack.token),
+            ready: state.runtime.ready().map(|ready| ready.bundle.token),
+            preparing: state.runtime.preparing_timing().is_some(),
+            last_error: state.runtime.last_error().map(|error| error.token),
+            request_stands: state
+                .requested_inputs
+                .as_ref()
+                .is_some_and(|inputs| inputs.read(&state.editor.document)),
+            reset: state.reset_requested,
+            drop: state.drop_requested,
+            pulses: state.pending_pulses.len(),
+            switches: state.pending_switches.len(),
+            fault: state.solver_fault.is_some(),
+            running: state.wave_running,
+            stepping: state.wave_step,
+            generation: self.request.generation() as u8,
+            installed: self.request.running_node_count().is_some(),
+            carries: self
+                .running
+                .filter(|_| self.request.running_node_count().is_some())
+                .map(|(_, token)| token),
+            ready_status: self.request.ready(),
+            failed: self.request.failed(),
+            behind: !self.request.caught_up(),
+            handoff: self.request.handoff_outcome() == CanonicalGpuHandoffOutcome::Pending,
+            refused: matches!(
+                self.request.handoff_outcome(),
+                CanonicalGpuHandoffOutcome::Rejected(_)
+            ),
+            event: self.request.live_event_pending(),
+            display: self.display.generation as u8,
+        }
+    }
+
+    /// The model's state in the same terms.
+    fn modelled(&self) -> Projection {
+        let model = &self.model;
+        Projection {
+            active: model.active.map(|token| self.real(token)),
+            uploading: model
+                .uploading
+                .map(|upload| (self.real(upload.token), upload.generation)),
+            source_commit: model.source_commit.map(|token| self.real(token)),
+            packed: model.packed.map(|token| self.real(token)),
+            ready: model.ready.map(|token| self.real(token)),
+            preparing: model.preparing.is_some(),
+            last_error: model.last_error.map(|token| self.real(token)),
+            request_stands: model.requested_inputs == Some(model.inputs),
+            reset: model.reset,
+            drop: model.drop,
+            pulses: model.pulses as usize,
+            switches: model.switches as usize,
+            fault: model.fault,
+            running: model.running,
+            stepping: model.stepping,
+            generation: model.generation,
+            installed: model.device.is_some(),
+            carries: model.device.map(|device| self.real(device.token)),
+            ready_status: model
+                .device
+                .is_some_and(|device| device.ready && !device.failed),
+            failed: model.failed(),
+            behind: model
+                .device
+                .is_some_and(|device| !device.caught_up && !device.failed),
+            handoff: model.handoff.is_some(),
+            refused: model.refused,
+            event: model.event.is_some(),
+            display: model.display,
+        }
+    }
+
+    /// Steps the model as the runtime stepped and holds the two to one
+    /// state: where they part, either the runtime left the protocol the
+    /// proofs are about or the model does not describe it.
+    fn conform(&mut self, act: &Act, was: Was) {
+        let log = std::mem::take(&mut self.state.protocol_log);
+        let requested = self.model.requested;
+        if let Some(step) = self.model_step(act, &was, &log) {
+            self.model.step(step);
+            self.model.check();
+        }
+        for note in &log {
+            if let ProtocolNote::Requested(real) = *note {
+                let token = self
+                    .model
+                    .requested
+                    .filter(|token| Some(*token) != requested)
+                    .unwrap_or_else(|| {
+                        panic!("the runtime requested {real:?} and the model did not")
+                    });
+                assert_eq!(
+                    token as usize,
+                    self.tokens.len(),
+                    "the model's tokens are in order"
+                );
+                self.tokens.push(real);
+            }
+        }
+        assert_eq!(
+            self.projection(),
+            self.modelled(),
+            "after {act:?} the runtime and the protocol model part"
+        );
     }
 
     fn before(&self) -> Before {
@@ -479,10 +834,13 @@ impl Session {
 
     fn step(&mut self, act: &Act) {
         let before = self.before();
+        let was = self.was();
         self.state.notices.clear();
+        self.state.protocol_log.clear();
         self.act(act);
         self.observe(act, before);
         self.check();
+        self.conform(act, was);
     }
 
     fn check(&self) {
@@ -625,7 +983,7 @@ impl Session {
         ];
         for _ in 0..32 {
             if self.request.failed() {
-                self.state.wave_running = true;
+                self.step(&Act::Run(true));
             }
             for act in &round {
                 self.step(act);

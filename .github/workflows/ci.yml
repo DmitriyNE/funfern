@@ -187,6 +187,26 @@ jobs:
         with:
           path: dist
 
+  kani:
+    name: Protocol proofs
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Prove the runtime protocol
+        # The runtime's generation protocol as a small state machine
+        # (crates/funfern-protocol), every sequence of its steps checked to
+        # the depths its proofs name. The runtime tests hold the real runtime
+        # to the same machine, so a proof here is about the app's. Kani is
+        # pinned to the version the proofs were last checked with locally.
+        uses: model-checking/kani-github-action@v1.1
+        with:
+          kani-version: '0.67.0'
+          args: '-p funfern-protocol'
+
   deploy:
     name: Deploy GitHub Pages
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
