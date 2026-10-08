@@ -2745,6 +2745,86 @@ mod tests {
         );
     }
 
+    /// Found by the generated reopening sequences as `[Advanced, Toggle,
+    /// Press(Apply), Reopen(File)]`: "Divide the coefficient" ticked on a row
+    /// with no drive and no Switch changed nothing, and a file read the law
+    /// as the plain linear one, so the tick was gone after a reload and a
+    /// drive added then multiplied. It is offered only on a row with a drive
+    /// or a Switch now, and removing the last of them takes it away.
+    #[test]
+    fn dividing_is_offered_only_where_there_is_something_to_divide() {
+        let mut state = Playground::default();
+        let selection = state.resolved_material_selection();
+        state.set_material_advanced(selection, true);
+        let driver = PanelDriver::new();
+        let divide = |widgets: &[LaidOut]| {
+            widgets
+                .iter()
+                .filter(|widget| widget.label == "Divide the coefficient")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
+        assert!(divide(&widgets).is_empty(), "offered on a linear material");
+
+        let material = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(selection)
+            .unwrap()
+            .clone();
+        let pump = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Parametric pump" && preset.row == LawPresetRow::Mass)
+            .unwrap();
+        state
+            .editor
+            .update_material(apply_law_preset(pump, &material).unwrap())
+            .unwrap();
+        // Opened afresh, as a click on it in the Library opens it.
+        state.material_edit = None;
+        let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
+        let offered = divide(&widgets);
+        assert_eq!(offered.len(), 1, "offered on the pumped row alone");
+        driver.pass(click(&offered[0]), |ui| state.materials_panel(ui));
+        assert!(state.material_edit.as_ref().unwrap().mass_law.inverted);
+
+        // The pump taken off leaves nothing to divide.
+        let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
+        let drive = widgets
+            .iter()
+            .find(|widget| widget.label == "Parametric pump")
+            .expect("the row's Drive");
+        driver.pass(click(drive), |ui| state.materials_panel(ui));
+        let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
+        let none = widgets
+            .iter()
+            .find(|widget| widget.label == "None" && widget.enabled)
+            .expect("the Drive list's None");
+        driver.pass(click(none), |ui| state.materials_panel(ui));
+        let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
+        assert_eq!(
+            state.material_edit.as_ref().unwrap().mass_law,
+            CoefficientLaw::linear()
+        );
+        assert!(divide(&widgets).is_empty());
+
+        let apply = widgets
+            .iter()
+            .find(|widget| widget.label == "Apply")
+            .unwrap();
+        driver.pass(click(apply), |ui| state.materials_panel(ui));
+        let document = &state.editor.document;
+        let saved = funfern_app::topology_persistence::save(document).unwrap();
+        assert_eq!(
+            &funfern_app::topology_persistence::parse_document(saved.as_bytes()).unwrap(),
+            document,
+            "the applied material comes back from a file as it was"
+        );
+    }
+
     /// The pump helper offers each enabled source that has a frequency, and
     /// only those.
     #[test]

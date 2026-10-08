@@ -304,7 +304,8 @@ names or with every expression evaluated at the material frame's origin. Each ro
   document's Damping σ appears as its primary row's loss, marked legacy, and
   moves to that named loss the first time it is edited. **Advanced view**,
   under the material's name, opens every law slot of each row - field response,
-  drive, Switch alternate, divide, and a driven loss - with the effective law
+  drive, Switch alternate, divide (offered on a row with a drive or a Switch,
+  the only things it divides), and a driven loss - with the effective law
   evaluated at the frame origin, and a **Short-wave loss** group: Off,
   Mesh-scale trim (α = 0.05) or α by hand up to 1. It damps waves near the
   mesh's own resolution, about α/(2h) at its ceiling with h the largest step,

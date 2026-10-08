@@ -20607,3 +20607,22 @@ at launch) and the browser's autosave (the compact form, restored at launch).
   a file, and a physics switch, normalize such a law to the plain linear one
   and drop it. A drive added afterwards divides in the session that ticked
   it and multiplies after a reload.
+
+## 2026-10-08 — Dividing is offered only where there is something to divide
+
+Found by the reopening sequences as `[Advanced, Toggle, Press(Apply),
+Reopen(File)]`. "Divide the coefficient" was offered on every row whose field
+response is linear, a row with no drive and no Switch among them, where it
+changes nothing. The session kept the tick, but a file's decoder and a physics
+switch normalize such a law to the plain linear one, so it was gone after a
+reload, and a drive added afterwards multiplied in a session that had divided
+before. The checkbox is now offered only on a linear row with a drive or a
+Switch, and an edit in the row's slots that leaves it with neither takes the
+tick with it, as a file would; a row merely shown is left as it is, so the
+Advanced view still edits nothing by being open. The user guide's Advanced
+view line says where it is offered.
+`dividing_is_offered_only_where_there_is_something_to_divide`, which fails
+with the fix cut out at its first assertion; the harness's tolerance is gone,
+and the reopening machine's seed file holds this finding, which it found
+again after 29 passing sequences with the fix cut out and shrank to the same
+four steps. 2,000 reopening sequences pass with the fix.

@@ -790,6 +790,7 @@ fn coefficient_law_editor(
     formulas: &mut FormulaEdits,
     timing: &mut DriveTiming,
 ) -> bool {
+    let before = law.clone();
     let kind = response_kind(&law.field);
     let mut chosen = kind;
     ui.horizontal(|ui| {
@@ -925,13 +926,23 @@ fn coefficient_law_editor(
             formulas,
         );
     }
-    if law.field == FieldLaw::Linear {
+    // Dividing acts on the drive and the Switch, so it is offered only on a
+    // row with one of them. On a row with neither it changed nothing, and a
+    // file and a physics switch read such a law as the plain linear one, so
+    // the tick held in the session was gone after a reload, and a drive added
+    // then multiplied where it had divided.
+    if law.field == FieldLaw::Linear && !law.is_linear() {
         ui.checkbox(&mut law.inverted, "Divide the coefficient")
             .on_hover_text(
                 "The drive and Switch divide this coefficient instead of multiplying it",
             );
-    } else if law.inverted {
+    } else if law.inverted && law.field != FieldLaw::Linear {
         ui.small("A divided field response does not run; clear it or choose Linear.");
+    }
+    // An edit that leaves the row nothing to divide takes the tick with it,
+    // as a file would. A row merely shown is left as it is.
+    if *law != before && law.is_linear() {
+        *law = law.normalized();
     }
     fired
 }

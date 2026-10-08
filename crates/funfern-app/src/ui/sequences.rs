@@ -333,15 +333,6 @@ fn kept(document: &TopologyDocument) -> TopologyDocument {
     readouts
         .probes
         .retain(|id, _| model.probes.iter().any(|probe| probe.id == *id));
-    // FINDING (temporary tolerance): "Divide the coefficient" ticked on a
-    // law with no drive and no Switch is held by the session, and a file
-    // normalizes the law to the plain linear one.
-    for scene in [&mut model.draft, &mut model.accepted] {
-        for material in &mut scene.materials {
-            material.mass_law = material.mass_law.normalized();
-            material.stiffness_law = material.stiffness_law.normalized();
-        }
-    }
     kept
 }
 
