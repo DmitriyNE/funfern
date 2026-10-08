@@ -4519,13 +4519,7 @@ impl CanonicalGpuRequest {
     }
 
     pub fn clear(&mut self, assets: &mut Assets<ShaderBuffer>, commands: &mut Commands) {
-        if let Some(handoff) = self.handoff.take() {
-            for handle in handoff.target.owned() {
-                assets.remove(handle.id());
-            }
-            assets.remove(handoff.transfer.id());
-            commands.entity(handoff.receipt_entity).despawn();
-        }
+        self.withdraw_handoff(assets, commands);
         if let Some(event) = self.live_event.take() {
             assets.remove(event.upload.id());
         }
@@ -4547,6 +4541,23 @@ impl CanonicalGpuRequest {
         // for good, and the next generation's upload, which waits on it,
         // never started. `install` sets its own count after this.
         self.desired_steps = self.stats.completed_steps();
+    }
+
+    /// Drops a pending handoff on the host's word: its target and transfer
+    /// go and its receipt is no longer read, so the running generation stays
+    /// the running one. One the device has already admitted is not pending
+    /// and is left alone.
+    pub fn withdraw_handoff(&mut self, assets: &mut Assets<ShaderBuffer>, commands: &mut Commands) {
+        let Some(handoff) = self.handoff.take() else {
+            return;
+        };
+        for handle in handoff.target.owned() {
+            assets.remove(handle.id());
+        }
+        assets.remove(handoff.transfer.id());
+        commands.entity(handoff.receipt_entity).despawn();
+        self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
+        self.revision = self.revision.wrapping_add(1).max(1);
     }
 
     pub fn request_steps(&mut self, count: u64) {

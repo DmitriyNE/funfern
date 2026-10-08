@@ -607,7 +607,17 @@ impl Playground {
             }
         }
         if let Some(upload) = &self.uploading {
-            let failure = if request.failed() {
+            // Whether the device already runs the candidate: an install
+            // replaces the running generation at once, and an admitted
+            // handoff has made the target the running one.
+            let runs_candidate = request.generation() == upload.generation;
+            let failure = if request.failed() && !runs_candidate {
+                // The running generation, the one the candidate hands off
+                // from, faulted before the device admitted the handoff. The
+                // handoff goes on the device too: left there it could still be
+                // admitted, and the device ran a candidate the host had
+                // dropped. The running generation stays, paused by the fault.
+                request.withdraw_handoff(assets, commands);
                 let reason = request.stats().failure();
                 Some(format!(
                     "Accepted canonical GPU generation faulted: {} (failure code {reason}); candidate was not committed",
@@ -627,7 +637,12 @@ impl Playground {
                 self.message = failure;
                 self.unseen_error = true;
                 self.uploading = None;
-            } else if request.ready()
+            // A fault on a candidate the device already runs is its own, and
+            // the generation it replaced is gone: the host publishes what the
+            // device runs, and the fault pauses it as any fault does. Kept
+            // back, the host went on pacing and painting a topology the
+            // device no longer had.
+            } else if (request.ready() || (request.failed() && runs_candidate))
                 && display.generation == upload.generation
                 && display.primary_flux.len() == upload.degrees_of_freedom
                 && !matches!(

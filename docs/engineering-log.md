@@ -20669,3 +20669,28 @@ for.
   6.08e-3, and its next frame failing "Temporal reconstruction does not match
   the GPU table layout"). Until then the device faults only while nothing
   uploads, and the rest test accepts a held draft's runtime as it stands.
+
+## 2026-10-08 — A fault during an upload leaves the host and the device agreed
+
+Found by the runtime sequences. A fault while an upload waited made the host
+reject the candidate and keep its old topology, whatever the device held. An
+install had already replaced the running generation, so the device ran the
+rejected candidate (revision 2 at a 6.41e-3 step, the host on revision 1
+pacing 6.41e-3); and a pending handoff stayed on the device and could still be
+admitted (the device on 1,519 nodes at 2.0e-3, the host on 1,579 at 6.08e-3,
+its next frame failing "Temporal reconstruction does not match the GPU table
+layout"), with edits unable to hand off until a Reset.
+
+- One rule decides it: whether the device already runs the candidate, its
+  running generation the one the upload waits for. If so, an install or an
+  admitted handoff, the fault is the candidate's own and the generation it
+  replaced is gone, so the host publishes the candidate and the fault pauses
+  it as any fault does, Run retrying from its last accepted step. If not, the
+  running generation faulted before the handoff was admitted, so the handoff
+  is withdrawn on the device, `CanonicalGpuRequest::withdraw_handoff`, which
+  `clear` now uses too, and the running generation stays, paused.
+- `a_fault_on_an_installed_candidate_publishes_what_the_device_runs` and
+  `a_fault_while_a_handoff_waits_withdraws_it`, both failing with the fix cut
+  out; the test device faults during uploads again, and the runtime machine's
+  seed file holds this finding, which it found again in ten steps with the fix
+  cut out. 2,000 runtime sequences pass with the fix.

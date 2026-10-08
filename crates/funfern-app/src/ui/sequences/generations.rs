@@ -291,16 +291,7 @@ impl Session {
                     }
                 });
             }
-            // FINDING (temporary tolerance): a fault while an upload waits
-            // makes the host drop the candidate and keep its old topology,
-            // while the device keeps what it holds: an installed candidate
-            // already runs, and a pending handoff can still be admitted. So
-            // the device here faults only while nothing uploads.
-            Act::Fault => {
-                if self.state.uploading.is_none() {
-                    self.request.fail(CANONICAL_FAILURE_NON_FINITE);
-                }
-            }
+            Act::Fault => self.request.fail(CANONICAL_FAILURE_NON_FINITE),
             Act::Validate => settle(&mut self.state.editor),
             Act::Material { nth, kind } => {
                 let materials = &self.state.editor.document.model.draft.materials;
@@ -674,4 +665,102 @@ prop_state_machine! {
     })]
     #[test]
     fn the_host_and_the_device_agree_on_what_runs(sequential 1..120 => Generations);
+}
+
+/// Found by the runtime sequences: a fault on a candidate just installed made
+/// the host reject it and keep its old topology, which the install had already
+/// replaced on the device, and the host paced the candidate's step for a
+/// topology that no longer ran. The host publishes what the device runs now,
+/// and the fault pauses it as any fault does; Run retries from there.
+#[test]
+fn a_fault_on_an_installed_candidate_publishes_what_the_device_runs() {
+    let mut session = Session::start();
+    session.quiesce();
+    // An edit with Reset pressed starts afresh, so it installs.
+    for act in [
+        Act::Material { nth: 0, kind: 0 },
+        Act::Reset,
+        Act::Validate,
+        Act::Frame(None),
+        Act::Readbacks(u64::MAX),
+        Act::Frame(None),
+    ] {
+        session.step(&act);
+    }
+    let upload = session
+        .state
+        .uploading
+        .as_ref()
+        .expect("an install uploads");
+    assert_eq!(upload.generation, session.request.generation(), "installed");
+    let candidate = upload.token;
+    session.step(&Act::Fault);
+    session.step(&Act::Readbacks(0));
+    session.step(&Act::Frame(Some(0)));
+    assert!(session.state.uploading.is_none());
+    assert_eq!(
+        session
+            .state
+            .runtime
+            .active()
+            .map(|active| active.bundle.token),
+        Some(candidate),
+        "the host runs what the device runs"
+    );
+    session.step(&Act::Frame(Some(0)));
+    assert!(!session.state.wave_running, "the fault pauses the run");
+    assert!(
+        session
+            .state
+            .notices
+            .iter()
+            .any(|notice| notice.title == "Simulation paused")
+    );
+    session.step(&Act::Run(true));
+    session.quiesce();
+}
+
+/// Found by the runtime sequences: a fault on the running generation while a
+/// handoff waited made the host drop the candidate, but the handoff stayed on
+/// the device and could still be admitted, which left the device on 1,519
+/// nodes at a step the host had never paced while the host kept 1,579. The
+/// host withdraws the handoff now, and the running generation stays, paused.
+#[test]
+fn a_fault_while_a_handoff_waits_withdraws_it() {
+    let mut session = Session::start();
+    session.quiesce();
+    for act in [
+        Act::Nudge(2),
+        Act::Validate,
+        Act::Frame(None),
+        Act::Readbacks(u64::MAX),
+        Act::Frame(None),
+    ] {
+        session.step(&act);
+    }
+    assert_eq!(
+        session.request.handoff_outcome(),
+        CanonicalGpuHandoffOutcome::Pending
+    );
+    let running = session.request.generation();
+    let active = session.state.runtime.active().unwrap().bundle.token;
+    session.step(&Act::Fault);
+    session.step(&Act::Frame(Some(0)));
+    assert!(session.state.uploading.is_none());
+    assert_ne!(
+        session.request.handoff_outcome(),
+        CanonicalGpuHandoffOutcome::Pending,
+        "the handoff was withdrawn"
+    );
+    session.step(&Act::Handoff(true));
+    assert_eq!(
+        session.request.generation(),
+        running,
+        "nothing was admitted"
+    );
+    assert_eq!(session.state.runtime.active().unwrap().bundle.token, active);
+    session.step(&Act::Frame(Some(0)));
+    assert!(!session.state.wave_running, "the fault pauses the run");
+    session.step(&Act::Run(true));
+    session.quiesce();
 }
