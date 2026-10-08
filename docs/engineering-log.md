@@ -20694,3 +20694,33 @@ layout"), with edits unable to hand off until a Reset.
   out; the test device faults during uploads again, and the runtime machine's
   seed file holds this finding, which it found again in ten steps with the fix
   cut out. 2,000 runtime sequences pass with the fix.
+
+## 2026-10-08 — An invalid draft no longer holds the run still
+
+Found by the runtime sequences. `request_runtime` prepared nothing unless the
+draft was valid, though a preparation reads only the accepted scene and what
+lies outside the draft. A scene whose draft an edit made invalid before its
+first validation never started, nor would one opened with an invalid draft,
+and a point source switched off while the draft was invalid ran on; probes,
+the far field, the mesh edge and the speed went the same way.
+
+- A request now waits only while the draft is being validated. While it is
+  invalid, a request is accounted for by what it read, `PreparedInputs` (the
+  accepted scene, the source, the probes and the far field) rather than by
+  the revision, which every edit of the invalid draft moves without changing
+  any of them; so those edits prepare nothing, and an edit outside the draft
+  prepares the accepted scene with it.
+- That exposed an editor defect behind it. Validation compiles the accepted
+  scene only when it accepts a draft, so an undo, redo or cancel that brought
+  back a model with an invalid draft kept the compilation of the scene
+  accepted since, which painting, hit tests and welds read in the invalid
+  draft's place and preparation now read too. `follow_accepted` compiles the
+  restored accepted scene when a whole model comes back with another one.
+- `a_scene_invalid_before_it_first_ran_runs_its_accepted_scene`,
+  `an_invalid_draft_holds_back_nothing_outside_it` and
+  `undoing_to_an_invalid_draft_compiles_its_accepted_scene`, each failing with
+  its part cut out. The runtime machine's rest test asks an invalid draft's
+  run for the accepted scene and what lies outside the draft as they stand,
+  and its seed file gained both findings. The user guide's Drafts entry says
+  what the run does meanwhile. 2,000 runtime sequences pass, and 500 of each
+  other machine.

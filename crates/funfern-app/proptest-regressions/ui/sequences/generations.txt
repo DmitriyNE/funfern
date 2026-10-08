@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 9342e06bd7afd988cbe04d499cd17caa152c88a8d45c70a7b16612eb6579d005 # shrinks to (initial_state, transitions, seen_counter) = ((), [Validate, Frame(Some(0)), Material { nth: 0, kind: 4 }, Frame(None), Readbacks(0), Frame(Some(0)), Readbacks(1), Frame(None), Fault, Frame(Some(0))], None)
+cc 9f169386559094c8096b8cfe7c16231e62fe7fab6ce3ff812a60fc0e49aa5c9e # shrinks to (initial_state, transitions, seen_counter) = ((), [Nudge(123), Edge(0), Nudge(0), Undo], None)
+cc b31431ce1d29ffbb3af31775d407c2f7189d7debf645573e089046042549aaba # shrinks to (initial_state, transitions, seen_counter) = ((), [Edge(0), Nudge(43), Nudge(128), Nudge(2), Validate, Undo], None)

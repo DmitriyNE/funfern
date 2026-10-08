@@ -524,7 +524,9 @@ names or with every expression evaluated at the material frame's origin. Each ro
   example, or Undo/Redo across one) opens framed, as launch does. Panel scrolling and text editing do not manipulate the viewport.
 - **Drafts:** curves are teal, accepted or being checked, and red while the
   draft is invalid; the boundary laws step aside then so the red reads. The
-  last accepted scene stays as a subdued reference.
+  last accepted scene stays as a subdued reference, and the simulation runs
+  it: a scene opened with an invalid draft starts on it, and the point
+  source, probes, far field, mesh and speed changed meanwhile reach it.
   Invalid edits remain after release. Escape during a drag restores its starting
   document; Undo can restore earlier accepted snapshots.
 - **History:** Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes outside text editing.

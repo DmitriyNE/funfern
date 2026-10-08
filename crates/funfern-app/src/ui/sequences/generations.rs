@@ -157,6 +157,21 @@ fn fixture(other: bool) -> TopologyDocument {
     document
 }
 
+/// Whether `active` was prepared from what a preparation reads of `document`:
+/// its accepted scene, source, probes and far field. The source's region is
+/// left out, as the preparation resolves it.
+fn runs_document(active: &PreparedTopology, document: &TopologyDocument) -> bool {
+    let model = &document.model;
+    *active.bundle.authored == model.accepted
+        && active.point_source
+            == PointSource {
+                region: active.point_source.region,
+                ..model.source
+            }
+        && *active.probe_definitions == model.probes[..]
+        && active.far_field_settings == model.far_field
+}
+
 /// The host and the device under test, and what the harness has watched.
 struct Session {
     state: Playground,
@@ -514,14 +529,6 @@ impl Session {
     /// naming that revision, and nothing waiting.
     fn unsettled(&self) -> Option<String> {
         let state = &self.state;
-        // FINDING (temporary tolerance): while the draft is not valid nothing
-        // is prepared. Edits outside the draft, such as the point source, wait
-        // for it, and a scene that has not started does not start, with a
-        // Reset or a Switch pressed meanwhile waiting for good.
-        let held = state.editor.acceptance != TopologyAcceptance::Valid;
-        if held && state.runtime.active().is_none() {
-            return None;
-        }
         let waits = [
             ("a Reset", state.reset_requested),
             ("a drop", state.drop_requested),
@@ -545,29 +552,43 @@ impl Session {
         if let Some((what, _)) = waits.iter().find(|(_, waiting)| *waiting) {
             return Some(format!("{what} still waits"));
         }
-        if held {
-            return state.runtime.active().and_then(|active| {
-                (self.running.map(|(_, token)| token) != Some(active.bundle.token))
-                    .then(|| "the device runs another topology than the host's".to_owned())
-            });
-        }
-        let target = self.accepted_revision;
-        if state
-            .runtime
-            .last_error()
-            .is_some_and(|error| error.token.document_revision == target)
-        {
+        // An invalid draft leaves the accepted scene alone, and the runtime
+        // comes to rest on it and on what lies outside the draft as they
+        // stand; a valid one, on its own revision. Either way an error naming
+        // the request that read them will do instead.
+        let held = state.editor.acceptance != TopologyAcceptance::Valid;
+        let refused = if held {
+            state
+                .requested_inputs
+                .as_ref()
+                .is_some_and(|inputs| inputs.read(&state.editor.document))
+                && state.runtime.last_error().is_some_and(|error| {
+                    Some(error.token.document_revision) == state.requested_revision
+                })
+        } else {
+            state
+                .runtime
+                .last_error()
+                .is_some_and(|error| error.token.document_revision == self.accepted_revision)
+        };
+        if refused {
             return None;
         }
         let Some(active) = state.runtime.active() else {
-            return Some(format!(
-                "nothing runs revision {target}, and no error says why"
-            ));
+            return Some("nothing runs, and no error says why".into());
         };
-        if active.bundle.token.document_revision != target {
+        if held {
+            if !runs_document(active, &state.editor.document) {
+                return Some(
+                    "the run is not the accepted scene with the source, probes and far field \
+                     as they stand, and no error says why"
+                        .into(),
+                );
+            }
+        } else if active.bundle.token.document_revision != self.accepted_revision {
             return Some(format!(
-                "revision {} runs where {target} was accepted, and no error says why",
-                active.bundle.token.document_revision
+                "revision {} runs where {} was accepted, and no error says why",
+                active.bundle.token.document_revision, self.accepted_revision
             ));
         }
         if self.running.map(|(_, token)| token) != Some(active.bundle.token) {
@@ -763,4 +784,58 @@ fn a_fault_while_a_handoff_waits_withdraws_it() {
     assert!(!session.state.wave_running, "the fault pauses the run");
     session.step(&Act::Run(true));
     session.quiesce();
+}
+
+/// Found by the runtime sequences: a scene whose draft an edit made invalid
+/// before its first validation never ran, since nothing was prepared while
+/// the draft was invalid, and neither did one opened with an invalid draft.
+/// Its accepted scene is prepared without the draft now.
+#[test]
+fn a_scene_invalid_before_it_first_ran_runs_its_accepted_scene() {
+    let mut session = Session::start();
+    session.step(&Act::Nudge(3));
+    session.quiesce();
+    assert!(matches!(
+        session.state.editor.acceptance,
+        TopologyAcceptance::Invalid(_)
+    ));
+    let active = session
+        .state
+        .runtime
+        .active()
+        .expect("the accepted scene runs");
+    assert!(runs_document(active, &session.state.editor.document));
+}
+
+/// Found by the runtime sequences: the point source switched off while the
+/// draft was invalid ran on, as nothing was prepared until the draft was valid
+/// again. What lies outside the draft reaches the run now, and further edits
+/// of the invalid draft, which change nothing a preparation reads, prepare
+/// nothing.
+#[test]
+fn an_invalid_draft_holds_back_nothing_outside_it() {
+    let mut session = Session::start();
+    session.quiesce();
+    session.step(&Act::Nudge(3));
+    session.step(&Act::Validate);
+    session.step(&Act::Source {
+        cell: 5,
+        on: false,
+        high: false,
+    });
+    session.quiesce();
+    let active = session.state.runtime.active().unwrap();
+    assert!(!active.point_source.enabled, "the source went off");
+    let running = active.bundle.token;
+    session.step(&Act::Nudge(3));
+    session.step(&Act::Validate);
+    session.step(&Act::Frame(None));
+    assert!(
+        !session.state.preparation_in_progress() && session.state.uploading.is_none(),
+        "an edit of the invalid draft prepared the same scene again"
+    );
+    assert_eq!(
+        session.state.runtime.active().unwrap().bundle.token,
+        running
+    );
 }

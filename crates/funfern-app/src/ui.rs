@@ -459,6 +459,37 @@ struct PendingSourceCommit {
     serial: u32,
 }
 
+/// What a preparation reads of the document: the accepted scene and what
+/// lies outside the draft. While the draft is invalid only these can put the
+/// running scene out of date, since its edits leave the accepted scene alone.
+#[derive(Clone, PartialEq)]
+struct PreparedInputs {
+    accepted: TopologyScene,
+    source: PointSource,
+    probes: Vec<funfern_app::topology_editor::TopologyProbeDefinition>,
+    far_field: funfern_app::document::FarFieldSettings,
+}
+
+impl PreparedInputs {
+    fn of(document: &funfern_app::topology_editor::TopologyDocument) -> Self {
+        let model = &document.model;
+        Self {
+            accepted: model.accepted.clone(),
+            source: model.source,
+            probes: model.probes.clone(),
+            far_field: model.far_field,
+        }
+    }
+
+    fn read(&self, document: &funfern_app::topology_editor::TopologyDocument) -> bool {
+        let model = &document.model;
+        self.accepted == model.accepted
+            && self.source == model.source
+            && self.probes == model.probes
+            && self.far_field == model.far_field
+    }
+}
+
 struct PreparedGpuUpload {
     plan: CanonicalGpuPlan,
     transfer: Option<CanonicalGpuTransferPlan>,

@@ -125,6 +125,9 @@ pub struct Playground {
     pub(super) remesh_requested: bool,
     pub(super) requested_edge: f64,
     pub(super) requested_revision: Option<u64>,
+    /// What the latest request read, which accounts for it while the draft
+    /// is invalid and its revision moves with every edit.
+    pub(super) requested_inputs: Option<PreparedInputs>,
     pub(super) uploading: Option<Uploading>,
     pub(super) source_commit: Option<PendingSourceCommit>,
     pub(super) gpu_upload_preparation: Option<GpuUploadPreparation>,
@@ -454,6 +457,7 @@ impl Default for Playground {
             remesh_requested: false,
             requested_edge: f64::NAN,
             requested_revision: None,
+            requested_inputs: None,
             uploading: None,
             source_commit: None,
             gpu_upload_preparation: None,

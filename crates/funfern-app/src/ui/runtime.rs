@@ -145,7 +145,13 @@ impl Playground {
     }
 
     pub(super) fn request_runtime(&mut self) {
-        if self.editor.acceptance != TopologyAcceptance::Valid
+        // A draft still being validated may yet change the accepted scene, so
+        // a request waits for it. An invalid draft leaves the accepted scene
+        // alone, and what a preparation reads, that scene and what lies
+        // outside the draft, is prepared without it: waiting for a valid
+        // draft, a scene made invalid before its first validation never
+        // started, and a source switched off meanwhile ran on.
+        if self.editor.acceptance == TopologyAcceptance::Pending
             || self.editor.editing()
             || self.mesh_edge_dragging
             || self.source_commit.is_some()
@@ -167,17 +173,33 @@ impl Playground {
         // replaced before it can be read. The next edit, a different mesh edge
         // or an explicit remesh moves on; Reset publishes onto the accepted
         // generation and does not come through here.
+        // The revision a request for the document as it stands was made at.
+        // An invalid draft's edits move the revision and nothing a
+        // preparation reads, so while the draft is invalid the latest request
+        // still stands if what it read has not changed; otherwise every edit
+        // of the invalid draft would prepare the same scene again.
+        let standing = if self.editor.acceptance == TopologyAcceptance::Valid {
+            Some(self.editor.revision)
+        } else {
+            self.requested_revision.filter(|_| {
+                self.requested_inputs
+                    .as_ref()
+                    .is_some_and(|inputs| inputs.read(&self.editor.document))
+            })
+        };
         if !self.remesh_requested
-            && self.requested_revision == Some(self.editor.revision)
+            && standing.is_some()
+            && self.requested_revision == standing
             && self.requested_edge == self.editor.document.presentation.mesh_edge
             && (self.preparation_in_progress()
-                || self.runtime.active().is_some_and(|active| {
-                    active.bundle.token.document_revision == self.editor.revision
-                })
+                || self
+                    .runtime
+                    .active()
+                    .is_some_and(|active| Some(active.bundle.token.document_revision) == standing)
                 || self
                     .runtime
                     .last_error()
-                    .is_some_and(|failure| failure.token.document_revision == self.editor.revision))
+                    .is_some_and(|failure| Some(failure.token.document_revision) == standing))
         {
             return;
         }
@@ -210,6 +232,7 @@ impl Playground {
         ) {
             Ok(_) => {
                 self.requested_revision = Some(self.editor.revision);
+                self.requested_inputs = Some(PreparedInputs::of(&self.editor.document));
                 self.requested_edge = self.editor.document.presentation.mesh_edge;
                 self.reset_requested = false;
                 self.fresh_requested = false;

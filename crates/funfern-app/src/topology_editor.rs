@@ -427,8 +427,9 @@ impl TopologyEditor {
 
     pub fn cancel(&mut self) {
         if let Some(before) = self.before.take() {
-            self.document.model = before;
+            let left = std::mem::replace(&mut self.document.model, before);
             self.changed();
+            self.follow_accepted(&left.accepted);
         }
     }
 
@@ -437,11 +438,14 @@ impl TopologyEditor {
             return false;
         };
         self.before = None;
+        let left = std::mem::replace(&mut self.document.model, previous.model);
+        let accepted = left.accepted.clone();
         self.redo.push(HistoryStep {
-            model: std::mem::replace(&mut self.document.model, previous.model),
+            model: left,
             replaces_scene: previous.replaces_scene,
         });
         self.changed();
+        self.follow_accepted(&accepted);
         true
     }
 
@@ -450,12 +454,29 @@ impl TopologyEditor {
             return false;
         };
         self.before = None;
+        let left = std::mem::replace(&mut self.document.model, next.model);
+        let accepted = left.accepted.clone();
         self.undo.push(HistoryStep {
-            model: std::mem::replace(&mut self.document.model, next.model),
+            model: left,
             replaces_scene: next.replaces_scene,
         });
         self.changed();
+        self.follow_accepted(&accepted);
         true
+    }
+
+    /// Compiles the model's accepted scene again when a whole model has come
+    /// back with another one than `left`'s: an undo, a redo, a cancelled
+    /// edit. Validation compiles it only when it accepts a draft, so a model
+    /// restored with an invalid draft kept the compilation of the scene
+    /// accepted since, which painting, hit tests and preparation read in the
+    /// invalid draft's place.
+    fn follow_accepted(&mut self, left: &TopologyScene) {
+        if self.document.model.accepted != *left
+            && let Ok(compiled) = self.document.model.accepted.compile(self.revision)
+        {
+            self.compiled_accepted = compiled;
+        }
     }
 
     /// Whether the next undo swaps in a whole other scene: it steps back over
@@ -5468,6 +5489,61 @@ mod tests {
         assert!(editor.redo_replaces_scene());
         assert!(editor.redo());
         assert!(editor.undo_replaces_scene());
+    }
+
+    /// Found by the runtime sequences once an invalid draft no longer held the
+    /// run back: an undo to a model whose draft is invalid brought back its
+    /// accepted scene but kept the compilation of the one accepted since,
+    /// which painting, hit tests and preparation read in the invalid draft's
+    /// place. A redo has to bring the other back as well.
+    #[test]
+    fn undoing_to_an_invalid_draft_compiles_its_accepted_scene() {
+        let mut editor = TopologyEditor::default();
+        let curve = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(-0.3, 0.0), 0.25),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let start = match &editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(curve)
+            .unwrap()
+            .spline
+        {
+            CurveSpline::Closed(spline) => spline.controls()[0],
+            CurveSpline::Open(_) => unreachable!(),
+        };
+        let moved = |editor: &mut TopologyEditor, point: Point2| {
+            editor.begin();
+            editor.set_control(curve, 0, point).unwrap();
+            editor.commit();
+            settle(editor);
+        };
+        // Out of the domain, so invalid, the accepted scene left alone.
+        moved(&mut editor, Point2::new(start.x, start.y + 2.0));
+        assert!(matches!(editor.acceptance, TopologyAcceptance::Invalid(_)));
+        // Back in and a little moved, so accepted.
+        moved(&mut editor, Point2::new(start.x + 0.05, start.y));
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+
+        assert!(editor.undo());
+        settle(&mut editor);
+        assert!(matches!(editor.acceptance, TopologyAcceptance::Invalid(_)));
+        assert_eq!(
+            editor.compiled_accepted.geometry, editor.document.model.accepted.geometry,
+            "the compiled accepted scene is the restored model's"
+        );
+        assert!(editor.redo());
+        settle(&mut editor);
+        assert_eq!(
+            editor.compiled_accepted.geometry,
+            editor.document.model.accepted.geometry
+        );
     }
 
     /// Found by the generated sequences as `[New, New]`: a scene replacing an
