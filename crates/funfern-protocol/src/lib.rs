@@ -9,6 +9,10 @@
 //! frame, how a ready candidate is carried, whether a pulse lands in a region
 //! - is an input of the step that needs it.
 //!
+//! The decisions the protocol makes are functions of what the host has seen,
+//! and the app's runtime makes them by calling the same functions the model
+//! does (see [`decisions`]).
+//!
 //! [`Protocol::step`] takes one [`Step`] the way the app does: a host frame
 //! runs the blocks of `refresh_runtime` in its order, and the device's and
 //! the user's steps change what those blocks read. [`Protocol::check`] holds
@@ -21,6 +25,10 @@
 //! lockstep with the real runtime, taking the inputs the real one met, and
 //! the two states are compared after every step; that is what makes a proof
 //! about this machine a statement about the app's.
+
+pub mod decisions;
+
+use decisions::{Settlement, UploadSeen, settle_upload};
 
 /// A candidate, named by the order of its request.
 pub type Token = u8;
@@ -562,31 +570,37 @@ impl Protocol {
         }
         // An upload settles.
         if let Some(upload) = self.uploading {
-            let runs_candidate = self.generation == upload.generation;
-            let failed = self.device.is_some_and(|device| device.failed);
-            if failed && !runs_candidate {
-                // The handoff is withdrawn, and the running generation stays.
-                // One the device has already refused has nothing to withdraw.
-                if self.handoff.take().is_some() {
-                    self.refused = false;
+            let seen = UploadSeen {
+                runs_candidate: self.generation == upload.generation,
+                failed: self.failed(),
+                refused: self.refused,
+                ready: self.device.is_some_and(|device| device.ready),
+                shown: self.display == upload.generation,
+                handoff_pending: self.handoff.is_some(),
+            };
+            match settle_upload(seen) {
+                Settlement::Withdraw => {
+                    // One the device has already refused has nothing to
+                    // withdraw.
+                    if self.handoff.take().is_some() {
+                        self.refused = false;
+                    }
+                    self.reject(upload.token);
+                    self.uploading = None;
                 }
-                self.reject(upload.token);
-                self.uploading = None;
-            } else if self.refused {
-                self.reject(upload.token);
-                self.uploading = None;
-            } else if self
-                .device
-                .is_some_and(|device| device.ready || (device.failed && runs_candidate))
-                && self.display == upload.generation
-                && self.handoff.is_none()
-            {
-                self.uploading = None;
-                self.uploaded = Some(upload.token);
-                if self.requested == Some(upload.token) && self.ready == Some(upload.token) {
-                    self.ready = None;
-                    self.active = Some(upload.token);
+                Settlement::Refused => {
+                    self.reject(upload.token);
+                    self.uploading = None;
                 }
+                Settlement::Publish => {
+                    self.uploading = None;
+                    self.uploaded = Some(upload.token);
+                    if self.requested == Some(upload.token) && self.ready == Some(upload.token) {
+                        self.ready = None;
+                        self.active = Some(upload.token);
+                    }
+                }
+                Settlement::Wait => {}
             }
         }
         // Reset installs the active topology from zero.

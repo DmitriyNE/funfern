@@ -17,6 +17,7 @@ use funfern_app::topology_runtime::{
     TopologyToken,
 };
 use funfern_core::*;
+use funfern_protocol::decisions::{Settlement, UploadSeen, settle_upload};
 use std::sync::{
     Arc, Mutex,
     mpsc::{self},
@@ -672,29 +673,36 @@ impl Playground {
             }
         }
         if let Some(upload) = &self.coordinator.uploading {
-            // Whether the device already runs the candidate: an install
-            // replaces the running generation at once, and an admitted
-            // handoff has made the target the running one.
-            let runs_candidate = request.generation() == upload.generation;
-            let failure = if request.failed() && !runs_candidate {
-                // The running generation, the one the candidate hands off
-                // from, faulted before the device admitted the handoff. The
-                // handoff goes on the device too: left there it could still be
-                // admitted, and the device ran a candidate the host had
-                // dropped. The running generation stays, paused by the fault.
-                request.withdraw_handoff(assets, commands);
-                let reason = request.stats().failure();
-                Some(format!(
-                    "Accepted canonical GPU generation faulted: {} (failure code {reason}); candidate was not committed",
-                    canonical_failure_description(reason),
-                ))
-            } else if let CanonicalGpuHandoffOutcome::Rejected(reason) = request.handoff_outcome() {
-                Some(format!(
-                    "Canonical GPU handoff rejected: {} (failure code {reason}); accepted generation was retained",
-                    canonical_failure_description(reason),
-                ))
-            } else {
-                None
+            let outcome = request.handoff_outcome();
+            let seen = UploadSeen {
+                runs_candidate: request.generation() == upload.generation,
+                failed: request.failed(),
+                refused: matches!(outcome, CanonicalGpuHandoffOutcome::Rejected(_)),
+                ready: request.ready(),
+                shown: display.generation == upload.generation
+                    && display.primary_flux.len() == upload.degrees_of_freedom,
+                handoff_pending: outcome == CanonicalGpuHandoffOutcome::Pending,
+            };
+            let settlement = settle_upload(seen);
+            let failure = match settlement {
+                Settlement::Withdraw => {
+                    request.withdraw_handoff(assets, commands);
+                    let reason = request.stats().failure();
+                    Some(format!(
+                        "Accepted canonical GPU generation faulted: {} (failure code {reason}); candidate was not committed",
+                        canonical_failure_description(reason),
+                    ))
+                }
+                Settlement::Refused => {
+                    let CanonicalGpuHandoffOutcome::Rejected(reason) = outcome else {
+                        unreachable!("a refusal is a rejected handoff");
+                    };
+                    Some(format!(
+                        "Canonical GPU handoff rejected: {} (failure code {reason}); accepted generation was retained",
+                        canonical_failure_description(reason),
+                    ))
+                }
+                Settlement::Publish | Settlement::Wait => None,
             };
             if let Some(failure) = failure {
                 let token = upload.token;
@@ -702,19 +710,7 @@ impl Playground {
                 self.message = failure;
                 self.unseen_error = true;
                 self.coordinator.uploading = None;
-            // A fault on a candidate the device already runs is its own, and
-            // the generation it replaced is gone: the host publishes what the
-            // device runs, and the fault pauses it as any fault does. Kept
-            // back, the host went on pacing and painting a topology the
-            // device no longer had.
-            } else if (request.ready() || (request.failed() && runs_candidate))
-                && display.generation == upload.generation
-                && display.primary_flux.len() == upload.degrees_of_freedom
-                && !matches!(
-                    request.handoff_outcome(),
-                    CanonicalGpuHandoffOutcome::Pending
-                )
-            {
+            } else if settlement == Settlement::Publish {
                 // The device has published the candidate.
                 let upload = self.coordinator.published();
                 match self.runtime.commit_ready(upload.token) {

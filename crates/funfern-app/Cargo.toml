@@ -15,6 +15,10 @@ workspace = true
 
 [dependencies]
 funfern-core = { path = "../funfern-core" }
+# The runtime's protocol as a small state machine, which Kani checks and the
+# runtime tests hold the real runtime to, and the decisions the runtime makes
+# by it, which the model makes by the same functions.
+funfern-protocol = { path = "../funfern-protocol" }
 bevy = { version = "=0.19.1", default-features = false, features = ["std", "async_executor", "bevy_asset", "bevy_color", "bevy_core_pipeline", "bevy_render", "bevy_camera", "bevy_window", "bevy_winit", "bevy_log", "multi_threaded", "webgpu", "x11", "wayland"] }
 # `manage_clipboard` is what hands egui's copied text to the operating
 # system. Without it `Context::copy_text` fills a buffer nothing reads and
@@ -58,6 +62,3 @@ ab_glyph = "=0.2.32"
 # the current value, with shrinking that keeps a shortened sequence legal.
 proptest = "1.11"
 proptest-state-machine = "0.8"
-# The runtime's protocol as a small state machine, which Kani checks and the
-# runtime tests hold the real runtime to.
-funfern-protocol = { path = "../funfern-protocol" }

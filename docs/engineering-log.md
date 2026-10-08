@@ -20887,3 +20887,22 @@ each. The plan had expected a third case, a region name, which commits to the
 document rather than to the staged copy, coming out differently for a click
 split across frames. It does not: egui lets a field go of the click, the
 release, which is also when the toolbar's button and the Library's row act.
+
+## 2026-10-09 — An upload in flight settles by the protocol's decision
+
+The runtime's decisions move into `funfern-protocol`, one to a commit, so that
+the proofs explore the code that decides in the app rather than a copy of it
+the lockstep comparison holds to the app. The first is how an upload in flight
+settles: withdrawn, with its handoff, when the generation it hands off from
+fails before the device admits it; dropped when the device refuses the
+handoff; published once the device runs it and the display shows it, a
+failure of the candidate itself included; otherwise left to wait.
+`decisions::settle_upload` makes it from what the host has seen, and
+`Protocol::frame` and `refresh_runtime` each act on the answer in their own
+terms: the model on its fields, the runtime on the device, the coordinator and
+the status line. What the runtime reads to give it its inputs stays the
+runtime's - the display shows an upload when it shows its generation with a
+field of the candidate's size - and the comparison holds that as before.
+`funfern-protocol` is a regular dependency of the app now, with none of its
+own. Nothing changes in what the app does: the runtime machine passes 2,000
+sequences in lockstep with the model, and both Kani proofs pass.

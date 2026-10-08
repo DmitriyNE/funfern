@@ -160,7 +160,11 @@ six, a fair device and preparation bring it to rest within nine rounds. It
 takes about three minutes; CI runs it in a job of its own, with Kani 0.67.0.
 The runtime machine runs the model in lockstep with the real runtime and
 compares the two after every step, so the proofs speak about the app's
-runtime only while that comparison holds.
+runtime only while that comparison holds. The protocol's decisions are
+functions in the crate's `decisions.rs`, which the runtime calls where the
+model does, so for those the proofs explore the code that decides in the app;
+what the runtime reads to give them their inputs is still held only by the
+comparison. They are, so far, how an upload in flight settles.
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,
