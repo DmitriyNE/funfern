@@ -19,6 +19,10 @@
 //!
 //! `PROPTEST_CASES` runs more sequences than the gate's few; a failure is
 //! written under `proptest-regressions` and replayed first on the next run.
+//! A seed names a sequence only through this generator: change an action, a
+//! weight or a text, and every seed there replays something else. So each
+//! finding gets a focused test of its own, and the seeds kept are only those
+//! of findings drawn by the generator as it stands.
 
 use super::test_support::*;
 use super::*;
@@ -744,11 +748,6 @@ impl StateMachineTest for MaterialPanel {
         );
         // The open material is in the draft, and the staged copy is of it.
         let open = state.material_selection;
-        // FINDING 1 (temporary tolerance): Undo past the open material's
-        // creation leaves the panel pointing at nothing.
-        if draft.material(open).is_none() {
-            return;
-        }
         assert!(draft.material(open).is_some(), "the open material is gone");
         let staged = state
             .material_edit

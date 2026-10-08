@@ -20524,3 +20524,26 @@ New and settling the draft.
   which needs a running medium; drag values; the colour picker; Open of a
   catalog scene. The runtime, with the device's transitions under the same
   harness, is the next machine.
+
+## 2026-10-08 — An undone material leaves the panel on the default one
+
+Found by the Materials panel sequences as `[Press(AddMaterial), Undo]`. Undo
+past the open material's creation left the panel's selection on a material
+the draft no longer has, so the Library highlighted nothing and no editor or
+Apply showed until another material was clicked. Drawing already resolved the
+selection against the draft, falling back to the default material and then
+the first, and the panel was the one use that trusted it. It now resolves it
+the same way before the Library is drawn. Two doc comments that had drifted
+onto `material_advanced` went back to `resolved_material_selection` and
+`select_region`.
+`undoing_a_materials_creation_opens_the_default_material`, and the harness's
+tolerance for this is gone.
+
+- The seeds the harness commit checked in replayed none of its findings:
+  replayed through the generator, the two saved before its weights changed
+  drew unrelated 35- and 32-step sequences, and a third was written by a
+  coverage run that failed on a harness bug fixed before the commit. The file
+  now holds only this finding's seed, drawn by the current generator, which
+  shrinks back to the same two steps with the fix cut out. A seed names its
+  sequence only through the generator, so each finding keeps a focused test,
+  and `docs/checks.md` and the harness say so.

@@ -10,15 +10,6 @@ use std::collections::BTreeSet;
 use super::*;
 
 impl Playground {
-    /// The material a drawn subdomain is given. The selection outlives the
-    /// document it was made in - a scene load, an undo past the material's
-    /// creation - so it is resolved against the draft each time it is used
-    /// rather than trusted: the default material if the draft has it,
-    /// otherwise its first.
-    /// Selects a region and, with it, the material it is assigned, so
-    /// clicking a region in the scene opens what it is made of. Edits not yet
-    /// applied to the open material keep it open instead, with a notice,
-    /// since following the selection would discard them.
     /// Whether the editor shows `material` in its Advanced view.
     pub(super) fn material_advanced(&self, material: MaterialId) -> bool {
         self.editor
@@ -57,6 +48,10 @@ impl Playground {
         }
     }
 
+    /// Selects a region and, with it, the material it is assigned, so
+    /// clicking a region in the scene opens what it is made of. Edits not yet
+    /// applied to the open material keep it open instead, with a notice,
+    /// since following the selection would discard them.
     pub(super) fn select_region(&mut self, region: RegionId) {
         self.region_selection = region;
         self.hole_selected = false;
@@ -129,6 +124,11 @@ impl Playground {
             .retain(|(owner, _), _| *owner != material.0);
     }
 
+    /// The open material, which a drawn subdomain is given too. The selection
+    /// outlives the document it was made in - a scene load, an undo past the
+    /// material's creation - so it is resolved against the draft each time it
+    /// is used rather than trusted: the default material if the draft has it,
+    /// otherwise its first.
     pub(super) fn resolved_material_selection(&mut self) -> MaterialId {
         let materials = &self.editor.document.model.draft.materials;
         if !materials
@@ -413,6 +413,10 @@ impl Playground {
             }
         }
         ui.separator();
+        // Taken as drawing takes it: trusted, a selection undone out of the
+        // draft left the panel open on nothing, with no editor and no Apply
+        // until another material was clicked.
+        self.resolved_material_selection();
         ui.horizontal(|ui| {
             ui.label("Library");
             self.formula_help_toggle(ui);
@@ -2706,6 +2710,39 @@ mod tests {
         let (region, material) = (region.id, region.material);
         state.select_region(region);
         assert_eq!(state.material_selection, material);
+    }
+
+    /// Found by the generated sequences as `[Press(AddMaterial), Undo]`: a
+    /// material added and then undone left the panel open on it, with no
+    /// editor and no Apply until another material was clicked. The panel now
+    /// resolves its selection against the draft, as drawing does, and opens
+    /// the default material.
+    #[test]
+    fn undoing_a_materials_creation_opens_the_default_material() {
+        let mut state = Playground::default();
+        let driver = PanelDriver::new();
+        let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
+        let add = widgets
+            .iter()
+            .find(|widget| widget.label == "+")
+            .expect("the Library's +");
+        driver.pass(click(add), |ui| state.materials_panel(ui));
+        let added = state.material_selection;
+        assert_ne!(added, DEFAULT_MATERIAL, "the new material opened");
+
+        state.undo();
+        let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
+        let draft = &state.editor.document.model.draft;
+        assert!(draft.material(added).is_none(), "the creation was undone");
+        assert_eq!(state.material_selection, DEFAULT_MATERIAL);
+        assert_eq!(
+            state.material_edit.as_ref(),
+            draft.material(DEFAULT_MATERIAL)
+        );
+        assert!(
+            widgets.iter().any(|widget| widget.label == "Apply"),
+            "the panel shows an editor"
+        );
     }
 
     /// The pump helper offers each enabled source that has a frequency, and

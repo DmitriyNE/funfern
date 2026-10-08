@@ -104,7 +104,11 @@ action. The gate runs a few dozen sequences; `PROPTEST_CASES=2000 cargo test -p
 funfern-app --release --bins material_edits_in_any_order` runs a sweep. A
 failure is shrunk to the shortest sequence that still fails, printed, and its
 seed written under `crates/funfern-app/proptest-regressions`, which is checked
-in so the case is replayed first everywhere.
+in so the case is replayed first everywhere. A seed names its sequence only
+through the generator as it stands: a changed action, weight or text makes
+every seed replay something else. So each finding also gets a focused test,
+and the file keeps only the seeds of findings drawn by the current generator,
+not those a sweep writes while the harness itself is being fixed.
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,
