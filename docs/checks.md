@@ -164,7 +164,8 @@ runtime only while that comparison holds. The protocol's decisions are
 functions in the crate's `decisions.rs`, which the runtime calls where the
 model does, so for those the proofs explore the code that decides in the app;
 what the runtime reads to give them their inputs is still held only by the
-comparison. They are, so far, how an upload in flight settles.
+comparison. They are, so far, how an upload in flight settles, and whether
+the document as it stands takes a new request.
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,

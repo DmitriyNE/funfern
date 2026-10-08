@@ -6,6 +6,8 @@
 //! inputs - a display that shows a generation, a device that reads ready - is
 //! its own, and its tests hold it to the model.
 
+use crate::Acceptance;
+
 /// What the host sees of the upload in flight, in a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UploadSeen {
@@ -60,4 +62,72 @@ pub fn settle_upload(seen: UploadSeen) -> Settlement {
     } else {
         Settlement::Wait
     }
+}
+
+/// The revision a request for the document as it stands was made at, if one
+/// stands. A valid draft is the accepted scene, and a request at its revision
+/// is for it. An invalid draft's edits move the revision and nothing a
+/// preparation reads, so while the draft is invalid the latest request still
+/// stands if what it read, `reads_current`, has not changed; otherwise every
+/// edit of the invalid draft would prepare the same scene again. None stands
+/// while the draft is being validated, which may yet change the accepted
+/// scene.
+pub fn standing<R: Copy>(
+    acceptance: Acceptance,
+    revision: R,
+    requested: Option<R>,
+    reads_current: impl FnOnce() -> bool,
+) -> Option<R> {
+    match acceptance {
+        Acceptance::Pending => None,
+        Acceptance::Valid => Some(revision),
+        Acceptance::Invalid => requested.filter(|_| reads_current()),
+    }
+}
+
+/// What a request for the document as it stands meets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestSeen<R> {
+    pub acceptance: Acceptance,
+    /// The revision a request for the document as it stands was made at; see
+    /// [`standing`].
+    pub standing: Option<R>,
+    /// The revision the latest request was made at.
+    pub requested: Option<R>,
+    /// The latest request was made at the mesh edge set now.
+    pub same_edge: bool,
+    /// A rebuild was asked for though nothing changed.
+    pub remesh: bool,
+    /// A candidate is being prepared, or waits to be carried.
+    pub in_flight: bool,
+    /// The revision the active topology was requested at.
+    pub active: Option<R>,
+    /// The revision whose preparation failed last.
+    pub failed: Option<R>,
+}
+
+/// Whether the document as it stands takes a new request. Not while its
+/// draft is being validated, which may yet change the accepted scene. An
+/// invalid draft holds nothing back: it leaves the accepted scene alone, and
+/// what a preparation reads, that scene and what lies outside the draft, is
+/// prepared without it. Waiting for a valid draft, a scene made invalid
+/// before its first validation never started, and a source switched off
+/// meanwhile ran on.
+///
+/// Nor is one due while the request standing for it is accounted for: a
+/// preparation in flight for it, the active topology, or a failure to prepare
+/// it. Without that last a revision that cannot be prepared is retried every
+/// frame forever: the whole preparation runs again, the phase label churns,
+/// and the error it is reporting is replaced before it can be read. The next
+/// edit, a different mesh edge or a rebuild asked for moves on; Reset installs
+/// the active topology afresh and asks for nothing.
+pub fn request_due<R: Copy + PartialEq>(seen: RequestSeen<R>) -> bool {
+    if seen.acceptance == Acceptance::Pending {
+        return false;
+    }
+    let accounted = seen.standing.is_some()
+        && seen.requested == seen.standing
+        && seen.same_edge
+        && (seen.in_flight || seen.active == seen.standing || seen.failed == seen.standing);
+    seen.remesh || !accounted
 }

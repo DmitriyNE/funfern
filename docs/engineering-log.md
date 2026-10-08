@@ -20906,3 +20906,21 @@ field of the candidate's size - and the comparison holds that as before.
 `funfern-protocol` is a regular dependency of the app now, with none of its
 own. Nothing changes in what the app does: the runtime machine passes 2,000
 sequences in lockstep with the model, and both Kani proofs pass.
+
+## 2026-10-09 — Whether a request is due, by the protocol's decision
+
+The second decision moved into `funfern-protocol`: whether the document as it
+stands takes a new request. `decisions::standing` names the revision a request
+for it was made at - the editor's own for a valid draft, the latest request's
+for an invalid one while what that request read is what a preparation reads
+now - and `decisions::request_due` holds a request back while the draft is
+being validated, or while the standing request is accounted for by a
+preparation in flight, the active topology or a failure to prepare it. The
+model's `request` and `at_rest` and the runtime's `request_runtime` call both;
+`at_rest` had a copy of `standing` of its own. Whether what the latest request
+read is current is a whole-scene comparison, so `standing` takes it as a
+closure and asks only for an invalid draft, as `request_runtime` did. The
+editor's holds - a drag in progress, a mesh edge being dragged, a source patch
+waiting - stay the runtime's, and so does Remesh, which the model passes as
+never pressed. The reasoning the runtime kept in comments is the functions'
+documentation now. Nothing changes in what the app does.

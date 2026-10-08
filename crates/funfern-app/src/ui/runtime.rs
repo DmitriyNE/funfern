@@ -17,7 +17,10 @@ use funfern_app::topology_runtime::{
     TopologyToken,
 };
 use funfern_core::*;
-use funfern_protocol::decisions::{Settlement, UploadSeen, settle_upload};
+use funfern_protocol::Acceptance;
+use funfern_protocol::decisions::{
+    RequestSeen, Settlement, UploadSeen, request_due, settle_upload, standing,
+};
 use std::sync::{
     Arc, Mutex,
     mpsc::{self},
@@ -143,17 +146,45 @@ impl Playground {
     }
 
     pub(super) fn request_runtime(&mut self) {
-        // A draft still being validated may yet change the accepted scene, so
-        // a request waits for it. An invalid draft leaves the accepted scene
-        // alone, and what a preparation reads, that scene and what lies
-        // outside the draft, is prepared without it: waiting for a valid
-        // draft, a scene made invalid before its first validation never
-        // started, and a source switched off meanwhile ran on.
-        if self.editor.acceptance == TopologyAcceptance::Pending
-            || self.editor.editing()
+        if self.editor.editing()
             || self.mesh_edge_dragging
             || self.coordinator.source_commit.is_some()
         {
+            return;
+        }
+        let acceptance = match self.editor.acceptance {
+            TopologyAcceptance::Pending => Acceptance::Pending,
+            TopologyAcceptance::Valid => Acceptance::Valid,
+            TopologyAcceptance::Invalid(_) => Acceptance::Invalid,
+        };
+        let due = request_due(RequestSeen {
+            acceptance,
+            standing: standing(
+                acceptance,
+                self.editor.revision,
+                self.coordinator.requested_revision,
+                || {
+                    self.coordinator
+                        .requested_inputs
+                        .as_ref()
+                        .is_some_and(|inputs| inputs.read(&self.editor.document))
+                },
+            ),
+            requested: self.coordinator.requested_revision,
+            same_edge: self.coordinator.requested_edge
+                == self.editor.document.presentation.mesh_edge,
+            remesh: self.coordinator.remesh_requested,
+            in_flight: self.preparation_in_progress(),
+            active: self
+                .runtime
+                .active()
+                .map(|active| active.bundle.token.document_revision),
+            failed: self
+                .runtime
+                .last_error()
+                .map(|failure| failure.token.document_revision),
+        });
+        if !due {
             return;
         }
         let domain = self.editor.document.model.accepted.geometry.domain;
@@ -163,45 +194,6 @@ impl Playground {
             ..MeshingOptions::default()
         }
         .sized_for_area(domain.width() * domain.height());
-        // This revision is accounted for when a preparation is in flight for
-        // it, when it is already the accepted generation, or when preparing it
-        // has already failed. Without that last case a revision that cannot be
-        // prepared is retried every frame forever: the whole preparation runs
-        // again, the phase label churns, and the error it is reporting is
-        // replaced before it can be read. The next edit, a different mesh edge
-        // or an explicit remesh moves on; Reset publishes onto the accepted
-        // generation and does not come through here.
-        // The revision a request for the document as it stands was made at.
-        // An invalid draft's edits move the revision and nothing a
-        // preparation reads, so while the draft is invalid the latest request
-        // still stands if what it read has not changed; otherwise every edit
-        // of the invalid draft would prepare the same scene again.
-        let standing = if self.editor.acceptance == TopologyAcceptance::Valid {
-            Some(self.editor.revision)
-        } else {
-            self.coordinator.requested_revision.filter(|_| {
-                self.coordinator
-                    .requested_inputs
-                    .as_ref()
-                    .is_some_and(|inputs| inputs.read(&self.editor.document))
-            })
-        };
-        if !self.coordinator.remesh_requested
-            && standing.is_some()
-            && self.coordinator.requested_revision == standing
-            && self.coordinator.requested_edge == self.editor.document.presentation.mesh_edge
-            && (self.preparation_in_progress()
-                || self
-                    .runtime
-                    .active()
-                    .is_some_and(|active| Some(active.bundle.token.document_revision) == standing)
-                || self
-                    .runtime
-                    .last_error()
-                    .is_some_and(|failure| Some(failure.token.document_revision) == standing))
-        {
-            return;
-        }
         let fresh = starts_from_zero(
             self.runtime.active().is_some(),
             self.coordinator.reset_requested,

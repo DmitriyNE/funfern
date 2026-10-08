@@ -28,7 +28,7 @@
 
 pub mod decisions;
 
-use decisions::{Settlement, UploadSeen, settle_upload};
+use decisions::{RequestSeen, Settlement, UploadSeen, request_due, settle_upload, standing};
 
 /// A candidate, named by the order of its request.
 pub type Token = u8;
@@ -391,6 +391,15 @@ impl Protocol {
         self.requests[token as usize % TOKENS].0
     }
 
+    fn standing(&self) -> Option<u8> {
+        standing(
+            self.acceptance,
+            self.revision,
+            self.requested_revision,
+            || self.requested_inputs == Some(self.inputs),
+        )
+    }
+
     fn behind(&self) -> bool {
         self.device
             .is_some_and(|device| !device.caught_up && !device.failed)
@@ -660,27 +669,17 @@ impl Protocol {
     /// `request_runtime`: a request for the document as it stands, unless one
     /// stands already.
     fn request(&mut self) {
-        if self.acceptance == Acceptance::Pending {
-            return;
-        }
-        let standing = if self.acceptance == Acceptance::Valid {
-            Some(self.revision)
-        } else {
-            self.requested_revision
-                .filter(|_| self.requested_inputs == Some(self.inputs))
-        };
-        let accounted = standing.is_some()
-            && self.requested_edge == Some(self.edge)
-            && self.requested_revision == standing
-            && (self.preparing.is_some()
-                || self.ready.is_some()
-                || self
-                    .active
-                    .is_some_and(|token| Some(self.revision_of(token)) == standing)
-                || self
-                    .last_error
-                    .is_some_and(|token| Some(self.revision_of(token)) == standing));
-        if accounted || self.next as usize >= TOKENS {
+        let due = request_due(RequestSeen {
+            acceptance: self.acceptance,
+            standing: self.standing(),
+            requested: self.requested_revision,
+            same_edge: self.requested_edge == Some(self.edge),
+            remesh: false,
+            in_flight: self.preparing.is_some() || self.ready.is_some(),
+            active: self.active.map(|token| self.revision_of(token)),
+            failed: self.last_error.map(|token| self.revision_of(token)),
+        });
+        if !due || self.next as usize >= TOKENS {
             return;
         }
         let token = self.next;
@@ -795,12 +794,7 @@ impl Protocol {
         if waiting {
             return false;
         }
-        let standing = if self.acceptance == Acceptance::Valid {
-            Some(self.revision)
-        } else {
-            self.requested_revision
-                .filter(|_| self.requested_inputs == Some(self.inputs))
-        };
+        let standing = self.standing();
         if standing.is_some()
             && self
                 .last_error
