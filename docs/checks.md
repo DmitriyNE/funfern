@@ -110,6 +110,17 @@ every seed replay something else. So each finding also gets a focused test,
 and the file keeps only the seeds of findings drawn by the current generator,
 not those a sweep writes while the harness itself is being fixed.
 
+A second machine (`ui/sequences/reopening.rs`,
+`documents_survive_reopening_between_any_edits`) runs the same panel with the
+document's other edits among its actions, drawing, dividing, baffles, control
+drags, deletions, detached ends, probes, the source and the domain, and saves
+and opens the document again between any two: by Save and Open, by a shared
+link and by the browser's autosave, each through the handler the app has for
+it. A reopened document must equal what a file keeps of the saved one, and
+validation must bring it where the session would have come. After every
+action, in both machines, the document must save, and a Valid acceptance must
+mean the accepted scene is the draft. Its seeds have a file of their own.
+
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,
 nested material inclusions,

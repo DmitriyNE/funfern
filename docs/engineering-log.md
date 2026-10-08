@@ -20564,3 +20564,46 @@ editor's scene with the default scene, now opens another one. The harness's
 tolerance is gone, its expected step for New weighs the whole model as the
 editor does, and the seed file gained this finding's seed, which shrinks back
 to the two News with the fix cut out. The user guide's History line says so.
+
+## 2026-10-08 — Documents saved and opened again between any two edits
+
+Phase 2 of the action-sequence harness: the document against persistence.
+`ui/sequences/reopening.rs` runs the Materials panel's actions with the
+document's other edits among them, each through the call its tool makes:
+drawing subdomains and holes (`create_closed`), floor-to-ceiling separators,
+free baffles, control-point drags (`plan_handle_drag` and
+`apply_transform_updates`), deleting curves with a merge's kept region,
+detaching ends, probes, the point source and domain resizes. Between any two
+it saves the document and opens it again by one of three routes, each through
+the app's own handler: Save and Open (the pretty form, through the file
+event), a shared link (the compact form, compressed into the address, opened
+at launch) and the browser's autosave (the compact form, restored at launch).
+
+- A reopened document must equal what a file keeps of the saved one, raise
+  no notice, start its history afresh, and validate to where the session
+  would have come: the same acceptance and the same accepted scene. What a
+  file keeps differs from the session's document on purpose in two places,
+  both written into the harness with the reason: the session holds a deleted
+  material's Advanced view and a deleted probe's readout so an Undo finds
+  them, and a file, having no Undo, keeps neither.
+- Both machines now also hold, after every action, that the document saves,
+  since the autosave writes it within a second, and that a Valid acceptance
+  means the accepted scene is the draft, the disagreement behind the drag
+  that came home with its geometry still moved. And an id the editor hands
+  out must be one nothing has held: not the accepted scene, not any step the
+  history can bring back.
+- Over 300 sequences: 635 reopens (201 by file, 233 by link, 201 by
+  autosave), 391 of them with the draft ahead of the accepted scene and 180
+  with a draft that does not compile; 863 geometry edits that changed the
+  document and 667 refused, each refusal checked to change nothing. The gate
+  runs 64 sequences in about eleven seconds; 2,000 passed.
+- The panel machine's generator moved into `panel_actions` unchanged, and
+  its two seeds replay the same sequences as before, checked by replaying
+  them through both builds. The new machine's seeds go in a file of its own.
+- One finding, left as a tolerance marked `FINDING` until decided:
+  `[Advanced, Toggle, Press(Apply), Reopen(File)]`. "Divide the coefficient"
+  is offered on any row whose field response is linear, also one with no
+  drive and no Switch, where it changes nothing. The session keeps the tick;
+  a file, and a physics switch, normalize such a law to the plain linear one
+  and drop it. A drive added afterwards divides in the session that ticked
+  it and multiplies after a reload.

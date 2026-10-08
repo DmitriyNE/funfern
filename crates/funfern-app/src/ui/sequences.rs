@@ -23,13 +23,23 @@
 //! weight or a text, and every seed there replays something else. So each
 //! finding gets a focused test of its own, and the seeds kept are only those
 //! of findings drawn by the generator as it stands.
+//!
+//! `reopening` runs the same panel with the document's other edits among its
+//! actions, saved and opened again between any two.
 
 use super::test_support::*;
 use super::*;
 use bevy_egui::egui::accesskit::Role;
-use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyDocument, TopologyDocumentModel};
+use funfern_app::topology_editor::{
+    ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment, TopologyDocument,
+    TopologyDocumentModel, TopologyProbeTarget,
+};
+use funfern_app::topology_persistence as persistence;
+use funfern_app::topology_viewport::{TopologyHandle, plan_handle_drag};
 use proptest::prelude::*;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
+
+mod reopening;
 
 /// One action on the panel, as a user takes it. Ordinals count the widgets
 /// of a kind top to bottom and wrap, so every value is legal in every state
@@ -67,6 +77,70 @@ enum Action {
     New,
     /// Let the draft's validation finish.
     Settle,
+    /// Click the `nth` checkbox.
+    Toggle(u8),
+    /// Save the document and open it again by `Route`, as a reload does.
+    Reopen(Route),
+    /// Draw a rounded closed curve in the `cell`th of sixteen cells of the
+    /// domain, a subdomain of the open material or a hole, `size` choosing
+    /// its radius, as the Draw tool's finish does.
+    Draw {
+        hole: bool,
+        cell: u8,
+        size: u8,
+    },
+    /// Draw a separator of the Draw palette's material from the floor to the
+    /// ceiling, at the `at`th of three places.
+    Divide {
+        at: u8,
+    },
+    /// Draw a free baffle through the `cell`th cell, turned `turn` sixteenths.
+    Baffle {
+        cell: u8,
+        turn: u8,
+    },
+    /// Drag a control point of the `curve`th curve by the `step`th offset,
+    /// as the viewport's handle drag does in one go.
+    Nudge {
+        curve: u8,
+        control: u8,
+        step: u8,
+    },
+    /// Delete the `curve`th curve, keeping the `keep`th region of those a
+    /// merge would offer.
+    Remove {
+        curve: u8,
+        keep: u8,
+    },
+    /// Let go of an end of the `curve`th open curve.
+    Detach {
+        curve: u8,
+        end: u8,
+    },
+    /// Place a point probe in the `cell`th cell.
+    Probe {
+        cell: u8,
+    },
+    /// Move the point source to the `cell`th cell, on or off.
+    Source {
+        cell: u8,
+        on: bool,
+    },
+    /// Resize the domain about its centre, the `nth` of four ways.
+    Domain(u8),
+}
+
+/// How a saved document comes back.
+#[derive(Clone, Copy, Debug)]
+enum Route {
+    /// Save scene's file, opened by Open: the pretty form, through the file
+    /// event the loader handles. The native autosave writes the same form.
+    File,
+    /// A shared link, opened at launch: the compact form, compressed and
+    /// encoded into the address.
+    Link,
+    /// The browser's autosave, restored at launch: the compact form.
+    Autosave,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -130,36 +204,7 @@ impl ReferenceStateMachine for MaterialPanel {
     }
 
     fn transitions(state: &Steps) -> BoxedStrategy<Action> {
-        let step = state.taken;
-        prop_oneof![
-            25 => (any::<u8>(), texts(step)).prop_map(|(field, text)| Action::Type { field, text }),
-            10 => any::<u8>().prop_map(|field| Action::EnterUntouched { field }),
-            15 => (any::<u8>(), any::<u8>()).prop_map(|(combo, item)| Action::Pick { combo, item }),
-            8 => Just(Action::Press(Button::Apply)),
-            4 => Just(Action::Press(Button::Revert)),
-            3 => Just(Action::Press(Button::AddMaterial)),
-            1 => Just(Action::Press(Button::DeleteMaterial)),
-            4 => Just(Action::Press(Button::AddParameter)),
-            3 => any::<u8>().prop_map(|nth| Action::Press(Button::DeleteParameter(nth))),
-            // Parameters more often than the rest: its rows are where names
-            // are typed and parameters added or deleted.
-            6 => prop_oneof![
-                3 => Just(Header::Parameters),
-                1 => Just(Header::Anisotropy),
-                1 => Just(Header::Restoring),
-                1 => Just(Header::ShortWave),
-            ]
-            .prop_map(Action::Fold),
-            5 => Just(Action::Advanced),
-            5 => any::<u8>().prop_map(Action::SelectMaterial),
-            5 => any::<u8>().prop_map(Action::SelectRegion),
-            5 => Just(Action::Undo),
-            3 => Just(Action::Redo),
-            2 => any::<u8>().prop_map(Action::Physics),
-            1 => Just(Action::New),
-            4 => Just(Action::Settle),
-        ]
-        .boxed()
+        panel_actions(state.taken)
     }
 
     fn apply(state: Steps, _: &Action) -> Steps {
@@ -167,6 +212,41 @@ impl ReferenceStateMachine for MaterialPanel {
             taken: state.taken + 1,
         }
     }
+}
+
+/// The Materials panel's own actions at `step`. The seeds kept for this
+/// machine name sequences through exactly this strategy: changing an arm or
+/// a weight here makes them replay something else.
+fn panel_actions(step: u32) -> BoxedStrategy<Action> {
+    prop_oneof![
+        25 => (any::<u8>(), texts(step)).prop_map(|(field, text)| Action::Type { field, text }),
+        10 => any::<u8>().prop_map(|field| Action::EnterUntouched { field }),
+        15 => (any::<u8>(), any::<u8>()).prop_map(|(combo, item)| Action::Pick { combo, item }),
+        8 => Just(Action::Press(Button::Apply)),
+        4 => Just(Action::Press(Button::Revert)),
+        3 => Just(Action::Press(Button::AddMaterial)),
+        1 => Just(Action::Press(Button::DeleteMaterial)),
+        4 => Just(Action::Press(Button::AddParameter)),
+        3 => any::<u8>().prop_map(|nth| Action::Press(Button::DeleteParameter(nth))),
+        // Parameters more often than the rest: its rows are where names
+        // are typed and parameters added or deleted.
+        6 => prop_oneof![
+            3 => Just(Header::Parameters),
+            1 => Just(Header::Anisotropy),
+            1 => Just(Header::Restoring),
+            1 => Just(Header::ShortWave),
+        ]
+        .prop_map(Action::Fold),
+        5 => Just(Action::Advanced),
+        5 => any::<u8>().prop_map(Action::SelectMaterial),
+        5 => any::<u8>().prop_map(Action::SelectRegion),
+        5 => Just(Action::Undo),
+        3 => Just(Action::Redo),
+        2 => any::<u8>().prop_map(Action::Physics),
+        1 => Just(Action::New),
+        4 => Just(Action::Settle),
+    ]
+    .boxed()
 }
 
 /// The panel under test: the playground, the context that shows its
@@ -190,6 +270,79 @@ fn authored(model: &TopologyDocumentModel) -> TopologyDocumentModel {
         accepted: model.draft.clone(),
         ..model.clone()
     }
+}
+
+/// The centre of the `cell`th of sixteen cells of `domain`, row by row.
+fn cell_point(domain: DomainRect, cell: u8) -> Point2 {
+    let (column, row) = (f64::from(cell % 4), f64::from(cell / 4 % 4));
+    Point2::new(
+        domain.min_x + (column + 0.5) / 4.0 * domain.width(),
+        domain.min_y + (row + 0.5) / 4.0 * domain.height(),
+    )
+}
+
+/// Every id a model holds, by kind, in the draft or in the accepted scene:
+/// what the editor's six allocators must never hand out again.
+fn ids(model: &TopologyDocumentModel, accepted: bool) -> BTreeSet<(&'static str, u64)> {
+    let scene = if accepted {
+        &model.accepted
+    } else {
+        &model.draft
+    };
+    let curves = &scene.geometry.curves;
+    curves
+        .iter()
+        .map(|curve| ("curve", curve.id.0))
+        .chain(
+            curves
+                .iter()
+                .flat_map(|curve| curve.spans.iter().map(|span| ("span", span.id.0))),
+        )
+        .chain(
+            scene
+                .geometry
+                .vertices
+                .iter()
+                .map(|vertex| ("vertex", vertex.id.0)),
+        )
+        .chain(scene.regions.iter().map(|region| ("region", region.id.0)))
+        .chain(
+            scene
+                .materials
+                .iter()
+                .map(|material| ("material", material.id.0)),
+        )
+        .chain(model.probes.iter().map(|probe| ("probe", probe.id.0)))
+        .collect()
+}
+
+/// What a file keeps of `document`. The session holds a deleted material's
+/// Advanced view and a deleted probe's readout, so that an Undo brings them
+/// back as they were; a file has no Undo and keeps neither
+/// (`shown_materials` and the probe readouts in `encode_document`).
+fn kept(document: &TopologyDocument) -> TopologyDocument {
+    let mut kept = document.clone();
+    let TopologyDocument {
+        model,
+        presentation,
+        readouts,
+    } = &mut kept;
+    presentation
+        .advanced_materials
+        .retain(|id| model.draft.material(id).is_some());
+    readouts
+        .probes
+        .retain(|id, _| model.probes.iter().any(|probe| probe.id == *id));
+    // FINDING (temporary tolerance): "Divide the coefficient" ticked on a
+    // law with no drive and no Switch is held by the session, and a file
+    // normalizes the law to the plain linear one.
+    for scene in [&mut model.draft, &mut model.accepted] {
+        for material in &mut scene.materials {
+            material.mass_law = material.mass_law.normalized();
+            material.stiffness_law = material.stiffness_law.normalized();
+        }
+    }
+    kept
 }
 
 /// What an action may or may not have changed, read before and after it.
@@ -640,7 +793,237 @@ impl Panel {
                 self.pass(vec![]);
                 assert_eq!(self.observe(), before, "validation edited something");
             }
+            Action::Toggle(nth) => {
+                let boxes = self.of_role(Role::CheckBox);
+                let Some(target) = Self::nth(&boxes, *nth) else {
+                    return;
+                };
+                self.pass(click(&target));
+                self.pass(vec![]);
+            }
+            Action::Reopen(route) => self.reopen(*route),
+            _ => {
+                let whole = self.state.editor.document.model.clone();
+                let result = self.edit_geometry(action);
+                self.pass(vec![]);
+                // A refused command leaves everything as it was.
+                if let Err(error) = result {
+                    assert_eq!(
+                        self.state.editor.document.model, whole,
+                        "{action:?} was refused ({error}) and changed the document"
+                    );
+                }
+            }
         }
+    }
+
+    /// The document's other edits, each through the call its tool makes.
+    fn edit_geometry(&mut self, action: &Action) -> Result<(), String> {
+        let state = &mut self.state;
+        let draft = &state.editor.document.model.draft;
+        let domain = draft.geometry.domain;
+        let span = domain.width().min(domain.height());
+        let curves = draft.geometry.curves.clone();
+        let pick = |nth: u8| (!curves.is_empty()).then(|| &curves[nth as usize % curves.len()]);
+        match *action {
+            Action::Draw { hole, cell, size } => {
+                state.closed_purpose = if hole {
+                    ClosedPurpose::Hole
+                } else {
+                    ClosedPurpose::Subdomain
+                };
+                let radius = [0.04, 0.08, 0.16][size as usize % 3] * span;
+                state
+                    .create_closed(PeriodicCubicSpline::rounded(
+                        cell_point(domain, cell),
+                        radius,
+                    ))
+                    .map(drop)
+            }
+            Action::Divide { at } => {
+                let fraction = [0.25, 0.5, 0.75][at as usize % 3];
+                let x = domain.min_x + fraction * domain.width();
+                let y = |share: f64| domain.min_y + share * domain.height();
+                let wall = |side, fraction| {
+                    Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                        side,
+                        fraction,
+                    }))
+                };
+                let spline = OpenCubicSpline::polyline(vec![
+                    Point2::new(x, y(0.1)),
+                    Point2::new(x, y(0.5)),
+                    Point2::new(x, y(0.9)),
+                ])
+                .map_err(|error| error.to_string())?;
+                // The Top side runs right to left.
+                state
+                    .editor
+                    .create_open_curve(
+                        spline,
+                        OpenCurvePurpose::SubdomainSeparator {
+                            material: state.new_separator_material,
+                        },
+                        wall(OuterSide::Bottom, fraction),
+                        wall(OuterSide::Top, 1.0 - fraction),
+                    )
+                    .map(drop)
+            }
+            Action::Baffle { cell, turn } => {
+                let centre = cell_point(domain, cell);
+                let angle = f64::from(turn % 16) * std::f64::consts::PI / 16.0;
+                let reach = 0.12 * span;
+                let (dx, dy) = (reach * angle.cos(), reach * angle.sin());
+                let spline = OpenCubicSpline::polyline(vec![
+                    Point2::new(centre.x - dx, centre.y - dy),
+                    centre,
+                    Point2::new(centre.x + dx, centre.y + dy),
+                ])
+                .map_err(|error| error.to_string())?;
+                state.editor.create_boundary_baffle(spline).map(drop)
+            }
+            Action::Nudge {
+                curve,
+                control,
+                step,
+            } => {
+                let Some(target) = pick(curve) else {
+                    return Ok(());
+                };
+                let controls = match &target.spline {
+                    CurveSpline::Closed(spline) => spline.controls(),
+                    CurveSpline::Open(spline) => spline.controls(),
+                };
+                let index = control as usize % controls.len();
+                let (dx, dy) = [
+                    (0.02, 0.0),
+                    (0.0, -0.03),
+                    (0.12, 0.08),
+                    (-0.35, 0.25),
+                    (0.8, -0.1),
+                ][step as usize % 5];
+                let point =
+                    Point2::new(controls[index].x + dx * span, controls[index].y + dy * span);
+                let update = plan_handle_drag(
+                    &draft.geometry,
+                    TopologyHandle::Control {
+                        curve: target.id,
+                        control: index,
+                    },
+                    point,
+                )
+                .map_err(|error| error.to_string())?;
+                state.editor.apply_transform_updates(&[update])
+            }
+            Action::Remove { curve, keep } => {
+                let Some(target) = pick(curve) else {
+                    return Ok(());
+                };
+                let choices = state.editor.curve_removal_choices(target.id)?;
+                let kept = (!choices.is_empty()).then(|| choices[keep as usize % choices.len()]);
+                state.editor.remove_curve(target.id, kept).map(drop)
+            }
+            Action::Detach { curve, end } => {
+                let open = curves
+                    .iter()
+                    .filter(|curve| matches!(curve.spline, CurveSpline::Open(_)))
+                    .collect::<Vec<_>>();
+                let Some(target) = (!open.is_empty()).then(|| open[curve as usize % open.len()])
+                else {
+                    return Ok(());
+                };
+                state.editor.detach_endpoint(target.id, end as usize % 2)
+            }
+            Action::Probe { cell } => {
+                let name = format!("Probe {}", state.editor.document.model.probes.len() + 1);
+                state
+                    .editor
+                    .create_probe(
+                        name,
+                        [91, 220, 194],
+                        TopologyProbeTarget::Point(cell_point(domain, cell)),
+                    )
+                    .map(drop)
+            }
+            Action::Source { cell, on } => {
+                let mut source = state.editor.document.model.source;
+                source.position = cell_point(domain, cell);
+                source.enabled = on;
+                state.editor.set_point_source(source)
+            }
+            Action::Domain(nth) => {
+                let (centre_x, centre_y) = (
+                    0.5 * (domain.min_x + domain.max_x),
+                    0.5 * (domain.min_y + domain.max_y),
+                );
+                let [wide, tall] =
+                    [[1.25, 1.25], [0.8, 0.8], [1.3, 1.0], [1.0, 0.7]][nth as usize % 4];
+                state.editor.set_domain(DomainRect {
+                    min_x: centre_x - 0.5 * wide * domain.width(),
+                    max_x: centre_x + 0.5 * wide * domain.width(),
+                    min_y: centre_y - 0.5 * tall * domain.height(),
+                    max_y: centre_y + 0.5 * tall * domain.height(),
+                })
+            }
+            _ => unreachable!("not a geometry edit: {action:?}"),
+        }
+    }
+
+    /// Saves the document by `route` and opens it again through that route's
+    /// own handler, as a reload does. The document comes back as it was,
+    /// invalid draft and accepted scene alike, and validation brings it where
+    /// the session would have come.
+    fn reopen(&mut self, route: Route) {
+        let saved = self.state.editor.document.clone();
+        let bytes = match route {
+            Route::File => persistence::save(&saved).map(String::into_bytes),
+            Route::Link => crate::sharing::encode(&saved)
+                .and_then(|fragment| crate::sharing::decode(&fragment)),
+            Route::Autosave => persistence::save_compact(&saved),
+        }
+        .unwrap_or_else(|error| panic!("the document would not save by {route:?}: {error}"));
+        settle(&mut self.state.editor);
+        let settled = (
+            self.state.editor.acceptance,
+            self.state.editor.document.clone(),
+        );
+        match route {
+            Route::File => {
+                self.state
+                    .sender
+                    .send(FileEvent::Loaded(bytes))
+                    .expect("the file channel is open");
+                self.state.update_files();
+            }
+            Route::Link => self
+                .state
+                .open_startup_scene(Some(Ok(bytes)), || Ok(None), true),
+            Route::Autosave => self
+                .state
+                .open_startup_scene(None, || Ok(Some(bytes)), true),
+        }
+        let notices = self
+            .state
+            .notices
+            .iter()
+            .map(|notice| format!("{}: {}", notice.title, notice.text))
+            .collect::<Vec<_>>();
+        assert!(
+            notices.is_empty(),
+            "reopening by {route:?} said {notices:?}"
+        );
+        assert_eq!(
+            self.state.editor.document,
+            kept(&saved),
+            "reopening by {route:?} changed the document"
+        );
+        settle(&mut self.state.editor);
+        assert_eq!(
+            (self.state.editor.acceptance, &self.state.editor.document),
+            (settled.0, &kept(&settled.1)),
+            "reopened by {route:?}, validation came somewhere the session did not"
+        );
+        self.pass(vec![]);
     }
 
     /// The shadow history's step for `action`, from what it was observed to do.
@@ -676,6 +1059,11 @@ impl Panel {
                     "Redo with nothing to redo changed the document"
                 ),
             },
+            // An opened file, link or autosave starts the history afresh.
+            Action::Reopen(_) => {
+                self.undo.clear();
+                self.redo.clear();
+            }
             // A replacement is a step unless it brings the same document,
             // accepted scene and all, which is what an edit's commit weighs
             // too; validation moves the accepted scene, not an action.
@@ -695,14 +1083,11 @@ impl Panel {
     }
 }
 
-impl StateMachineTest for MaterialPanel {
-    type SystemUnderTest = Panel;
-    type Reference = Self;
-
+impl Panel {
     /// The default scene with a second material and a subdomain made of it,
     /// so a selection can move between materials. The two edits that build
     /// it are the history's first steps.
-    fn init_test(_: &Steps) -> Panel {
+    fn start() -> Self {
         let mut state = Playground::default();
         let mut undo = vec![state.editor.document.model.clone()];
         let second = state.editor.add_material().unwrap();
@@ -726,18 +1111,46 @@ impl StateMachineTest for MaterialPanel {
         panel
     }
 
-    fn apply(mut panel: Panel, _: &Steps, action: Action) -> Panel {
-        let before = panel.state.editor.document.model.clone();
-        panel.state.message.clear();
-        panel.act(&action);
-        panel.record(&action, before);
-        panel
+    fn step(mut self, action: Action) -> Self {
+        let before = self.state.editor.document.model.clone();
+        self.state.message.clear();
+        self.state.notices.clear();
+        self.act(&action);
+        // An id handed out is one nothing has held: not the accepted scene,
+        // and not any step the history can bring back. Undo, Redo and a scene
+        // replacement bring ids back rather than hand them out.
+        if !matches!(
+            action,
+            Action::Undo | Action::Redo | Action::New | Action::Reopen(_)
+        ) {
+            let held = ids(&before, true)
+                .into_iter()
+                .chain(
+                    self.undo
+                        .iter()
+                        .chain(&self.redo)
+                        .flat_map(|model| ids(model, false)),
+                )
+                .collect::<BTreeSet<_>>();
+            let fresh = ids(&self.state.editor.document.model, false)
+                .difference(&ids(&before, false))
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let reused = fresh.intersection(&held).collect::<Vec<_>>();
+            assert!(
+                reused.is_empty(),
+                "{action:?} handed out held ids {reused:?}"
+            );
+        }
+        self.record(&action, before);
+        self
     }
 
-    fn check_invariants(panel: &Panel, _: &Steps) {
-        let state = &panel.state;
+    fn check(&self) {
+        let state = &self.state;
         assert!(!state.editor.editing(), "an edit was left open");
-        let draft = &state.editor.document.model.draft;
+        let model = &state.editor.document.model;
+        let draft = &model.draft;
         for material in &draft.materials {
             assert!(
                 material.valid(),
@@ -745,9 +1158,20 @@ impl StateMachineTest for MaterialPanel {
                 material.name
             );
         }
+        // Valid says the accepted scene is the draft, validated.
+        if state.editor.acceptance == TopologyAcceptance::Valid {
+            assert_eq!(
+                model.accepted, model.draft,
+                "Valid, with an accepted scene that is not the draft"
+            );
+        }
+        // The autosave writes the document within a second of any change.
+        if let Err(error) = persistence::save_compact(&state.editor.document) {
+            panic!("the document would not save: {error}");
+        }
         assert_eq!(
             state.editor.history_len(),
-            (panel.undo.len(), panel.redo.len()),
+            (self.undo.len(), self.redo.len()),
             "the history is not as deep as the commits observed"
         );
         // The open material is in the draft, and the staged copy is of it.
@@ -759,7 +1183,7 @@ impl StateMachineTest for MaterialPanel {
             .expect("a pass leaves a staged copy");
         assert_eq!(staged.id, open, "the staged copy is of another material");
         // Apply is offered exactly while the staged copy differs.
-        let apply = panel
+        let apply = self
             .widgets
             .iter()
             .find(|widget| widget.role == Role::Button && widget.label == "Apply")
@@ -769,6 +1193,23 @@ impl StateMachineTest for MaterialPanel {
             state.material_edits_pending(),
             "Apply is offered against the staged copy's state"
         );
+    }
+}
+
+impl StateMachineTest for MaterialPanel {
+    type SystemUnderTest = Panel;
+    type Reference = Self;
+
+    fn init_test(_: &Steps) -> Panel {
+        Panel::start()
+    }
+
+    fn apply(panel: Panel, _: &Steps, action: Action) -> Panel {
+        panel.step(action)
+    }
+
+    fn check_invariants(panel: &Panel, _: &Steps) {
+        panel.check();
     }
 }
 
