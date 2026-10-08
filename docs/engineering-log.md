@@ -20939,3 +20939,25 @@ the input `latched`, the latch holding this failure, and not a difference in
 the decision. A Resume the device does not take - `clear_failure` refused for
 a generation not installed - stays paused, as it did. Nothing changes in what
 the app does.
+
+## 2026-10-09 — A live event refused, by the protocol's decision
+
+The fourth decision moved into `funfern-protocol`: what becomes of a live
+event the running generation would not take. `decisions::live_event_fallback`
+tries a busy generation again next frame, packs a source edit prepared to be
+packed, and refuses anything else - a pulse or a Switch press leaves its queue
+with the reason on the status line, an edit not packable is rejected saying
+why. The runtime asked it of an error string, and a busy generation was the
+one string `"another canonical transaction is pending"`;
+`CanonicalGpuRequest::queue_live_event` answers a `LiveEventRefusal` now,
+`Busy` or `Refused(reason)`, and the two examples that wait out a busy
+generation match `Busy`. The model's source patch and its waiting pulses and
+Switch presses go through the same function after the device's answer, which
+it gives in `queue_live_event`'s order. One difference came out, in a state no
+run reaches: the model retried a patch that could not be built while a handoff
+was pending, where the runtime refuses it as unbuilt; a handoff pending means
+an upload in flight, which `check` holds in every state the proofs reach, and
+nothing is carried while one is. The model now answers as the runtime does.
+The fallback's documentation had come to sit on `fixed_batch`, the spike's
+switch below it; it is the function's again, and its test, which named the
+refusals by their strings, is the decision's in the protocol crate.

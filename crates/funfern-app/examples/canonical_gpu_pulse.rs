@@ -30,7 +30,7 @@ use std::{
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuLiveEvent, CanonicalGpuPlan,
-    CanonicalGpuRequest, CanonicalWaveGpuPlugin,
+    CanonicalGpuRequest, CanonicalWaveGpuPlugin, LiveEventRefusal,
 };
 use funfern_core::{
     CanonicalForcing, CanonicalSource, CanonicalWaveOperator, CanonicalWaveState, MeshingOptions,
@@ -363,7 +363,7 @@ fn validate(
                             pending.events.pop_front();
                             expected.event_started = true;
                         }
-                        Err("another canonical transaction is pending") => {}
+                        Err(LiveEventRefusal::Busy) => {}
                         Err(error) => {
                             eprintln!("the generation refused the live pulse edit: {error}");
                             expected.failed = true;

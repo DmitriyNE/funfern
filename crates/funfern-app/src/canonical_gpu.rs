@@ -4244,6 +4244,37 @@ struct CanonicalGpuLiveEventHandles {
     upload_words: u32,
 }
 
+/// Why the request would not take a live event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveEventRefusal {
+    /// Another transaction is pending; the same event may be taken once it
+    /// settles.
+    Busy,
+    /// The running generation cannot take it, for the reason given.
+    Refused(String),
+}
+
+impl LiveEventRefusal {
+    pub fn busy(&self) -> bool {
+        *self == Self::Busy
+    }
+}
+
+impl From<&str> for LiveEventRefusal {
+    fn from(reason: &str) -> Self {
+        Self::Refused(reason.into())
+    }
+}
+
+impl std::fmt::Display for LiveEventRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Busy => formatter.write_str("another canonical transaction is pending"),
+            Self::Refused(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CanonicalGpuHandoffOutcome {
     #[default]
@@ -4900,19 +4931,19 @@ impl CanonicalGpuRequest {
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
         mut event: CanonicalGpuLiveEvent,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), LiveEventRefusal> {
         if self.buffers.is_none() {
-            return Err("canonical GPU is not installed");
+            return Err("canonical GPU is not installed".into());
         }
         if self.handoff.is_some() || self.live_event.is_some() {
-            return Err("another canonical transaction is pending");
+            return Err(LiveEventRefusal::Busy);
         }
         if self.stats.failure() != 0 || event.serial <= self.stats.processed_event() {
-            return Err("live canonical event serial is stale or the solver has failed");
+            return Err("live canonical event serial is stale or the solver has failed".into());
         }
         let handles = self.buffers.as_ref().expect("checked installed buffers");
         if event.kind == EVENT_GRID_FILTER && !handles.grid_filter_admitted {
-            return Err("the grid filter is not validated for this time-driven scene");
+            return Err("the grid filter is not validated for this time-driven scene".into());
         }
         // A pulse is a field increment scaled by the nodal mass, and a law
         // patch revalidates only positive factors: neither is the nonlinear
@@ -4924,7 +4955,9 @@ impl CanonicalGpuRequest {
                 EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE | EVENT_TEMPORAL_LAW_PATCH
             )
         {
-            return Err("this event is not derived for a field-dependent medium on the device");
+            return Err(
+                "this event is not derived for a field-dependent medium on the device".into(),
+            );
         }
         // A law patch rewrites coefficient records, not restoring ones, so an
         // oscillator generation takes a new generation for it.
@@ -4934,7 +4967,7 @@ impl CanonicalGpuRequest {
                 EVENT_TEMPORAL_LAW_PATCH | EVENT_LINEAR_LAW_PATCH
             )
         {
-            return Err("a law patch on an oscillator medium takes a new generation");
+            return Err("a law patch on an oscillator medium takes a new generation".into());
         }
         let payload_valid = match event.kind {
             EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE => {
@@ -4978,7 +5011,7 @@ impl CanonicalGpuRequest {
             _ => false,
         };
         if !payload_valid {
-            return Err("live canonical event does not match the active generation");
+            return Err("live canonical event does not match the active generation".into());
         }
         // A source edit rewrites the drive table and the nodal weights and
         // nothing else. The weights are normalized by the generation's fixed
@@ -4996,12 +5029,12 @@ impl CanonicalGpuRequest {
                     | EVENT_TEMPORAL_LAW_PATCH
             )
         {
-            return Err("this event has not passed its Stage 7 temporal composition gate");
+            return Err("this event has not passed its Stage 7 temporal composition gate".into());
         }
         if handles.material_runtime_count == 0
             && matches!(event.kind, EVENT_TEMPORAL_SWITCH | EVENT_TEMPORAL_LAW_PATCH)
         {
-            return Err("a temporal material event requires a temporal generation");
+            return Err("a temporal material event requires a temporal generation".into());
         }
         if handles.material_runtime_count != 0 && event.kind == EVENT_GRID_FILTER {
             event.dispatches += 2;
@@ -5023,7 +5056,7 @@ impl CanonicalGpuRequest {
                 handles.drive_count as usize != event.upload[0].data.z as usize
             })
         {
-            return Err("source patch changes the compiled drive layout");
+            return Err("source patch changes the compiled drive layout".into());
         }
         self.live_event = Some(CanonicalGpuLiveEventHandles {
             upload: add_shader_buffer!(assets, event.upload),

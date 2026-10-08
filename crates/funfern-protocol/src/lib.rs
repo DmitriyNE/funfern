@@ -29,8 +29,8 @@
 pub mod decisions;
 
 use decisions::{
-    FaultSeen, RequestSeen, Settlement, Supervision, UploadSeen, request_due, settle_upload,
-    standing, supervise_fault,
+    FaultSeen, LiveEventFallback, RequestSeen, Settlement, Supervision, UploadSeen,
+    live_event_fallback, request_due, settle_upload, standing, supervise_fault,
 };
 
 /// A candidate, named by the order of its request.
@@ -516,19 +516,17 @@ impl Protocol {
                 Route::InPlace => self.commit_in_place(token),
                 Route::Patch { built, packable } => {
                     if self.event.is_none() {
-                        let free = self
-                            .device
-                            .is_some_and(|device| !device.failed && self.handoff.is_none());
-                        if built && free {
-                            self.event = Some(Event::Patch(token));
-                            self.patched = None;
-                            self.source_commit = Some(token);
-                        } else if self.handoff.is_some() {
-                            // Busy: a later frame tries again.
-                        } else if packable {
-                            self.packed = Some(token);
-                        } else {
-                            self.reject(token);
+                        match self.queue(built, Event::Patch(token)) {
+                            Queued::Taken => {
+                                self.patched = None;
+                                self.source_commit = Some(token);
+                            }
+                            refusal => match live_event_fallback(refusal == Queued::Busy, packable)
+                            {
+                                LiveEventFallback::Retry => {}
+                                LiveEventFallback::Pack => self.packed = Some(token),
+                                LiveEventFallback::Refuse => self.reject(token),
+                            },
                         }
                     }
                 }
@@ -645,17 +643,19 @@ impl Protocol {
         if self.active.is_some() {
             // A waiting pulse, then a waiting Switch, each taken by a device
             // free for it and dropped by one that cannot take it at all.
-            if self.uploading.is_none() && self.source_commit.is_none() && self.pulses > 0 {
-                match self.queue(frame.pulse, Event::Pulse) {
-                    Queued::Taken | Queued::Refused => self.pulses -= 1,
-                    Queued::Busy => {}
-                }
+            if self.uploading.is_none()
+                && self.source_commit.is_none()
+                && self.pulses > 0
+                && self.sent(frame.pulse, Event::Pulse)
+            {
+                self.pulses -= 1;
             }
-            if self.uploading.is_none() && self.source_commit.is_none() && self.switches > 0 {
-                match self.queue(frame.switch, Event::Switch) {
-                    Queued::Taken | Queued::Refused => self.switches -= 1,
-                    Queued::Busy => {}
-                }
+            if self.uploading.is_none()
+                && self.source_commit.is_none()
+                && self.switches > 0
+                && self.sent(frame.switch, Event::Switch)
+            {
+                self.switches -= 1;
             }
             // Steps, unless a packed candidate or a fresh upload holds them.
             let fresh_upload = self
@@ -721,6 +721,10 @@ impl Protocol {
         }
     }
 
+    /// Offers a live event to the device, which answers in
+    /// `queue_live_event`'s order: one that could not be built is never
+    /// offered, and the generation must be installed, free of another
+    /// transaction, and not failed.
     fn queue(&mut self, built: bool, event: Event) -> Queued {
         if !built {
             return Queued::Refused;
@@ -735,6 +739,17 @@ impl Protocol {
         } else {
             self.event = Some(event);
             Queued::Taken
+        }
+    }
+
+    /// Offers a pulse or a Switch press, and answers whether it leaves the
+    /// queue: taken, or refused by a generation that cannot take it at all.
+    fn sent(&mut self, built: bool, event: Event) -> bool {
+        match self.queue(built, event) {
+            Queued::Taken => true,
+            refusal => {
+                live_event_fallback(refusal == Queued::Busy, false) != LiveEventFallback::Retry
+            }
         }
     }
 
@@ -866,6 +881,7 @@ impl Protocol {
     }
 }
 
+#[derive(PartialEq)]
 enum Queued {
     Taken,
     Busy,

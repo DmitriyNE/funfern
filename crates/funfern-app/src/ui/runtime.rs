@@ -3,7 +3,7 @@
 
 use crate::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuHandoffOutcome, CanonicalGpuLiveEvent,
-    CanonicalGpuPlan, CanonicalGpuRequest, canonical_failure_description,
+    CanonicalGpuPlan, CanonicalGpuRequest, LiveEventRefusal, canonical_failure_description,
 };
 use crate::drawn_pacing::PacingNote;
 use crate::gpu_frame_timer::GpuFrameReading;
@@ -19,8 +19,8 @@ use funfern_app::topology_runtime::{
 use funfern_core::*;
 use funfern_protocol::Acceptance;
 use funfern_protocol::decisions::{
-    FaultSeen, RequestSeen, Settlement, Supervision, UploadSeen, request_due, settle_upload,
-    standing, supervise_fault,
+    FaultSeen, LiveEventFallback, RequestSeen, Settlement, Supervision, UploadSeen,
+    live_event_fallback, request_due, settle_upload, standing, supervise_fault,
 };
 use std::sync::{
     Arc, Mutex,
@@ -512,11 +512,10 @@ impl Playground {
                                 built: event.is_ok(),
                                 packable: candidate.canonical_transfer.is_some(),
                             });
-                            match event.and_then(|event| {
-                                request
-                                    .queue_live_event(assets, event)
-                                    .map_err(str::to_owned)
-                            }) {
+                            match event
+                                .map_err(LiveEventRefusal::Refused)
+                                .and_then(|event| request.queue_live_event(assets, event))
+                            {
                                 Ok(()) => {
                                     self.coordinator.canonical_event_serial = serial;
                                     self.handoff_packed = self.handoff_ready;
@@ -524,15 +523,15 @@ impl Playground {
                                     self.coordinator.source_commit =
                                         Some(PendingSourceCommit { token, serial });
                                 }
-                                Err(error) => match live_event_fallback(
-                                    &error,
+                                Err(refusal) => match live_event_fallback(
+                                    refusal.busy(),
                                     candidate.canonical_transfer.is_some(),
                                 ) {
                                     LiveEventFallback::Retry => {}
                                     LiveEventFallback::Pack => needs_gpu_pack = true,
                                     LiveEventFallback::Refuse => {
                                         let refusal = format!(
-                                            "{error}, and this edit was prepared without the \
+                                            "{refusal}, and this edit was prepared without the \
                                              handoff maps a packed generation needs"
                                         );
                                         self.runtime.reject_ready(token, refusal.clone());
@@ -851,19 +850,18 @@ impl Playground {
                 });
                 #[cfg(test)]
                 self.protocol_log.push(ProtocolNote::Pulse(built.is_ok()));
-                match built.and_then(|event| {
-                    request
-                        .queue_live_event(assets, event)
-                        .map_err(str::to_owned)
-                }) {
+                match built
+                    .map_err(LiveEventRefusal::Refused)
+                    .and_then(|event| request.queue_live_event(assets, event))
+                {
                     Ok(()) => {
                         self.coordinator.canonical_event_serial = serial;
                         self.coordinator.pending_pulses.pop_front();
                     }
-                    Err(error) => {
-                        if live_event_fallback(&error, false) != LiveEventFallback::Retry {
+                    Err(refusal) => {
+                        if live_event_fallback(refusal.busy(), false) != LiveEventFallback::Retry {
                             self.coordinator.pending_pulses.pop_front();
-                            self.message = error;
+                            self.message = refusal.to_string();
                         }
                     }
                 }
@@ -879,10 +877,10 @@ impl Playground {
                     Ok(()) => {
                         self.coordinator.pending_switches.pop_front();
                     }
-                    Err(error) => {
-                        if live_event_fallback(&error, false) != LiveEventFallback::Retry {
+                    Err(refusal) => {
+                        if live_event_fallback(refusal.busy(), false) != LiveEventFallback::Retry {
                             self.coordinator.pending_switches.pop_front();
-                            self.message = error;
+                            self.message = refusal.to_string();
                         }
                     }
                 }
@@ -1139,7 +1137,7 @@ impl Playground {
         request: &mut CanonicalGpuRequest,
         assets: &mut Assets<ShaderBuffer>,
         material: MaterialId,
-    ) -> Result<(), String> {
+    ) -> Result<(), LiveEventRefusal> {
         let Some(temporal) = &active.canonical_temporal_operator else {
             #[cfg(test)]
             self.protocol_log.push(ProtocolNote::Switch(false));
@@ -1188,9 +1186,7 @@ impl Playground {
                 .map_err(|error| format!("{error:?}"));
         #[cfg(test)]
         self.protocol_log.push(ProtocolNote::Switch(event.is_ok()));
-        request
-            .queue_live_event(assets, event?)
-            .map_err(str::to_owned)?;
+        request.queue_live_event(assets, event.map_err(LiveEventRefusal::Refused)?)?;
         self.coordinator.canonical_event_serial = serial;
         self.coordinator.switch_targets.insert(material, !heading);
         Ok(())
@@ -1263,58 +1259,12 @@ impl Playground {
     }
 }
 
-/// What to do with a source edit whose live patch the accepted generation would
-/// not take.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LiveEventFallback {
-    /// The generation is busy. The candidate stays ready and a later frame
-    /// tries the same patch again.
-    Retry,
-    /// The generation cannot take this patch at all. The edit goes through a
-    /// whole prepared generation instead, which is what it did before the patch
-    /// existed.
-    Pack,
-    /// The generation cannot take the patch and the edit was not prepared in a
-    /// form that can be packed either. Nothing can carry it, so say so rather
-    /// than fail further on with a reason that names neither cause.
-    Refuse,
-}
-
-/// A refused live patch is a reason to take the slow path, never a reason to
-/// lose the edit.
-///
-/// Source moves and weight edits were routed onto the live-patch fast path in
-/// "Avoid full handoffs for sources and measurements"; the day after, temporal
-/// material events arrived and gated every patch kind whose composition with a
-/// driven medium had not been tested. A driven scene therefore took the fast
-/// path and was then refused, and the refusal rejected the prepared candidate -
-/// so moving a source on a pumped medium reported a failed preparation and
-/// dropped the edit. Neither change is wrong on its own.
-///
-/// Packing is the fallback because it is the path these edits took before the
-/// patch existed - but only for a candidate prepared with the handoff maps a
-/// pack needs. A source-only preparation deliberately builds none of them, on
-/// the promise that a live patch will carry the edit; where that promise cannot
-/// be kept, the preparation now makes a whole generation instead, so the last
-/// case should not arise. It is kept truthful rather than trusted, because what
-/// it replaced failed later on with a reason that named neither the refusal nor
-/// the missing maps.
 /// Spike (2026-10-05): `FUNFERN_FIXED_BATCH=N` asks N steps every running
 /// frame in place of the controller's batch; the GPU backpressure still
 /// bounds what is admitted.
 fn fixed_batch() -> Option<u64> {
     static FIXED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *FIXED.get_or_init(|| std::env::var("FUNFERN_FIXED_BATCH").ok()?.parse().ok())
-}
-
-fn live_event_fallback(error: &str, packable: bool) -> LiveEventFallback {
-    if error == "another canonical transaction is pending" {
-        LiveEventFallback::Retry
-    } else if packable {
-        LiveEventFallback::Pack
-    } else {
-        LiveEventFallback::Refuse
-    }
 }
 
 /// The material runtime the running generation stepped with: the display's
@@ -1361,53 +1311,6 @@ fn pulse_increment(
 mod tests {
     use super::*;
     use crate::canonical_gpu::CANONICAL_FAILURE_NON_FINITE;
-
-    /// The reported regression: moving a continuous source on a pumped medium
-    /// reported "this event has not passed its Stage 7 temporal composition
-    /// gate" as a failed preparation, and the edit was lost.
-    #[test]
-    fn a_refused_source_patch_packs_instead_of_losing_the_edit() {
-        // The gate a driven generation puts on patch kinds it has not composed
-        // with yet, verbatim from `queue_live_event`.
-        assert_eq!(
-            live_event_fallback(
-                "this event has not passed its Stage 7 temporal composition gate",
-                true
-            ),
-            LiveEventFallback::Pack
-        );
-        // Anything else the generation will not take is equally a reason to
-        // take the slow path rather than to drop the edit.
-        for refusal in [
-            "live canonical event does not match the active generation",
-            "a temporal material event requires a temporal generation",
-            "live canonical event serial is stale or the solver has failed",
-            "canonical GPU is not installed",
-        ] {
-            assert_eq!(
-                live_event_fallback(refusal, true),
-                LiveEventFallback::Pack,
-                "{refusal}"
-            );
-            // The same refusal on an edit that was never prepared to be packed
-            // says so, rather than failing later on missing handoff maps.
-            assert_eq!(
-                live_event_fallback(refusal, false),
-                LiveEventFallback::Refuse,
-                "{refusal}"
-            );
-        }
-
-        // Except a generation that is merely busy: the same patch is worth
-        // trying again next frame, and packing would throw away a fast path
-        // that is about to be available.
-        for packable in [true, false] {
-            assert_eq!(
-                live_event_fallback("another canonical transaction is pending", packable),
-                LiveEventFallback::Retry
-            );
-        }
-    }
 
     /// Handover generations preserve the accepted-step total. Their first
     /// observation establishes a baseline instead of re-crediting the run;

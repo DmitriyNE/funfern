@@ -173,3 +173,72 @@ pub fn supervise_fault(seen: FaultSeen) -> Supervision {
         Supervision::Hold
     }
 }
+
+/// What to do with a live event the running generation would not take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveEventFallback {
+    /// The generation is busy. The event waits, or the candidate it carries
+    /// stays ready, and a later frame tries the same again.
+    Retry,
+    /// The generation cannot take this patch at all. The edit goes through a
+    /// whole prepared generation instead, which is what it did before the
+    /// patch existed.
+    Pack,
+    /// The generation cannot take it, and nothing else carries it: a pulse or
+    /// a Switch press goes, and so does an edit not prepared in a form that
+    /// can be packed. Nothing can carry it, so say so rather than fail further
+    /// on with a reason that names neither cause.
+    Refuse,
+}
+
+/// A refused live patch is a reason to take the slow path, never a reason to
+/// lose the edit.
+///
+/// Source moves and weight edits were routed onto the live-patch fast path in
+/// "Avoid full handoffs for sources and measurements"; the day after, temporal
+/// material events arrived and gated every patch kind whose composition with a
+/// driven medium had not been tested. A driven scene therefore took the fast
+/// path and was then refused, and the refusal rejected the prepared candidate -
+/// so moving a source on a pumped medium reported a failed preparation and
+/// dropped the edit. Neither change is wrong on its own.
+///
+/// Packing is the fallback because it is the path these edits took before the
+/// patch existed - but only for a candidate prepared with the handoff maps a
+/// pack needs. A source-only preparation deliberately builds none of them, on
+/// the promise that a live patch will carry the edit; where that promise cannot
+/// be kept, the preparation now makes a whole generation instead, so the last
+/// case should not arise. It is kept truthful rather than trusted, because what
+/// it replaced failed later on with a reason that named neither the refusal nor
+/// the missing maps.
+pub fn live_event_fallback(busy: bool, packable: bool) -> LiveEventFallback {
+    if busy {
+        LiveEventFallback::Retry
+    } else if packable {
+        LiveEventFallback::Pack
+    } else {
+        LiveEventFallback::Refuse
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reported regression: moving a continuous source on a pumped medium
+    /// reported "this event has not passed its Stage 7 temporal composition
+    /// gate" as a failed preparation, and the edit was lost. A refusal packs
+    /// an edit prepared to be packed and says so of one that was not; only a
+    /// generation merely busy is tried again, since packing would throw away
+    /// a fast path about to be available.
+    #[test]
+    fn a_refused_source_patch_packs_instead_of_losing_the_edit() {
+        assert_eq!(live_event_fallback(false, true), LiveEventFallback::Pack);
+        assert_eq!(live_event_fallback(false, false), LiveEventFallback::Refuse);
+        for packable in [true, false] {
+            assert_eq!(
+                live_event_fallback(true, packable),
+                LiveEventFallback::Retry
+            );
+        }
+    }
+}
