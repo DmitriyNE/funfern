@@ -96,6 +96,16 @@ resize. A successful `main` run publishes the browser bundle to
 <https://dmitriyne.github.io/funfern/>. The Pages source is configured as
 **GitHub Actions** in the repository settings.
 
+The Materials panel is also driven by generated sequences of its own actions
+(`crates/funfern-app/src/ui/sequences.rs`): typing, presets, Apply, Revert,
+selection moves, Undo and Redo, a physics switch and New, in orders nobody
+wrote down, checked against a shadow of the history and a post-condition per
+action. The gate runs a few dozen sequences; `PROPTEST_CASES=2000 cargo test -p
+funfern-app --release --bins material_edits_in_any_order` runs a sweep. A
+failure is shrunk to the shortest sequence that still fails, printed, and its
+seed written under `crates/funfern-app/proptest-regressions`, which is checked
+in so the case is replayed first everywhere.
+
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,
 nested material inclusions,

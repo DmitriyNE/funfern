@@ -96,7 +96,7 @@ impl Playground {
     }
 
     /// Whether the material editor holds edits the draft does not have yet.
-    fn material_edits_pending(&self) -> bool {
+    pub(super) fn material_edits_pending(&self) -> bool {
         self.material_edit.as_ref().is_some_and(|edit| {
             edit.id == self.material_selection
                 && self.editor.document.model.draft.material(edit.id) != Some(edit)

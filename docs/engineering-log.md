@@ -20476,3 +20476,51 @@ committed as a hand-made law. Both pickers now drop the material's formula,
 error and parameter-name text when a preset applies, as Revert does; text
 that parsed was in the law already, since opening the picker took the focus.
 `a_preset_takes_the_formula_text_of_the_laws_it_replaces`.
+
+## 2026-10-08 — The Materials panel under generated sequences of its own actions
+
+The recent defects were disagreements about what is current between parts
+that were each right alone: formula text against the material it was typed
+for, a staged copy against the document, a selection against the material it
+opened. Each needed a particular order of ordinary actions, and the focused
+tests document one order each. `ui/sequences.rs` now draws orders of legal
+actions and runs them through the panel's own widgets: typing into any text
+field, Enter in a field nobody typed into, picking from any combo, Apply,
+Revert, adding and deleting materials and parameters, folding the headers,
+the Advanced view, Library and face selection, Undo, Redo, a physics switch,
+New and settling the draft.
+
+- `proptest` and `proptest-state-machine` are dev-dependencies. The reference
+  state is a step counter, so typed text is fresh each time; what the harness
+  checks is a shadow history kept from the commits it observes, which says
+  what Undo and Redo must bring back and how deep the history is, and a
+  post-condition per action: Apply commits the staged copy exactly and only
+  it, Revert leaves it the document's, Enter in an untouched field changes
+  nothing, typed text is on screen or refused with a notice, a selection away
+  from pending edits is refused and said, a view toggle edits nothing, and
+  after every action no edit is left open, every material is valid and Apply
+  is offered exactly while the staged copy differs.
+- A failure shrinks to the shortest sequence that still fails, which is a
+  focused test waiting to be written; its seed goes under
+  `proptest-regressions` and is replayed first. The gate runs 64 sequences in
+  about two seconds; `PROPTEST_CASES=2000` is a fifty-second sweep. A tally
+  over 500 sequences: 2,055 typed texts accepted, 152 kept with an error, 533
+  picks that changed the staged copy and 78 the document, 242 Applies, 362
+  Reverts, 436 Undos and 35 Redos that moved, 143 physics switches.
+- `test_support` gained the panel driver the panel tests wrote by hand each
+  time, a role on each laid-out widget, and typing helpers. Three egui facts
+  the driver has to know: a collapsing header opens over a dozen passes unless
+  `animation_time` is zero; a new popup is laid out disabled on its first
+  frame, to be measured, so its entries take a click only from the next pass;
+  and a roster row and a Library row can carry the same name, so the Library
+  is found below its heading and in the materials' order.
+- Two findings, left as tolerances marked `FINDING` in the harness until
+  decided: `[Press(AddMaterial), Undo]` leaves the panel open on a material
+  the draft no longer has, so no editor and no Apply show until a material is
+  clicked, where drawing already falls back to the default; and `[New, New]`
+  takes an undo step for a scene identical to the one it replaces, where an
+  edit that changes nothing takes none.
+- Not yet driven: Fire now, which needs a gate on a drive; the Switch button,
+  which needs a running medium; drag values; the colour picker; Open of a
+  catalog scene. The runtime, with the device's transitions under the same
+  harness, is the next machine.

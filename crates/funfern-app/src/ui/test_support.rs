@@ -162,12 +162,14 @@ pub(super) fn every_span(state: &Playground) -> BTreeSet<TopologySpanTarget> {
 }
 
 /// A widget of a pass as AccessKit was told of it: its label, or a label's
-/// own text, where it was laid out, and whether it was enabled.
+/// own text, where it was laid out, whether it was enabled, and what kind of
+/// control it is.
 #[derive(Clone, Debug)]
 pub(super) struct LaidOut {
     pub(super) label: String,
     pub(super) rect: Rect,
     pub(super) enabled: bool,
+    pub(super) role: egui::accesskit::Role,
 }
 
 /// Every labelled widget of `output`'s pass, which a context with AccessKit
@@ -189,9 +191,75 @@ pub(super) fn laid_out(output: &egui::FullOutput) -> Vec<LaidOut> {
                     Pos2::new(bounds.x1 as f32, bounds.y1 as f32),
                 ),
                 enabled: !node.is_disabled(),
+                role: node.role(),
             })
         })
         .collect()
+}
+
+/// A panel shown pass by pass in a context of its own, with the events of one
+/// frame each, as the panel tests do by hand: themed, so the fonts are the
+/// app's, and with AccessKit on, so the widgets of each pass can be found.
+pub(super) struct PanelDriver {
+    context: egui::Context,
+}
+
+impl PanelDriver {
+    pub(super) fn new() -> Self {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.enable_accesskit();
+        // A header opens over a dozen passes otherwise, its body laid out
+        // where the next pass's click no longer finds it.
+        context.all_styles_mut(|style| style.animation_time = 0.0);
+        Self { context }
+    }
+
+    /// One pass of `show` with `events`, on a screen tall enough that nothing
+    /// scrolls out of reach. Answers the widgets laid out, top to bottom and
+    /// left to right, so the nth of a kind is the same widget pass to pass.
+    pub(super) fn pass(
+        &self,
+        events: Vec<egui::Event>,
+        show: impl FnMut(&mut egui::Ui),
+    ) -> Vec<LaidOut> {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(480.0, 6000.0))),
+            events,
+            ..egui::RawInput::default()
+        };
+        let output = self.context.run_ui(input, show);
+        let mut widgets = laid_out(&output);
+        widgets.sort_by(|a, b| {
+            a.rect
+                .min
+                .y
+                .total_cmp(&b.rect.min.y)
+                .then(a.rect.min.x.total_cmp(&b.rect.min.x))
+        });
+        widgets
+    }
+}
+
+/// A key pressed with `modifiers` held, as the events of one pass.
+pub(super) fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+/// Replacing a focused text field's text with `text` and pressing Enter, as
+/// the events of one pass: select all, type, commit.
+pub(super) fn typed(text: &str) -> Vec<egui::Event> {
+    vec![
+        key(egui::Key::A, egui::Modifiers::COMMAND),
+        egui::Event::Text(text.to_owned()),
+        key(egui::Key::Enter, egui::Modifiers::NONE),
+    ]
 }
 
 /// A primary click at the centre of `widget`, as the events of one pass.

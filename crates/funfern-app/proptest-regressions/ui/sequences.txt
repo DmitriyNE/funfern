@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b750423139c4537365fa5e58b95311dbb809a258fcc2ae9e983c9428154195b3 # shrinks to (initial_state, transitions, seen_counter) = (Steps { taken: 0 }, [Press(AddMaterial), Undo], None)
+cc fffb6ff95d8ec545fab1774fe15deae7b8c6fa2ead6972cec5c985ec115dc931 # shrinks to (initial_state, transitions, seen_counter) = (Steps { taken: 0 }, [New, New], None)
+cc 9b616869b32718300037556f50a1bfcc59bb5e28865a11fd51d1a33a14ecb8ad # shrinks to (initial_state, transitions, seen_counter) = (Steps { taken: 0 }, [Fold(Parameters), Advanced, Pick { combo: 31, item: 3 }, Press(AddParameter), Fold(Anisotropy), Pick { combo: 42, item: 223 }, Pick { combo: 60, item: 39 }, Type { field: 206, text: "8.5" }], None)

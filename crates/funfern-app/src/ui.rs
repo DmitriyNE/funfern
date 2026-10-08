@@ -62,6 +62,8 @@ mod runtime;
 mod scene_card;
 mod selection;
 
+#[cfg(test)]
+mod sequences;
 mod session;
 mod signals;
 mod state;

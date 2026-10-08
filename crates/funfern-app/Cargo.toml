@@ -54,3 +54,7 @@ naga = { version = "=29.0.4", features = ["wgsl-in", "wgsl-out"] }
 # calls a glyph the family's replacement face owns missing, and for the
 # monospace family that face is the primary one.
 ab_glyph = "=0.2.32"
+# Generated sequences of user actions against a reference model of what owns
+# the current value, with shrinking that keeps a shortened sequence legal.
+proptest = "1.11"
+proptest-state-machine = "0.8"
