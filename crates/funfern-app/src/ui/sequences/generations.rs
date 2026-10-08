@@ -1197,3 +1197,48 @@ fn an_invalid_draft_holds_back_nothing_outside_it() {
         running
     );
 }
+
+/// Found with the protocol model beside the runtime: the device's counters
+/// outlived a dropped generation, so after a fault the scene opened in its
+/// place read that failure as its own. Opened while the fault's upload was
+/// still in flight, the new scene started paused; opened after the pause, it
+/// raised a second "Simulation paused" notice. Run could not clear either
+/// until the new scene installed.
+#[test]
+fn a_scene_opened_after_a_fault_takes_none_of_it() {
+    // A fault while an install uploads, the scene replaced before the host
+    // has paused for it.
+    let mut session = Session::start();
+    for act in [Act::Validate, Act::Frame(None)] {
+        session.step(&act);
+    }
+    assert!(session.state.uploading.is_some(), "an install uploads");
+    for act in [Act::Fault, Act::Open(false), Act::Frame(Some(0))] {
+        session.step(&act);
+    }
+    assert!(!session.request.failed());
+    assert!(session.state.wave_running, "the new scene runs");
+    assert!(
+        session.state.notices.is_empty(),
+        "{:?}",
+        session.state.notices.len()
+    );
+    session.quiesce();
+
+    // A fault the host has paused for, the scene replaced after.
+    let mut session = Session::start();
+    session.quiesce();
+    for act in [Act::Fault, Act::Frame(Some(0))] {
+        session.step(&act);
+    }
+    assert!(session.state.solver_fault.is_some(), "paused for the fault");
+    for act in [Act::Open(true), Act::Frame(Some(0))] {
+        session.step(&act);
+    }
+    assert!(!session.request.failed());
+    assert!(
+        session.state.notices.is_empty(),
+        "a second notice of the dropped generation's fault"
+    );
+    session.quiesce();
+}

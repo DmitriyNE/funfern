@@ -20764,3 +20764,21 @@ blocks in its order.
   as the new scene's. The new scene starts paused, a second "Simulation
   paused" notice appears, and Run cannot clear it until the new scene
   installs.
+
+## 2026-10-08 — A dropped generation's counters go with it
+
+Found with the protocol model running beside the runtime, as
+`[Validate, Frame, Fault, Open, Frame]`. `CanonicalGpuRequest::clear` dropped a
+replaced scene's generation but kept its counters, so after a fault the scene
+opened in its place read that failure as its own: opened while the fault's
+install was still uploading, the new scene started paused; opened after the
+pause, it raised a second "Simulation paused" notice; and Run could not clear
+either until the new scene installed, since clearing a failure needs a
+generation. `clear` now starts the counters afresh, as `install` does, rather
+than resetting the old ones in place, which a late readback of the dropped
+generation still holds. The model's `stale_failure`, which mirrored the defect
+until it was decided, is gone, and both Kani proofs hold without it.
+`a_cleared_request_forgets_its_failure` and
+`a_scene_opened_after_a_fault_takes_none_of_it`, both failing with the fix cut
+out, as the runtime machine does, which shrinks it to those five steps.
+2,000 runtime sequences agree with the model at every step.

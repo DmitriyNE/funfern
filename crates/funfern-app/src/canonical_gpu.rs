@@ -4536,6 +4536,13 @@ impl CanonicalGpuRequest {
         self.integrated_readback_entity = None;
         self.manifest = None;
         self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
+        // The generation's counters go with it, as `install` replaces them:
+        // kept, its failure was read as the next scene's, which started
+        // paused with a second notice of a fault it never had, and Run could
+        // not clear it until something installed. Fresh ones rather than its
+        // own reset, since a late readback of the dropped generation still
+        // holds those.
+        self.stats = Arc::new(CanonicalGpuStats::default());
         // With the generation gone nothing it was asked for can still run, so
         // nothing is outstanding: a backlog left here kept `caught_up` false
         // for good, and the next generation's upload, which waits on it,
@@ -8471,6 +8478,30 @@ mod tests {
             request.clear(&mut assets, &mut commands);
             assert!(request.caught_up());
             assert!(request.buffer_handles().is_none());
+        });
+    }
+
+    /// Found with the protocol model beside the runtime: a request cleared
+    /// after its generation failed still read as failed, and the scene opened
+    /// next took the failure for its own.
+    #[test]
+    fn a_cleared_request_forgets_its_failure() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            request.install(
+                &mut assets,
+                &mut commands,
+                plan(OuterBoundaryCondition::Reflecting),
+            );
+            request.fail(CANONICAL_FAILURE_NON_FINITE);
+            assert!(request.failed());
+            request.clear(&mut assets, &mut commands);
+            assert!(!request.failed(), "the dropped generation's failure stayed");
+            assert!(request.caught_up());
         });
     }
 

@@ -230,9 +230,6 @@ pub struct Protocol {
     pub patched: Option<bool>,
     /// The generation the display shows.
     pub display: u8,
-    /// FINDING: a failure the device's counters kept when its generation was
-    /// dropped, which reads as the next scene's until something installs.
-    pub stale_failure: bool,
 }
 
 impl Default for Protocol {
@@ -275,7 +272,6 @@ impl Default for Protocol {
             event: None,
             patched: None,
             display: 0,
-            stale_failure: false,
         }
     }
 }
@@ -377,12 +373,10 @@ impl Protocol {
         }
     }
 
-    /// The device's failure as the host reads it.
+    /// The device's failure as the host reads it: none without a generation,
+    /// whose counters go with it.
     pub fn failed(&self) -> bool {
-        match self.device {
-            Some(device) => device.failed,
-            None => self.stale_failure,
-        }
+        self.device.is_some_and(|device| device.failed)
     }
 
     fn revision_of(&self, token: Token) -> u8 {
@@ -402,9 +396,6 @@ impl Protocol {
         }
         // A replaced scene's generation goes, and all that was for it.
         if std::mem::take(&mut self.drop) {
-            // FINDING: clearing the device keeps its failure count, so the
-            // dropped generation's failure is read as the new scene's.
-            self.stale_failure |= self.device.is_some_and(|device| device.failed);
             self.device = None;
             self.handoff = None;
             self.refused = false;
@@ -543,7 +534,6 @@ impl Protocol {
             if !frame.begun {
                 self.reject(token);
             } else if install {
-                self.stale_failure = false;
                 self.generation = self.generation.wrapping_add(1).max(1);
                 self.device = Some(Running {
                     token,
@@ -605,7 +595,6 @@ impl Protocol {
             && self.source_commit.is_none()
             && let Some(active) = self.active
         {
-            self.stale_failure = false;
             self.generation = self.generation.wrapping_add(1).max(1);
             self.device = Some(Running {
                 token: active,
