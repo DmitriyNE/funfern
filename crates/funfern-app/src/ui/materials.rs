@@ -562,7 +562,13 @@ impl Playground {
             }
             if let Some(preset) = chosen {
                 match apply_law_preset(preset, &material) {
-                    Ok(applied) => material = applied,
+                    Ok(applied) => {
+                        material = applied;
+                        // The fields' text was for the laws the preset
+                        // replaced; kept, it showed them and committed them
+                        // back over the preset.
+                        self.forget_material_edits(material.id);
+                    }
                     Err(error) => self.notify(error.to_string()),
                 }
             }
@@ -1271,7 +1277,12 @@ impl Playground {
         }
         if let Some(preset) = chosen {
             match apply_medium_preset(preset, material, physics) {
-                Ok(applied) => *material = applied,
+                Ok(applied) => {
+                    *material = applied;
+                    // As in Advanced: the cached text belongs to the laws the
+                    // medium replaced.
+                    self.forget_material_edits(material.id);
+                }
                 Err(error) => self.notify(error.to_string()),
             }
         }
@@ -2037,6 +2048,108 @@ mod tests {
     /// the parameter it reads. A drive at a parameter the edit had just added
     /// was refused as invalid. Both fire as edited now, and the material's
     /// other edits stay pending.
+    /// Reported: a pump whose depth was typed as `0.4`, given the Parametric
+    /// pump preset, still showed `0.4` in its Depth field; Enter there wrote
+    /// it back over the preset's `depth`, and Apply committed it. Either
+    /// picker, Advanced or Simple, now drops the material's formula text.
+    #[test]
+    fn a_preset_takes_the_formula_text_of_the_laws_it_replaces() {
+        for simple in [false, true] {
+            let mut state = Playground::default();
+            let selection = state.resolved_material_selection();
+            let mut applied = state
+                .editor
+                .document
+                .model
+                .draft
+                .material(selection)
+                .unwrap()
+                .clone();
+            applied.mass_law.drive = TimeDrive::ParametricPump {
+                depth: ScalarField::formula("0.4").unwrap(),
+                frequency_hz: ScalarField::constant(1.0),
+                phase_radians: ScalarField::constant(0.0),
+            };
+            state.editor.update_material(applied).unwrap();
+            settle(&mut state.editor);
+            state.set_material_advanced(selection, true);
+            let context = egui::Context::default();
+            theme::apply(&context);
+            context.enable_accesskit();
+            let pass = |state: &mut Playground, events: Vec<egui::Event>| {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(480.0, 6000.0),
+                    )),
+                    events,
+                    ..egui::RawInput::default()
+                };
+                let output = context.run_ui(input, |ui| state.materials_panel(ui));
+                laid_out(&output)
+            };
+            let click_on = |widgets: &[LaidOut], label: &str| {
+                widgets
+                    .iter()
+                    .find(|widget| widget.label == label)
+                    .map(click)
+                    .unwrap_or_else(|| panic!("simple {simple}: no {label:?}"))
+            };
+            let widgets = pass(&mut state, vec![]);
+            assert!(widgets.iter().any(|widget| widget.label == "0.4"));
+            let item = if simple {
+                state.set_material_advanced(selection, false);
+                let widgets = pass(&mut state, vec![]);
+                pass(&mut state, click_on(&widgets, "Custom"));
+                let medium = medium_presets()
+                    .iter()
+                    .find(|medium| medium.response().id == "M-T2")
+                    .unwrap();
+                medium_label(medium, PhysicsModel::Mechanical)
+            } else {
+                pass(&mut state, click_on(&widgets, "Custom"));
+                let pump = law_presets()
+                    .iter()
+                    .find(|preset| preset.id == "M-T2")
+                    .unwrap();
+                law_preset_label(pump, PhysicsModel::Mechanical)
+            };
+            let widgets = pass(&mut state, vec![]);
+            pass(&mut state, click_on(&widgets, &item));
+            state.set_material_advanced(selection, true);
+            let widgets = pass(&mut state, vec![]);
+            assert!(
+                !widgets.iter().any(|widget| widget.label == "0.4"),
+                "simple {simple}: a field still shows the replaced depth"
+            );
+            pass(&mut state, click_on(&widgets, "depth"));
+            pass(
+                &mut state,
+                vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            let widgets = pass(&mut state, vec![]);
+            pass(&mut state, click_on(&widgets, "Apply"));
+            let applied = state
+                .editor
+                .document
+                .model
+                .draft
+                .material(selection)
+                .unwrap();
+            assert_eq!(
+                identify_law_preset(applied).map(|found| found.preset.id),
+                Some("M-T2"),
+                "simple {simple}"
+            );
+        }
+    }
+
     #[test]
     fn fire_now_takes_the_parameters_its_drive_reads() {
         for added in [false, true] {

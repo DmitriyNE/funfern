@@ -20464,3 +20464,15 @@ that names the browser's reason and points to the link in the address bar.
 It leaves a save or capture under way alone. Checked on a scratch build in
 Chrome with `writeText` made to reject, as a denied write does.
 `a_refused_copy_is_told_and_leaves_a_save_alone`.
+
+## 2026-10-08 — A preset takes the formula text of the laws it replaces
+
+A formula field keeps its text per material and slot, and fills it from the
+law only when none is kept. The Response pickers, Advanced and Simple,
+replaced the whole material and left that text: a pump whose depth was typed
+as `0.4`, given the Parametric pump preset, still showed `0.4` over the
+preset's `depth`, and Enter in the field wrote it back, which Apply then
+committed as a hand-made law. Both pickers now drop the material's formula,
+error and parameter-name text when a preset applies, as Revert does; text
+that parsed was in the law already, since opening the picker took the focus.
+`a_preset_takes_the_formula_text_of_the_laws_it_replaces`.
