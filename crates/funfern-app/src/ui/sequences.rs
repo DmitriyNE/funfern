@@ -430,16 +430,24 @@ impl Panel {
                     return;
                 };
                 let before = self.observe();
+                // A formula field keeps text it refused, an unknown parameter
+                // say, and shows it with the error; once a later edit makes it
+                // valid, Enter commits what the field shows, as it should. So
+                // only with no refusal standing does every field show what the
+                // material has.
+                let refused = !self.state.material_session.errors.is_empty();
                 self.pass(click(&target));
                 self.pass(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
                 self.pass(vec![]);
                 // A field nobody typed into commits nothing: what it shows
                 // is what the material has.
-                assert_eq!(
-                    self.observe(),
-                    before,
-                    "Enter in the untouched field {target:?} changed something"
-                );
+                if !refused {
+                    assert_eq!(
+                        self.observe(),
+                        before,
+                        "Enter in the untouched field {target:?} changed something"
+                    );
+                }
                 let fields = self.of_role(Role::TextInput);
                 assert_eq!(
                     Self::nth(&fields, *field).map(|shown| shown.label),

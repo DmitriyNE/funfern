@@ -20803,3 +20803,16 @@ machines pass 2,000 sequences each over it, the runtime one in lockstep with
 the protocol model. The panel machine's sweep stopped on an expectation of the
 harness's own, which fails the same way on the code before this change and is
 corrected in the next entry.
+
+## 2026-10-08 — The panel machine's untouched field, corrected
+
+A 2,000-sequence sweep of the Materials panel machine stopped on
+`[Fold(Parameters), Pick, Type "p1*2", Press(AddParameter), EnterUntouched]`,
+and failed the same way on the code before the material session. `p1*2` typed
+into a loss rate with no `p1` was refused and stayed in the field with its
+error; the added parameter made it valid, and Enter then committed what the
+field showed. That is the panel doing what it shows; the harness had taken a
+field holding refused text for one nobody typed into. The check that Enter in
+an untouched field changes nothing now holds only while no refusal stands.
+The case passes, its seed was not kept, being the harness's own, and 2,000
+sequences pass.
