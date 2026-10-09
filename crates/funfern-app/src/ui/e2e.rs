@@ -5,7 +5,8 @@
 //! when it does not or does not finish in time.
 //!
 //! The driver acts as the user's handlers do - it opens a document, places a
-//! pulse, presses Run and Switch - and reads only what the device accepted:
+//! pulse, presses Run and Switch, edits a material - and reads only what the
+//! device accepted:
 //! its accepted-step counter, the serial of the last event it processed, and
 //! a full snapshot stamped with the step it holds. A fixture holds the run at
 //! the steps where it acts, so each action lands at a step both sides know,
@@ -19,9 +20,11 @@ mod check;
 
 use super::runtime::pulse_increment;
 use super::*;
+use crate::canonical_gpu::{CanonicalGpuHandoffOutcome, CanonicalGpuRuntimeTransfer};
 use bevy_egui::EguiPrimaryContextPass;
 use check::{within, worse};
 use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyDocument, TopologyEditor};
+use funfern_app::topology_runtime::PreparedCanonicalTransfer;
 use funfern_core::{
     CanonicalTemporalWaveState, CanonicalWaveState, OuterBoundaryCondition, OuterBoundaryConditions,
 };
@@ -48,6 +51,8 @@ pub(crate) fn add(app: &mut App) {
             BATCHES.iter().copied().map(Some).collect(),
         ),
         "switch" => (Fixture::Switch, vec![None]),
+        "handoff" => (Fixture::Handoff, vec![None]),
+        "remesh" => (Fixture::Remesh, vec![None]),
         _ => {
             eprintln!("e2e: no fixture named {name:?}");
             std::process::exit(2);
@@ -79,6 +84,13 @@ enum Fixture {
     /// The cavity with a disc of a switchable medium, its Switch pressed at
     /// step 128 of 256, once the pulse's wave has reached it.
     Switch,
+    /// The cavity, its medium's permittivity raised at step 128 of 256: a
+    /// whole new generation, handed the running field on the same mesh.
+    Handoff,
+    /// The cavity remeshed finer at step 128 of 256, nothing else changed:
+    /// the field is interpolated onto another mesh of the same geometry, its
+    /// component totals kept.
+    Remesh,
 }
 
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
@@ -90,6 +102,11 @@ const BATCHES: [u64; 4] = [1, 7, 128, 256];
 enum Action {
     /// Switch's hotkey, which throws the scene's only Switch.
     Switch,
+    /// The default medium's permittivity raised by half, as its row in the
+    /// material panel does on Apply.
+    Edit,
+    /// The mesh's target edge set finer, as its preset or slider does.
+    Remesh,
 }
 
 impl Fixture {
@@ -98,19 +115,26 @@ impl Fixture {
         match self {
             Fixture::Cavity | Fixture::CavityBatches => (&[], 256),
             Fixture::Switch => (&[(128, Action::Switch)], 256),
+            Fixture::Handoff => (&[(128, Action::Edit)], 256),
+            Fixture::Remesh => (&[(128, Action::Remesh)], 256),
         }
     }
 
-    /// The relative L2 error Q, b and r may reach: what the device examples
-    /// allow for f32 stepping over a few hundred steps.
+    /// The relative L2 error Q, b and r may reach. Measured on the M1 Max the
+    /// fixtures read 6e-7 to 1.2e-6 after their 256 steps; 5e-6 leaves four
+    /// times that, where the device examples' 3e-5 let a remesh that lost its
+    /// component totals through at 2.5e-5. A device that reads more is to be
+    /// looked at, not given more.
     fn tolerance(self) -> f64 {
-        3.0e-5
+        5.0e-6
     }
 
     /// The fixture's document, and the material its Switch throws.
     fn document(self) -> (TopologyDocument, Option<MaterialId>) {
         match self {
-            Fixture::Cavity | Fixture::CavityBatches => (cavity_document(), None),
+            Fixture::Cavity | Fixture::CavityBatches | Fixture::Handoff | Fixture::Remesh => {
+                (cavity_document(), None)
+            }
             Fixture::Switch => {
                 let (document, material) = switch_document();
                 (document, Some(material))
@@ -155,11 +179,16 @@ enum Phase {
         reference: Reference,
         next: usize,
     },
-    /// The `next` action waits for the device to take it.
+    /// The `next` action waits for the device to take it: a live event by
+    /// its serial, an edit by the generation the device publishes for it.
     Act {
         reference: Reference,
         next: usize,
         processed: u32,
+        generation: u64,
+        /// The edit's handoff maps, taken from the candidate while it waits:
+        /// the runtime drops them once the generation is published.
+        maps: Option<Arc<PreparedCanonicalTransfer>>,
     },
     /// A full snapshot of the endpoint is asked for.
     Snapshot {
@@ -189,8 +218,9 @@ struct Reference {
     active: Arc<PreparedTopology>,
     state: State,
     /// The device must stand far from it: an action that changed nothing
-    /// would prove nothing. None until the first action.
-    control: Option<State>,
+    /// would prove nothing. None until the first action; it keeps the
+    /// generation it started on.
+    control: Option<(Arc<PreparedTopology>, State)>,
     steps: u64,
 }
 
@@ -268,8 +298,8 @@ impl Reference {
     fn advance_to(&mut self, step: u64) -> Result<(), String> {
         while self.steps < step {
             self.state.step(&self.active)?;
-            if let Some(control) = &mut self.control {
-                control.step(&self.active)?;
+            if let Some((active, control)) = &mut self.control {
+                control.step(active)?;
             }
             self.steps += 1;
         }
@@ -523,13 +553,36 @@ fn advance(
                 return None;
             };
             let processed = request.stats().processed_event();
+            let generation = request.generation();
             match action {
                 Action::Switch => state.request_material_switch(),
+                Action::Edit => {
+                    let edited = state
+                        .editor
+                        .document
+                        .model
+                        .draft
+                        .material(DEFAULT_MATERIAL)
+                        .cloned()
+                        .map(|mut medium| {
+                            medium.mass_density = ScalarField::constant(1.5);
+                            medium
+                        });
+                    let applied = edited
+                        .ok_or_else(|| "the default medium is gone".to_owned())
+                        .and_then(|medium| state.editor.update_material(medium));
+                    if let Err(error) = applied {
+                        return Some(Err(format!("the edit did not apply: {error}")));
+                    }
+                }
+                Action::Remesh => state.editor.document.presentation.mesh_edge = 0.06,
             }
             driver.phase = Phase::Act {
                 reference,
                 next,
                 processed,
+                generation,
+                maps: None,
             };
             None
         }
@@ -537,23 +590,49 @@ fn advance(
             mut reference,
             next,
             processed,
+            generation,
+            maps,
         } => {
-            if request.stats().processed_event() == processed
-                || !state.coordinator.pending_switches.is_empty()
-            {
+            let (step, action) = actions[next];
+            let maps = maps.or_else(|| {
+                state
+                    .runtime
+                    .ready()
+                    .filter(|candidate| {
+                        candidate.bundle.token.document_revision == state.editor.revision
+                    })
+                    .and_then(|candidate| candidate.canonical_transfer.clone())
+            });
+            // The generation published for the edit: of the document's
+            // revision, nothing uploading, and on the display.
+            let published = state.runtime.active().cloned().filter(|active| {
+                active.bundle.token.document_revision == state.editor.revision
+                    && state.coordinator.uploading.is_none()
+                    && request.generation() != generation
+                    && display.generation == request.generation()
+            });
+            let waiting = match action {
+                Action::Switch => {
+                    request.stats().processed_event() == processed
+                        || !state.coordinator.pending_switches.is_empty()
+                }
+                Action::Edit | Action::Remesh => published.is_none(),
+            };
+            if waiting {
                 driver.phase = Phase::Act {
                     reference,
                     next,
                     processed,
+                    generation,
+                    maps,
                 };
                 return None;
             }
-            let (step, action) = actions[next];
             if let Err(failure) = taken(request, &format!("the {action:?}"), step) {
                 return Some(Err(failure));
             }
             if reference.control.is_none() {
-                reference.control = Some(reference.state.clone());
+                reference.control = Some((reference.active.clone(), reference.state.clone()));
             }
             match action {
                 Action::Switch => {
@@ -588,6 +667,49 @@ fn advance(
                         return Some(Err(format!("the reference did not switch: {error}")));
                     }
                 }
+                Action::Edit | Action::Remesh => {
+                    let target = published.expect("an edit waits for its generation");
+                    let (from, to) = (
+                        reference.active.canonical_operator.degrees_of_freedom(),
+                        target.canonical_operator.degrees_of_freedom(),
+                    );
+                    if matches!(action, Action::Remesh) == (from == to) {
+                        return Some(Err(format!(
+                            "the {action:?} went from {from} nodes to {to}"
+                        )));
+                    }
+                    println!(
+                        "e2e {:?}: handed off at step {step}, {from} nodes to {to}",
+                        driver.fixture
+                    );
+                    if request.handoff_outcome() != CanonicalGpuHandoffOutcome::Accepted {
+                        return Some(Err(format!(
+                            "the edit's generation came by {:?}, not an admitted handoff",
+                            request.handoff_outcome()
+                        )));
+                    }
+                    let Some(maps) = maps else {
+                        return Some(Err(
+                            "the edit's candidate was never seen with its maps".into()
+                        ));
+                    };
+                    let carried = hand_off(
+                        &reference,
+                        &target,
+                        &maps,
+                        state.coordinator.uploaded_time_step,
+                        display.runtime_serials,
+                    );
+                    match carried {
+                        Ok(carried) => {
+                            reference.state = carried;
+                            reference.active = target;
+                        }
+                        Err(error) => {
+                            return Some(Err(format!("the reference was not handed off: {error}")));
+                        }
+                    }
+                }
             }
             state.e2e_steps.limit = Some(stop(next + 1));
             driver.phase = Phase::Run {
@@ -618,6 +740,82 @@ fn advance(
         }
         Phase::Done => None,
     }
+}
+
+/// The reference's state carried onto `target` as the device carries the
+/// running field: through `maps`, the ones the candidate was prepared with, each
+/// component's total kept where the app keeps it - on the same geometry, the
+/// shares of the source components the runtime transfer names - and stepped on
+/// at the step the app uploaded for it. The cavity has no thin gap and no
+/// outgoing wall, so the primary and vector fields are all there is to carry.
+fn hand_off(
+    reference: &Reference,
+    target: &PreparedTopology,
+    maps: &PreparedCanonicalTransfer,
+    time_step: f64,
+    runtime_serials: [u32; 4],
+) -> Result<State, String> {
+    let source = &reference.active;
+    let State::Fixed(running) = &reference.state else {
+        return Err("a handoff of a time-varying reference".into());
+    };
+    let runtime = CanonicalGpuRuntimeTransfer::from_primary_transfer(
+        &source.canonical_operator,
+        &target.canonical_operator,
+        &source.canonical_forcing,
+        &target.canonical_forcing,
+        &maps.primary,
+        runtime_serials,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let runtime = if target.mesh.geometry_revision == source.mesh.geometry_revision {
+        runtime
+    } else {
+        runtime.without_total_correction()
+    };
+    let mut totals = vec![0.0; source.canonical_operator.component_count()];
+    for (value, label) in running
+        .primary_flux()
+        .iter()
+        .zip(source.canonical_operator.component_labels())
+    {
+        totals[*label as usize] += value;
+    }
+    let desired = runtime
+        .components
+        .iter()
+        .map(|component| {
+            (!component.sources.is_empty()).then(|| {
+                component
+                    .sources
+                    .iter()
+                    .map(|(source, share)| share * totals[*source as usize])
+                    .sum()
+            })
+        })
+        .collect::<Vec<Option<f64>>>();
+    let prescribed = target
+        .canonical_forcing
+        .prescribed()
+        .iter()
+        .map(Option::is_some)
+        .collect::<Vec<_>>();
+    let (primary, _) = maps
+        .primary
+        .transfer(running.primary_flux(), &desired, &prescribed)
+        .map_err(|error| error.to_string())?;
+    let (complementary, _) = maps
+        .complementary
+        .transfer(running.complementary_flux())
+        .map_err(|error| error.to_string())?;
+    CanonicalWaveState::new(
+        &target.canonical_operator,
+        time_step,
+        primary,
+        complementary,
+    )
+    .map(State::Fixed)
+    .map_err(|error| error.to_string())
 }
 
 /// Whether the device took the event just processed cleanly, at `step`.
@@ -689,9 +887,14 @@ fn compare(
     if !within(worse(worse(q, b), r), tolerance) {
         return Err(format!("{summary}, beyond {tolerance:.0e}"));
     }
-    if let Some(control) = &reference.control {
+    if let Some((_, control)) = reference
+        .control
+        .as_ref()
+        .filter(|(_, control)| control.primary().len() == expected.primary().len())
+    {
         // An action the device ignored would leave it where the control is;
-        // a hundred tolerances away, it did not.
+        // a hundred tolerances away, it did not. A remesh the device ignored
+        // would leave it on the other mesh, which the lengths already catch.
         let apart = primary(control);
         summary.push_str(&format!(
             "; the run without its actions stands {apart:.3e} off"

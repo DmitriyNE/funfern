@@ -37,8 +37,10 @@ same mesh. The one thing the feature adds to the app is where a run stops, since
 the app asks for steps by the wall clock. The process exits 0 when the fixture
 holds; the suite runs each. `cavity` strikes a closed reflecting box of the
 default medium, grid filter off, with one pulse at step 0 and compares Q and b
-after 256 steps, to 3e-5: it reads `6.2e-7` and `1.0e-6` at 11,121 degrees of
-freedom. Negating b, reading the lanes a step old, or stepping the reference one
+after 256 steps, to 5e-6: it reads `6.2e-7` and `1.0e-6` at 11,121 degrees of
+freedom. Every fixture reads 6e-7 to 1.2e-6 on the M1 Max; 5e-6 leaves four times
+that, where the device examples' 3e-5 let a remesh that lost its component totals
+through. Negating b, reading the lanes a step old, or stepping the reference one
 step short each fails it. `cavity-batches` runs the cavity four times, its steps
 asked for one at a time, seven, 128 and all 256 a frame, and requires the
 accepted state at the endpoint to be the same bits each time, which it is: the
@@ -54,6 +56,16 @@ at the same step. It reads Q `7.4e-7` and b `9.4e-7`, and the run without the
 Switch stands `8.8e-2` off, which the fixture requires to be a hundred
 tolerances or more, so a Switch the device ignored cannot pass. A reference
 that omits the Switch, throws it the other way, or throws it a step late fails.
+`handoff` raises the cavity medium's permittivity by half at step 128, as the
+material panel's Apply does: a whole new generation, handed the running field by
+an admitted handoff. The reference carries its own state through the maps the
+candidate was prepared with, taken from it before the runtime drops them, keeps
+each component's total as the device does, and steps on at the step the app
+uploaded. Q reads `9.9e-7`, the run without the edit `1.4` off; a reference left
+on the old step fails at 1.1. `remesh` sets the target edge finer at step 128,
+nothing else changed: the field is interpolated from 11,121 nodes onto 15,349 of
+the same geometry. Q reads `7.7e-7`, and a reference that drops the component
+totals the runtime keeps reads 2.5e-5 and fails.
 
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without

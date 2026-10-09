@@ -21140,3 +21140,31 @@ throwing it fails, the last at 1.1e-2. The preset's ramp is the default 0, an
 instant Switch, whose blend is the target at once whatever its commit time:
 the step it is thrown at is what decides, and that is what the fixture
 pins. The cavity and its batchings read as before, to the bit.
+
+## 2026-10-09 — A live handoff and a remesh through the app, on the device
+
+Two fixtures carry the running field into a new generation through the app's
+own handoff. `handoff` raises the cavity medium's permittivity by half at step
+128 of 256, as the material panel's Apply does, and requires the generation to
+come by an admitted handoff; `remesh` sets the target edge finer at the same
+step, as its preset or slider does, which interpolates the field from 11,121
+nodes onto 15,349 of the same geometry. The reference carries its own state the
+way the device carries the field: through the candidate's primary and vector
+maps, each target component's total kept as the shares of the source
+components the runtime transfer names, on the same geometry and not across an
+edit of it (as `compile_gpu_upload` decides), then stepped on the target's
+operator at the step the app uploaded. The maps come from the candidate while
+the edit is in flight: the runtime drops them once the generation is published,
+some 60 MiB at 130k DOFs, which the first run met as a generation without
+maps. Q reads 9.9e-7 and 7.7e-7; the run without the permittivity edit stands
+1.4 off.
+
+Each fixture fails what it should. A reference left on the old step fails the
+handoff at 1.1. One that drops the component totals passes the handoff - on
+one mesh the maps carry the field unchanged and the totals already agree - and
+fails the remesh at 2.5e-5, but only once the fixtures' tolerance came down
+from the device examples' 3e-5 to 5e-6. Every fixture reads 6e-7 to 1.2e-6 on
+the M1 Max, so 5e-6 leaves four times the worst; a device that reads more is
+to be looked at, not given more. The cavity, its batchings and the Switch
+pass under it unchanged. The remesh's own action is checked to have remeshed:
+a node count that stayed fails it, and one that moved fails the handoff.

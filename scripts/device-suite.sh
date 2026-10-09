@@ -66,6 +66,8 @@ RUNS=(
   'FUNFERN_E2E=cavity funfern-app'
   'FUNFERN_E2E=cavity-batches funfern-app'
   'FUNFERN_E2E=switch funfern-app'
+  'FUNFERN_E2E=handoff funfern-app'
+  'FUNFERN_E2E=remesh funfern-app'
 )
 
 pattern=${1:-}
