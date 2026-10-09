@@ -9100,6 +9100,208 @@ mod tests {
         assert_eq!(tm.primary_mass(), mechanical.primary_mass());
     }
 
+    /// The default scene's box with every side reflecting, meshed at `edge`
+    /// on the application's own path, the source off.
+    fn reflecting_box(edge: f64) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let mut builder = Builder::new();
+        builder.scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        prepare(&document, edge)
+    }
+
+    /// The angular frequency of a sampled sinusoid, from the recurrence
+    /// `s(n+1) + s(n−1) = 2 cos(ω dt) s(n)` it satisfies exactly, fitted in
+    /// least squares over the series.
+    fn sampled_frequency(series: &[f64], dt: f64) -> f64 {
+        let (mut numerator, mut denominator) = (0.0, 0.0);
+        for window in series.windows(3) {
+            numerator += window[1] * (window[0] + window[2]);
+            denominator += 2.0 * window[1] * window[1];
+        }
+        (numerator / denominator).acos() / dt
+    }
+
+    /// What a box-mode run reads.
+    struct CavityRun {
+        /// The frequency the stepped mode has.
+        stepped: f64,
+        /// The mode's amplitude at the end over its start.
+        envelope: f64,
+        /// The energy's largest relative excursion from its start.
+        excursion: f64,
+    }
+
+    /// Runs the box mode `cos(k(x+1)) cos(k(y+1))` from rest on `prepared`
+    /// with `integrator` at `dt` for `periods` of the exact mode and reads
+    /// its frequency from the mode's mass-weighted projection.
+    fn cavity_run(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        integrator: CanonicalIntegrator,
+        dt: f64,
+        k: f64,
+        periods: f64,
+    ) -> CavityRun {
+        let operator = &prepared.canonical_operator;
+        let shape = operator
+            .node_points()
+            .iter()
+            .map(|point| (k * (point.x + 1.0)).cos() * (k * (point.y + 1.0)).cos())
+            .collect::<Vec<_>>();
+        let mut state = CanonicalWaveState::from_primary_and_potential(
+            operator,
+            dt,
+            &shape,
+            &vec![0.0; shape.len()],
+        )
+        .unwrap()
+        .with_integrator(integrator);
+        let weights = shape
+            .iter()
+            .zip(operator.primary_mass())
+            .map(|(shape, mass)| shape * mass)
+            .collect::<Vec<_>>();
+        let norm = weights.iter().zip(&shape).map(|(w, s)| w * s).sum::<f64>();
+        let project = |state: &CanonicalWaveState| {
+            let field = state.primary_field(operator).unwrap();
+            weights.iter().zip(&field).map(|(w, u)| w * u).sum::<f64>() / norm
+        };
+        let steps = (periods * std::f64::consts::TAU / (k * 2.0f64.sqrt()) / dt).ceil() as usize;
+        let start = state.energy(operator).unwrap();
+        let mut series = Vec::with_capacity(steps + 1);
+        series.push(project(&state));
+        let mut excursion: f64 = 0.0;
+        for _ in 0..steps {
+            state.step(operator).unwrap();
+            series.push(project(&state));
+            excursion = excursion.max((state.energy(operator).unwrap() / start - 1.0).abs());
+        }
+        let stepped = sampled_frequency(&series, dt);
+        // A sinusoid's amplitude from three samples about one.
+        let amplitude = |window: &[f64]| {
+            (window[1].powi(2) + ((window[2] - window[0]) / (2.0 * (stepped * dt).sin())).powi(2))
+                .sqrt()
+        };
+        CavityRun {
+            stepped,
+            envelope: amplitude(&series[series.len() - 3..]) / amplitude(&series[..3]),
+            excursion,
+        }
+    }
+
+    /// The semidiscrete frequency a stepped one came from, by the
+    /// integrator's exact dispersion relation on a linear mode: leapfrog's
+    /// `2 sin(ω dt/2)/dt`, and for the fourth-order step
+    /// `cos(ω dt) = 1 − x²/2 + x⁴/24` at `x = ω_h dt`.
+    fn semidiscrete_frequency(integrator: CanonicalIntegrator, stepped: f64, dt: f64) -> f64 {
+        match integrator {
+            CanonicalIntegrator::Leapfrog => 2.0 * (0.5 * stepped * dt).sin() / dt,
+            CanonicalIntegrator::FourthOrder => {
+                let x_squared = 6.0 - (36.0 - 24.0 * (1.0 - (stepped * dt).cos())).sqrt();
+                x_squared.sqrt() / dt
+            }
+        }
+    }
+
+    /// The box mode `cos(3π(x+1)/2) cos(3π(y+1)/2)` on the production path -
+    /// the application's mesh of the reflecting box, its fourth-order step
+    /// at its recommended size - with space and time told apart exactly. On
+    /// a linear mode each integrator has an exact dispersion relation,
+    /// leapfrog's `2 sin(ω dt/2)/dt = ω_h` and the fourth-order step's
+    /// `cos(ω dt) = 1 − x²/2 + x⁴/24` at `x = ω_h dt`, so the semidiscrete
+    /// frequency `ω_h` is read from each run without extrapolation, and the
+    /// two must agree: at edge 0.08 they do to 1e-8, over three step sizes
+    /// each. Their stepped frequencies then miss `ω_h` as their laws say,
+    /// leapfrog by `ω_h³dt²/24` to 0.1% and the fourth-order step by
+    /// `−ω_h⁵dt⁴/720` to 0.2%, two orders of magnitude apart at the
+    /// recommended step. In space `ω_h` misses the exact `3π/√2` by 3.7e-5
+    /// at edge 0.16, 9.9e-7 at 0.08 and 1.1e-7 at 0.04: 339 times down over
+    /// two halvings, the fourth order of the element. The mode's amplitude
+    /// over ten periods holds to 1e-6 at the coarsest mesh and 2e-10 at the
+    /// finest, and the energy wobbles by a quarter of `(ω dt)²` about its
+    /// start, four times less each halving, and never drifts.
+    #[test]
+    fn a_box_mode_on_the_production_path_keeps_its_frequency_in_space_and_time() {
+        let k = 1.5 * std::f64::consts::PI;
+        let exact = k * 2.0f64.sqrt();
+        let periods = 10.0;
+
+        // Time, at one mesh.
+        let prepared = reflecting_box(0.08);
+        let largest = prepared.canonical_operator.maximum_time_step();
+        let mut semidiscrete = Vec::new();
+        for integrator in [
+            CanonicalIntegrator::Leapfrog,
+            CanonicalIntegrator::FourthOrder,
+        ] {
+            let mut excursions = Vec::new();
+            for fraction in [1.0, 0.5, 0.25] {
+                let dt = fraction * integrator.recommended() * largest;
+                let run = cavity_run(&prepared, integrator, dt, k, periods);
+                let inverted = semidiscrete_frequency(integrator, run.stepped, dt);
+                let law = match integrator {
+                    CanonicalIntegrator::Leapfrog => inverted.powi(3) * dt * dt / 24.0,
+                    CanonicalIntegrator::FourthOrder => -inverted.powi(5) * dt.powi(4) / 720.0,
+                };
+                let case = format!("{integrator:?} at {fraction} of its step");
+                eprintln!(
+                    "{case}: ω_h {inverted:.10}, stepped − ω_h {:.3e} against {law:.3e}, envelope − 1 {:.1e}, energy excursion {:.2e} of (ω dt)² {:.2e}",
+                    run.stepped - inverted,
+                    run.envelope - 1.0,
+                    run.excursion,
+                    (run.stepped * dt).powi(2)
+                );
+                assert!(
+                    (run.stepped - inverted - law).abs() < 1.0e-2 * law.abs() + 1.0e-10,
+                    "{case}: {} against {law}",
+                    run.stepped - inverted
+                );
+                assert!(
+                    (run.envelope - 1.0).abs() < 1.0e-6,
+                    "{case}: {}",
+                    run.envelope
+                );
+                assert!(run.excursion > 0.0 && run.excursion < 0.5 * (run.stepped * dt).powi(2));
+                excursions.push(run.excursion);
+                semidiscrete.push(inverted);
+            }
+            assert!(excursions[0] / excursions[1] > 3.5 && excursions[1] / excursions[2] > 3.5);
+        }
+        let spread = semidiscrete.iter().copied().fold(f64::MIN, f64::max)
+            - semidiscrete.iter().copied().fold(f64::MAX, f64::min);
+        assert!(
+            spread < 1.0e-8 * exact,
+            "ω_h spread {spread:.3e} over {semidiscrete:?}"
+        );
+
+        // Space, at the production step.
+        let mut errors = Vec::new();
+        for edge in [0.16, 0.08, 0.04] {
+            let prepared = reflecting_box(edge);
+            let dt = prepared.recommended_time_step();
+            let run = cavity_run(&prepared, CanonicalIntegrator::default(), dt, k, periods);
+            let inverted = semidiscrete_frequency(CanonicalIntegrator::default(), run.stepped, dt);
+            eprintln!(
+                "edge {edge}: ω_h {inverted:.10} off {:.3e}, envelope − 1 {:.1e}",
+                inverted / exact - 1.0,
+                run.envelope - 1.0
+            );
+            assert!(
+                (run.envelope - 1.0).abs() < 1.0e-5,
+                "edge {edge}: {}",
+                run.envelope
+            );
+            errors.push((inverted / exact - 1.0).abs());
+        }
+        assert!(
+            errors[0] / errors[1] > 6.0 && errors[1] / errors[2] > 6.0,
+            "{errors:?}"
+        );
+        assert!(errors[0] / errors[2] > 200.0, "{errors:?}");
+        assert!(errors[2] < 1.0e-6, "{errors:?}");
+    }
+
     #[test]
     fn an_etalon_passes_every_whole_hertz_and_six_tenths_between() {
         let layers = [(ETALON_PERMITTIVITY.sqrt(), ETALON_THICKNESS)];

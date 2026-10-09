@@ -316,7 +316,21 @@ between electric walls in TM, where the field vanishes at the corners, the
 second-order wall's trace ends there and the mode reflects as it does between
 reflecting sides, to 2%
 (`an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`).
-With the pinned corners kept on the trace it reflected 6.6 times its law.
+With the pinned corners kept on the trace it reflected 6.6 times its law. The
+box mode `cos(3π(x+1)/2) cos(3π(y+1)/2)` runs on the production path, the
+application's mesh of the reflecting box under its fourth-order step at its
+recommended size, with space and time told apart exactly: on a linear mode
+each integrator's dispersion relation is exact, so the semidiscrete frequency
+is read from a leapfrog run and from a fourth-order run without
+extrapolation and the two agree to 1e-8 over three step sizes; the stepped
+frequencies miss it by `ω_h³dt²/24` and `−ω_h⁵dt⁴/720` to 0.1% and 0.2%; the
+semidiscrete frequency misses the exact one by 3.7e-5, 9.9e-7 and 1.1e-7 at
+edges 0.16, 0.08 and 0.04, the element's fourth order; the amplitude holds
+over ten periods and the energy wobbles by a quarter of `(ω dt)²` without
+drifting
+(`a_box_mode_on_the_production_path_keeps_its_frequency_in_space_and_time`).
+A fourth-order correction of `dt²/13` instead of `dt²/12` fails it: the
+fourth-order run's semidiscrete frequency lands 7.6e-5 off leapfrog's.
 
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth

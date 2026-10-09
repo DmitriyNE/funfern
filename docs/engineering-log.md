@@ -21477,3 +21477,40 @@ linearly along a fixed CFL, the first-order wall matches its law to 0.5% at
 every step, and the kick is the scattering spike's corrected force-coupled
 update, so it is not the split that spike replaced. The fixture holds the
 band to 15% over the law meanwhile. Nothing on screen shows it.
+
+## 2026-10-09 — A box mode on the production path keeps its frequency in space and time
+
+The fifth physical-accuracy fixture. `wave_convergence`, which `docs/checks.md`
+still names, is gone; `canonical_fourth_order` reads a box mode's phase by a
+least-squares fit over a period; nothing held the production step's frequency
+to the exact mode with the mesh's and the step's errors told apart. The
+fixture runs `cos(3π(x+1)/2) cos(3π(y+1)/2)` from rest in the reflecting box
+the application meshes, and reads its frequency from the mode's mass-weighted
+projection by the recurrence a sampled sinusoid satisfies exactly,
+`s(n+1) + s(n−1) = 2 cos(ω dt) s(n)`, in least squares over ten periods. The
+step's error needs no extrapolation: on a linear mode leapfrog's dispersion
+relation `2 sin(ω dt/2)/dt = ω_h` and the fourth-order step's
+`cos(ω dt) = 1 − x²/2 + x⁴/24`, `x = ω_h dt`, are exact, so each run gives
+the semidiscrete frequency `ω_h` by inversion, and the two integrators must
+give the same one. At edge 0.08 they do: six runs, three step sizes each,
+within 1e-8 of each other. The stepped frequencies then miss `ω_h` as the
+laws say, leapfrog by `ω_h³dt²/24` (5.525e-4 against 5.523e-4 at its step)
+and the fourth-order step by `−ω_h⁵dt⁴/720` (−1.158e-7 against −1.157e-7),
+each falling as its order under halving, down to 4.5e-10 where the relation's
+own inversion is the last digit. In space the inverted `ω_h` misses the exact
+`3π/√2` by −3.7e-5 at edge 0.16, −9.9e-7 at 0.08 and −1.1e-7 at 0.04: 38 and
+9 times down per halving on the mesher's unstructured meshes, 339 over both,
+the element's fourth order (2^8.4). The mode's amplitude over the ten periods
+holds to 1.1e-6 at the coarsest mesh and 2e-10 at the finest - the shape's
+projection onto the mesh is not quite the discrete mode, and the rest beats
+against it - and the energy wobbles about its start by a quarter of
+`(ω dt)²`, 5e-4 at leapfrog's step and 5.9e-4 at the fourth-order step's
+larger one, four times less each halving, never drifting. The fixture holds
+each law to 1% plus 1e-10, the integrators' `ω_h` to a spread of 1e-8, the
+spatial error to a fall of 6 per halving and 200 over both and 1e-6 at the
+finest mesh, the envelope to 1e-6 and 1e-5, and the wobble to half of
+`(ω dt)²` and a fall of 3.5 per halving. A fourth-order correction of
+`dt²/13` in place of `dt²/12` fails the agreement: the inversion, which
+assumes the step's own relation, takes the wrong coefficient into `ω_h`,
+which lands 7.6e-5 off leapfrog's, while that run's law still reads true.
+Twenty seconds in the suite.
