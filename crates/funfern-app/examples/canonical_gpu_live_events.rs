@@ -114,6 +114,7 @@ fn main() -> AppExit {
     .expect("event GPU plan");
 
     let new_frequency = 1.45;
+    let new_phase = -1.7;
     let new_weights = weights
         .iter()
         .zip(operator.node_points())
@@ -125,10 +126,10 @@ fn main() -> AppExit {
             CanonicalSource::direct(
                 &operator,
                 new_weights.clone(),
-                // This authored phase is intentionally different: the live
-                // event preserves the current carrier unless phase is edited
-                // through a future explicit phase-edit operation.
-                TimeSignal::harmonic(0.015, 0.03, new_frequency, -1.7),
+                // Another authored phase as well: the live patch keeps the
+                // running carrier continuous and then steps it by as much as
+                // the authored phase moved.
+                TimeSignal::harmonic(0.015, 0.03, new_frequency, new_phase),
             )
             .unwrap(),
         )
@@ -166,15 +167,20 @@ fn main() -> AppExit {
             .expect("old-source oracle step");
     }
     let edit_time = WARMUP_STEPS as f64 * time_step;
-    let preserved_anchor =
-        old_phase + std::f64::consts::TAU * (old_frequency - new_frequency) * edit_time;
+    // The anchor that keeps the carrier continuous at the edit under the new
+    // frequency, stepped by the edit's change of authored phase, reduced to
+    // (-π, π] as the patch uploads it.
+    let phase_step = new_phase - old_phase;
+    let accepted_anchor = old_phase
+        + std::f64::consts::TAU * (old_frequency - new_frequency) * edit_time
+        + phase_step.sin().atan2(phase_step.cos());
     let mut accepted_new_forcing = CanonicalForcing::none(&operator);
     accepted_new_forcing
         .push_source(
             CanonicalSource::direct(
                 &operator,
                 new_weights,
-                TimeSignal::harmonic(0.015, 0.03, new_frequency, preserved_anchor),
+                TimeSignal::harmonic(0.015, 0.03, new_frequency, accepted_anchor),
             )
             .unwrap(),
         )

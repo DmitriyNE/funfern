@@ -3402,9 +3402,10 @@ above:
   each flip of the chain recovery scanned every edge; a walk along the segment
   now finds them, 1,256 ms to 41 ms, and a vertex grid the chain's points,
   41 ms to 6.6 ms; see that day's entries).
-- [ ] `canonical_gpu_live_events` reads Q 1.4e-3 and b 5.0e-4 against its
+- [x] `canonical_gpu_live_events` reads Q 1.4e-3 and b 5.0e-4 against its
   3e-5 after five paused events, the clock unchanged (2026-10-09, the device
-  suite's first run).
+  suite's first run; its reference kept the carrier where since 517a28e the
+  patch steps it, see that day's entry).
 - [ ] The budget's 60 Hz and Low Power Mode measurements (postponed
   2026-10-05; the machine has one panel and the mode is the user's to
   toggle). Quiet host and overlay scene are measured, see the spike doc.
@@ -21061,3 +21062,18 @@ one that is not. 517a28e gated with all three flags. The suite now runs
 `--source --prescribed --edit`, which passes at Q 2.1e-7, its carriers
 without their phase steps standing 2.2e-2 from the oracle, as 517a28e
 recorded (2.1e-7, and 1e-2 to 2.8e-2). The TODO is gone.
+
+## 2026-10-09 — The live-events reference steps the carrier as the patch does
+
+`canonical_gpu_live_events` had read Q 1.4e-3 against its 3e-5 since 517a28e,
+the first bad commit of a bisect over the 181 since its last recorded pass;
+nothing ran it in between. 517a28e made a live source patch keep a harmonic
+carrier continuous and then step it by as much as the authored phase moved,
+and a weight patch uploads its drives the same way (`patched_drive`). This
+example authors its new source at another phase, -1.7 against 0.35, and its
+comment called the difference deliberate because the patch then preserved the
+carrier; its f64 reference applied no step. 517a28e brought the handoff and
+temporal live-source examples to the new rule and left this one. The device
+was right: the reference now anchors the new carrier at the continuous phase
+plus the step, reduced to (-π, π] as the patch uploads it, and reads Q 3.1e-7
+and b 1.0e-6.
