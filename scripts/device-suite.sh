@@ -43,6 +43,7 @@ RUNS=(
   'canonical_gpu_handoff --source --prescribed --edit'
   'canonical_gpu_handoff --failure'
   'canonical_gpu_handoff --second-order'
+  'canonical_gpu_handoff --second-order --pinned-sides'
   'canonical_gpu_handoff --pulse'
   'canonical_gpu_live_events'
   'canonical_gpu_long_run'

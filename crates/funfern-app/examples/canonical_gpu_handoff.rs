@@ -4,6 +4,9 @@
 //! pin a Gaussian flash, both under way at the handoff, whose starts the
 //! device moves onto the new epoch while their carriers stay put.
 //!
+//! `--pinned-sides` pins the top and bottom sides to zero on both
+//! generations, so the `--second-order` wall's trace ends at the corners.
+//!
 //! `--edit` gives the target generation's harmonic `--source` and
 //! `--prescribed` other numbers, phase included. Each carrier runs on from the
 //! phase it has reached and then steps by as much as its authored phase moved;
@@ -30,8 +33,8 @@ use funfern_core::{
     CanonicalPrimaryTransferMap, CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferJob,
     CanonicalWaveOperator, CanonicalWaveState, InternalBoundary, InternalBoundaryCoupling,
     InternalBoundaryId, InternalBoundaryLaw, MeshingOptions, OpenCubicSpline,
-    OuterBoundaryCondition, Point2, PulseEnvelope, QuadraticTransferMap, QuadraticWaveOperator,
-    Scene, TimeSignal, mesh_scene,
+    OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, Point2, PulseEnvelope,
+    QuadraticTransferMap, QuadraticWaveOperator, Scene, TimeSignal, mesh_scene,
 };
 
 const WARMUP_STEPS: u64 = 12;
@@ -106,6 +109,11 @@ fn main() -> AppExit {
         .find_map(|argument| argument.strip_prefix("--steps=")?.parse::<u64>().ok())
         .unwrap_or(MEASURED_STEPS);
     let prescribed = std::env::args().any(|argument| argument == "--prescribed");
+    let pinned_sides = std::env::args().any(|argument| argument == "--pinned-sides");
+    assert!(
+        !(pinned_sides && prescribed),
+        "--pinned-sides pins through the assembled sides; --prescribed pins one node through the forcing"
+    );
     let pulse = std::env::args().any(|argument| argument == "--pulse");
     let standard = std::env::args().any(|argument| argument == "--standard");
     let edit = std::env::args().any(|argument| argument == "--edit");
@@ -178,10 +186,20 @@ fn main() -> AppExit {
     } else {
         OuterBoundaryCondition::FirstOrderOutgoing
     };
-    let source_scalar = QuadraticWaveOperator::assemble_scene(&source_mesh, &scene, boundary)
-        .expect("source scalar");
-    let target_scalar = QuadraticWaveOperator::assemble_scene(&target_mesh, &scene, boundary)
-        .expect("target scalar");
+    let mut boundaries = OuterBoundaryConditions::uniform(boundary);
+    if pinned_sides {
+        let zero = OuterBoundaryCondition::Dirichlet {
+            signal: TimeSignal::ZERO,
+        };
+        boundaries.sides[OuterSide::Top.index()] = zero;
+        boundaries.sides[OuterSide::Bottom.index()] = zero;
+    }
+    let source_scalar =
+        QuadraticWaveOperator::assemble_scene_with_boundaries(&source_mesh, &scene, boundaries)
+            .expect("source scalar");
+    let target_scalar =
+        QuadraticWaveOperator::assemble_scene_with_boundaries(&target_mesh, &scene, boundaries)
+            .expect("target scalar");
     let source_operator = Arc::new(
         CanonicalWaveOperator::compile_scene(&source_mesh, &source_scalar, &scene, 11)
             .expect("source canonical operator"),
@@ -194,10 +212,21 @@ fn main() -> AppExit {
         * source_operator
             .maximum_time_step()
             .min(target_operator.maximum_time_step());
+    // A field that already vanishes on pinned sides, so the pins have nothing
+    // to take out at the first step.
+    let pin_profile = |point: &Point2| {
+        if pinned_sides {
+            1.0 - point.y * point.y
+        } else {
+            1.0
+        }
+    };
     let primary = source_operator
         .node_points()
         .iter()
-        .map(|point| 0.35 + 0.08 * (1.1 * point.x).sin() * (0.7 * point.y).cos())
+        .map(|point| {
+            (0.35 + 0.08 * (1.1 * point.x).sin() * (0.7 * point.y).cos()) * pin_profile(point)
+        })
         .collect::<Vec<_>>();
     let potential = source_operator
         .node_points()
@@ -225,8 +254,9 @@ fn main() -> AppExit {
     } else {
         TimeSignal::harmonic(0.04, 0.03, 0.8, 0.25)
     };
-    let mut source_prescribed = vec![None; source_operator.degrees_of_freedom()];
-    let mut target_prescribed = vec![None; target_operator.degrees_of_freedom()];
+    // The assembled sides' pins, which the app hands the step as they are.
+    let mut source_prescribed = source_scalar.dirichlet_signals().to_vec();
+    let mut target_prescribed = target_scalar.dirichlet_signals().to_vec();
     // Strong enough that a carrier landing on the wrong phase is seen in the
     // whole state.
     let edited_prescribed = TimeSignal::harmonic(0.06, 0.5, 1.3, -2.2);
@@ -382,6 +412,8 @@ fn main() -> AppExit {
                     .unwrap_or_default(),
             })
             .collect(),
+        // A pinned side's nodes are new carriers; only the forcing's pin at
+        // node 0 runs on from its source.
         prescribed_sources: (0..target_operator.degrees_of_freedom())
             .map(|node| (prescribed && node == 0).then_some(0))
             .collect(),
@@ -434,8 +466,10 @@ fn main() -> AppExit {
         .transfer(
             oracle.primary_flux(),
             &desired_totals,
-            &(0..target_operator.degrees_of_freedom())
-                .map(|node| prescribed && node == 0)
+            &target_forcing
+                .prescribed()
+                .iter()
+                .map(Option::is_some)
                 .collect::<Vec<_>>(),
         )
         .expect("CPU primary transfer");
@@ -499,18 +533,16 @@ fn main() -> AppExit {
         )
     };
     let oracle_forcing = |stepped: bool| {
-        let mut forcing = if prescribed {
-            let mut signals = vec![None; target_operator.degrees_of_freedom()];
+        let mut signals = target_scalar.dirichlet_signals().to_vec();
+        if prescribed {
             signals[0] = Some(carried(
                 prescribed_signal,
                 target_prescribed_signal,
                 stepped,
             ));
-            CanonicalForcing::from_prescribed(&target_operator, signals)
-                .expect("target oracle forcing")
-        } else {
-            CanonicalForcing::none(&target_operator)
-        };
+        }
+        let mut forcing = CanonicalForcing::from_prescribed(&target_operator, signals)
+            .expect("target oracle forcing");
         if source_drive {
             forcing
                 .push_source(

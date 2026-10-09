@@ -3478,4 +3478,108 @@ mod tests {
         assert_eq!(job.phase(), "Finished");
         assert_eq!(prepared, map);
     }
+
+    /// A handoff from free to zero-pinned sides on one mesh moves the
+    /// second-order wall's memory onto a trace that ends before the corners:
+    /// the map builds for the shorter trace, the corners' pole currents go
+    /// nowhere, and what is carried is exactly the rest, no more than it was.
+    /// The way back lengthens the trace again: the corners are new trace
+    /// nodes and take their neighbours' memory, as a remesh's new nodes do,
+    /// and the energy that adds is the edit's.
+    #[test]
+    fn outgoing_history_moves_onto_a_trace_that_pinned_sides_end() {
+        let scene = Scene::default();
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.2,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let compile = |sides| {
+            let quadratic =
+                QuadraticWaveOperator::assemble_scene_with_boundaries(&mesh, &scene, sides)
+                    .unwrap();
+            let canonical =
+                CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            (quadratic, canonical)
+        };
+        let mut sides = crate::OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        sides.sides[OuterSide::Right.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
+        let (free_quadratic, free) = compile(sides);
+        let zero = OuterBoundaryCondition::Dirichlet {
+            signal: crate::TimeSignal::ZERO,
+        };
+        sides.sides[OuterSide::Top.index()] = zero;
+        sides.sides[OuterSide::Bottom.index()] = zero;
+        let (pinned_quadratic, pinned) = compile(sides);
+        let free_boundary = free.outgoing_boundary().unwrap();
+        let pinned_boundary = pinned.outgoing_boundary().unwrap();
+        assert_eq!(
+            pinned_boundary.trace_nodes().len() + 2,
+            free_boundary.trace_nodes().len()
+        );
+
+        let onto_pinned =
+            QuadraticTransferMap::identity_on_mesh(&mesh, &free_quadratic, &pinned_quadratic)
+                .unwrap();
+        let map =
+            CanonicalOutgoingHistoryTransferMap::prepare(&onto_pinned, &free, &pinned).unwrap();
+        let normalized = map.normalized_matrix(&free, &pinned).unwrap();
+        assert!(!normalized.identity);
+        assert_eq!(normalized.source_count, free_boundary.auxiliary_count());
+        assert_eq!(normalized.target_count, pinned_boundary.auxiliary_count());
+        let memory = (0..free_boundary.auxiliary_count())
+            .map(|index| (0.31 * index as f64 + 0.4).sin())
+            .collect::<Vec<_>>();
+        let physical = free_boundary.physical_memory(&memory).unwrap();
+        let (moved, report) = map.transfer(&free, &pinned, Some(&physical)).unwrap();
+        let moved = moved.unwrap();
+        assert!(
+            moved
+                .pole_currents
+                .iter()
+                .all(|pole| pole.len() == pinned_boundary.trace_nodes().len())
+        );
+        assert!(
+            moved
+                .pole_currents
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+        );
+        assert!(report.physical_residual_norm.is_finite());
+        eprintln!(
+            "onto pinned: {:.5} -> {:.5}, exchange {:.2e}, residual {:.2e}",
+            report.source_energy,
+            report.target_energy,
+            report.edit_exchange,
+            report.physical_residual_norm
+        );
+        assert!(report.target_energy >= 0.0);
+        assert!(report.target_energy <= report.source_energy * (1.0 + 1.0e-9));
+
+        let onto_free =
+            QuadraticTransferMap::identity_on_mesh(&mesh, &pinned_quadratic, &free_quadratic)
+                .unwrap();
+        let back =
+            CanonicalOutgoingHistoryTransferMap::prepare(&onto_free, &pinned, &free).unwrap();
+        let (returned, report) = back.transfer(&pinned, &free, Some(&moved)).unwrap();
+        let returned = returned.unwrap();
+        assert_eq!(
+            returned.pole_currents[0].len(),
+            free_boundary.trace_nodes().len()
+        );
+        eprintln!(
+            "back onto free: {:.5} -> {:.5}, exchange {:.2e}",
+            report.source_energy, report.target_energy, report.edit_exchange
+        );
+        assert!(report.target_energy.is_finite());
+        assert!(
+            (report.target_energy - report.source_energy - report.edit_exchange).abs()
+                < 1.0e-9 * report.source_energy
+        );
+    }
 }

@@ -808,6 +808,14 @@ impl TimeSignal {
         matches!(self, Self::Pulsed { .. })
     }
 
+    /// Whether the signal is zero at every time: no offset and no amplitude,
+    /// whatever its carrier and envelope. A node pinned to such a signal has
+    /// no field, which is what an electric or magnetic wall resolves to.
+    pub fn is_zero(self) -> bool {
+        let [offset, amplitude, _, _] = self.carrier();
+        offset == 0.0 && amplitude == 0.0
+    }
+
     /// The frequency the signal oscillates at: its carrier's, when the
     /// carrier has an amplitude.
     pub fn carrier_frequency_hz(self) -> f64 {

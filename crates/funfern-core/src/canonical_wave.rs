@@ -4040,14 +4040,26 @@ fn linear_loss_rate(
     }
 }
 
+/// The second-order wall's trace and tangential operator. A node pinned to a
+/// zero signal - the corner an electric wall, a magnetic wall or a zero
+/// Dirichlet side or span shares with the wall - has no field, so it is not
+/// on the trace: the tangential operator ends there as at a Dirichlet end,
+/// its modes vanish there, and the entries coupling a trace row to it are
+/// dropped, since they multiply zero. Kept, the corner would give the
+/// operator a free end whose modes do not vanish where the field does, and a
+/// mode that does would read as the wrong tangential wavenumbers: beside
+/// pinned sides the wall reflected 2.5 to 10 times what its law says. A node
+/// pinned to a driven signal stays on the trace as a held row.
 fn outgoing_signature(
     quadratic: &QuadraticWaveOperator,
 ) -> Result<Option<CanonicalOutgoingSignature>, WaveError> {
+    let zero_pinned =
+        |node: usize| quadratic.dirichlet_signals()[node].is_some_and(TimeSignal::is_zero);
     let trace_nodes = quadratic
         .second_order_boundary_damping()
         .iter()
         .enumerate()
-        .filter_map(|(node, damping)| (*damping > 0.0).then_some(node as u32))
+        .filter_map(|(node, damping)| (*damping > 0.0 && !zero_pinned(node)).then_some(node as u32))
         .collect::<Vec<_>>();
     if trace_nodes.is_empty() {
         if quadratic
@@ -4079,7 +4091,7 @@ fn outgoing_signature(
             let trace_column = trace_position[column];
             let value = quadratic.auxiliary_stiffness_values()[entry];
             if trace_column == usize::MAX {
-                if value.abs() > 2.0e-12 {
+                if value.abs() > 2.0e-12 && !zero_pinned(column) {
                     return Err(WaveError::InvalidMesh(
                         "the outgoing tangential operator leaves its physical trace",
                     ));
@@ -7091,5 +7103,173 @@ mod tests {
         assert!(error(&medium) / error(&fine) > 3.5);
         assert!(coarse_energy / medium_energy > 3.5);
         assert!(medium_energy / fine_energy > 3.5);
+    }
+
+    /// The default scene's box meshed at `edge` with `sides`, assembled and
+    /// compiled. The mesh does not read the sides, so two boxes that differ
+    /// only in theirs share every node.
+    fn walled_box(
+        sides: crate::OuterBoundaryConditions,
+        edge: f64,
+    ) -> (TriMesh, QuadraticWaveOperator, CanonicalWaveOperator) {
+        let scene = Scene::default();
+        let mesh = crate::mesh_scene(
+            &scene,
+            1,
+            crate::MeshingOptions {
+                target_edge_length: edge,
+                ..crate::MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic =
+            QuadraticWaveOperator::assemble_scene_with_boundaries(&mesh, &scene, sides).unwrap();
+        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        (mesh, quadratic, canonical)
+    }
+
+    /// A second-order wall on the right side of the box, between two sides
+    /// pinned to zero, ends its trace at the pinned corners: its tangential
+    /// operator has Dirichlet ends, so its modes are the sines of the side,
+    /// `λ_n = (nπ/H)²/2` at unit speed and impedance, with no constant mode
+    /// and poles on every mode. Between free sides the same wall keeps the
+    /// corners and the cosines, the constant mode included; between driven
+    /// sides it keeps the corners too, as held rows.
+    #[test]
+    fn a_zero_pinned_side_ends_the_outgoing_trace_and_a_driven_one_does_not() {
+        let mut sides = crate::OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        sides.sides[crate::OuterSide::Right.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
+        let (mesh, quadratic, free) = walled_box(sides, 0.1);
+        let zero = OuterBoundaryCondition::Dirichlet {
+            signal: TimeSignal::ZERO,
+        };
+        sides.sides[crate::OuterSide::Top.index()] = zero;
+        sides.sides[crate::OuterSide::Bottom.index()] = zero;
+        let (pinned_mesh, pinned_quadratic, pinned) = walled_box(sides, 0.1);
+        assert_eq!(pinned_mesh.vertices, mesh.vertices);
+        let free_boundary = free.outgoing_boundary().unwrap();
+        let pinned_boundary = pinned.outgoing_boundary().unwrap();
+
+        // The right side's nodes, less the two the pinned sides share with it.
+        let side_nodes = quadratic
+            .second_order_boundary_damping()
+            .iter()
+            .filter(|damping| **damping > 0.0)
+            .count();
+        assert_eq!(free_boundary.trace_nodes().len(), side_nodes);
+        let corners = free_boundary
+            .trace_nodes()
+            .iter()
+            .copied()
+            .filter(|node| pinned_quadratic.dirichlet_signals()[*node as usize].is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(corners.len(), 2);
+        for node in &corners {
+            let point = pinned.node_points()[*node as usize];
+            assert!(point.x > 0.999 && point.y.abs() > 0.999, "{point:?}");
+        }
+        let expected = free_boundary
+            .trace_nodes()
+            .iter()
+            .copied()
+            .filter(|node| !corners.contains(node))
+            .collect::<Vec<_>>();
+        assert_eq!(pinned_boundary.trace_nodes(), expected.as_slice());
+
+        assert!(
+            free_boundary
+                .modes()
+                .iter()
+                .any(|mode| mode.eigenvalue == 0.0)
+        );
+        assert!(
+            pinned_boundary
+                .modes()
+                .iter()
+                .all(|mode| mode.eigenvalue > 0.0)
+        );
+        assert_eq!(
+            pinned_boundary.auxiliary_count(),
+            3 * pinned_boundary.trace_nodes().len()
+        );
+        let spectrum = |boundary: &CanonicalOutgoingBoundary| {
+            let mut eigenvalues = boundary
+                .modes()
+                .iter()
+                .map(|mode| mode.eigenvalue)
+                .collect::<Vec<_>>();
+            eigenvalues.sort_by(f64::total_cmp);
+            eigenvalues
+        };
+        let height = mesh
+            .vertices
+            .iter()
+            .map(|v| v.point.y)
+            .fold(f64::MIN, f64::max)
+            - mesh
+                .vertices
+                .iter()
+                .map(|v| v.point.y)
+                .fold(f64::MAX, f64::min);
+        let exact = |n: usize| (n as f64 * std::f64::consts::PI / height).powi(2) / 2.0;
+        let (free_spectrum, pinned_spectrum) = (spectrum(free_boundary), spectrum(pinned_boundary));
+        for n in 1..=3 {
+            eprintln!(
+                "n {n}: sine {:.5} cosine {:.5} exact {:.5} -> {:.2e} {:.2e}",
+                pinned_spectrum[n - 1],
+                free_spectrum[n],
+                exact(n),
+                pinned_spectrum[n - 1] / exact(n) - 1.0,
+                free_spectrum[n] / exact(n) - 1.0
+            );
+            assert!((pinned_spectrum[n - 1] / exact(n) - 1.0).abs() < 1.0e-4);
+            assert!((free_spectrum[n] / exact(n) - 1.0).abs() < 1.0e-4);
+        }
+
+        // The pinned wall runs: the lowest sine mode along it, stepped with
+        // its pins, radiates. Every stage keeps its balance or the step fails;
+        // the field's own energy wobbles at the step's order and the memory
+        // gives some back, so only the whole run is held to a loss.
+        let forcing =
+            CanonicalForcing::from_legacy_boundaries(&pinned, &pinned_quadratic, 0.0).unwrap();
+        let primary = pinned
+            .node_points()
+            .iter()
+            .zip(pinned.primary_mass())
+            .map(|(point, mass)| {
+                mass * (std::f64::consts::PI * (point.y + 1.0) / height).sin()
+                    * (0.5 * std::f64::consts::PI * (point.x + 1.0)).sin()
+            })
+            .collect::<Vec<_>>();
+        let dt = 0.5 * pinned.maximum_time_step();
+        let mut state = CanonicalWaveState::new(
+            &pinned,
+            dt,
+            primary,
+            vec![Point2::default(); pinned.constitutive_samples().len()],
+        )
+        .unwrap();
+        let start = state.energy(&pinned).unwrap();
+        for _ in 0..400 {
+            state.step_with_forcing(&pinned, &forcing).unwrap();
+            assert!(state.energy(&pinned).unwrap() < start * (1.0 + 1.0e-6));
+        }
+        let energy = state.energy(&pinned).unwrap();
+        eprintln!(
+            "energy {start:.4} -> {energy:.4} over {:.3} s",
+            state.time()
+        );
+        assert!(energy < 0.9 * start);
+
+        let driven = OuterBoundaryCondition::Dirichlet {
+            signal: TimeSignal::harmonic(0.2, 0.1, 1.0, 0.0),
+        };
+        sides.sides[crate::OuterSide::Top.index()] = driven;
+        sides.sides[crate::OuterSide::Bottom.index()] = driven;
+        let (_, _, held) = walled_box(sides, 0.1);
+        assert_eq!(
+            held.outgoing_boundary().unwrap().trace_nodes(),
+            free_boundary.trace_nodes()
+        );
     }
 }

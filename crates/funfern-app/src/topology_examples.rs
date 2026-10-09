@@ -5060,6 +5060,8 @@ mod tests {
     ) -> Arc<crate::topology_runtime::PreparedTopology> {
         let editor = TopologyEditor::from_document(document.clone()).unwrap();
         let mut runtime = TopologyRuntime::default();
+        // Capped for the domain's area, as the application meshes it.
+        let domain = document.model.accepted.geometry.domain;
         let token = runtime
             .request(
                 editor.revision,
@@ -5068,7 +5070,8 @@ mod tests {
                 MeshingOptions {
                     target_edge_length: edge,
                     ..MeshingOptions::default()
-                },
+                }
+                .sized_for_area(domain.width() * domain.height()),
                 true,
             )
             .unwrap();
@@ -6034,7 +6037,8 @@ mod tests {
     }
 
     /// A pinned or electric-wall side beside a second-order outgoing one pins
-    /// the corner nodes they share, which sit on the outgoing wall's trace.
+    /// the corner nodes they share, which end the outgoing wall's trace: they
+    /// carry its damping but are not on it, and nothing on it is pinned.
     /// Every law-carrying gallery scene behind such a wall used to be refused
     /// whole; with one side pinned, each steps on the reference, packs for the
     /// device and is estimated as the adaptation worker estimates it.
@@ -6071,12 +6075,20 @@ mod tests {
             let Some(boundary) = operator.base().outgoing_boundary() else {
                 continue;
             };
+            let pinned_corners = prepared
+                .operator
+                .second_order_boundary_damping()
+                .iter()
+                .zip(prepared.canonical_forcing.prescribed())
+                .filter(|(damping, pin)| **damping > 0.0 && pin.is_some())
+                .count();
+            assert!(pinned_corners >= 2, "{}: no pinned corner", example.name);
             assert!(
                 boundary
                     .trace_nodes()
                     .iter()
-                    .any(|node| prepared.canonical_forcing.prescribed()[*node as usize].is_some()),
-                "{}: no pin on the trace",
+                    .all(|node| prepared.canonical_forcing.prescribed()[*node as usize].is_none()),
+                "{}: a pin on the trace",
                 example.name
             );
             let time_step = prepared.recommended_time_step();
@@ -8777,6 +8789,315 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A channel `[left, right] × [-0.5, 0.5]` of the unit medium with `wall`
+    /// at its right end, reflecting sides unless `sides` names the physics
+    /// and the condition they take, and a strip at `x = -0.7` across it
+    /// radiating `signal` under `profile`.
+    fn wall_channel(
+        left: f64,
+        right: f64,
+        wall: OuterBoundaryCondition,
+        edge: f64,
+        profile: &str,
+        signal: TimeSignal,
+        sides: Option<(PhysicsModel, OuterBoundaryCondition)>,
+    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let mut builder = Builder::new();
+        builder.scene.geometry.domain = DomainRect {
+            min_x: left,
+            max_x: right,
+            min_y: -0.5,
+            max_y: 0.5,
+        };
+        // The background's anchor, on the floor at x = 0 as the builder
+        // expects, right of the launcher.
+        builder.scene.face_assignments[0].anchor = FaceAnchor::Outer {
+            side: OuterSide::Bottom,
+            fraction: -left / (right - left),
+        };
+        let mut boundaries = channel();
+        boundaries.sides[OuterSide::Right.index()] = wall;
+        if let Some((physics, transverse)) = sides {
+            builder.scene.physics = physics;
+            boundaries.sides[OuterSide::Top.index()] = transverse;
+            boundaries.sides[OuterSide::Bottom.index()] = transverse;
+        }
+        builder.scene.outer_boundaries = boundaries;
+        builder.launcher(-0.7, INTERFACE_HZ, 1.0);
+        let launcher = builder.scene.volume_sources.last_mut().unwrap();
+        launcher.signal = signal;
+        launcher.profile = ScalarField::formula(profile).unwrap();
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        prepare(&document, edge)
+    }
+
+    /// The primary field at `points` after each of `steps` steps of `dt`.
+    fn wall_traces(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        dt: f64,
+        steps: usize,
+        points: &[Point2],
+    ) -> Vec<Vec<f64>> {
+        let stencils = points
+            .iter()
+            .map(|point| {
+                QuadraticPointStencil::build_topology(
+                    &prepared.mesh,
+                    &prepared.operator,
+                    &prepared.bundle.plan,
+                    prepared.fixed_model(),
+                    *point,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let operator = &prepared.canonical_operator;
+        let mut state = CanonicalWaveState::zero(operator, dt).unwrap();
+        let mut traces = vec![Vec::with_capacity(steps); points.len()];
+        for _ in 0..steps {
+            state
+                .step_with_forcing(operator, &prepared.canonical_forcing)
+                .unwrap();
+            let field = state.primary_field(operator).unwrap();
+            for (trace, stencil) in traces.iter_mut().zip(&stencils) {
+                trace.push(
+                    stencil
+                        .nodes
+                        .iter()
+                        .zip(stencil.value_weights)
+                        .map(|(node, weight)| weight * field[*node as usize])
+                        .sum(),
+                );
+            }
+        }
+        traces
+    }
+
+    /// The first-order wall's energy reflection at `cos θ` from the normal,
+    /// a wall of coefficient one: `((1 − cos θ)/(1 + cos θ))²`.
+    fn first_order_reflection(cos: f64) -> f64 {
+        ((1.0 - cos) / (1.0 + cos)).powi(2)
+    }
+
+    /// The second-order wall's, at `cos θ` and angular frequency `w` with
+    /// tangential wavenumber `k`: the passive law of the boundary spike,
+    /// `Y(s) = 1 + (6d/7)/s − (8d/7)/(s + d) + (2d/7)/(s + 2d)` at `s = iw`,
+    /// `d = √(7/8) k`, and `|(cos θ − Y)/(cos θ + Y)|²`.
+    fn second_order_reflection(cos: f64, w: f64, k: f64) -> f64 {
+        let d = (7.0f64 / 8.0).sqrt() * k;
+        let inverse = |re: f64, im: f64| (re / (re * re + im * im), -im / (re * re + im * im));
+        let poles = [inverse(0.0, w), inverse(d, w), inverse(2.0 * d, w)];
+        let residues = [6.0 * d / 7.0, -8.0 * d / 7.0, 2.0 * d / 7.0];
+        let (mut re, mut im) = (1.0, 0.0);
+        for (pole, residue) in poles.iter().zip(residues) {
+            re += residue * pole.0;
+            im += residue * pole.1;
+        }
+        ((cos - re).powi(2) + im * im) / ((cos + re).powi(2) + im * im)
+    }
+
+    /// An outgoing wall against a far domain, then against its own law. At
+    /// normal incidence a pulse down the channel `[-1, 1] × [-0.5, 0.5]` meets
+    /// the right wall; the same run with that wall at `x = 3` can return
+    /// nothing in the time, so the near run less the far run at nine points
+    /// is what the wall sent back: a reflecting wall all of it, either
+    /// outgoing wall under 2e-5 of it, over a floor of 3e-6 from the two
+    /// meshes. Both orders are exact there, so the wall is then met by the
+    /// channel's second transverse mode, `cos(2πy)`, whose angle at the wall
+    /// falls from 39° at 1.6 Hz to 27° at 2.2 Hz, under a pulse 0.35 s wide
+    /// on 2.2 Hz with the left wall at `x = -3`, and read on one mesh: a
+    /// reflecting wall returns the incident wave and a zero-Dirichlet wall
+    /// its negative, so their mean is the incident wave and their
+    /// half-difference what a wall of coefficient one returns. Over the band
+    /// the first-order wall's energy reflection matches its law to 1%; the
+    /// second-order wall's reads 1.10 of the passive law at the default step,
+    /// 1.03 at half of it and 1.02 at a quarter, an excess in the stepping,
+    /// not the law (`docs/plan.md`, Worth checking sometime), and is held to
+    /// 15%. Between electric walls in TM the field vanishes at the corners,
+    /// the wall's trace ends there, and `sin(2πy)` must reflect as `cos(2πy)`
+    /// does between reflecting sides, within 2%: with the corners kept on the
+    /// trace it reflected 6.6 times its law. Electric walls in TM and zero
+    /// Dirichlet sides in a mechanical medium resolve to one operator.
+    #[test]
+    fn an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides() {
+        let edge = 0.05;
+        let pulse = TimeSignal::pulsed(
+            [0.0, 1.0, INTERFACE_HZ, 0.0],
+            PulseEnvelope::Gaussian {
+                width: INTERFACE_WIDTH,
+            },
+            INTERFACE_START,
+            0.0,
+        );
+        let points = (1..=9)
+            .flat_map(|i| [-0.3, 0.0, 0.3].map(|y| Point2::new(0.1 * f64::from(i), y)))
+            .collect::<Vec<_>>();
+        let far = wall_channel(
+            -1.0,
+            3.0,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            edge,
+            "1",
+            pulse,
+            None,
+        );
+        let walls = [
+            OuterBoundaryCondition::Reflecting,
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        ];
+        let nears = walls.map(|wall| wall_channel(-1.0, 1.0, wall, edge, "1", pulse, None));
+        let dt = nears
+            .iter()
+            .map(|near| near.recommended_time_step())
+            .fold(far.recommended_time_step(), f64::min);
+        let steps = (3.6 / dt).ceil() as usize;
+        let far_traces = wall_traces(&far, dt, steps, &points);
+        let returned = nears.each_ref().map(|near| {
+            let (mut incident, mut returned) = (0.0, 0.0);
+            for (near, far) in wall_traces(near, dt, steps, &points)
+                .iter()
+                .zip(&far_traces)
+            {
+                for (n, f) in near.iter().zip(far) {
+                    incident += f * f;
+                    returned += (n - f) * (n - f);
+                }
+            }
+            returned / incident
+        });
+        eprintln!(
+            "normal incidence: reflecting {:.4}, first order {:.2e}, second order {:.2e}",
+            returned[0], returned[1], returned[2]
+        );
+        assert!((returned[0] - 1.0).abs() < 0.01, "{}", returned[0]);
+        assert!(returned[1] < 2.0e-5, "{}", returned[1]);
+        assert!(returned[2] < 2.0e-5, "{}", returned[2]);
+
+        let signal = TimeSignal::pulsed(
+            [0.0, 1.0, 2.2, 0.0],
+            PulseEnvelope::Gaussian { width: 0.35 },
+            0.1,
+            0.0,
+        );
+        // Where both `cos(2πy)` and `sin(2πy)` are 0.7 in size.
+        let points = [0.3, 0.5, 0.7]
+            .into_iter()
+            .flat_map(|x| [0.125, -0.125, 0.375].map(|y| Point2::new(x, y)))
+            .collect::<Vec<_>>();
+        let tangential = std::f64::consts::TAU;
+        // The band's energy reflection over its law, first and second order.
+        let band = |profile: &str, sides: Option<(PhysicsModel, OuterBoundaryCondition)>| {
+            let walls = [
+                OuterBoundaryCondition::FirstOrderOutgoing,
+                OuterBoundaryCondition::SecondOrderOutgoing,
+                OuterBoundaryCondition::Reflecting,
+                OuterBoundaryCondition::Dirichlet {
+                    signal: TimeSignal::ZERO,
+                },
+            ];
+            let nears =
+                walls.map(|wall| wall_channel(-3.0, 1.0, wall, edge, profile, signal, sides));
+            let dt = nears
+                .iter()
+                .map(|near| near.recommended_time_step())
+                .fold(f64::INFINITY, f64::min);
+            let steps = (7.5 / dt).ceil() as usize;
+            let traces = nears
+                .each_ref()
+                .map(|near| wall_traces(near, dt, steps, &points));
+            let spectrum = |trace: &[f64], hz: f64| {
+                let (mut re, mut im) = (0.0, 0.0);
+                for (step, u) in trace.iter().enumerate() {
+                    let phase = std::f64::consts::TAU * hz * (step + 1) as f64 * dt;
+                    re += u * phase.cos() * dt;
+                    im -= u * phase.sin() * dt;
+                }
+                (re, im)
+            };
+            let norm = |(re, im): (f64, f64)| re * re + im * im;
+            let mut returned = [0.0; 2];
+            let mut predicted = [0.0; 2];
+            for tenth in 16..=22 {
+                let hz = f64::from(tenth) / 10.0;
+                let cos = (1.0 - (tangential / (std::f64::consts::TAU * hz)).powi(2)).sqrt();
+                let law = [
+                    first_order_reflection(cos),
+                    second_order_reflection(cos, std::f64::consts::TAU * hz, tangential),
+                ];
+                for point in 0..points.len() {
+                    let at = traces.each_ref().map(|trace| spectrum(&trace[point], hz));
+                    let (n, d) = (at[2], at[3]);
+                    let incident = (0.5 * (n.0 + d.0), 0.5 * (n.1 + d.1));
+                    let unit = norm((0.5 * (n.0 - d.0), 0.5 * (n.1 - d.1)));
+                    for wall in 0..2 {
+                        returned[wall] += norm((at[wall].0 - incident.0, at[wall].1 - incident.1));
+                        predicted[wall] += law[wall] * unit;
+                    }
+                }
+            }
+            [returned[0] / predicted[0], returned[1] / predicted[1]]
+        };
+        let free = band("cos(2 * pi * y)", None);
+        let pinned = band(
+            "sin(2 * pi * y)",
+            Some((
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                },
+                OuterBoundaryCondition::ElectricWall,
+            )),
+        );
+        eprintln!(
+            "oblique, over the law: free sides first {:.4} second {:.4}; pinned sides first {:.4} second {:.4}",
+            free[0], free[1], pinned[0], pinned[1]
+        );
+        assert!((free[0] - 1.0).abs() < 0.01, "{}", free[0]);
+        assert!(free[1] > 0.95 && free[1] < 1.15, "{}", free[1]);
+        assert!((pinned[0] - 1.0).abs() < 0.01, "{}", pinned[0]);
+        assert!(
+            (pinned[1] / free[1] - 1.0).abs() < 0.02,
+            "{} / {}",
+            pinned[1],
+            free[1]
+        );
+
+        let resolved = [
+            (
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                },
+                OuterBoundaryCondition::ElectricWall,
+            ),
+            (
+                PhysicsModel::Mechanical,
+                OuterBoundaryCondition::Dirichlet {
+                    signal: TimeSignal::ZERO,
+                },
+            ),
+        ]
+        .map(|sides| {
+            wall_channel(
+                -3.0,
+                1.0,
+                OuterBoundaryCondition::SecondOrderOutgoing,
+                edge,
+                "1",
+                signal,
+                Some(sides),
+            )
+        });
+        let [tm, mechanical] = resolved
+            .each_ref()
+            .map(|prepared| &prepared.canonical_operator);
+        assert_eq!(
+            tm.outgoing_boundary().unwrap().trace_nodes(),
+            mechanical.outgoing_boundary().unwrap().trace_nodes()
+        );
+        assert_eq!(tm.primary_mass(), mechanical.primary_mass());
     }
 
     #[test]

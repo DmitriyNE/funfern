@@ -21384,3 +21384,83 @@ elements'. The lag first missed by up to 23 ms, the probe node's offset from
 moves R by 6e-4 and fails it, as only R can; μ 1% off everywhere leaves R alone
 and fails the lag; TE placing ε unreciprocated keeps `R = 1/9`, which `Z → 1/Z`
 leaves unchanged, and fails R + T and the lag.
+
+## 2026-10-09 — A zero-pinned side ends the second-order wall's trace
+
+The fourth physical-accuracy fixture, an outgoing wall against a far domain,
+found a defect. At normal incidence both outgoing orders are exact: a pulse
+down a channel meets the right wall, the same run with the wall moved to
+`x = 3` returns nothing in the time, and the near run less the far run at
+nine points is what the wall sent back - a reflecting wall 1.000, either
+outgoing wall 5.9e-6 over a 3e-6 floor of mesh difference. So the fixture
+also meets the wall with the channel's second transverse mode, 27° to 39°
+over 1.6 to 2.2 Hz, and reads reflection per frequency on one mesh: the mean
+of a reflecting and a zero-Dirichlet wall's responses is the incident wave,
+their half-difference what a wall of coefficient one returns. The first-order
+wall matches `((1 − cos θ)/(1 + cos θ))²` to 0.5%. The second-order wall is
+the passive three-pole law the boundary spike adopted on 19 September,
+`Y(s) = 1 + (6d/7)/s − (8d/7)/(s + d) + (2d/7)/(s + 2d)`, `d = √(7/8) k_y`,
+not Engquist-Majda; its formula gives the spike's 1.96% at 30°. Between
+reflecting sides the wall reads 1.10 of that law over the band (below).
+Between electric walls in TM, or magnetic walls in TE, or zero Dirichlet
+sides in a mechanical medium - one resolved operator, bit for bit - it read
+3.5 times its law with the probes of the first measurement and 6.6 with the
+fixture's, at 30° 1.5e-3 against 3.8e-4, and halving the step changed
+nothing. The cause: `outgoing_signature` put every node with second-order
+damping on the trace, the two corners a pinned side shares with the wall
+included, so the tangential operator behind the wall's memory had free ends
+whose modes do not vanish where the field does, and a mode that does read as
+the wrong tangential wavenumbers. The 28 September entry had taken those
+corners' presence on the trace as given and made the kick hold them.
+
+A node pinned to a zero signal now leaves the trace: the tangential operator
+ends there as at a Dirichlet end, and the entries coupling a trace row to it
+are dropped, since they multiply zero (`TimeSignal::is_zero`). Nothing else
+moved: the eigensolve, the kicks, the GPU plan, the memory transfer and the
+time-driven path all read `trace_nodes()`, and for zero pins the
+`prescribed_trace` pattern is now all false, so the device applies its direct
+inverse where it ran the sweep. A node pinned to a driven signal stays on the
+trace as a held row, today's convention, for which no physical reference
+exists and every gate (`NONLINEAR_FORCED`, `wall2-pins`,
+`canonical_gpu_handoff --prescribed`) pins with one, so none moves; the discontinuity
+between an exact Dirichlet end at amplitude zero and the convention at any
+other amplitude is deliberate and documented at the function. The membership
+is decided once at compile: any edit of a side or span condition reassembles
+the operator (`operator_scene_eq`), and a pin can never be a live patch
+(`forcing_sparse_layout_eq` requires equal pins).
+
+Measured, pinned against free sides, over the law: first order 1.0051 and
+1.0052, second order 1.0957 and 1.0979. The wall's spectrum between zero
+Dirichlet sides is the sines of the side, `(nπ/H)²/2` at unit speed and
+impedance, within 2e-5 for the first three, with no constant mode and poles on
+every mode; between reflecting sides the cosines, the constant mode included
+(`a_zero_pinned_side_ends_the_outgoing_trace_and_a_driven_one_does_not`,
+which also runs the lowest sine mode 400 steps against its pins, every stage
+balanced, 20% radiated in 1.9 s, and holds a driven side's corners on the
+trace). A handoff from free to zero-pinned sides on one mesh moves the memory
+onto the shorter trace exactly, the corners' share gone with them
+(`outgoing_history_moves_onto_a_trace_that_pinned_sides_end`); the way back
+gives the corners their neighbours' memory as a remesh gives new nodes, 9%
+of it here, booked as the edit's exchange, where zero would be the faithful
+start for a node whose field was pinned - a transient at a user's edit, left
+as it is. On the device, `canonical_gpu_handoff --second-order --pinned-sides`
+hands off between traces of 222 and 234 modes without their corners and reads
+Q 2.1e-7, b 1.3e-6, auxiliary RMS 1.3e-9; it joins the device suite. With
+the corners kept on the trace the core test fails on the trace length and the
+fixture reads 6.6. The 28 September test that runs every driven gallery scene
+with a side pinned beside its wall asserted a pin on the trace; it now asserts
+the pinned corners carry the wall's damping and nothing on the trace is pinned,
+and every scene still steps, packs and is estimated.
+
+Found on the way and left: the second-order wall between free sides returns
+1.10 of its law's energy at the default step, 1.03 at half the step, 1.02 at
+a quarter at a fixed mesh, and 1.07 at edge 0.035 with its own step - about
+4x per halving of the step at a fixed mesh, about linearly along a fixed
+CFL - the same for sine and cosine modes, so not a corner effect but the
+wall's stepping; in amplitude about 1e-3 of the incident wave. The fixture
+holds the second-order band to 15% over it and the first-order band to 1%;
+`docs/plan.md` lists it. The test helper `prepare` now sizes the mesher's
+caps to the domain's area as `ui/runtime.rs` does, which only lets a larger
+channel finish meshing. The first measurements stalled for forty minutes
+each: the runs were launched with their output piped through a filter, so
+nothing showed until the end; a long run now writes its own log.

@@ -304,7 +304,19 @@ when the reflected, transmitted and reference pulses are clear of the
 interface, and the transmitted pulse lags the reference by what the slower
 medium adds, to 1e-4 s; `ε = μ = 2`, as slow and matched, reflects under 1e-5
 (`a_pulse_at_an_interface_splits_as_fresnel_says_and_lags_by_the_slower_medium`).
-An impedance 0.2% off at the right speed fails it.
+An impedance 0.2% off at the right speed fails it. An outgoing wall
+at the end of a channel is read against the same channel with the wall moved
+far off, and at normal incidence a reflecting wall returns everything, either
+outgoing order under 2e-5; met by the channel's second transverse mode at 27°
+to 39°, read on one mesh against reflecting and zero-Dirichlet references, the
+first-order wall returns `((1 − cos θ)/(1 + cos θ))²` of the energy to 1% and
+the second-order wall 1.10 of its passive law at the default step, an excess
+of the stepping listed under "Worth checking sometime" in `docs/plan.md`; and
+between electric walls in TM, where the field vanishes at the corners, the
+second-order wall's trace ends there and the mode reflects as it does between
+reflecting sides, to 2%
+(`an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`).
+With the pinned corners kept on the trace it reflected 6.6 times its law.
 
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
