@@ -74,8 +74,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run Clippy on the end-to-end fixtures
-        # The app's e2e feature (src/ui/e2e.rs), which no other step compiles.
-        # The fixtures themselves need a GPU and run in scripts/device-suite.sh.
+        # The app's e2e feature (src/ui/e2e.rs), which no other step lints.
+        # The fixtures run in the device job below and in
+        # scripts/device-suite.sh.
         run: cargo clippy -p funfern-app --bins --features e2e --locked -- -D warnings
 
       - name: Build tests
@@ -212,12 +213,84 @@ jobs:
           kani-version: '0.67.0'
           args: '-p funfern-protocol'
 
+  device:
+    name: Device fixtures on software Vulkan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies, lavapipe and a virtual display
+        # The runtime X libraries are the ones winit opens; the build needs
+        # only the headers above them.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev \
+            mesa-vulkan-drivers \
+            libvulkan1 \
+            xvfb \
+            xauth \
+            libxcursor1 \
+            libxrandr2 \
+            libxi6 \
+            libx11-xcb1
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@v6
+        with:
+          # The same paths as the save step below.
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: device-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build the app with its end-to-end fixtures
+        run: cargo build -p funfern-app --release --locked --features e2e --bin funfern-app
+
+      - name: Save build cache
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Run the fixtures on lavapipe
+        # The app as it ships, driven through its own handlers, on Mesa's
+        # software Vulkan: the shaders, the render graph and the runtime on a
+        # second backend, judged against the f64 reference. Each run must
+        # report lavapipe's adapter, so a runner without it fails rather than
+        # passing on nothing. Lavapipe flushes subnormals to zero, which is how
+        # it found the nonlinear inverse's convergence tests unreachable near
+        # zero, where the Metal device never noticed.
+        run: scripts/e2e-lavapipe.sh
+
   deploy:
     name: Deploy GitHub Pages
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     # The protocol's decisions are the app's own code, so a proof that fails
-    # holds the deploy as a failing test does.
-    needs: [native, web, kani]
+    # holds the deploy as a failing test does, and so does a fixture that
+    # fails on the second backend.
+    needs: [native, web, kani, device]
     runs-on: ubuntu-24.04
     permissions:
       pages: write

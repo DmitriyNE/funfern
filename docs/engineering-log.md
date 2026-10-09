@@ -21216,3 +21216,21 @@ there, and the device suite passes 48 of 48 on the M1 Max. A device or browser
 that flushes subnormals would have paused a field-law scene started from rest
 at once; which hardware does, nothing here has checked. The fixture's refusal
 message now names the step, the failure and the reference's own verdict.
+
+## 2026-10-09 — CI runs the device fixtures on software Vulkan
+
+A CI job, `Device fixtures on software Vulkan`, builds the app with its `e2e`
+feature on ubuntu-24.04 and runs the six fixtures on Mesa's lavapipe under
+xvfb, through `scripts/e2e-lavapipe.sh`: the fixture list is the device
+suite's, read from `scripts/device-suite.sh` so the two cannot part, and a run
+whose log does not report lavapipe's adapter fails, so a runner that found no
+device or another one cannot pass on nothing. The Pages deploy waits for it, as
+for the proofs. It was tried first in an arm64 container in the Colima VM:
+the release build took four minutes cold, each fixture forty to sixty seconds,
+and winit needs the X client libraries (`libxcursor1`, `libxrandr2`, `libxi6`,
+`libx11-xcb1`) at run time though the build needs only the headers. On
+lavapipe the fixtures read as on the M1 Max - cavity Q 6.4e-7, Switch 7.0e-7,
+handoff 1.0e-6, remesh 7.9e-7, the rejection at step 788 - with their own
+bits, the same across the four batchings. Running there is what found the
+inverse's convergence floor of the previous entry. The x86_64 runner itself is
+checked by the job's first run.
