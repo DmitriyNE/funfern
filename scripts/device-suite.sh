@@ -64,6 +64,7 @@ RUNS=(
   'canonical_gpu_timing --failure'
   # The app itself, driven through its own handlers (src/ui/e2e.rs).
   'FUNFERN_E2E=cavity funfern-app'
+  'FUNFERN_E2E=cavity-batches funfern-app'
 )
 
 pattern=${1:-}

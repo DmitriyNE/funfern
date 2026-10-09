@@ -7,9 +7,10 @@
 //! The driver acts as the user's handlers do - it opens a document, places a
 //! pulse, presses Run - and reads only what the device accepted: its
 //! accepted-step counter, the serial of the last event it processed, and a
-//! full snapshot stamped with the step it holds. The one thing it adds to the
-//! app is where the run stops ([`E2eSteps`]), since the app asks for steps by
-//! the wall clock and a comparison needs an exact endpoint.
+//! full snapshot stamped with the step it holds. What it adds to the app is
+//! where a run stops and, for a fixture that asks, how many steps a running
+//! frame asks for ([`E2eSteps`]): the app asks by the wall clock, and a
+//! comparison needs an exact endpoint.
 
 #[path = "../../examples/support/check.rs"]
 mod check;
@@ -20,12 +21,15 @@ use bevy_egui::EguiPrimaryContextPass;
 use check::{within, worse};
 use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
 use funfern_core::{CanonicalWaveState, OuterBoundaryCondition, OuterBoundaryConditions};
+use std::collections::VecDeque;
 
 /// Where an end-to-end fixture holds the run: the steps a running frame asks
-/// for stop at `limit`, counted on the running generation.
+/// for stop at `limit`, counted on the running generation, and are `batch` a
+/// frame where it names a number, in place of the frame's pacing.
 #[derive(Default)]
 pub(super) struct E2eSteps {
     pub(super) limit: Option<u64>,
+    pub(super) batch: Option<u64>,
 }
 
 /// Adds the driver of the fixture `FUNFERN_E2E` names, if it names one.
@@ -33,8 +37,12 @@ pub(crate) fn add(app: &mut App) {
     let Ok(name) = std::env::var("FUNFERN_E2E") else {
         return;
     };
-    let fixture = match name.as_str() {
-        "cavity" => Fixture::Cavity,
+    let (fixture, batches) = match name.as_str() {
+        "cavity" => (Fixture::Cavity, vec![None]),
+        "cavity-batches" => (
+            Fixture::CavityBatches,
+            BATCHES.iter().copied().map(Some).collect(),
+        ),
         _ => {
             eprintln!("e2e: no fixture named {name:?}");
             std::process::exit(2);
@@ -43,6 +51,8 @@ pub(crate) fn add(app: &mut App) {
     app.insert_resource(Driver {
         fixture,
         phase: Phase::Open,
+        batches: batches.into(),
+        hashes: Vec::new(),
         deadline: Instant::now() + std::time::Duration::from_secs(120),
     })
     .add_systems(EguiPrimaryContextPass, drive.before(frame));
@@ -53,7 +63,18 @@ enum Fixture {
     /// A closed reflecting box of a lossless linear medium, struck by one
     /// pulse at step 0 and run for [`CAVITY_STEPS`].
     Cavity,
+    /// The cavity once for each of [`BATCHES`], the same steps asked for in
+    /// batches of that many: the accepted state at the endpoint must be the
+    /// same bits each time. The device keeps its clock and control state on
+    /// the GPU, takes no host write while stepping, and reduces in fixed-order
+    /// workgroup trees, so how the steps were grouped into submissions has no
+    /// arithmetic to change.
+    CavityBatches,
 }
+
+/// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
+/// time, a number that divides nothing, half the run, and the whole run.
+const BATCHES: [u64; 4] = [1, 7, 128, 256];
 
 /// Steps the cavity runs after its pulse.
 const CAVITY_STEPS: u64 = 256;
@@ -66,7 +87,19 @@ const CAVITY_TOLERANCE: f64 = 3.0e-5;
 struct Driver {
     fixture: Fixture,
     phase: Phase,
+    /// The batch of each run still to come, the current one first; none, the
+    /// frame's own pacing.
+    batches: VecDeque<Option<u64>>,
+    /// Each finished run's batch and the hash of its accepted endpoint.
+    hashes: Vec<(Option<u64>, u64)>,
     deadline: Instant,
+}
+
+/// A run that held: what it measured, and a hash of the accepted state at its
+/// endpoint.
+struct Run {
+    summary: String,
+    hash: u64,
 }
 
 enum Phase {
@@ -108,17 +141,49 @@ fn drive(
         return;
     }
     let fixture = driver.fixture;
-    let verdict = match fixture {
-        Fixture::Cavity => cavity(&mut driver, &mut state, &mut request, &display),
+    let run = match fixture {
+        Fixture::Cavity | Fixture::CavityBatches => {
+            cavity(&mut driver, &mut state, &mut request, &display)
+        }
     };
-    let verdict = match verdict {
-        Some(verdict) => verdict,
+    let run = match run {
+        Some(run) => run,
         None if Instant::now() >= driver.deadline => Err(format!(
             "did not finish in time, at {}",
             driver.phase.name()
         )),
         None => return,
     };
+    let verdict = run.map(|run| {
+        let batch = driver.batches.pop_front().flatten();
+        let label = batch.map_or(String::new(), |batch| format!(" in batches of {batch}"));
+        println!(
+            "e2e {fixture:?}{label}: {}, endpoint hash {:016x}",
+            run.summary, run.hash
+        );
+        driver.hashes.push((batch, run.hash));
+        run.summary
+    });
+    if verdict.is_ok() && !driver.batches.is_empty() {
+        driver.phase = Phase::Open;
+        return;
+    }
+    let verdict = verdict.and_then(|summary| match driver.hashes.as_slice() {
+        [(_, first), rest @ ..] if rest.iter().any(|(_, hash)| hash != first) => Err(format!(
+            "the endpoint differs with the batching: {}",
+            driver
+                .hashes
+                .iter()
+                .map(|(batch, hash)| format!("{}: {hash:016x}", batch.unwrap_or(0)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        [_, _, ..] => Ok(format!(
+            "the endpoint is the same bits in all {} batchings",
+            driver.hashes.len()
+        )),
+        _ => Ok(summary),
+    });
     driver.phase = Phase::Done;
     match verdict {
         Ok(summary) => {
@@ -166,7 +231,7 @@ fn cavity(
     state: &mut Playground,
     request: &mut CanonicalGpuRequest,
     display: &CanonicalGpuDisplay,
-) -> Option<Result<String, String>> {
+) -> Option<Result<Run, String>> {
     match std::mem::replace(&mut driver.phase, Phase::Done) {
         Phase::Open => {
             if !state.startup_done {
@@ -175,6 +240,7 @@ fn cavity(
             }
             // Nothing steps until the pulse is in: the run waits at step 0.
             state.e2e_steps.limit = Some(0);
+            state.e2e_steps.batch = None;
             state.wave_running = true;
             if let Err(error) = state.set_document(cavity_document(), false, true) {
                 return Some(Err(format!("the document did not open: {error}")));
@@ -183,8 +249,11 @@ fn cavity(
             None
         }
         Phase::Install => {
+            // This run's generation: a document opened again is the same
+            // scene as the last run's, but not the same revision.
             let installed = state.runtime.active().cloned().filter(|active| {
-                *active.bundle.authored == state.editor.document.model.accepted
+                active.bundle.token.document_revision == state.editor.revision
+                    && *active.bundle.authored == state.editor.document.model.accepted
                     && state.coordinator.uploading.is_none()
                     && request.generation() != 0
                     && display.generation == request.generation()
@@ -276,6 +345,7 @@ fn cavity(
                 }
             }
             state.e2e_steps.limit = Some(CAVITY_STEPS);
+            state.e2e_steps.batch = driver.batches.front().copied().flatten();
             driver.phase = Phase::Run { reference };
             None
         }
@@ -306,7 +376,10 @@ fn cavity(
                 driver.phase = Phase::Snapshot { reference, seen };
                 return None;
             }
-            Some(compare(&reference, display))
+            Some(compare(&reference, display).map(|summary| Run {
+                summary,
+                hash: hash(&display.accepted_storage_bits()),
+            }))
         }
         Phase::Done => None,
     }
@@ -353,4 +426,14 @@ fn relative_l2(actual: impl Iterator<Item = f64>, expected: impl Iterator<Item =
         (sum.0 + (pair.0 - pair.1).powi(2), sum.1 + pair.1 * pair.1)
     });
     (difference / scale).sqrt()
+}
+
+/// FNV-1a over the accepted state's bits.
+fn hash(words: &[u32]) -> u64 {
+    words
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
 }

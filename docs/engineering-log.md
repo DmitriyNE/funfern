@@ -21107,3 +21107,18 @@ when it failed at first: `main` dropped the status `app.run()` answers, so the
 app always exited 0. It answers it now, which also gives a render error Bevy
 quits on a failing status. The suite runs the fixture, and CI lints the
 feature, which no other step compiles.
+
+## 2026-10-09 — The same steps in any batches are the same bits
+
+`cavity-batches` runs the cavity four times through the app, its 256 steps
+asked for one at a time, seven, 128 and all 256 a frame - a per-run override
+of the frame's batch, compiled only with the `e2e` feature - and hashes the
+accepted state at the endpoint each time. The four are the same bits,
+`15ba17d5782e69d1`, and each also holds against the f64 reference at Q 6.2e-7
+and b 1.0e-6: the device keeps its clock and control state on the GPU, takes
+no host write while stepping, and reduces in fixed-order workgroup trees, so
+grouping steps into submissions leaves no arithmetic to change. The cavity's
+11,121 nodes leave a partial last workgroup at 128, 64 and 16. Flipping one
+ulp of one word in the batch-of-seven run, which leaves Q and b the same to
+every printed digit, fails it. Each run recognizes its own generation by the
+document's revision, since a document opened again holds the same scene.

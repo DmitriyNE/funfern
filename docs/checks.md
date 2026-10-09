@@ -39,7 +39,13 @@ holds; the suite runs each. `cavity` strikes a closed reflecting box of the
 default medium, grid filter off, with one pulse at step 0 and compares Q and b
 after 256 steps, to 3e-5: it reads `6.2e-7` and `1.0e-6` at 11,121 degrees of
 freedom. Negating b, reading the lanes a step old, or stepping the reference one
-step short each fails it.
+step short each fails it. `cavity-batches` runs the cavity four times, its steps
+asked for one at a time, seven, 128 and all 256 a frame, and requires the
+accepted state at the endpoint to be the same bits each time, which it is: the
+device keeps its clock and control on the GPU, takes no host write while
+stepping and reduces in fixed-order trees. The 11,121 nodes leave a partial
+workgroup at 128, 64 and 16. One flipped ulp in one run, which no tolerance on
+Q and b sees, fails it.
 
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without

@@ -921,6 +921,11 @@ impl Playground {
                         steps,
                         ceiling_bound: false,
                     });
+                    #[cfg(feature = "e2e")]
+                    let batch = self.e2e_steps.batch.map_or(batch, |steps| FrameBatch {
+                        steps,
+                        ceiling_bound: false,
+                    });
                     let admitted = steps_with_gpu_backpressure(
                         request.stats().retired_steps(),
                         request.requested_steps(),
