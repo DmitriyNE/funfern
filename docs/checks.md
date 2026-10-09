@@ -95,6 +95,14 @@ Metal, five fixtures read what the native app reads to every printed digit -
 the cavity Q `6.242e-7` - and the refusal lands at step 788 as natively. A
 reference a step short fails there as it does natively.
 
+Each fixture also holds its mesh to the one recorded, to the bit: the
+triangles' vertices and regions, and every vertex's coordinates (`CAVITY_MESH`,
+`DISC_MESH` and `FINER_CAVITY_MESH` in `src/ui/e2e.rs`). The mesher decides
+through portable arithmetic, and the M1 Max natively, Chrome's wasm and Linux on
+arm64 build the three meshes alike, the disc's curve included; CI's x86_64
+runner holds them each run. A change to the mesher made on purpose records them
+again.
+
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without
 its file; regenerate them all with

@@ -21255,3 +21255,18 @@ reading 7.2e-7 against the native 7.3e-7. A reference a step short fails the
 cavity in the browser at 1.2e-1, as it does natively. The threaded bundle
 builds in under five minutes with fat LTO. CI and the gate lint the feature for
 the browser target as well, which no other step compiles.
+
+## 2026-10-09 — Every platform builds the fixtures' meshes to the bit
+
+The mesher decides through portable arithmetic (`portable_*`, `pseudo_angle`)
+because a platform's libm once moved a decision by a last bit; nothing checked
+that the meshes themselves agree across platforms. Each end-to-end fixture now
+hashes the mesh its generation was prepared on - the triangles' vertices and
+regions, and every vertex's coordinates to the bit - and holds it to the one
+recorded: the cavity, the cavity with the switchable disc, and the cavity
+remeshed finer. Measured first: the M1 Max natively, Chrome's wasm build and
+Linux on arm64 (lavapipe in the Colima VM) built all three alike, the disc's
+curved boundary included, so the check is exact; CI's x86_64 runner is the
+fourth platform and holds them from its next run. A mismatch names both
+hashes and says that a change to the mesher made on purpose records them again.
+The browser spec now prints the driver's whole account beside the verdict.

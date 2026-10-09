@@ -112,6 +112,16 @@ enum Fixture {
     Rejection,
 }
 
+/// The meshes the fixtures run on, as [`mesh_hashes`] reads them: the cavity,
+/// the cavity with the switchable disc, and the cavity remeshed finer. The
+/// mesher decides through portable arithmetic, so every platform must build
+/// them to the bit: the M1 Max natively, Chrome's wasm and Linux on arm64 do,
+/// and CI's x86_64 runner holds them each run. A change to the mesher made on
+/// purpose records them again here.
+const CAVITY_MESH: &str = "fdbd8736b4d960ea/c57811e22d49eb75";
+const DISC_MESH: &str = "abf88c2e20bff3c6/8496257d436c195f";
+const FINER_CAVITY_MESH: &str = "2a08c7884de88562/d105b9149fd88df1";
+
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
 /// time, a number that divides nothing, half the run, and the whole run.
 const BATCHES: [u64; 4] = [1, 7, 128, 256];
@@ -155,6 +165,14 @@ impl Fixture {
     /// looked at, not given more.
     fn tolerance(self) -> f64 {
         5.0e-6
+    }
+
+    /// The mesh the fixture's document must be built on.
+    fn mesh(self) -> &'static str {
+        match self {
+            Fixture::Switch => DISC_MESH,
+            _ => CAVITY_MESH,
+        }
     }
 
     /// The fixture's document, and the material its Switch throws.
@@ -528,6 +546,9 @@ fn advance(
                 driver.phase = Phase::Install;
                 return None;
             };
+            if let Err(failure) = same_mesh(&active.mesh, driver.fixture.mesh()) {
+                return Some(Err(failure));
+            }
             let temporal = active.canonical_temporal_operator.is_some();
             let expected =
                 driver.material.is_some() || matches!(driver.fixture, Fixture::Rejection);
@@ -547,9 +568,10 @@ fn advance(
                     }
                 };
                 report(&format!(
-                    "e2e {:?}: {} DOFs, step {time_step:.4e}, driven by its source",
+                    "e2e {:?}: {} DOFs, step {time_step:.4e}, driven by its source, mesh {}",
                     driver.fixture,
                     active.canonical_operator.degrees_of_freedom(),
+                    mesh_hashes(&active.mesh),
                 ));
                 state.e2e_steps.limit = Some(stop(0));
                 state.e2e_steps.batch = driver.batches.front().copied().flatten();
@@ -590,11 +612,12 @@ fn advance(
                 Err(error) => return Some(Err(format!("the reference did not start: {error}"))),
             };
             report(&format!(
-                "e2e {:?}: {} DOFs, step {time_step:.4e}, pulse at ({:.3}, {:.3})",
+                "e2e {:?}: {} DOFs, step {time_step:.4e}, pulse at ({:.3}, {:.3}), mesh {}",
                 driver.fixture,
                 active.canonical_operator.degrees_of_freedom(),
                 position.x,
-                position.y
+                position.y,
+                mesh_hashes(&active.mesh)
             ));
             driver.phase = Phase::Pulse {
                 reference: Reference {
@@ -797,14 +820,20 @@ fn advance(
                         reference.active.canonical_operator.degrees_of_freedom(),
                         target.canonical_operator.degrees_of_freedom(),
                     );
+                    if matches!(action, Action::Remesh)
+                        && let Err(failure) = same_mesh(&target.mesh, FINER_CAVITY_MESH)
+                    {
+                        return Some(Err(failure));
+                    }
                     if matches!(action, Action::Remesh) == (from == to) {
                         return Some(Err(format!(
                             "the {action:?} went from {from} nodes to {to}"
                         )));
                     }
                     report(&format!(
-                        "e2e {:?}: handed off at step {step}, {from} nodes to {to}",
-                        driver.fixture
+                        "e2e {:?}: handed off at step {step}, {from} nodes to {to}, mesh {}",
+                        driver.fixture,
+                        mesh_hashes(&target.mesh)
                     ));
                     if request.handoff_outcome() != CanonicalGpuHandoffOutcome::Accepted {
                         return Some(Err(format!(
@@ -1202,4 +1231,50 @@ fn mark(verdict: &str, summary: &str) {
     }
     #[cfg(not(target_arch = "wasm32"))]
     let _ = (verdict, summary);
+}
+
+/// Whether `mesh` is the one recorded, to the bit.
+fn same_mesh(mesh: &funfern_core::TriMesh, recorded: &str) -> Result<(), String> {
+    let built = mesh_hashes(mesh);
+    if built == recorded {
+        Ok(())
+    } else {
+        Err(format!(
+            "the mesh is {built} where {recorded} is recorded: every platform must build \
+             the same mesh to the bit, and a change to the mesher made on purpose records \
+             it again in src/ui/e2e.rs"
+        ))
+    }
+}
+
+/// A mesh as two hashes, `topology/positions`: its triangles' vertices and
+/// regions, and every vertex's coordinates to the bit.
+fn mesh_hashes(mesh: &funfern_core::TriMesh) -> String {
+    let topology = mesh
+        .triangles
+        .iter()
+        .flat_map(|triangle| {
+            triangle
+                .vertices
+                .iter()
+                .map(|vertex| *vertex as u64)
+                .chain([triangle.region.0])
+        })
+        .chain([mesh.vertices.len() as u64]);
+    let positions = mesh
+        .vertices
+        .iter()
+        .flat_map(|vertex| [vertex.point.x.to_bits(), vertex.point.y.to_bits()]);
+    let fnv = |words: &mut dyn Iterator<Item = u64>| {
+        words
+            .flat_map(u64::to_le_bytes)
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    };
+    format!(
+        "{:016x}/{:016x}",
+        fnv(&mut topology.into_iter()),
+        fnv(&mut positions.into_iter())
+    )
 }

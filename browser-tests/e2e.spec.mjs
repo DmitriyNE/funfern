@@ -44,6 +44,9 @@ for (const fixture of fixtures) {
     const verdict = await root.getAttribute("data-funfern-e2e");
     const summary = await root.getAttribute("data-funfern-e2e-summary");
     console.log(`${fixture}: ${verdict}: ${summary}`);
+    for (const line of lines) {
+      console.log(`  ${line}`);
+    }
     expect(fatal, fatal.join("\n\n")).toEqual([]);
     expect(verdict, `${summary}\n${lines.join("\n")}`).toBe("pass");
   });
