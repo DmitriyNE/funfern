@@ -282,6 +282,17 @@ system carries no nodal mass: one preparation serves every stage and the mass
 arrives at the solve. The fixed column is unchanged - a generation whose mass
 cannot move still inverts once and solves in a single pass.
 
+Some tests hold the physics itself to references that owe nothing to the
+solver. A spatially uniform field in a closed box feels no gradient, so every
+node is one oscillator: a sine-Gordon medium's is the pendulum, checked swung
+to 2 radians against its exact period `4K(sin 1)/ω₀` and against RK4
+(`a_sine_gordon_uniform_mode_swings_as_the_pendulum`), and a Kerr medium with a
+Klein-Gordon cutoff its own ODE, against RK4 with the flux inverted by Newton
+from the law's definition (`a_kerr_uniform_mode_follows_its_ode`). Both
+integrators converge at second order: the production step's fourth order is
+the linear bulk's. A pendulum law 0.1% too strong or a Kerr coefficient 1% too
+large fails them.
+
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
 reflecting-box problem. It crosses the driven constitutive row against the

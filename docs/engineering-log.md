@@ -21310,3 +21310,28 @@ which the lost device took eleven minutes to reach. A message injected three
 seconds in fails a fixture in 3.2 s. Chrome passes all seven as before. A lost
 device leaves the app stopped with no word on the page; what it should do then
 is the next step's.
+
+## 2026-10-09 — Uniform nonlinear modes against references the solver owes nothing to
+
+The first of the physical-accuracy fixtures the testing review asked for. Only
+the solver's own recurrences checked a uniform mode before: Klein-Gordon's
+against velocity Verlet's closed form, a linear law, and RK4 met only van der
+Pol's loss sub-map. A spatially uniform field in a closed box feels no
+gradient, so every node is the one oscillator `q̇ = −V′(r)`, `ṙ = P⁻¹(q)`.
+`a_sine_gordon_uniform_mode_swings_as_the_pendulum` swings a sine-Gordon
+medium's to 2 radians, where the pendulum's period is a third past the small
+swing's, and holds it to the exact period `4K(sin 1)/ω₀` (the elliptic integral
+by the arithmetic-geometric mean) and to an RK4 trajectory; at 0.4 of the
+largest step the period is 1.6e-4 off and the trajectory 1e-2 of the swing.
+`a_kerr_uniform_mode_follows_its_ode` starts a Kerr medium (`χ₂ = 0.5`) with a
+Klein-Gordon cutoff where the multiplier is above 2 and holds its integrated
+field to RK4 of `q̇ = −ω₀² r`, `ṙ = u`, `q = u (1 + χ₂u²)`, the flux inverted
+by Newton from the law's definition: 4.9e-4. Under each integrator both halve
+the step twice and converge at second order - the ratios read 4.00 for
+leapfrog. The production step reads 3.6 to 3.9 on the pendulum: its fourth
+order is the linear bulk's, as its documentation says, and a nonlinear law
+leaves it second order. The tests pin that rather than assume more. Rounding
+alone parts the nodes, whose lumped masses differ, by 4e-9 of the swing over
+the pendulum's twelve thousand steps; the tests hold them within 5e-8. A
+sine-Gordon slope 0.1% too strong fails the pendulum at 8.5e-4 against its
+3e-4, a Kerr coefficient 1% too large the Kerr mode at 1.3e-2 against 1e-3.

@@ -11941,6 +11941,260 @@ mod tests {
         }
     }
 
+    /// `K(k)`, the complete elliptic integral of the first kind, by the
+    /// arithmetic-geometric mean: `π / (2 AGM(1, √(1 − k²)))`.
+    fn complete_elliptic_k(k: f64) -> f64 {
+        let (mut a, mut g) = (1.0_f64, (1.0 - k * k).sqrt());
+        while (a - g).abs() > 1.0e-15 * a {
+            (a, g) = (0.5 * (a + g), (a * g).sqrt());
+        }
+        std::f64::consts::PI / (2.0 * a)
+    }
+
+    /// Classic fourth-order Runge-Kutta over `(r, q)` with `ṙ = field(q)` and
+    /// `q̇ = −force(r)`, sampled every `substeps` steps of `h / substeps`:
+    /// the reference a uniform mode is checked against, owing nothing to the
+    /// solver.
+    fn runge_kutta_samples(
+        field: impl Fn(f64) -> f64,
+        force: impl Fn(f64) -> f64,
+        q0: f64,
+        h: f64,
+        substeps: usize,
+        samples: usize,
+    ) -> Vec<f64> {
+        let rate = |(r, q): (f64, f64)| (field(q), -force(r));
+        let dt = h / substeps as f64;
+        let (mut r, mut q) = (0.0, q0);
+        let mut out = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            for _ in 0..substeps {
+                let k1 = rate((r, q));
+                let k2 = rate((r + 0.5 * dt * k1.0, q + 0.5 * dt * k1.1));
+                let k3 = rate((r + 0.5 * dt * k2.0, q + 0.5 * dt * k2.1));
+                let k4 = rate((r + dt * k3.0, q + dt * k3.1));
+                r += dt / 6.0 * (k1.0 + 2.0 * k2.0 + 2.0 * k3.0 + k4.0);
+                q += dt / 6.0 * (k1.1 + 2.0 * k2.1 + 2.0 * k3.1 + k4.1);
+            }
+            out.push(r);
+        }
+        out
+    }
+
+    /// The times `r` crosses zero upward, linearly interpolated: near a
+    /// crossing a restoring force vanishes with `r`, so `r` runs straight.
+    fn upward_crossings(series: &[f64], h: f64) -> Vec<f64> {
+        series
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| pair[0] < 0.0 && pair[1] >= 0.0)
+            .map(|(n, pair)| h * (n as f64 + 1.0 + pair[0] / (pair[0] - pair[1])))
+            .collect()
+    }
+
+    /// One integrator's uniform runs: each step size with the integrated field
+    /// at node 0 after every step, and the largest spread across the nodes.
+    type UniformRuns = (CanonicalIntegrator, Vec<(f64, Vec<f64>)>, f64);
+
+    /// The uniform mode feels no gradient, so every node is the one
+    /// oscillator `q̇ = −V′(r)`, `ṙ = P⁻¹(q)` per unit lumped mass. Run from
+    /// `r = 0` at the field `u0`, at `h0` and twice halved, under each
+    /// integrator: the integrated field at node 0 at every step, the step
+    /// sizes, and the largest spread of `r` across the nodes.
+    fn uniform_runs(
+        operator: &CanonicalTemporalWaveOperator,
+        q0: f64,
+        seconds: f64,
+    ) -> Vec<UniformRuns> {
+        let base = operator.base();
+        let h0 = 0.4 * operator.maximum_time_step();
+        [
+            CanonicalIntegrator::Leapfrog,
+            CanonicalIntegrator::FourthOrder,
+        ]
+        .into_iter()
+        .map(|integrator| {
+            let mut spread = 0.0_f64;
+            let runs = (0..3)
+                .map(|halvings| {
+                    let h = h0 / f64::from(1 << halvings);
+                    let primary = base.primary_mass().iter().map(|mass| mass * q0).collect();
+                    let complementary =
+                        vec![Point2::default(); base.complementary_degrees_of_freedom()];
+                    let mut state =
+                        CanonicalTemporalWaveState::new(operator, h, primary, complementary)
+                            .unwrap()
+                            .with_integrator(integrator);
+                    let series = (0..(seconds / h).ceil() as usize)
+                        .map(|_| {
+                            state.step(operator).unwrap();
+                            let r = state.integrated_field();
+                            spread = r
+                                .iter()
+                                .fold(spread, |m, value| m.max((value - r[0]).abs()));
+                            r[0]
+                        })
+                        .collect();
+                    (h, series)
+                })
+                .collect();
+            (integrator, runs, spread)
+        })
+        .collect()
+    }
+
+    /// A sine-Gordon medium's uniform mode is the pendulum `r̈ = −ω₀² sin r`,
+    /// whose period at amplitude `a` is exactly `4K(sin(a/2))/ω₀`: swung to 2
+    /// radians, where the period is a third past the small swing's, it is checked
+    /// against that and against RK4, neither of which owes anything to the
+    /// solver. Both converge at second order under each integrator - the
+    /// production step's fourth order is the linear bulk's, and a nonlinear
+    /// restoring law takes the second-order place its form leaves it - and
+    /// every node swings alike.
+    #[test]
+    fn a_sine_gordon_uniform_mode_swings_as_the_pendulum() {
+        let omega0 = 3.0;
+        let operator = restoring_operator(sine_gordon(omega0), 0.4);
+        let amplitude = 2.0_f64;
+        let k = (0.5 * amplitude).sin();
+        let u0 = 2.0 * omega0 * k;
+        let period = 4.0 * complete_elliptic_k(k) / omega0;
+        assert!((period * omega0 / std::f64::consts::TAU - 1.329).abs() < 1.0e-3);
+        for (integrator, runs, spread) in uniform_runs(&operator, u0, 8.5 * period) {
+            // Rounding alone parts the nodes, whose lumped masses differ, by
+            // some 4e-9 of the swing over its twelve thousand steps.
+            assert!(
+                spread < 5.0e-8 * amplitude,
+                "{integrator:?}: the nodes parted by {spread:.2e}"
+            );
+            let errors = runs
+                .iter()
+                .map(|(h, series)| {
+                    let crossings = upward_crossings(&[&[0.0], &series[..]].concat(), *h);
+                    let measured = (crossings[crossings.len() - 1] - crossings[0])
+                        / (crossings.len() - 1) as f64;
+                    let reference = runge_kutta_samples(
+                        |q| q,
+                        |r| omega0 * omega0 * r.sin(),
+                        u0,
+                        *h,
+                        64,
+                        series.len(),
+                    );
+                    let trajectory = series
+                        .iter()
+                        .zip(&reference)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0, f64::max)
+                        / amplitude;
+                    ((measured / period - 1.0).abs(), trajectory)
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                errors[0].0 < 3.0e-4 && errors[0].1 < 2.0e-2,
+                "{integrator:?}: period {:.2e}, trajectory {:.2e} at the coarsest step",
+                errors[0].0,
+                errors[0].1
+            );
+            for pair in errors.windows(2) {
+                let (period_order, trajectory_order) =
+                    (pair[0].0 / pair[1].0, pair[0].1 / pair[1].1);
+                assert!(
+                    period_order > 3.4 && trajectory_order > 3.4,
+                    "{integrator:?}: halving the step divides the errors by {period_order:.2} and \
+                     {trajectory_order:.2}, not four: {errors:?}"
+                );
+            }
+        }
+    }
+
+    /// A Kerr medium with a Klein-Gordon cutoff, its uniform mode the
+    /// oscillator `q̇ = −ω₀² r`, `ṙ = u` with `q = u (1 + χ u²)`: the field is
+    /// the flux's inverse, which the reference takes by Newton from the law's
+    /// definition. Started where the multiplier is above 2, its integrated
+    /// field follows RK4's at second order under each integrator, every node
+    /// alike.
+    #[test]
+    fn a_kerr_uniform_mode_follows_its_ode() {
+        let omega0 = 3.0;
+        let chi2 = 0.5;
+        let mut scene = Scene::default();
+        scene.materials[0].restoring = klein_gordon(omega0);
+        scene.materials[0].mass_law.field = crate::FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(chi2),
+            amplitude_bound: None,
+        };
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.4,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let field = |q: f64| {
+            let mut u = q;
+            for _ in 0..60 {
+                u -= (u * (1.0 + chi2 * u * u) - q) / (1.0 + 3.0 * chi2 * u * u);
+            }
+            u
+        };
+        let u0 = 1.5_f64;
+        let q0 = u0 * (1.0 + chi2 * u0 * u0);
+        assert!(1.0 + chi2 * u0 * u0 > 2.0);
+        for (integrator, runs, spread) in uniform_runs(&operator, q0, 6.0) {
+            assert!(
+                spread < 1.0e-10,
+                "{integrator:?}: the nodes parted by {spread:.2e}"
+            );
+            let errors = runs
+                .iter()
+                .map(|(h, series)| {
+                    let reference = runge_kutta_samples(
+                        field,
+                        |r| omega0 * omega0 * r,
+                        q0,
+                        *h,
+                        64,
+                        series.len(),
+                    );
+                    let peak = reference.iter().fold(0.0_f64, |m, r| m.max(r.abs()));
+                    series
+                        .iter()
+                        .zip(&reference)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0, f64::max)
+                        / peak
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                errors[0] < 1.0e-3,
+                "{integrator:?}: {:.2e} from the ODE at the coarsest step",
+                errors[0]
+            );
+            for pair in errors.windows(2) {
+                assert!(
+                    pair[0] / pair[1] > 3.8,
+                    "{integrator:?}: halving the step divides the error by {:.2}, not four: \
+                     {errors:?}",
+                    pair[0] / pair[1]
+                );
+            }
+        }
+    }
+
     /// A spatial mode's frequency moves by exactly the cutoff:
     /// `ω_KG² − ω_linear² = ω₀²`.
     #[test]
