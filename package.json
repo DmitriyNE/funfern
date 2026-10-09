@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "test:browser": "playwright test",
-    "test:shaders": "playwright test browser-tests/shaders.spec.mjs"
+    "test:shaders": "playwright test browser-tests/shaders.spec.mjs",
+    "test:e2e": "FUNFERN_E2E_BUNDLE=1 FUNFERN_TEST_DIST=${FUNFERN_TEST_DIST:-dist-e2e} playwright test browser-tests/e2e.spec.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.55.0"

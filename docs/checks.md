@@ -83,6 +83,18 @@ each its own bits across batchings, in about forty seconds a fixture; the Pages
 deploy waits for the job. Lavapipe flushes subnormals to zero, which is how it
 found the nonlinear inverse's relative convergence tests unreachable near zero.
 
+The same fixtures run in the browser from a bundle built with the feature,
+`TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --dist
+dist-e2e`, which the Pages bundle is not. `npm run test:e2e` serves it
+cross-origin isolated and opens `?e2e=<fixture>` for each fixture the device
+suite names; the driver writes its verdict on the page's root element,
+`data-funfern-e2e` reading `pass` or `fail` beside `data-funfern-e2e-summary`,
+and its lines on the console, and `e2e-deadline=` raises its time limit. In
+Chrome on the M1 Max (`PLAYWRIGHT_CHANNEL=chrome`), whose WebGPU runs on
+Metal, five fixtures read what the native app reads to every printed digit -
+the cavity Q `6.242e-7` - and the refusal lands at step 788 as natively. A
+reference a step short fails there as it does natively.
+
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without
 its file; regenerate them all with

@@ -2,7 +2,10 @@
 //! on this machine's GPU and judged against the f64 reference stepped on the
 //! generation the app accepted. Built with the `e2e` feature and chosen by
 //! `FUNFERN_E2E=<fixture>`; the process exits 0 when the fixture holds, and 1
-//! when it does not or does not finish in time.
+//! when it does not or does not finish in time. In the browser the fixture is
+//! `?e2e=<fixture>`, and the verdict is the page's: `data-funfern-e2e` on its
+//! root element reads `pass` or `fail`, with `data-funfern-e2e-summary` beside
+//! it, and the driver's lines go to the console.
 //!
 //! The driver acts as the user's handlers do - it opens a document, places a
 //! pulse, presses Run and Switch, edits a material - and reads only what the
@@ -42,9 +45,9 @@ pub(super) struct E2eSteps {
     pub(super) batch: Option<u64>,
 }
 
-/// Adds the driver of the fixture `FUNFERN_E2E` names, if it names one.
+/// Adds the driver of the fixture asked for, if one is.
 pub(crate) fn add(app: &mut App) {
-    let Ok(name) = std::env::var("FUNFERN_E2E") else {
+    let Some((name, seconds)) = requested() else {
         return;
     };
     let (fixture, batches) = match name.as_str() {
@@ -58,17 +61,23 @@ pub(crate) fn add(app: &mut App) {
         "remesh" => (Fixture::Remesh, vec![None]),
         "rejection" => (Fixture::Rejection, vec![None]),
         _ => {
-            eprintln!("e2e: no fixture named {name:?}");
+            let failure = format!("no fixture named {name:?}");
+            report(&format!("e2e: {failure}"));
+            mark("fail", &failure);
+            #[cfg(not(target_arch = "wasm32"))]
             std::process::exit(2);
+            #[cfg(target_arch = "wasm32")]
+            return;
         }
     };
+    mark("running", "");
     app.insert_resource(Driver {
         fixture,
         phase: Phase::Open,
         material: None,
         batches: batches.into(),
         hashes: Vec::new(),
-        deadline: Instant::now() + std::time::Duration::from_secs(120),
+        deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(120)),
     })
     .add_systems(EguiPrimaryContextPass, drive.before(frame));
 }
@@ -361,10 +370,10 @@ fn drive(
     let verdict = run.map(|run| {
         let batch = driver.batches.pop_front().flatten();
         let label = batch.map_or(String::new(), |batch| format!(" in batches of {batch}"));
-        println!(
+        report(&format!(
             "e2e {fixture:?}{label}: {}, endpoint hash {:016x}",
             run.summary, run.hash
-        );
+        ));
         driver.hashes.push((batch, run.hash));
         run.summary
     });
@@ -391,11 +400,13 @@ fn drive(
     driver.phase = Phase::Done;
     match verdict {
         Ok(summary) => {
-            println!("e2e {fixture:?}: {summary}");
+            report(&format!("e2e {fixture:?}: {summary}"));
+            mark("pass", &summary);
             exit.write(AppExit::Success);
         }
         Err(failure) => {
-            eprintln!("e2e {fixture:?} failed: {failure}");
+            report(&format!("e2e {fixture:?} failed: {failure}"));
+            mark("fail", &failure);
             exit.write(AppExit::error());
         }
     }
@@ -535,11 +546,11 @@ fn advance(
                         return Some(Err(format!("the reference did not start: {error}")));
                     }
                 };
-                println!(
+                report(&format!(
                     "e2e {:?}: {} DOFs, step {time_step:.4e}, driven by its source",
                     driver.fixture,
                     active.canonical_operator.degrees_of_freedom(),
-                );
+                ));
                 state.e2e_steps.limit = Some(stop(0));
                 state.e2e_steps.batch = driver.batches.front().copied().flatten();
                 driver.phase = Phase::Run {
@@ -578,13 +589,13 @@ fn advance(
                 Ok(reference) => reference,
                 Err(error) => return Some(Err(format!("the reference did not start: {error}"))),
             };
-            println!(
+            report(&format!(
                 "e2e {:?}: {} DOFs, step {time_step:.4e}, pulse at ({:.3}, {:.3})",
                 driver.fixture,
                 active.canonical_operator.degrees_of_freedom(),
                 position.x,
                 position.y
-            );
+            ));
             driver.phase = Phase::Pulse {
                 reference: Reference {
                     active,
@@ -791,10 +802,10 @@ fn advance(
                             "the {action:?} went from {from} nodes to {to}"
                         )));
                     }
-                    println!(
+                    report(&format!(
                         "e2e {:?}: handed off at step {step}, {from} nodes to {to}",
                         driver.fixture
-                    );
+                    ));
                     if request.handoff_outcome() != CanonicalGpuHandoffOutcome::Accepted {
                         return Some(Err(format!(
                             "the edit's generation came by {:?}, not an admitted handoff",
@@ -922,10 +933,10 @@ fn advance(
                             Ok(summary) => summary,
                             Err(failure) => return Some(Err(failure)),
                         };
-                    println!(
+                    report(&format!(
                         "e2e Rejection: refused after step {step} as the reference is, the app \
                          paused; {summary}"
-                    );
+                    ));
                     // Run, as the toolbar's button.
                     state.wave_running = true;
                     driver.phase = Phase::Refused {
@@ -1137,4 +1148,58 @@ fn hash(words: &[u32]) -> u64 {
         .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
         })
+}
+
+/// The fixture asked for and its time limit in seconds, if one is:
+/// `FUNFERN_E2E` and `FUNFERN_E2E_DEADLINE` natively, `?e2e=` and
+/// `e2e-deadline=` in the page's address.
+fn requested() -> Option<(String, Option<u64>)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let name = std::env::var("FUNFERN_E2E").ok()?;
+        let seconds = std::env::var("FUNFERN_E2E_DEADLINE")
+            .ok()
+            .and_then(|seconds| seconds.parse().ok());
+        Some((name, seconds))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let search = web_sys::window()?.location().search().ok()?;
+        let value = |key: &str| {
+            search
+                .trim_start_matches('?')
+                .split('&')
+                .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
+                .map(str::to_owned)
+        };
+        Some((
+            value("e2e")?,
+            value("e2e-deadline").and_then(|s| s.parse().ok()),
+        ))
+    }
+}
+
+/// A line of the driver's account: standard output natively, the console in
+/// the browser, where standard output goes nowhere.
+fn report(line: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    println!("{line}");
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(&line.into());
+}
+
+/// The fixture's state where a browser test reads it: `running`, `pass` or
+/// `fail` on the page's root element, its summary written first. Natively the
+/// exit status says it.
+fn mark(verdict: &str, summary: &str) {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(root) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.document_element())
+    {
+        let _ = root.set_attribute("data-funfern-e2e-summary", summary);
+        let _ = root.set_attribute("data-funfern-e2e", verdict);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (verdict, summary);
 }

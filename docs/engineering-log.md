@@ -21234,3 +21234,24 @@ handoff 1.0e-6, remesh 7.9e-7, the rejection at step 788 - with their own
 bits, the same across the four batchings. Running there is what found the
 inverse's convergence floor of the previous entry. The x86_64 runner itself is
 checked by the job's first run.
+
+## 2026-10-09 — The end-to-end fixtures in the browser
+
+The driver runs in the wasm build as it does natively: built with the `e2e`
+feature into a bundle of its own (`dist-e2e`, from `scripts/trunk` with
+`TRUNK_BUILD_FEATURES=browser-threads,e2e`, which the script now takes from
+its caller), it reads its fixture from `?e2e=` and its time limit from
+`e2e-deadline=`, writes its lines to the console, where standard output goes
+nowhere, and its verdict on the page's root element: `data-funfern-e2e`
+`running`, then `pass` or `fail`, the summary written first beside it.
+`browser-tests/e2e.spec.mjs` (`npm run test:e2e`) serves the bundle
+cross-origin isolated, opens each fixture the device suite names, waits for
+the verdict and fails on a fatal console message; the default browser run
+leaves it out, having no such bundle. In Chrome on the M1 Max all six pass in
+about a minute, and five read what the native app reads to every printed
+digit - Chrome's WebGPU runs on Metal - the cavity Q 6.242e-7, the Switch
+7.417e-7, the handoff 9.879e-7; the refusal lands at step 788 as natively,
+reading 7.2e-7 against the native 7.3e-7. A reference a step short fails the
+cavity in the browser at 1.2e-1, as it does natively. The threaded bundle
+builds in under five minutes with fat LTO. CI and the gate lint the feature for
+the browser target as well, which no other step compiles.

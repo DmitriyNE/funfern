@@ -13,6 +13,9 @@ if (process.platform === "linux") {
 
 export default defineConfig({
   testDir: "browser-tests",
+  // The end-to-end fixtures need a bundle built with the e2e feature, and run
+  // only from `npm run test:e2e`, which serves one.
+  testIgnore: process.env.FUNFERN_E2E_BUNDLE ? [] : ["**/e2e.spec.mjs"],
   fullyParallel: false,
   workers: 1,
   timeout: 60_000,
