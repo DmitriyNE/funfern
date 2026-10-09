@@ -330,7 +330,20 @@ over ten periods and the energy wobbles by a quarter of `(ω dt)²` without
 drifting
 (`a_box_mode_on_the_production_path_keeps_its_frequency_in_space_and_time`).
 A fourth-order correction of `dt²/13` instead of `dt²/12` fails it: the
-fourth-order run's semidiscrete frequency lands 7.6e-5 off leapfrog's.
+fourth-order run's semidiscrete frequency lands 7.6e-5 off leapfrog's. Edits the field
+cannot tell run on the application's own path: a disc of the box's own
+medium drawn into the running box mode and erased three periods later, the
+state carried each time through the maps the runtime prepares for the edit,
+is off the untouched run by 7e-4 at edge 0.16 and 5e-5 at 0.08 right after
+the disc, 9e-4 and 1e-4 three periods after it is erased; a remesh 1.4
+times finer by 1e-3 and 2e-4 at once, 3e-3 and 4e-4 three periods on. A
+curl-free flux, the gradient of `cos(πx/2) cos(πy/2)`, pushes no field -
+sampled, its compatible part is 1e-13 of it by energy, and less that part
+its field stays at 1e-14 over three periods - and carried across that remesh
+keeps its
+energy to 4e-7 and 5e-9, a compatible share of 3e-10 and 5e-12, and gives
+the field 1e-10 of its energy
+(`edits_the_field_cannot_tell_leave_it_as_the_mesh_allows_and_a_static_flux_static`).
 
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth

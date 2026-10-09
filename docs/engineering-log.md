@@ -21514,3 +21514,55 @@ finest mesh, the envelope to 1e-6 and 1e-5, and the wobble to half of
 assumes the step's own relation, takes the wrong coefficient into `ω_h`,
 which lands 7.6e-5 off leapfrog's, while that run's law still reads true.
 Twenty seconds in the suite.
+
+## 2026-10-09 — Edits the field cannot tell, and a static flux across a remesh
+
+The sixth and last of the physical-accuracy fixtures the testing review
+asked for. The end-to-end remesh fixture holds the device to the reference
+across a remesh; nothing held the reference's own carry-over to the physics.
+This one runs the box mode `cos(3π(x+1)/2) cos(3π(y+1)/2)` on the
+application's path and edits the document mid-run as a user would, each
+generation prepared on one `TopologyRuntime` after the last, with the maps
+the runtime builds for the edit and lets go of at the commit, taken from the
+candidate as the end-to-end driver takes them (`prepare_on`), and the state
+carried as the driver carries the reference (`carry_over`): integrated flux
+through the primary map with the component totals kept when the geometry is
+the same, the complementary flux through its map. Every generation steps at
+the smallest step among them, since the disc's curve gives a smaller mesh.
+A disc of the box's own medium drawn in after three periods and erased three
+periods later - edits the field cannot tell - leaves the run off the
+untouched one at twenty-five points by 6.8e-4, 6.8e-4, 8.5e-4 and 8.8e-4 at
+edge 0.16 (after the disc, three periods on, after its erasure, three
+periods on) and by 5.5e-5, 8.2e-5, 7.8e-5 and 1.0e-4 at 0.08: nine to twelve
+times less. A remesh 1.4 times finer leaves it off by 9.7e-4 at once and
+3.0e-3 three periods on at 0.16, 2.0e-4 and 3.7e-4 at 0.08; the control
+there is the coarser mesh's own run, so the three periods compare two
+discretizations of the mode as much as the transfer.
+
+The first static flux tried was the curl of a stream function, and its
+compatible share read 1.00: in this system `CᵀW` is a discrete curl - the
+force gathers the shape functions' curls - and `C` the rotated gradient, so
+the curl of a potential is exactly the dynamic, compatible flux, and what
+the Poisson solve left of it was a 1e-5 remnant of roundoff and
+discretization, whose carried version then read 66% compatible and gave the
+field 30% of its energy: a measurement of noise. The static fluxes are the
+curl-free ones, gradients of a potential; in TM a magnetostatic field. The
+gradient of `cos(πx/2) cos(πy/2)` sampled on the mesh is force-free to a
+compatible share of 4e-14 by energy, its discretization - 2e-7 in amplitude,
+enough to move the field by 1e-9 in three periods - and less that part, the
+same Poisson solve, it is force-free exactly: its field stays at 1e-14 over
+three periods. Carried across the remesh it keeps its
+energy to −3.9e-7 at edge 0.16 and −4.7e-9 at 0.08, stays force-free to a
+compatible share of 3.0e-10 and 5.0e-12, and over three periods more gives
+the field 1.3e-10 and 2.1e-12 of its energy. The fixture holds the drawn and
+erased disc to 2e-3 at 0.16 and a fall of 5 per halving at every reading,
+the remesh to 2e-3 and 5e-3 and a fall of 3, the static flux to 1e-12 in the
+field, its carry to 1e-5 in energy falling ten times with the mesh, 1e-8
+compatible and 1e-8 given to the field. The vector map's `transfer` scaled
+by 1.001 fails the carried energy at 2e-3. Five seconds in the suite.
+
+Fixture 5's measuring code for this one had gone into its commit: written
+into `topology_examples.rs` while that commit's gate ran, after its test
+binaries were built and before its `git add`. The commit was reset and
+rebuilt on the file as tested, through the gate again, before this one.
+Nothing is edited in the tree while a gate runs.

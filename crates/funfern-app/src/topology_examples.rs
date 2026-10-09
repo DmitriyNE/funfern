@@ -5058,13 +5058,28 @@ mod tests {
         document: &TopologyDocument,
         edge: f64,
     ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        prepare_on(&mut TopologyRuntime::default(), document, 1, edge).0
+    }
+
+    /// Prepares `document` as the application does, on `runtime`, where it
+    /// follows whatever that runtime holds: the first generation is fresh,
+    /// a later one is an edit of the active one and comes with the maps
+    /// that carry a state over, which the commit lets go of.
+    fn prepare_on(
+        runtime: &mut TopologyRuntime,
+        document: &TopologyDocument,
+        revision: u64,
+        edge: f64,
+    ) -> (
+        Arc<crate::topology_runtime::PreparedTopology>,
+        Option<Arc<crate::topology_runtime::PreparedCanonicalTransfer>>,
+    ) {
         let editor = TopologyEditor::from_document(document.clone()).unwrap();
-        let mut runtime = TopologyRuntime::default();
         // Capped for the domain's area, as the application meshes it.
         let domain = document.model.accepted.geometry.domain;
         let token = runtime
             .request(
-                editor.revision,
+                revision,
                 &editor.document,
                 editor.compiled_accepted.clone(),
                 MeshingOptions {
@@ -5072,15 +5087,19 @@ mod tests {
                     ..MeshingOptions::default()
                 }
                 .sized_for_area(domain.width() * domain.height()),
-                true,
+                runtime.active().is_none(),
             )
             .unwrap();
         loop {
             if let Some(result) = runtime.advance(1 << 16) {
                 result.unwrap();
-                return runtime.commit_ready(token).unwrap();
+                break;
             }
         }
+        let maps = runtime
+            .ready()
+            .and_then(|candidate| candidate.canonical_transfer.clone());
+        (runtime.commit_ready(token).unwrap(), maps)
     }
 
     /// Every gallery probe compiles on its scene's mesh. A point probe on a
@@ -9300,6 +9319,354 @@ mod tests {
         );
         assert!(errors[0] / errors[2] > 200.0, "{errors:?}");
         assert!(errors[2] < 1.0e-6, "{errors:?}");
+    }
+
+    /// Carries a fixed state from `source` to `target` through `maps`, as the
+    /// application's handoff does on the reference: integrated flux through
+    /// the primary map with its component totals kept when the geometry is
+    /// the same, the complementary flux through its map.
+    fn carry_over(
+        state: &CanonicalWaveState,
+        source: &crate::topology_runtime::PreparedTopology,
+        target: &crate::topology_runtime::PreparedTopology,
+        maps: &crate::topology_runtime::PreparedCanonicalTransfer,
+    ) -> CanonicalWaveState {
+        let runtime = crate::canonical_gpu::CanonicalGpuRuntimeTransfer::from_primary_transfer(
+            &source.canonical_operator,
+            &target.canonical_operator,
+            &source.canonical_forcing,
+            &target.canonical_forcing,
+            &maps.primary,
+            [0; 4],
+        )
+        .unwrap();
+        let runtime = if target.mesh.geometry_revision == source.mesh.geometry_revision {
+            runtime
+        } else {
+            runtime.without_total_correction()
+        };
+        let mut totals = vec![0.0; source.canonical_operator.component_count()];
+        for (value, label) in state
+            .primary_flux()
+            .iter()
+            .zip(source.canonical_operator.component_labels())
+        {
+            totals[*label as usize] += value;
+        }
+        let desired = runtime
+            .components
+            .iter()
+            .map(|component| {
+                (!component.sources.is_empty()).then(|| {
+                    component
+                        .sources
+                        .iter()
+                        .map(|(source, share)| share * totals[*source as usize])
+                        .sum()
+                })
+            })
+            .collect::<Vec<Option<f64>>>();
+        let prescribed = target
+            .canonical_forcing
+            .prescribed()
+            .iter()
+            .map(Option::is_some)
+            .collect::<Vec<_>>();
+        let (primary, _) = maps
+            .primary
+            .transfer(state.primary_flux(), &desired, &prescribed)
+            .unwrap();
+        let (complementary, _) = maps
+            .complementary
+            .transfer(state.complementary_flux())
+            .unwrap();
+        CanonicalWaveState::new(
+            &target.canonical_operator,
+            state.time_step(),
+            primary,
+            complementary,
+        )
+        .unwrap()
+    }
+
+    /// The primary field of `state` at `points` on `prepared`'s mesh.
+    fn field_at(
+        state: &CanonicalWaveState,
+        prepared: &crate::topology_runtime::PreparedTopology,
+        points: &[Point2],
+    ) -> Vec<f64> {
+        let field = state.primary_field(&prepared.canonical_operator).unwrap();
+        points
+            .iter()
+            .map(|point| {
+                let stencil = QuadraticPointStencil::build_topology(
+                    &prepared.mesh,
+                    &prepared.operator,
+                    &prepared.bundle.plan,
+                    prepared.fixed_model(),
+                    *point,
+                )
+                .unwrap();
+                stencil
+                    .nodes
+                    .iter()
+                    .zip(stencil.value_weights)
+                    .map(|(node, weight)| weight * field[*node as usize])
+                    .sum()
+            })
+            .collect()
+    }
+
+    /// The relative RMS distance between two readings.
+    fn relative_distance(a: &[f64], b: &[f64]) -> f64 {
+        let difference: f64 = a.iter().zip(b).map(|(a, b)| (a - b).powi(2)).sum();
+        let scale: f64 = b.iter().map(|b| b * b).sum();
+        (difference / scale).sqrt()
+    }
+
+    /// The reflecting box with a disc of its own medium drawn in it: the
+    /// field cannot tell.
+    fn reflecting_box_with_disc() -> TopologyDocument {
+        let mut builder = Builder::new();
+        builder.scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        let background = builder.scene.regions[0].material;
+        builder.subdomain(
+            circle(Point2::new(0.2, -0.1), 0.35),
+            background,
+            MaterialFrame::world(),
+        );
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        document
+    }
+
+    /// A curl-free flux, the gradient of `cos(πx/2) cos(πy/2)`: it pushes
+    /// no field, so it is static, a stored field that never moves.
+    fn static_flux(point: Point2) -> Point2 {
+        let half = 0.5 * std::f64::consts::PI;
+        Point2::new(
+            -half * (half * point.x).sin() * (half * point.y).cos(),
+            -half * (half * point.x).cos() * (half * point.y).sin(),
+        )
+    }
+
+    /// Edits the field cannot tell, on the application's own path. The box
+    /// mode `cos(3π(x+1)/2) cos(3π(y+1)/2)` runs three periods; a disc of the
+    /// box's own medium is then drawn in, the state carried onto the new
+    /// mesh through the maps the runtime prepares for the edit, run three
+    /// periods more, and the disc erased the same way. Against the untouched
+    /// run at twenty-five points the edited one is off by 7e-4 right after the
+    /// disc is drawn and 9e-4 after it is erased and three more periods, at
+    /// edge 0.16; at 0.08 by 5e-5 and 1e-4, nine to twelve times less. A
+    /// remesh 1.4 times finer mid-run is off by 1e-3 at once and 3e-3 three
+    /// periods on at edge 0.16, 2e-4 and 4e-4 at 0.08: the carried field's
+    /// error falls with the mesh, as a transfer's must. And a flux that
+    /// pushes no field - the gradient of `cos(πx/2) cos(πy/2)`, curl-free,
+    /// which in TM is a magnetostatic field - is static: sampled on the mesh
+    /// its compatible part is 1e-13 of it by energy, and less that part its
+    /// field stays at 1e-14 over three periods; carried across that remesh it
+    /// keeps its
+    /// energy to 4e-7 and 5e-9, stays force-free to a compatible share of
+    /// 3e-10 and 5e-12, and gives the field 1e-10 of its energy in three
+    /// periods more.
+    #[test]
+    fn edits_the_field_cannot_tell_leave_it_as_the_mesh_allows_and_a_static_flux_static() {
+        let k = 1.5 * std::f64::consts::PI;
+        let period = std::f64::consts::TAU / (k * 2.0f64.sqrt());
+        let shape = |operator: &CanonicalWaveOperator| {
+            operator
+                .node_points()
+                .iter()
+                .map(|point| (k * (point.x + 1.0)).cos() * (k * (point.y + 1.0)).cos())
+                .collect::<Vec<_>>()
+        };
+        let points = (0..5)
+            .flat_map(|i| {
+                (0..5)
+                    .map(move |j| Point2::new(-0.8 + 0.4 * f64::from(i), -0.8 + 0.4 * f64::from(j)))
+            })
+            .collect::<Vec<_>>();
+        let mut plain = Builder::new();
+        plain.scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        let mut plain = plain.document();
+        plain.model.source.enabled = false;
+        let with_disc = reflecting_box_with_disc();
+        // Each run against the untouched one, right after the edit and
+        // `stage` steps on, for every stage of the sequence of edits.
+        let distances = |edits: &[(&TopologyDocument, f64)], edge: f64| -> Vec<f64> {
+            let mut runtime = TopologyRuntime::default();
+            let (first, _) = prepare_on(&mut runtime, &plain, 1, edge);
+            let mut generations = vec![(first.clone(), None)];
+            for (revision, (document, scale)) in edits.iter().enumerate() {
+                let (prepared, maps) =
+                    prepare_on(&mut runtime, document, revision as u64 + 2, edge * scale);
+                generations.push((prepared, Some(maps.expect("maps for the edit"))));
+            }
+            // Every generation takes the smallest step among them.
+            let dt = generations
+                .iter()
+                .map(|(prepared, _)| prepared.recommended_time_step())
+                .fold(f64::INFINITY, f64::min);
+            let stage = (3.0 * period / dt).ceil() as usize;
+            let operator = &first.canonical_operator;
+            let mut control = CanonicalWaveState::from_primary_and_potential(
+                operator,
+                dt,
+                &shape(operator),
+                &vec![0.0; operator.degrees_of_freedom()],
+            )
+            .unwrap();
+            let mut edited = control.clone();
+            for _ in 0..stage {
+                control.step(operator).unwrap();
+                edited.step(operator).unwrap();
+            }
+            let mut distances = Vec::new();
+            for pair in generations.windows(2) {
+                let (source, _) = &pair[0];
+                let (target, maps) = &pair[1];
+                edited = carry_over(&edited, source, target, maps.as_ref().unwrap());
+                distances.push(relative_distance(
+                    &field_at(&edited, target, &points),
+                    &field_at(&control, &first, &points),
+                ));
+                for _ in 0..stage {
+                    control.step(operator).unwrap();
+                    edited.step(&target.canonical_operator).unwrap();
+                }
+                distances.push(relative_distance(
+                    &field_at(&edited, target, &points),
+                    &field_at(&control, &first, &points),
+                ));
+            }
+            distances
+        };
+        let drawn_and_erased = [0.16, 0.08].map(|edge| {
+            let distances = distances(&[(&with_disc, 1.0), (&plain, 1.0)], edge);
+            eprintln!(
+                "edge {edge}: disc drawn {:.2e}, run {:.2e}, erased {:.2e}, run {:.2e}",
+                distances[0], distances[1], distances[2], distances[3]
+            );
+            distances
+        });
+        for distance in &drawn_and_erased[0] {
+            assert!(*distance < 2.0e-3, "{drawn_and_erased:?}");
+        }
+        for (coarse, fine) in drawn_and_erased[0].iter().zip(&drawn_and_erased[1]) {
+            assert!(coarse / fine > 5.0, "{drawn_and_erased:?}");
+        }
+        let remeshed = [0.16, 0.08].map(|edge| {
+            let distances = distances(&[(&plain, 1.0 / 1.4)], edge);
+            eprintln!(
+                "edge {edge}: remeshed {:.2e}, run {:.2e}",
+                distances[0], distances[1]
+            );
+            distances
+        });
+        assert!(
+            remeshed[0][0] < 2.0e-3 && remeshed[0][1] < 5.0e-3,
+            "{remeshed:?}"
+        );
+        for (coarse, fine) in remeshed[0].iter().zip(&remeshed[1]) {
+            assert!(coarse / fine > 3.0, "{remeshed:?}");
+        }
+
+        // The static flux across that remesh.
+        let mut carried_energy_changes = Vec::new();
+        for edge in [0.16, 0.08] {
+            let mut runtime = TopologyRuntime::default();
+            let (coarse, _) = prepare_on(&mut runtime, &plain, 1, edge);
+            let (fine, maps) = prepare_on(&mut runtime, &plain, 2, edge / 1.4);
+            let maps = maps.unwrap();
+            let dt = coarse
+                .recommended_time_step()
+                .min(fine.recommended_time_step());
+            let stage = (3.0 * period / dt).ceil() as usize;
+            let operator = &coarse.canonical_operator;
+            let sampled = operator
+                .constitutive_samples()
+                .iter()
+                .map(|sample| static_flux(sample.point))
+                .collect::<Vec<_>>();
+            // Sampled, the gradient is force-free to its discretization; less
+            // its compatible part it is force-free exactly.
+            assert!(compatible_share(operator, dt, &sampled) < 1.0e-10);
+            let compatible = compatible_part(operator, dt, &sampled);
+            let flux = sampled
+                .iter()
+                .zip(&compatible)
+                .map(|(sampled, compatible)| *sampled - *compatible)
+                .collect::<Vec<_>>();
+            let mut state = CanonicalWaveState::new(
+                operator,
+                dt,
+                vec![0.0; operator.degrees_of_freedom()],
+                flux,
+            )
+            .unwrap();
+            let energy = state.energy(operator).unwrap();
+            for _ in 0..stage {
+                state.step(operator).unwrap();
+            }
+            let moved = state
+                .primary_flux()
+                .iter()
+                .fold(0.0f64, |m, q| m.max(q.abs()));
+            assert!(moved < 1.0e-12, "{moved}");
+            let mut carried = carry_over(&state, &coarse, &fine, &maps);
+            let fine_operator = &fine.canonical_operator;
+            let carried_energy = carried.energy(fine_operator).unwrap();
+            let share = compatible_share(fine_operator, dt, carried.complementary_flux());
+            for _ in 0..stage {
+                carried.step(fine_operator).unwrap();
+            }
+            let pushed = carried
+                .primary_flux()
+                .iter()
+                .zip(carried.primary_field(fine_operator).unwrap())
+                .map(|(q, u)| 0.5 * q * u)
+                .sum::<f64>()
+                / carried_energy;
+            eprintln!(
+                "edge {edge}: static flux of energy {energy:.4} carried to {:.2e} of it, compatible share {share:.1e}, {pushed:.1e} of it in the field after {stage} steps",
+                carried_energy / energy - 1.0
+            );
+            assert!((carried_energy / energy - 1.0).abs() < 1.0e-5);
+            assert!(share < 1.0e-8, "{share}");
+            assert!(pushed < 1.0e-8, "{pushed}");
+            carried_energy_changes.push((carried_energy / energy - 1.0).abs());
+        }
+        assert!(carried_energy_changes[0] > 10.0 * carried_energy_changes[1]);
+    }
+
+    /// The compatible part of a flux, the one that pushes the field: the
+    /// flux `ηCψ` of the potential the Poisson solve finds for its force.
+    fn compatible_part(operator: &CanonicalWaveOperator, dt: f64, flux: &[Point2]) -> Vec<Point2> {
+        let force = operator.force(flux).unwrap();
+        let velocity = force
+            .iter()
+            .zip(operator.primary_mass())
+            .map(|(force, mass)| -force / mass)
+            .collect::<Vec<_>>();
+        let zeros = vec![0.0; operator.degrees_of_freedom()];
+        CanonicalWaveState::from_primary_velocity(operator, dt, &zeros, &velocity)
+            .unwrap()
+            .complementary_flux()
+            .to_vec()
+    }
+
+    /// How much of a flux is compatible, by energy.
+    fn compatible_share(operator: &CanonicalWaveOperator, dt: f64, flux: &[Point2]) -> f64 {
+        let zeros = vec![0.0; operator.degrees_of_freedom()];
+        let energy = |flux: Vec<Point2>| {
+            CanonicalWaveState::new(operator, dt, zeros.clone(), flux)
+                .unwrap()
+                .energy(operator)
+                .unwrap()
+        };
+        energy(compatible_part(operator, dt, flux)) / energy(flux.to_vec())
     }
 
     #[test]
