@@ -65,6 +65,7 @@ RUNS=(
   # The app itself, driven through its own handlers (src/ui/e2e.rs).
   'FUNFERN_E2E=cavity funfern-app'
   'FUNFERN_E2E=cavity-batches funfern-app'
+  'FUNFERN_E2E=switch funfern-app'
 )
 
 pattern=${1:-}

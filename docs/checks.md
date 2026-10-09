@@ -45,7 +45,15 @@ accepted state at the endpoint to be the same bits each time, which it is: the
 device keeps its clock and control on the GPU, takes no host write while
 stepping and reduces in fixed-order trees. The 11,121 nodes leave a partial
 workgroup at 128, 64 and 16. One flipped ulp in one run, which no tolerance on
-Q and b sees, fails it.
+Q and b sees, fails it. A fixture holds the run at the steps where it acts, so
+an action lands at a step both sides know and the reference takes it there.
+`switch` adds a disc of the switchable medium to the cavity and presses Switch's
+hotkey at step 128 of 256, once the pulse's wave has reached the disc; the
+reference throws the Switch the app records sending, with the material's ramp,
+at the same step. It reads Q `7.4e-7` and b `9.4e-7`, and the run without the
+Switch stands `8.8e-2` off, which the fixture requires to be a hundred
+tolerances or more, so a Switch the device ignored cannot pass. A reference
+that omits the Switch, throws it the other way, or throws it a step late fails.
 
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without

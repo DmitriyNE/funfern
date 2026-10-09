@@ -5,12 +5,14 @@
 //! when it does not or does not finish in time.
 //!
 //! The driver acts as the user's handlers do - it opens a document, places a
-//! pulse, presses Run - and reads only what the device accepted: its
-//! accepted-step counter, the serial of the last event it processed, and a
-//! full snapshot stamped with the step it holds. What it adds to the app is
-//! where a run stops and, for a fixture that asks, how many steps a running
-//! frame asks for ([`E2eSteps`]): the app asks by the wall clock, and a
-//! comparison needs an exact endpoint.
+//! pulse, presses Run and Switch - and reads only what the device accepted:
+//! its accepted-step counter, the serial of the last event it processed, and
+//! a full snapshot stamped with the step it holds. A fixture holds the run at
+//! the steps where it acts, so each action lands at a step both sides know,
+//! and the reference takes it there. What the driver adds to the app is where
+//! a run stops and, for a fixture that asks, how many steps a running frame
+//! asks for ([`E2eSteps`]): the app asks by the wall clock, and a comparison
+//! needs an exact endpoint.
 
 #[path = "../../examples/support/check.rs"]
 mod check;
@@ -19,8 +21,10 @@ use super::runtime::pulse_increment;
 use super::*;
 use bevy_egui::EguiPrimaryContextPass;
 use check::{within, worse};
-use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
-use funfern_core::{CanonicalWaveState, OuterBoundaryCondition, OuterBoundaryConditions};
+use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyDocument, TopologyEditor};
+use funfern_core::{
+    CanonicalTemporalWaveState, CanonicalWaveState, OuterBoundaryCondition, OuterBoundaryConditions,
+};
 use std::collections::VecDeque;
 
 /// Where an end-to-end fixture holds the run: the steps a running frame asks
@@ -43,6 +47,7 @@ pub(crate) fn add(app: &mut App) {
             Fixture::CavityBatches,
             BATCHES.iter().copied().map(Some).collect(),
         ),
+        "switch" => (Fixture::Switch, vec![None]),
         _ => {
             eprintln!("e2e: no fixture named {name:?}");
             std::process::exit(2);
@@ -51,6 +56,7 @@ pub(crate) fn add(app: &mut App) {
     app.insert_resource(Driver {
         fixture,
         phase: Phase::Open,
+        material: None,
         batches: batches.into(),
         hashes: Vec::new(),
         deadline: Instant::now() + std::time::Duration::from_secs(120),
@@ -61,7 +67,7 @@ pub(crate) fn add(app: &mut App) {
 #[derive(Clone, Copy, Debug)]
 enum Fixture {
     /// A closed reflecting box of a lossless linear medium, struck by one
-    /// pulse at step 0 and run for [`CAVITY_STEPS`].
+    /// pulse at step 0 and run for 256 steps.
     Cavity,
     /// The cavity once for each of [`BATCHES`], the same steps asked for in
     /// batches of that many: the accepted state at the endpoint must be the
@@ -70,23 +76,55 @@ enum Fixture {
     /// workgroup trees, so how the steps were grouped into submissions has no
     /// arithmetic to change.
     CavityBatches,
+    /// The cavity with a disc of a switchable medium, its Switch pressed at
+    /// step 128 of 256, once the pulse's wave has reached it.
+    Switch,
 }
 
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
 /// time, a number that divides nothing, half the run, and the whole run.
 const BATCHES: [u64; 4] = [1, 7, 128, 256];
 
-/// Steps the cavity runs after its pulse.
-const CAVITY_STEPS: u64 = 256;
+/// What a fixture does at a step it holds the run at.
+#[derive(Clone, Copy, Debug)]
+enum Action {
+    /// Switch's hotkey, which throws the scene's only Switch.
+    Switch,
+}
 
-/// The relative L2 error Q and b may reach, as the device examples allow
-/// for f32 stepping over a few hundred steps.
-const CAVITY_TOLERANCE: f64 = 3.0e-5;
+impl Fixture {
+    /// The step each action is taken at, in order, and the endpoint.
+    fn script(self) -> (&'static [(u64, Action)], u64) {
+        match self {
+            Fixture::Cavity | Fixture::CavityBatches => (&[], 256),
+            Fixture::Switch => (&[(128, Action::Switch)], 256),
+        }
+    }
+
+    /// The relative L2 error Q, b and r may reach: what the device examples
+    /// allow for f32 stepping over a few hundred steps.
+    fn tolerance(self) -> f64 {
+        3.0e-5
+    }
+
+    /// The fixture's document, and the material its Switch throws.
+    fn document(self) -> (TopologyDocument, Option<MaterialId>) {
+        match self {
+            Fixture::Cavity | Fixture::CavityBatches => (cavity_document(), None),
+            Fixture::Switch => {
+                let (document, material) = switch_document();
+                (document, Some(material))
+            }
+        }
+    }
+}
 
 #[derive(Resource)]
 struct Driver {
     fixture: Fixture,
     phase: Phase,
+    /// The material the fixture's Switch throws.
+    material: Option<MaterialId>,
     /// The batch of each run still to come, the current one first; none, the
     /// frame's own pacing.
     batches: VecDeque<Option<u64>>,
@@ -112,9 +150,16 @@ enum Phase {
         reference: Reference,
         processed: u32,
     },
-    /// The run steps to its endpoint.
+    /// The run steps to the `next` action's step, or to the endpoint.
     Run {
         reference: Reference,
+        next: usize,
+    },
+    /// The `next` action waits for the device to take it.
+    Act {
+        reference: Reference,
+        next: usize,
+        processed: u32,
     },
     /// A full snapshot of the endpoint is asked for.
     Snapshot {
@@ -124,10 +169,112 @@ enum Phase {
     Done,
 }
 
-/// The f64 reference, on the generation the app accepted.
+impl Phase {
+    fn name(&self) -> &'static str {
+        match self {
+            Phase::Open => "opening the document",
+            Phase::Install => "installing its generation",
+            Phase::Pulse { .. } => "waiting for the device to take the pulse",
+            Phase::Run { .. } => "running to the next stop",
+            Phase::Act { .. } => "waiting for the device to take the action",
+            Phase::Snapshot { .. } => "waiting for the endpoint's snapshot",
+            Phase::Done => "done",
+        }
+    }
+}
+
+/// The f64 reference, on the generation the app accepted, and the same run
+/// without the fixture's actions.
 struct Reference {
     active: Arc<PreparedTopology>,
-    state: CanonicalWaveState,
+    state: State,
+    /// The device must stand far from it: an action that changed nothing
+    /// would prove nothing. None until the first action.
+    control: Option<State>,
+    steps: u64,
+}
+
+#[derive(Clone)]
+enum State {
+    Fixed(CanonicalWaveState),
+    Temporal(CanonicalTemporalWaveState),
+}
+
+impl State {
+    fn zero(active: &PreparedTopology, time_step: f64) -> Result<Self, String> {
+        match &active.canonical_temporal_operator {
+            Some(temporal) => CanonicalTemporalWaveState::zero(temporal, time_step)
+                .map(State::Temporal)
+                .map_err(|error| error.to_string()),
+            None => CanonicalWaveState::zero(&active.canonical_operator, time_step)
+                .map(State::Fixed)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    fn pulse(&mut self, active: &PreparedTopology, increment: &[f64]) -> Result<(), String> {
+        let forcing = &active.canonical_forcing;
+        match (self, &active.canonical_temporal_operator) {
+            (State::Fixed(state), _) => state
+                .apply_primary_pulse(&active.canonical_operator, forcing, increment)
+                .map(|_| ()),
+            (State::Temporal(state), Some(temporal)) => {
+                state.apply_primary_pulse(temporal, forcing, increment)
+            }
+            (State::Temporal(_), None) => unreachable!("a temporal state on a fixed generation"),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    fn step(&mut self, active: &PreparedTopology) -> Result<(), String> {
+        let forcing = &active.canonical_forcing;
+        match (self, &active.canonical_temporal_operator) {
+            (State::Fixed(state), _) => state
+                .step_with_forcing(&active.canonical_operator, forcing)
+                .map(|_| ()),
+            (State::Temporal(state), Some(temporal)) => {
+                state.step_with_forcing(temporal, forcing).map(|_| ())
+            }
+            (State::Temporal(_), None) => unreachable!("a temporal state on a fixed generation"),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    fn primary(&self) -> &[f64] {
+        match self {
+            State::Fixed(state) => state.primary_flux(),
+            State::Temporal(state) => state.primary_flux(),
+        }
+    }
+
+    fn complementary(&self) -> &[Point2] {
+        match self {
+            State::Fixed(state) => state.complementary_flux(),
+            State::Temporal(state) => state.complementary_flux(),
+        }
+    }
+
+    /// The integrated field `r`, empty where the medium keeps none.
+    fn integrated(&self) -> &[f64] {
+        match self {
+            State::Fixed(_) => &[],
+            State::Temporal(state) => state.integrated_field(),
+        }
+    }
+}
+
+impl Reference {
+    /// Steps the reference, and the control, to the accepted step `step`.
+    fn advance_to(&mut self, step: u64) -> Result<(), String> {
+        while self.steps < step {
+            self.state.step(&self.active)?;
+            if let Some(control) = &mut self.control {
+                control.step(&self.active)?;
+            }
+            self.steps += 1;
+        }
+        Ok(())
+    }
 }
 
 fn drive(
@@ -141,12 +288,7 @@ fn drive(
         return;
     }
     let fixture = driver.fixture;
-    let run = match fixture {
-        Fixture::Cavity | Fixture::CavityBatches => {
-            cavity(&mut driver, &mut state, &mut request, &display)
-        }
-    };
-    let run = match run {
+    let run = match advance(&mut driver, &mut state, &mut request, &display) {
         Some(run) => run,
         None if Instant::now() >= driver.deadline => Err(format!(
             "did not finish in time, at {}",
@@ -197,19 +339,6 @@ fn drive(
     }
 }
 
-impl Phase {
-    fn name(&self) -> &'static str {
-        match self {
-            Phase::Open => "opening the document",
-            Phase::Install => "installing its generation",
-            Phase::Pulse { .. } => "waiting for the device to take the pulse",
-            Phase::Run { .. } => "running to the endpoint",
-            Phase::Snapshot { .. } => "waiting for the endpoint's snapshot",
-            Phase::Done => "done",
-        }
-    }
-}
-
 /// The unit square with reflecting walls, the default medium alone, no
 /// source, no grid filter, adaptation off: nothing but the pulse puts energy
 /// in, and nothing takes it out.
@@ -225,13 +354,46 @@ fn cavity_document() -> TopologyDocument {
     document
 }
 
-/// Advances the cavity a phase; answers its verdict once it has one.
-fn cavity(
+/// The cavity with a disc of the switchable medium preset on its mass row,
+/// near enough the pulse for its wave to reach the disc by the Switch.
+fn switch_document() -> (TopologyDocument, MaterialId) {
+    let mut editor = TopologyEditor::from_document(cavity_document()).expect("the cavity opens");
+    let material = editor.add_material().expect("a material to switch");
+    let medium = editor
+        .document
+        .model
+        .draft
+        .material(material)
+        .expect("the material added")
+        .clone();
+    let preset = law_presets()
+        .iter()
+        .find(|preset| preset.name == "Switchable medium" && preset.row == LawPresetRow::Mass)
+        .expect("the switchable medium preset");
+    editor
+        .update_material(apply_law_preset(preset, &medium).expect("the preset applies"))
+        .expect("the switchable medium");
+    editor
+        .create_closed_curve(
+            PeriodicCubicSpline::rounded(Point2::new(0.15, -0.1), 0.3),
+            ClosedCurvePurpose::Subdomain { material },
+        )
+        .expect("the disc");
+    let mut document = editor.document;
+    document.model.accepted = document.model.draft.clone();
+    (document, material)
+}
+
+/// Advances the fixture a phase; answers a run's verdict once it has one.
+fn advance(
     driver: &mut Driver,
     state: &mut Playground,
     request: &mut CanonicalGpuRequest,
     display: &CanonicalGpuDisplay,
 ) -> Option<Result<Run, String>> {
+    let (actions, endpoint) = driver.fixture.script();
+    // The step the run holds at before the `next` action, or the endpoint.
+    let stop = |next: usize| actions.get(next).map_or(endpoint, |(step, _)| *step);
     match std::mem::replace(&mut driver.phase, Phase::Done) {
         Phase::Open => {
             if !state.startup_done {
@@ -242,7 +404,9 @@ fn cavity(
             state.e2e_steps.limit = Some(0);
             state.e2e_steps.batch = None;
             state.wave_running = true;
-            if let Err(error) = state.set_document(cavity_document(), false, true) {
+            let (document, material) = driver.fixture.document();
+            driver.material = material;
+            if let Err(error) = state.set_document(document, false, true) {
                 return Some(Err(format!("the document did not open: {error}")));
             }
             driver.phase = Phase::Install;
@@ -262,8 +426,12 @@ fn cavity(
                 driver.phase = Phase::Install;
                 return None;
             };
-            if active.canonical_temporal_operator.is_some() {
-                return Some(Err("the cavity prepared a time-varying generation".into()));
+            let temporal = active.canonical_temporal_operator.is_some();
+            if temporal != driver.material.is_some() {
+                return Some(Err(format!(
+                    "the document prepared a {} generation",
+                    if temporal { "time-varying" } else { "fixed" }
+                )));
             }
             let domain = state.editor.document.model.accepted.geometry.domain;
             let point = Point2::new(
@@ -275,29 +443,26 @@ fn cavity(
                 return Some(Err(format!("the pulse was not queued: {}", state.message)));
             };
             let time_step = state.coordinator.uploaded_time_step;
-            let increment = match pulse_increment(
+            let reference = pulse_increment(
                 &active,
                 position,
                 region,
                 f64::from(state.pulse_amplitude),
                 f64::from(state.pulse_width),
-            ) {
-                Ok(increment) => increment,
-                Err(error) => return Some(Err(format!("the pulse has no profile: {error}"))),
-            };
-            let operator = &active.canonical_operator;
-            let mut reference = match CanonicalWaveState::zero(operator, time_step) {
+            )
+            .and_then(|increment| {
+                let mut reference = State::zero(&active, time_step)?;
+                reference.pulse(&active, &increment)?;
+                Ok(reference)
+            });
+            let reference = match reference {
                 Ok(reference) => reference,
                 Err(error) => return Some(Err(format!("the reference did not start: {error}"))),
             };
-            if let Err(error) =
-                reference.apply_primary_pulse(operator, &active.canonical_forcing, &increment)
-            {
-                return Some(Err(format!("the reference took no pulse: {error}")));
-            }
             println!(
-                "e2e cavity: {} DOFs, step {time_step:.4e}, pulse at ({:.3}, {:.3})",
-                operator.degrees_of_freedom(),
+                "e2e {:?}: {} DOFs, step {time_step:.4e}, pulse at ({:.3}, {:.3})",
+                driver.fixture,
+                active.canonical_operator.degrees_of_freedom(),
                 position.x,
                 position.y
             );
@@ -305,13 +470,15 @@ fn cavity(
                 reference: Reference {
                     active,
                     state: reference,
+                    control: None,
+                    steps: 0,
                 },
                 processed: request.stats().processed_event(),
             };
             None
         }
         Phase::Pulse {
-            mut reference,
+            reference,
             processed,
         } => {
             if request.stats().processed_event() == processed
@@ -323,46 +490,110 @@ fn cavity(
                 };
                 return None;
             }
-            if request.stats().event_rejection() != 0 {
-                return Some(Err(format!(
-                    "the device refused the pulse (failure code {})",
-                    request.stats().event_rejection()
-                )));
+            if let Err(failure) = taken(request, "the pulse", 0) {
+                return Some(Err(failure));
             }
-            if request.stats().completed_steps() != 0 {
-                return Some(Err(format!(
-                    "the pulse landed at step {}, not 0",
-                    request.stats().completed_steps()
-                )));
-            }
-            let operator = &reference.active.canonical_operator;
-            for _ in 0..CAVITY_STEPS {
-                if let Err(error) = reference
-                    .state
-                    .step_with_forcing(operator, &reference.active.canonical_forcing)
-                {
-                    return Some(Err(format!("the reference did not step: {error}")));
-                }
-            }
-            state.e2e_steps.limit = Some(CAVITY_STEPS);
+            state.e2e_steps.limit = Some(stop(0));
             state.e2e_steps.batch = driver.batches.front().copied().flatten();
-            driver.phase = Phase::Run { reference };
+            driver.phase = Phase::Run { reference, next: 0 };
             None
         }
-        Phase::Run { reference } => {
+        Phase::Run {
+            mut reference,
+            next,
+        } => {
+            let target = stop(next);
             let completed = request.stats().completed_steps();
-            if completed < CAVITY_STEPS {
-                driver.phase = Phase::Run { reference };
+            if completed < target {
+                driver.phase = Phase::Run { reference, next };
                 return None;
             }
-            if completed > CAVITY_STEPS {
+            if completed > target {
                 return Some(Err(format!(
-                    "the run went past its endpoint, to {completed}"
+                    "the run went past its stop at {target}, to {completed}"
                 )));
             }
-            let seen = display.full_readbacks;
-            request.request_full_state_readback();
-            driver.phase = Phase::Snapshot { reference, seen };
+            if let Err(error) = reference.advance_to(target) {
+                return Some(Err(format!("the reference did not step: {error}")));
+            }
+            let Some(&(_, action)) = actions.get(next) else {
+                let seen = display.full_readbacks;
+                request.request_full_state_readback();
+                driver.phase = Phase::Snapshot { reference, seen };
+                return None;
+            };
+            let processed = request.stats().processed_event();
+            match action {
+                Action::Switch => state.request_material_switch(),
+            }
+            driver.phase = Phase::Act {
+                reference,
+                next,
+                processed,
+            };
+            None
+        }
+        Phase::Act {
+            mut reference,
+            next,
+            processed,
+        } => {
+            if request.stats().processed_event() == processed
+                || !state.coordinator.pending_switches.is_empty()
+            {
+                driver.phase = Phase::Act {
+                    reference,
+                    next,
+                    processed,
+                };
+                return None;
+            }
+            let (step, action) = actions[next];
+            if let Err(failure) = taken(request, &format!("the {action:?}"), step) {
+                return Some(Err(failure));
+            }
+            if reference.control.is_none() {
+                reference.control = Some(reference.state.clone());
+            }
+            match action {
+                Action::Switch => {
+                    let Some(material) = driver.material else {
+                        return Some(Err("a Switch with no material to throw".into()));
+                    };
+                    // What the app sent: the direction it records, and the
+                    // material's authored ramp.
+                    let Some(&target) = state.coordinator.switch_targets.get(&material) else {
+                        return Some(Err("the app recorded no Switch it sent".into()));
+                    };
+                    let Some(ramp) = state
+                        .editor
+                        .document
+                        .model
+                        .accepted
+                        .materials
+                        .iter()
+                        .find(|found| found.id == material)
+                        .map(|found| found.switch_ramp)
+                    else {
+                        return Some(Err("the switched material is gone".into()));
+                    };
+                    let State::Temporal(temporal) = &mut reference.state else {
+                        return Some(Err("a Switch on a fixed generation".into()));
+                    };
+                    let time = temporal.time();
+                    if let Err(error) = temporal
+                        .runtime_mut()
+                        .begin_switch(material, target, time, ramp)
+                    {
+                        return Some(Err(format!("the reference did not switch: {error}")));
+                    }
+                }
+            }
+            state.e2e_steps.limit = Some(stop(next + 1));
+            driver.phase = Phase::Run {
+                reference,
+                next: next + 1,
+            };
             None
         }
         Phase::Snapshot { reference, seen } => {
@@ -370,54 +601,106 @@ fn cavity(
             // inside the state it copied, is the endpoint's.
             let arrived = display.full_readbacks > seen
                 && display.generation == request.generation()
-                && display.full_snapshot_completed_steps() == CAVITY_STEPS;
+                && display.full_snapshot_completed_steps() == endpoint;
             if !arrived {
                 request.request_full_state_readback();
                 driver.phase = Phase::Snapshot { reference, seen };
                 return None;
             }
-            Some(compare(&reference, display).map(|summary| Run {
-                summary,
-                hash: hash(&display.accepted_storage_bits()),
-            }))
+            Some(
+                compare(&reference, display, driver.fixture.tolerance(), endpoint).map(|summary| {
+                    Run {
+                        summary,
+                        hash: hash(&display.accepted_storage_bits()),
+                    }
+                }),
+            )
         }
         Phase::Done => None,
     }
 }
 
-/// The endpoint's snapshot against the reference: the relative L2 error of Q
-/// and of b, each within the cavity's tolerance.
-fn compare(reference: &Reference, display: &CanonicalGpuDisplay) -> Result<String, String> {
-    let primary = reference.state.primary_flux();
-    let complementary = reference.state.complementary_flux();
-    if display.primary_flux.len() != primary.len()
-        || display.complementary_flux.len() != complementary.len()
-    {
+/// Whether the device took the event just processed cleanly, at `step`.
+fn taken(request: &CanonicalGpuRequest, what: &str, step: u64) -> Result<(), String> {
+    let rejection = request.stats().event_rejection();
+    if rejection != 0 {
         return Err(format!(
-            "the snapshot holds {} and {} values where the generation has {} and {}",
-            display.primary_flux.len(),
-            display.complementary_flux.len(),
-            primary.len(),
-            complementary.len()
+            "the device refused {what} (failure code {rejection})"
         ));
     }
-    let q = relative_l2(
-        display.primary_flux.iter().map(|value| f64::from(*value)),
-        primary.iter().copied(),
-    );
+    let completed = request.stats().completed_steps();
+    if completed != step {
+        return Err(format!("{what} landed at step {completed}, not {step}"));
+    }
+    Ok(())
+}
+
+/// The endpoint's snapshot against the reference: the relative L2 error of Q,
+/// of b, and of r where the medium keeps one, each within `tolerance`; and,
+/// where the fixture acted, the device far from the run without its actions.
+fn compare(
+    reference: &Reference,
+    display: &CanonicalGpuDisplay,
+    tolerance: f64,
+    endpoint: u64,
+) -> Result<String, String> {
+    let expected = &reference.state;
+    let integrated = display.integrated_field();
+    if display.primary_flux.len() != expected.primary().len()
+        || display.complementary_flux.len() != expected.complementary().len()
+        || integrated.len() != expected.integrated().len()
+    {
+        return Err(format!(
+            "the snapshot holds {}, {} and {} values where the generation has {}, {} and {}",
+            display.primary_flux.len(),
+            display.complementary_flux.len(),
+            integrated.len(),
+            expected.primary().len(),
+            expected.complementary().len(),
+            expected.integrated().len()
+        ));
+    }
+    let primary = |state: &State| {
+        relative_l2(
+            display.primary_flux.iter().map(|value| f64::from(*value)),
+            state.primary().iter().copied(),
+        )
+    };
+    let q = primary(expected);
     let b = relative_l2(
         display
             .complementary_flux
             .iter()
             .flat_map(|value| value.iter().map(|lane| f64::from(*lane))),
-        complementary.iter().flat_map(|value| [value.x, value.y]),
+        expected
+            .complementary()
+            .iter()
+            .flat_map(|value| [value.x, value.y]),
     );
-    let summary = format!("Q {q:.3e}, b {b:.3e} after {CAVITY_STEPS} steps");
-    if within(worse(q, b), CAVITY_TOLERANCE) {
-        Ok(summary)
+    let r = if integrated.is_empty() {
+        0.0
     } else {
-        Err(format!("{summary}, beyond {CAVITY_TOLERANCE:.0e}"))
+        relative_l2(
+            integrated.iter().map(|value| f64::from(*value)),
+            expected.integrated().iter().copied(),
+        )
+    };
+    let mut summary = format!("Q {q:.3e}, b {b:.3e}, r {r:.3e} after {endpoint} steps");
+    if !within(worse(worse(q, b), r), tolerance) {
+        return Err(format!("{summary}, beyond {tolerance:.0e}"));
     }
+    if let Some(control) = &reference.control {
+        // An action the device ignored would leave it where the control is;
+        // a hundred tolerances away, it did not.
+        let apart = primary(control);
+        summary.push_str(&format!(
+            "; the run without its actions stands {apart:.3e} off"
+        ));
+        if !apart.is_finite() || apart <= 100.0 * tolerance {
+            return Err(format!("{summary}, too near to tell the action took"));
+        }
+    }
+    Ok(summary)
 }
 
 /// `‖actual − expected‖ / ‖expected‖`, a NaN on either side carried through.

@@ -21122,3 +21122,21 @@ grouping steps into submissions leaves no arithmetic to change. The cavity's
 ulp of one word in the batch-of-seven run, which leaves Q and b the same to
 every printed digit, fails it. Each run recognizes its own generation by the
 document's revision, since a document opened again holds the same scene.
+
+## 2026-10-09 — A Switch through the app, on the device
+
+The end-to-end driver now runs a fixture's script: the actions it takes and
+the steps it takes them at, the run held at each so the action lands at a step
+both sides know. The reference covers a time-varying generation as well as a
+fixed one, and keeps a control, the same run without the fixture's actions,
+from which the device must end a hundred tolerances away: an action the
+device ignored would leave it there. `switch` puts a disc of the switchable
+medium in the cavity and presses Switch's hotkey at step 128 of 256, after the
+pulse's wave has reached it; the reference throws the Switch the app records
+having sent (`switch_targets`), with the material's ramp, at the same step. Q
+reads 7.4e-7 and b 9.4e-7 against 3e-5, the control 8.8e-2 off. A reference
+that omits the Switch, throws it the other way, or advances a step before
+throwing it fails, the last at 1.1e-2. The preset's ramp is the default 0, an
+instant Switch, whose blend is the target at once whatever its commit time:
+the step it is thrown at is what decides, and that is what the fixture
+pins. The cavity and its batchings read as before, to the bit.
