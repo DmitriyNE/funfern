@@ -1,5 +1,8 @@
 //! Real-device rejection/rollback gate for temporal material live events.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -385,9 +388,9 @@ fn validate(
                 "temporal event rejection rolled back byte-exactly, resumed one old-law step, then committed retry: Q {:.3e}, b {:.3e}, clock {:.3e}",
                 q_error, b_error, clock_error,
             );
-            if q_error > 8.0e-5
-                || b_error > 8.0e-5
-                || clock_error > 2.0e-4 * expected.time_step.max(1.0)
+            if !within(q_error, 8.0e-5)
+                || !within(b_error, 8.0e-5)
+                || !within(clock_error, 2.0e-4 * expected.time_step.max(1.0))
             {
                 eprintln!("temporal event rollback/resumption accuracy gate was exceeded");
                 expected.failed = true;

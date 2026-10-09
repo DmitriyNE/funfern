@@ -22,6 +22,9 @@
 //! keeps it running but drops the phase steps all land far from the oracle, so
 //! it cannot pass by measuring nothing.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -340,7 +343,10 @@ fn validate(
                 if processed != expected.last_observed_serial + 1
                     || request.stats().event_rejection() != 0
                     || clock.accepted_steps != WARMUP_STEPS as u32
-                    || (clock.absolute_seconds - expected.paused_time).abs() > 2.0e-5
+                    || !within(
+                        (clock.absolute_seconds - expected.paused_time).abs(),
+                        2.0e-5,
+                    )
                 {
                     eprintln!("a paused edit changed time, skipped a serial, or was rejected");
                     expected.failed = true;
@@ -413,7 +419,7 @@ fn validate(
                 "three paused edits on a driven medium from epoch origin {EPOCH_ORIGIN}: \
                  Q {q_error:.3e}, b {b_error:.3e}"
             );
-            expected.failed = q_error > TOLERANCE || b_error > TOLERANCE;
+            expected.failed = !within(q_error, TOLERANCE) || !within(b_error, TOLERANCE);
             expected.phase = Phase::Done;
         }
         _ => {}

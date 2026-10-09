@@ -12,30 +12,19 @@ cargo run -p funfern-core --release --example wave_convergence
 cargo run -p funfern-core --release --example wave_boundary_reflection
 cargo run -p funfern-core --release --example temporal_amr_calibration
 cargo run -p funfern-core --release --example canonical_temporal_timing
-cargo run -p funfern-app --release --locked --example canonical_gpu_filter_boundary
-cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_work
-cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_amr
-TEMPORAL_AMR_LOSSY_WALLS=1 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_amr
-cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_forced
-cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing
-cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --fixed
-cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --outgoing
-cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
-DRIVEN_WALLS=outgoing cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
-DRIVEN_LAW=van-der-pol cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
-OSCILLATOR_MEDIUM=kink OSCILLATOR_FILTER=1 cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator
-OSCILLATOR_MEDIUM=van-der-pol OSCILLATOR_COMPOSE=junction OSCILLATOR_SHORT_WAVE=0.3 cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator
-NONLINEAR_FORCED=1 NONLINEAR_SHORT_WAVE=0.3 cargo run -p funfern-app --release --locked --example canonical_gpu_nonlinear
-OSCILLATOR_MEDIUM=van-der-pol OSCILLATOR_FIELD_LAW=kerr OSCILLATOR_COMPOSE=junction OSCILLATOR_SHORT_WAVE=0.3 cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator
-LONG_RUN_SCENE="Self-sustained emitter" LONG_RUN_SHORT_WAVE=0.25 LONG_RUN_STEPS=1000 cargo run -p funfern-app --release --locked --example canonical_gpu_long_run
-OSCILLATOR_HANDOFF=remesh cargo run -p funfern-app --release --locked --example canonical_gpu_oscillator_handoff
-FAILURE_LAW=phi4 cargo run -p funfern-app --release --locked --example canonical_gpu_nonlinear_failure
-cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --oscillator
+scripts/device-suite.sh
 ```
 
-The `funfern-app` examples open a window and read the autosave, so run them with
-`HOME` pointed at a scratch directory. Build with the real `HOME` first, or the
-toolchain is re-fetched into the scratch one.
+`scripts/device-suite.sh` runs every `funfern-app` GPU-versus-reference example,
+in the configurations it lists, on this machine's GPU, and prints a verdict per
+run; given a pattern it runs the matching ones. A run fails on a device fault, a
+timeout, or an error outside its bound, a NaN included: the examples judge their
+errors through `examples/support/check.rs`, since `error > tolerance` is false
+for a NaN and `f64::max` drops one. The examples open a window and read the
+autosave, so the script runs each with `HOME` pointed at a scratch directory,
+after building them with the real `HOME`; run one by hand the same way, or the
+toolchain is re-fetched into the scratch one. Nothing runs them in CI, which has
+no GPU.
 
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without

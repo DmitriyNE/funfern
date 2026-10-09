@@ -13,6 +13,9 @@
 //! speed setting, which `paced_time_step` reaches by making the step the
 //! speed over 120.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -267,7 +270,7 @@ fn finish_when_ready(
     // The deferred sample carries the later time, which is the point. A
     // sample still sitting on the commit is the defect itself, so say so
     // rather than spin until the deadline.
-    if (sample.time - expected.time).abs() > 2.0e-4 {
+    if !within((sample.time - expected.time).abs(), 2.0e-4) {
         eprintln!(
             "the last sample is at {:.6e}, not the deferred {:.6e}: it landed on the filter commit",
             sample.time, expected.time
@@ -285,7 +288,7 @@ fn finish_when_ready(
         expected.collapsed_rate
     );
     expected.finished = true;
-    if field > 2.0e-4 || rate > 2.0e-4 {
+    if !within(field, 2.0e-4) || !within(rate, 2.0e-4) {
         expected.failed = true;
         exit.write(AppExit::error());
     } else {

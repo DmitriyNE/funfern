@@ -22,6 +22,9 @@
 //! so the bound there is looser; a start the rebase lost or a carrier phase
 //! it moved is a wrong train, far outside it.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -426,7 +429,8 @@ fn validate(
                 eprintln!("the long run ended without a clock rebase");
                 expected.failed = true;
             }
-            expected.failed |= q_error > expected.tolerance || b_error > expected.tolerance;
+            expected.failed |=
+                !within(q_error, expected.tolerance) || !within(b_error, expected.tolerance);
             expected.phase = Phase::Done;
         }
         _ => {}

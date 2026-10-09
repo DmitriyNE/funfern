@@ -42,7 +42,10 @@
 //! grows, and 1.5e-5 by 1000 once it has saturated. Not fully accurate; it
 //! is under "Worth checking sometime" in `docs/plan.md`.
 
+#[path = "support/check.rs"]
+mod check;
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
+use check::within;
 use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest,
     CanonicalWaveGpuPlugin,
@@ -315,7 +318,9 @@ fn drive(
     );
     expected.finished = true;
     // The Stage 0 f32 gate, where it is a claim.
-    if steps() <= 1000 && (primary > expected.bound || complementary > expected.bound) {
+    if steps() <= 1000
+        && (!within(primary, expected.bound) || !within(complementary, expected.bound))
+    {
         expected.failed = true;
     }
 }

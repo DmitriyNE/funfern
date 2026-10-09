@@ -13,6 +13,9 @@
 //! medium undriven, both land far from the oracle, so the run cannot pass by
 //! measuring nothing.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -343,9 +346,9 @@ fn finish_when_ready(
         expected.initial_epoch, clock.epoch
     );
     expected.finished = true;
-    expected.failed = q_error > TOLERANCE
-        || b_error > TOLERANCE
-        || clock_error > 2.0e-4 * expected.time_step.max(1.0)
+    expected.failed = !within(q_error, TOLERANCE)
+        || !within(b_error, TOLERANCE)
+        || !within(clock_error, 2.0e-4 * expected.time_step.max(1.0))
         || clock.epoch == expected.initial_epoch;
 }
 

@@ -16,6 +16,9 @@
 //! that the two candidate masses are far enough apart to tell apart first, so
 //! it cannot pass by measuring nothing.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -234,7 +237,7 @@ fn drive(
         expected.started.elapsed().as_secs_f64() * 1_000.0
     );
     expected.finished = true;
-    if primary > TOLERANCE || complementary > TOLERANCE {
+    if !within(primary, TOLERANCE) || !within(complementary, TOLERANCE) {
         expected.failed = true;
     }
 }

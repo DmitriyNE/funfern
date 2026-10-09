@@ -36,6 +36,9 @@
 //! noise with no handoff at all, so it is no new error in the physics, and
 //! `b` is held to 1e-4 there; `Q` and `r` keep the Stage 0 3e-5.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -578,7 +581,7 @@ fn validate(
                         f64::INFINITY
                     };
                     println!("first target frame r against the handed r: {error:.3e}");
-                    if error > 3.0e-5 {
+                    if !within(error, 3.0e-5) {
                         expected.failed = true;
                         expected.phase = Phase::Done;
                         return;
@@ -662,9 +665,9 @@ fn validate(
                  {complementary:.3e}, r {integrated:.3e}",
                 expected.started.elapsed().as_secs_f64() * 1_000.0
             );
-            if primary > 3.0e-5
-                || complementary > expected.complementary_bound
-                || integrated > 3.0e-5
+            if !within(primary, 3.0e-5)
+                || !within(complementary, expected.complementary_bound)
+                || !within(integrated, 3.0e-5)
             {
                 expected.failed = true;
             }

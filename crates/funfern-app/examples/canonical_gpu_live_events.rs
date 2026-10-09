@@ -1,5 +1,8 @@
 //! Paused zero-duration edits on the production canonical GPU core.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -278,7 +281,10 @@ fn validate(
                 if processed != expected.last_observed_serial + 1
                     || request.stats().event_rejection() != 0
                     || clock.accepted_steps != WARMUP_STEPS as u32
-                    || (clock.absolute_seconds - expected.paused_time).abs() > 2.0e-6
+                    || !within(
+                        (clock.absolute_seconds - expected.paused_time).abs(),
+                        2.0e-6,
+                    )
                 {
                     eprintln!("paused event changed time, skipped a serial, or was rejected");
                     expected.failed = true;
@@ -304,7 +310,10 @@ fn validate(
             }
             if display.runtime_serials != [2, 1, 3, 5]
                 || clock.accepted_steps != WARMUP_STEPS as u32
-                || (clock.absolute_seconds - expected.paused_time).abs() > 2.0e-6
+                || !within(
+                    (clock.absolute_seconds - expected.paused_time).abs(),
+                    2.0e-6,
+                )
             {
                 eprintln!("paused events failed runtime ownership or changed time");
                 expected.failed = true;
@@ -343,7 +352,7 @@ fn validate(
                 q_error,
                 b_error,
             );
-            expected.failed = q_error > 3.0e-5 || b_error > 3.0e-5;
+            expected.failed = !within(q_error, 3.0e-5) || !within(b_error, 3.0e-5);
             expected.phase = Phase::Done;
         }
         _ => {}

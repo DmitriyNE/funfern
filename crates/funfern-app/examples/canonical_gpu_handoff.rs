@@ -10,6 +10,9 @@
 //! the gate also checks that a carrier kept running without the step lands
 //! far from the oracle.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -830,10 +833,10 @@ fn validate(
                 auxiliary_error,
                 absolute_error,
             );
-            expected.failed = q_error > 3.0e-5
-                || b_error > 3.0e-5
-                || auxiliary_error > 2.0e-5
-                || absolute_error > 2.0e-5;
+            expected.failed = !within(q_error, 3.0e-5)
+                || !within(b_error, 3.0e-5)
+                || !within(auxiliary_error, 2.0e-5)
+                || !within(absolute_error, 2.0e-5);
             expected.phase = Phase::Done;
         }
         _ => {}

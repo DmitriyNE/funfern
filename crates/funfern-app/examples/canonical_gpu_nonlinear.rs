@@ -29,6 +29,9 @@
 //! viscous stress is applied through the field law's own map, and the primary
 //! loss lane, which carries what it takes, is held to the reference's sum.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -378,7 +381,7 @@ fn drive(
     expected.finished = true;
     // The Stage 0 f32 gate. A stage that read a linear map would miss by the
     // departure printed above, which is tens of percent.
-    if primary > 3.0e-5 || complementary > 3.0e-5 {
+    if !within(primary, 3.0e-5) || !within(complementary, 3.0e-5) {
         expected.failed = true;
     }
     // The device charges the viscosity at the field of the mean flux, the
@@ -391,7 +394,7 @@ fn drive(
             "nonlinear loss lane: {:.6e} against {lost:.6e} ({error:.2e})",
             display.accounting[2]
         );
-        if error > 1.0e-3 {
+        if !within(error, 1.0e-3) {
             expected.failed = true;
         }
     }

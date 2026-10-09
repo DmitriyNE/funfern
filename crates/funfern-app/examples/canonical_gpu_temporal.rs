@@ -4,6 +4,9 @@
 //! atomic commit path, state readback, and clock rebase. It is not an isolated
 //! shader benchmark.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -499,9 +502,9 @@ fn finish_when_ready(
         request.stats().dispatches(),
     );
     expected.finished = true;
-    if q_error > 6.0e-5
-        || b_error > b_tolerance
-        || clock_error > 2.0e-4 * expected.time_step.max(1.0)
+    if !within(q_error, 6.0e-5)
+        || !within(b_error, b_tolerance)
+        || !within(clock_error, 2.0e-4 * expected.time_step.max(1.0))
         || !crossed_rebase
     {
         eprintln!("temporal GPU accuracy or clock-rebase gate was exceeded");

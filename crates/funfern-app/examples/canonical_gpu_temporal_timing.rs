@@ -85,6 +85,9 @@ struct Timing {
     started: Option<Instant>,
     deadline: Instant,
     finished: bool,
+    /// The run timed out or the device failed, which exits with an error: a
+    /// timing taken from a failed run is no timing.
+    failed: bool,
 }
 
 fn main() -> AppExit {
@@ -269,6 +272,7 @@ fn main() -> AppExit {
         started: None,
         deadline: Instant::now() + Duration::from_secs(300),
         finished: false,
+        failed: false,
     })
     .add_systems(Startup, install)
     .add_systems(Update, drive)
@@ -302,11 +306,16 @@ fn drive(
     mut exit: MessageWriter<AppExit>,
 ) {
     if timing.finished {
-        exit.write(AppExit::Success);
+        exit.write(if timing.failed {
+            AppExit::error()
+        } else {
+            AppExit::Success
+        });
         return;
     }
     if Instant::now() >= timing.deadline || request.stats().failure() != 0 {
         eprintln!("gpu timing timed out or failed");
+        timing.failed = true;
         timing.finished = true;
         return;
     }

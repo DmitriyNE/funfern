@@ -10,6 +10,9 @@
 //! The fixture stamps a Switch, evolves past it, then compares the decoded
 //! runtime and the energy breakdown against the f64 oracle.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -304,7 +307,7 @@ fn drive(
         breakdown.temporal_power
     );
     expected.finished = true;
-    if errors.into_iter().any(|error| error > 1.0e-3) {
+    if errors.into_iter().any(|error| !within(error, 1.0e-3)) {
         expected.failed = true;
         exit.write(AppExit::error());
     } else {

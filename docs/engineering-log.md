@@ -3402,6 +3402,13 @@ above:
   each flip of the chain recovery scanned every edge; a walk along the segment
   now finds them, 1,256 ms to 41 ms, and a vertex grid the chain's points,
   41 ms to 6.6 ms; see that day's entries).
+- [ ] `canonical_gpu_handoff --edit` stops on its own guard, "the fixture
+  cannot tell a stepped carrier from one that is not": its edited carriers
+  without their phase steps stand 0.000e0 from the oracle (2026-10-09, the
+  device suite's first run; the guard came with 517a28e, whose gate it was).
+- [ ] `canonical_gpu_live_events` reads Q 1.4e-3 and b 5.0e-4 against its
+  3e-5 after five paused events, the clock unchanged (2026-10-09, the device
+  suite's first run).
 - [ ] The budget's 60 Hz and Low Power Mode measurements (postponed
   2026-10-05; the machine has one panel and the mode is the user's to
   toggle). Quiet host and overlay scene are measured, see the spike doc.
@@ -21017,3 +21024,32 @@ that is a failing check on what ships, and it holds the deploy as a failing
 test does: `needs: [native, web, kani]`. The proofs take about four and a half
 minutes in CI and the tests longer, so the deploy waits no longer for it.
 `docs/checks.md` says so. The workflow itself is checked by CI's next run.
+
+## 2026-10-09 — The device examples fail on a NaN, and run as a suite
+
+The GPU-versus-reference examples judged their runs by `error > tolerance`,
+which is false for a NaN, and kept running worst errors with `f64::max`, which
+drops one; `relative_l2` carried a NaN through, so a device, readback or
+reference that produced one passed. They judge through
+`examples/support/check.rs` now, `within` and `worse`, which fail it, as do
+the time checks that wait for a reading at the expected instant. A NaN put
+into `canonical_gpu_driven_document`'s Q error made it exit 1, where it exited
+0 before. `canonical_gpu_temporal_timing` exited 0 on a timeout or a device
+failure; it exits 1. The browser startup test's fatal pattern caught only a
+validation error among Bevy's render errors; it catches a lost device and any
+error Bevy quits rendering on.
+
+Nothing ran the device examples but a hand at a time, nineteen configurations
+listed in `docs/checks.md` and eleven examples listed nowhere.
+`scripts/device-suite.sh` runs forty-two configurations - every example, the
+documented variants, and the handoff and timing runs whose device rejects and
+rolls back for real - each with a scratch `HOME`, a time limit and its own log,
+and prints a verdict per run; `checks.md` points to it in place of the list.
+The first run took about four minutes on the M1 Max. Forty passed, each
+printing its measurement. Two fail, and fail on the committed code too: they
+had stopped passing without anyone running them. `canonical_gpu_handoff
+--edit` stops on its own guard, "the fixture cannot tell a stepped carrier
+from one that is not", its carriers without their phase steps standing
+0.000e0 from the oracle; the guard came with 517a28e, which it gated. And
+`canonical_gpu_live_events` reads Q 1.4e-3 and b 5.0e-4 after five paused
+events against its 3e-5. Both are in the TODOs; neither is changed here.

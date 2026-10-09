@@ -13,6 +13,9 @@
 //! auxiliary lanes and the accounting, so a change meant to leave the
 //! arithmetic alone can be held to the same bits at the same step count.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -708,11 +711,11 @@ fn finish_when_ready(
         request.stats().dispatches(),
     );
     println!("state checksum: {:016x}", state_hash(&display));
-    if q_error > 3.0e-5
-        || b_error > 3.0e-5
-        || auxiliary_absolute > 2.0e-5
-        || energy_residual > 2.0e-4
-        || overlay_error > 3.0e-5
+    if !within(q_error, 3.0e-5)
+        || !within(b_error, 3.0e-5)
+        || !within(auxiliary_absolute, 2.0e-5)
+        || !within(energy_residual, 2.0e-4)
+        || !within(overlay_error, 3.0e-5)
     {
         eprintln!("canonical GPU accuracy or energy gate was exceeded");
         expected.failed = true;

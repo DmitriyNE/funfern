@@ -17,6 +17,9 @@
 //! primary channel. The oscillator runs also seed and compare the integrated
 //! field `r`.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -337,7 +340,7 @@ fn drive(
         expected.started.elapsed().as_secs_f64() * 1_000.0
     );
     expected.finished = true;
-    if primary > 2.0e-4 || complementary > 2.0e-4 || integrated > 2.0e-4 {
+    if !within(primary, 2.0e-4) || !within(complementary, 2.0e-4) || !within(integrated, 2.0e-4) {
         expected.failed = true;
     }
 }

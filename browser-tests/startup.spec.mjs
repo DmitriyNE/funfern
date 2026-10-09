@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
 
+// Bevy's render error handler logs each of these before it stops rendering:
+// a validation or out-of-memory error, and the device lost.
 const fatalConsolePattern =
-  /Caught rendering error|Quitting the application due to Validation RenderError|panicked at|RuntimeError: unreachable|WebGPU initialization failed/i;
+  /Caught rendering error|Caught DeviceLost error|Quitting the application due to \w+ RenderError|panicked at|RuntimeError: unreachable|WebGPU initialization failed/i;
 const expectPreparationWorker = process.env.FUNFERN_EXPECT_BROWSER_WORKER !== "0";
 
 test("WebGPU app starts, advances, and resizes its render target", async ({ page }) => {

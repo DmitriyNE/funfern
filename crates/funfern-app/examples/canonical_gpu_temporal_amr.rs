@@ -23,6 +23,9 @@
 //! step's contraction of `b` taken out, and the wall residual from the
 //! solver's own flux against the impedance the step freezes.
 
+#[path = "support/check.rs"]
+mod check;
+use check::{within, worse};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -733,7 +736,11 @@ fn drive(
             // check rather than left to a comment. The free one misses by
             // `2e-4`; the conserving one lands at f32 level, and the
             // complementary transfer is exact.
-            if conserving > 1.0e-6 || complementary > 1.0e-6 || free <= conserving {
+            if !within(conserving, 1.0e-6)
+                || !within(complementary, 1.0e-6)
+                || !free.is_finite()
+                || free <= conserving
+            {
                 eprintln!("the device is not performing the conserving primary transfer");
                 expected.failed = true;
                 expected.phase = Phase::Done;
@@ -780,7 +787,7 @@ fn drive(
             let ok = compare("after refinement", &device, &oracle, &expected, true);
             // The transferred state itself, which is what the rate-sensitive
             // terms are actually reporting on.
-            let carried = lanes <= 1.0e-3;
+            let carried = within(lanes, 1.0e-3);
             if !carried {
                 eprintln!("the transfer moved the state by {lanes:.3e}, beyond its measured 2e-4");
             }
@@ -882,7 +889,7 @@ fn read_estimate(
         "  state lanes: Q {:.3e}, previous Q {:.3e}, b {:.3e}, previous b {:.3e}",
         lanes[0], lanes[1], lanes[2], lanes[3]
     );
-    let lanes = lanes.into_iter().fold(0.0_f64, f64::max);
+    let lanes = lanes.into_iter().fold(0.0_f64, worse);
     // The coefficients the two sides are actually using. A mass-row drive puts
     // its whole effect here, and nowhere in the flux terms, so this separates
     // a state disagreement from a coefficient one.
@@ -945,7 +952,7 @@ fn compare(
         .iter()
         .zip(&oracle.element_indicators)
         .map(|(device, oracle)| (device - oracle).abs() / oracle.abs().max(floor))
-        .fold(0.0_f64, f64::max);
+        .fold(0.0_f64, worse);
     let errors = [
         (
             "total energy",
@@ -994,7 +1001,7 @@ fn compare(
         } else {
             1.0e-4
         };
-        !error.is_finite() || error > bound
+        !within(error, bound)
     })
 }
 

@@ -7,6 +7,9 @@
 //! consumer contract, and the line samples against the same contract dotted
 //! with each sample's normal.
 
+#[path = "support/check.rs"]
+mod check;
+use check::{within, worse};
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -496,7 +499,7 @@ fn finish_when_ready(
     else {
         return;
     };
-    if (sample.time - expected.time).abs() > 2.0e-4 {
+    if !within((sample.time - expected.time).abs(), 2.0e-4) {
         return;
     }
     let Some(line) = curves
@@ -507,7 +510,7 @@ fn finish_when_ready(
     else {
         return;
     };
-    if (line.time - expected.line_time).abs() > 2.0e-4
+    if !within((line.time - expected.line_time).abs(), 2.0e-4)
         || line.displacement.len() != expected.line.len()
     {
         return;
@@ -527,7 +530,10 @@ fn finish_when_ready(
             want.normal_flux,
         ];
         for lane in 0..4 {
-            line_errors[lane] = line_errors[lane].max(relative_error(got[lane], reference[lane]));
+            line_errors[lane] = worse(
+                line_errors[lane],
+                relative_error(got[lane], reference[lane]),
+            );
         }
     }
     let mut area_errors = [0.0; 2];
@@ -541,7 +547,7 @@ fn finish_when_ready(
         else {
             return;
         };
-        if (area.time - expected.line_time).abs() > 2.0e-4 {
+        if !within((area.time - expected.line_time).abs(), 2.0e-4) {
             return;
         }
         area_errors = [
@@ -562,15 +568,20 @@ fn finish_when_ready(
         line_errors[3]
     );
     if arrows.samples.len() != expected.arrows.len()
-        || (arrows.absolute_time - expected.line_time).abs() > 2.0e-4
+        || !within((arrows.absolute_time - expected.line_time).abs(), 2.0e-4)
     {
         return;
     }
     let mut arrow_errors = [0.0_f64; 2];
     for (sample, (complementary, flow)) in arrows.samples.iter().zip(&expected.arrows) {
-        arrow_errors[0] =
-            arrow_errors[0].max(relative_error(sample.complementary.norm(), *complementary));
-        arrow_errors[1] = arrow_errors[1].max(relative_error(sample.energy_flow.norm(), *flow));
+        arrow_errors[0] = worse(
+            arrow_errors[0],
+            relative_error(sample.complementary.norm(), *complementary),
+        );
+        arrow_errors[1] = worse(
+            arrow_errors[1],
+            relative_error(sample.energy_flow.norm(), *flow),
+        );
     }
     println!(
         "temporal area consumer over {:.0}% coverage: total energy {:.3e}, complement rms {:.3e}",
@@ -609,7 +620,7 @@ fn finish_when_ready(
         .chain(line_errors)
         .chain(area_errors)
         .chain(arrow_errors)
-        .any(|error| error > 2.0e-4)
+        .any(|error| !within(error, 2.0e-4))
     {
         expected.failed = true;
         exit.write(AppExit::error());

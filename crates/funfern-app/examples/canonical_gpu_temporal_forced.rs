@@ -13,6 +13,9 @@
 //! f64 reference is the oracle; disagreement localizes to whichever stage the
 //! fixture turns on.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -323,7 +326,7 @@ fn drive(
     // f32 against an f64 oracle over 48 steps of a driven, forced, radiating
     // fixture. A stage reading the authored mass instead of the instantaneous
     // one misses by the modulation depth, which is percent-level, not this.
-    if primary > 2.0e-4 || complementary > 2.0e-4 {
+    if !within(primary, 2.0e-4) || !within(complementary, 2.0e-4) {
         expected.failed = true;
     }
 }

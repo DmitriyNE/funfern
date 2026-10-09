@@ -14,6 +14,9 @@
 //! bound, refused with the restoring-domain status. The retry's bit check
 //! covers `r`, which is part of the accepted auxiliary lanes.
 
+#[path = "support/check.rs"]
+mod check;
+use check::{within, worse};
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -279,24 +282,26 @@ fn drive(
                 return;
             }
             let (primary, complementary) = &expected.history[completed as usize - 1];
-            let error = relative_l2(
-                display.primary_flux.iter().map(|value| f64::from(*value)),
-                primary.iter().copied(),
-            )
-            .max(relative_l2(
-                display
-                    .complementary_flux
-                    .iter()
-                    .flat_map(|value| value.iter().map(|lane| f64::from(*lane))),
-                complementary.iter().flat_map(|value| [value.x, value.y]),
-            ));
+            let error = worse(
+                relative_l2(
+                    display.primary_flux.iter().map(|value| f64::from(*value)),
+                    primary.iter().copied(),
+                ),
+                relative_l2(
+                    display
+                        .complementary_flux
+                        .iter()
+                        .flat_map(|value| value.iter().map(|lane| f64::from(*lane))),
+                    complementary.iter().flat_map(|value| [value.x, value.y]),
+                ),
+            );
             println!(
                 "device refused step {} with status {failure} ({}); accepted state against the \
                  oracle's step {completed}: {error:.3e}",
                 completed + 1,
                 funfern_app::canonical_gpu::canonical_failure_description(failure)
             );
-            if error > 3.0e-5 {
+            if !within(error, 3.0e-5) {
                 expected.failed = true;
                 expected.phase = Phase::Done;
                 return;

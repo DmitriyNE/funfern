@@ -37,6 +37,9 @@
 //! reads the node's field through its own map, in two secant passes on both
 //! sides.
 
+#[path = "support/check.rs"]
+mod check;
+use check::within;
 use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
@@ -517,7 +520,11 @@ fn drive(
     // steps. Past that a medium's own sensitivity, and a lane that shrinks
     // while the others grow, make the relative figure a characterization.
     let judged = expected.steps <= 1000;
-    if judged && (primary > 3.0e-5 || complementary > 3.0e-5 || integrated > 3.0e-5) {
+    if judged
+        && (!within(primary, 3.0e-5)
+            || !within(complementary, 3.0e-5)
+            || !within(integrated, 3.0e-5))
+    {
         expected.failed = true;
     }
     // The gain and primary-loss lanes, each against the reference's sum. An
@@ -531,7 +538,7 @@ fn drive(
          against {:.6e} ({loss:.2e})",
         display.active_gain, expected.gained, display.accounting[2], expected.lost
     );
-    if judged && (gain > 1.0e-3 || loss > 1.0e-3) {
+    if judged && (!within(gain, 1.0e-3) || !within(loss, 1.0e-3)) {
         expected.failed = true;
     }
 }
