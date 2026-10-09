@@ -21464,3 +21464,16 @@ caps to the domain's area as `ui/runtime.rs` does, which only lets a larger
 channel finish meshing. The first measurements stalled for forty minutes
 each: the runs were launched with their output piped through a filter, so
 nothing showed until the end; a long run now writes its own log.
+
+## 2026-10-09 — The second-order wall's time-step excess, listed
+
+The excess the outgoing-wall fixture measured between free sides - the
+second-order wall returning 1.10 of its passive law's energy at the default
+step, 1.03 at half the step, 1.02 at a quarter, 1.07 at edge 0.035 with its
+own step, alike for sine and cosine modes, about 1e-3 of the incident wave in
+amplitude - goes under "Worth checking sometime" in `docs/plan.md`, with what
+is known: it falls about 4x per halving of the step at a fixed mesh and about
+linearly along a fixed CFL, the first-order wall matches its law to 0.5% at
+every step, and the kick is the scattering spike's corrected force-coupled
+update, so it is not the split that spike replaced. The fixture holds the
+band to 15% over the law meanwhile. Nothing on screen shows it.

@@ -1434,6 +1434,18 @@ is next touched.
   most 5 for any eigenvalue, 1.7 on average. LAPACK's `dsteqr` budgets 30·n
   for the whole solve instead, so an eigenvalue that stalls borrows from the
   others; that, and a message naming the way out, would be the change.
+- The second-order outgoing wall returns more energy than its law says, by
+  the stepping, not the law: met by a channel's second transverse mode at 27°
+  to 39°, between free sides, it reads 1.10 of the passive law's energy
+  reflection at the default step, 1.03 at half the step and 1.02 at a quarter
+  on one mesh, and 1.07 at edge 0.035 with its own step - about 4x per
+  halving of the step at a fixed mesh, about linearly along a fixed CFL - the
+  same for sine and cosine modes, so no corner effect. In amplitude it is
+  about 1e-3 of the incident wave. The first-order wall matches its law to
+  0.5% at every step. The kick is the scattering spike's corrected,
+  force-coupled update, so this is not the split that spike replaced. Fixture
+  `an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`
+  holds the second-order band to 15% over its law; the first-order band to 1%.
 
 ## Working practice
 
