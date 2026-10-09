@@ -2,12 +2,12 @@
 //!
 //! The app's runtime prepares a candidate topology, packs it for the device,
 //! uploads it and publishes it once the device has taken it, while the user
-//! edits, resets, replaces the scene, fires pulses and throws Switches, and
-//! the device answers in an order of its own. This crate holds that protocol
-//! and nothing else: tokens are small numbers, a generation is a counter, and
-//! what the app computes from geometry - whether a preparation finished this
-//! frame, what a ready candidate changes, whether a pulse lands in a region -
-//! is an input of the step that needs it.
+//! edits, remeshes, resets, replaces the scene, fires pulses and throws
+//! Switches, and the device answers in an order of its own. This crate holds
+//! that protocol and nothing else: tokens are small numbers, a generation is
+//! a counter, and what the app computes from geometry - whether a preparation
+//! finished this frame, what a ready candidate changes, whether a pulse lands
+//! in a region - is an input of the step that needs it.
 //!
 //! The decisions the protocol makes are functions of what the host has seen,
 //! and the app's runtime makes them by calling the same functions the model
@@ -154,6 +154,9 @@ pub enum Step {
     Edge {
         edge: u8,
     },
+    /// The Remesh button: a rebuild of the document as it stands, though
+    /// nothing changed.
+    Remesh,
     /// Another scene opened in this one's place: what a preparation reads of
     /// it, its mesh edge, and what its draft's validation will come to.
     Replace {
@@ -227,6 +230,8 @@ pub struct Protocol {
     /// The token whose step the host paces.
     pub uploaded: Option<Token>,
     pub reset: bool,
+    /// A rebuild asked for and not yet requested.
+    pub remesh: bool,
     pub drop: bool,
     pub fresh: bool,
     pub pulses: u8,
@@ -278,6 +283,7 @@ impl Default for Protocol {
             last_error: None,
             uploaded: None,
             reset: false,
+            remesh: false,
             drop: true,
             fresh: true,
             pulses: 0,
@@ -353,6 +359,7 @@ impl Protocol {
                 self.inputs = inputs;
             }
             Step::Edge { edge } => self.edge = edge,
+            Step::Remesh => self.remesh = true,
             Step::Replace {
                 inputs,
                 edge,
@@ -691,7 +698,7 @@ impl Protocol {
             standing: self.standing(),
             requested: self.requested_revision,
             same_edge: self.requested_edge == Some(self.edge),
-            remesh: false,
+            remesh: self.remesh,
             in_flight: self.preparing.is_some() || self.ready.is_some(),
             active: self.active.map(|token| self.revision_of(token)),
             failed: self.last_error.map(|token| self.revision_of(token)),
@@ -711,6 +718,7 @@ impl Protocol {
         self.requested_revision = Some(self.revision);
         self.requested_inputs = Some(self.inputs);
         self.reset = false;
+        self.remesh = false;
         self.fresh = false;
         self.requested_edge = Some(self.edge);
     }
@@ -815,6 +823,7 @@ impl Protocol {
         let held = self.active.is_some() && (self.reset || self.switches > 0);
         let waiting = self.drop
             || held
+            || self.remesh
             || self.uploading.is_some()
             || self.packed.is_some()
             || self.source_commit.is_some()

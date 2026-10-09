@@ -2,14 +2,14 @@
 //! completions and user actions.
 //!
 //! The host prepares a candidate, packs it, uploads it and publishes it once
-//! the device has taken it, while edits, Reset, scene replacements, pulses and
-//! Switch presses arrive, and the device finishes things in an order of its
-//! own. The defects of this area each needed one particular order: a waiting
-//! pulse sent into the run Reset had just cleared, an upload waiting for a
-//! generation that never came, a rejected handoff that kept the candidate's
-//! step. Here the order is drawn. A frame lends preparation some work units,
-//! the device delivers readbacks, settles a handoff or a live event either
-//! way, or faults, and the user acts in between.
+//! the device has taken it, while edits, Reset, Remesh, scene replacements,
+//! pulses and Switch presses arrive, and the device finishes things in an
+//! order of its own. The defects of this area each needed one particular
+//! order: a waiting pulse sent into the run Reset had just cleared, an upload
+//! waiting for a generation that never came, a rejected handoff that kept the
+//! candidate's step. Here the order is drawn. A frame lends preparation some
+//! work units, the device delivers readbacks, settles a handoff or a live
+//! event either way, or faults, and the user acts in between.
 //!
 //! The device is the request's test transitions (`deliver_readbacks`,
 //! `accept_handoff`, `reject_handoff`, `process_live_event`,
@@ -72,6 +72,8 @@ enum Act {
     Nudge(u8),
     /// Set the mesh edge to the `nth` of three.
     Edge(u8),
+    /// Press Remesh: rebuild at the mesh edge set, though nothing changed.
+    Remesh,
     /// Set the simulation speed to the `nth` of three.
     Speed(u8),
     /// Move the point source to the `cell`th cell, on or off, at one of two
@@ -108,6 +110,7 @@ fn acts() -> BoxedStrategy<Act> {
         3 => (any::<u8>(), any::<u8>()).prop_map(|(nth, kind)| Act::Material { nth, kind }),
         2 => any::<u8>().prop_map(Act::Nudge),
         1 => any::<u8>().prop_map(Act::Edge),
+        1 => Just(Act::Remesh),
         1 => any::<u8>().prop_map(Act::Speed),
         2 => (any::<u8>(), any::<bool>(), any::<bool>())
             .prop_map(|(cell, on, high)| Act::Source { cell, on, high }),
@@ -236,6 +239,7 @@ struct Projection {
     last_error: Option<TopologyToken>,
     request_stands: bool,
     reset: bool,
+    remesh: bool,
     drop: bool,
     pulses: usize,
     switches: usize,
@@ -417,6 +421,7 @@ impl Session {
             Act::Fault => model::Step::Fault,
             Act::Validate => model::Step::Validate { inputs },
             Act::Reset => model::Step::Reset,
+            Act::Remesh => model::Step::Remesh,
             Act::Run(on) => model::Step::Run(*on),
             Act::Step => model::Step::StepOnce,
             Act::Pulse(_) => {
@@ -500,6 +505,7 @@ impl Session {
                 .as_ref()
                 .is_some_and(|inputs| inputs.read(&state.editor.document)),
             reset: state.coordinator.reset_requested,
+            remesh: state.coordinator.remesh_requested,
             drop: state.coordinator.drop_requested,
             pulses: state.coordinator.pending_pulses.len(),
             switches: state.coordinator.pending_switches.len(),
@@ -540,6 +546,7 @@ impl Session {
             last_error: model.last_error.map(|token| self.real(token)),
             request_stands: model.requested_inputs == Some(model.inputs),
             reset: model.reset,
+            remesh: model.remesh,
             drop: model.drop,
             pulses: model.pulses as usize,
             switches: model.switches as usize,
@@ -743,6 +750,7 @@ impl Session {
                 let _ = self.state.editor.set_point_source(source);
             }
             Act::Reset => self.state.coordinator.reset_requested = true,
+            Act::Remesh => self.state.coordinator.remesh_requested = true,
             Act::Run(on) => self.state.wave_running = *on,
             Act::Step => self.state.wave_step = true,
             Act::Pulse(cell) => self.state.place_pulse(cell_point(domain, *cell)),

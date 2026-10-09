@@ -20984,3 +20984,25 @@ both, and the second's test went with it. `time_step_unchanged` is
 `carry` asks separately. Nothing changes in what the app does. The proofs
 explore a frame of more inputs and take a little longer for it, the first
 about three minutes rather than two and a half.
+
+## 2026-10-09 — Remesh, generated and modelled
+
+`request_due` takes whether a rebuild was asked for, and nothing explored it:
+the model passed it as never asked, and the runtime machine never pressed
+Remesh. The model has a `Remesh` step now, which raises a flag the next
+request reads and spends, as `request_runtime` spends `remesh_requested`; a
+replacement leaves it raised in both, and `at_rest` counts it as waiting. The
+runtime machine presses Remesh as the button does, about once a sequence, and
+compares the flag with the model's. It found nothing: the machine passes
+2,000 sequences in lockstep and both Kani proofs pass, Remesh among the steps
+they explore. The new action changes the generator, so the machine's three
+seeds named other sequences than the ones they were kept for, and were drawn
+again by cutting each fix out of the current code: a failure during an upload
+rejecting it with nothing withdrawn (0c691b4) stops on a fault in the frame
+after a material edit's upload begins, `a handoff no upload waits for`; a
+request waiting for a valid draft (82dd0cd) stops on `[Nudge(211)]`, a scene
+made invalid before its first validation that never runs; and a restored
+model keeping the compilation of the scene accepted since (82dd0cd) stops on
+`[Open(true), Undo, Nudge(87), Frame]`, where the runtime makes no request
+for the scene the undo brought back. The three replace the old ones, and the
+real code passes them.

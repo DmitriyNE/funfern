@@ -136,18 +136,18 @@ file of their own.
 
 A fourth machine (`ui/sequences/generations.rs`,
 `the_host_and_the_device_agree_on_what_runs`) runs the runtime itself under
-interleavings of host frames, device completions and user actions: edits,
-mesh edge and speed changes, source edits, Reset, Run and Step, pulses,
+interleavings of host frames, device completions and user actions: edits, mesh
+edge and speed changes, Remesh, source edits, Reset, Run and Step, pulses,
 Switch, scenes opened, Undo and Redo, while the device delivers readbacks,
 admits or refuses a handoff, takes or refuses a live event, or faults. The
 device is the request's test transitions, preparation advances by the slices
 each frame is granted and packing happens on the frame, so the order is the
 sequence's alone. While nothing uploads, the host's active topology must be
 the one the device runs, at the step it was packed for; a topology is only
-prepared from a scene the editor has held since its last replacement; a
-commit without a new generation must be one that needs none; and with the
-device fair at the end, the runtime must come to rest on the accepted
-revision or with an error naming it.
+prepared from a scene the editor has held since its last replacement; a commit
+without a new generation must be one that needs none; and with the device fair
+at the end, the runtime must come to rest on the accepted revision or with an
+error naming it.
 
 The protocol that machine exercises is also a small state machine of its own,
 `crates/funfern-protocol`: requests, preparation, packing, uploads, handoffs,
