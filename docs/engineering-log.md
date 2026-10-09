@@ -21335,3 +21335,24 @@ alone parts the nodes, whose lumped masses differ, by 4e-9 of the swing over
 the pendulum's twelve thousand steps; the tests hold them within 5e-8. A
 sine-Gordon slope 0.1% too strong fails the pendulum at 8.5e-4 against its
 3e-4, a Kerr coefficient 1% too large the Kerr mode at 1.3e-2 against 1e-3.
+
+## 2026-10-09 — A uniform permittivity switch keeps D and B and runs as the slower medium
+
+The second physical-accuracy fixture. The gallery's sudden permittivity drop
+measures energy shares and the doubled frequency of a gated pump on a slab;
+nothing asserted what a temporal interface keeps. A uniform medium in the box,
+no source, its field two box modes run until both lanes hold energy, is
+switched at once (`begin_switch`, ramp 0) to four times its permittivity, in TM
+and in TE under each integrator. The state is untouched, so `D` and `B` are;
+the field the switched coefficient divides - `E = D/ε`, the primary field in
+TM, the complementary in TE, where the mass row's ε lands - falls to a quarter
+to 1e-14, that lane's energy to a quarter and the other lane's is kept, to
+1e-13 of the total. And the switched medium is the unswitched one slowed by
+two: in TM `(Q(t/2), b(t/2)/2)` solves it, in TE `(Q(t/2)/2, b(t/2))`, and the
+discrete step inherits that at half the step, its `dt²/12` correction included
+since `dt²ω²` is invariant. From the switch the run matches an unswitched run
+from the same state at half the step for 200 steps to the bit - the factor is
+a power of two, so even the rounding coincides. The field the fixture first
+tried had a mean, which a closed box keeps in `Q` forever, and never filled
+`b`; two zero-mean box modes do. An alternate factor applied 0.1% off fails it,
+and so does a switch the runtime ignores.

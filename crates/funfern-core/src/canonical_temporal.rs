@@ -8855,6 +8855,182 @@ mod tests {
         }
     }
 
+    /// A uniform medium switched at once to four times its permittivity, no
+    /// source, a field in both lanes. A temporal interface keeps `D` and `B`:
+    /// the state is untouched, the field the switched coefficient divides -
+    /// `E = D/ε`, the primary in TM and the complementary in TE - falls to a
+    /// quarter exactly, its energy lane with it, and the other lane keeps its
+    /// own. And the switched medium is the unswitched one slowed by two: in
+    /// TM `(Q(t/2), b(t/2)/2)`, in TE `(Q(t/2)/2, b(t/2))` solve it, which the
+    /// discrete step inherits at half the step - its `dt²/12` correction
+    /// included, `dt²ω²` being invariant - so from the switch on the run
+    /// matches an unswitched run from the same state at half the step, to
+    /// rounding, under each integrator.
+    #[test]
+    fn a_uniform_permittivity_switch_keeps_d_and_b_and_runs_as_the_slower_medium() {
+        for polarization in [
+            ElectromagneticPolarization::Tm,
+            ElectromagneticPolarization::Te,
+        ] {
+            let tm = polarization == ElectromagneticPolarization::Tm;
+            let mut scene = Scene {
+                physics: PhysicsModel::Electromagnetic { polarization },
+                ..Scene::default()
+            };
+            scene.materials[0].mass_law.alternate = Some(ScalarField::constant(4.0));
+            scene.materials[0].switch_ramp = 0.0;
+            let material = scene.materials[0].id;
+            let operator = compile(&scene).unwrap();
+            let base = operator.base();
+            let h = 0.4 * operator.maximum_time_step();
+            for integrator in [
+                CanonicalIntegrator::Leapfrog,
+                CanonicalIntegrator::FourthOrder,
+            ] {
+                let primary = base
+                    .node_points()
+                    .iter()
+                    .zip(base.primary_mass())
+                    .map(|(p, mass)| {
+                        // Two of the box's modes, so the field has no mean,
+                        // which would stay in Q, and trades its energy with b.
+                        let k = 0.5 * std::f64::consts::PI;
+                        mass * ((k * (p.x + 1.0)).cos() * (k * (p.y + 1.0)).cos()
+                            + 0.5 * (2.0 * k * (p.x + 1.0)).cos())
+                    })
+                    .collect();
+                let complementary =
+                    vec![Point2::default(); base.complementary_degrees_of_freedom()];
+                let mut state =
+                    CanonicalTemporalWaveState::new(&operator, h, primary, complementary)
+                        .unwrap()
+                        .with_integrator(integrator);
+                // Run until both lanes hold a good share of the energy.
+                for _ in 0..2000 {
+                    state.step(&operator).unwrap();
+                    let share = canonical_temporal_energy_breakdown(
+                        &operator,
+                        state.primary_flux(),
+                        state.complementary_flux(),
+                        state.time(),
+                        state.runtime(),
+                    )
+                    .unwrap();
+                    if share.complementary > 0.3 * share.total() {
+                        break;
+                    }
+                }
+                let (q, b, t) = (
+                    state.primary_flux().to_vec(),
+                    state.complementary_flux().to_vec(),
+                    state.time(),
+                );
+                let before =
+                    canonical_temporal_energy_breakdown(&operator, &q, &b, t, state.runtime())
+                        .unwrap();
+                let u_before = operator.primary_field_at(&q, t, state.runtime()).unwrap();
+                let v_before = operator
+                    .complementary_field_at(&b, t, state.runtime())
+                    .unwrap();
+                assert!(
+                    before.primary > 0.1 * before.total()
+                        && before.complementary > 0.3 * before.total(),
+                    "{polarization:?}: the lanes hold {:.3e} and {:.3e} at {t:.3} s",
+                    before.primary,
+                    before.complementary,
+                );
+
+                state
+                    .runtime_mut()
+                    .begin_switch(material, true, t, 0.0)
+                    .unwrap();
+
+                // D and B are the state, which the switch leaves alone.
+                assert_eq!(state.primary_flux(), &q[..]);
+                assert_eq!(state.complementary_flux(), &b[..]);
+                let after =
+                    canonical_temporal_energy_breakdown(&operator, &q, &b, t, state.runtime())
+                        .unwrap();
+                let u_after = operator.primary_field_at(&q, t, state.runtime()).unwrap();
+                let v_after = operator
+                    .complementary_field_at(&b, t, state.runtime())
+                    .unwrap();
+                let u_scale = u_before.iter().fold(0.0_f64, |m, u| m.max(u.abs()));
+                let v_scale = v_before.iter().fold(0.0_f64, |m, v| m.max(v.norm()));
+                let (u_factor, v_factor) = if tm { (0.25, 1.0) } else { (1.0, 0.25) };
+                for (a, b) in u_after.iter().zip(&u_before) {
+                    assert!(
+                        (a - u_factor * b).abs() <= 1.0e-14 * u_scale,
+                        "{polarization:?}: E {a} from {b}"
+                    );
+                }
+                for (a, b) in v_after.iter().zip(&v_before) {
+                    assert!(
+                        (*a - *b * v_factor).norm() <= 1.0e-14 * v_scale,
+                        "{polarization:?}: H {a:?} from {b:?}"
+                    );
+                }
+                let total = before.total();
+                assert!((after.primary - u_factor * before.primary).abs() < 1.0e-13 * total);
+                assert!(
+                    (after.complementary - v_factor * before.complementary).abs() < 1.0e-13 * total
+                );
+
+                // From here, the unswitched medium at half the step.
+                let (q_reference, b_reference): (Vec<f64>, Vec<Point2>) = if tm {
+                    (q.clone(), b.iter().map(|value| *value * 2.0).collect())
+                } else {
+                    (q.iter().map(|value| value * 2.0).collect(), b.clone())
+                };
+                let mut reference =
+                    CanonicalTemporalWaveState::new(&operator, 0.5 * h, q_reference, b_reference)
+                        .unwrap()
+                        .with_integrator(integrator);
+                for _ in 0..200 {
+                    state.step(&operator).unwrap();
+                    reference.step(&operator).unwrap();
+                }
+                let (q_scale, b_scale) = if tm { (1.0, 0.5) } else { (0.5, 1.0) };
+                let q_norm = state
+                    .primary_flux()
+                    .iter()
+                    .fold(0.0_f64, |m, v| m.max(v.abs()));
+                let b_norm = state
+                    .complementary_flux()
+                    .iter()
+                    .fold(0.0_f64, |m, v| m.max(v.norm()));
+                let q_error = state
+                    .primary_flux()
+                    .iter()
+                    .zip(reference.primary_flux())
+                    .fold(0.0_f64, |m, (a, r)| m.max((a - q_scale * r).abs()))
+                    / q_norm;
+                let b_error = state
+                    .complementary_flux()
+                    .iter()
+                    .zip(reference.complementary_flux())
+                    .fold(0.0_f64, |m, (a, r)| m.max((*a - *r * b_scale).norm()))
+                    / b_norm;
+                assert!(
+                    q_error < 1.0e-11 && b_error < 1.0e-11,
+                    "{polarization:?} {integrator:?}: the switched run is {q_error:.2e} and {b_error:.2e} \
+                     from the slower medium's"
+                );
+                // And it moved: the field 200 steps on is not the switch's.
+                let moved = state
+                    .primary_flux()
+                    .iter()
+                    .zip(&q)
+                    .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()))
+                    / q_norm;
+                assert!(
+                    moved > 0.1,
+                    "{polarization:?} {integrator:?}: the field barely moved, {moved:.2e}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn switch_and_reciprocal_drive_modify_the_complete_primary_map() {
         let mut scene = Scene::initial();

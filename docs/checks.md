@@ -291,7 +291,12 @@ Klein-Gordon cutoff its own ODE, against RK4 with the flux inverted by Newton
 from the law's definition (`a_kerr_uniform_mode_follows_its_ode`). Both
 integrators converge at second order: the production step's fourth order is
 the linear bulk's. A pendulum law 0.1% too strong or a Kerr coefficient 1% too
-large fails them.
+large fails them. A uniform medium switched at once to four times its
+permittivity keeps `D` and `B`, its `E` falls to exactly a quarter with that lane's
+energy, the other lane's kept, and from the switch it runs as the unswitched
+medium at half the step - `(Q(t/2), b(t/2)/2)` in TM, `(Q(t/2)/2, b(t/2))` in TE -
+which the discrete step inherits; the two runs agree to the bit
+(`a_uniform_permittivity_switch_keeps_d_and_b_and_runs_as_the_slower_medium`).
 
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
