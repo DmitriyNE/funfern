@@ -21612,3 +21612,39 @@ page. The page stops to install the worker while the module is still
 downloading, so the server treats a connection its client drops as no error,
 where it printed a traceback for each. Each context is a fresh browser
 profile, so a worker one run registers reaches no other.
+
+## 2026-10-10 — The cooperative builds run the fixtures too
+
+The third packaging item: the fixtures on the paths without a worker pool. The
+single-threaded bundle, which plain `trunk` builds without the wrapper's
+shared memory, is built for `/funfern/` with the e2e feature and served as the
+Pages site is served, since a static host is where such a bundle lives; the
+spec holds the page to having no preparation worker
+(`FUNFERN_EXPECT_BROWSER_WORKER=0`: the attribute is never written without the
+feature) and the fixtures to passing on the main thread, with the deadline
+doubled for it. The threaded bundle's own fallback, the main thread running
+the work where iOS Safari's memory growth is invisible to it, is taken on
+request: `?e2e-pool=off` makes the page's growth check report false, as that
+Safari does, and the app starts without its pool, `data-funfern-preparation-
+worker` reading `unavailable`, which `npm run test:e2e:nopool` holds the
+fixtures to under the headers. Measured in Chrome on the M1 Max: all six
+fixtures pass on both paths, the single-threaded bundle cold and warm, to the
+same digits as the threaded bundle under the headers - the cavity Q 6.242e-7,
+the handoff Q 9.879e-7, the refusal at step 788 - and in the same time, 1.1
+minutes for the six without the pool and 2.0 for the six twice on the plain
+bundle, as the Pages run takes: at these sizes the main thread does the
+preparation without a frame anyone would see. The threaded bundle's page was
+rebuilt for the hook, and the plain bundle is 30.5 MB against the wrapper's
+30.1, built by the stable toolchain without its fat LTO.
+
+Found on the way: the page's isolation gate cannot tell the bundles apart.
+Where a service worker cannot register - blocked by policy, as Playwright's
+`serviceWorkers: 'block'` does it - the page stops its download, gives up after
+the registration fails and shows its note that funfern needs shared memory,
+and no load event follows; right for the threaded bundle, which would not
+instantiate, wrong for the plain one, which needs no isolation and would run.
+WebGPU needs a secure context, and a secure context has service workers, so
+this is the one path left on which the plain bundle differs from the threaded
+one, and it is closed. Whether the gate should let the application start when
+the worker fails, the threaded bundle then failing in its own words, is a
+product decision, raised and not taken here.

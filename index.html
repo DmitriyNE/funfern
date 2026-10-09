@@ -102,9 +102,14 @@
     lock, so every later allocation spins and the page freezes on its splash.
     This runs that sequence on a two-page memory; the app starts its pool only
     where the check passes, and otherwise runs its work on the main thread.
+    `?e2e-pool=off` makes it report what that Safari gets, so the end-to-end
+    fixtures run the main-thread path anywhere.
   -->
   <script>
     window.funfernSharedMemoryGrowthVisible = (function () {
+      if (new URLSearchParams(location.search).get('e2e-pool') === 'off') {
+        return Promise.resolve(false);
+      }
       if (!window.crossOriginIsolated || !window.Worker || typeof WebAssembly !== 'object') {
         return Promise.resolve(false);
       }

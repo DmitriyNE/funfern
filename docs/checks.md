@@ -129,7 +129,18 @@ navigation registers the worker and the page reloads itself - two navigations
 of the main frame, then the page is cross-origin isolated, a worker controls
 it and the reload flag is gone - and the fixture passes; a warm reload starts
 in one navigation, the worker already there, and passes again, the build
-attribute checked on both.
+attribute checked on both. The cooperative builds run the
+same way. `npm run test:e2e:plain` serves the single-threaded bundle, built by
+plain `trunk` without the wrapper's shared memory
+(`TRUNK_BUILD_FEATURES=e2e trunk build --release --public-url /funfern/ --dist
+dist-e2e-plain`), on the Pages path, where such a bundle lives, and holds the
+fixtures with no worker pool on the page (`FUNFERN_EXPECT_BROWSER_WORKER=0`);
+`npm run test:e2e:nopool` serves the threaded bundle under the headers with
+`?e2e-pool=off`, which makes the page's shared-memory growth check report what
+it reports on iOS Safari, so the app runs its work on the main thread
+(`data-funfern-preparation-worker` reading `unavailable`), and holds the
+fixtures there. With service workers blocked the page shows its note that
+funfern needs shared memory and never starts, for either bundle.
 
 No CI job runs the browser fixtures yet. Chromium's software WebGPU, SwiftShader,
 found its adapter in Playwright's image on arm64 Linux, but lost the app's device

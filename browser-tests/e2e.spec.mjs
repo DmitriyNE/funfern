@@ -20,6 +20,18 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 //   TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --public-url /funfern/ --dist dist-e2e-pages
 // under that prefix.
 const hosting = process.env.FUNFERN_E2E_HOSTING ?? "isolated";
+// The worker pool the page should end up with: the threaded bundle's, `active`;
+// `unavailable`, the threaded bundle running its work on the main thread as it
+// does where the page's shared-memory growth check fails (`?e2e-pool=off`
+// makes it fail, through FUNFERN_E2E_QUERY); or `0`, the single-threaded
+// bundle, which never writes the attribute.
+const expectedWorker = process.env.FUNFERN_EXPECT_BROWSER_WORKER ?? "active";
+// More of the page's query, `e2e-pool=off` for the main-thread run.
+const query = (process.env.FUNFERN_E2E_QUERY ?? "")
+  .split("&")
+  .filter(Boolean)
+  .map((parameter) => `&${parameter}`)
+  .join("");
 // Bevy's render error handler logs each of these before it stops rendering.
 const fatalConsolePattern =
   /Caught rendering error|Caught DeviceLost error|Quitting the application due to \w+ RenderError|panicked at|RuntimeError: unreachable|WebGPU initialization failed/i;
@@ -108,18 +120,20 @@ for (const fixture of fixtures) {
         crossOriginIsolated,
         Boolean(navigator.serviceWorker?.controller),
         sessionStorage.getItem("funfernCoiReload"),
+        document.documentElement.getAttribute("data-funfern-preparation-worker"),
       ]);
       expect(navigations, `${start}: navigations of the main frame`).toBe(expectedNavigations);
-      expect(path, `${start}: [isolated, worker controls the page, reload flag]`).toEqual([
+      expect(path, `${start}: [isolated, worker controls the page, reload flag, pool]`).toEqual([
         true,
         hosting === "pages",
         null,
+        expectedWorker === "0" ? null : expectedWorker,
       ]);
       expect(fatal, fatal.join("\n\n")).toEqual([]);
       expect(verdict, `${summary}\n${lines.join("\n")}`).toBe("pass");
     };
 
-    await page.goto(`./?e2e=${fixture}&e2e-deadline=${deadline}`);
+    await page.goto(`./?e2e=${fixture}&e2e-deadline=${deadline}${query}`);
     await holds("cold", hosting === "pages" ? 2 : 1);
     if (hosting === "pages") {
       navigations = 0;

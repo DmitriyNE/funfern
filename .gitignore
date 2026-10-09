@@ -2,6 +2,7 @@
 /dist/
 /dist-e2e/
 /dist-e2e-pages/
+/dist-e2e-plain/
 /node_modules/
 /.playwright-browsers/
 /playwright-report/
