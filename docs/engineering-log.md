@@ -21270,3 +21270,17 @@ curved boundary included, so the check is exact; CI's x86_64 runner is the
 fourth platform and holds them from its next run. A mismatch names both
 hashes and says that a change to the mesher made on purpose records them again.
 The browser spec now prints the driver's whole account beside the verdict.
+
+## 2026-10-09 — The end-to-end fixtures in Safari
+
+`browser-tests/safari-e2e.mjs` (`npm run test:e2e:safari`) runs the fixtures in
+real Safari: it serves `dist-e2e` cross-origin isolated, starts `safaridriver`,
+and for each fixture the device suite names opens `?e2e=<fixture>` and polls
+the verdict on the page's root element through WebDriver's `execute/sync`,
+speaking the protocol directly so nothing is installed. It runs by hand, with
+remote automation on in Safari's developer settings, as the Safari shader
+check does. On Safari 26.3.1 all six pass in about a minute, the meshes the
+recorded ones; the readings sit within a percent or two of Chrome's - the
+Switch Q 7.55e-7 against 7.42e-7 - WebKit translating the shaders its own way
+onto the same Metal, and the refusal lands at step 788 as everywhere. A
+fixture that does not exist reads FAIL and the script exits 1.

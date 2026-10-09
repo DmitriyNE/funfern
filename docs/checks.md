@@ -103,6 +103,14 @@ arm64 build the three meshes alike, the disc's curve included; CI's x86_64
 runner holds them each run. A change to the mesher made on purpose records them
 again.
 
+Safari runs them by hand, as no CI browser runs its WebGPU: with remote
+automation on in Safari's developer settings, `npm run test:e2e:safari` serves
+`dist-e2e` isolated and drives Safari through `safaridriver`, speaking WebDriver
+directly, fixture by fixture, and exits 1 if one fails. On Safari 26.3.1 on the
+M1 Max all six pass in about a minute, within a percent or two of Chrome's
+readings - WebKit translates the shaders its own way onto the same Metal - the
+refusal at step 788 as everywhere.
+
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without
 its file; regenerate them all with
