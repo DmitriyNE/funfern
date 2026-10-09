@@ -21648,3 +21648,23 @@ this is the one path left on which the plain bundle differs from the threaded
 one, and it is closed. Whether the gate should let the application start when
 the worker fails, the threaded bundle then failing in its own words, is a
 product decision, raised and not taken here.
+
+## 2026-10-10 — The browser suite
+
+The last of the packaging items, the four hosting variants in one run.
+`scripts/browser-suite.sh` builds the three bundles - the threaded one, the
+threaded one for `/funfern/`, the single-threaded one for `/funfern/` - or
+takes them as they are with `--no-build`, runs `test:e2e`, `test:e2e:nopool`,
+`test:e2e:pages` and `test:e2e:plain` one after another, since each serves
+on the one port, prints a verdict a run with each fixture's line, and exits
+1 if any failed, with logs under `target/browser-suite/<time>/`; a pattern
+picks runs by name, as the device suite's does. It is the browser gate for a
+change to the web shell, `index.html`, the service worker, the specs,
+`scripts/trunk` and the wasm entry points, as the device suite is for the
+shaders and the runtime; CI runs no browser WebGPU, so it runs by hand, like
+`npm run test:e2e` did. Its first full run, the three bundles built at this
+commit so every page carries its stamp, passed four of four: the six fixtures
+under the headers in 62 s, without the pool in 65 s, on the Pages path cold and
+warm in 118 s and on the single-threaded bundle cold and warm in 123 s, every
+reading the same digits on every path, the cavity Q 6.242e-7 and the refusal
+at step 788; about sixteen minutes with the builds, six without.

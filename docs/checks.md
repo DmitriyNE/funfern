@@ -140,7 +140,13 @@ fixtures with no worker pool on the page (`FUNFERN_EXPECT_BROWSER_WORKER=0`);
 it reports on iOS Safari, so the app runs its work on the main thread
 (`data-funfern-preparation-worker` reading `unavailable`), and holds the
 fixtures there. With service workers blocked the page shows its note that
-funfern needs shared memory and never starts, for either bundle.
+funfern needs shared memory and never starts, for either bundle. `scripts/browser-suite.sh` is the four in one: it
+builds the three bundles, or runs against them as they are with `--no-build`,
+runs the four hosting variants one after another, prints a verdict a run and
+each fixture's line, and exits 1 if any failed. It is the browser gate for a
+change to the web shell - `index.html`, the service worker, the Playwright
+specs, `scripts/trunk`, the wasm entry points - as the device suite is for a
+change to the shaders or the runtime.
 
 No CI job runs the browser fixtures yet. Chromium's software WebGPU, SwiftShader,
 found its adapter in Playwright's image on arm64 Linux, but lost the app's device
