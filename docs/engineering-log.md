@@ -3406,6 +3406,12 @@ above:
   3e-5 after five paused events, the clock unchanged (2026-10-09, the device
   suite's first run; its reference kept the carrier where since 517a28e the
   patch steps it, see that day's entry).
+- [ ] The browser fixtures in CI on Chromium's SwiftShader WebGPU (2026-10-09,
+  time-boxed and stopped): in Playwright 1.55's image on arm64 Linux the
+  adapter is found, but the app's device is lost as it starts, "A valid
+  external Instance reference no longer exists", with the Linux flags and
+  without. Untried: the x86_64 runner, headed Chromium under xvfb, another
+  Chromium.
 - [ ] The budget's 60 Hz and Low Power Mode measurements (postponed
   2026-10-05; the machine has one panel and the mode is the user's to
   toggle). Quiet host and overlay scene are measured, see the spike doc.
@@ -21284,3 +21290,23 @@ recorded ones; the readings sit within a percent or two of Chrome's - the
 Switch Q 7.55e-7 against 7.42e-7 - WebKit translating the shaders its own way
 onto the same Metal, and the refusal lands at step 788 as everywhere. A
 fixture that does not exist reads FAIL and the script exits 1.
+
+## 2026-10-09 — SwiftShader, tried and stopped; the browser spec fails fast
+
+The plan's last browser item was a CI job running the fixtures on Chromium's
+software WebGPU, SwiftShader, time-boxed. In Playwright 1.55's image on arm64
+Linux in the Colima VM, with `--use-webgpu-adapter=swiftshader`, the page
+finds the adapter - a spec check reads "google swiftshader" - but the app's
+device is lost as it starts: Dawn reports "A valid external Instance reference
+no longer exists", Bevy "Caught DeviceLost error" and quits rendering, and
+nothing runs after. The config's Linux flags (Vulkan, ANGLE on Vulkan, no
+Vulkan surface) and none at all, with `--enable-unsafe-swiftshader`, end the
+same way, so no job is added; the TODO names what is untried. Two pieces stay:
+the spec takes more Chromium flags from `FUNFERN_CHROMIUM_ARGS` and, given
+`FUNFERN_EXPECT_ADAPTER`, requires the page's adapter to name it, which such a
+run needs; and a fixture now fails at the first fatal console message - a
+lost device, a render error, a panic - instead of waiting out its deadline,
+which the lost device took eleven minutes to reach. A message injected three
+seconds in fails a fixture in 3.2 s. Chrome passes all seven as before. A lost
+device leaves the app stopped with no word on the page; what it should do then
+is the next step's.

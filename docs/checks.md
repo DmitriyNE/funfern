@@ -111,6 +111,15 @@ M1 Max all six pass in about a minute, within a percent or two of Chrome's
 readings - WebKit translates the shaders its own way onto the same Metal - the
 refusal at step 788 as everywhere.
 
+No CI job runs the browser fixtures yet. Chromium's software WebGPU, SwiftShader,
+found its adapter in Playwright's image on arm64 Linux, but lost the app's device
+as it started ("A valid external Instance reference no longer exists"), with the
+config's Linux flags and with none; the attempt is in the log of 2026-10-09 and
+the TODOs. For such a run the spec takes more Chromium flags from
+`FUNFERN_CHROMIUM_ARGS` and requires the page's adapter to name
+`FUNFERN_EXPECT_ADAPTER`, and a lost device or any other fatal console message
+fails a fixture at once rather than at its deadline.
+
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without
 its file; regenerate them all with

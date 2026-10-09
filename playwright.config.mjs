@@ -10,6 +10,9 @@ if (process.platform === "linux") {
     "--disable-vulkan-surface",
   );
 }
+// More flags for a run that needs them, space-separated: the software adapter's
+// `--use-webgpu-adapter=swiftshader`.
+webGpuArgs.push(...(process.env.FUNFERN_CHROMIUM_ARGS ?? "").split(" ").filter(Boolean));
 
 export default defineConfig({
   testDir: "browser-tests",
