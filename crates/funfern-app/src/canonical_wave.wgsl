@@ -23,6 +23,14 @@ const TEMPORAL_FIELD_MASK: u32 = 12u;
 // a pathological solve into a detected failure, never an accepted guess.
 const INVERSE_TOLERANCE: f32 = 4.76837158e-7;
 const INVERSE_ITERATIONS: u32 = 40u;
+// f32's smallest normal number, the floor under every relative convergence
+// test. A device that flushes subnormals to zero - llvmpipe does - turns a
+// relative test's tolerance into zero below it while the residual it is
+// compared with stays nonzero, so the test can never pass: a run driven from
+// rest, its wavefront holding subnormal fluxes, failed a nonlinear inverse at
+// its fifth step. A residual, bracket or step under it is as resolved as f32
+// holds it.
+const F32_MIN_NORMAL: f32 = 1.17549435e-38;
 const SNAPSHOT_METADATA_MAGIC: f32 = 8675309.0;
 
 const STATUS_LAYOUT: u32 = 1u;
@@ -819,9 +827,11 @@ fn solve_primary_radius(node: u32, local_time: f32, goal: f32) -> f32 {
     for (var iteration = 0u; iteration < INVERSE_ITERATIONS; iteration += 1u) {
         let site = primary_site(node, local_time, r);
         let residual = site.x - goal;
-        if abs(residual) <= INVERSE_TOLERANCE * goal { return r; }
+        if abs(residual) <= max(INVERSE_TOLERANCE * goal, F32_MIN_NORMAL) { return r; }
         if residual < 0.0 { low = r; } else { high = r; }
-        if high - low <= 2.0 * 1.1920929e-7 * high { return 0.5 * (low + high); }
+        if high - low <= max(2.0 * 1.1920929e-7 * high, F32_MIN_NORMAL) {
+            return 0.5 * (low + high);
+        }
         let newton = r - residual / site.y;
         r = select(0.5 * (low + high), newton, newton > low && newton < high);
     }
@@ -925,9 +935,11 @@ fn solve_complementary_radius(word: u32, coefficient: f32, goal: f32) -> f32 {
     for (var iteration = 0u; iteration < INVERSE_ITERATIONS; iteration += 1u) {
         let response = field_response(word, r);
         let residual = coefficient * response.x * r - goal;
-        if abs(residual) <= INVERSE_TOLERANCE * goal { return r; }
+        if abs(residual) <= max(INVERSE_TOLERANCE * goal, F32_MIN_NORMAL) { return r; }
         if residual < 0.0 { low = r; } else { high = r; }
-        if high - low <= 2.0 * 1.1920929e-7 * high { return 0.5 * (low + high); }
+        if high - low <= max(2.0 * 1.1920929e-7 * high, F32_MIN_NORMAL) {
+            return 0.5 * (low + high);
+        }
         let newton = r - residual / (coefficient * response.y);
         r = select(0.5 * (low + high), newton, newton > low && newton < high);
     }
@@ -2437,7 +2449,7 @@ fn kick_nonlinear_node(
             if !(candidate >= low && candidate <= high) { candidate = 0.5 * (low + high); }
             let step = abs(candidate - next);
             next = candidate;
-            converged = step <= 4.0 * 1.1920929e-7 * max(abs(next), abs(old));
+            converged = step <= max(4.0 * 1.1920929e-7 * max(abs(next), abs(old)), F32_MIN_NORMAL);
         }
         if !converged { reject(STATUS_INVERSE_CONVERGENCE); }
         field = trace_gradient(node, old, next, target_time).x;

@@ -21191,3 +21191,28 @@ increment is not derived through the nonlinear map, and the app drops it with a
 message. The driver met that as a pulse that never landed, and now says so - a
 pulse neither waiting, nor on its way, nor taken has been dropped - instead of
 running out its time.
+
+## 2026-10-09 — The nonlinear inverse converges near zero on a device that flushes subnormals
+
+Run on Mesa's software Vulkan, lavapipe, the end-to-end `rejection` fixture - a
+bounded Kerr medium driven from rest by its point source - stopped at its fifth
+step: "a constitutive inverse did not converge within its iteration cap", a
+step the f64 reference takes and the M1 Max runs on past by 783. The Kerr
+device examples pass on lavapipe; they start from a smooth field, where this
+one starts from rest, its wavefront holding subnormal fluxes.
+`temporal_primary_field` hands any nonzero flux to `solve_primary_radius`,
+whose tests are relative - `|residual| <= INVERSE_TOLERANCE·goal`, a bracket
+`<= 2ε·high` - and a device that flushes subnormals to zero makes those
+products zero while the residual it compares stays nonzero, so neither test can
+pass and the solve spends its forty iterations and refuses. The same holds for
+any goal below about 2.5e-32, whose tolerance product is subnormal, and for
+`solve_complementary_radius` and the implicit kick on an absorbing wall. Each
+test now has an absolute floor at f32's smallest normal, `F32_MIN_NORMAL`: a
+residual, bracket or step under it is as resolved as f32 holds it. Counting a
+subnormal goal as zero confirmed the cause first. With the floors, lavapipe
+refuses the fixture's step after 788 with the domain status as the reference
+and the M1 Max do, Q 7.2e-7, and retries it bit for bit; the six fixtures pass
+there, and the device suite passes 48 of 48 on the M1 Max. A device or browser
+that flushes subnormals would have paused a field-law scene started from rest
+at once; which hardware does, nothing here has checked. The fixture's refusal
+message now names the step, the failure and the reference's own verdict.

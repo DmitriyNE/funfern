@@ -22,6 +22,7 @@ use super::runtime::pulse_increment;
 use super::*;
 use crate::canonical_gpu::{
     CANONICAL_FAILURE_INVERSE_DOMAIN, CanonicalGpuHandoffOutcome, CanonicalGpuRuntimeTransfer,
+    canonical_failure_description,
 };
 use bevy_egui::EguiPrimaryContextPass;
 use check::{within, worse};
@@ -891,9 +892,16 @@ fn advance(
             let hash = hash(&display.accepted_storage_bits());
             match first {
                 None => {
+                    let refusal = reference.state.clone().step(&reference.active);
                     if code != CANONICAL_FAILURE_INVERSE_DOMAIN {
                         return Some(Err(format!(
-                            "the device refused with code {code}, not the inverse domain's"
+                            "the device refused the step after {step} with code {code} ({}), not \
+                             the inverse domain's; the reference {}",
+                            canonical_failure_description(code),
+                            match &refusal {
+                                Ok(()) => "takes that step".to_owned(),
+                                Err(error) => format!("refuses it: {error}"),
+                            }
                         )));
                     }
                     // The reference takes every step the device accepted and
