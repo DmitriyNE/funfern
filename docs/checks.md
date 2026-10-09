@@ -157,20 +157,20 @@ it with [Kani](https://model-checking.github.io/kani/): every state reached in
 nine steps of any kind keeps the host's active topology on the device while
 nothing uploads, at the step the device runs, and from any state reached in
 six, a fair device and preparation bring it to rest within nine rounds. It
-takes about three and a half minutes; CI runs it in a job of its own, with Kani 0.67.0.
-The runtime machine runs the model in lockstep with the real runtime and
-compares the two after every step, so the proofs speak about the app's
-runtime only while that comparison holds. The protocol's decisions are
-functions in the crate's `decisions.rs`, which the runtime calls where the
-model does, so for those the proofs explore the code that decides in the app;
-what the runtime reads to give them their inputs is still held only by the
-comparison. They are whether the document as it stands takes a new request
-and whether that starts the field from zero, how a ready candidate is carried
-- in place, by a live patch or as a whole generation - how an upload in
-flight settles, when the steps a frame asks for are held back, what the host
-does about a failure of the running generation, and what becomes of a live
-event - a source patch, a pulse, a Switch press - the running generation
-would not take.
+takes about three and a half minutes; CI runs it in a job of its own, with
+Kani 0.67.0, and Pages deploys only once it has passed. The runtime machine
+runs the model in lockstep with the real runtime and compares the two after
+every step, so the proofs speak about the app's runtime only while that
+comparison holds. The protocol's decisions are functions in the crate's
+`decisions.rs`, which the runtime calls where the model does, so for those the
+proofs explore the code that decides in the app; what the runtime reads to
+give them their inputs is still held only by the comparison. They are whether
+the document as it stands takes a new request and whether that starts the
+field from zero, how a ready candidate is carried - in place, by a live patch
+or as a whole generation - how an upload in flight settles, when the steps a
+frame asks for are held back, what the host does about a failure of the
+running generation, and what becomes of a live event - a source patch, a
+pulse, a Switch press - the running generation would not take.
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,

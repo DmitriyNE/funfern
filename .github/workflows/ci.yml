@@ -210,7 +210,9 @@ jobs:
   deploy:
     name: Deploy GitHub Pages
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    needs: [native, web]
+    # The protocol's decisions are the app's own code, so a proof that fails
+    # holds the deploy as a failing test does.
+    needs: [native, web, kani]
     runs-on: ubuntu-24.04
     permissions:
       pages: write

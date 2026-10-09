@@ -21006,3 +21006,14 @@ model keeping the compilation of the scene accepted since (82dd0cd) stops on
 `[Open(true), Undo, Nudge(87), Frame]`, where the runtime makes no request
 for the scene the undo brought back. The three replace the old ones, and the
 real code passes them.
+
+## 2026-10-09 — Pages waits for the proofs
+
+The Pages deploy waited for the tests and the browser bundle and not for the
+protocol proofs: `deploy` needed `native` and `web`, and the `kani` job, added
+beside them in 3e8e7f6, was left out of the list, so a failing proof on main
+still deployed. Since the protocol's decisions became the runtime's own code
+that is a failing check on what ships, and it holds the deploy as a failing
+test does: `needs: [native, web, kani]`. The proofs take about four and a half
+minutes in CI and the tests longer, so the deploy waits no longer for it.
+`docs/checks.md` says so. The workflow itself is checked by CI's next run.
