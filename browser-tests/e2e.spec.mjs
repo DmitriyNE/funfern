@@ -13,6 +13,13 @@ const fixtures = [
   ...readFileSync("scripts/device-suite.sh", "utf8").matchAll(/FUNFERN_E2E=([a-z-]+)/g),
 ].map((match) => match[1]);
 const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
+// How the bundle is hosted: `isolated`, the test server sending the headers a
+// threaded bundle needs, or `pages`, as GitHub Pages serves the site - no
+// headers, so the page installs coi-serviceworker.js and reloads itself once.
+// `npm run test:e2e:pages` serves `dist-e2e-pages`, built with
+//   TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --public-url /funfern/ --dist dist-e2e-pages
+// under that prefix.
+const hosting = process.env.FUNFERN_E2E_HOSTING ?? "isolated";
 // Bevy's render error handler logs each of these before it stops rendering.
 const fatalConsolePattern =
   /Caught rendering error|Caught DeviceLost error|Quitting the application due to \w+ RenderError|panicked at|RuntimeError: unreachable|WebGPU initialization failed/i;
@@ -27,7 +34,7 @@ test("the device suite names fixtures", () => {
 const expectedAdapter = process.env.FUNFERN_EXPECT_ADAPTER;
 if (expectedAdapter) {
   test(`the page's WebGPU adapter is ${expectedAdapter}`, async ({ page }) => {
-    await page.goto("/");
+    await page.goto("./");
     const info = await page.evaluate(async () => {
       const adapter = await navigator.gpu?.requestAdapter();
       const info = adapter?.info ?? {};
@@ -64,29 +71,60 @@ for (const fixture of fixtures) {
       fatal.push(error.message);
       stopped(error.message);
     });
+    let navigations = 0;
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) {
+        navigations += 1;
+      }
+    });
 
-    await page.goto(`/?e2e=${fixture}&e2e-deadline=${deadline}`);
-    const root = page.locator("html");
-    // The bundle served is the one built from this checkout.
-    await expect(root).toHaveAttribute("data-funfern-build", expectedBuildId());
-    const outcome = await Promise.race([
-      expect(root)
-        .toHaveAttribute("data-funfern-e2e", /^(pass|fail)$/, {
-          timeout: (deadline + 60) * 1000,
-        })
-        .then(() => null),
-      stopping,
-    ]);
-    if (outcome !== null) {
-      throw new Error(`the app stopped before its verdict: ${outcome}\n${lines.join("\n")}`);
+    // Waits for the fixture's verdict and holds it, and the hosting path the
+    // page took to run it: under the headers one navigation and no service
+    // worker; on Pages the cold start registers the worker and reloads, two
+    // navigations, and a warm start one, the worker already in place; both
+    // leave the page isolated with its one-shot reload flag cleared.
+    const holds = async (start, expectedNavigations) => {
+      const root = page.locator("html");
+      // The bundle served is the one built from this checkout.
+      await expect(root).toHaveAttribute("data-funfern-build", expectedBuildId());
+      const outcome = await Promise.race([
+        expect(root)
+          .toHaveAttribute("data-funfern-e2e", /^(pass|fail)$/, {
+            timeout: (deadline + 60) * 1000,
+          })
+          .then(() => null),
+        stopping,
+      ]);
+      if (outcome !== null) {
+        throw new Error(`the app stopped before its verdict: ${outcome}\n${lines.join("\n")}`);
+      }
+      const verdict = await root.getAttribute("data-funfern-e2e");
+      const summary = await root.getAttribute("data-funfern-e2e-summary");
+      console.log(`${fixture} (${start}): ${verdict}: ${summary}`);
+      for (const line of lines.splice(0)) {
+        console.log(`  ${line}`);
+      }
+      const path = await page.evaluate(() => [
+        crossOriginIsolated,
+        Boolean(navigator.serviceWorker?.controller),
+        sessionStorage.getItem("funfernCoiReload"),
+      ]);
+      expect(navigations, `${start}: navigations of the main frame`).toBe(expectedNavigations);
+      expect(path, `${start}: [isolated, worker controls the page, reload flag]`).toEqual([
+        true,
+        hosting === "pages",
+        null,
+      ]);
+      expect(fatal, fatal.join("\n\n")).toEqual([]);
+      expect(verdict, `${summary}\n${lines.join("\n")}`).toBe("pass");
+    };
+
+    await page.goto(`./?e2e=${fixture}&e2e-deadline=${deadline}`);
+    await holds("cold", hosting === "pages" ? 2 : 1);
+    if (hosting === "pages") {
+      navigations = 0;
+      await page.reload();
+      await holds("warm", 1);
     }
-    const verdict = await root.getAttribute("data-funfern-e2e");
-    const summary = await root.getAttribute("data-funfern-e2e-summary");
-    console.log(`${fixture}: ${verdict}: ${summary}`);
-    for (const line of lines) {
-      console.log(`  ${line}`);
-    }
-    expect(fatal, fatal.join("\n\n")).toEqual([]);
-    expect(verdict, `${summary}\n${lines.join("\n")}`).toBe("pass");
   });
 }

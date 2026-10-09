@@ -5,6 +5,7 @@
     "test:browser": "playwright test",
     "test:shaders": "playwright test browser-tests/shaders.spec.mjs",
     "test:e2e": "FUNFERN_E2E_BUNDLE=1 FUNFERN_TEST_DIST=${FUNFERN_TEST_DIST:-dist-e2e} playwright test browser-tests/e2e.spec.mjs",
+    "test:e2e:pages": "FUNFERN_E2E_BUNDLE=1 FUNFERN_TEST_DIST=${FUNFERN_TEST_DIST:-dist-e2e-pages} FUNFERN_TEST_ISOLATED=0 FUNFERN_TEST_PREFIX=/funfern/ FUNFERN_E2E_HOSTING=pages playwright test browser-tests/e2e.spec.mjs",
     "test:e2e:safari": "node browser-tests/safari-e2e.mjs"
   },
   "devDependencies": {

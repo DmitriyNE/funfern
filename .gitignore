@@ -1,6 +1,7 @@
 /target/
 /dist/
 /dist-e2e/
+/dist-e2e-pages/
 /node_modules/
 /.playwright-browsers/
 /playwright-report/

@@ -118,6 +118,18 @@ directly, fixture by fixture, and exits 1 if one fails. On Safari 26.3.1 on the
 M1 Max all six pass in about a minute, within a percent or two of Chrome's
 readings - WebKit translates the shaders its own way onto the same Metal - the
 refusal at step 788 as everywhere.
+The site itself is served another way: GitHub Pages sends no isolation
+headers, so the page installs `coi-serviceworker.js`, which adds them to every
+response, and reloads once. `npm run test:e2e:pages` runs the fixtures as the
+site runs them: a bundle built for the production path,
+`TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release
+--public-url /funfern/ --dist dist-e2e-pages`, served under `/funfern/`
+(`server.py --prefix`) without the headers. On the cold start the first
+navigation registers the worker and the page reloads itself - two navigations
+of the main frame, then the page is cross-origin isolated, a worker controls
+it and the reload flag is gone - and the fixture passes; a warm reload starts
+in one navigation, the worker already there, and passes again, the build
+attribute checked on both.
 
 No CI job runs the browser fixtures yet. Chromium's software WebGPU, SwiftShader,
 found its adapter in Playwright's image on arm64 Linux, but lost the app's device

@@ -21590,3 +21590,25 @@ end-to-end specs hold the attribute to `expectedBuildId()`
 `git rev-parse --short=12 HEAD`; the Safari runner reads it with the verdict
 and fails a fixture whose page runs another build. Nothing about the bundle's
 contents or its caching changed; the check only names what is running.
+
+## 2026-10-10 — The fixtures run as the site runs them, behind the isolation service worker
+
+The second packaging item. The browser runs served every bundle with the
+isolation headers the test server sends, which GitHub Pages cannot: there the
+page installs `coi-serviceworker.js`, which adds the headers to every response
+it fetches, and reloads once, a path no run had taken. `npm run test:e2e:pages`
+takes it: the e2e bundle built with `--public-url /funfern/`, the production
+path, served under that prefix by `browser-tests/server.py --prefix` without
+the headers. The spec, under `FUNFERN_E2E_HOSTING=pages`, counts the main
+frame's navigations: the cold start takes two, the first registering the
+worker and the page reloading itself once `navigator.serviceWorker.ready`
+resolves, and afterwards the page is cross-origin isolated, a worker controls
+it and the page has cleared its one-shot reload flag; the fixture then passes
+as under the headers. A warm reload takes one navigation, the worker already
+in place, and passes again. The build attribute is held on both. The
+Playwright base URL carries the prefix (`FUNFERN_TEST_PREFIX`), the spec
+navigates relative to it, and the server's health check asks for the prefixed
+page. The page stops to install the worker while the module is still
+downloading, so the server treats a connection its client drops as no error,
+where it printed a traceback for each. Each context is a fresh browser
+profile, so a worker one run registers reaches no other.
