@@ -89,7 +89,15 @@ dist-e2e`, which the Pages bundle is not. `npm run test:e2e` serves it
 cross-origin isolated and opens `?e2e=<fixture>` for each fixture the device
 suite names; the driver writes its verdict on the page's root element,
 `data-funfern-e2e` reading `pass` or `fail` beside `data-funfern-e2e-summary`,
-and its lines on the console, and `e2e-deadline=` raises its time limit. In
+and its lines on the console, and `e2e-deadline=` raises its time limit.
+Every browser run first holds the page to the build it meant to load:
+`build.rs` stamps the application with `FUNFERN_BUILD_ID`, the commit CI
+checked out or the checkout's own, the application writes it on the root
+element as `data-funfern-build` (and shows it in the diagnostics window,
+prints it for `--version`), and the startup, end-to-end and Safari runs
+compare it with `FUNFERN_EXPECT_BUILD` or this checkout's commit, so a stale
+service worker or a cached bundle serving yesterday's application fails the
+run instead of passing on old code. In
 Chrome on the M1 Max (`PLAYWRIGHT_CHANNEL=chrome`), whose WebGPU runs on
 Metal, five fixtures read what the native app reads to every printed digit -
 the cavity Q `6.242e-7` - and the refusal lands at step 788 as natively. A

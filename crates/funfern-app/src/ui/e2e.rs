@@ -71,6 +71,7 @@ pub(crate) fn add(app: &mut App) {
         }
     };
     mark("running", "");
+    report(&format!("e2e build {}", crate::BUILD_ID));
     app.insert_resource(Driver {
         fixture,
         phase: Phase::Open,

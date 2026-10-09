@@ -14,6 +14,7 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
+import { expectedBuildId } from "./build-id.mjs";
 
 const port = 4174;
 const driverPort = 4445;
@@ -90,9 +91,13 @@ try {
         const state = await webdriver("POST", `/session/${session}/execute/sync`, {
           script:
             "const root = document.documentElement;" +
-            "return [root.getAttribute('data-funfern-e2e'), root.getAttribute('data-funfern-e2e-summary')];",
+            "return [root.getAttribute('data-funfern-e2e'), root.getAttribute('data-funfern-e2e-summary'), root.getAttribute('data-funfern-build')];",
           args: [],
         });
+        // The bundle served is the one built from this checkout.
+        if (state[2] !== null && state[2] !== expectedBuildId()) {
+          throw new Error(`the page runs build ${state[2]}, not ${expectedBuildId()}`);
+        }
         return state[0] === "pass" || state[0] === "fail" ? state : null;
       },
       deadline + 60,

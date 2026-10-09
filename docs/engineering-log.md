@@ -21566,3 +21566,27 @@ into `topology_examples.rs` while that commit's gate ran, after its test
 binaries were built and before its `git add`. The commit was reset and
 rebuilt on the file as tested, through the gate again, before this one.
 Nothing is edited in the tree while a gate runs.
+
+## 2026-10-10 — The build says what it was built from, and the browser runs hold the page to it
+
+The first of the packaging items the testing review asked for. Nothing
+identified a running bundle: a service worker left behind, or a bundle the
+browser cached, could serve yesterday's application and pass today's run, the
+mesh hashes aside. `build.rs` now stamps the application with
+`FUNFERN_BUILD_ID`: the variable of that name when the build sets it - the
+browser bundle's CI step passes the commit it checked out - else the
+checkout's own commit, twelve digits, else `unknown`, with the git directory's
+`HEAD`, the branch it names and `packed-refs` watched so a new commit restamps.
+The commit alone: a dirty tree is not tracked, since a change to a file the
+script does not watch would not rerun it, and the browser runs compare with
+the checkout's commit either way. Every wasm build writes it on the page's
+root element as `data-funfern-build` before anything else runs, the threaded
+one and the plain one alike (`set_browser_build_id` is not behind the feature
+the other attributes are); the diagnostics window shows it under its summary
+line; `funfern-app --version` prints it with the crate's version; and the
+end-to-end driver's first line is `e2e build <id>`. The startup and
+end-to-end specs hold the attribute to `expectedBuildId()`
+(`browser-tests/build-id.mjs`): `FUNFERN_EXPECT_BUILD` when set, else
+`git rev-parse --short=12 HEAD`; the Safari runner reads it with the verdict
+and fails a fixture whose page runs another build. Nothing about the bundle's
+contents or its caching changed; the check only names what is running.

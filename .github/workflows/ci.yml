@@ -175,7 +175,12 @@ jobs:
         # path is set, and the bundle is built for the site root.
         env:
           PUBLIC_URL: ${{ steps.pages.outputs.base_path }}/
-        run: scripts/trunk build --release --locked --public-url "$PUBLIC_URL"
+          # What the bundle says it was built from (build.rs), which a browser
+          # run holds the page it loads to.
+          FUNFERN_BUILD_ID: ${{ github.sha }}
+        run: |
+          scripts/trunk build --release --locked --public-url "$PUBLIC_URL"
+          echo "Built $FUNFERN_BUILD_ID"
 
       - name: Save build cache
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.cache.outputs.cache-hit != 'true'

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { expectedBuildId } from "./build-id.mjs";
 
 // Bevy's render error handler logs each of these before it stops rendering:
 // a validation or out-of-memory error, and the device lost.
@@ -20,6 +21,8 @@ test("WebGPU app starts, advances, and resizes its render target", async ({ page
   page.on("pageerror", (error) => fatalMessages.push(error.message));
 
   await page.goto("/");
+  // The bundle served is the one built from this checkout.
+  await expect(page.locator("html")).toHaveAttribute("data-funfern-build", expectedBuildId());
   expect(await page.evaluate(() => crossOriginIsolated)).toBe(expectPreparationWorker);
   // The page's shared-memory growth check decides whether the pool starts; it
   // must pass wherever the pool works, or the check alone would switch it off.

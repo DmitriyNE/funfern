@@ -9,6 +9,9 @@ Start `scripts/trunk serve --release`, wait for its listening message, then open
 <http://127.0.0.1:8080/>. The wrapper builds the isolated one-worker bundle;
 plain `trunk` builds the cooperative static-host variant.
 
+- [ ] The page's root element carries `data-funfern-build`, the commit the bundle
+  was built from, and Performance diagnostics shows the same under its summary
+  line; after a deploy it is the commit deployed, not the one before.
 - [ ] On iOS Safari, or wherever the page's shared-memory growth check fails, the
   app starts without its background pool: the console warns once,
   `data-funfern-preparation-worker` reads `unavailable`, and the simulation runs.

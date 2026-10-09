@@ -174,6 +174,7 @@ impl Playground {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.monospace(self.summary_line());
+                    ui.small(format!("Build {}", crate::BUILD_ID));
                     ui.separator();
                     self.frame_section(ui);
                     // Above the sections whose height follows whatever the

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
+import { expectedBuildId } from "./build-id.mjs";
 
 // The app's end-to-end fixtures (crates/funfern-app/src/ui/e2e.rs) in the
 // browser: a bundle built with the e2e feature runs the fixture `?e2e=` names
@@ -66,6 +67,8 @@ for (const fixture of fixtures) {
 
     await page.goto(`/?e2e=${fixture}&e2e-deadline=${deadline}`);
     const root = page.locator("html");
+    // The bundle served is the one built from this checkout.
+    await expect(root).toHaveAttribute("data-funfern-build", expectedBuildId());
     const outcome = await Promise.race([
       expect(root)
         .toHaveAttribute("data-funfern-e2e", /^(pass|fail)$/, {

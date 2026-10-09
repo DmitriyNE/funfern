@@ -27,6 +27,11 @@ mod wave_gpu;
 use bevy::prelude::*;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 
+/// What this build was built from, stamped by `build.rs`: the commit, or what
+/// CI named. The page carries it as `data-funfern-build` on its root element,
+/// the diagnostics window shows it, and `--version` prints it.
+pub(crate) const BUILD_ID: &str = env!("FUNFERN_BUILD_ID");
+
 /// Runs the app; answers how it exited, which the native build makes its
 /// process's status: an end-to-end fixture's verdict, or a render error Bevy
 /// quit on.
@@ -60,7 +65,24 @@ fn run_app() -> AppExit {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> AppExit {
+    if std::env::args().any(|argument| argument == "--version") {
+        println!("funfern-app {} {BUILD_ID}", env!("CARGO_PKG_VERSION"));
+        return AppExit::Success;
+    }
     run_app()
+}
+
+/// Writes the build's identity on the page's root element, for whatever
+/// loads the page to hold what it got to what it meant to load.
+#[cfg(target_arch = "wasm32")]
+fn set_browser_build_id() {
+    let Some(root) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.document_element())
+    else {
+        return;
+    };
+    let _ = root.set_attribute("data-funfern-build", BUILD_ID);
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
@@ -127,6 +149,7 @@ fn record_worker_aborts() {
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
 fn main() {
+    set_browser_build_id();
     set_browser_preparation_worker_status("initializing");
     set_browser_amr_worker_status("initializing");
     set_browser_amr_job_status("waiting");
@@ -179,5 +202,6 @@ async fn shared_memory_growth_visible() -> bool {
 
 #[cfg(all(target_arch = "wasm32", not(feature = "browser-threads")))]
 fn main() {
+    set_browser_build_id();
     run_app();
 }
