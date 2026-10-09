@@ -8591,6 +8591,194 @@ mod tests {
     /// `|t(f)|` within 3% from 0.5 to 3.5 Hz (2.5%): one at 1, 2 and 3 Hz,
     /// 0.6 at 1.5 and 2.5. The readout, a pulse a segment for two of them,
     /// reads the whole pulse within 5% from 0.6 to 3.4 Hz (2.0%).
+    const INTERFACE_X: f64 = 0.1;
+    const INTERFACE_HZ: f64 = 1.5;
+    const INTERFACE_WIDTH: f64 = 0.1;
+    const INTERFACE_START: f64 = 0.1;
+
+    struct InterfaceRun {
+        /// Upper arm left of the interface, upper arm right of it, lower arm.
+        energies: [f64; 3],
+        /// How far the upper probe's pulse arrives behind the lower one's.
+        lag: f64,
+        /// What that should be, from where the probe nodes are.
+        expected_lag: f64,
+    }
+
+    /// A pulse down the two-arm channel at normal incidence on a planar
+    /// interface: medium 2 fills the upper arm from `INTERFACE_X` on, and the
+    /// launcher at `x = −0.85` lights both arms. The Gaussian, σ = 0.1 s on a
+    /// 1.5 Hz carrier and cut at 4σ, is 0.8 long in medium 1 and 0.4 in
+    /// medium 2. Four σ after its peak crosses the interface, the reflected
+    /// pulse spans −0.7 to 0.1, the transmitted 0.1 to 0.5 and the reference
+    /// 0.1 to 0.9, each clear of the interface, the launcher and the far wall:
+    /// the energy then, `½Q·u` a node and `½w b·v` a sample, summed over each
+    /// arm right of the launcher, the upper one either side of the interface.
+    /// The probes at `(0.5, ±0.5)` time the pulse past them.
+    fn interface_run(
+        polarization: ElectromagneticPolarization,
+        permittivity: f64,
+        permeability: f64,
+    ) -> InterfaceRun {
+        let mut builder = Builder::new();
+        builder.scene.physics = PhysicsModel::Electromagnetic { polarization };
+        builder.scene.outer_boundaries = channel();
+        builder.scene.materials.push(Material {
+            id: MaterialId(2),
+            name: "Medium 2".into(),
+            mass_density: ScalarField::constant(permittivity),
+            stiffness: ScalarField::constant(permeability),
+            ..Material::default_medium()
+        });
+        let pulse = TimeSignal::pulsed(
+            [0.0, 1.0, INTERFACE_HZ, 0.0],
+            PulseEnvelope::Gaussian {
+                width: INTERFACE_WIDTH,
+            },
+            INTERFACE_START,
+            0.0,
+        );
+        builder.arms(-0.85, pulse, &[(INTERFACE_X, 0.95, MaterialId(2))], None);
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        let prepared = prepare(&document, 0.035);
+        assert!(prepared.canonical_temporal_operator.is_none());
+        let operator = &prepared.canonical_operator;
+        let peak = INTERFACE_START + GAUSSIAN_CUT_WIDTHS * INTERFACE_WIDTH;
+        let hit = peak + (INTERFACE_X + 0.85);
+        let snapshot = hit + GAUSSIAN_CUT_WIDTHS * INTERFACE_WIDTH;
+        // The transmitted pulse passes the upper probe from 0.4 to 1.2 s after
+        // the hit, and its echo from the layer's far end is not back before
+        // 2.2 s. The reference passes the lower probe from 0 to 0.8 s, and its
+        // front could be back from the far wall at 1 s.
+        let ends = [hit + 1.4, hit + 1.0];
+        let probes = [Point2::new(0.5, 0.5), Point2::new(0.5, -0.5)].map(|point| {
+            operator
+                .node_points()
+                .iter()
+                .enumerate()
+                .min_by(|a, b| (*a.1 - point).norm().total_cmp(&(*b.1 - point).norm()))
+                .unwrap()
+                .0
+        });
+        // The wall along `y = 0` carries a node for each arm at one point:
+        // which arm a node is in is the arm of the elements around it.
+        let mut lower = vec![false; operator.node_points().len()];
+        for nodes in operator.element_nodes() {
+            let below = operator.node_points()[nodes[6] as usize].y < 0.0;
+            for node in nodes {
+                lower[*node as usize] = below;
+            }
+        }
+        let mut state =
+            CanonicalWaveState::zero(operator, prepared.recommended_time_step()).unwrap();
+        let mut energies = None;
+        let mut traces = [Vec::new(), Vec::new()];
+        while state.time() < ends[0] {
+            state
+                .step_with_forcing(operator, &prepared.canonical_forcing)
+                .unwrap();
+            let field = state.primary_field(operator).unwrap();
+            for ((trace, node), end) in traces.iter_mut().zip(probes).zip(ends) {
+                if state.time() < end {
+                    trace.push((state.time(), field[node]));
+                }
+            }
+            if energies.is_some() || state.time() < snapshot {
+                continue;
+            }
+            let mut shares = [0.0; 3];
+            let mut add = |point: Point2, lower: bool, energy: f64| {
+                if point.x < -0.8 {
+                    return;
+                }
+                let lane = if lower {
+                    2
+                } else if point.x < INTERFACE_X {
+                    0
+                } else {
+                    1
+                };
+                shares[lane] += energy;
+            };
+            for (((point, q), u), lower) in operator
+                .node_points()
+                .iter()
+                .zip(state.primary_flux())
+                .zip(&field)
+                .zip(&lower)
+            {
+                add(*point, *lower, 0.5 * q * u);
+            }
+            let v = state.complementary_field(operator).unwrap();
+            for ((sample, b), v) in operator
+                .constitutive_samples()
+                .iter()
+                .zip(state.complementary_flux())
+                .zip(&v)
+            {
+                add(
+                    sample.point,
+                    sample.point.y < 0.0,
+                    0.5 * sample.integration_weight * b.dot(*v),
+                );
+            }
+            energies = Some(shares);
+        }
+        // Where a pulse sits in time at a probe: the centroid of `u²`.
+        let [upper, lower] = traces.map(|trace| {
+            let weight: f64 = trace.iter().map(|(_, u)| u * u).sum();
+            trace.iter().map(|(t, u)| t * u * u).sum::<f64>() / weight
+        });
+        let speed = (permittivity * permeability).sqrt().recip();
+        let [upper_x, lower_x] = probes.map(|node| operator.node_points()[node].x);
+        InterfaceRun {
+            energies: energies.unwrap(),
+            lag: upper - lower,
+            expected_lag: (upper_x - INTERFACE_X) / speed + (INTERFACE_X - lower_x),
+        }
+    }
+
+    /// A pulse at normal incidence on a planar interface, in TM and in TE,
+    /// against the reference arm. Medium 2 with ε = 4, μ = 1 has half the
+    /// impedance and half the speed: it reflects R = ((Z₂ − Z₁)/(Z₂ + Z₁))² =
+    /// 1/9 of the energy, passes the rest, and the transmitted pulse lags by
+    /// the time the slower medium adds. ε = μ = 2 is as slow and matched, and
+    /// reflects nothing. At this mesh R misses 1/9 by ±9e-5, TM over and TE
+    /// under, R + T misses 1 by 2e-6, the matched R is 1e-6 and the lag misses
+    /// by 2e-5 s. An impedance 0.2% off at the right speed moves R by 6e-4.
+    #[test]
+    fn a_pulse_at_an_interface_splits_as_fresnel_says_and_lags_by_the_slower_medium() {
+        for polarization in [
+            ElectromagneticPolarization::Tm,
+            ElectromagneticPolarization::Te,
+        ] {
+            for (permittivity, permeability, fresnel, tolerance) in
+                [(4.0, 1.0, 1.0 / 9.0, 3.0e-4), (2.0, 2.0, 0.0, 1.0e-5)]
+            {
+                let run = interface_run(polarization, permittivity, permeability);
+                let [reflected, transmitted, incident] = run.energies;
+                let (r, t) = (reflected / incident, transmitted / incident);
+                let case = format!("{polarization:?}, ε {permittivity}, μ {permeability}");
+                eprintln!(
+                    "{case}: R {r:.6}, off {:.2e}, R + T − 1 {:.2e}, lag {:.5} off {:.2e}",
+                    r - fresnel,
+                    r + t - 1.0,
+                    run.lag,
+                    run.lag - run.expected_lag
+                );
+                assert!((r - fresnel).abs() < tolerance, "{case}: R {r}");
+                assert!((r + t - 1.0).abs() < 1.0e-5, "{case}: R + T {}", r + t);
+                assert!(
+                    (run.lag - run.expected_lag).abs() < 1.0e-4,
+                    "{case}: lag {} against {}",
+                    run.lag,
+                    run.expected_lag
+                );
+            }
+        }
+    }
+
     #[test]
     fn an_etalon_passes_every_whole_hertz_and_six_tenths_between() {
         let layers = [(ETALON_PERMITTIVITY.sqrt(), ETALON_THICKNESS)];

@@ -21356,3 +21356,31 @@ a power of two, so even the rounding coincides. The field the fixture first
 tried had a mean, which a closed box keeps in `Q` forever, and never filled
 `b`; two zero-mean box modes do. An alternate factor applied 0.1% off fails it,
 and so does a switch the runtime ignores.
+
+## 2026-10-09 — A pulse at an interface splits as Fresnel says and lags by the slower medium
+
+The third physical-accuracy fixture. The Brewster test holds oblique `|r_s|`
+within 15%; nothing held a single interface at normal incidence, where the
+reference is exact. The gallery's two-arm channel launches one pulse down both
+arms; medium 2 fills the upper arm from `x = 0.1`, the lower arm is the
+reference. In TM and in TE, `ε = 4, μ = 1` must reflect `R = 1/9` of the
+energy and pass the rest, and `ε = μ = 2`, as slow but matched, nothing. Four
+widths after the pulse's peak crosses the interface, reflected, transmitted and
+reference pulses are each clear of it; the fixed path's energy, `½Q·u` a node
+and `½w b·v` a sample, summed over each, gives R and T against the reference.
+Probes at `x = 0.5` time the pulse in each arm by its `u²` centroid, and the
+transmitted one must lag by what the slower medium adds over the probe nodes'
+actual distances. At edge 0.035, R misses 1/9 by ±9e-5, TM over and TE under;
+R + T misses 1 by 2e-6; the matched R is 1e-6; the lag misses by 2e-5 s.
+Coarser, at 0.06 and 0.045, R misses by 2e-3 and 5e-4 and the matched R reads
+2.5e-4 and 1e-5. The first layout put the interface at `x = −0.1` with a 3 Hz
+carrier under a 0.08 s Gaussian, whose spectrum reaches 9 Hz, a wavelength
+under two edges in medium 2: R missed by 1 to 3% and wandered with the mesh.
+Moving the interface to 0.1 made room for σ = 0.1 s on 1.5 Hz. The energy sum
+first read 1.004: the wall between the arms carries a node for each arm at one
+point, and both had counted as the upper arm's; a node's arm is now its
+elements'. The lag first missed by up to 23 ms, the probe node's offset from
+`x = 0.5` at half speed. An impedance 0.2% off in medium 2 at the right speed
+moves R by 6e-4 and fails it, as only R can; μ 1% off everywhere leaves R alone
+and fails the lag; TE placing ε unreciprocated keeps `R = 1/9`, which `Z → 1/Z`
+leaves unchanged, and fails R + T and the lag.

@@ -296,7 +296,15 @@ permittivity keeps `D` and `B`, its `E` falls to exactly a quarter with that lan
 energy, the other lane's kept, and from the switch it runs as the unswitched
 medium at half the step - `(Q(t/2), b(t/2)/2)` in TM, `(Q(t/2)/2, b(t/2))` in TE -
 which the discrete step inherits; the two runs agree to the bit
-(`a_uniform_permittivity_switch_keeps_d_and_b_and_runs_as_the_slower_medium`).
+(`a_uniform_permittivity_switch_keeps_d_and_b_and_runs_as_the_slower_medium`). A
+pulse down the two-arm channel at normal incidence on a planar interface, in TM
+and in TE, splits as Fresnel says: medium 2 with `ε = 4` reflects 1/9 of the
+energy to 3e-4 and transmits the rest to 1e-5, read against the reference arm
+when the reflected, transmitted and reference pulses are clear of the
+interface, and the transmitted pulse lags the reference by what the slower
+medium adds, to 1e-4 s; `ε = μ = 2`, as slow and matched, reflects under 1e-5
+(`a_pulse_at_an_interface_splits_as_fresnel_says_and_lags_by_the_slower_medium`).
+An impedance 0.2% off at the right speed fails it.
 
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
