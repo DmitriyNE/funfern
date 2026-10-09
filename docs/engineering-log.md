@@ -21077,3 +21077,33 @@ temporal live-source examples to the new rule and left this one. The device
 was right: the reference now anchors the new carrier at the continuous phase
 plus the step, reduced to (-π, π] as the patch uploads it, and reads Q 3.1e-7
 and b 1.0e-6.
+
+## 2026-10-09 — The app runs a fixture on the device through its own handlers
+
+Every device check so far drove `CanonicalGpuRequest` itself; the runtime
+that the app runs - `refresh_runtime`, its requests, uploads and live events -
+had met only the simulated device of the protocol tests. The `e2e` feature
+puts a driver in the app (`src/ui/e2e.rs`, `FUNFERN_E2E=<fixture>`) beside
+`ui::frame`, so the harness is the shipped binary: egui, the render graph, the
+runtime and the device. The driver acts only through the app's handlers and
+judges only what the device accepted: progress by its accepted-step counter
+and processed event serial, the endpoint by a full snapshot whose own stamp,
+the step it copied, is the endpoint's, of the running generation. The f64
+reference steps on the generation the app accepted (`runtime.active()`): its
+operator, forcing and uploaded step, so the same mesh, with the pulse the app
+built (`pulse_increment`). One hook, compiled only with the feature, caps the
+steps a running frame asks for at the fixture's endpoint, since the app asks
+by the wall clock.
+
+The first fixture, `cavity`, strikes the unit square with reflecting walls and
+the default medium with one pulse at step 0 and compares Q and b after 256
+steps: `6.2e-7` and `1.0e-6` against 3e-5, at 11,121 degrees of freedom. Its
+first run read 2.7e-3: the default document runs the grid filter, which the
+reference did not apply, and the cavity now turns it off, as a fixture of
+nothing but the pulse should; a filtered fixture is for later. Negating b in
+the comparison, reading the lanes a step old, and stepping the reference one
+step short each fail it, at b 2.0, Q 1.2e-1 and 1.2e-1. The run did not exit
+when it failed at first: `main` dropped the status `app.run()` answers, so the
+app always exited 0. It answers it now, which also gives a render error Bevy
+quits on a failing status. The suite runs the fixture, and CI lints the
+feature, which no other step compiles.

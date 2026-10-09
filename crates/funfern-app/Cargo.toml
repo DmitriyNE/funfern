@@ -9,6 +9,9 @@ publish.workspace = true
 [features]
 default = []
 browser-threads = ["dep:rayon", "dep:wasm-bindgen-rayon"]
+# End-to-end fixtures run by the app itself on the device, chosen with
+# FUNFERN_E2E (src/ui/e2e.rs). Off in the shipped build.
+e2e = []
 
 [lints]
 workspace = true

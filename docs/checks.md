@@ -26,6 +26,21 @@ after building them with the real `HOME`; run one by hand the same way, or the
 toolchain is re-fetched into the scratch one. Nothing runs them in CI, which has
 no GPU.
 
+The examples drive the device request directly. The app's own end-to-end
+fixtures (`src/ui/e2e.rs`) run the app as it ships, built with the `e2e` feature
+and chosen by `FUNFERN_E2E=<fixture>`: a driver beside the frame acts only
+through the app's handlers - it opens a document, places a pulse, presses Run -
+and reads only what the device accepted, its accepted-step counter, the serial
+of the last event it processed, and a full snapshot stamped with the step it
+holds. The f64 reference steps on the generation the app accepted, so on the
+same mesh. The one thing the feature adds to the app is where a run stops, since
+the app asks for steps by the wall clock. The process exits 0 when the fixture
+holds; the suite runs each. `cavity` strikes a closed reflecting box of the
+default medium, grid filter off, with one pulse at step 0 and compares Q and b
+after 256 steps, to 3e-5: it reads `6.2e-7` and `1.0e-6` at 11,121 degrees of
+freedom. Negating b, reading the lanes a step old, or stepping the reference one
+step short each fails it.
+
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without
 its file; regenerate them all with

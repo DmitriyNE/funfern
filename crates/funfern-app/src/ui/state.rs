@@ -52,6 +52,9 @@ pub struct Playground {
     /// beside it.
     #[cfg(test)]
     pub(super) protocol_log: Vec<ProtocolNote>,
+    /// Where an end-to-end fixture holds the run.
+    #[cfg(feature = "e2e")]
+    pub(super) e2e_steps: e2e::E2eSteps,
     pub(super) selection: TopologySelection,
     pub(super) inspector: Option<InspectorPanel>,
     pub(super) draw_open: bool,
@@ -360,6 +363,8 @@ impl Default for Playground {
             pack_inline: false,
             #[cfg(test)]
             protocol_log: Vec::new(),
+            #[cfg(feature = "e2e")]
+            e2e_steps: e2e::E2eSteps::default(),
             selection: TopologySelection::None,
             inspector: Some(InspectorPanel::Edit),
             draw_open: false,

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Runs the GPU-versus-reference examples on this machine's GPU and reports each
-# run's verdict. Every run steps the device and compares what it reads back
-# with the f64 reference on the same discretization; a run fails on a device
-# fault, a timeout, or an error outside its bound, a NaN included.
+# Runs the GPU-versus-reference examples, and the app's own end-to-end
+# fixtures, on this machine's GPU and reports each run's verdict. Every run
+# steps the device and compares what it reads back with the f64 reference on
+# the same discretization; a run fails on a device fault, a timeout, or an
+# error outside its bound, a NaN included.
 #
 #   scripts/device-suite.sh             every run
 #   scripts/device-suite.sh handoff     the runs whose line matches a pattern
@@ -61,6 +62,8 @@ RUNS=(
   'canonical_gpu_temporal_rollback'
   'canonical_gpu_timing'
   'canonical_gpu_timing --failure'
+  # The app itself, driven through its own handlers (src/ui/e2e.rs).
+  'FUNFERN_E2E=cavity funfern-app'
 )
 
 pattern=${1:-}
@@ -77,6 +80,7 @@ if [[ ${#selected[@]} -eq 0 ]]; then
 fi
 
 cargo build -p funfern-app --release --locked --examples || exit 1
+cargo build -p funfern-app --release --locked --features e2e --bin funfern-app || exit 1
 
 logs="target/device-suite/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$logs"
@@ -96,6 +100,8 @@ for run in "${selected[@]}"; do
   done
   example=$1
   shift
+  binary="target/release/examples/$example"
+  [[ $example == funfern-app ]] && binary=target/release/funfern-app
   log="$logs/$(printf %02d "$index")-$example.log"
   home="$scratch/$index"
   mkdir -p "$home/Library/Application Support/funfern"
@@ -105,7 +111,7 @@ for run in "${selected[@]}"; do
   # where macOS has no `timeout`.
   env HOME="$home" ${assignments[@]+"${assignments[@]}"} \
     perl -e 'alarm shift @ARGV; exec @ARGV or die "$!\n"' "$limit" \
-    "target/release/examples/$example" "$@" >"$log" 2>&1
+    "$binary" "$@" >"$log" 2>&1
   status=$?
   if [[ $status -eq 142 ]]; then
     echo "stopped after ${limit} s" >>"$log"

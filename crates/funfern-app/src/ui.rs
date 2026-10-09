@@ -43,6 +43,8 @@ mod coordinator;
 mod diagnostics;
 mod domain;
 mod draw_tools;
+#[cfg(feature = "e2e")]
+pub(crate) mod e2e;
 mod events;
 mod exposure;
 mod gesture;

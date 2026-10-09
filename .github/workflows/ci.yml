@@ -73,6 +73,11 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Run Clippy on the end-to-end fixtures
+        # The app's e2e feature (src/ui/e2e.rs), which no other step compiles.
+        # The fixtures themselves need a GPU and run in scripts/device-suite.sh.
+        run: cargo clippy -p funfern-app --bins --features e2e --locked -- -D warnings
+
       - name: Build tests
         # Release, as the local checks run them: the gallery's scene tests
         # simulate seconds of a wave, which in a debug build took the step

@@ -27,7 +27,10 @@ mod wave_gpu;
 use bevy::prelude::*;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 
-fn run_app() {
+/// Runs the app; answers how it exited, which the native build makes its
+/// process's status: an end-to-end fixture's verdict, or a render error Bevy
+/// quit on.
+fn run_app() -> AppExit {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
@@ -50,12 +53,14 @@ fn run_app() {
             commands.spawn(Camera2d);
         })
         .add_systems(EguiPrimaryContextPass, ui::frame);
-    app.run();
+    #[cfg(feature = "e2e")]
+    ui::e2e::add(&mut app);
+    app.run()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn main() {
-    run_app();
+fn main() -> AppExit {
+    run_app()
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]

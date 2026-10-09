@@ -926,6 +926,12 @@ impl Playground {
                         request.requested_steps(),
                         batch.steps,
                     );
+                    // An end-to-end fixture's endpoint: the steps asked for
+                    // stop there.
+                    #[cfg(feature = "e2e")]
+                    let admitted = self.e2e_steps.limit.map_or(admitted, |limit| {
+                        admitted.min(limit.saturating_sub(request.requested_steps()))
+                    });
                     if admitted > 0 {
                         request.request_steps(admitted);
                     }
@@ -1275,7 +1281,7 @@ fn running_material_runtime(
 /// elements of `region`: the point source's carrier there, so it reaches
 /// only what a source at that spot would. Spread by straight-line distance,
 /// a pulse beside a baffle went straight through it.
-fn pulse_increment(
+pub(super) fn pulse_increment(
     active: &PreparedTopology,
     position: Point2,
     region: RegionId,
