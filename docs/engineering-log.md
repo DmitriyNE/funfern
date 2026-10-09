@@ -3402,10 +3402,6 @@ above:
   each flip of the chain recovery scanned every edge; a walk along the segment
   now finds them, 1,256 ms to 41 ms, and a vertex grid the chain's points,
   41 ms to 6.6 ms; see that day's entries).
-- [ ] `canonical_gpu_handoff --edit` stops on its own guard, "the fixture
-  cannot tell a stepped carrier from one that is not": its edited carriers
-  without their phase steps stand 0.000e0 from the oracle (2026-10-09, the
-  device suite's first run; the guard came with 517a28e, whose gate it was).
 - [ ] `canonical_gpu_live_events` reads Q 1.4e-3 and b 5.0e-4 against its
   3e-5 after five paused events, the clock unchanged (2026-10-09, the device
   suite's first run).
@@ -21053,3 +21049,15 @@ from one that is not", its carriers without their phase steps standing
 0.000e0 from the oracle; the guard came with 517a28e, which it gated. And
 `canonical_gpu_live_events` reads Q 1.4e-3 and b 5.0e-4 after five paused
 events against its 3e-5. Both are in the TODOs; neither is changed here.
+
+## 2026-10-09 — The suite runs the edit handoff with the carriers it edits
+
+The device suite's first run reported `canonical_gpu_handoff --edit` failing,
+and the previous entry called it a check that had stopped passing. It had not:
+`--edit` gives the target generation's `--source` and `--prescribed` carriers
+other numbers, so alone it has no carrier to edit, and the fixture's own guard
+stopped it, as it should, for a run that could not tell a stepped carrier from
+one that is not. 517a28e gated with all three flags. The suite now runs
+`--source --prescribed --edit`, which passes at Q 2.1e-7, its carriers
+without their phase steps standing 2.2e-2 from the oracle, as 517a28e
+recorded (2.1e-7, and 1e-2 to 2.8e-2). The TODO is gone.

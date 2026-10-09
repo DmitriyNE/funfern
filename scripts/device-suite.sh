@@ -39,7 +39,7 @@ RUNS=(
   # Each other example as it stands, and the rejections and rollbacks the
   # device performs for real.
   'canonical_gpu_handoff'
-  'canonical_gpu_handoff --edit'
+  'canonical_gpu_handoff --source --prescribed --edit'
   'canonical_gpu_handoff --failure'
   'canonical_gpu_handoff --second-order'
   'canonical_gpu_handoff --pulse'
