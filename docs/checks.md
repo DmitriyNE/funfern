@@ -65,7 +65,14 @@ uploaded. Q reads `9.9e-7`, the run without the edit `1.4` off; a reference left
 on the old step fails at 1.1. `remesh` sets the target edge finer at step 128,
 nothing else changed: the field is interpolated from 11,121 nodes onto 15,349 of
 the same geometry. Q reads `7.7e-7`, and a reference that drops the component
-totals the runtime keeps reads 2.5e-5 and fails.
+totals the runtime keeps reads 2.5e-5 and fails. `rejection` makes the cavity's
+medium defocusing Kerr with an amplitude bound of 0.2 and drives it with its
+point source at the (1, 1) mode until the field reaches the bound. The device
+refuses the step after 788 with the inverse-domain status, as the reference
+refuses it; the app pauses on its own, the accepted state reads Q `7.3e-7`
+against the reference's step 788, and Run - which clears the failure - retries
+the step to the same refusal with the stored state the same bits. A reference a
+step short, or a retry that moves one bit, fails it.
 
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without

@@ -21168,3 +21168,26 @@ the M1 Max, so 5e-6 leaves four times the worst; a device that reads more is
 to be looked at, not given more. The cavity, its batchings and the Switch
 pass under it unchanged. The remesh's own action is checked to have remeshed:
 a node count that stayed fails it, and one that moved fails the handoff.
+
+## 2026-10-09 — A real refusal on the device, paused and retried by the app
+
+`rejection` makes the cavity's medium defocusing Kerr - a negative cubic term
+on its mass row with a declared amplitude bound, as the Advanced editor's
+field-law row authors it - and switches its point source on at the (1, 1)
+mode's frequency until the field reaches the bound. Nothing injects the
+failure: the device refuses the step after 788 with the inverse-domain status
+because the state it would take has no constitutive inverse, and the f64
+reference refuses the same step, taking every one before it. The app pauses on
+its own (its fault latched, Run released), the accepted state reads Q 7.3e-7
+and b 1.8e-6 against the reference's step 788, and Run, which clears the
+failure, retries the step to the same refusal with the stored state the same
+bits. A reference a step short, or a retry that moves one bit, fails it.
+
+The bound took finding: at a drive of 10 the field peaks at 0.45 by step
+4096, the Kerr term detuning the resonance as it grows, so the bound is 0.2 and
+the refusal comes well into the run. The fixture is driven from rest, without
+a pulse: the device request refuses a pulse on a field-dependent medium, whose
+increment is not derived through the nonlinear map, and the app drops it with a
+message. The driver met that as a pulse that never landed, and now says so - a
+pulse neither waiting, nor on its way, nor taken has been dropped - instead of
+running out its time.

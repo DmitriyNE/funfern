@@ -20,7 +20,9 @@ mod check;
 
 use super::runtime::pulse_increment;
 use super::*;
-use crate::canonical_gpu::{CanonicalGpuHandoffOutcome, CanonicalGpuRuntimeTransfer};
+use crate::canonical_gpu::{
+    CANONICAL_FAILURE_INVERSE_DOMAIN, CanonicalGpuHandoffOutcome, CanonicalGpuRuntimeTransfer,
+};
 use bevy_egui::EguiPrimaryContextPass;
 use check::{within, worse};
 use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyDocument, TopologyEditor};
@@ -53,6 +55,7 @@ pub(crate) fn add(app: &mut App) {
         "switch" => (Fixture::Switch, vec![None]),
         "handoff" => (Fixture::Handoff, vec![None]),
         "remesh" => (Fixture::Remesh, vec![None]),
+        "rejection" => (Fixture::Rejection, vec![None]),
         _ => {
             eprintln!("e2e: no fixture named {name:?}");
             std::process::exit(2);
@@ -91,6 +94,12 @@ enum Fixture {
     /// the field is interpolated onto another mesh of the same geometry, its
     /// component totals kept.
     Remesh,
+    /// The cavity's medium made defocusing Kerr with an amplitude bound and
+    /// driven at its resonance until the field reaches the bound: the device
+    /// must refuse the step the reference refuses, the app pause on it with
+    /// the last accepted state kept, and Run retry it to the same refusal
+    /// without moving a stored bit.
+    Rejection,
 }
 
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
@@ -117,7 +126,16 @@ impl Fixture {
             Fixture::Switch => (&[(128, Action::Switch)], 256),
             Fixture::Handoff => (&[(128, Action::Edit)], 256),
             Fixture::Remesh => (&[(128, Action::Remesh)], 256),
+            // The endpoint is a ceiling the run must not reach.
+            Fixture::Rejection => (&[], 4096),
         }
+    }
+
+    /// Whether a pulse at step 0 sets the field going. A field-dependent medium
+    /// takes none - a pulse's increment is not derived through its nonlinear
+    /// map, so the app refuses one - and its fixture is driven by its source.
+    fn pulses(self) -> bool {
+        !matches!(self, Fixture::Rejection)
     }
 
     /// The relative L2 error Q, b and r may reach. Measured on the M1 Max the
@@ -135,6 +153,7 @@ impl Fixture {
             Fixture::Cavity | Fixture::CavityBatches | Fixture::Handoff | Fixture::Remesh => {
                 (cavity_document(), None)
             }
+            Fixture::Rejection => (rejection_document(), None),
             Fixture::Switch => {
                 let (document, material) = switch_document();
                 (document, Some(material))
@@ -195,6 +214,17 @@ enum Phase {
         reference: Reference,
         seen: u64,
     },
+    /// The device refused the step after `step`, with `code`; the app is to
+    /// pause on it. `first` is the refused state's hash and summary once its
+    /// snapshot is in, and `retried` whether Run has cleared the failure since.
+    Refused {
+        reference: Reference,
+        step: u64,
+        code: u32,
+        seen: u64,
+        first: Option<(u64, String)>,
+        retried: bool,
+    },
     Done,
 }
 
@@ -207,6 +237,7 @@ impl Phase {
             Phase::Run { .. } => "running to the next stop",
             Phase::Act { .. } => "waiting for the device to take the action",
             Phase::Snapshot { .. } => "waiting for the endpoint's snapshot",
+            Phase::Refused { .. } => "waiting for the app to pause on the refusal",
             Phase::Done => "done",
         }
     }
@@ -384,6 +415,35 @@ fn cavity_document() -> TopologyDocument {
     document
 }
 
+/// The cavity's medium made defocusing Kerr, as the Advanced editor's field
+/// law row authors it - a negative cubic term needs a declared amplitude
+/// bound - and its point source switched on at the (1, 1) mode's frequency,
+/// which pumps the closed box until the field reaches the bound.
+fn rejection_document() -> TopologyDocument {
+    let mut document = cavity_document();
+    for scene in [&mut document.model.draft, &mut document.model.accepted] {
+        for material in &mut scene.materials {
+            if material.id == DEFAULT_MATERIAL {
+                material.mass_law.field = FieldLaw::Polynomial {
+                    chi1: ScalarField::constant(0.0),
+                    chi2: ScalarField::constant(-0.2),
+                    amplitude_bound: Some(ScalarField::constant(REJECTION_BOUND)),
+                };
+            }
+        }
+    }
+    document.model.source.enabled = true;
+    document.model.source.signal = TimeSignal::harmonic(0.0, REJECTION_DRIVE, 0.354, 0.0);
+    document
+}
+
+/// The rejection fixture's drive amplitude and its medium's amplitude bound:
+/// the drive reaches the bound well into the run, not at its start. At this
+/// drive the field peaks at 0.45 by step 4096, the Kerr term detuning the
+/// resonance as it grows.
+const REJECTION_DRIVE: f64 = 10.0;
+const REJECTION_BOUND: f64 = 0.2;
+
 /// The cavity with a disc of the switchable medium preset on its mass row,
 /// near enough the pulse for its wave to reach the disc by the Switch.
 fn switch_document() -> (TopologyDocument, MaterialId) {
@@ -457,11 +517,40 @@ fn advance(
                 return None;
             };
             let temporal = active.canonical_temporal_operator.is_some();
-            if temporal != driver.material.is_some() {
+            let expected =
+                driver.material.is_some() || matches!(driver.fixture, Fixture::Rejection);
+            if temporal != expected {
                 return Some(Err(format!(
                     "the document prepared a {} generation",
                     if temporal { "time-varying" } else { "fixed" }
                 )));
+            }
+            let time_step = state.coordinator.uploaded_time_step;
+            if !driver.fixture.pulses() {
+                // Driven by its source from rest: the run starts at once.
+                let reference = match State::zero(&active, time_step) {
+                    Ok(reference) => reference,
+                    Err(error) => {
+                        return Some(Err(format!("the reference did not start: {error}")));
+                    }
+                };
+                println!(
+                    "e2e {:?}: {} DOFs, step {time_step:.4e}, driven by its source",
+                    driver.fixture,
+                    active.canonical_operator.degrees_of_freedom(),
+                );
+                state.e2e_steps.limit = Some(stop(0));
+                state.e2e_steps.batch = driver.batches.front().copied().flatten();
+                driver.phase = Phase::Run {
+                    reference: Reference {
+                        active,
+                        state: reference,
+                        control: None,
+                        steps: 0,
+                    },
+                    next: 0,
+                };
+                return None;
             }
             let domain = state.editor.document.model.accepted.geometry.domain;
             let point = Point2::new(
@@ -472,7 +561,6 @@ fn advance(
             let Some(&(position, region)) = state.coordinator.pending_pulses.back() else {
                 return Some(Err(format!("the pulse was not queued: {}", state.message)));
             };
-            let time_step = state.coordinator.uploaded_time_step;
             let reference = pulse_increment(
                 &active,
                 position,
@@ -511,6 +599,13 @@ fn advance(
             reference,
             processed,
         } => {
+            // Neither waiting, nor on its way, nor taken: the app dropped it.
+            if request.stats().processed_event() == processed
+                && state.coordinator.pending_pulses.is_empty()
+                && !request.live_event_pending()
+            {
+                return Some(Err(format!("the app dropped the pulse: {}", state.message)));
+            }
             if request.stats().processed_event() == processed
                 || !state.coordinator.pending_pulses.is_empty()
             {
@@ -534,6 +629,23 @@ fn advance(
         } => {
             let target = stop(next);
             let completed = request.stats().completed_steps();
+            let code = request.stats().failure();
+            if code != 0 {
+                if !matches!(driver.fixture, Fixture::Rejection) {
+                    return Some(Err(format!(
+                        "the device failed after step {completed} (failure code {code})"
+                    )));
+                }
+                driver.phase = Phase::Refused {
+                    reference,
+                    step: completed,
+                    code,
+                    seen: display.full_readbacks,
+                    first: None,
+                    retried: false,
+                };
+                return None;
+            }
             if completed < target {
                 driver.phase = Phase::Run { reference, next };
                 return None;
@@ -737,6 +849,101 @@ fn advance(
                     }
                 }),
             )
+        }
+        Phase::Refused {
+            mut reference,
+            step,
+            code,
+            seen,
+            first,
+            mut retried,
+        } => {
+            let paused = state.coordinator.solver_fault.is_some() && !state.wave_running;
+            if first.is_some() && !retried && state.coordinator.solver_fault.is_none() {
+                // Run cleared the failure: what follows is the retry's.
+                retried = true;
+            }
+            let waiting_for_retry = first.is_some() && !retried;
+            let snapshot_in = display.full_readbacks > seen
+                && display.generation == request.generation()
+                && display.full_snapshot_completed_steps() == step;
+            if !paused || waiting_for_retry || !snapshot_in {
+                if paused && !waiting_for_retry {
+                    request.request_full_state_readback();
+                }
+                driver.phase = Phase::Refused {
+                    reference,
+                    step,
+                    code,
+                    seen,
+                    first,
+                    retried,
+                };
+                return None;
+            }
+            let completed = request.stats().completed_steps();
+            let again = request.stats().failure();
+            if completed != step || again != code {
+                return Some(Err(format!(
+                    "refused after step {step} with code {code}, then after {completed} with {again}"
+                )));
+            }
+            let hash = hash(&display.accepted_storage_bits());
+            match first {
+                None => {
+                    if code != CANONICAL_FAILURE_INVERSE_DOMAIN {
+                        return Some(Err(format!(
+                            "the device refused with code {code}, not the inverse domain's"
+                        )));
+                    }
+                    // The reference takes every step the device accepted and
+                    // refuses the one after, as the device did.
+                    if let Err(error) = reference.advance_to(step) {
+                        return Some(Err(format!(
+                            "the reference refused earlier than the device, before step {}: {error}",
+                            reference.steps + 1
+                        )));
+                    }
+                    if reference.state.clone().step(&reference.active).is_ok() {
+                        return Some(Err(format!(
+                            "the device refused the step after {step}, which the reference takes"
+                        )));
+                    }
+                    let summary =
+                        match compare(&reference, display, driver.fixture.tolerance(), step) {
+                            Ok(summary) => summary,
+                            Err(failure) => return Some(Err(failure)),
+                        };
+                    println!(
+                        "e2e Rejection: refused after step {step} as the reference is, the app \
+                         paused; {summary}"
+                    );
+                    // Run, as the toolbar's button.
+                    state.wave_running = true;
+                    driver.phase = Phase::Refused {
+                        reference,
+                        step,
+                        code,
+                        seen: display.full_readbacks,
+                        first: Some((hash, summary)),
+                        retried: false,
+                    };
+                    None
+                }
+                Some((first, summary)) => Some(if hash == first {
+                    Ok(Run {
+                        summary: format!(
+                            "{summary}; Run retried the step to the same refusal, the stored \
+                             state the same bits"
+                        ),
+                        hash,
+                    })
+                } else {
+                    Err(format!(
+                        "the retry moved the stored state: {first:016x} to {hash:016x}"
+                    ))
+                }),
+            }
         }
         Phase::Done => None,
     }
