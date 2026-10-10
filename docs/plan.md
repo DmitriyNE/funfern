@@ -1443,9 +1443,9 @@ is next touched.
   [The wall-step spike](spikes/funfern-outgoing-wall-step-spike.md) found the
   cause - the two half-step Cayley kicks leave the trace node's mass off by
   `w²/16`, `w` the wall's rate times the step, and the wall's rates are stiff,
-  so the error is first order in `ω·dt` at a fixed CFL - and a fix: plain
-  kicks at the trace, one Cayley over the wall for the whole step, and the
-  wall's acceleration in the drift's corrected field. On the spike's strip
+  so the error is first order in `ω·dt` at a fixed CFL - and a fix: one
+  Cayley over the wall for the whole step, split as the trapezoid rule around
+  the kicks, and the wall's acceleration in the drift's corrected field. On the spike's strip
   that takes the band from 1.077 to 1.0006 and leaves `(ω·dt)²/24` at any
   step. Stages B (CPU) and C (device) are next; the fixture holds the
   second-order band to 15% until then.

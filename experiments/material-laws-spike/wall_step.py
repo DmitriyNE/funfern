@@ -47,15 +47,22 @@ class Scheme:
     fourth: the drift-form fourth-order step, u~ = u - dt^2/12 M^-1 K u.
     wall: 'halves' kicks the wall in each half-kick by `kick` ('cayley',
       'pade22', 'exact', 'sqrt-cayley', 'sqrt-pade'); 'after' kicks the trace
-      as the bulk and then takes one Cayley over (Q_b, Z) for the whole step.
+      as the bulk and then takes one Cayley over (Q_b, Z) for the whole step;
+      'trapezoid' splits that Cayley into its halves, (I + dt/2 G) with the
+      first kick and (I - dt/2 G)^-1 after the second.
     force_quadratic, generator_cubic, drift_wall: the Taylor-derived coupling
       (kick force (I + c dt^2 G^2) E F, generator G + c dt^2 G^3, u~_b +=
       c dt^2 M^-1 (G^2 X)_Q).
     wall_acceleration: u~_b += c dt^2 M^-1 (G (G X - E F_mid))_Q, the wall's
       share of dt^2/12 u'', with F_mid = F + dt/2 K u.
+    kick_form: the fourth-order kick form, its linear limit: each kick takes
+      F~ = F - dt^2/12 K M^-1 F and the drift the plain field.
+    wall_rate: under the kick form, the trace's rate in F~ includes the
+      wall's, F - (G X)_Q, with X as the kick finds it.
     """
     def __init__(self, name, fourth=True, wall='halves', kick='cayley', force_quadratic=0.,
-                 generator_cubic=0., drift_wall=0., wall_acceleration=0.):
+                 generator_cubic=0., drift_wall=0., wall_acceleration=0., kick_form=False,
+                 wall_rate=False):
         self.name = name
         self.fourth = fourth
         self.wall = wall
@@ -64,6 +71,8 @@ class Scheme:
         self.generator_cubic = generator_cubic
         self.drift_wall = drift_wall
         self.wall_acceleration = wall_acceleration
+        self.kick_form = kick_form
+        self.wall_rate = wall_rate
 
 
 PRODUCTION = Scheme('production')
@@ -77,6 +86,10 @@ TAYLOR = Scheme('taylor-derived pair, pade halves', kick='pade22', force_quadrat
 TAYLOR_CAYLEY = Scheme('taylor-derived pair, cayley halves', generator_cubic=-1/48, force_quadratic=-1/16, drift_wall=1/24)
 TARGET = Scheme('full-step cayley + wall acceleration', wall='after', wall_acceleration=1/12)
 TARGET_SQRT = Scheme('same, as square-root halves', kick='sqrt-cayley', wall_acceleration=1/12)
+TRAPEZOID = Scheme('same, as the trapezoid split', wall='trapezoid', wall_acceleration=1/12)
+KICK_PRODUCTION = Scheme('kick form, production wall', kick_form=True)
+KICK_PLAIN = Scheme('kick form, trapezoid split, no wall rate', wall='trapezoid', kick_form=True)
+KICK_TRAPEZOID = Scheme('kick form, trapezoid split, wall rate', wall='trapezoid', kick_form=True, wall_rate=True)
 LEAPFROG_TARGET = Scheme('leapfrog, full-step cayley', fourth=False, wall='after')
 
 
@@ -156,6 +169,29 @@ class Model:
         kick[np.ix_(self.x, self.fb)] = b
         return kick
 
+    def corrected_force(self, dt, scheme):
+        """The kick form's F~ at every free node, a map of the augmented state."""
+        v = np.zeros((self.n, self.N), dtype=complex)
+        v[2+np.arange(self.nf), self.f] = 1
+        if scheme.wall_rate:
+            x = np.zeros((2+self.m, self.N), dtype=complex)
+            x[np.arange(2+self.m), self.x] = 1
+            v[-2:] -= (self.g@x)[:2]
+        corrected = np.zeros((self.nf, self.N), dtype=complex)
+        corrected[np.arange(self.nf), self.f] = 1
+        corrected -= dt*dt/12*(self.k@(v/self.mass[:, None]))[2:]
+        return corrected
+
+    def with_force(self, kick, dt, scheme):
+        """The kick reading F~ where it read F, under the kick form."""
+        if not scheme.kick_form:
+            return kick
+        out = kick.copy()
+        out[:, self.f] = 0
+        out += kick[:, self.f]@self.corrected_force(dt, scheme)
+        out[self.f, :] = np.eye(self.N, dtype=complex)[self.f, :]
+        return out
+
     def full_cayley(self, duration):
         eye = np.eye(len(self.g))
         wall = np.eye(self.N, dtype=complex)
@@ -166,7 +202,7 @@ class Model:
         u = self.field()
         ku = self.k@u
         ut = u.copy()
-        if scheme.fourth:
+        if scheme.fourth and not scheme.kick_form:
             ut[2:] -= dt*dt/12*ku[2:]/self.mass[2:, None]
         x = np.zeros((2+self.m, self.N), dtype=complex)
         x[np.arange(2+self.m), self.x] = 1
@@ -187,7 +223,16 @@ class Model:
         if scheme.wall == 'after':
             kick = self.plain_kick(dt/2)
             return self.full_cayley(dt)@kick@self.drift(dt, scheme)@kick, kick
-        kick = self.wall_kick(dt/2, dt, scheme)
+        if scheme.wall == 'trapezoid':
+            eye = np.eye(len(self.g))
+            first = self.plain_kick(dt/2)
+            first[np.ix_(self.x, self.x)] = eye+dt/2*self.g
+            implicit = np.eye(self.N, dtype=complex)
+            implicit[np.ix_(self.x, self.x)] = np.linalg.inv(eye-dt/2*self.g)
+            first = self.with_force(first, dt, scheme)
+            second = self.with_force(self.plain_kick(dt/2), dt, scheme)
+            return implicit@second@self.drift(dt, scheme)@first, first
+        kick = self.with_force(self.wall_kick(dt/2, dt, scheme), dt, scheme)
         return kick@self.drift(dt, scheme)@kick, kick
 
     def reflection(self, dt, scheme, window=(.2, .8)):
@@ -305,15 +350,18 @@ def orders(cell):
 
 
 def split_equivalence(cell):
-    worst = 0.
+    worst = trapezoid = 0.
     for kind in ('first', 'passive'):
         for wavelength, angle in ((.45, 0), (.625, 38.7), (1., 75)):
             model = Model(strip_at(cell, wavelength, angle), kind)
             for factor in (1.2, .3):
                 a = model.reflection(factor*FIXTURE_BOUND, TARGET)
                 b = model.reflection(factor*FIXTURE_BOUND, TARGET_SQRT)
+                c = model.reflection(factor*FIXTURE_BOUND, TRAPEZOID)
                 worst = max(worst, abs(a-b)/abs(a))
+                trapezoid = max(trapezoid, abs(a-c)/abs(a))
     check('the wall after the kicks responds as the square-root halves', worst, 1e-9)
+    check('the trapezoid split responds as the wall after the kicks', trapezoid, 1e-9)
 
 
 def refinement(cell):
@@ -394,7 +442,13 @@ class Box:
         drift[np.ix_(bi, np.arange(total))] += dt*self.c@ut
         kick = np.eye(total)
         kick[np.ix_(qi, bi)] = -tau*self.c.T
-        if scheme.wall == 'after':
+        if scheme.wall == 'trapezoid':
+            first = kick.copy()
+            first[np.ix_(xi, xi)] = eye+dt*g/2
+            implicit = np.eye(total)
+            implicit[np.ix_(xi, xi)] = np.linalg.inv(eye-dt*g/2)
+            step = implicit@kick@drift@first
+        elif scheme.wall == 'after':
             wall = np.eye(total)
             wall[np.ix_(xi, xi)] = np.linalg.solve(eye-dt*g/2, eye+dt*g/2)
             step = wall@kick@drift@kick
@@ -428,7 +482,7 @@ def box_tests(mesh):
     initial = np.r_[np.sqrt(mesh.m)*np.cos(np.pi*mesh.x[:, 0]/2),
                     (np.sqrt(mesh.w)[..., None]*mesh.C(.03*np.sin(np.pi*mesh.x[:, 1]))).ravel(),
                     np.zeros(box.na)]
-    for scheme in (PRODUCTION, TARGET):
+    for scheme in (PRODUCTION, TARGET, TRAPEZOID):
         for name, gp, gc in cases:
             excess = max(max(abs(np.linalg.eigvals(box.step(cfl*mesh.dt, scheme, gp, gc))))-1
                          for cfl in (.2, .5, .9, 1., 1.1, 1.2, 1.22))
@@ -446,20 +500,53 @@ def box_tests(mesh):
     times = (10., 30.)
     reference = box.run(TARGET, .075, pulse, times)
     reference_production = box.run(PRODUCTION, .075, pulse, times)
-    observation('2D pulse: energy in the box at the small step', target=reference, production=reference_production)
-    for scheme, ref in ((PRODUCTION, reference_production), (TARGET, reference)):
+    reference_trapezoid = box.run(TRAPEZOID, .075, pulse, times)
+    observation('2D pulse: energy in the box at the small step', target=reference, production=reference_production,
+                trapezoid=reference_trapezoid)
+    for scheme, ref in ((PRODUCTION, reference_production), (TARGET, reference), (TRAPEZOID, reference_trapezoid)):
         at_step = box.run(scheme, 1.2, pulse, times)
         errors = [a/b-1 for a, b in zip(at_step, ref)]
         observation(f'2D pulse at 1.2 of the bound, {scheme.name}', energy=at_step, relative_to_small_step=errors)
-    errors = [a/b-1 for a, b in zip(box.run(TARGET, 1.2, pulse, times), reference)]
-    check('2D pulse: full-step cayley + acceleration within 10% of its small step', max(map(abs, errors)), .1)
+        if scheme is not PRODUCTION:
+            check(f'2D pulse: {scheme.name} within 10% of its small step', max(map(abs, errors)), .1)
     # The caveat: data that starts with a normal field at the wall. The raw
     # state means something else at the trace under each step, and the second
     # order wall's static memory keeps a different share of it.
     residue = {}
-    for scheme in (PRODUCTION, TARGET):
-        residue[scheme.name] = {str(cfl): box.run(scheme, cfl, initial, (100.,))[0] for cfl in (1.2, .3, .075)}
+    for scheme in (PRODUCTION, TARGET, TRAPEZOID):
+        residue[scheme.name] = {str(cfl): box.run(scheme, cfl, initial, (100.,))[0] for cfl in (1.2, .6, .3, .075)}
     observation('2D data with a field at the wall: energy at t = 100', **residue)
+    # The trapezoid split stores the average of its two drift instants, as
+    # the interior does, and keeps less of a field started at the wall than
+    # the wall-after split; the rest is the stiff modes' start, which the
+    # full-step bilinear map rings on.
+    check('2D data at the wall: the trapezoid split keeps less than the wall-after split at 1.2',
+          residue[TRAPEZOID.name]['1.2']/residue[TARGET.name]['1.2'], .7)
+
+
+def kick_form(cell):
+    """The kick form's linear limit: F~ in the kicks, the plain field in the drift."""
+    factors = (1.2, .6, .3, .15)
+    for kind in ('first', 'passive'):
+        for wavelength, angle in ((.45, 0), (1/2.2, math.degrees(math.asin(1/2.2))), (1., 75)):
+            model = Model(strip_at(cell, wavelength, angle), kind)
+            semi = model.strip.solve(kind)['reflection']
+            errors = {}
+            for scheme in (PRODUCTION, KICK_PRODUCTION, KICK_PLAIN, KICK_TRAPEZOID, TRAPEZOID):
+                errors[scheme.name] = [abs(model.reflection(f*FIXTURE_BOUND, scheme)-semi) for f in factors]
+            observation(f'kick form {kind} wavelength={wavelength:.3f} angle={angle:.1f}', **errors)
+            same = max(abs(a-b)/b for a, b in zip(errors[KICK_PRODUCTION.name], errors[PRODUCTION.name]))
+            check(f'kick form {kind} {wavelength:.3f} {angle:.0f}: production wall reflects as the drift form', same, 1e-6)
+            check(f'kick form {kind} {wavelength:.3f} {angle:.0f}: without the wall rate worse than production',
+                  errors[KICK_PLAIN.name][0]/errors[PRODUCTION.name][0], 1., lower=True)
+            check(f'kick form {kind} {wavelength:.3f} {angle:.0f}: with the wall rate at most 0.6 of production',
+                  errors[KICK_TRAPEZOID.name][0]/errors[PRODUCTION.name][0], .6)
+    model = Model(strip_at(cell, .45, 0), 'first')
+    semi = model.strip.solve('first')['reflection']
+    dt = .15*FIXTURE_BOUND
+    z = model.strip.omega*dt
+    check('normal incidence: kick form with the wall rate at z^2/24',
+          abs(abs(model.reflection(dt, KICK_TRAPEZOID)-semi)/(z*z/24)-1), .1)
 
 
 def main():
@@ -474,6 +561,7 @@ def main():
     split_equivalence(cell)
     refinement(cell)
     sweep(cell, bound)
+    kick_form(cell)
     box_tests(mesh)
     for result in RESULTS:
         if 'passed' in result:

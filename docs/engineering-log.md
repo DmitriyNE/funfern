@@ -22058,3 +22058,25 @@ and the second-order wall's static memory keeps four times too much of it,
 so handoffs and remeshes must carry the wall's state in the update's terms.
 
 Next: plan stage B (both CPU paths) for the user.
+
+## 2026-10-10 — The wall-step spike's update split as the trapezoid rule, and the kick form
+
+Two findings while planning stage B, recorded in the spike before any
+production change. The wall-after split stores, at a trace node, a state off
+from the field by a factor of order `w`, which every reader of the state at
+a step's end would see. The same full-step Cayley split as the trapezoid
+rule - its explicit half with the first kick, its implicit half after the
+second - responds identically (4e-10 on the strip) but stores the mean of
+the two drift instants around it, exactly as the interior's `Q` is, so the
+display, the probes and the rates read the trace as they read the interior;
+it is symmetric in time but for the drift's midpoint-force estimate, and
+costs one generator application more in the first kick. It also keeps 0.61
+of the wall-after split's share of data that starts with a field at the
+wall in the second-order wall's static memory (3.0e-3 against 4.95e-3 at
+1.2 of the bound; 1.15e-3 at a small step, production 1.21e-3). The rest is
+the stiff modes' start, on which the bilinear map rings by necessity, so
+stage B measures handoffs and equilibrates the carried wall state if they
+show it. The kick form's linear limit needs the wall's rate in the trace's
+`u̇`: without it 2.9 times production's error, with it 0.37 to 0.42 and
+`z²/24` at small steps, twice the drift form's at the app's step. The
+harness now runs 106 checks.

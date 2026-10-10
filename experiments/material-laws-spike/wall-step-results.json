@@ -1,10 +1,10 @@
 {
   "baseline": "beca47e0d05c9b24945ef632b00c5cc16f80c8a0",
   "summary": {
-    "passed": 76,
+    "passed": 106,
     "failed": 0,
     "failed_cases": [],
-    "seconds": 202.27784929203335
+    "seconds": 276.0963739170693
   },
   "results": [
     {
@@ -1408,6 +1408,14 @@
       "note": ""
     },
     {
+      "name": "the trapezoid split responds as the wall after the kicks",
+      "value": 4.37651326290471e-10,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
       "name": "error at 1.2 of each mesh bound, first, h = .05 to .00625",
       "observation": {
         "production": [
@@ -1579,6 +1587,368 @@
       "note": ""
     },
     {
+      "name": "kick form first wavelength=0.450 angle=0.0",
+      "observation": {
+        "production": [
+          0.0022034365113063285,
+          0.00039161585639861635,
+          8.96691143125563e-05,
+          2.192428460770884e-05
+        ],
+        "kick form, production wall": [
+          0.0022034365113075983,
+          0.0003916158564035846,
+          8.96691143161639e-05,
+          2.1924284607169143e-05
+        ],
+        "kick form, trapezoid split, no wall rate": [
+          0.006381949647248964,
+          0.0014362604805023482,
+          0.0003508164545086086,
+          8.721003235906101e-05
+        ],
+        "kick form, trapezoid split, wall rate": [
+          0.0009323652788364375,
+          7.665223108351369e-05,
+          1.3796684750625804e-05,
+          3.530590940067999e-06
+        ],
+        "same, as the trapezoid split": [
+          0.00044137749215451984,
+          7.270497580078366e-05,
+          1.5723861346077198e-05,
+          3.7793596476163893e-06
+        ]
+      }
+    },
+    {
+      "name": "kick form first 0.450 0: production wall reflects as the drift form",
+      "value": 4.0232374786347255e-11,
+      "limit": 1e-06,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form first 0.450 0: without the wall rate worse than production",
+      "value": 2.8963619394077136,
+      "limit": 1.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form first 0.450 0: with the wall rate at most 0.6 of production",
+      "value": 0.423141431147329,
+      "limit": 0.6,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form first wavelength=0.455 angle=27.0",
+      "observation": {
+        "production": [
+          0.0021743064524410286,
+          0.000386382731787063,
+          8.846643831520618e-05,
+          2.162992996473996e-05
+        ],
+        "kick form, production wall": [
+          0.002174306452448629,
+          0.000386382731775327,
+          8.846643828633496e-05,
+          2.1629929974488164e-05
+        ],
+        "kick form, trapezoid split, no wall rate": [
+          0.006296716497025679,
+          0.001416995876387341,
+          0.0003461063124495916,
+          8.603884663773346e-05
+        ],
+        "kick form, trapezoid split, wall rate": [
+          0.0009203086977580995,
+          7.538796496495064e-05,
+          1.348691100660544e-05,
+          3.448545344640811e-06
+        ],
+        "same, as the trapezoid split": [
+          0.00043110726861758,
+          7.10122100787306e-05,
+          1.5357694555756976e-05,
+          3.691343742620347e-06
+        ]
+      }
+    },
+    {
+      "name": "kick form first 0.455 27: production wall reflects as the drift form",
+      "value": 4.5068125741707665e-10,
+      "limit": 1e-06,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form first 0.455 27: without the wall rate worse than production",
+      "value": 2.895965511189347,
+      "limit": 1.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form first 0.455 27: with the wall rate at most 0.6 of production",
+      "value": 0.4232654034231911,
+      "limit": 0.6,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form first wavelength=1.000 angle=75.0",
+      "observation": {
+        "production": [
+          0.0006474288635932858,
+          0.00011512716578628075,
+          2.636235220317221e-05,
+          6.445756522362325e-06
+        ],
+        "kick form, production wall": [
+          0.000647428865796333,
+          0.00011512716648792904,
+          2.636235182667845e-05,
+          6.445758221499198e-06
+        ],
+        "kick form, trapezoid split, no wall rate": [
+          0.0018758558883181908,
+          0.0004222322805481709,
+          0.00010313778563007906,
+          2.5639552027143208e-05
+        ],
+        "kick form, trapezoid split, wall rate": [
+          0.00027254583502519657,
+          1.90969351514994e-05,
+          2.0909347591035584e-06,
+          4.714602889325129e-07
+        ],
+        "same, as the trapezoid split": [
+          5.838111239715777e-05,
+          9.618714897667713e-06,
+          2.0802725439954368e-06,
+          5.000170799059396e-07
+        ]
+      }
+    },
+    {
+      "name": "kick form first 1.000 75: production wall reflects as the drift form",
+      "value": 2.6360550035452135e-07,
+      "limit": 1e-06,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form first 1.000 75: without the wall rate worse than production",
+      "value": 2.8973930477968337,
+      "limit": 1.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form first 1.000 75: with the wall rate at most 0.6 of production",
+      "value": 0.4209664572452698,
+      "limit": 0.6,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form passive wavelength=0.450 angle=0.0",
+      "observation": {
+        "production": [
+          0.0021942426289190014,
+          0.0003918119708944652,
+          8.975156663407907e-05,
+          2.1945984272943773e-05
+        ],
+        "kick form, production wall": [
+          0.002194242628913683,
+          0.0003918119708993849,
+          8.975156664365827e-05,
+          2.194598428338051e-05
+        ],
+        "kick form, trapezoid split, no wall rate": [
+          0.006324917670682978,
+          0.001434966903868256,
+          0.0003510133156263551,
+          8.728849885335898e-05
+        ],
+        "kick form, trapezoid split, wall rate": [
+          0.0009297272885584935,
+          7.673437937761399e-05,
+          1.3797688599620692e-05,
+          3.5304400675481513e-06
+        ],
+        "same, as the trapezoid split": [
+          0.0004417283831890934,
+          7.272637623773843e-05,
+          1.5725177353285662e-05,
+          3.779441463114744e-06
+        ]
+      }
+    },
+    {
+      "name": "kick form passive 0.450 0: production wall reflects as the drift form",
+      "value": 4.755647620349197e-10,
+      "limit": 1e-06,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form passive 0.450 0: without the wall rate worse than production",
+      "value": 2.882506058046536,
+      "limit": 1.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form passive 0.450 0: with the wall rate at most 0.6 of production",
+      "value": 0.4237121621397565,
+      "limit": 0.6,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form passive wavelength=0.455 angle=27.0",
+      "observation": {
+        "production": [
+          0.0019168254808492368,
+          0.0003417703619473534,
+          7.82501031871959e-05,
+          1.9131097724547984e-05
+        ],
+        "kick form, production wall": [
+          0.0019168254808538115,
+          0.0003417703619390034,
+          7.82501031695409e-05,
+          1.9131097725327187e-05
+        ],
+        "kick form, trapezoid split, no wall rate": [
+          0.005517349368360961,
+          0.0012510700032232495,
+          0.00030598993542336767,
+          7.608984230795916e-05
+        ],
+        "kick form, trapezoid split, wall rate": [
+          0.0007905937513977664,
+          5.816982660585606e-05,
+          9.732973047524794e-06,
+          2.5622667154156175e-06
+        ],
+        "same, as the trapezoid split": [
+          0.00035127815520477466,
+          5.531003482992757e-05,
+          1.1721650133987314e-05,
+          2.800635847192751e-06
+        ]
+      }
+    },
+    {
+      "name": "kick form passive 0.455 27: production wall reflects as the drift form",
+      "value": 2.256226941544038e-10,
+      "limit": 1e-06,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form passive 0.455 27: without the wall rate worse than production",
+      "value": 2.878378560533605,
+      "limit": 1.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form passive 0.455 27: with the wall rate at most 0.6 of production",
+      "value": 0.41244952099003773,
+      "limit": 0.6,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form passive wavelength=1.000 angle=75.0",
+      "observation": {
+        "production": [
+          0.0005292223803087035,
+          9.365145373540579e-05,
+          2.138785670300874e-05,
+          5.2255240825956455e-06
+        ],
+        "kick form, production wall": [
+          0.0005292223825095304,
+          9.365145440271813e-05,
+          2.1387856243115558e-05,
+          5.225525685476243e-06
+        ],
+        "kick form, trapezoid split, no wall rate": [
+          0.0015117174036566473,
+          0.0003419154524676691,
+          8.357539178084272e-05,
+          2.0779419173101525e-05
+        ],
+        "kick form, trapezoid split, wall rate": [
+          0.00019539624744027148,
+          1.2176997223009986e-05,
+          3.076293113597839e-06,
+          8.783342776890242e-07
+        ],
+        "same, as the trapezoid split": [
+          7.814985099912521e-05,
+          1.6039063543498026e-05,
+          3.795490689647054e-06,
+          9.358935427520619e-07
+        ]
+      }
+    },
+    {
+      "name": "kick form passive 1.000 75: production wall reflects as the drift form",
+      "value": 3.067406391798482e-07,
+      "limit": 1e-06,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form passive 1.000 75: without the wall rate worse than production",
+      "value": 2.8564880471888574,
+      "limit": 1.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kick form passive 1.000 75: with the wall rate at most 0.6 of production",
+      "value": 0.3692138781551413,
+      "limit": 0.6,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "normal incidence: kick form with the wall rate at z^2/24",
+      "value": 0.05323709024321521,
+      "limit": 0.1,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
       "name": "2D spectral excess production lossless, 0.2 to 1.22 of the bound",
       "value": 6.8833827526759706e-15,
       "limit": 1e-10,
@@ -1707,6 +2077,70 @@
       "note": ""
     },
     {
+      "name": "2D spectral excess same, as the trapezoid split lossless, 0.2 to 1.22 of the bound",
+      "value": 9.547918011776346e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak same, as the trapezoid split lossless",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess same, as the trapezoid split both loss, 0.2 to 1.22 of the bound",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak same, as the trapezoid split both loss",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess same, as the trapezoid split old loss counterexample, 0.2 to 1.22 of the bound",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak same, as the trapezoid split old loss counterexample",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess same, as the trapezoid split spatial loss, 0.2 to 1.22 of the bound",
+      "value": 1.4210854715202004e-14,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak same, as the trapezoid split spatial loss",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
       "name": "2D pulse: energy in the box at the small step",
       "observation": {
         "target": [
@@ -1716,6 +2150,10 @@
         "production": [
           0.002687271992410804,
           0.00019970847506217183
+        ],
+        "trapezoid": [
+          0.002686752959164226,
+          0.00019964840371277105
         ]
       }
     },
@@ -1746,8 +2184,29 @@
       }
     },
     {
-      "name": "2D pulse: full-step cayley + acceleration within 10% of its small step",
+      "name": "2D pulse: full-step cayley + wall acceleration within 10% of its small step",
       "value": 0.05464306647950323,
+      "limit": 0.1,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D pulse at 1.2 of the bound, same, as the trapezoid split",
+      "observation": {
+        "energy": [
+          0.0028466050486620517,
+          0.0001957730966098897
+        ],
+        "relative_to_small_step": [
+          0.05949638538689883,
+          -0.019410659092755078
+        ]
+      }
+    },
+    {
+      "name": "2D pulse: same, as the trapezoid split within 10% of its small step",
+      "value": 0.05949638538689883,
       "limit": 0.1,
       "comparison": "<=",
       "passed": true,
@@ -1758,15 +2217,31 @@
       "observation": {
         "production": {
           "1.2": 0.0012094546215565783,
+          "0.6": 0.0011469934940735785,
           "0.3": 0.0011491637185197603,
           "0.075": 0.0011513594101918853
         },
         "full-step cayley + wall acceleration": {
           "1.2": 0.004953529850737105,
+          "0.6": 0.0016460600567837907,
           "0.3": 0.0012483422859400977,
           "0.075": 0.0011568037886004543
+        },
+        "same, as the trapezoid split": {
+          "1.2": 0.0030095354204502057,
+          "0.6": 0.0011790081949723862,
+          "0.3": 0.0011465645780468028,
+          "0.075": 0.0011510467587627915
         }
       }
+    },
+    {
+      "name": "2D data at the wall: the trapezoid split keeps less than the wall-after split at 1.2",
+      "value": 0.6075537063741273,
+      "limit": 0.7,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
     }
   ]
 }

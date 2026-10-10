@@ -1,8 +1,10 @@
 # The outgoing wall under the step, 10 October 2026
 
 **Status: stage A done, 10 October 2026.** A spike in
-`experiments/material-laws-spike/` with no production change. Stages B (both
-CPU paths) and C (the device) are planned separately.
+`experiments/material-laws-spike/` with no production change. Its follow-up
+the same day split the update as the trapezoid rule (see "The update") and
+took in the kick form. Stages B (both CPU paths) and C (the device) are
+planned separately.
 
 ## The question
 
@@ -111,20 +113,44 @@ included, puts an error back into the damping term.
 ## The update
 
 Since only `AA′` and `B + AB′` matter, the update needs no square root of a
-Cayley map. It is:
+Cayley map, and there is more than one way to place it in the step. The
+first found, the *wall-after* split, kicks the trace as the bulk in both
+halves and takes the whole Cayley, `(I − dt G/2) X′ = (I + dt G/2) X`, after
+the second kick. It reflects right, but what it stores at a step's end is
+off from the field by a factor of order `w` at the trace (see "One caveat"
+below), which every reader of the state at a step's end would see.
 
-1. **Kicks:** the trace nodes take the bulk's plain kick, `Q −= dt/2 · F`, in
-   both halves.
+The adopted split is the trapezoid rule over the whole step, cut into its
+two halves:
+
+1. **First kick:** the trace takes the bulk's plain kick and the explicit
+   half, `X_h = (I + dt G/2) X_n + dt/2 · E(s − F)`.
 2. **Drift:** the drift form's `ũ` at the trace gains the wall's acceleration,
-   `+ dt²/12 · M⁻¹ (G (G X − E F_mid))_Q`, with `F_mid = F + dt/2 · K u`.
-3. **Wall:** after the second kick, one Cayley over `(Q_b, Z)` for the whole
-   step, `(I − dt G/2) X′ = (I + dt G/2) X`.
+   `+ dt²/12 · M⁻¹ (G (G X_h + E(s − F_mid)))_Q`, with `F_mid = F + dt/2 · K u`.
+3. **Second kick:** the plain kick, then the implicit half,
+   `(I − dt G/2) X_{n+1} = X_h + dt/2 · E(s − F)`.
 
-That is one wall solve a step instead of two, with today's structure at twice
-the duration, and two applications of the generator in the drift. Stepped
-this way and as square-root halves the harness's responses agree to 3e-10.
-The leapfrog needs only step 3: it has no `ũ`, and the full-step Cayley alone
+Its `AA′` and `B + AB′` are the wall-after split's, and the harness's
+responses agree to 4e-10. What it stores is `X_n = (X_{h,n−1/2} + X_{h,n+1/2})/2`,
+the mean of the two drift instants around it, exactly as the interior's `Q`
+is, so the field at the trace reads as the field anywhere else. It is one
+wall solve a step instead of two, today's solve at twice the duration, plus
+one application of the generator in the first kick and two in the drift. It
+is symmetric in time but for the drift's estimate of `F_mid`. The leapfrog
+needs only steps 1 and 3: it has no `ũ`, and the full-step Cayley alone
 leaves it `z²/8` in the admittance.
+
+**The kick form.** A generation with a stiffness-side field law corrects the
+kicks' force instead of the drift's field: `F̃ = F + dt²/12 · L u̇`, with
+`u̇ = M⁻¹(s − F)` at every free node. Its linear limit, on the strip, needs
+the same two things: the trapezoid split, and the wall's rate in the trace's
+`u̇`, `M⁻¹(s − F + (G X)_Q)`, with `X` as each kick finds it - `X_n` for the
+first, `X_h` for the second. Without the wall's rate it is 2.9 times worse
+than production; with it, 0.37 to 0.42 of production's error at the app's
+step and `z²/24` (to 5%) at small steps. That is about twice the drift form's
+error at the app's step: the second kick reads the wall's rate half a step
+early. Under production's half-step Cayleys the kick form reflects as the
+drift form does, to 3e-7.
 
 ## Measurements
 
@@ -172,14 +198,31 @@ as production's. A Gaussian pulse from the interior, nothing at the walls:
 the energy still in the box at t = 10 is 5% above the same update's small
 step, production's 23%; at t = 30 2% below, production's 60% above.
 
+The trapezoid split matches these: spectral excess 9.5e-15, the pulse 6%
+above its small step at t = 10 and 2% below at t = 30.
+
 **One caveat.** Data that starts with a normal field already *at* the wall
-leaves the second-order wall's static memory - its law's pole at zero
-frequency - holding four times the small step's energy at 1.2 of the bound,
-where production's holds the right amount. The raw state at a trace node
-means something different under the two updates; a field that arrives from
-the interior is unaffected, but a handoff or a remesh that carries a field
-onto the trace into a new generation is exactly such data. Stage B must
-carry the wall's state in the update's own terms.
+is out of equilibrium there, and the second-order wall's static memory - its
+law's pole at zero frequency - keeps a share of the start that depends on
+the step. The energy left at t = 100, against 1.15e-3 at 0.075 of the bound:
+
+| update | 1.2 | 0.6 | 0.3 |
+| --- | --- | --- | --- |
+| production | 1.21e-3 | 1.15e-3 | 1.15e-3 |
+| wall-after split | 4.95e-3 | 1.65e-3 | 1.25e-3 |
+| trapezoid split | 3.01e-3 | 1.18e-3 | 1.15e-3 |
+
+The wall-after split's share is mostly its stored state meaning something
+else at the trace; the trapezoid split, whose stored state is the interior's
+kind, keeps 0.61 of it. The rest is the start itself: the wall's stiff modes
+answer within a step, and the bilinear map, which tends to −1 at stiff rates
+where the exact flow tends to 0, rings on them instead of letting them die.
+That limit is the price of the damping term being exact for every `w`, so
+it is not to be traded away. A field that arrives from the interior is
+unaffected. A handoff or a remesh that hands a generation a field already at
+the trace is such data, so stage B measures repeated handoffs and, if the
+static memory drifts, starts the wall's state at its equilibrium with the
+carried field.
 
 ## What is left
 
@@ -195,16 +238,25 @@ only from 4.4e-4 to 3.7e-4, not worth its gather.
 
 Production carries the wall through more than the fixed linear path:
 
-- the driven path, whose mass moves within a step, so the full-step Cayley
-  must pick its stage's mass;
-- the kick form, for stiffness-side field laws, whose `F̃` replaces `F` and
-  whose `ũ` is the plain field;
-- the leapfrog, which takes step 3 alone;
-- pinned trace nodes, as held rows of the wall solve;
-- the energy ledger's wall terms, now a plain kick and a separate wall work;
-- handoffs, remeshes and the wall's physical memory, per the caveat;
-- whatever reads the field at the trace nodes, which now holds the state
-  after the wall's update;
-- the step is no longer symmetric in time, for any test that assumes so.
+- first-order walls, which damp node by node in the kicks' local loop rather
+  than on the trace, take the same halves as scalars;
+- the driven path, whose mass moves within a step: the explicit half at the
+  start's mass and the implicit half at the end's, the trapezoid rule for a
+  moving generator, and one preparation a step instead of two;
+- the kick form, with the wall's rate in `u̇`;
+- the leapfrog, which takes the halves alone;
+- pinned trace nodes, as held rows of both halves;
+- the energy ledger: the wall's loss becomes the trapezoid's own dissipation
+  at the step's mean state, `dt Σ (D û² + (w + memory)²)`, and what the
+  split leaves goes to the splitting residual, which converges at second
+  order as the bulk's does;
+- nonlinear wall sites, whose discrete-gradient kick does not split into
+  halves as it stands;
+- the AMR indicator and the primary rate, which rebuild the wall from the
+  state at a step's ends with today's update;
+- handoffs and remeshes, per the caveat;
+- the solve's contraction, about `(1/7)(h · decay)²` with `h` its duration:
+  doubling the duration roughly quadruples it, which the gallery's meshes
+  must show to stay well inside the sweep's limits.
 
 The fixture's second-order band would then be held to about 1%.
