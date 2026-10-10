@@ -1192,6 +1192,18 @@ polynomials - good to about 1e-7 to ten thousand radians on any device. A test
 holds the copies identical and the builtins out, and the browser's shader spec
 measures the block on the page's device.
 
+This gives up the GPU's special-function units on purpose. A builtin is one or
+two of their instructions and the block about twenty multiply-adds, but the
+canonical step is bound by memory, not arithmetic: on the M1 Max the driven
+step costs 0.3% more for it and the sine-Gordon step, which takes two of the
+calls per node a stage, 1.9%. Many calls repeat across nodes - a pump's or a
+time crystal's carrier is its material's, a harmonic source's phase is the
+source's - yet each is made in place rather than once a stage, since handing
+the values on through memory would add to the traffic the step is bound by,
+for a saving the measurement does not show. Accuracy is chosen over the
+hardware's speed in every shader alike, so every device computes the same
+arithmetic: Metal and SwiftShader read the same errors at the same arguments.
+
 The laws compile into a `CanonicalTemporalWaveOperator` over the same base as
 the fixed operator, which the application assembles from the law-stripped
 model. Every coefficient is evaluated at its own stage instant. Named loss

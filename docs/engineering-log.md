@@ -22008,3 +22008,18 @@ since: device-loss panicked in the snapshot's staging buffer, and rejection
 read SwiftShader's sine (the two entries before this one). The cavity's page
 took 237 s and the slowest, cavity-batches' four runs, 745 s, so a page's
 deadline is 600 s on every push and 1,500 nightly.
+
+## 2026-10-10 — Why the shaders' trigonometry leaves the special-function units, written where it is decided
+
+Asked whether the portable sine and cosine cost the step its speed by passing
+over the GPU's special-function units: they do replace one or two such
+instructions with about twenty multiply-adds, but the canonical step is bound
+by memory, and the previous entry's timing reads 0.3% more on the driven step
+and 1.9% on the sine-Gordon one. Many of the calls repeat across nodes - a
+pump's carrier is its material's, so every node of that material takes the
+same cosine each stage - and computing them once a stage was considered and
+left: it would hand the values on through memory, the traffic the step is
+bound by, for a saving the measurement does not show. Accuracy over the
+hardware's speed, in every shader alike. The decision and its reasons are now
+in the block's own comment, the same words in all six shaders, and in the
+architecture's paragraph on the device's trigonometry.

@@ -106,6 +106,16 @@ fn sample_contour(@builtin(global_invocation_id) invocation: vec3<u32>) {
 // their products with it are exact, through fma - Metal's fast math folded
 // the plain differences back into one rounded pi/2 - and Cephes'
 // single-precision polynomials take the rest on [-pi/4, pi/4].
+//
+// They give up the GPU's special-function units on purpose. A builtin is one
+// or two of their instructions and this about twenty multiply-adds, but the
+// step is bound by memory, not arithmetic: on the M1 Max the driven step costs
+// 0.3% more for it and the sine-Gordon step, two calls a node a stage, 1.9%.
+// Calls that repeat across nodes - a pump's carrier is its material's - are
+// still made in place rather than once a stage, since handing the values on
+// through memory would add to the traffic the step is bound by. The same
+// arithmetic everywhere is the point: Metal and SwiftShader read the same
+// errors at the same arguments.
 const TRIG_TWO_OVER_PI: f32 = 0.63661975;
 const TRIG_HALF_PI_1: f32 = 1.5703125;
 const TRIG_HALF_PI_2: f32 = 4.837512969970703e-4;
