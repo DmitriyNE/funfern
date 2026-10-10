@@ -328,11 +328,25 @@ impl Playground {
             .autosave_due
             .is_some_and(|at| at.elapsed().as_secs_f32() > 0.8)
         {
-            self.autosave_due = None;
-            let written = crate::recovery::save(&self.editor.document);
-            self.autosave_written(written);
-            self.refresh_link();
+            self.write_autosave();
         }
+    }
+
+    /// Writes the autosave now if the document has moved since the last one,
+    /// the debounce notwithstanding: what a stop of rendering does first, so
+    /// the last edit is not the one a reload loses.
+    pub(crate) fn autosave_now(&mut self) {
+        if self.editor.document != self.autosave_observed || self.autosave_due.is_some() {
+            self.autosave_observed = self.editor.document.clone();
+            self.write_autosave();
+        }
+    }
+
+    fn write_autosave(&mut self) {
+        self.autosave_due = None;
+        let written = crate::recovery::save(&self.editor.document);
+        self.autosave_written(written);
+        self.refresh_link();
     }
 
     /// An autosave that fails says so once, until one succeeds: the session

@@ -192,7 +192,7 @@ impl Fixture {
 }
 
 #[derive(Resource)]
-struct Driver {
+pub(crate) struct Driver {
     fixture: Fixture,
     phase: Phase,
     /// The material the fixture's Switch throws.

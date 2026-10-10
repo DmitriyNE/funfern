@@ -579,7 +579,10 @@ names or with every expression evaluated at the material frame's origin. Each ro
   fragment; while that fragment is active, opened or copied, later autosaves
   keep it current, so a reload opens the scene as it now is. A scene grown past
   what a link can carry has the link taken out of the address, with a notice,
-  and a reload then restores the autosave.
+  and a reload then restores the autosave. If the GPU device is lost, or a
+  rendering error stops funfern, the page says so in its startup overlay (the
+  terminal, natively): the document is autosaved at that moment and comes back
+  on reload or relaunch; the running simulation is not kept.
   The catalog includes ready-to-run GRIN collimator and circular Luneburg profiles with
   their drivers, probes, and wave-speed view presets. View toggles, field intensity,
   and material-overlay settings travel through files, links, recovery, and examples.

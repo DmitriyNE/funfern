@@ -213,6 +213,9 @@
         ? 'funfern stopped' + (/unreachable/.test(detail) ? ', most likely out of memory' : '') + '. Reload the page to start again. ' + detail
         : 'Unable to start WebGPU. Use a WebGPU-capable browser with hardware acceleration on, over HTTPS or localhost. ' + detail;
     };
+    // The app's own way to say it stopped: a lost GPU device, or a rendering
+    // error, told in this overlay's words (src/stopped.rs).
+    window.funfernStopped = fail;
     if (!navigator.gpu) fail('This browser does not expose navigator.gpu.');
     addEventListener('error', e => fail(e.message));
     addEventListener('unhandledrejection', e => fail(String(e.reason)));

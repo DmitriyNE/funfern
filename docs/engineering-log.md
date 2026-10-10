@@ -21720,3 +21720,42 @@ which still said one copy in flight, now says what the code does. Bevy's
 `expect` is worth an upstream issue: a lost device should not panic an
 application that has readbacks in flight, which is any application reading
 anything back.
+
+## 2026-10-10 — A lost device stops rendering and says so
+
+The device-loss behaviour the testing review asked for, the choice made:
+stop honestly. With the readbacks the application's own, a lost device
+reaches Bevy's `RenderErrorHandler`, which by default answers every
+`RenderError` - the device lost, a validation error, out of memory - by
+writing `AppExit::error()`, so natively the process ended with an error and
+in the browser the canvas froze with no word on the page; nothing of the
+application's own looked at it. `src/stopped.rs` installs the application's
+handler: the first error is recorded in the main world as `RenderStopped`,
+its kind the device lost or a rendering error, and the policy is
+`StopRendering`, under which Bevy asks the handler every frame and the main
+schedule keeps running without a render world. `announce` acts once: the
+session writes its autosave if the document moved since the last one
+(`Playground::autosave_now`, the 0.8 s debounce set aside, so the last edit is
+not the one a reload loses), the page is told - `data-funfern-stopped` on the
+root element, `device-lost` or `render-error`, and the message through
+`window.funfernStopped`, the page's own `fail`, which shows the startup
+overlay as "funfern stopped … Reload the page to start again." with "The GPU
+device was lost. The document is saved; the running simulation is not." -
+and natively the same goes to standard error and the process exits with an
+error. With the end-to-end driver present it only saves and tells the page;
+the driver reports and exits by its verdict, which the next entry's fixture
+uses. The field is not promised and not kept: nothing holds a copy the
+application could resume from, and the guide now says so. On Metal the
+experiment's destroyed device arrived as the validation errors of the
+operations that failed on it, the lost-device callback never firing before
+the stop, so a rendering error's message names the GPU too, with the first
+line of wgpu's description, which can run to many. Measured, the device
+destroyed after a hundred frames natively under a scratch HOME: Bevy caught
+three validation errors, the handler recorded the first, standard error read
+"The GPU stopped with a rendering error: Validation Error. The document is
+saved; the running simulation is not.", the process exited with 1 through
+`AppExit`, no panic and no "Quitting the application" from Bevy's handler,
+which this one replaces, and the autosave was on disk. A unit test
+holds the handler to recording the first error once, as the device lost, and
+keeping rendering stopped, and the message to one line; the fixture that
+loses the application's own device follows.

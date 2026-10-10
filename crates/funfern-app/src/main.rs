@@ -21,6 +21,7 @@ mod recording;
 mod recovery;
 #[allow(dead_code)]
 mod sharing;
+mod stopped;
 mod ui;
 #[allow(dead_code)]
 mod wave_gpu;
@@ -53,10 +54,14 @@ fn run_app() -> AppExit {
         .add_plugins(field_paint::FieldPaintPlugin)
         .add_plugins(wave_gpu::WaveGpuPlugin)
         .add_plugins(canonical_gpu::CanonicalWaveGpuPlugin)
+        // A lost device or a rendering error stops rendering and is told, in
+        // place of Bevy's quit (`stopped`).
+        .insert_resource(stopped::handler())
         .init_resource::<ui::Playground>()
         .add_systems(Startup, |mut commands: Commands| {
             commands.spawn(Camera2d);
         })
+        .add_systems(Update, stopped::announce)
         .add_systems(EguiPrimaryContextPass, ui::frame);
     #[cfg(feature = "e2e")]
     ui::e2e::add(&mut app);
