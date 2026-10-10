@@ -5570,8 +5570,8 @@ enum CanonicalSnapshotResult {
 /// and snapshots are asked for four times a second, so each one was copied
 /// into a buffer allocated for it, 6.4 MB at 137k DOFs. On the web wgpu does
 /// not destroy a buffer it drops, so each waited for the garbage collector.
-/// This one is replaced only when a generation's state changes size, and the
-/// one it replaces is destroyed.
+/// This one is replaced only when a generation's state changes size or its
+/// map failed, and the one it replaces is destroyed.
 #[derive(Resource, Default)]
 struct CanonicalSnapshotStaging {
     buffer: Option<Buffer>,
@@ -5582,6 +5582,10 @@ struct CanonicalSnapshotStaging {
     /// Whether the buffer is mapping or mapped; nothing is copied into it
     /// until it is unmapped.
     busy: Arc<AtomicBool>,
+    /// Whether the buffer's last map failed - the device lost. wgpu keeps a
+    /// failed map's state on the buffer, so mapping it again would assert
+    /// that it is already mapped; the next copy goes to a new one.
+    failed: Arc<AtomicBool>,
 }
 
 /// Copies the state into the snapshot staging buffer when a snapshot of the
@@ -5609,10 +5613,12 @@ fn copy_canonical_snapshot(
         return;
     };
     let size = state.buffer.size();
-    if staging
-        .buffer
-        .as_ref()
-        .is_none_or(|buffer| buffer.size() != size)
+    let failed = staging.failed.swap(false, Ordering::AcqRel);
+    if failed
+        || staging
+            .buffer
+            .as_ref()
+            .is_none_or(|buffer| buffer.size() != size)
     {
         if let Some(replaced) = staging.buffer.take() {
             replaced.destroy();
@@ -5694,6 +5700,7 @@ fn map_canonical_snapshot(mut staging: ResMut<CanonicalSnapshotStaging>) {
         return;
     };
     let busy = staging.busy.clone();
+    let failed = staging.failed.clone();
     let mapped = buffer.clone();
     buffer.slice(..).map_async(MapMode::Read, move |outcome| {
         let received = match outcome {
@@ -5702,7 +5709,10 @@ fn map_canonical_snapshot(mut staging: ResMut<CanonicalSnapshotStaging>) {
                 mapped.unmap();
                 CanonicalSnapshotResult::Ready(data)
             }
-            Err(_) => CanonicalSnapshotResult::Failed,
+            Err(_) => {
+                failed.store(true, Ordering::Release);
+                CanonicalSnapshotResult::Failed
+            }
         };
         *result.lock().unwrap() = received;
         busy.store(false, Ordering::Release);

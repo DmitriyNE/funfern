@@ -21918,3 +21918,28 @@ where it gives up; before, the app blamed the trap there too. Measured: under
 the same load the four loads keep their pool, the check answering in 2.3 to
 5.6 s, one past the old five; `?e2e-pool=off` says so and the pool stays off;
 and the browser suite's five variants pass in Chrome, in 66 to 201 s.
+
+## 2026-10-10 — A snapshot whose map failed gets a new staging buffer, so a lost device no longer panics in the next one
+
+The first full run of the browser fixtures on SwiftShader, on CI's runner,
+ended device-loss with a panic in both of its legs: wgpu's "Buffer is already
+mapped" (`api/buffer.rs:572`), the assertion the app's own readbacks were
+rewritten this morning to stay clear of. A third mapping site was left: the
+full-state snapshot's staging buffer (`CanonicalSnapshotStaging`), which the
+diagnostic snapshots copy into several times a second. Its map callback
+recorded a failed map and freed the buffer for the next snapshot, and a
+failed map leaves wgpu's map state on the buffer, so the next map asserted.
+It takes a snapshot in flight at the loss and another asked for before the
+stop holds: Chrome on Metal stops in about 25 ms, SwiftShader at three frames
+a second took 463 ms in the container, and natively the window is narrow but
+open. A scratch build whose render error policy ignored the first 200 errors,
+so that the app rendered on past the loss, panicked there and only there -
+`map_canonical_snapshot`, the buffer's 528,832 bytes still marked mapped -
+while the paced readbacks dropped their failed buffers and the frame timer
+unmapped its own. Now the callback marks the failure and the next copy
+replaces the buffer, as a change of size does. The same scratch build ran
+202 errors past the loss without a panic and the fixture passed, and the
+device suite passes, 50 of 50. No fixture holds the render past the loss:
+in an end-to-end build that would cost the device-loss fixture its two-second
+bound on a device as slow as SwiftShader, and the nightly SwiftShader run met
+the race in both of its legs.
