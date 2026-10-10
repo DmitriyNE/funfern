@@ -22118,3 +22118,40 @@ across the gallery at edges 0.16, 0.08 and 0.05 at the app's step
 contraction at most 0.141 against 0.040, f64 sweeps at most 22 against 14,
 f32 sweeps at most 12 against 8 - one device solve of at most 12 sweeps a
 step where there were two of at most 8. Next: B2, the driven path.
+
+## 2026-10-10 — The trapezoid wall step on the driven path (stage B2)
+
+`CanonicalTemporalWaveState::with_wall_step`, beside the half kicks, which
+stay the default. The first kick takes the plain kick and the walls'
+explicit half on the field the step starts from, at the mass in force
+there; the second takes the plain kick and the implicit half at the end's
+mass - the trapezoid rule for an admittance that moves with the mass - and
+the wall solve is prepared once a step where the half kicks prepare it once
+a kick. A nonlinear site reads the field the implicit half ends with: along
+the trace by Newton on `U ≈ U_k + U′_k (Q − Q_k)`, each iteration the linear
+solve at the per-node mass `1/U′_k` (`trapezoid_trace_implicit_half`, which
+the fixed path now shares), and at a first-order wall's node by a scalar
+Newton on `Q + τd U(Q)`. The drift form's `ũ` carries the walls' share of
+`dt²/12 · ü`, read through `A = ∂u/∂Q` at the middle, and the kick form's
+`u̇` the wall's rate `G X` beside `s − F`, `X` as each kick finds it. The
+loss is the trapezoid's dissipation at the mean of the two fields, each read
+at its own instant (`trapezoid_wall_dissipation`, shared), with a step taken
+backwards booking none, as the half kicks' trace does.
+
+Checked first by making the trapezoid every state's default for one run of
+the core: 514 of 515 tests passed, among them the nonlinear walls'
+passivity and second-order balance, the strong Kerr pulse, pumps, pins, the
+reversal with a pinned trace, and equality with the fixed path on inert
+generations. The one failure reads the AMR indicator, which rebuilds the
+wall from a step's two ends with the half kicks' update - stage B3. Twelve
+driven-path wall tests now run under both steps through a test-only default
+(`under_each_wall_step`), the suite taking 74 s where it took 42. On a
+kick-form generation - a stiffness-side Kerr law of `χ = 1e-9`, too weak to
+read, at its own step of 0.9 of the bound - the channel's second-order band
+reads 1.0195 of its law against the half kicks' 1.0532, twice the drift
+form's residue as the strip predicted; the run takes seventeen minutes, a
+field law sending every node through its inverse, so
+`measure_the_kick_forms_wall_against_its_law` is ignored. B1's gallery
+measurement had been placed between another test and its doc comment; the
+comment is back on its test. Next: B3, the AMR indicator, the primary rate
+and handoffs.

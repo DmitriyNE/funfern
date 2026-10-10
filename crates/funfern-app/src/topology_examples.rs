@@ -6055,12 +6055,109 @@ mod tests {
         );
     }
 
-    /// A pinned or electric-wall side beside a second-order outgoing one pins
-    /// the corner nodes they share, which end the outgoing wall's trace: they
-    /// carry its damping but are not on it, and nothing on it is pinned.
-    /// Every law-carrying gallery scene behind such a wall used to be refused
-    /// whole; with one side pinned, each steps on the reference, packs for the
-    /// device and is estimated as the adaptation worker estimates it.
+    /// The kick form, which a generation with a stiffness-side field law
+    /// steps with, against the second-order wall's law: the channel's second
+    /// transverse mode as in
+    /// `an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`,
+    /// in a medium whose stiffness-side Kerr law is too weak to be read
+    /// (`χ = 1e-9`) but takes the generation to the kick form, at that
+    /// generation's own step. Under the half kicks the wall returns what it
+    /// does in the drift form; under the trapezoid wall step, whose kicks read
+    /// the wall's own rate beside `s − F`, it returns its law to the mesh's
+    /// percent: 1.0195 at 0.9 of the bound, the half kicks 1.0532. A field
+    /// law, however weak, sends every node through its inverse, and the run
+    /// takes about seventeen minutes, so it is a measurement:
+    /// `cargo test -p funfern-app --release --lib measure_the_kick_forms_wall -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn measure_the_kick_forms_wall_against_its_law() {
+        let edge = 0.05;
+        let signal = TimeSignal::pulsed(
+            [0.0, 1.0, 2.2, 0.0],
+            PulseEnvelope::Gaussian { width: 0.35 },
+            0.1,
+            0.0,
+        );
+        let points = [0.3, 0.5, 0.7]
+            .into_iter()
+            .flat_map(|x| [0.125, -0.125, 0.375].map(|y| Point2::new(x, y)))
+            .collect::<Vec<_>>();
+        let weak = FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(1.0e-9),
+            amplitude_bound: None,
+        };
+        let walls = [
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            OuterBoundaryCondition::Reflecting,
+            OuterBoundaryCondition::Dirichlet {
+                signal: TimeSignal::ZERO,
+            },
+        ];
+        let nears = walls.map(|wall| {
+            wall_channel(
+                -3.0,
+                1.0,
+                wall,
+                edge,
+                "cos(2 * pi * y)",
+                signal,
+                None,
+                Some(weak.clone()),
+            )
+        });
+        for near in &nears {
+            let operator = near.canonical_temporal_operator.as_ref().unwrap();
+            assert_eq!(operator.fourth_order_form(), FourthOrderForm::Kick);
+        }
+        let dt = nears
+            .iter()
+            .map(|near| near.recommended_time_step())
+            .fold(f64::INFINITY, f64::min);
+        let steps = (7.5 / dt).ceil() as usize;
+        let references = [&nears[1], &nears[2]].map(|near| {
+            temporal_wall_traces(near, dt, steps, &points, CanonicalWallStep::HalfKicks)
+        });
+        let walled = [CanonicalWallStep::HalfKicks, CanonicalWallStep::Trapezoid]
+            .map(|wall_step| temporal_wall_traces(&nears[0], dt, steps, &points, wall_step));
+        let spectrum = |trace: &[f64], hz: f64| {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (step, u) in trace.iter().enumerate() {
+                let phase = std::f64::consts::TAU * hz * (step + 1) as f64 * dt;
+                re += u * phase.cos() * dt;
+                im -= u * phase.sin() * dt;
+            }
+            (re, im)
+        };
+        let norm = |(re, im): (f64, f64)| re * re + im * im;
+        let tangential = std::f64::consts::TAU;
+        let mut returned = [0.0; 2];
+        let mut predicted = 0.0;
+        for tenth in 16..=22 {
+            let hz = f64::from(tenth) / 10.0;
+            let cos = (1.0 - (tangential / (std::f64::consts::TAU * hz)).powi(2)).sqrt();
+            let law = second_order_reflection(cos, std::f64::consts::TAU * hz, tangential);
+            for point in 0..points.len() {
+                let (n, d) = (
+                    spectrum(&references[0][point], hz),
+                    spectrum(&references[1][point], hz),
+                );
+                let incident = (0.5 * (n.0 + d.0), 0.5 * (n.1 + d.1));
+                predicted += law * norm((0.5 * (n.0 - d.0), 0.5 * (n.1 - d.1)));
+                for (returned, traces) in returned.iter_mut().zip(&walled) {
+                    let at = spectrum(&traces[point], hz);
+                    *returned += norm((at.0 - incident.0, at.1 - incident.1));
+                }
+            }
+        }
+        let [halves, trapezoid] = returned.map(|returned| returned / predicted);
+        eprintln!(
+            "kick form at {:.3e} s: second order over its law, half kicks {halves:.4}, trapezoid wall step {trapezoid:.4}",
+            dt
+        );
+        assert!((trapezoid - 1.0).abs() < 0.02, "{trapezoid}");
+    }
+
     /// The trapezoid wall step solves the wall over the whole step, twice
     /// the half kick's duration, and the sweep's contraction grows about as
     /// the duration's square. Measured across the gallery at the app's step.
@@ -6112,6 +6209,12 @@ mod tests {
         }
     }
 
+    /// A pinned or electric-wall side beside a second-order outgoing one pins
+    /// the corner nodes they share, which end the outgoing wall's trace: they
+    /// carry its damping but are not on it, and nothing on it is pinned.
+    /// Every law-carrying gallery scene behind such a wall used to be refused
+    /// whole; with one side pinned, each steps on the reference, packs for the
+    /// device and is estimated as the adaptation worker estimates it.
     #[test]
     fn every_driven_gallery_scene_runs_with_a_side_pinned_beside_an_outgoing_wall() {
         let outgoing = OuterBoundaryCondition::SecondOrderOutgoing;
@@ -8864,7 +8967,9 @@ mod tests {
     /// A channel `[left, right] × [-0.5, 0.5]` of the unit medium with `wall`
     /// at its right end, reflecting sides unless `sides` names the physics
     /// and the condition they take, and a strip at `x = -0.7` across it
-    /// radiating `signal` under `profile`.
+    /// radiating `signal` under `profile`. `stiffness` gives the medium a
+    /// field law on its stiffness side.
+    #[allow(clippy::too_many_arguments)]
     fn wall_channel(
         left: f64,
         right: f64,
@@ -8873,8 +8978,12 @@ mod tests {
         profile: &str,
         signal: TimeSignal,
         sides: Option<(PhysicsModel, OuterBoundaryCondition)>,
+        stiffness: Option<FieldLaw>,
     ) -> Arc<crate::topology_runtime::PreparedTopology> {
         let mut builder = Builder::new();
+        if let Some(law) = stiffness {
+            builder.scene.materials[0].stiffness_law.field = law;
+        }
         builder.scene.geometry.domain = DomainRect {
             min_x: left,
             max_x: right,
@@ -8937,6 +9046,54 @@ mod tests {
                 .step_with_forcing(operator, &prepared.canonical_forcing)
                 .unwrap();
             let field = state.primary_field(operator).unwrap();
+            for (trace, stencil) in traces.iter_mut().zip(&stencils) {
+                trace.push(
+                    stencil
+                        .nodes
+                        .iter()
+                        .zip(stencil.value_weights)
+                        .map(|(node, weight)| weight * field[*node as usize])
+                        .sum(),
+                );
+            }
+        }
+        traces
+    }
+
+    /// The primary field at `points` after each of `steps` steps of `dt` on a
+    /// driven generation, the walls stepped `wall_step`'s way.
+    fn temporal_wall_traces(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        dt: f64,
+        steps: usize,
+        points: &[Point2],
+        wall_step: CanonicalWallStep,
+    ) -> Vec<Vec<f64>> {
+        let stencils = points
+            .iter()
+            .map(|point| {
+                QuadraticPointStencil::build_topology(
+                    &prepared.mesh,
+                    &prepared.operator,
+                    &prepared.bundle.plan,
+                    prepared.fixed_model(),
+                    *point,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let operator = prepared.canonical_temporal_operator.as_ref().unwrap();
+        let mut state = CanonicalTemporalWaveState::zero(operator, dt)
+            .unwrap()
+            .with_wall_step(wall_step);
+        let mut traces = vec![Vec::with_capacity(steps); points.len()];
+        for _ in 0..steps {
+            state
+                .step_with_forcing(operator, &prepared.canonical_forcing)
+                .unwrap();
+            let field = operator
+                .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                .unwrap();
             for (trace, stencil) in traces.iter_mut().zip(&stencils) {
                 trace.push(
                     stencil
@@ -9023,13 +9180,14 @@ mod tests {
             "1",
             pulse,
             None,
+            None,
         );
         let walls = [
             OuterBoundaryCondition::Reflecting,
             OuterBoundaryCondition::FirstOrderOutgoing,
             OuterBoundaryCondition::SecondOrderOutgoing,
         ];
-        let nears = walls.map(|wall| wall_channel(-1.0, 1.0, wall, edge, "1", pulse, None));
+        let nears = walls.map(|wall| wall_channel(-1.0, 1.0, wall, edge, "1", pulse, None, None));
         let dt = nears
             .iter()
             .map(|near| near.recommended_time_step())
@@ -9119,7 +9277,7 @@ mod tests {
                 },
             ];
             let nears =
-                walls.map(|wall| wall_channel(-3.0, 1.0, wall, edge, profile, signal, sides));
+                walls.map(|wall| wall_channel(-3.0, 1.0, wall, edge, profile, signal, sides, None));
             let dt = nears
                 .iter()
                 .map(|near| near.recommended_time_step())
@@ -9232,6 +9390,7 @@ mod tests {
                 "1",
                 signal,
                 Some(sides),
+                None,
             )
         });
         let [tm, mechanical] = resolved

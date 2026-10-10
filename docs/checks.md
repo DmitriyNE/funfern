@@ -398,7 +398,14 @@ The same runs under the trapezoid wall step, not yet the production one
 wall at 1.01 of its law, the mesh's own, held to 2%, and the first-order wall
 to 1%; at normal incidence the two meshes' difference hides the wall's step,
 so there the near run is held against its own run at a quarter of the step,
-to a fifth of the half kicks' distance (measured: a tenth).
+to a fifth of the half kicks' distance (measured: a tenth). On the driven
+path twelve wall tests - second-order balance under pumps and pins,
+nonlinear walls' passivity, the strong Kerr pulse, a reversal, equality with
+the fixed path on inert generations - run under both wall steps
+(`under_each_wall_step`), and `measure_the_kick_forms_wall_against_its_law`
+(ignored: seventeen minutes, a field law sending every node through its
+inverse) reads the kick form's band at 1.0195 of its law against the half
+kicks' 1.0532.
 With the pinned corners kept on the trace it reflected 6.6 times its law. The
 box mode `cos(3π(x+1)/2) cos(3π(y+1)/2)` runs on the production path, the
 application's mesh of the reflecting box under its fourth-order step at its

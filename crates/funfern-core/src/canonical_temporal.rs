@@ -14,7 +14,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::canonical_wave::{
-    CanonicalIntegrator, FilterSampleBound, FourthOrderForm, fourth_order_source, grid_filter_reach,
+    CanonicalIntegrator, CanonicalWallStep, FilterSampleBound, FourthOrderForm,
+    apply_outgoing_generator, fourth_order_source, grid_filter_reach, trace_state,
+    trapezoid_trace_implicit_half, trapezoid_wall_dissipation,
 };
 use crate::{
     CanonicalAreaContribution, CanonicalAreaSample, CanonicalForcing, CanonicalIndicatorSnapshot,
@@ -2867,6 +2869,69 @@ impl CanonicalTemporalWaveOperator {
         Ok((gradient, 0.5 / site.tangent(field.abs())))
     }
 
+    /// `U(Q)` at one node and its slope `dU/dQ = 1/P′(U)`.
+    fn primary_field_and_slope(
+        &self,
+        terms: &[ConstitutiveTerm],
+        node: usize,
+        flux: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(f64, f64), WaveError> {
+        let field = self.primary_inverse(terms, node, flux, runtime)?;
+        let tangent = ConstitutiveSite::new(&terms[self.primary_range(node)]).tangent(field.abs());
+        Ok((field, 1.0 / tangent))
+    }
+
+    /// `Q` solving `Q + τd·U(Q) = held` at one absorbing node: the trapezoid
+    /// wall step's implicit half at a nonlinear site, on the field the half
+    /// ends with. `f(Q)` rises with slope at least one, so every trial `x`
+    /// brackets the root with `x − f(x)`.
+    fn implicit_damped_site(
+        &self,
+        terms: &[ConstitutiveTerm],
+        node: usize,
+        held: f64,
+        admittance: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<f64, WaveError> {
+        let residual = |flux: f64| -> Result<(f64, f64), WaveError> {
+            let (field, slope) = self.primary_field_and_slope(terms, node, flux, runtime)?;
+            Ok((flux + admittance * field - held, 1.0 + admittance * slope))
+        };
+        let mut flux = held;
+        let (value, _) = residual(flux)?;
+        let (mut low, mut high) = if value > 0.0 {
+            (flux - value, flux)
+        } else {
+            (flux, flux - value)
+        };
+        let scale = held.abs().max(f64::MIN_POSITIVE);
+        for _ in 0..100 {
+            let (value, slope) = residual(flux)?;
+            if value == 0.0 {
+                return Ok(flux);
+            }
+            if value > 0.0 {
+                high = high.min(flux);
+            } else {
+                low = low.max(flux);
+            }
+            let newton = flux - value / slope;
+            let next = if newton > low && newton < high {
+                newton
+            } else {
+                0.5 * (low + high)
+            };
+            if (next - flux).abs() <= 1e-13 * scale.max(next.abs()) {
+                return Ok(next);
+            }
+            flux = next;
+        }
+        Err(WaveError::Unsupported(
+            "the nonlinear absorbing-wall kick did not converge",
+        ))
+    }
+
     /// `Q` solving `Q − old = impulse − τd·ū(old, Q)` at one absorbing node:
     /// the discrete-gradient first-order wall. `f(Q)` rises with slope at
     /// least one, so every trial `x` brackets the root with `x − f(x)`.
@@ -3460,6 +3525,7 @@ pub struct CanonicalTemporalWaveState {
     /// A form forced over the operator's choice, for the tests that compare
     /// the two.
     form_override: Option<FourthOrderForm>,
+    wall_step: CanonicalWallStep,
 }
 
 impl CanonicalTemporalWaveState {
@@ -3551,6 +3617,7 @@ impl CanonicalTemporalWaveState {
             time,
             integrator: CanonicalIntegrator::default(),
             form_override: None,
+            wall_step: crate::canonical_wave::default_wall_step(),
         })
     }
 
@@ -3592,6 +3659,18 @@ impl CanonicalTemporalWaveState {
 
     pub fn with_integrator(mut self, integrator: CanonicalIntegrator) -> Self {
         self.integrator = integrator;
+        self
+    }
+
+    pub fn wall_step(&self) -> CanonicalWallStep {
+        self.wall_step
+    }
+
+    /// The same state stepping its walls the other way. Nothing is prepared
+    /// ahead: a driven generation prepares its wall solve at each step's
+    /// stage, for the duration its way takes.
+    pub fn with_wall_step(mut self, wall_step: CanonicalWallStep) -> Self {
+        self.wall_step = wall_step;
         self
     }
 
@@ -4195,6 +4274,10 @@ impl CanonicalTemporalWaveState {
             short_wave_gain += gain;
             short_wave_loss += loss;
         }
+        // Without a wall the trapezoid wall step is the half kicks' step.
+        let trapezoid =
+            self.wall_step == CanonicalWallStep::Trapezoid && operator.base().has_walls();
+        let wall_start = trapezoid.then(|| (primary.clone(), outgoing_z.clone()));
         let mut first_force = operator.force_at(&complementary, start_time, &self.runtime)?;
         add_gap_force(operator, &self.thin_gap_jump, &mut first_force)?;
         add_restoring_force(operator, &self.integrated_field, &mut first_force)?;
@@ -4203,6 +4286,10 @@ impl CanonicalTemporalWaveState {
             fourth_order_source(forcing, start_time, duration, &mut first_source)?;
         }
         if form == Some(FourthOrderForm::Kick) {
+            let wall_rate = trapezoid
+                .then(|| wall_rate_at(operator, &primary, &outgoing_z, start_time, &self.runtime))
+                .transpose()?
+                .map(|(rate, _)| rate);
             first_force = fourth_order_kick_force(
                 operator,
                 forcing,
@@ -4213,19 +4300,34 @@ impl CanonicalTemporalWaveState {
                 start_time,
                 duration,
                 &self.runtime,
+                wall_rate.as_deref(),
             )?;
         }
-        let (work, exchange, escaped) = forced_kick(
-            operator,
-            &mut primary,
-            &mut outgoing_z,
-            &first_force,
-            &first_source,
-            0.5 * duration,
-            forcing,
-            start_time,
-            &self.runtime,
-        )?;
+        let (work, exchange, escaped) = if trapezoid {
+            trapezoid_forced_first_kick(
+                operator,
+                &mut primary,
+                &mut outgoing_z,
+                &first_force,
+                &first_source,
+                0.5 * duration,
+                forcing,
+                start_time,
+                &self.runtime,
+            )?
+        } else {
+            forced_kick(
+                operator,
+                &mut primary,
+                &mut outgoing_z,
+                &first_force,
+                &first_source,
+                0.5 * duration,
+                forcing,
+                start_time,
+                &self.runtime,
+            )?
+        };
         source_work += work;
         prescribed_exchange += exchange;
         boundary_loss += escaped;
@@ -4266,6 +4368,10 @@ impl CanonicalTemporalWaveState {
                 middle_time,
                 duration,
                 &self.runtime,
+                trapezoid.then_some(TemporalWallAcceleration {
+                    outgoing_z: &outgoing_z,
+                    force: &first_force,
+                }),
             )?
         } else {
             let mut field = midpoint_field.clone();
@@ -4310,6 +4416,10 @@ impl CanonicalTemporalWaveState {
             fourth_order_source(forcing, end_time, duration, &mut second_source)?;
         }
         if form == Some(FourthOrderForm::Kick) {
+            let wall_rate = trapezoid
+                .then(|| wall_rate_at(operator, &primary, &outgoing_z, end_time, &self.runtime))
+                .transpose()?
+                .map(|(rate, _)| rate);
             second_force = fourth_order_kick_force(
                 operator,
                 forcing,
@@ -4320,23 +4430,52 @@ impl CanonicalTemporalWaveState {
                 end_time,
                 duration,
                 &self.runtime,
+                wall_rate.as_deref(),
             )?;
         }
-        let (work, exchange, escaped) = forced_kick(
-            operator,
-            &mut primary,
-            &mut outgoing_z,
-            &second_force,
-            &second_source,
-            0.5 * duration,
-            forcing,
-            end_time,
-            &self.runtime,
-        )?;
+        let (work, exchange, escaped) = if trapezoid {
+            trapezoid_forced_second_kick(
+                operator,
+                &mut primary,
+                &mut outgoing_z,
+                &second_force,
+                &second_source,
+                0.5 * duration,
+                forcing,
+                end_time,
+                &self.runtime,
+            )?
+        } else {
+            forced_kick(
+                operator,
+                &mut primary,
+                &mut outgoing_z,
+                &second_force,
+                &second_source,
+                0.5 * duration,
+                forcing,
+                end_time,
+                &self.runtime,
+            )?
+        };
         source_work += work;
         prescribed_exchange += exchange;
         boundary_loss += escaped;
         validate_finite(&primary)?;
+        if let Some((start_primary, start_z)) = &wall_start {
+            let (loss, exchange) = trapezoid_forced_wall_loss(
+                operator,
+                (start_primary, start_z),
+                (&primary, &outgoing_z),
+                start_time,
+                end_time,
+                duration,
+                forcing,
+                &self.runtime,
+            )?;
+            boundary_loss += loss;
+            prescribed_exchange += exchange;
+        }
         if operator.has_short_wave() {
             let (gain, loss) = short_wave_half(
                 operator,
@@ -4431,19 +4570,23 @@ fn fourth_order_kick_force(
     time: f64,
     duration: f64,
     runtime: &CanonicalMaterialRuntimeState,
+    wall_rate: Option<&[f64]>,
 ) -> Result<Vec<f64>, WaveError> {
     let base = operator.base();
     let mass = operator.primary_mass_at(time, runtime)?;
+    // Under the trapezoid wall step a wall node's rate carries the wall's own
+    // `G X` beside `s − F`, as the drift form's `ũ` carries its acceleration.
     let rate = force
         .iter()
         .zip(source)
         .zip(&mass)
         .zip(forcing.prescribed())
-        .map(|(((force, source), mass), signal)| match signal {
+        .enumerate()
+        .map(|(node, (((force, source), mass), signal))| match signal {
             Some(signal) => {
                 (signal.value(time + duration) - signal.value(time - duration)) / (2.0 * duration)
             }
-            None => (source - force) / mass,
+            None => (source - force + wall_rate.map_or(0.0, |rate| rate[node])) / mass,
         })
         .collect::<Vec<_>>();
     let tangents = operator.complementary_tangents_at(complementary, time, runtime)?;
@@ -4510,6 +4653,7 @@ fn fourth_order_temporal_field(
     middle_time: f64,
     duration: f64,
     runtime: &CanonicalMaterialRuntimeState,
+    wall: Option<TemporalWallAcceleration<'_>>,
 ) -> Result<Vec<f64>, WaveError> {
     let base = operator.base();
     let tangents = operator.complementary_tangents_at(complementary, middle_time, runtime)?;
@@ -4542,13 +4686,6 @@ fn fourth_order_temporal_field(
                 * field[node];
         }
     }
-    if !forcing.sources().is_empty() {
-        let later = forcing.integrated_rate(middle_time + 0.5 * duration)?;
-        let earlier = forcing.integrated_rate(middle_time - 0.5 * duration)?;
-        for ((value, later), earlier) in stiffness.iter_mut().zip(later).zip(earlier) {
-            *value -= (later - earlier) / duration;
-        }
-    }
     let inverse = if operator.has_field_laws() {
         operator.primary_tangent_inverse_at(field, middle_time, runtime)?
     } else {
@@ -4558,6 +4695,26 @@ fn fourth_order_temporal_field(
             .map(|mass| 1.0 / mass)
             .collect()
     };
+    let wall_share = match wall {
+        Some(wall) => temporal_wall_acceleration(
+            operator,
+            forcing,
+            field,
+            &wall,
+            &stiffness,
+            &inverse,
+            middle_time,
+            duration,
+        )?,
+        None => Vec::new(),
+    };
+    if !forcing.sources().is_empty() {
+        let later = forcing.integrated_rate(middle_time + 0.5 * duration)?;
+        let earlier = forcing.integrated_rate(middle_time - 0.5 * duration)?;
+        for ((value, later), earlier) in stiffness.iter_mut().zip(later).zip(earlier) {
+            *value -= (later - earlier) / duration;
+        }
+    }
     let scale = duration * duration / 12.0;
     let corrected = field
         .iter()
@@ -4578,8 +4735,94 @@ fn fourth_order_temporal_field(
             None => field - scale * stiffness * inverse,
         })
         .collect::<Vec<_>>();
+    let mut corrected = corrected;
+    for (node, share) in wall_share {
+        corrected[node] += share;
+    }
     validate_finite(&corrected)?;
     Ok(corrected)
+}
+
+/// What the trapezoid wall step's drift reads beside the field to give a
+/// wall node its share of `dt²/12 · ü`: the pole currents after the first
+/// kick and that kick's force.
+struct TemporalWallAcceleration<'a> {
+    outgoing_z: &'a [f64],
+    force: &'a [f64],
+}
+
+/// The walls' share of the drift's `dt²/12 · ü` at their free nodes on a
+/// driven generation: `dt²/12 · A (G Ẋ)_Q`, `A = ∂u/∂Q` at the middle, with
+/// `Ẋ = G X + E (s − F)` at the drift's field `U` and `F` at the drift's
+/// middle, the first kick's force advanced half a step by `L u`. The
+/// generator reads a field, so the rate it is applied to is `u̇ = A Q̇`, and a
+/// pinned node's `u̇` is its signal's; see the fixed path's
+/// `wall_acceleration`.
+#[allow(clippy::too_many_arguments)]
+fn temporal_wall_acceleration(
+    operator: &CanonicalTemporalWaveOperator,
+    forcing: &CanonicalForcing,
+    field: &[f64],
+    wall: &TemporalWallAcceleration<'_>,
+    stiffness: &[f64],
+    inverse: &[f64],
+    middle_time: f64,
+    duration: f64,
+) -> Result<Vec<(usize, f64)>, WaveError> {
+    let base = operator.base();
+    let scale = duration * duration / 12.0;
+    let source = if forcing.sources().is_empty() {
+        None
+    } else {
+        Some(forcing.integrated_rate(middle_time)?)
+    };
+    // `u̇` at a node whose wall rate there is `held`, in flux units.
+    let field_rate = |node: usize, held: f64| match forcing.prescribed()[node] {
+        Some(signal) => {
+            (signal.value(middle_time + 0.5 * duration)
+                - signal.value(middle_time - 0.5 * duration))
+                / duration
+        }
+        None => {
+            inverse[node]
+                * (held + source.as_ref().map_or(0.0, |source| source[node])
+                    - (wall.force[node] + 0.5 * duration * stiffness[node]))
+        }
+    };
+    let mut on_trace = vec![false; field.len()];
+    if let Some(boundary) = base.outgoing_boundary() {
+        for node in boundary.trace_nodes() {
+            on_trace[*node as usize] = true;
+        }
+    }
+    let mut share = Vec::new();
+    for (node, damping) in base.first_order_boundary_damping().iter().enumerate() {
+        if *damping > 0.0 && !on_trace[node] && forcing.prescribed()[node].is_none() {
+            let rate = field_rate(node, -damping * field[node]);
+            share.push((node, scale * inverse[node] * (-damping * rate)));
+        }
+    }
+    if let Some(boundary) = base.outgoing_boundary() {
+        let unit_mass = vec![1.0; base.degrees_of_freedom()];
+        let held = apply_outgoing_generator(
+            base,
+            boundary,
+            &unit_mass,
+            &trace_state(boundary, field, wall.outgoing_z)?,
+        )?;
+        let mut rate = held.clone();
+        for (position, node) in boundary.trace_nodes().iter().enumerate() {
+            rate[position] = field_rate(*node as usize, held[position]);
+        }
+        let acceleration = apply_outgoing_generator(base, boundary, &unit_mass, &rate)?;
+        for (position, node) in boundary.trace_nodes().iter().enumerate() {
+            let node = *node as usize;
+            if forcing.prescribed()[node].is_none() {
+                share.push((node, scale * inverse[node] * acceleration[position]));
+            }
+        }
+    }
+    Ok(share)
 }
 
 /// The stores the bulk fields do not hold: the gap springs, the outgoing pole
@@ -5234,6 +5477,287 @@ fn bernoulli_map(flux: f64, beta: f64, k: f64, duration: f64) -> f64 {
     flux.signum() * next.max(0.0).sqrt()
 }
 
+/// The walls' rate `G X` at a state, in flux units, with the field `U` the
+/// state holds at `time`: `−D U` at a first-order wall's node, the generator
+/// on `(U, z)` along the trace. Returns the flux rates and the pole currents'.
+fn wall_rate_at(
+    operator: &CanonicalTemporalWaveOperator,
+    primary: &[f64],
+    outgoing_z: &[f64],
+    time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<(Vec<f64>, Vec<f64>), WaveError> {
+    let base = operator.base();
+    let field = operator.primary_field_at(primary, time, runtime)?;
+    let mut rate = base
+        .first_order_boundary_damping()
+        .iter()
+        .zip(&field)
+        .map(|(damping, field)| -damping * field)
+        .collect::<Vec<_>>();
+    let mut z_rate = Vec::new();
+    if let Some(boundary) = base.outgoing_boundary() {
+        let unit_mass = vec![1.0; base.degrees_of_freedom()];
+        let derivative = apply_outgoing_generator(
+            base,
+            boundary,
+            &unit_mass,
+            &trace_state(boundary, &field, outgoing_z)?,
+        )?;
+        let trace_count = boundary.trace_nodes().len();
+        for (position, node) in boundary.trace_nodes().iter().enumerate() {
+            rate[*node as usize] = derivative[position];
+        }
+        z_rate = derivative[trace_count..].to_vec();
+    }
+    validate_finite(&rate)?;
+    Ok((rate, z_rate))
+}
+
+/// The bulk's kick at every node, `wall_rate` added, a pinned node set to its
+/// signal at `target_time`, with the work the forced kick charges: the
+/// midpoint field at a linear node, the discrete gradient at a nonlinear one,
+/// the signal at a pinned one. Returns the source work and what the pins put
+/// in beyond the kick's own terms.
+#[allow(clippy::too_many_arguments)]
+fn plain_forced_kick(
+    operator: &CanonicalTemporalWaveOperator,
+    primary: &mut [f64],
+    force: &[f64],
+    source: &[f64],
+    wall_rate: &[f64],
+    duration: f64,
+    forcing: &CanonicalForcing,
+    target_time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<(f64, f64), WaveError> {
+    let mass = operator.primary_mass_at(target_time, runtime)?;
+    let nonlinear = if operator.has_field_laws {
+        Some(operator.primary_terms_at(target_time, runtime)?.0)
+    } else {
+        None
+    };
+    let mut source_work = 0.0;
+    let mut prescribed_exchange = 0.0;
+    for node in 0..primary.len() {
+        let old = primary[node];
+        let rate = source[node] - force[node] + wall_rate[node];
+        let signal = forcing.prescribed()[node];
+        if let Some(terms) = nonlinear.as_deref()
+            && !ConstitutiveSite::new(&terms[operator.primary_range(node)]).is_linear()
+        {
+            let old_energy = operator.primary_node_energy(terms, node, old, runtime)?;
+            let (new, new_energy, gradient) = match signal {
+                Some(signal) => {
+                    let value = signal.value(target_time);
+                    let (new, energy) =
+                        operator.primary_flux_and_energy_of_field(terms, node, value, runtime)?;
+                    (new, energy, value)
+                }
+                None => {
+                    let new = old + duration * rate;
+                    let (gradient, _) =
+                        operator.primary_discrete_gradient(terms, node, old, new, runtime)?;
+                    (
+                        new,
+                        operator.primary_node_energy(terms, node, new, runtime)?,
+                        gradient,
+                    )
+                }
+            };
+            let node_source_work = duration * gradient * source[node];
+            source_work += node_source_work;
+            if signal.is_some() {
+                prescribed_exchange +=
+                    new_energy - old_energy - node_source_work + duration * gradient * force[node];
+            }
+            primary[node] = new;
+            continue;
+        }
+        let new = match signal {
+            Some(signal) => mass[node] * signal.value(target_time),
+            None => old + duration * rate,
+        };
+        let midpoint_field = match signal {
+            Some(signal) => signal.value(target_time),
+            None => 0.5 * (old + new) / mass[node],
+        };
+        let node_source_work = duration * midpoint_field * source[node];
+        source_work += node_source_work;
+        if signal.is_some() {
+            prescribed_exchange += 0.5 * (new * new - old * old) / mass[node] - node_source_work
+                + duration * midpoint_field * force[node];
+        }
+        primary[node] = new;
+    }
+    validate_finite(primary)?;
+    if source_work.is_finite() && prescribed_exchange.is_finite() {
+        Ok((source_work, prescribed_exchange))
+    } else {
+        Err(WaveError::InvalidState)
+    }
+}
+
+/// The trapezoid wall step's first kick on a driven generation: the plain
+/// kick with the walls' explicit half `dt/2 · G X`, read at the state the
+/// step starts from and the mass in force there.
+#[allow(clippy::too_many_arguments)]
+fn trapezoid_forced_first_kick(
+    operator: &CanonicalTemporalWaveOperator,
+    primary: &mut [f64],
+    outgoing_z: &mut [f64],
+    force: &[f64],
+    source: &[f64],
+    duration: f64,
+    forcing: &CanonicalForcing,
+    target_time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<(f64, f64, f64), WaveError> {
+    let (rate, z_rate) = wall_rate_at(operator, primary, outgoing_z, target_time, runtime)?;
+    for (z, rate) in outgoing_z.iter_mut().zip(&z_rate) {
+        *z += duration * rate;
+    }
+    let (source_work, prescribed_exchange) = plain_forced_kick(
+        operator,
+        primary,
+        force,
+        source,
+        &rate,
+        duration,
+        forcing,
+        target_time,
+        runtime,
+    )?;
+    Ok((source_work, prescribed_exchange, 0.0))
+}
+
+/// The trapezoid wall step's second kick on a driven generation: the plain
+/// kick, then the walls' implicit half `(I − dt/2 · G) X′ = X` at the mass in
+/// force at the step's end - the trapezoid rule for a wall whose admittance
+/// moves with the mass. A nonlinear site reads the field the half ends with.
+#[allow(clippy::too_many_arguments)]
+fn trapezoid_forced_second_kick(
+    operator: &CanonicalTemporalWaveOperator,
+    primary: &mut [f64],
+    outgoing_z: &mut [f64],
+    force: &[f64],
+    source: &[f64],
+    duration: f64,
+    forcing: &CanonicalForcing,
+    target_time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<(f64, f64, f64), WaveError> {
+    let base = operator.base();
+    let no_rate = vec![0.0; primary.len()];
+    let (source_work, prescribed_exchange) = plain_forced_kick(
+        operator,
+        primary,
+        force,
+        source,
+        &no_rate,
+        duration,
+        forcing,
+        target_time,
+        runtime,
+    )?;
+    let mass = operator.primary_mass_at(target_time, runtime)?;
+    let nonlinear = if operator.has_field_laws {
+        Some(operator.primary_terms_at(target_time, runtime)?.0)
+    } else {
+        None
+    };
+    let mut on_trace = vec![false; primary.len()];
+    if let Some(boundary) = base.outgoing_boundary() {
+        for node in boundary.trace_nodes() {
+            on_trace[*node as usize] = true;
+        }
+    }
+    for (node, damping) in base.first_order_boundary_damping().iter().enumerate() {
+        if *damping == 0.0 || on_trace[node] || forcing.prescribed()[node].is_some() {
+            continue;
+        }
+        primary[node] = match nonlinear.as_deref() {
+            Some(terms)
+                if !ConstitutiveSite::new(&terms[operator.primary_range(node)]).is_linear() =>
+            {
+                operator.implicit_damped_site(
+                    terms,
+                    node,
+                    primary[node],
+                    duration * damping,
+                    runtime,
+                )?
+            }
+            _ => primary[node] / (1.0 + duration * damping / mass[node]),
+        };
+    }
+    if let Some(boundary) = base.outgoing_boundary() {
+        let factor = crate::canonical_wave::CanonicalOutgoingMidpointFactor::prepare(
+            base,
+            boundary,
+            2.0 * duration,
+        )?;
+        let nonlinear_trace = nonlinear.as_deref().filter(|terms| {
+            boundary.trace_nodes().iter().any(|node| {
+                !ConstitutiveSite::new(&terms[operator.primary_range(*node as usize)]).is_linear()
+            })
+        });
+        let trace = nonlinear_trace.map(|terms| TemporalTrace {
+            operator,
+            terms,
+            runtime,
+        });
+        trapezoid_trace_implicit_half(
+            primary,
+            outgoing_z,
+            &mut None,
+            &factor,
+            base,
+            boundary,
+            &mass,
+            forcing,
+            trace
+                .as_ref()
+                .map(|trace| trace as &dyn crate::canonical_wave::TraceConstitutive),
+        )?;
+    }
+    validate_finite(primary)?;
+    Ok((source_work, prescribed_exchange, 0.0))
+}
+
+/// The trapezoid wall step's loss on a driven generation, from the state the
+/// core started from and the one it ends with, each read as a field at its
+/// own instant; see `trapezoid_wall_dissipation`. Its sign is the step's, so
+/// a step taken backwards books none, as the half kicks' trace does.
+#[allow(clippy::too_many_arguments)]
+fn trapezoid_forced_wall_loss(
+    operator: &CanonicalTemporalWaveOperator,
+    start: (&[f64], &[f64]),
+    end: (&[f64], &[f64]),
+    start_time: f64,
+    end_time: f64,
+    duration: f64,
+    forcing: &CanonicalForcing,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<(f64, f64), WaveError> {
+    let first = operator.primary_field_at(start.0, start_time, runtime)?;
+    let last = operator.primary_field_at(end.0, end_time, runtime)?;
+    let mean_field = first
+        .iter()
+        .zip(&last)
+        .map(|(first, last)| 0.5 * (first + last))
+        .collect::<Vec<_>>();
+    let mean_z = start
+        .1
+        .iter()
+        .zip(end.1)
+        .map(|(first, last)| 0.5 * (first + last))
+        .collect::<Vec<_>>();
+    let (loss, prescribed_exchange) =
+        trapezoid_wall_dissipation(operator.base(), &mean_field, &mean_z, duration, forcing)?;
+    Ok((loss.max(0.0), prescribed_exchange))
+}
+
 /// One half kick with the sources, the pins and both walls folded into it, as
 /// the fixed path's `force_coupled_kick` does.
 ///
@@ -5881,6 +6405,11 @@ impl crate::canonical_wave::TraceConstitutive for TemporalTrace<'_> {
         self.operator
             .primary_flux_and_energy_of_field(self.terms, node, field, self.runtime)
             .map(|(flux, _)| flux)
+    }
+
+    fn field_and_slope(&self, node: usize, flux: f64) -> Result<(f64, f64), WaveError> {
+        self.operator
+            .primary_field_and_slope(self.terms, node, flux, self.runtime)
     }
 }
 
@@ -6873,17 +7402,19 @@ mod tests {
     /// the two paths hold a pin at different fields and the same constant.
     #[test]
     fn an_inert_generation_steps_forcing_exactly_as_the_fixed_path_does() {
-        for condition in [
-            OuterBoundaryCondition::Reflecting,
-            OuterBoundaryCondition::SecondOrderOutgoing,
-        ] {
-            for integrator in [
-                CanonicalIntegrator::Leapfrog,
-                CanonicalIntegrator::FourthOrder,
+        crate::canonical_wave::under_each_wall_step(|_| {
+            for condition in [
+                OuterBoundaryCondition::Reflecting,
+                OuterBoundaryCondition::SecondOrderOutgoing,
             ] {
-                inert_forcing_matches_the_fixed_path(condition, integrator);
+                for integrator in [
+                    CanonicalIntegrator::Leapfrog,
+                    CanonicalIntegrator::FourthOrder,
+                ] {
+                    inert_forcing_matches_the_fixed_path(condition, integrator);
+                }
             }
-        }
+        });
     }
 
     fn inert_forcing_matches_the_fixed_path(
@@ -7331,40 +7862,113 @@ mod tests {
     /// the wall carries some out, and the drive puts some in.
     #[test]
     fn a_driven_open_boundary_keeps_its_balance_second_order() {
-        let mut scene = Scene::default();
-        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
-            depth: ScalarField::constant(0.18),
-            frequency_hz: ScalarField::constant(1.2),
-            phase_radians: ScalarField::constant(0.25),
-        };
-        let mut base_scene = scene.clone();
-        strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
-            &base_scene,
-            1,
-            MeshingOptions {
-                target_edge_length: 0.3,
-                ..MeshingOptions::default()
-            },
-        )
-        .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &base_scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
-        )
-        .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
-        let base = operator.base();
-        let forcing = CanonicalForcing::none(base);
+        crate::canonical_wave::under_each_wall_step(|_| {
+            let mut scene = Scene::default();
+            scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+                depth: ScalarField::constant(0.18),
+                frequency_hz: ScalarField::constant(1.2),
+                phase_radians: ScalarField::constant(0.25),
+            };
+            let mut base_scene = scene.clone();
+            strip_temporal_laws(&mut base_scene.materials);
+            let mesh = mesh_scene(
+                &base_scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.3,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap();
+            let quadratic = QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &base_scene,
+                OuterBoundaryCondition::SecondOrderOutgoing,
+            )
+            .unwrap();
+            let operator =
+                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            let base = operator.base();
+            let forcing = CanonicalForcing::none(base);
 
-        let ceiling = 0.4 * operator.maximum_time_step();
-        let target = 0.2;
-        let mut previous: Option<(f64, f64)> = None;
-        for refinement in [1.0, 0.5, 0.25] {
-            let steps = (target / (ceiling * refinement)).ceil() as u64;
-            let time_step = target / steps as f64;
+            let ceiling = 0.4 * operator.maximum_time_step();
+            let target = 0.2;
+            let mut previous: Option<(f64, f64)> = None;
+            for refinement in [1.0, 0.5, 0.25] {
+                let steps = (target / (ceiling * refinement)).ceil() as u64;
+                let time_step = target / steps as f64;
+                let primary = base
+                    .node_points()
+                    .iter()
+                    .map(|point| 0.05 * (1.5 * point.x - 0.9 * point.y).sin())
+                    .collect::<Vec<_>>();
+                let potential = base
+                    .node_points()
+                    .iter()
+                    .map(|point| 0.03 * (1.0 * point.x + 1.3 * point.y).cos())
+                    .collect::<Vec<_>>();
+                let complementary = base.compatible_flux(&potential).unwrap();
+                let mut state =
+                    CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+                        .unwrap();
+
+                let before = state.energy(&operator).unwrap();
+                let mut work = 0.0;
+                let mut escaped = 0.0;
+                for _ in 0..steps {
+                    let accounting = state.step_with_forcing(&operator, &forcing).unwrap();
+                    assert!(accounting.boundary_loss >= 0.0, "a wall cannot inject");
+                    work += accounting.temporal_work;
+                    escaped += accounting.boundary_loss;
+                }
+                let after = state.energy(&operator).unwrap();
+                assert!(escaped > 1.0e-6, "the wall must actually radiate");
+
+                let residual = after - before - work + escaped;
+                if let Some((coarse_step, coarse_residual)) = previous {
+                    let order = (coarse_residual.abs() / residual.abs()).log2()
+                        / (coarse_step / time_step).log2();
+                    assert!(
+                        order > 1.7,
+                        "a nonlocal wall must not cost the balance its order, measured \
+                     {order:.2} between dt {coarse_step:.3e} and {time_step:.3e}"
+                    );
+                }
+                previous = Some((time_step, residual));
+            }
+        });
+    }
+
+    /// A second-order outgoing boundary, inert, must evolve exactly as the
+    /// fixed path's does - including its pole currents, which are the only
+    /// state on this path that is neither a field nor a local spring.
+    #[test]
+    fn an_inert_open_boundary_evolves_exactly_as_the_fixed_path_does() {
+        crate::canonical_wave::under_each_wall_step(|_| {
+            let scene = Scene::default();
+            let mesh = mesh_scene(
+                &scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.3,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap();
+            let quadratic = QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &scene,
+                OuterBoundaryCondition::SecondOrderOutgoing,
+            )
+            .unwrap();
+            let operator =
+                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            let base = operator.base();
+            assert!(base.outgoing_boundary().is_some());
+            assert!(!operator.conservative_bulk_supported());
+            let forcing = CanonicalForcing::none(base);
+            let time_step = 0.4 * operator.maximum_time_step();
+
             let primary = base
                 .node_points()
                 .iter()
@@ -7376,107 +7980,39 @@ mod tests {
                 .map(|point| 0.03 * (1.0 * point.x + 1.3 * point.y).cos())
                 .collect::<Vec<_>>();
             let complementary = base.compatible_flux(&potential).unwrap();
-            let mut state =
-                CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
-                    .unwrap();
+            let mut temporal = CanonicalTemporalWaveState::new(
+                &operator,
+                time_step,
+                primary.clone(),
+                complementary.clone(),
+            )
+            .unwrap();
+            let mut fixed =
+                CanonicalWaveState::new(base, time_step, primary, complementary).unwrap();
 
-            let before = state.energy(&operator).unwrap();
-            let mut work = 0.0;
             let mut escaped = 0.0;
-            for _ in 0..steps {
-                let accounting = state.step_with_forcing(&operator, &forcing).unwrap();
-                assert!(accounting.boundary_loss >= 0.0, "a wall cannot inject");
-                work += accounting.temporal_work;
-                escaped += accounting.boundary_loss;
-            }
-            let after = state.energy(&operator).unwrap();
-            assert!(escaped > 1.0e-6, "the wall must actually radiate");
-
-            let residual = after - before - work + escaped;
-            if let Some((coarse_step, coarse_residual)) = previous {
-                let order = (coarse_residual.abs() / residual.abs()).log2()
-                    / (coarse_step / time_step).log2();
+            for _ in 0..24 {
+                let temporal_accounting = temporal.step_with_forcing(&operator, &forcing).unwrap();
+                let fixed_accounting = fixed.step_with_forcing(base, &forcing).unwrap();
                 assert!(
-                    order > 1.7,
-                    "a nonlocal wall must not cost the balance its order, measured \
-                     {order:.2} between dt {coarse_step:.3e} and {time_step:.3e}"
+                    (temporal_accounting.boundary_loss - fixed_accounting.boundary_loss).abs()
+                        < 1.0e-12,
+                    "boundary loss diverged"
                 );
+                escaped += temporal_accounting.boundary_loss;
             }
-            previous = Some((time_step, residual));
-        }
-    }
-
-    /// A second-order outgoing boundary, inert, must evolve exactly as the
-    /// fixed path's does - including its pole currents, which are the only
-    /// state on this path that is neither a field nor a local spring.
-    #[test]
-    fn an_inert_open_boundary_evolves_exactly_as_the_fixed_path_does() {
-        let scene = Scene::default();
-        let mesh = mesh_scene(
-            &scene,
-            1,
-            MeshingOptions {
-                target_edge_length: 0.3,
-                ..MeshingOptions::default()
-            },
-        )
-        .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
-        )
-        .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
-        let base = operator.base();
-        assert!(base.outgoing_boundary().is_some());
-        assert!(!operator.conservative_bulk_supported());
-        let forcing = CanonicalForcing::none(base);
-        let time_step = 0.4 * operator.maximum_time_step();
-
-        let primary = base
-            .node_points()
-            .iter()
-            .map(|point| 0.05 * (1.5 * point.x - 0.9 * point.y).sin())
-            .collect::<Vec<_>>();
-        let potential = base
-            .node_points()
-            .iter()
-            .map(|point| 0.03 * (1.0 * point.x + 1.3 * point.y).cos())
-            .collect::<Vec<_>>();
-        let complementary = base.compatible_flux(&potential).unwrap();
-        let mut temporal = CanonicalTemporalWaveState::new(
-            &operator,
-            time_step,
-            primary.clone(),
-            complementary.clone(),
-        )
-        .unwrap();
-        let mut fixed = CanonicalWaveState::new(base, time_step, primary, complementary).unwrap();
-
-        let mut escaped = 0.0;
-        for _ in 0..24 {
-            let temporal_accounting = temporal.step_with_forcing(&operator, &forcing).unwrap();
-            let fixed_accounting = fixed.step_with_forcing(base, &forcing).unwrap();
-            assert!(
-                (temporal_accounting.boundary_loss - fixed_accounting.boundary_loss).abs()
-                    < 1.0e-12,
-                "boundary loss diverged"
-            );
-            escaped += temporal_accounting.boundary_loss;
-        }
-        assert!(escaped > 1.0e-6, "the wall must actually radiate");
-        for (temporal, fixed) in temporal.primary_flux().iter().zip(fixed.primary_flux()) {
-            assert!((temporal - fixed).abs() < 1.0e-12);
-        }
-        for (temporal, fixed) in temporal
-            .complementary_flux()
-            .iter()
-            .zip(fixed.complementary_flux())
-        {
-            assert!((*temporal - *fixed).norm() < 1.0e-12);
-        }
+            assert!(escaped > 1.0e-6, "the wall must actually radiate");
+            for (temporal, fixed) in temporal.primary_flux().iter().zip(fixed.primary_flux()) {
+                assert!((temporal - fixed).abs() < 1.0e-12);
+            }
+            for (temporal, fixed) in temporal
+                .complementary_flux()
+                .iter()
+                .zip(fixed.complementary_flux())
+            {
+                assert!((*temporal - *fixed).norm() < 1.0e-12);
+            }
+        });
     }
 
     /// The same gap, inert, must evolve exactly as the fixed path's does.
@@ -9649,167 +10185,176 @@ mod tests {
 
     #[test]
     fn a_zero_response_on_a_wall_kicks_as_the_linear_wall_does() {
-        // χ = 0 runs the Newton trace solve and the discrete gradient, which
-        // must converge onto the linear midpoint kick, pins on the wall
-        // included.
-        for (condition, pins) in WALLS
-            .into_iter()
-            .flat_map(|condition| [false, true].map(|pins| (condition, pins)))
-        {
-            let mut scene = Scene::default();
-            let linear = walled(condition, &scene);
-            scene.materials[0].mass_law.field = kerr(0.0);
-            let nonlinear = walled(condition, &scene);
-            assert!(nonlinear.has_field_laws());
-            let time_step = 0.4 * linear.maximum_time_step();
-            let (primary, complementary) = strong_fluxes(&linear, 6.0);
-            let run = |operator: &CanonicalTemporalWaveOperator| {
-                let base = operator.base();
-                let prescribed = base
-                    .node_points()
-                    .iter()
-                    .map(|point| {
-                        (pins && point.x < -0.999 && point.y.abs() < 0.1)
-                            .then_some(TimeSignal::harmonic(0.4, 0.2, 1.3, 0.2))
-                    })
-                    .collect();
-                let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
-                let mut state = CanonicalTemporalWaveState::new(
-                    operator,
-                    time_step,
-                    primary.clone(),
-                    complementary.clone(),
-                )
-                .unwrap()
-                .pinned(operator, &forcing)
-                .unwrap();
-                let (mut escaped, mut exchange) = (0.0, 0.0);
-                for _ in 0..20 {
-                    let accounting = state.step_with_forcing(operator, &forcing).unwrap();
-                    escaped += accounting.boundary_loss;
-                    exchange += accounting.prescribed_exchange;
+        crate::canonical_wave::under_each_wall_step(|_| {
+            // χ = 0 runs the Newton trace solve and the discrete gradient, which
+            // must converge onto the linear midpoint kick, pins on the wall
+            // included.
+            for (condition, pins) in WALLS
+                .into_iter()
+                .flat_map(|condition| [false, true].map(|pins| (condition, pins)))
+            {
+                let mut scene = Scene::default();
+                let linear = walled(condition, &scene);
+                scene.materials[0].mass_law.field = kerr(0.0);
+                let nonlinear = walled(condition, &scene);
+                assert!(nonlinear.has_field_laws());
+                let time_step = 0.4 * linear.maximum_time_step();
+                let (primary, complementary) = strong_fluxes(&linear, 6.0);
+                let run = |operator: &CanonicalTemporalWaveOperator| {
+                    let base = operator.base();
+                    let prescribed = base
+                        .node_points()
+                        .iter()
+                        .map(|point| {
+                            (pins && point.x < -0.999 && point.y.abs() < 0.1)
+                                .then_some(TimeSignal::harmonic(0.4, 0.2, 1.3, 0.2))
+                        })
+                        .collect();
+                    let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+                    let mut state = CanonicalTemporalWaveState::new(
+                        operator,
+                        time_step,
+                        primary.clone(),
+                        complementary.clone(),
+                    )
+                    .unwrap()
+                    .pinned(operator, &forcing)
+                    .unwrap();
+                    let (mut escaped, mut exchange) = (0.0, 0.0);
+                    for _ in 0..20 {
+                        let accounting = state.step_with_forcing(operator, &forcing).unwrap();
+                        escaped += accounting.boundary_loss;
+                        exchange += accounting.prescribed_exchange;
+                    }
+                    (state.primary_flux().to_vec(), escaped, exchange)
+                };
+                let (expected, expected_loss, expected_exchange) = run(&linear);
+                let (actual, actual_loss, actual_exchange) = run(&nonlinear);
+                let scale = expected.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+                for (a, b) in expected.iter().zip(&actual) {
+                    assert!((a - b).abs() <= 1e-12 * scale, "{condition:?}, pins {pins}");
                 }
-                (state.primary_flux().to_vec(), escaped, exchange)
-            };
-            let (expected, expected_loss, expected_exchange) = run(&linear);
-            let (actual, actual_loss, actual_exchange) = run(&nonlinear);
-            let scale = expected.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
-            for (a, b) in expected.iter().zip(&actual) {
-                assert!((a - b).abs() <= 1e-12 * scale, "{condition:?}, pins {pins}");
+                assert!(expected_loss > 0.0);
+                assert!((expected_loss - actual_loss).abs() <= 1e-11 * expected_loss);
+                assert_eq!(expected_exchange != 0.0, pins);
+                assert!(
+                    (expected_exchange - actual_exchange).abs() <= 1e-11 * expected_loss,
+                    "{condition:?}: {expected_exchange} against {actual_exchange}"
+                );
             }
-            assert!(expected_loss > 0.0);
-            assert!((expected_loss - actual_loss).abs() <= 1e-11 * expected_loss);
-            assert_eq!(expected_exchange != 0.0, pins);
-            assert!(
-                (expected_exchange - actual_exchange).abs() <= 1e-11 * expected_loss,
-                "{condition:?}: {expected_exchange} against {actual_exchange}"
-            );
-        }
+        });
     }
 
     #[test]
     fn a_nonlinear_trace_radiates_passively_and_balances_at_second_order() {
-        for (condition, pumped) in [(WALLS[0], false), (WALLS[1], false), (WALLS[1], true)] {
-            let mut scene = Scene::default();
-            scene.materials[0].mass_law.field = kerr(0.8);
-            scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
-            if pumped {
-                // The trace mass then moves under the wall as well.
-                scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+        crate::canonical_wave::under_each_wall_step(|_| {
+            for (condition, pumped) in [(WALLS[0], false), (WALLS[1], false), (WALLS[1], true)] {
+                let mut scene = Scene::default();
+                scene.materials[0].mass_law.field = kerr(0.8);
+                scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+                if pumped {
+                    // The trace mass then moves under the wall as well.
+                    scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+                }
+                let operator = walled(condition, &scene);
+                let forcing = CanonicalForcing::none(operator.base());
+                let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
+                assert!(total.boundary_loss > 1e-5, "{condition:?}: {total:?}");
             }
-            let operator = walled(condition, &scene);
-            let forcing = CanonicalForcing::none(operator.base());
-            let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
-            assert!(total.boundary_loss > 1e-5, "{condition:?}: {total:?}");
-        }
+        });
     }
 
     #[test]
     fn a_nonlinear_wall_reflects_as_the_linear_one_at_small_amplitude() {
-        // The wall's departure from its linear control is cubic in the
-        // amplitude, like the bulk's: nothing at the wall is first order in
-        // the nonlinearity.
-        for condition in WALLS {
-            let mut scene = Scene::default();
-            let linear = walled(condition, &scene);
-            scene.materials[0].mass_law.field = kerr(0.8);
-            let nonlinear = walled(condition, &scene);
-            let time_step = 0.4 * linear.maximum_time_step();
-            let departure = |amplitude: f64| {
-                let run = |operator: &CanonicalTemporalWaveOperator| {
-                    let (primary, complementary) = strong_fluxes(&linear, amplitude);
-                    let mut state = CanonicalTemporalWaveState::new(
-                        operator,
-                        time_step,
-                        primary,
-                        complementary,
-                    )
-                    .unwrap();
-                    for _ in 0..40 {
-                        state.step(operator).unwrap();
-                    }
-                    state.primary_flux().to_vec()
+        crate::canonical_wave::under_each_wall_step(|_| {
+            // The wall's departure from its linear control is cubic in the
+            // amplitude, like the bulk's: nothing at the wall is first order in
+            // the nonlinearity.
+            for condition in WALLS {
+                let mut scene = Scene::default();
+                let linear = walled(condition, &scene);
+                scene.materials[0].mass_law.field = kerr(0.8);
+                let nonlinear = walled(condition, &scene);
+                let time_step = 0.4 * linear.maximum_time_step();
+                let departure = |amplitude: f64| {
+                    let run = |operator: &CanonicalTemporalWaveOperator| {
+                        let (primary, complementary) = strong_fluxes(&linear, amplitude);
+                        let mut state = CanonicalTemporalWaveState::new(
+                            operator,
+                            time_step,
+                            primary,
+                            complementary,
+                        )
+                        .unwrap();
+                        for _ in 0..40 {
+                            state.step(operator).unwrap();
+                        }
+                        state.primary_flux().to_vec()
+                    };
+                    let control = run(&linear);
+                    let actual = run(&nonlinear);
+                    let norm = control
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f64>()
+                        .sqrt();
+                    control
+                        .iter()
+                        .zip(&actual)
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum::<f64>()
+                        .sqrt()
+                        / norm
                 };
-                let control = run(&linear);
-                let actual = run(&nonlinear);
-                let norm = control
-                    .iter()
-                    .map(|value| value * value)
-                    .sum::<f64>()
-                    .sqrt();
-                control
-                    .iter()
-                    .zip(&actual)
-                    .map(|(a, b)| (a - b) * (a - b))
-                    .sum::<f64>()
-                    .sqrt()
-                    / norm
-            };
-            let ratio = departure(0.5) / departure(0.25);
-            assert!((ratio - 4.0).abs() < 0.3, "{condition:?}: ratio {ratio}");
-        }
+                let ratio = departure(0.5) / departure(0.25);
+                assert!((ratio - 4.0).abs() < 0.3, "{condition:?}: ratio {ratio}");
+            }
+        });
     }
 
     #[test]
     fn a_strong_kerr_pulse_leaves_through_an_outgoing_wall() {
-        // A pulse strong enough that the trace map departs from linear by
-        // over 50% crosses the second-order wall. Nothing may pile up at the
-        // wall: most of the energy leaves, and the budget closes.
-        let mut scene = Scene::default();
-        scene.materials[0].mass_law.field = kerr(0.8);
-        let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
-        let base = operator.base();
-        let primary = base
-            .node_points()
-            .iter()
-            .zip(base.primary_mass())
-            .map(|(point, mass)| {
-                let u = 1.2 * (-(point.x * point.x + point.y * point.y) / 0.08).exp();
-                mass * (1.0 + 0.8 * u * u) * u
-            })
-            .collect::<Vec<_>>();
-        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
-        let time_step = 0.4 * operator.maximum_time_step();
-        let mut state =
-            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary).unwrap();
-        let initial = state.energy(&operator).unwrap();
-        let mut escaped = 0.0;
-        let steps = (3.0 / time_step).ceil() as usize;
-        for _ in 0..steps {
-            // The split conserves a nearby energy, not this one, so the
-            // stored energy is not monotone step by step; the wall's own
-            // dissipation is, and the budget below closes.
-            let accounting = state.step(&operator).unwrap();
-            assert!(accounting.boundary_loss >= 0.0);
-            escaped += accounting.boundary_loss;
-        }
-        let previous = state.energy(&operator).unwrap();
-        assert!(
-            previous < 0.2 * initial,
-            "{} of the energy stayed",
-            previous / initial
-        );
-        assert!((initial - previous - escaped).abs() < 1e-3 * initial);
+        crate::canonical_wave::under_each_wall_step(|_| {
+            // A pulse strong enough that the trace map departs from linear by
+            // over 50% crosses the second-order wall. Nothing may pile up at the
+            // wall: most of the energy leaves, and the budget closes.
+            let mut scene = Scene::default();
+            scene.materials[0].mass_law.field = kerr(0.8);
+            let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
+            let base = operator.base();
+            let primary = base
+                .node_points()
+                .iter()
+                .zip(base.primary_mass())
+                .map(|(point, mass)| {
+                    let u = 1.2 * (-(point.x * point.x + point.y * point.y) / 0.08).exp();
+                    mass * (1.0 + 0.8 * u * u) * u
+                })
+                .collect::<Vec<_>>();
+            let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+            let time_step = 0.4 * operator.maximum_time_step();
+            let mut state =
+                CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+                    .unwrap();
+            let initial = state.energy(&operator).unwrap();
+            let mut escaped = 0.0;
+            let steps = (3.0 / time_step).ceil() as usize;
+            for _ in 0..steps {
+                // The split conserves a nearby energy, not this one, so the
+                // stored energy is not monotone step by step; the wall's own
+                // dissipation is, and the budget below closes.
+                let accounting = state.step(&operator).unwrap();
+                assert!(accounting.boundary_loss >= 0.0);
+                escaped += accounting.boundary_loss;
+            }
+            let previous = state.energy(&operator).unwrap();
+            assert!(
+                previous < 0.2 * initial,
+                "{} of the energy stayed",
+                previous / initial
+            );
+            assert!((initial - previous - escaped).abs() < 1e-3 * initial);
+        });
     }
 
     /// A snapshot across one step of `operator` from a strong state, and the
@@ -11006,29 +11551,32 @@ mod tests {
 
     #[test]
     fn a_complementary_nonlinearity_radiates_through_both_outgoing_walls() {
-        for condition in [
-            OuterBoundaryCondition::FirstOrderOutgoing,
-            OuterBoundaryCondition::SecondOrderOutgoing,
-        ] {
-            let mut scene = Scene::default();
-            let mesh = mesh_scene(
-                &scene,
-                1,
-                MeshingOptions {
-                    target_edge_length: 0.3,
-                    ..MeshingOptions::default()
-                },
-            )
-            .unwrap();
-            let quadratic =
-                QuadraticWaveOperator::assemble_scene(&mesh, &scene, condition).unwrap();
-            scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
-            let operator =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
-            let forcing = CanonicalForcing::none(operator.base());
-            let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
-            assert!(total.boundary_loss > 1e-5, "{condition:?}: {total:?}");
-        }
+        crate::canonical_wave::under_each_wall_step(|_| {
+            for condition in [
+                OuterBoundaryCondition::FirstOrderOutgoing,
+                OuterBoundaryCondition::SecondOrderOutgoing,
+            ] {
+                let mut scene = Scene::default();
+                let mesh = mesh_scene(
+                    &scene,
+                    1,
+                    MeshingOptions {
+                        target_edge_length: 0.3,
+                        ..MeshingOptions::default()
+                    },
+                )
+                .unwrap();
+                let quadratic =
+                    QuadraticWaveOperator::assemble_scene(&mesh, &scene, condition).unwrap();
+                scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+                let operator =
+                    CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1)
+                        .unwrap();
+                let forcing = CanonicalForcing::none(operator.base());
+                let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
+                assert!(total.boundary_loss > 1e-5, "{condition:?}: {total:?}");
+            }
+        });
     }
 
     /// Prescribed data used to reach the drift through its endpoint flux, so
@@ -11078,8 +11626,10 @@ mod tests {
     /// stage: these ratios read 2.00 and 2.05, first order, that way.
     #[test]
     fn a_pinned_trace_under_a_pump_steps_at_second_order() {
-        pinned_trace_steps_at_second_order(None);
-        pinned_trace_steps_at_second_order(Some(kerr(0.8)));
+        crate::canonical_wave::under_each_wall_step(|_| {
+            pinned_trace_steps_at_second_order(None);
+            pinned_trace_steps_at_second_order(Some(kerr(0.8)));
+        });
     }
 
     fn pinned_trace_steps_at_second_order(field: Option<FieldLaw>) {
@@ -11154,57 +11704,64 @@ mod tests {
     /// their own lane.
     #[test]
     fn a_pinned_nonlinear_trace_holds_its_field_and_balances_at_second_order() {
-        let mut scene = Scene::default();
-        scene.materials[0].mass_law.field = kerr(0.8);
-        scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
-        scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
-        let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
-        let base = operator.base();
-        let boundary = base.outgoing_boundary().unwrap();
-        let signal = TimeSignal::harmonic(0.4, 0.2, 1.3, 0.2);
-        let prescribed = base
-            .node_points()
-            .iter()
-            .map(|point| (point.x < -0.999 && point.y.abs() < 0.1).then_some(signal))
-            .collect::<Vec<_>>();
-        let pinned = boundary
-            .trace_nodes()
-            .iter()
-            .map(|node| *node as usize)
-            .filter(|node| prescribed[*node].is_some())
-            .collect::<Vec<_>>();
-        assert!(!pinned.is_empty());
-        let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
-        let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
-        assert!(total.prescribed_exchange.abs() > 1e-5, "{total:?}");
-        assert!(total.boundary_loss > 1e-5, "{total:?}");
+        crate::canonical_wave::under_each_wall_step(|_| {
+            let mut scene = Scene::default();
+            scene.materials[0].mass_law.field = kerr(0.8);
+            scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+            scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+            let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
+            let base = operator.base();
+            let boundary = base.outgoing_boundary().unwrap();
+            let signal = TimeSignal::harmonic(0.4, 0.2, 1.3, 0.2);
+            let prescribed = base
+                .node_points()
+                .iter()
+                .map(|point| (point.x < -0.999 && point.y.abs() < 0.1).then_some(signal))
+                .collect::<Vec<_>>();
+            let pinned = boundary
+                .trace_nodes()
+                .iter()
+                .map(|node| *node as usize)
+                .filter(|node| prescribed[*node].is_some())
+                .collect::<Vec<_>>();
+            assert!(!pinned.is_empty());
+            let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+            let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
+            assert!(total.prescribed_exchange.abs() > 1e-5, "{total:?}");
+            assert!(total.boundary_loss > 1e-5, "{total:?}");
 
-        let (primary, complementary) = strong_fluxes(&operator, 4.0);
-        let mut state = CanonicalTemporalWaveState::new(
-            &operator,
-            0.4 * operator.maximum_time_step(),
-            primary,
-            complementary,
-        )
-        .unwrap()
-        .pinned(&operator, &forcing)
-        .unwrap();
-        for _ in 0..20 {
-            state.step_with_forcing(&operator, &forcing).unwrap();
-            let (terms, _) = operator
-                .primary_terms_at(state.time(), state.runtime())
-                .unwrap();
-            for node in &pinned {
-                let field = operator
-                    .primary_inverse(&terms, *node, state.primary_flux()[*node], state.runtime())
+            let (primary, complementary) = strong_fluxes(&operator, 4.0);
+            let mut state = CanonicalTemporalWaveState::new(
+                &operator,
+                0.4 * operator.maximum_time_step(),
+                primary,
+                complementary,
+            )
+            .unwrap()
+            .pinned(&operator, &forcing)
+            .unwrap();
+            for _ in 0..20 {
+                state.step_with_forcing(&operator, &forcing).unwrap();
+                let (terms, _) = operator
+                    .primary_terms_at(state.time(), state.runtime())
                     .unwrap();
-                let held = signal.value(state.time());
-                assert!(
-                    (field - held).abs() <= 1e-12 * held.abs(),
-                    "{field} against {held}"
-                );
+                for node in &pinned {
+                    let field = operator
+                        .primary_inverse(
+                            &terms,
+                            *node,
+                            state.primary_flux()[*node],
+                            state.runtime(),
+                        )
+                        .unwrap();
+                    let held = signal.value(state.time());
+                    assert!(
+                        (field - held).abs() <= 1e-12 * held.abs(),
+                        "{field} against {held}"
+                    );
+                }
             }
-        }
+        });
     }
 
     /// A pinned trace node holds `Q = M(t) g(t)` at every step, under a pump,
@@ -11226,83 +11783,89 @@ mod tests {
     /// of 32 sits between the two.
     #[test]
     fn a_pinned_trace_holds_its_signal_and_reverses() {
-        let mut scene = Scene::default();
-        scene.materials[0].mass_law.drive = pump(0.4, 1.1, 0.3);
-        let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
-        let base = operator.base();
-        let boundary = base.outgoing_boundary().unwrap();
-        let signal = TimeSignal::harmonic(1.0, 0.2, 1.3, 0.2);
-        let mut prescribed = vec![None; base.degrees_of_freedom()];
-        for (node, point) in base.node_points().iter().enumerate() {
-            if point.x < -0.999 && point.y.abs() < 0.1 {
-                prescribed[node] = Some(signal);
+        crate::canonical_wave::under_each_wall_step(|_| {
+            let mut scene = Scene::default();
+            scene.materials[0].mass_law.drive = pump(0.4, 1.1, 0.3);
+            let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
+            let base = operator.base();
+            let boundary = base.outgoing_boundary().unwrap();
+            let signal = TimeSignal::harmonic(1.0, 0.2, 1.3, 0.2);
+            let mut prescribed = vec![None; base.degrees_of_freedom()];
+            for (node, point) in base.node_points().iter().enumerate() {
+                if point.x < -0.999 && point.y.abs() < 0.1 {
+                    prescribed[node] = Some(signal);
+                }
             }
-        }
-        let pinned = boundary
-            .trace_nodes()
-            .iter()
-            .map(|node| *node as usize)
-            .filter(|node| prescribed[*node].is_some())
-            .collect::<Vec<_>>();
-        assert!(!pinned.is_empty());
-        let time_step = 0.4 * operator.maximum_time_step();
-        // How far 30 steps and 30 reversed ones leave a state from its start,
-        // in the primary flux, the complementary flux and the pole currents.
-        let round_trip = |forcing: &CanonicalForcing,
-                          holds: &dyn Fn(&CanonicalTemporalWaveState)| {
-            let (primary, complementary) = strong_fluxes(&operator, 1.0);
-            let start =
-                CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+            let pinned = boundary
+                .trace_nodes()
+                .iter()
+                .map(|node| *node as usize)
+                .filter(|node| prescribed[*node].is_some())
+                .collect::<Vec<_>>();
+            assert!(!pinned.is_empty());
+            let time_step = 0.4 * operator.maximum_time_step();
+            // How far 30 steps and 30 reversed ones leave a state from its start,
+            // in the primary flux, the complementary flux and the pole currents.
+            let round_trip =
+                |forcing: &CanonicalForcing, holds: &dyn Fn(&CanonicalTemporalWaveState)| {
+                    let (primary, complementary) = strong_fluxes(&operator, 1.0);
+                    let start = CanonicalTemporalWaveState::new(
+                        &operator,
+                        time_step,
+                        primary,
+                        complementary,
+                    )
                     .unwrap()
                     .pinned(&operator, forcing)
                     .unwrap();
-            let mut state = start.clone();
-            for _ in 0..30 {
-                state.step_with_forcing(&operator, forcing).unwrap();
-                holds(&state);
-            }
-            assert!(state.outgoing_pole_currents().iter().any(|z| *z != 0.0));
-            for _ in 0..30 {
-                state
-                    .step_with_forcing_by(&operator, forcing, -time_step)
+                    let mut state = start.clone();
+                    for _ in 0..30 {
+                        state.step_with_forcing(&operator, forcing).unwrap();
+                        holds(&state);
+                    }
+                    assert!(state.outgoing_pole_currents().iter().any(|z| *z != 0.0));
+                    for _ in 0..30 {
+                        state
+                            .step_with_forcing_by(&operator, forcing, -time_step)
+                            .unwrap();
+                    }
+                    [
+                        state
+                            .primary_flux()
+                            .iter()
+                            .zip(start.primary_flux())
+                            .map(|(a, b)| (a - b).abs())
+                            .fold(0.0_f64, f64::max),
+                        state
+                            .complementary_flux()
+                            .iter()
+                            .zip(start.complementary_flux())
+                            .map(|(a, b)| (*a - *b).norm())
+                            .fold(0.0_f64, f64::max),
+                        state
+                            .outgoing_pole_currents()
+                            .iter()
+                            .fold(0.0_f64, |a, b| a.max(b.abs())),
+                    ]
+                };
+            let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
+            let pinned_trip = round_trip(&forcing, &|state| {
+                let mass = operator
+                    .primary_mass_at(state.time(), state.runtime())
                     .unwrap();
-            }
-            [
-                state
-                    .primary_flux()
-                    .iter()
-                    .zip(start.primary_flux())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0.0_f64, f64::max),
-                state
-                    .complementary_flux()
-                    .iter()
-                    .zip(start.complementary_flux())
-                    .map(|(a, b)| (*a - *b).norm())
-                    .fold(0.0_f64, f64::max),
-                state
-                    .outgoing_pole_currents()
-                    .iter()
-                    .fold(0.0_f64, |a, b| a.max(b.abs())),
-            ]
-        };
-        let forcing = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
-        let pinned_trip = round_trip(&forcing, &|state| {
-            let mass = operator
-                .primary_mass_at(state.time(), state.runtime())
-                .unwrap();
-            for node in &pinned {
-                let held = mass[*node] * signal.value(state.time());
-                assert!((state.primary_flux()[*node] - held).abs() <= 1e-14 * held.abs());
+                for node in &pinned {
+                    let held = mass[*node] * signal.value(state.time());
+                    assert!((state.primary_flux()[*node] - held).abs() <= 1e-14 * held.abs());
+                }
+            });
+            let free_trip = round_trip(&CanonicalForcing::none(base), &|_| {});
+            for (pinned, free) in pinned_trip.iter().zip(free_trip) {
+                assert!(
+                    *pinned <= 32.0 * free.max(1e-13),
+                    "{pinned_trip:?} against {free_trip:?}"
+                );
             }
         });
-        let free_trip = round_trip(&CanonicalForcing::none(base), &|_| {});
-        for (pinned, free) in pinned_trip.iter().zip(free_trip) {
-            assert!(
-                *pinned <= 32.0 * free.max(1e-13),
-                "{pinned_trip:?} against {free_trip:?}"
-            );
-        }
     }
 
     /// The same defect under a breathing mass: a constant held value beside a
@@ -13482,83 +14045,86 @@ mod tests {
     /// what shows it composes.
     #[test]
     fn oscillator_media_balance_at_second_order_beside_each_composition() {
-        type Author = fn(&mut Scene);
-        let media: [(&str, Author); 5] = [
-            ("klein-gordon", |scene| {
-                scene.materials[0].restoring = klein_gordon(2.0);
-            }),
-            ("sine-gordon", |scene| {
-                scene.materials[0].restoring = sine_gordon(3.0);
-            }),
-            ("pumped sine-gordon", |scene| {
-                scene.materials[0].restoring = sine_gordon(3.0);
-                scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
-            }),
-            ("kerr sine-gordon", |scene| {
-                scene.materials[0].restoring = sine_gordon(3.0);
-                scene.materials[0].mass_law.field = kerr(0.8);
-            }),
-            ("van der pol", |scene| {
-                scene.materials[0].restoring = klein_gordon(2.0);
-                scene.materials[0].magnetic_loss = Some(LossChannel {
-                    base_rate: ScalarField::constant(0.8),
-                    law: DampingLaw {
-                        rate: RateLaw::VanDerPol {
-                            threshold: ScalarField::constant(0.4),
-                            amplitude_bound: ScalarField::constant(10.0),
+        crate::canonical_wave::under_each_wall_step(|_| {
+            type Author = fn(&mut Scene);
+            let media: [(&str, Author); 5] = [
+                ("klein-gordon", |scene| {
+                    scene.materials[0].restoring = klein_gordon(2.0);
+                }),
+                ("sine-gordon", |scene| {
+                    scene.materials[0].restoring = sine_gordon(3.0);
+                }),
+                ("pumped sine-gordon", |scene| {
+                    scene.materials[0].restoring = sine_gordon(3.0);
+                    scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
+                }),
+                ("kerr sine-gordon", |scene| {
+                    scene.materials[0].restoring = sine_gordon(3.0);
+                    scene.materials[0].mass_law.field = kerr(0.8);
+                }),
+                ("van der pol", |scene| {
+                    scene.materials[0].restoring = klein_gordon(2.0);
+                    scene.materials[0].magnetic_loss = Some(LossChannel {
+                        base_rate: ScalarField::constant(0.8),
+                        law: DampingLaw {
+                            rate: RateLaw::VanDerPol {
+                                threshold: ScalarField::constant(0.4),
+                                amplitude_bound: ScalarField::constant(10.0),
+                            },
+                            drive: TimeDrive::None,
+                            gate: None,
                         },
-                        drive: TimeDrive::None,
-                        gate: None,
-                    },
-                });
-            }),
-        ];
-        let mut compositions = filter_compositions();
-        compositions.push((
-            "source",
-            Scene::default(),
-            OuterBoundaryCondition::Reflecting,
-        ));
-        for (label, scene, condition) in compositions {
-            for (medium, author) in &media {
-                // Van der Pol is the primary row's loss channel; the lossy
-                // composition already holds that row's loss.
-                if label == "loss" && *medium == "van der pol" {
-                    continue;
-                }
-                let mut scene = scene.clone();
-                author(&mut scene);
-                let operator = filter_operator(&scene, condition);
-                assert!(operator.has_restoring(), "{label}, {medium}");
-                let base = operator.base();
-                let mut forcing = filter_forcing(label, base);
-                if label == "source" {
-                    forcing
-                        .push_source(
-                            CanonicalSource::direct(
-                                base,
-                                base.primary_mass().to_vec(),
-                                TimeSignal::harmonic(0.0, 0.9, 1.7, 0.4),
+                    });
+                }),
+            ];
+            let mut compositions = filter_compositions();
+            compositions.push((
+                "source",
+                Scene::default(),
+                OuterBoundaryCondition::Reflecting,
+            ));
+            for (label, scene, condition) in compositions {
+                for (medium, author) in &media {
+                    // Van der Pol is the primary row's loss channel; the lossy
+                    // composition already holds that row's loss.
+                    if label == "loss" && *medium == "van der pol" {
+                        continue;
+                    }
+                    let mut scene = scene.clone();
+                    author(&mut scene);
+                    let operator = filter_operator(&scene, condition);
+                    assert!(operator.has_restoring(), "{label}, {medium}");
+                    let base = operator.base();
+                    let mut forcing = filter_forcing(label, base);
+                    if label == "source" {
+                        forcing
+                            .push_source(
+                                CanonicalSource::direct(
+                                    base,
+                                    base.primary_mass().to_vec(),
+                                    TimeSignal::harmonic(0.0, 0.9, 1.7, 0.4),
+                                )
+                                .unwrap(),
                             )
-                            .unwrap(),
-                        )
-                        .unwrap();
-                }
-                let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.3, 0.5);
-                let exchanged = match label {
-                    "first-order wall" | "second-order wall" => total.boundary_loss,
-                    "prescribed wall" => total.prescribed_exchange.abs(),
-                    "pinned trace" => total.prescribed_exchange.abs().min(total.boundary_loss),
-                    "loss" => total.primary_loss,
-                    "source" => total.source_work.abs(),
-                    _ => 1.0,
-                };
-                assert!(exchanged > 1e-5, "{label}, {medium}: {total:?}");
-                if *medium == "van der pol" {
-                    assert!(total.active_gain.abs() > 1e-5, "{label}: {total:?}");
+                            .unwrap();
+                    }
+                    let (total, _) =
+                        nonlinear_balance_is_second_order(&operator, &forcing, 0.3, 0.5);
+                    let exchanged = match label {
+                        "first-order wall" | "second-order wall" => total.boundary_loss,
+                        "prescribed wall" => total.prescribed_exchange.abs(),
+                        "pinned trace" => total.prescribed_exchange.abs().min(total.boundary_loss),
+                        "loss" => total.primary_loss,
+                        "source" => total.source_work.abs(),
+                        _ => 1.0,
+                    };
+                    assert!(exchanged > 1e-5, "{label}, {medium}: {total:?}");
+                    if *medium == "van der pol" {
+                        assert!(total.active_gain.abs() > 1e-5, "{label}: {total:?}");
+                    }
                 }
             }
-        }
+        });
     }
 
     /// A pulse is an increment of `u`, and `r = ∫u dt` is continuous in

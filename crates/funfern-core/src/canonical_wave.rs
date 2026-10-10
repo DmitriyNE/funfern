@@ -1663,6 +1663,38 @@ pub enum CanonicalWallStep {
     Trapezoid,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The wall step a state is built with inside [`under_each_wall_step`].
+    static TEST_WALL_STEP: std::cell::Cell<CanonicalWallStep> =
+        const { std::cell::Cell::new(CanonicalWallStep::HalfKicks) };
+}
+
+/// The wall step a new state takes: the default, or in a test the one
+/// [`under_each_wall_step`] is running its body under.
+pub(crate) fn default_wall_step() -> CanonicalWallStep {
+    #[cfg(test)]
+    {
+        TEST_WALL_STEP.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        CanonicalWallStep::default()
+    }
+}
+
+/// Runs `body` once under each wall step, every state built inside it
+/// taking that step, so a test written for the half kicks holds the
+/// trapezoid step to the same checks.
+#[cfg(test)]
+pub(crate) fn under_each_wall_step(body: impl Fn(CanonicalWallStep)) {
+    for wall_step in [CanonicalWallStep::HalfKicks, CanonicalWallStep::Trapezoid] {
+        TEST_WALL_STEP.with(|step| step.set(wall_step));
+        body(wall_step);
+    }
+    TEST_WALL_STEP.with(|step| step.set(CanonicalWallStep::HalfKicks));
+}
+
 impl CanonicalWallStep {
     /// The duration the wall's implicit solve is prepared for: each
     /// half-kick's, or the whole step's.
@@ -1796,7 +1828,7 @@ impl CanonicalWaveState {
                 outgoing_z: vec![0.0; outgoing_count],
             })
         };
-        let wall_step = CanonicalWallStep::default();
+        let wall_step = default_wall_step();
         Ok(Self {
             primary_flux,
             complementary_flux,
@@ -2760,38 +2792,22 @@ impl CanonicalWaveState {
                 .as_ref()
                 .ok_or(WaveError::InvalidState)?
                 .clone();
-            if cache.duration != 2.0 * duration || cache.trace_count != boundary.trace_nodes.len() {
+            if cache.duration != 2.0 * duration {
                 return Err(WaveError::InvalidState);
             }
-            let trace_count = boundary.trace_nodes.len();
-            let right = trace_state(boundary, &self.primary_flux, self.outgoing_z())?;
-            let pinned = boundary
-                .trace_nodes
-                .iter()
-                .map(|node| forcing.prescribed[*node as usize].is_some())
-                .collect::<Vec<_>>();
-            let solution = if pinned.iter().any(|pinned| *pinned) {
-                let rebuild = self
-                    .boundary_prescribed_cache
-                    .as_ref()
-                    .is_none_or(|(pattern, _)| pattern != &pinned);
-                if rebuild {
-                    let export = cache.export_with_prescribed(&pinned)?;
-                    self.boundary_prescribed_cache = Some((pinned, Arc::new(export)));
-                }
-                self.boundary_prescribed_cache
-                    .as_ref()
-                    .ok_or(WaveError::InvalidState)?
-                    .1
-                    .solve(mass, boundary, &right)?
-            } else {
-                cache.solve(boundary, mass, &right)?
-            };
-            for (position, node) in boundary.trace_nodes.iter().enumerate() {
-                self.primary_flux[*node as usize] = solution[position];
-            }
-            self.outgoing_z_mut()
-                .copy_from_slice(&solution[trace_count..]);
+            let mut outgoing_z = self.outgoing_z().to_vec();
+            trapezoid_trace_implicit_half(
+                &mut self.primary_flux,
+                &mut outgoing_z,
+                &mut self.boundary_prescribed_cache,
+                &cache,
+                operator,
+                boundary,
+                mass,
+                forcing,
+                None,
+            )?;
+            self.outgoing_z_mut().copy_from_slice(&outgoing_z);
         }
         operator.validate_primary(&self.primary_flux)?;
         Ok((source_work, 0.0, prescribed_exchange))
@@ -2840,10 +2856,8 @@ impl CanonicalWaveState {
         }
     }
 
-    /// The trapezoid wall step's loss: the walls' dissipation at the step's
-    /// mean state, `dt Σ (D û² + (w + memory)²)`, a sum of squares. At a
-    /// pinned node the pin overrides what the wall would have done there,
-    /// so that node's share of the dissipation goes back as the pin's.
+    /// The trapezoid wall step's loss, from the state the step started from
+    /// and the one it ends with; see [`trapezoid_wall_dissipation`].
     fn trapezoid_wall_loss(
         &self,
         operator: &CanonicalWaveOperator,
@@ -2851,58 +2865,20 @@ impl CanonicalWaveState {
         start_flux: &[f64],
         start_z: &[f64],
     ) -> Result<(f64, f64), WaveError> {
-        let duration = self.time_step;
-        let mass = operator.primary_mass();
-        let on_trace = operator.trace_flags();
-        let mut loss = 0.0;
-        let mut prescribed_exchange = 0.0;
-        let mut midpoint_field = vec![0.0; self.primary_flux.len()];
-        for node in 0..self.primary_flux.len() {
-            let damping = operator.first_order_boundary_damping[node];
-            let field = 0.5 * (start_flux[node] + self.primary_flux[node]) / mass[node];
-            midpoint_field[node] = field;
-            if damping > 0.0 && !on_trace[node] {
-                let node_loss = duration * damping * field * field;
-                loss += node_loss;
-                if forcing.prescribed[node].is_some() {
-                    prescribed_exchange += node_loss;
-                }
-            }
-        }
-        if let Some(boundary) = operator.outgoing_boundary() {
-            let trace_count = boundary.trace_nodes.len();
-            let midpoint_z = start_z
-                .iter()
-                .zip(self.outgoing_z())
-                .map(|(start, end)| 0.5 * (start + end))
-                .collect::<Vec<_>>();
-            for node in &boundary.trace_nodes {
-                let node = *node as usize;
-                let field = midpoint_field[node];
-                loss += duration * operator.first_order_boundary_damping[node] * field * field;
-            }
-            loss += modal_outgoing_loss(boundary, &midpoint_field, &midpoint_z, duration)?;
-            let pinned = boundary
-                .trace_nodes
-                .iter()
-                .any(|node| forcing.prescribed[*node as usize].is_some());
-            if pinned {
-                let mut midpoint = vec![0.0; trace_count + midpoint_z.len()];
-                for (position, node) in boundary.trace_nodes.iter().enumerate() {
-                    let node = *node as usize;
-                    midpoint[position] = 0.5 * (start_flux[node] + self.primary_flux[node]);
-                }
-                midpoint[trace_count..].copy_from_slice(&midpoint_z);
-                let rate = apply_outgoing_generator(operator, boundary, mass, &midpoint)?;
-                for (position, node) in boundary.trace_nodes.iter().enumerate() {
-                    let node = *node as usize;
-                    if forcing.prescribed[node].is_some() {
-                        prescribed_exchange -= duration * midpoint_field[node] * rate[position];
-                    }
-                }
-            }
-        }
-        if loss.is_finite() && loss >= 0.0 && prescribed_exchange.is_finite() {
+        let mean_field = start_flux
+            .iter()
+            .zip(&self.primary_flux)
+            .zip(operator.primary_mass())
+            .map(|((start, end), mass)| 0.5 * (start + end) / mass)
+            .collect::<Vec<_>>();
+        let mean_z = start_z
+            .iter()
+            .zip(self.outgoing_z())
+            .map(|(start, end)| 0.5 * (start + end))
+            .collect::<Vec<_>>();
+        let (loss, prescribed_exchange) =
+            trapezoid_wall_dissipation(operator, &mean_field, &mean_z, self.time_step, forcing)?;
+        if loss >= 0.0 {
             Ok((loss, prescribed_exchange))
         } else {
             Err(WaveError::InvalidState)
@@ -3095,7 +3071,7 @@ fn wall_acceleration(
 }
 
 /// The wall's state `(Q_Γ, z)` in trace order, as the generator reads it.
-fn trace_state(
+pub(crate) fn trace_state(
     boundary: &CanonicalOutgoingBoundary,
     flux: &[f64],
     outgoing_z: &[f64],
@@ -3276,7 +3252,7 @@ pub(crate) fn force_coupled_outgoing_kick_with(
 
 /// The outgoing wall's dissipation over one kick, `τ Σ (w + memory)²`, from the
 /// trace field and the auxiliaries at the kick's midpoint.
-fn modal_outgoing_loss(
+pub(crate) fn modal_outgoing_loss(
     boundary: &CanonicalOutgoingBoundary,
     midpoint_field: &[f64],
     midpoint_z: &[f64],
@@ -3316,6 +3292,185 @@ fn modal_outgoing_loss(
     Ok(outgoing_loss)
 }
 
+/// The trapezoid wall step's implicit half on the second-order trace,
+/// `(I − h/2 · G) X′ = X` with `X` the trace's flux and the pole currents as
+/// the second kick left them, `cache` prepared for the whole step `h`, at the
+/// stage's `mass`. A pinned row is held at the flux the kick pinned it to. On
+/// a trace with nonlinear sites the wall reads the field the step ends with,
+/// `U(Q′)`: Newton on `U ≈ U_k + U′_k (Q − Q_k)`, each iteration the linear
+/// solve at the per-node mass `1/U′_k` with `U_k − U′_k Q_k` carried on the
+/// right through the generator, as [`nonlinear_outgoing_kick_with`] carries
+/// its discrete gradient.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn trapezoid_trace_implicit_half(
+    primary_flux: &mut [f64],
+    outgoing_z: &mut [f64],
+    prescribed_cache: &mut Option<(Vec<bool>, Arc<CanonicalOutgoingFactorExport>)>,
+    cache: &CanonicalOutgoingMidpointFactor,
+    operator: &CanonicalWaveOperator,
+    boundary: &CanonicalOutgoingBoundary,
+    mass: &[f64],
+    forcing: &CanonicalForcing,
+    nonlinear: Option<&dyn TraceConstitutive>,
+) -> Result<(), WaveError> {
+    let trace_count = boundary.trace_nodes.len();
+    if cache.trace_count != trace_count || outgoing_z.len() != boundary.auxiliary_count {
+        return Err(WaveError::InvalidState);
+    }
+    let nodes = boundary
+        .trace_nodes
+        .iter()
+        .map(|node| *node as usize)
+        .collect::<Vec<_>>();
+    let pinned = nodes
+        .iter()
+        .map(|node| forcing.prescribed[*node].is_some())
+        .collect::<Vec<_>>();
+    let constrained = if pinned.iter().any(|pinned| *pinned) {
+        let rebuild = prescribed_cache
+            .as_ref()
+            .is_none_or(|(pattern, _)| pattern != &pinned);
+        if rebuild {
+            let export = cache.export_with_prescribed(&pinned)?;
+            *prescribed_cache = Some((pinned.clone(), Arc::new(export)));
+        }
+        Some(
+            prescribed_cache
+                .as_ref()
+                .ok_or(WaveError::InvalidState)?
+                .1
+                .clone(),
+        )
+    } else {
+        None
+    };
+    let held = trace_state(boundary, primary_flux, outgoing_z)?;
+    let solve = |mass: &[f64], right: &[f64]| match &constrained {
+        Some(factor) => factor.solve(mass, boundary, right),
+        None => cache.solve(boundary, mass, right),
+    };
+    let solution = match nonlinear {
+        None => solve(mass, &held)?,
+        Some(trace_map) => {
+            let half_duration = 0.5 * cache.duration;
+            let unit_mass = vec![1.0; operator.degrees_of_freedom()];
+            let mut iteration_mass = mass.to_vec();
+            let mut current = held[..trace_count].to_vec();
+            let mut solution = held.clone();
+            let mut converged = false;
+            let mut previous_step = f64::INFINITY;
+            for _ in 0..NONLINEAR_TRACE_ITERATIONS {
+                let mut offset = vec![0.0; held.len()];
+                for position in 0..trace_count {
+                    let (field, slope) =
+                        trace_map.field_and_slope(nodes[position], current[position])?;
+                    if !slope.is_finite() || slope <= 0.0 {
+                        return Err(WaveError::InvalidState);
+                    }
+                    offset[position] = field - slope * current[position];
+                    iteration_mass[nodes[position]] = 1.0 / slope;
+                }
+                let offset_derivative =
+                    apply_outgoing_generator(operator, boundary, &unit_mass, &offset)?;
+                let mut right = held
+                    .iter()
+                    .zip(&offset_derivative)
+                    .map(|(held, derivative)| held + half_duration * derivative)
+                    .collect::<Vec<_>>();
+                for (position, pinned) in pinned.iter().enumerate() {
+                    if *pinned {
+                        right[position] = held[position];
+                    }
+                }
+                solution = solve(&iteration_mass, &right)?;
+                let step = solution[..trace_count]
+                    .iter()
+                    .zip(&current)
+                    .map(|(next, current)| (next - current).abs())
+                    .fold(0.0_f64, f64::max);
+                current.copy_from_slice(&solution[..trace_count]);
+                // As in `nonlinear_outgoing_kick_with`: settled once a step is
+                // below `1e-12` of the trace, or has stopped shrinking below
+                // `1e-10` of it.
+                let scale = current
+                    .iter()
+                    .chain(&held[..trace_count])
+                    .map(|value| value.abs())
+                    .fold(f64::MIN_POSITIVE, f64::max);
+                if step <= 1e-12 * scale || (step <= 1e-10 * scale && step >= 0.5 * previous_step) {
+                    converged = true;
+                    break;
+                }
+                previous_step = step;
+            }
+            if !converged {
+                return Err(WaveError::Unsupported(
+                    "the nonlinear boundary kick did not converge",
+                ));
+            }
+            solution
+        }
+    };
+    for (position, node) in nodes.iter().enumerate() {
+        primary_flux[*node] = solution[position];
+    }
+    outgoing_z.copy_from_slice(&solution[trace_count..]);
+    finite_values(primary_flux)?;
+    finite_values(outgoing_z)
+}
+
+/// The trapezoid wall step's loss: the walls' dissipation at the step's mean
+/// field `û` and mean pole currents, `dt Σ (D û² + (w + memory)²)`, a sum of
+/// squares. A pinned node's field is the pin's, not the wall's doing, so its
+/// share of the dissipation is the pin's to give back. Returns the loss and
+/// what the pins exchange.
+pub(crate) fn trapezoid_wall_dissipation(
+    operator: &CanonicalWaveOperator,
+    mean_field: &[f64],
+    mean_z: &[f64],
+    duration: f64,
+    forcing: &CanonicalForcing,
+) -> Result<(f64, f64), WaveError> {
+    let on_trace = operator.trace_flags();
+    let mut loss = 0.0;
+    let mut prescribed_exchange = 0.0;
+    for (node, damping) in operator.first_order_boundary_damping().iter().enumerate() {
+        let field = mean_field[node];
+        let node_loss = duration * damping * field * field;
+        loss += node_loss;
+        if !on_trace[node] && forcing.prescribed[node].is_some() {
+            prescribed_exchange += node_loss;
+        }
+    }
+    if let Some(boundary) = operator.outgoing_boundary() {
+        loss += modal_outgoing_loss(boundary, mean_field, mean_z, duration)?;
+        if boundary
+            .trace_nodes
+            .iter()
+            .any(|node| forcing.prescribed[*node as usize].is_some())
+        {
+            let unit_mass = vec![1.0; operator.degrees_of_freedom()];
+            let rate = apply_outgoing_generator(
+                operator,
+                boundary,
+                &unit_mass,
+                &trace_state(boundary, mean_field, mean_z)?,
+            )?;
+            for (position, node) in boundary.trace_nodes.iter().enumerate() {
+                let node = *node as usize;
+                if forcing.prescribed[node].is_some() {
+                    prescribed_exchange -= duration * mean_field[node] * rate[position];
+                }
+            }
+        }
+    }
+    if loss.is_finite() && prescribed_exchange.is_finite() {
+        Ok((loss, prescribed_exchange))
+    } else {
+        Err(WaveError::InvalidState)
+    }
+}
+
 /// A trace node's constitutive map, as the nonlinear boundary kick reads it.
 pub(crate) trait TraceConstitutive {
     /// The discrete gradient `ū = [T(new) − T(old)] / (new − old)` of the
@@ -3327,6 +3482,9 @@ pub(crate) trait TraceConstitutive {
     /// The flux `P(u)` a node holds at field `u`, which is where a pin puts
     /// it.
     fn flux_of_field(&self, node: usize, field: f64) -> Result<f64, WaveError>;
+    /// The field `U(Q)` at one node and its slope `dU/dQ = 1/P′(U)`, which is
+    /// positive for every monotone map.
+    fn field_and_slope(&self, node: usize, flux: f64) -> Result<(f64, f64), WaveError>;
 }
 
 /// Newton iterations the nonlinear boundary kick may take before its failure
@@ -4797,7 +4955,7 @@ fn outgoing_generator(
 /// Applies the passive trace generator without materializing its dense
 /// `(trace + poles)^2` matrix. The dense form remains the preparation oracle
 /// for the cached Schur factor and the uncommon prescribed-trace path.
-fn apply_outgoing_generator(
+pub(crate) fn apply_outgoing_generator(
     operator: &CanonicalWaveOperator,
     boundary: &CanonicalOutgoingBoundary,
     mass: &[f64],

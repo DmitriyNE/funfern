@@ -273,3 +273,21 @@ quarter step than the half kicks'. Across the gallery at the app's step the
 wall solve's contraction is at most 0.14 (0.04 under the half kicks), its
 sweeps at most 22 in f64 and 12 in f32 (14 and 8): one solve of at most 12
 device sweeps a step where there were two of at most 8.
+
+**B2, done 10 October 2026: the driven path.**
+`CanonicalTemporalWaveState::with_wall_step`. The explicit half reads the
+state the step starts from at the mass in force there and the implicit half
+the end's - the trapezoid rule for an admittance that moves with the mass -
+and the wall solve is prepared once a step instead of once a kick. A
+nonlinear site reads the field the half ends with: along the trace by Newton
+on its linearization, each iteration the linear solve at the per-node mass
+`1/U′`, and at a first-order wall's node by a scalar Newton. The drift form's
+`ũ` and the kick form's `u̇` carry the wall as on the fixed path. With the
+trapezoid step made every state's default for one run, 514 of the core's 515
+tests passed - nonlinear walls' passivity and second-order balance, pumps,
+pins and a reversal among them; the one that did not reads the AMR
+indicator, which rebuilds the wall with the half kicks (B3). Twelve
+driven-path wall tests now run under both steps. On a kick-form generation,
+a stiffness-side Kerr law of `χ = 1e-9`, at its own step of 0.9 of the
+bound, the channel's second-order band reads 1.0195 of its law against the
+half kicks' 1.0532: twice the drift form's residue, as the strip said.
