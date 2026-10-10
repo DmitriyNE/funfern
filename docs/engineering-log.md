@@ -3406,12 +3406,10 @@ above:
   3e-5 after five paused events, the clock unchanged (2026-10-09, the device
   suite's first run; its reference kept the carrier where since 517a28e the
   patch steps it, see that day's entry).
-- [ ] The browser fixtures in CI on Chromium's SwiftShader WebGPU (2026-10-09,
-  time-boxed and stopped): in Playwright 1.55's image on arm64 Linux the
-  adapter is found, but the app's device is lost as it starts, "A valid
-  external Instance reference no longer exists", with the Linux flags and
-  without. Untried: the x86_64 runner, headed Chromium under xvfb, another
-  Chromium.
+- [x] The browser fixtures in CI on Chromium's SwiftShader WebGPU (2026-10-09,
+  time-boxed and stopped; 2026-10-10: the canvas's swap chain lost the device,
+  not the platform, and the compositor on SwiftShader's Vulkan keeps it; CI
+  runs the cavity every push and all seven nightly, see that day's entries).
 - [ ] The budget's 60 Hz and Low Power Mode measurements (postponed
   2026-10-05; the machine has one panel and the mode is the user's to
   toggle). Quiet host and overlay scene are measured, see the spike doc.
@@ -21987,3 +21985,26 @@ suite passes its five variants, the rejection fixture from 7.204e-7 to
 rounds in alternating order, the driven fixture 297.5 µs before and 298.3
 after, the sine-Gordon oscillator, with two of the calls per node a stage,
 313.3 and 319.4, and the fixed control, which takes none, 300.2 and 297.1.
+
+## 2026-10-10 — CI runs the browser cavity on SwiftShader every push, and every fixture nightly
+
+The `browser` job of `ci.yml` builds the bundle with its fixtures with the web
+job's toolchain and cache - read, never saved, since only the app's own crate
+differs - installs Playwright's Chromium on the runner and runs
+`npm run test:e2e:swiftshader`. On every push and pull request it runs the
+cavity alone, isolated, a smoke check that the shipped bundle starts in a
+browser, compiles its shaders through Tint and draws through the compositor,
+and the deploy waits on it. Nightly at 03:17 UTC, and when the workflow is
+dispatched with `browser: full`, it runs every fixture, isolated and with
+service workers refused, as two jobs in parallel, the other jobs skipped and
+nothing deployed. It lives in `ci.yml` rather than a workflow of its own so it
+reads the toolchain version and the cache key where the web job does.
+Measured on the runner, on a branch dispatched both ways: the per-push job
+takes 11 minutes - six to build the bundle, half a minute to install Chromium,
+four for the cavity, which reads the container's digits and endpoint hash -
+inside the 21 the test job takes. The full run took 43 minutes isolated and 53
+with service workers refused, and failed two fixtures in each, both fixed
+since: device-loss panicked in the snapshot's staging buffer, and rejection
+read SwiftShader's sine (the two entries before this one). The cavity's page
+took 237 s and the slowest, cavity-batches' four runs, 745 s, so a page's
+deadline is 600 s on every push and 1,500 nightly.

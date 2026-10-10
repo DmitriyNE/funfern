@@ -4,7 +4,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly, the browser fixtures in full on SwiftShader, and nothing else.
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      browser:
+        description: "Browser fixtures on SwiftShader: the cavity alone, or every fixture isolated and with service workers refused"
+        type: choice
+        options: [smoke, full]
+        default: smoke
 
 permissions:
   contents: read
@@ -27,6 +36,7 @@ env:
 jobs:
   native:
     name: Check and test
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -107,6 +117,7 @@ jobs:
 
   web:
     name: Browser bundle
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -202,6 +213,7 @@ jobs:
 
   kani:
     name: Protocol proofs
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -222,6 +234,7 @@ jobs:
 
   device:
     name: Device fixtures on software Vulkan
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -291,13 +304,108 @@ jobs:
         # zero, where the Metal device never noticed.
         run: scripts/e2e-lavapipe.sh
 
+  browser:
+    name: Browser fixtures on SwiftShader (${{ matrix.hosting }})
+    # The app's end-to-end fixtures in Chromium on its bundled software WebGPU:
+    # the shipped bundle with its fixtures, started in a browser that compiles
+    # its shaders through Tint and draws them through its compositor. Every
+    # push runs the cavity alone, isolated, a smoke check of that wiring, since
+    # SwiftShader compiles the app's pipelines for a minute a page and runs a
+    # few frames a second; nightly, and dispatched with `full`, every fixture
+    # runs, isolated and with service workers refused, the two in parallel.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        hosting: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["isolated", "pages-blocked"]' || '["isolated"]') }}
+    env:
+      FULL: ${{ github.event_name == 'schedule' || inputs.browser == 'full' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install threaded browser toolchain
+        run: |
+          rustup toolchain install "$WEB_RUST_VERSION" \
+            --profile minimal \
+            --component rust-src \
+            --target wasm32-unknown-unknown \
+            --no-self-update
+
+      # -Zbuild-std compiles std from these sources as path crates, which cargo
+      # checks by modification time. A fresh install dates them now, so the
+      # cached std would rebuild, and with it every crate above it. The cache
+      # key names the exact toolchain, so their contents never change under it.
+      - name: Pin the std sources' timestamps
+        run: |
+          find "$(rustc +"$WEB_RUST_VERSION" --print sysroot)/lib/rustlib/src/rust" \
+            -exec touch -h -d '2000-01-01T00:00:00Z' {} +
+
+      - name: Install Trunk
+        working-directory: /tmp
+        env:
+          TRUNK_ARCHIVE: trunk-x86_64-unknown-linux-gnu.tar.gz
+        run: |
+          curl --fail --location --silent --show-error \
+            --output "$TRUNK_ARCHIVE" \
+            "https://github.com/trunk-rs/trunk/releases/download/v$TRUNK_VERSION/$TRUNK_ARCHIVE"
+          curl --fail --location --silent --show-error \
+            --output "$TRUNK_ARCHIVE.sha256" \
+            "https://github.com/trunk-rs/trunk/releases/download/v$TRUNK_VERSION/$TRUNK_ARCHIVE.sha256"
+          sed "s/$/  $TRUNK_ARCHIVE/" "$TRUNK_ARCHIVE.sha256" > checksums.txt
+          sha256sum --check checksums.txt
+          tar --extract --gzip --file "$TRUNK_ARCHIVE"
+          sudo install trunk /usr/local/bin/trunk
+          trunk --version
+
+      - name: Restore build cache
+        # The web job's, read and never saved here: the fixtures' feature
+        # changes the app's own crate alone, so everything under it is reused.
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.cache/trunk/
+            target/
+          key: web-${{ runner.os }}-${{ env.WEB_RUST_VERSION }}-${{ env.TRUNK_VERSION }}-${{ hashFiles('Cargo.lock', 'scripts/trunk', 'Trunk.toml') }}
+
+      - name: Build the browser bundle with its end-to-end fixtures
+        env:
+          TRUNK_BUILD_FEATURES: browser-threads,e2e
+          FUNFERN_BUILD_ID: ${{ github.sha }}
+        run: scripts/trunk build --release --locked --dist dist-e2e
+
+      - name: Install Playwright's Chromium
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run the fixtures on SwiftShader
+        # Served at the site root, under the isolation headers or without them
+        # and with service workers refused, where the page runs without its
+        # pool; each page must be this commit's build on SwiftShader's adapter.
+        # A page's deadline is about twice the runner's: the cavity took 237 s,
+        # and the slowest page, cavity-batches' four runs, 745 s.
+        env:
+          FUNFERN_EXPECT_BUILD: ${{ github.sha }}
+          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || '' }}
+          FUNFERN_E2E_DEADLINE: ${{ env.FULL != 'true' && '600' || '1500' }}
+          FUNFERN_E2E_HOSTING: ${{ matrix.hosting }}
+          FUNFERN_TEST_ISOLATED: ${{ matrix.hosting == 'isolated' && '1' || '0' }}
+          FUNFERN_EXPECT_BROWSER_WORKER: ${{ matrix.hosting == 'isolated' && 'active' || 'unavailable' }}
+        run: npm run test:e2e:swiftshader
+
   deploy:
     name: Deploy GitHub Pages
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'schedule'
     # The protocol's decisions are the app's own code, so a proof that fails
     # holds the deploy as a failing test does, and so does a fixture that
-    # fails on the second backend.
-    needs: [native, web, kani, device]
+    # fails on the second backend or in the browser.
+    needs: [native, web, kani, device, browser]
     runs-on: ubuntu-24.04
     permissions:
       pages: write

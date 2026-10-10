@@ -185,6 +185,13 @@ the home directory, against a `dist-e2e` built from the checkout:
       -e FUNFERN_EXPECT_BUILD=$(git rev-parse --short=12 HEAD) \
       mcr.microsoft.com/playwright:v1.55.0-noble npm run test:e2e:swiftshader
 
+CI runs it in the `browser` job: on every push and pull request the cavity
+alone, isolated - a smoke check that the shipped bundle starts in a browser,
+compiles its shaders through Tint and draws through the compositor - with the
+deploy waiting on it; nightly at 03:17 UTC, and when the workflow is
+dispatched with `browser: full`, every fixture, isolated and with service
+workers refused, the two in parallel and the other jobs skipped.
+
 A lost device or any other fatal console message fails a fixture at once
 rather than at its deadline.
 
