@@ -13,13 +13,25 @@ const fixtures = [
   ...readFileSync("scripts/device-suite.sh", "utf8").matchAll(/FUNFERN_E2E=([a-z-]+)/g),
 ].map((match) => match[1]);
 const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
-// How the bundle is hosted: `isolated`, the test server sending the headers a
-// threaded bundle needs, or `pages`, as GitHub Pages serves the site - no
-// headers, so the page installs coi-serviceworker.js and reloads itself once.
-// `npm run test:e2e:pages` serves `dist-e2e-pages`, built with
+// How the bundle is hosted: `isolated`, the test server sending the headers that
+// isolate the page; `pages`, as GitHub Pages serves the site - no headers, so the
+// page installs coi-serviceworker.js and reloads itself once; or
+// `pages-blocked`, the same with service workers refused, as a browser that
+// blocks the site's storage refuses them, where the page runs without its
+// worker pool after one reload. `npm run test:e2e:pages` and
+// `test:e2e:pages-blocked` serve `dist-e2e-pages`, built with
 //   TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --public-url /funfern/ --dist dist-e2e-pages
 // under that prefix.
 const hosting = process.env.FUNFERN_E2E_HOSTING ?? "isolated";
+const viaPages = hosting === "pages" || hosting === "pages-blocked";
+// What the page ends up as: cross-origin isolated, controlled by a service
+// worker, and the gate's one-shot reload flag in session storage.
+const expectedPath = {
+  isolated: [true, false, null],
+  pages: [true, true, null],
+  "pages-blocked": [false, false, "1"],
+}[hosting];
+test.use({ serviceWorkers: hosting === "pages-blocked" ? "block" : "allow" });
 // The worker pool the page should end up with: the threaded bundle's, `active`;
 // `unavailable`, the threaded bundle running its work on the main thread as it
 // does where the page's shared-memory growth check fails (`?e2e-pool=off`
@@ -130,11 +142,13 @@ for (const fixture of fixtures) {
       ]);
       expect(navigations, `${start}: navigations of the main frame`).toBe(expectedNavigations);
       expect(path, `${start}: [isolated, worker controls the page, reload flag, pool]`).toEqual([
-        true,
-        hosting === "pages",
-        null,
+        ...expectedPath,
         expectedWorker === "0" ? null : expectedWorker,
       ]);
+      // The address is the one asked for: the gate's marker never stays in it.
+      expect(new URL(page.url()).searchParams.has("isolation"), `${start}: ${page.url()}`).toBe(
+        false,
+      );
       expect(fatal, fatal.join("\n\n")).toEqual([]);
       expect(verdict, `${summary}\n${lines.join("\n")}`).toBe("pass");
       if (fixture === "device-loss") {
@@ -152,8 +166,12 @@ for (const fixture of fixtures) {
     };
 
     await page.goto(`./?e2e=${fixture}&e2e-deadline=${deadline}${query}`);
-    await holds("cold", hosting === "pages" ? 2 : 1);
-    if (hosting === "pages") {
+    // Navigations of the main frame on a cold start: the one asked for; on
+    // Pages the reload once the service worker controls the page; refused,
+    // the reload marked `isolation=off` and then the same-document one that
+    // gives the address back without the marker. A warm start takes one.
+    await holds("cold", { isolated: 1, pages: 2, "pages-blocked": 3 }[hosting]);
+    if (viaPages) {
       navigations = 0;
       await page.reload();
       await holds("warm", 1);

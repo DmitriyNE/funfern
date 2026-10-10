@@ -4,7 +4,8 @@
 # bundle under the isolation headers a server sends; the same with its worker
 # pool refused, as on iOS Safari, the work on the main thread; the bundle as
 # GitHub Pages serves it, under /funfern/ without the headers, through the
-# isolation service worker's one reload, cold and warm; and the
+# isolation service worker's one reload, cold and warm; the same with service
+# workers refused, where the page runs without its pool; and the
 # single-threaded bundle served that way. Every run first holds the page to
 # the build this checkout is. Chrome unless PLAYWRIGHT_CHANNEL says otherwise.
 #
@@ -32,6 +33,7 @@ RUNS=(
   'isolated test:e2e dist-e2e'
   'nopool test:e2e:nopool dist-e2e'
   'pages test:e2e:pages dist-e2e-pages'
+  'blocked test:e2e:pages-blocked dist-e2e-pages'
   'plain test:e2e:plain dist-e2e-plain'
 )
 selected=()

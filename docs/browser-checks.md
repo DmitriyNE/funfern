@@ -14,8 +14,8 @@ plain `trunk` builds the cooperative static-host variant.
   line; after a deploy it is the commit deployed, not the one before.
 - [ ] `scripts/browser-suite.sh` passes: the fixtures under the isolation headers,
   with the worker pool refused, on the Pages path cold and warm through the
-  service worker, and on the single-threaded bundle, each page the build this
-  checkout is.
+  service worker, on the Pages path with service workers refused, and on the
+  single-threaded bundle, each page the build this checkout is.
 - [ ] On iOS Safari, or wherever the page's shared-memory growth check fails, the
   app starts without its background pool: the console warns once,
   `data-funfern-preparation-worker` reads `unavailable`, and the simulation runs.

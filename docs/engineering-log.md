@@ -21791,3 +21791,43 @@ element reading `device-lost` and the startup overlay back with "funfern
 stopped … The document is saved"; the fixture takes four seconds. With the
 handler's forced autosave removed it fails natively on "the autosave does not
 hold the document as it was at the loss".
+
+## 2026-10-10 — The threaded bundle runs without isolation, so a refused service worker no longer stops the page
+
+Asked whether a browser could be left unable to run the threaded bundle, I
+measured rather than took the page's comment for it. Without cross-origin
+isolation Chrome, Firefox 148 and Safari 26.3.1 on macOS all create a shared
+`WebAssembly.Memory`: a probe page served without the headers reported
+`shared-memory=ok(SharedArrayBuffer)` in each, with the `SharedArrayBuffer`
+global undefined. In Chrome the whole app ran so: the Pages bundle, with
+`navigator.serviceWorker` removed so the page never isolated, started, its
+pool `unavailable`, and the cavity fixture passed at Q 6.242e-7. Isolation
+gates only handing the memory to the worker pool. The gate's give-up note,
+"This browser could not enable cross-origin isolation, which funfern needs
+for its shared-memory build", was therefore false, and where a worker would
+not register - a browser that refuses one, as blocking a site's storage does -
+it stopped a page that would have run. The cooperative-paths entry of this
+morning found the note and took its premise from the comment above it.
+
+Now, when registration fails or does not activate within ten seconds, the
+gate reloads once with `isolation=off` in the address; that load takes the
+marker out again with `history.replaceState`, warns once on the console and
+runs without the pool, the preparation work on the main thread as on iOS
+Safari. The marker lives in the address because refused storage is the usual
+reason a worker is refused, and the session flag could not guard the loop
+there. `npm run test:e2e:pages-blocked` serves the Pages bundle under
+`/funfern/` with Playwright's service workers blocked and holds the fixtures
+to passing, cold and warm, the page not isolated, no worker in control, the
+gate's flag set, the pool `unavailable` and the marker gone from the
+address. A cold start takes three navigations of the main frame - the one
+asked for, the marked reload, and the same-document one `replaceState` makes,
+which Playwright counts - and a warm one a single navigation, the flag
+sending the gate straight to the app; against the old gate the run timed out
+on the note. The browser suite
+runs it as its fifth variant. The README, the CI comment and `checks.md` no
+longer say the build requires isolation. The single-threaded bundle stays a
+tested variant; it is not needed as a fallback. Measured in Chrome on the
+M1 Max: the suite's five variants pass, the seven fixtures reading the same
+digits on every path - the cavity Q 6.242e-7, the refusal at step 788, the
+device loss told 24 to 31 ms after it - the blocked one in 202 s for the seven
+twice, against 129 s on the Pages path with the pool.

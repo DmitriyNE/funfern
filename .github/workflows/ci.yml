@@ -169,9 +169,9 @@ jobs:
         uses: actions/configure-pages@v6
 
       - name: Build browser release
-        # Pages cannot send the cross-origin isolation headers the shared-memory
-        # bundle needs, so the page installs coi-serviceworker to add them and
-        # the threaded bundle is what gets published. Off main no Pages base
+        # Pages cannot send the cross-origin isolation headers the threaded
+        # bundle's worker pool needs, so the page installs coi-serviceworker to
+        # add them and the threaded bundle is what gets published. Off main no Pages base
         # path is set, and the bundle is built for the site root.
         env:
           PUBLIC_URL: ${{ steps.pages.outputs.base_path }}/

@@ -264,7 +264,9 @@ Public deployment still requires HTTPS, normally through a reverse proxy.
 ### Static hosting and GitHub Pages
 
 Static hosts such as GitHub Pages cannot send the cross-origin isolation headers
-that the threaded shared-memory build requires. `index.html` works around that
+that the threaded build's background worker pool requires. The build itself runs
+without them - every engine creates its shared memory regardless - but hands
+that memory to its workers only on an isolated page. `index.html` works around that
 with [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker), vendored
 at the repository root: it installs a service worker that adds COOP/COEP to every
 response from inside the browser, so the published build at
@@ -273,8 +275,9 @@ response from inside the browser, so the published build at
 The first visit costs one reload while the worker installs. The page stops
 parsing before Trunk's loader and its wasm preload are reached, so that reload
 does not discard a partly downloaded module. Where no worker can be registered —
-an insecure context, or a browser with service workers unavailable — the page
-says so rather than failing as a WebGPU error.
+a browser without service workers, or one that refuses them, as blocking the
+site's storage does — the app runs without its worker pool, its preparation
+work on the main thread, after at most one more reload.
 
 The worker stays dormant whenever the page is already cross-origin isolated,
 which is the case under `trunk serve`, under the Docker nginx configuration, and

@@ -5,20 +5,30 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>funfern · wave playground</title>
   <!--
-    Cross-origin isolation gate. The threaded bundle imports a shared memory and
-    cannot instantiate unless the page is cross-origin isolated. Trunk's dev
-    server, the Docker nginx configuration and any host that can set response
-    headers provide that directly. On a header-less static host such as GitHub
-    Pages, coi-serviceworker.js installs a worker that adds COOP/COEP to every
-    response instead, which costs one reload. Parsing stops here so that reload
-    does not throw away a partly downloaded module: Trunk injects its loader and
-    a wasm preload further down this head, and the module is tens of megabytes.
+    Cross-origin isolation gate. The threaded bundle imports a shared memory,
+    which every engine creates without isolation (Chrome, Firefox 148 and
+    Safari 26 do; the SharedArrayBuffer global is what they hide), but it can
+    hand that memory to the background worker pool only when the page is
+    cross-origin isolated. Trunk's dev server, the Docker nginx configuration
+    and any host that can set response headers isolate the page directly. On a
+    header-less static host such as GitHub Pages, coi-serviceworker.js installs
+    a worker that adds COOP/COEP to every response instead, which costs one
+    reload. Parsing stops here so that reload does not throw away a partly
+    downloaded module: Trunk injects its loader and a wasm preload further down
+    this head, and the module is tens of megabytes. Where no worker registers -
+    the browser or its settings refuse one, or it never activates - the page
+    reloads once more marked `isolation=off` and runs without the pool, the
+    preparation work on the main thread, as on iOS Safari. The marker lives in
+    the address, not in storage: refused site storage is the usual reason a
+    worker is refused. A browser with no service workers at all runs without
+    the pool at once.
 
     This must stay above the data-trunk rust link below.
   -->
   <script>
     (function () {
       var flag = 'funfernCoiReload';
+      var marker = 'isolation';
       var store = null;
       try { store = window.sessionStorage; } catch (e) { /* storage blocked */ }
       var note = function (text) {
@@ -37,8 +47,21 @@
       }
       // Undefined rather than false means the browser has no notion of it.
       if (window.crossOriginIsolated !== false) return;
-      // Nothing a service worker can do here; let the app report the failure.
+      // Nothing a service worker can do here; the app runs without its pool.
       if (!window.isSecureContext || !navigator.serviceWorker) return;
+      // Back from a worker that would not register: run without the pool, and
+      // give the address back as it was, so a link copied from it isolates
+      // wherever it is opened.
+      var params = new URLSearchParams(location.search);
+      if (params.get(marker) === 'off') {
+        params.delete(marker);
+        var query = params.toString();
+        history.replaceState(history.state, '',
+          location.pathname + (query ? '?' + query : '') + location.hash);
+        console.warn('funfern: no service worker could make this page cross-origin ' +
+          'isolated, so it runs without its background worker pool.');
+        return;
+      }
       try {
         if (store && store.getItem(flag)) return;
         store && store.setItem(flag, '1');
@@ -48,19 +71,19 @@
       note('Enabling shared memory…');
 
       var settled = false;
-      var giveUp = function () {
+      var runWithoutPool = function () {
         if (settled) return;
         settled = true;
-        note('This browser could not enable cross-origin isolation, which funfern ' +
-          'needs for its shared-memory build. Serve it from a host that sends ' +
-          'Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy.');
+        var url = new URL(location.href);
+        url.searchParams.set(marker, 'off');
+        location.replace(url.href);
       };
       // A registration that never activates must not leave the splash spinning.
-      setTimeout(giveUp, 10000);
+      setTimeout(runWithoutPool, 10000);
       navigator.serviceWorker.register('coi-serviceworker.js')
         .then(function () { return navigator.serviceWorker.ready; })
         .then(function () { if (!settled) { settled = true; location.reload(); } })
-        .catch(giveUp);
+        .catch(runWithoutPool);
     })();
   </script>
   <!--

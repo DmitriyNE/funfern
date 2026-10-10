@@ -150,10 +150,16 @@ fixtures with no worker pool on the page (`FUNFERN_EXPECT_BROWSER_WORKER=0`);
 `?e2e-pool=off`, which makes the page's shared-memory growth check report what
 it reports on iOS Safari, so the app runs its work on the main thread
 (`data-funfern-preparation-worker` reading `unavailable`), and holds the
-fixtures there. With service workers blocked the page shows its note that
-funfern needs shared memory and never starts, for either bundle. `scripts/browser-suite.sh` is the four in one: it
+fixtures there. `npm run test:e2e:pages-blocked` serves the Pages bundle as
+the site is served but with service workers refused, as a browser that blocks
+the site's storage refuses them: the page cannot isolate itself, reloads once
+marked `isolation=off`, gives the address back without the marker and runs
+without its pool, and the fixtures must pass there, cold and warm. The threaded
+bundle needs isolation only to share its memory with the pool; Chrome, Firefox
+148 and Safari 26.3.1 all create the shared memory without it.
+`scripts/browser-suite.sh` is the five in one: it
 builds the three bundles, or runs against them as they are with `--no-build`,
-runs the four hosting variants one after another, prints a verdict a run and
+runs the five hosting variants one after another, prints a verdict a run and
 each fixture's line, and exits 1 if any failed. It is the browser gate for a
 change to the web shell - `index.html`, the service worker, the Playwright
 specs, `scripts/trunk`, the wasm entry points - as the device suite is for a
