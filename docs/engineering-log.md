@@ -22193,3 +22193,84 @@ holds the trapezoid's surplus below half the half kicks'. No equilibration is
 needed. With the trapezoid made every state's default, all 517 of the core's
 tests pass, as they do with the half kicks as the default. Next: stage C, the
 device.
+
+## 2026-10-11 — The trapezoid wall step on the device, fixed generations (stage C1)
+
+`CanonicalWallStep::Trapezoid` now compiles for a fixed generation, plan flag
+1024, under either integrator. Before the first kick the trace's prepare and
+reduce leave the walls' rate `G X` of the state the step starts from, which
+the nodal kick adds - with the pole currents' explicit half written there and
+then; after the second kick prepare, reduce, one solve over the whole step and
+finalize take the implicit half. Between them the drift form's `ũ` takes the
+wall's acceleration `dt²/12 · A (G Ẋ)_Q` along the trace in four passes, two
+applications of the generator, and a prescribed trace's pins return their
+shares in one more pass. A first-order wall's halves are scalars in the nodal
+kicks, with the drift form's share at its node. The lanes book the trapezoid
+of the walls' dissipation rate at the step's two ends, each by the pass that
+holds that end's state, as the reference's `trapezoid_wall_dissipation` now
+does where it read the step's mean state. A driven generation's walls stay refused on the
+device until C2.
+
+Against the f64 reference the state reads as the half kicks' does: `Q` and
+`b` within 1e-6 over `canonical_gpu_timing`'s 144 steps behind second- and
+first-order walls, with loss, forcing and a pinned trace node, a thin gap,
+obstacles, each staged event, the periodic filter, a clock rebase, an
+injected failure, the fenced readback and `--leapfrog` (new: the leapfrog at
+its own step); handoffs within 2.6e-7 and 1.4e-6 (second-order, pinned sides,
+source and prescribed edit, thin gap, same mesh, advancing during upload, a
+pulse, an injected rejection); 1,000 steps behind second-order walls 2.2e-6
+and 2.7e-6 on Double slit, 3.5e-6 and 4.0e-6 on Luneburg lens.
+
+The trapezoid's ledger is not an identity: its split leaves a second-order
+remainder, 7.7e-4 of the timing fixture's energy over those 144 steps, and
+the reference leaves the same. The timing example now sums the reference's
+own remainder step by step and holds the device's ledger to it; under the
+half kicks it is roundoff, 1.8e-7, so that gate means what it did. The
+device's ledger then holds to the reference's within 1.6e-7 in every case.
+Two device faults surfaced on the way and are fixed here: under a loss stage
+the first kick's prepare read the start's mode loss from the candidate pole
+currents it had just written (4e-4 of the energy in the lanes, none in the
+state); and a law patch's commit kept only the integrator's flags and dropped
+the wall step's, after which a first-order wall stepped by the half kicks and
+a second-order one by the half kicks on the whole step's factor (Q 2.8e-1).
+`the_trapezoid_wall_step_takes_one_solve_a_step` pins the manifest, and the
+device suite gains eight trapezoid runs.
+
+The half kicks keep their arithmetic but not all their bits. Their state
+checksums after 2,000 steps on 15 fixtures (`canonical_gpu_timing`,
+reflecting, both wall orders, loss, gap, obstacles, forcing and each event)
+differ from HEAD's, each build repeating its own. Bisected with HEAD's Rust
+and this shader: two hunks move them, the drift form's first-order wall term
+and the trapezoid's reduce, and neither runs under the half kicks; with those
+two taken out, all 15 match HEAD to the bit. Metal's compiler schedules the
+two functions differently once the trapezoid's branches are in them, and
+neither computing the half kicks' expression first nor folding the term in
+ahead of it kept the bits. Keeping them would take separate entry points for
+code the default switch retires, so the half kicks' rounding moves here, and
+only that: `--second-order --loss` reads `Q` 9.50e-7 and `b` 7.08e-7 against
+the reference where HEAD read 9.54e-7 and 7.08e-7.
+
+A step costs one wall solve where the half kicks took two, plus six passes:
+with a fixed generation's inverse that is two dispatches more a step, 18
+against 16, and 0.229 against 0.212 ms on the timing fixture (medians of
+three, 20,000 steps, rotated); beside a pinned trace, whose solve sweeps,
+four fewer, 36 against 40, and 0.409 against 0.445 ms. At the app's
+plain-scene edge of 0.06 it reads 0.271 against 0.259 ms, 5% more. Over
+20,000 steps either wall step leaves that fixture's decayed field 2.1e-4
+from the reference, past the 3e-5 gate; the gate is meant for the default
+144.
+
+Two findings outside C1, reported and not changed. The staged law-patch
+writer, `stage_linear_loss_patch`, which only the timing example and a
+packing test use, never fills `control.event.w`, from which the device's
+commit takes the loss-stage and force-cache flags, so a staged patch with a
+nonzero rate turns the loss stages off: `canonical_gpu_timing --loss
+--law-patch` reads `Q` 1.1e-2 at HEAD under either wall step and passes with
+the word filled. The live patch carries the flags and is unaffected. And over
+8,000 forced steps the device's boundary-loss lane falls 1.47e-5 behind the
+reference's under either wall step, once the pulse has left and each step's
+increment is a small fraction of an f32 total; the half kicks book a pinned
+trace's mode loss into the prescribed lane as well, where the same deficit
+cancels it in their residual, while the trapezoid returns the pin's share by
+node, so its residual shows it: 4.2e-5 at 20,000 steps, inside the 2e-4 gate.
+Next: C2, the driven path on the device.

@@ -6,6 +6,8 @@
 //!
 //! `--pinned-sides` pins the top and bottom sides to zero on both
 //! generations, so the `--second-order` wall's trace ends at the corners.
+//! `--trapezoid` steps the walls by the trapezoid rule on both generations,
+//! the reference and the device alike.
 //!
 //! `--edit` gives the target generation's harmonic `--source` and
 //! `--prescribed` other numbers, phase included. Each carrier runs on from the
@@ -31,10 +33,10 @@ use funfern_core::{
     BACKGROUND_REGION, CanonicalAuxiliaryState, CanonicalForcing,
     CanonicalOutgoingHistoryTransferMap, CanonicalOutgoingNormalizedTransferJob,
     CanonicalPrimaryTransferMap, CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferJob,
-    CanonicalWaveOperator, CanonicalWaveState, InternalBoundary, InternalBoundaryCoupling,
-    InternalBoundaryId, InternalBoundaryLaw, MeshingOptions, OpenCubicSpline,
-    OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, Point2, PulseEnvelope,
-    QuadraticTransferMap, QuadraticWaveOperator, Scene, TimeSignal, mesh_scene,
+    CanonicalWallStep, CanonicalWaveOperator, CanonicalWaveState, InternalBoundary,
+    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw, MeshingOptions,
+    OpenCubicSpline, OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, Point2,
+    PulseEnvelope, QuadraticTransferMap, QuadraticWaveOperator, Scene, TimeSignal, mesh_scene,
 };
 
 const WARMUP_STEPS: u64 = 12;
@@ -84,6 +86,11 @@ enum Phase {
 
 fn main() -> AppExit {
     let second_order = std::env::args().any(|argument| argument == "--second-order");
+    let wall_step = if std::env::args().any(|argument| argument == "--trapezoid") {
+        CanonicalWallStep::Trapezoid
+    } else {
+        CanonicalWallStep::HalfKicks
+    };
     let same_mesh = std::env::args().any(|argument| argument == "--same-mesh");
     let thin_gap = std::env::args().any(|argument| argument == "--thin-gap");
     let inject_failure = std::env::args().any(|argument| argument == "--failure");
@@ -239,7 +246,9 @@ fn main() -> AppExit {
         &primary,
         &potential,
     )
-    .expect("source initial state");
+    .expect("source initial state")
+    .with_wall_step(&source_operator, wall_step)
+    .expect("source wall step");
     let source_steps = WARMUP_STEPS + handoff_steps;
     let handoff_time = source_steps as f64 * time_step;
     let prescribed_signal = if pulse {
@@ -477,7 +486,9 @@ fn main() -> AppExit {
         .transfer(oracle.complementary_flux())
         .expect("CPU vector transfer");
     let mut target_state = CanonicalWaveState::new(&target_operator, time_step, target_q, target_b)
-        .expect("target state");
+        .expect("target state")
+        .with_wall_step(&target_operator, wall_step)
+        .expect("target wall step");
     let (gap_memory, _) = gap_map
         .transfer(&oracle.thin_gap_memory(&source_operator).unwrap())
         .expect("CPU gap transfer");
@@ -583,7 +594,10 @@ fn main() -> AppExit {
             "the fixture cannot tell a stepped carrier from one that is not"
         );
     }
-    let target_placeholder = CanonicalWaveState::zero(&target_operator, time_step).unwrap();
+    let target_placeholder = CanonicalWaveState::zero(&target_operator, time_step)
+        .unwrap()
+        .with_wall_step(&target_operator, wall_step)
+        .unwrap();
     let target_plan_started = Instant::now();
     let mut target_plan = CanonicalGpuPlan::compile_with_quadratic(
         &target_operator,

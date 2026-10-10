@@ -5727,7 +5727,8 @@ fn trapezoid_forced_second_kick(
 
 /// The trapezoid wall step's loss on a driven generation, from the state the
 /// core started from and the one it ends with, each read as a field at its
-/// own instant; see `trapezoid_wall_dissipation`. Its sign is the step's, so
+/// own instant and through the mass in force there; see
+/// `trapezoid_wall_dissipation`. Its sign is the step's, so
 /// a step taken backwards books none, as the half kicks' trace does.
 #[allow(clippy::too_many_arguments)]
 fn trapezoid_forced_wall_loss(
@@ -5742,19 +5743,13 @@ fn trapezoid_forced_wall_loss(
 ) -> Result<(f64, f64), WaveError> {
     let first = operator.primary_field_at(start.0, start_time, runtime)?;
     let last = operator.primary_field_at(end.0, end_time, runtime)?;
-    let mean_field = first
-        .iter()
-        .zip(&last)
-        .map(|(first, last)| 0.5 * (first + last))
-        .collect::<Vec<_>>();
-    let mean_z = start
-        .1
-        .iter()
-        .zip(end.1)
-        .map(|(first, last)| 0.5 * (first + last))
-        .collect::<Vec<_>>();
-    let (loss, prescribed_exchange) =
-        trapezoid_wall_dissipation(operator.base(), &mean_field, &mean_z, duration, forcing)?;
+    let (loss, prescribed_exchange) = trapezoid_wall_dissipation(
+        operator.base(),
+        (&first, start.1),
+        (&last, end.1),
+        duration,
+        forcing,
+    )?;
     Ok((loss.max(0.0), prescribed_exchange))
 }
 

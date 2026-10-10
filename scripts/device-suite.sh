@@ -37,6 +37,14 @@ RUNS=(
   'LONG_RUN_SCENE="Self-sustained emitter" LONG_RUN_SHORT_WAVE=0.25 LONG_RUN_STEPS=1000 canonical_gpu_long_run'
   'OSCILLATOR_HANDOFF=remesh canonical_gpu_oscillator_handoff'
   'FAILURE_LAW=phi4 canonical_gpu_nonlinear_failure'
+  'canonical_gpu_timing --second-order --trapezoid'
+  'canonical_gpu_timing --second-order --loss --forcing --trapezoid'
+  'canonical_gpu_timing --first-order --loss --forcing --trapezoid'
+  'canonical_gpu_timing --second-order --leapfrog --trapezoid'
+  'canonical_gpu_timing --second-order --law-patch --trapezoid'
+  'canonical_gpu_handoff --second-order --trapezoid'
+  'canonical_gpu_handoff --second-order --pinned-sides --trapezoid'
+  'LONG_RUN_SCENE="Luneburg lens" LONG_RUN_WALLS=second LONG_RUN_WALL_STEP=trapezoid LONG_RUN_STEPS=1000 canonical_gpu_long_run'
   # Each other example as it stands, and the rejections and rollbacks the
   # device performs for real.
   'canonical_gpu_handoff'

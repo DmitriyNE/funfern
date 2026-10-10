@@ -2865,19 +2865,15 @@ impl CanonicalWaveState {
         start_flux: &[f64],
         start_z: &[f64],
     ) -> Result<(f64, f64), WaveError> {
-        let mean_field = start_flux
-            .iter()
-            .zip(&self.primary_flux)
-            .zip(operator.primary_mass())
-            .map(|((start, end), mass)| 0.5 * (start + end) / mass)
-            .collect::<Vec<_>>();
-        let mean_z = start_z
-            .iter()
-            .zip(self.outgoing_z())
-            .map(|(start, end)| 0.5 * (start + end))
-            .collect::<Vec<_>>();
-        let (loss, prescribed_exchange) =
-            trapezoid_wall_dissipation(operator, &mean_field, &mean_z, self.time_step, forcing)?;
+        let start_field = operator.primary_field(start_flux)?;
+        let end_field = operator.primary_field(&self.primary_flux)?;
+        let (loss, prescribed_exchange) = trapezoid_wall_dissipation(
+            operator,
+            (&start_field, start_z),
+            (&end_field, self.outgoing_z()),
+            self.time_step,
+            forcing,
+        )?;
         if loss >= 0.0 {
             Ok((loss, prescribed_exchange))
         } else {
@@ -3419,15 +3415,33 @@ pub(crate) fn trapezoid_trace_implicit_half(
     finite_values(outgoing_z)
 }
 
-/// The trapezoid wall step's loss: the walls' dissipation at the step's mean
-/// field `û` and mean pole currents, `dt Σ (D û² + (w + memory)²)`, a sum of
-/// squares. A pinned node's field is the pin's, not the wall's doing, so its
-/// share of the dissipation is the pin's to give back. Returns the loss and
-/// what the pins exchange.
+/// The trapezoid wall step's loss: the trapezoid of the walls' dissipation
+/// rate over the step, `dt/2 Σ (D u² + (w + memory)²)` at each of its two
+/// ends, each `(field, pole currents)` - a sum of squares, and second order as
+/// the step is. Each end's term is the one its kick can form from the state in
+/// hand, which is how the device books it. A pinned node's field is the
+/// pin's, not the wall's doing, so its share of the dissipation is the pin's
+/// to give back. Returns the loss and what the pins exchange.
 pub(crate) fn trapezoid_wall_dissipation(
     operator: &CanonicalWaveOperator,
-    mean_field: &[f64],
-    mean_z: &[f64],
+    start: (&[f64], &[f64]),
+    end: (&[f64], &[f64]),
+    duration: f64,
+    forcing: &CanonicalForcing,
+) -> Result<(f64, f64), WaveError> {
+    let (first_loss, first_exchange) =
+        endpoint_wall_dissipation(operator, start.0, start.1, 0.5 * duration, forcing)?;
+    let (last_loss, last_exchange) =
+        endpoint_wall_dissipation(operator, end.0, end.1, 0.5 * duration, forcing)?;
+    Ok((first_loss + last_loss, first_exchange + last_exchange))
+}
+
+/// One end's share of [`trapezoid_wall_dissipation`]: the walls' dissipation
+/// rate at `(field, z)` over `duration`.
+fn endpoint_wall_dissipation(
+    operator: &CanonicalWaveOperator,
+    field: &[f64],
+    z: &[f64],
     duration: f64,
     forcing: &CanonicalForcing,
 ) -> Result<(f64, f64), WaveError> {
@@ -3435,15 +3449,15 @@ pub(crate) fn trapezoid_wall_dissipation(
     let mut loss = 0.0;
     let mut prescribed_exchange = 0.0;
     for (node, damping) in operator.first_order_boundary_damping().iter().enumerate() {
-        let field = mean_field[node];
-        let node_loss = duration * damping * field * field;
+        let value = field[node];
+        let node_loss = duration * damping * value * value;
         loss += node_loss;
         if !on_trace[node] && forcing.prescribed[node].is_some() {
             prescribed_exchange += node_loss;
         }
     }
     if let Some(boundary) = operator.outgoing_boundary() {
-        loss += modal_outgoing_loss(boundary, mean_field, mean_z, duration)?;
+        loss += modal_outgoing_loss(boundary, field, z, duration)?;
         if boundary
             .trace_nodes
             .iter()
@@ -3454,12 +3468,12 @@ pub(crate) fn trapezoid_wall_dissipation(
                 operator,
                 boundary,
                 &unit_mass,
-                &trace_state(boundary, mean_field, mean_z)?,
+                &trace_state(boundary, field, z)?,
             )?;
             for (position, node) in boundary.trace_nodes.iter().enumerate() {
                 let node = *node as usize;
                 if forcing.prescribed[node].is_some() {
-                    prescribed_exchange -= duration * mean_field[node] * rate[position];
+                    prescribed_exchange -= duration * field[node] * rate[position];
                 }
             }
         }
@@ -8027,9 +8041,9 @@ mod tests {
         }
     }
 
-    /// The trapezoid step's ledger: the walls' loss is their dissipation at
-    /// the step's mean state, and what is left over is the split's own,
-    /// which falls at second order with the step, pins or not.
+    /// The trapezoid step's ledger: the walls' loss is the trapezoid of their
+    /// dissipation rate at the step's two ends, and what is left over is the
+    /// split's own, which falls at second order with the step, pins or not.
     #[test]
     fn the_trapezoid_wall_steps_ledger_closes_at_second_order() {
         for (condition, pinned) in [

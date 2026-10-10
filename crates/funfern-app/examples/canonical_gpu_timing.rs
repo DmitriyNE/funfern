@@ -26,11 +26,12 @@ use funfern_app::canonical_gpu::{
 use funfern_app::wave_gpu::{VectorOverlayDisplay, WaveGpuPlugin, WaveGpuRequest};
 use funfern_core::{
     BACKGROUND_REGION, CANONICAL_GRID_FILTER_STRENGTH, CanonicalAuxiliaryState, CanonicalForcing,
-    CanonicalPointStencil, CanonicalSource, CanonicalWaveOperator, CanonicalWaveState, DampingLaw,
-    GRID_SCALE_FILTER_CADENCE, InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId,
-    InternalBoundaryLaw, LossChannel, MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline,
-    OuterBoundaryCondition, PeriodicCubicSpline, Point2, QuadraticPointStencil,
-    QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
+    CanonicalIntegrator, CanonicalPointStencil, CanonicalSource, CanonicalWallStep,
+    CanonicalWaveOperator, CanonicalWaveState, DampingLaw, GRID_SCALE_FILTER_CADENCE,
+    InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw,
+    LossChannel, MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline, OuterBoundaryCondition,
+    PeriodicCubicSpline, Point2, QuadraticPointStencil, QuadraticWaveOperator, RateLaw,
+    ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
 };
 
 const DEFAULT_STEPS: u64 = 128;
@@ -48,6 +49,7 @@ struct Expected {
     complementary_energy: Vec<[f64; 4]>,
     auxiliary_energy_weight: Vec<f64>,
     initial_energy: f64,
+    split_residual: f64,
     time_step: f64,
     steps: u64,
     warmup_steps: u64,
@@ -79,6 +81,20 @@ struct FailureSnapshot {
 fn main() -> AppExit {
     let second_order = std::env::args().any(|argument| argument == "--second-order");
     let first_order = std::env::args().any(|argument| argument == "--first-order");
+    // The walls stepped by the trapezoid rule, the reference and the device
+    // alike.
+    let wall_step = if std::env::args().any(|argument| argument == "--trapezoid") {
+        CanonicalWallStep::Trapezoid
+    } else {
+        CanonicalWallStep::HalfKicks
+    };
+    // The leapfrog at its own step, where the production integrator is the
+    // fourth-order step.
+    let integrator = if std::env::args().any(|argument| argument == "--leapfrog") {
+        CanonicalIntegrator::Leapfrog
+    } else {
+        CanonicalIntegrator::FourthOrder
+    };
     let loss = std::env::args().any(|argument| argument == "--loss");
     let thin_gap = std::env::args().any(|argument| argument == "--thin-gap");
     let obstacles = std::env::args().any(|argument| argument == "--obstacles");
@@ -234,7 +250,7 @@ fn main() -> AppExit {
         Vec::new()
     };
     // The app's own step, so the figure is what the app gets.
-    let time_step = operator.recommended_time_step();
+    let time_step = integrator.recommended() * operator.maximum_time_step();
     let primary = operator
         .node_points()
         .iter()
@@ -247,7 +263,10 @@ fn main() -> AppExit {
         .collect::<Vec<_>>();
     let initial =
         CanonicalWaveState::from_primary_and_potential(&operator, time_step, &primary, &potential)
-            .expect("compatible initial state");
+            .expect("compatible initial state")
+            .with_integrator(integrator)
+            .with_wall_step(&operator, wall_step)
+            .expect("wall step");
     let initial_energy = initial.energy(&operator).expect("initial energy");
     let mut forcing = if driven {
         let mut prescribed = vec![None; operator.degrees_of_freedom()];
@@ -352,10 +371,21 @@ fn main() -> AppExit {
     let manifest = plan.manifest.clone();
     let preparation_time = preparation.elapsed();
     let measured_steps = if failure_test { 1 } else { steps };
+    // What the reference's own steps leave out of its ledger: nothing beyond
+    // roundoff under the half kicks, the split's second-order remainder under
+    // the trapezoid wall step. The device books what the reference books.
+    let mut split_residual = 0.0;
     for _ in 0..measured_steps + warmup_steps {
-        oracle
+        let before = oracle.energy(&operator).expect("CPU energy");
+        let accounting = oracle
             .step_with_forcing(&operator, &forcing)
             .expect("CPU oracle step");
+        split_residual += oracle.energy(&operator).expect("CPU energy")
+            - before
+            - (accounting.source_work + accounting.prescribed_exchange
+                - accounting.boundary_loss
+                - accounting.primary_loss
+                - accounting.complementary_loss);
         if periodic_filter
             && (initial_step + oracle.steps()).is_multiple_of(GRID_SCALE_FILTER_CADENCE)
         {
@@ -426,6 +456,7 @@ fn main() -> AppExit {
             })
             .collect(),
         initial_energy,
+        split_residual,
         time_step,
         steps: measured_steps,
         warmup_steps,
@@ -675,7 +706,9 @@ fn finish_when_ready(
     let accounting = display.accounting.map(|value| value as f64);
     let external = accounting[0] + accounting[1] + accounting[6] + accounting[7];
     let dissipated = accounting[2] + accounting[3] + accounting[4] + accounting[5];
-    let energy_residual = (final_energy - expected.initial_energy - external + dissipated).abs()
+    let energy_residual = (final_energy - expected.initial_energy - external + dissipated
+        - expected.split_residual)
+        .abs()
         / expected.initial_energy.abs().max(1.0);
     let overlay_error = relative_l2(
         vector_display.samples.iter().flat_map(|sample| {
@@ -692,7 +725,7 @@ fn finish_when_ready(
             .flat_map(|(complementary, flow)| [complementary.x, complementary.y, flow.x, flow.y]),
     );
     println!(
-        "{} accepted steps in {:.2} ms ({:.3} ms/step, {}): {:.2} simulated seconds/wall second; Q error {:.3e}, b error {:.3e}, auxiliary error {:.3e} relative/{:.3e} RMS, energy residual {:.3e}, vector-overlay error {:.3e}; {} dispatches",
+        "{} accepted steps in {:.2} ms ({:.3} ms/step, {}): {:.2} simulated seconds/wall second; Q error {:.3e}, b error {:.3e}, auxiliary error {:.3e} relative/{:.3e} RMS, energy residual {:.3e} beside the reference's {:.3e}, vector-overlay error {:.3e}; {} dispatches",
         expected.steps,
         elapsed * 1_000.0,
         elapsed * 1_000.0 / expected.steps as f64,
@@ -707,6 +740,7 @@ fn finish_when_ready(
         auxiliary_error,
         auxiliary_absolute,
         energy_residual,
+        expected.split_residual / expected.initial_energy.abs().max(1.0),
         overlay_error,
         request.stats().dispatches(),
     );

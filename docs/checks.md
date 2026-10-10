@@ -567,5 +567,16 @@ pump power computed from it, to match an f64 oracle. The Switch origin is
 stamped on the GPU, so this is the check that the accepted runtime reaches a
 consumer rather than being guessed from the clock.
 
+`--trapezoid` on `canonical_gpu_timing` and `canonical_gpu_handoff`, and
+`LONG_RUN_WALL_STEP=trapezoid` on `canonical_gpu_long_run`, step the walls by
+the trapezoid rule (`docs/spikes/funfern-outgoing-wall-step-spike.md`) on the
+reference and the device alike. That rule's ledger is not an exact identity:
+its split leaves a second-order remainder, `7.7e-4` of the energy over the
+timing fixture's 144 steps, which the reference leaves too. The timing example
+therefore holds the device's ledger to the reference's own remainder, which
+under the half kicks is roundoff. `--leapfrog` steps both at the leapfrog's
+own step instead of the production integrator's. `--law-patch` under the
+trapezoid rule is the check that a patch's commit keeps the wall step.
+
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.

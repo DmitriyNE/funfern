@@ -233,6 +233,16 @@ fn use_force_cache() -> bool { return (control.boundary_offsets.w & 4u) != 0u; }
 fn fourth_order() -> bool { return (control.boundary_offsets.w & 256u) != 0u; }
 fn fourth_order_kick_form() -> bool { return (control.boundary_offsets.w & 512u) != 0u; }
 fn has_prescribed_trace() -> bool { return (control.boundary_offsets.w & 8u) != 0u; }
+// The walls step by the trapezoid rule around the kicks
+// (`docs/spikes/funfern-outgoing-wall-step-spike.md`): the first kick takes
+// their explicit half beside the bulk's plain kick, the second the plain kick
+// and then their implicit half over the whole step.
+fn trapezoid_walls() -> bool { return (control.boundary_offsets.w & 1024u) != 0u; }
+// The half-duration the wall's implicit solve runs over: half a kick under the
+// half kicks, half the step under the trapezoid rule.
+fn wall_solve_half() -> f32 {
+    return select(control.evolution.w, control.evolution.z, trapezoid_walls());
+}
 fn accepted_slot() -> u32 { return control.event.z & 1u; }
 fn event_operation() -> u32 { return control.event.z >> 8u; }
 fn live_event() -> bool { return (control.event.z & 2u) != 0u; }
@@ -2093,7 +2103,9 @@ fn commit_event() {
     control.accepted_accounting_b = control.candidate_accounting_b;
     control.accepted_accounting_c = control.candidate_accounting_c;
     if operation == 3u {
-        var flags = control.boundary_offsets.w & (8u | 256u | 512u);
+        // A law patch rewrites the loss flags; the trace's pins, the
+        // integrator and the wall step stay as compiled.
+        var flags = control.boundary_offsets.w & (8u | 256u | 512u | 1024u);
         flags |= control.event.w & 1u;
         flags |= 2u;
         flags |= control.event.w & 4u;
@@ -2412,14 +2424,17 @@ fn kick_node(node: u32, second: bool) {
     let source = step_source(node, source_time);
     let held_force = kick_force(node, second);
     let net = source - held_force;
-    if nodes[node].boundary.x != NO_INDEX {
+    // A trace node is the wall's under the half kicks; under the trapezoid
+    // rule it takes the plain kick here and the wall's halves around it.
+    let on_trace = nodes[node].boundary.x != NO_INDEX;
+    if on_trace && !trapezoid_walls() {
         return;
     }
     var old = select(
         accepted_q(node), candidate_q(node), second || has_loss_stages());
     // Gate O: the short-wave split's first half, applied to the flux this
     // kick starts from; its stresses were left on that flux before the kick.
-    if !second && short_wave_offset() != 0u {
+    if !second && short_wave_offset() != 0u && !on_trace {
         old = short_wave_applied(node, old, false);
     }
     if temporal_enabled() && node_is_nonlinear(node) {
@@ -2436,6 +2451,11 @@ fn kick_node(node: u32, second: bool) {
     if temporal_enabled() {
         mass = temporal_primary_mass(node, target_time);
         inverse_mass = 1.0 / mass;
+    }
+    if trapezoid_walls() {
+        kick_trapezoid_node(
+            node, second, old, net, source, held_force, mass, inverse_mass, target_time, on_trace);
+        return;
     }
     let damping = nodes[node].damping_support.x;
     let ratio = 0.5 * duration * damping * inverse_mass;
@@ -2462,6 +2482,77 @@ fn kick_node(node: u32, second: bool) {
     set_candidate_q(node, next);
     if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
     if second { inject_at(node); }
+}
+
+// A node's kick under the trapezoid wall step. Every node takes the bulk's
+// plain kick. The first adds the walls' explicit half `dt/2 · G X` of the state
+// the step starts from - the trace's rate as the wall's passes left it, a
+// first-order wall's `−D u` here - and the second divides a first-order
+// wall's node by `1 + dt/2 · D/M`, the implicit half; the trace's is the solve
+// that follows. Each books its end's half of the walls' dissipation,
+// `dt/2 · D u²`, the trace's second end in the solve's finalize, and a pin
+// gives its node's share back: the reference's `trapezoid_wall_dissipation`.
+fn kick_trapezoid_node(
+    node: u32,
+    second: bool,
+    old: f32,
+    net: f32,
+    source: f32,
+    held_force: f32,
+    mass: f32,
+    inverse_mass: f32,
+    target_time: f32,
+    on_trace: bool,
+) {
+    let duration = control.evolution.z;
+    let h = control.clock_f32.x;
+    let pinned = nodes[node].boundary.z != 0u;
+    var damping = nodes[node].damping_support.x;
+    var wall_rate = 0.0;
+    if on_trace {
+        let trace = nodes[node].boundary.x;
+        damping = bitcast<f32>(boundary[control.table_offsets.z + trace].data.z);
+        if !second {
+            wall_rate = scratch[trace_solution_offset() + trace].values.x;
+        }
+    } else if !second {
+        wall_rate = -damping * old * inverse_mass;
+    }
+    var kicked = old + duration * (net + wall_rate);
+    if pinned {
+        kicked = mass * prescribed_value(node, target_time);
+    }
+    var next = kicked;
+    if second && !on_trace && !pinned {
+        next = kicked / (1.0 + duration * damping * inverse_mass);
+    }
+    let midpoint = 0.5 * (old + kicked) * inverse_mass;
+    let source_work = duration * midpoint * source;
+    let force_work = duration * midpoint * held_force;
+    // The walls' dissipation at this kick's end of the step: the start's
+    // field on the first, the end's on the second.
+    var field = old * inverse_mass;
+    if second {
+        field = next * inverse_mass;
+    }
+    var dissipation = 0.0;
+    if !second || !on_trace {
+        dissipation = 0.5 * h * damping * field * field;
+    }
+    scratch[node].values.x += source_work;
+    scratch[node].values.w += dissipation;
+    if pinned {
+        let energy_change = 0.5 * (kicked * kicked - old * old) * inverse_mass;
+        var share = dissipation;
+        if !second {
+            share = -0.5 * h * field * wall_rate;
+        }
+        scratch[node].values.y += energy_change - source_work + force_work + share;
+    }
+    set_candidate_q(node, next);
+    if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
+    // The second kick's injection at a trace node comes after the solve.
+    if second && !on_trace { inject_at(node); }
 }
 
 // The kick at a node whose map follows its field. It is explicit in the bulk
@@ -2676,6 +2767,7 @@ fn boundary_prepare(mode: u32, local: u32, second: bool) {
         scratch[mode_accounting_offset() + mode].values = vec4<f32>(0.0);
     }
     var memory = 0.0;
+    var loss_memory = 0.0;
     var solved = vec3<f32>(0.0);
     var coupling = 0.0;
     if mode_header.z != 0u {
@@ -2689,17 +2781,41 @@ fn boundary_prepare(mode: u32, local: u32, second: bool) {
             boundary_float(mode_word(mode, 1u), 1u),
             boundary_float(mode_word(mode, 1u), 2u));
         memory = dot(residue, old_z);
+        let loss_coefficient = vec3<f32>(
+            boundary_float(mode_word(mode, 11u), 0u),
+            boundary_float(mode_word(mode, 11u), 1u),
+            boundary_float(mode_word(mode, 11u), 2u));
+        // Read before the trapezoid rule's first kick writes the candidate
+        // currents below, which a loss stage has this kick read from.
+        loss_memory = dot(loss_coefficient, old_z);
         let input_gain = vec3<f32>(
             boundary_float(mode_word(mode, 2u), 0u),
             boundary_float(mode_word(mode, 2u), 1u),
             boundary_float(mode_word(mode, 2u), 2u));
-        var right_z = old_z + control.evolution.w * input_gain * modal;
+        // The half kicks' Cayley holds `h/2` of the generator on its right.
+        // Under the trapezoid rule the first kick's explicit half, `dt/2` of
+        // it, is the whole update the pole currents take there, and the
+        // second kick's right holds none: the implicit half solves from the
+        // state the plain kick left.
+        var explicit_part = control.evolution.w;
+        if trapezoid_walls() {
+            explicit_part = select(control.evolution.z, 0.0, second);
+        }
+        var right_z = old_z + explicit_part * input_gain * modal;
         for (var row = 0u; row < 3u; row += 1u) {
             let generator = vec3<f32>(
                 boundary_float(mode_word(mode, 3u + row), 0u),
                 boundary_float(mode_word(mode, 3u + row), 1u),
                 boundary_float(mode_word(mode, 3u + row), 2u));
-            right_z[row] += control.evolution.w * dot(generator, old_z);
+            right_z[row] += explicit_part * dot(generator, old_z);
+        }
+        if trapezoid_walls() && !second {
+            set_candidate_auxiliary(auxiliary, right_z.x);
+            set_candidate_auxiliary(auxiliary + 1u, right_z.y);
+            set_candidate_auxiliary(auxiliary + 2u, right_z.z);
+            if !finite_vec3(right_z) {
+                reject(STATUS_NON_FINITE);
+            }
         }
         for (var row = 0u; row < 3u; row += 1u) {
             let inverse = vec3<f32>(
@@ -2713,6 +2829,13 @@ fn boundary_prepare(mode: u32, local: u32, second: bool) {
             boundary_float(mode_word(mode, 9u), 1u),
             boundary_float(mode_word(mode, 9u), 2u));
         coupling = dot(aqz, solved);
+    }
+    // The trapezoid rule's first end of the walls' dissipation, from the
+    // state the step starts from; its second end is the finalize's.
+    if trapezoid_walls() && !second {
+        let at_start = modal + loss_memory;
+        scratch[mode_accounting_offset() + mode].values.w +=
+            0.5 * control.clock_f32.x * at_start * at_start;
     }
     scratch[mode_temporary_offset() + mode].values = vec4<f32>(solved, coupling);
     scratch[mode_modal_offset() + mode].values = vec4<f32>(modal, memory, 0.0, 0.0);
@@ -2747,12 +2870,23 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
         old_field = bitcast<f32>(trace_word.y);
     }
     let derivative = -damping * old_field - coupling.x;
+    if trapezoid_walls() && !second {
+        // The first kick's explicit half: this row's rate, which the plain
+        // kick adds. Nothing is solved.
+        scratch[trace_solution_offset() + trace].values.x = derivative;
+        return;
+    }
     let source_time = control.clock_f32.y
         + select(0.0, control.clock_f32.x, second);
     let source = step_source(node, source_time);
     let held_force = kick_force(node, second);
-    var reduced = old + control.evolution.w * derivative
-        + control.evolution.z * (source - held_force);
+    // Under the trapezoid rule the second kick's plain kick already moved
+    // the trace, and the implicit half solves from where it left it.
+    var reduced = old;
+    if !trapezoid_walls() {
+        reduced = old + control.evolution.w * derivative
+            + control.evolution.z * (source - held_force);
+    }
     if nodes[node].boundary.z != 0u {
         reduced = pinned_trace_flux(node, boundary_instant(second));
     } else {
@@ -2764,7 +2898,7 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
     // its row of the matrix by an identity row meant.
     let held = nodes[node].boundary.z != 0u;
     let scale = select(
-        1.0 / (1.0 + control.evolution.w * trace_diagonal(trace) * inverse_mass),
+        1.0 / (1.0 + wall_solve_half() * trace_diagonal(trace) * inverse_mass),
         1.0,
         held);
     scratch[trace_solution_offset() + trace].values =
@@ -2801,7 +2935,7 @@ fn boundary_sweep_modal(mode: u32, local: u32) {
     let modal = reduce_boundary_scalar(local, partial);
     if participating && local == 0u {
         scratch[mode_modal_offset() + mode].values.z =
-            control.evolution.w * modal_correction(mode) * modal;
+            wall_solve_half() * modal_correction(mode) * modal;
     }
 }
 
@@ -2881,7 +3015,20 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
         trace_scale = reduce_boundary_max(local, partial_scale);
     }
     if !participating || local != 0u { return; }
-    if i < trace_count {
+    if i < trace_count && trapezoid_walls() {
+        // The plain kick charged the work; the solve's end books the walls'
+        // dissipation there, a pin's share returned by the pins pass.
+        let trace_word = boundary[control.table_offsets.z + i].data;
+        let node = trace_word.x;
+        let inverse_mass = scratch[trace_solution_offset() + i].values.y;
+        let damping = bitcast<f32>(trace_word.z);
+        let next = scratch[trace_solution_offset() + i].values.x;
+        let field = next * inverse_mass;
+        set_candidate_q(node, next);
+        scratch[node].values.w += 0.5 * control.clock_f32.x * damping * field * field;
+        if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
+        if second { inject_at(node); }
+    } else if i < trace_count {
         let trace = i;
         let trace_word = boundary[control.table_offsets.z + trace].data;
         let node = trace_word.x;
@@ -2965,6 +3112,34 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
                 inject_at(auxiliary_offset() + auxiliary + 1u);
                 inject_at(auxiliary_offset() + auxiliary + 2u);
             }
+        }
+        if trapezoid_walls() {
+            // The trapezoid rule's second end of the walls' dissipation, at
+            // the state the step ends with, and that state's `w + memory`,
+            // which the pins pass reads.
+            var at_end = new_modal;
+            var generator_memory = 0.0;
+            if mode_header.z != 0u {
+                let auxiliary = mode_header.y;
+                let new_z = vec3<f32>(
+                    candidate_auxiliary(auxiliary),
+                    candidate_auxiliary(auxiliary + 1u),
+                    candidate_auxiliary(auxiliary + 2u));
+                let loss_coefficient = vec3<f32>(
+                    boundary_float(mode_word(mode, 11u), 0u),
+                    boundary_float(mode_word(mode, 11u), 1u),
+                    boundary_float(mode_word(mode, 11u), 2u));
+                let residue = vec3<f32>(
+                    boundary_float(mode_word(mode, 1u), 0u),
+                    boundary_float(mode_word(mode, 1u), 1u),
+                    boundary_float(mode_word(mode, 1u), 2u));
+                at_end += dot(loss_coefficient, new_z);
+                generator_memory = dot(residue, new_z);
+            }
+            scratch[mode_accounting_offset() + mode].values.w +=
+                0.5 * control.clock_f32.x * at_end * at_end;
+            scratch[mode_modal_offset() + mode].values.x = new_modal + generator_memory;
+            return;
         }
         let old_modal = scratch[mode_modal_offset() + mode].values.x;
         let midpoint_field = 0.5 * (old_modal + new_modal);
@@ -3087,6 +3262,203 @@ fn boundary_finalize_second(
     @builtin(local_invocation_id) local: vec3<u32>,
 ) {
     boundary_finalize(group.x, local.x, true);
+}
+
+// The trapezoid wall step's share of the drift form's `ũ` along the trace,
+// `h²/12 · A (G Ẋ)_Q` with `Ẋ = G X + E (s − F_mid)` at the state the first
+// kick left and `F_mid` that kick's force advanced half a step by the
+// drift's own `L u`: two applications of the wall's generator, each a
+// reduction over the trace into the modes and one back over the modes. The
+// reference's `wall_acceleration`.
+fn wall_drift_instant() -> f32 { return control.clock_f32.y + 0.5 * control.clock_f32.x; }
+
+// First pass, a mode: the state's `w + memory` and its pole currents' rate.
+fn wall_rate_modes(mode: u32, local: u32) {
+    let participating = !stopped() && mode < control.counts_b.z;
+    var partial = 0.0;
+    if participating {
+        for (var trace = local; trace < control.counts_b.y; trace += WORKGROUP_SIZE) {
+            let trace_word = boundary[control.table_offsets.z + trace].data;
+            partial += trace_coefficient(mode, trace) * candidate_q(trace_word.x)
+                * trace_inverse_mass(trace_word, wall_drift_instant());
+        }
+    }
+    let modal = reduce_boundary_scalar(local, partial);
+    if !participating || local != 0u { return; }
+    let mode_header = boundary[mode_word(mode, 0u)].data;
+    var rate_z = vec3<f32>(0.0);
+    var memory = 0.0;
+    if mode_header.z != 0u {
+        let auxiliary = mode_header.y;
+        let z = vec3<f32>(
+            candidate_auxiliary(auxiliary),
+            candidate_auxiliary(auxiliary + 1u),
+            candidate_auxiliary(auxiliary + 2u));
+        let residue = vec3<f32>(
+            boundary_float(mode_word(mode, 1u), 0u),
+            boundary_float(mode_word(mode, 1u), 1u),
+            boundary_float(mode_word(mode, 1u), 2u));
+        memory = dot(residue, z);
+        let input_gain = vec3<f32>(
+            boundary_float(mode_word(mode, 2u), 0u),
+            boundary_float(mode_word(mode, 2u), 1u),
+            boundary_float(mode_word(mode, 2u), 2u));
+        rate_z = input_gain * modal;
+        for (var row = 0u; row < 3u; row += 1u) {
+            let generator = vec3<f32>(
+                boundary_float(mode_word(mode, 3u + row), 0u),
+                boundary_float(mode_word(mode, 3u + row), 1u),
+                boundary_float(mode_word(mode, 3u + row), 2u));
+            rate_z[row] += dot(generator, z);
+        }
+    }
+    scratch[mode_temporary_offset() + mode].values = vec4<f32>(rate_z, modal + memory);
+}
+
+// Second pass, a trace row: `u̇ = A ((G X)_Q + s − F_mid)`; a pin's is its
+// signal's.
+fn wall_rate_trace(trace: u32, local: u32) {
+    let participating = !stopped() && trace < control.counts_b.y;
+    var partial = 0.0;
+    if participating {
+        for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
+            partial += trace_coefficient_transposed(trace, mode)
+                * scratch[mode_temporary_offset() + mode].values.w;
+        }
+    }
+    let coupling = reduce_boundary_scalar(local, partial);
+    if !participating || local != 0u { return; }
+    let trace_word = boundary[control.table_offsets.z + trace].data;
+    let node = trace_word.x;
+    let h = control.clock_f32.x;
+    let middle = wall_drift_instant();
+    var rate: f32;
+    if nodes[node].boundary.z != 0u {
+        rate = (prescribed_value(node, middle + 0.5 * h) - prescribed_value(node, middle - 0.5 * h))
+            / h;
+    } else {
+        let inverse_mass = trace_inverse_mass(trace_word, middle);
+        let damping = bitcast<f32>(trace_word.z);
+        let held = -damping * candidate_q(node) * inverse_mass - coupling;
+        let force_middle = kick_force(node, false)
+            + 0.5 * h * scratch[fourth_order_node_offset() + node].values.w;
+        rate = inverse_mass * (held + source_rate(node, middle) - force_middle);
+    }
+    scratch[trace_solution_offset() + trace].values.z = rate;
+    if !finite_scalar(rate) { reject(STATUS_NON_FINITE); }
+}
+
+// Third pass, a mode: the rate's `w + memory`, from `u̇` along the trace and
+// the pole currents' rate the first pass left.
+fn wall_acceleration_modes(mode: u32, local: u32) {
+    let participating = !stopped() && mode < control.counts_b.z;
+    var partial = 0.0;
+    if participating {
+        for (var trace = local; trace < control.counts_b.y; trace += WORKGROUP_SIZE) {
+            partial += trace_coefficient(mode, trace)
+                * scratch[trace_solution_offset() + trace].values.z;
+        }
+    }
+    let modal = reduce_boundary_scalar(local, partial);
+    if !participating || local != 0u { return; }
+    let mode_header = boundary[mode_word(mode, 0u)].data;
+    var memory = 0.0;
+    if mode_header.z != 0u {
+        let residue = vec3<f32>(
+            boundary_float(mode_word(mode, 1u), 0u),
+            boundary_float(mode_word(mode, 1u), 1u),
+            boundary_float(mode_word(mode, 1u), 2u));
+        memory = dot(residue, scratch[mode_temporary_offset() + mode].values.xyz);
+    }
+    scratch[mode_modal_offset() + mode].values.x = modal + memory;
+}
+
+// Fourth pass, a trace row: `(G Ẋ)_Q`, and its share of `ũ` at a free row; a
+// pin keeps its expanded signal.
+fn wall_acceleration_trace(trace: u32, local: u32) {
+    let participating = !stopped() && trace < control.counts_b.y;
+    var partial = 0.0;
+    if participating {
+        for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
+            partial += trace_coefficient_transposed(trace, mode)
+                * scratch[mode_modal_offset() + mode].values.x;
+        }
+    }
+    let coupling = reduce_boundary_scalar(local, partial);
+    if !participating || local != 0u { return; }
+    let trace_word = boundary[control.table_offsets.z + trace].data;
+    let node = trace_word.x;
+    if nodes[node].boundary.z != 0u { return; }
+    let h = control.clock_f32.x;
+    let inverse_mass = trace_inverse_mass(trace_word, wall_drift_instant());
+    let damping = bitcast<f32>(trace_word.z);
+    let acceleration = -damping * scratch[trace_solution_offset() + trace].values.z - coupling;
+    let share = h * h / 12.0 * inverse_mass * acceleration;
+    scratch[fourth_order_node_offset() + node].values.x += share;
+    if !finite_scalar(share) { reject(STATUS_NON_FINITE); }
+}
+
+// The trapezoid rule's second end at a pinned trace row, after the solve:
+// the pin gives back its share of the walls' dissipation,
+// `−dt/2 · u (G X)_Q`, at the state the step ends with, whose `w + memory`
+// the finalize left a mode.
+fn boundary_trapezoid_pin(trace: u32, local: u32) {
+    let participating = !stopped() && trace < control.counts_b.y;
+    var partial = 0.0;
+    if participating {
+        for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
+            partial += trace_coefficient_transposed(trace, mode)
+                * scratch[mode_modal_offset() + mode].values.x;
+        }
+    }
+    let coupling = reduce_boundary_scalar(local, partial);
+    if !participating || local != 0u { return; }
+    let trace_word = boundary[control.table_offsets.z + trace].data;
+    let node = trace_word.x;
+    if nodes[node].boundary.z == 0u { return; }
+    let field = candidate_q(node) * trace_inverse_mass(trace_word, boundary_instant(true));
+    let rate = -bitcast<f32>(trace_word.z) * field - coupling;
+    scratch[node].values.y -= 0.5 * control.clock_f32.x * field * rate;
+}
+
+@compute @workgroup_size(128)
+fn wall_rate_modes_pass(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    wall_rate_modes(group.x, local.x);
+}
+
+@compute @workgroup_size(128)
+fn wall_rate_trace_pass(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    wall_rate_trace(group.x, local.x);
+}
+
+@compute @workgroup_size(128)
+fn wall_acceleration_modes_pass(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    wall_acceleration_modes(group.x, local.x);
+}
+
+@compute @workgroup_size(128)
+fn wall_acceleration_trace_pass(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    wall_acceleration_trace(group.x, local.x);
+}
+
+@compute @workgroup_size(128)
+fn boundary_trapezoid_pins(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    boundary_trapezoid_pin(group.x, local.x);
 }
 
 // The primary field a driven drift reads at its midpoint. A prescribed node's
@@ -3233,6 +3605,10 @@ fn fourth_order_nodes(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
         stiffness += restoring_curvature(node, false) * field;
+        // The drift's own `L u`, which the trapezoid wall step's rate pass
+        // advances the first kick's force by along the trace.
+        scratch[fourth_order_node_offset() + node].values.w = stiffness;
+        let plain_stiffness = stiffness;
         stiffness -= (source_rate(node, start + h) - source_rate(node, start)) / h;
         var inverse = nodes[node].mass_loss.y;
         if temporal_enabled() {
@@ -3241,6 +3617,16 @@ fn fourth_order_nodes(@builtin(global_invocation_id) id: vec3<u32>) {
             } else {
                 inverse = temporal_inverse_primary_mass(node, middle_time);
             }
+        }
+        // A first-order wall's node, under the trapezoid wall step, carries
+        // the wall's own share of `h²/12 · ü`, `A (−D u̇)` with
+        // `u̇ = A (−D u + s − F_mid)`, here as `D u̇` beside `L u − ṡ`. The
+        // trace's is the wall passes'.
+        let damping = nodes[node].damping_support.x;
+        if trapezoid_walls() && damping > 0.0 && nodes[node].boundary.x == NO_INDEX {
+            let force_middle = kick_force(node, false) + 0.5 * h * plain_stiffness;
+            let rate = inverse * (-damping * field + source_rate(node, middle_time) - force_middle);
+            stiffness += damping * rate;
         }
         value = field - h * h / 12.0 * inverse * stiffness;
     }
@@ -3677,7 +4063,9 @@ fn reduce_accounting(@builtin(local_invocation_id) id: vec3<u32>) {
         accounting_a.w += scratch[accounting_bank_offset(accepted_slot()) + item].values.x;
     }
     for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
-        if has_prescribed_trace() {
+        // The half kicks charge a pinned trace's whole balance through its
+        // modes; the trapezoid rule's pins return their own shares by node.
+        if has_prescribed_trace() && !trapezoid_walls() {
             let item_index = control.counts_a.x + control.counts_a.y + mode;
             let item = scratch[accounting_bank_offset(accepted_slot()) + item_index].values;
             accounting_a.y += item.x + item.w;

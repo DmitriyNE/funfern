@@ -165,6 +165,12 @@ const FOURTH_ORDER_FLAG: u32 = 256;
 /// The fourth-order correction sits in the kicks, beside a stiffness-side
 /// field law, rather than in the drift.
 const KICK_FORM_FLAG: u32 = 512;
+/// The walls step by the trapezoid rule around the kicks
+/// (`docs/spikes/funfern-outgoing-wall-step-spike.md`), the state's
+/// `CanonicalWallStep::Trapezoid`.
+const TRAPEZOID_WALL_FLAG: u32 = 1024;
+/// A trace row is prescribed: the wall's solve holds it.
+const PRESCRIBED_TRACE_FLAG: u32 = 8;
 /// The short-wave split's passes a step: field and stresses before the first
 /// kick, which applies them; field, stresses, predict, stresses and apply
 /// after the second.
@@ -1107,6 +1113,7 @@ impl CanonicalGpuPlan {
     ) -> Result<Self, CanonicalGpuBuildError> {
         let mut plan = Self::compile_inner(operator, None, state, forcing, clock)?;
         plan.apply_integrator(state.integrator(), FourthOrderForm::Drift);
+        plan.apply_wall_step(state.wall_step());
         Ok(plan)
     }
 
@@ -1130,6 +1137,7 @@ impl CanonicalGpuPlan {
         }
         let mut plan = Self::compile_inner(operator, Some(quadratic), state, forcing, clock)?;
         plan.apply_integrator(state.integrator(), FourthOrderForm::Drift);
+        plan.apply_wall_step(state.wall_step());
         Ok(plan)
     }
 
@@ -1142,6 +1150,7 @@ impl CanonicalGpuPlan {
         if flags & FOURTH_ORDER_FLAG != 0 {
             self.manifest.dispatches_per_step -= fourth_order_dispatches(flags);
         }
+        self.manifest.dispatches_per_step -= self.wall_dispatches(flags);
         let mut flags = flags & !(FOURTH_ORDER_FLAG | KICK_FORM_FLAG);
         let fourth_order = integrator == CanonicalIntegrator::FourthOrder;
         if fourth_order {
@@ -1151,6 +1160,7 @@ impl CanonicalGpuPlan {
             }
             self.manifest.dispatches_per_step += fourth_order_dispatches(flags);
         }
+        self.manifest.dispatches_per_step += self.wall_dispatches(flags);
         // The short-wave prediction's words sit after the fourth-order ones,
         // under either integrator.
         if fourth_order || self.short_wave {
@@ -1171,6 +1181,30 @@ impl CanonicalGpuPlan {
             }
         }
         self.control.boundary_offsets.w = flags;
+    }
+
+    /// Sets how the device steps the walls, the state's own way, so the
+    /// device and the CPU reference it is compiled from step alike. The
+    /// wall's factor already came from that state, prepared for the duration
+    /// its way solves over.
+    fn apply_wall_step(&mut self, wall_step: CanonicalWallStep) {
+        let flags = self.control.boundary_offsets.w;
+        self.manifest.dispatches_per_step -= self.wall_dispatches(flags);
+        let mut flags = flags & !TRAPEZOID_WALL_FLAG;
+        if wall_step == CanonicalWallStep::Trapezoid {
+            flags |= TRAPEZOID_WALL_FLAG;
+        }
+        self.manifest.dispatches_per_step += self.wall_dispatches(flags);
+        self.control.boundary_offsets.w = flags;
+    }
+
+    fn wall_dispatches(&self, flags: u32) -> usize {
+        wall_dispatches(
+            flags,
+            self.trace_count,
+            self.trace_sweeps,
+            self.trace_direct,
+        )
     }
 
     /// Packs the dormant Stage 7 conservative-bulk plan into the production
@@ -1218,6 +1252,13 @@ impl CanonicalGpuPlan {
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "the temporal state, clock and operator must share one boundary",
+            ));
+        }
+        // A driven generation's walls reach the trapezoid rule on the device
+        // in stage C2 of `docs/spikes/funfern-outgoing-wall-step-spike.md`.
+        if state.wall_step() != CanonicalWallStep::HalfKicks {
+            return Err(CanonicalGpuBuildError::Unrepresentable(
+                "the device steps a driven generation's walls by half kicks only",
             ));
         }
         if state.thin_gap_jump().iter().any(|jump| *jump != 0.0)
@@ -1859,14 +1900,6 @@ impl CanonicalGpuPlan {
             tables.push(GpuCanonicalTableWord::default());
         }
 
-        // The device kicks the walls by half-step Cayleys and packs the factor
-        // for them; the trapezoid wall step reaches it in stage C of
-        // `docs/spikes/funfern-outgoing-wall-step-spike.md`.
-        if state.wall_step() != CanonicalWallStep::HalfKicks {
-            return Err(CanonicalGpuBuildError::Unrepresentable(
-                "the device steps the walls by half kicks only",
-            ));
-        }
         let prescribed_trace = operator
             .outgoing_boundary()
             .map(|boundary| {
@@ -2251,11 +2284,7 @@ impl CanonicalGpuPlan {
             + usize::from(self.needs_accounting)
             + 2 * usize::from(self.manifest.temporal.is_some())
             + usize::from(self.field_laws)
-            + if self.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0 {
-                nonlinear_trace_dispatches(self.trace_count, self.trace_sweeps)
-            } else {
-                trace_dispatches(self.trace_count, self.trace_sweeps, self.trace_direct)
-            };
+            + self.wall_dispatches(self.control.boundary_offsets.w);
         Ok(())
     }
 
@@ -3244,6 +3273,26 @@ fn fourth_order_dispatches(flags: u32) -> usize {
     }
 }
 
+/// Every wall dispatch a step encodes, by the way the plan steps its walls.
+/// The trapezoid rule's first kick takes prepare and reduce, which leave the
+/// explicit half; its second prepare, reduce, the solve and finalize; a
+/// prescribed trace one more pass for the pins' shares; and the drift form
+/// four for the walls' share of `ũ`.
+fn wall_dispatches(flags: u32, trace_count: usize, sweeps: usize, direct: bool) -> usize {
+    if trace_count == 0 {
+        return 0;
+    }
+    if flags & NONLINEAR_TRACE_FLAG != 0 {
+        return nonlinear_trace_dispatches(trace_count, sweeps);
+    }
+    if flags & TRAPEZOID_WALL_FLAG == 0 {
+        return trace_dispatches(trace_count, sweeps, direct);
+    }
+    let solve = if direct { 1 } else { 2 * sweeps };
+    let drift = flags & FOURTH_ORDER_FLAG != 0 && flags & KICK_FORM_FLAG == 0;
+    2 + 3 + solve + usize::from(flags & PRESCRIBED_TRACE_FLAG != 0) + 4 * usize::from(drift)
+}
+
 fn trace_dispatches(trace_count: usize, sweeps: usize, direct: bool) -> usize {
     if trace_count == 0 {
         return 0;
@@ -4177,6 +4226,8 @@ pub(crate) struct CanonicalGpuBufferHandles {
     nonlinear_trace: bool,
     fourth_order: bool,
     fourth_order_kick_form: bool,
+    trapezoid_walls: bool,
+    prescribed_trace: bool,
     short_wave: bool,
     drive_count: u32,
     material_runtime_count: u32,
@@ -4472,6 +4523,8 @@ fn add_canonical_buffers(
         nonlinear_trace: plan.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0,
         fourth_order: plan.control.boundary_offsets.w & FOURTH_ORDER_FLAG != 0,
         fourth_order_kick_form: plan.control.boundary_offsets.w & KICK_FORM_FLAG != 0,
+        trapezoid_walls: plan.control.boundary_offsets.w & TRAPEZOID_WALL_FLAG != 0,
+        prescribed_trace: plan.control.boundary_offsets.w & PRESCRIBED_TRACE_FLAG != 0,
         short_wave: plan.short_wave,
         drive_count,
         material_runtime_count,
@@ -6472,6 +6525,11 @@ struct CanonicalPipeline {
     short_wave_stresses_second: CachedComputePipelineId,
     short_wave_predict: CachedComputePipelineId,
     short_wave_apply_second: CachedComputePipelineId,
+    wall_rate_modes: CachedComputePipelineId,
+    wall_rate_trace: CachedComputePipelineId,
+    wall_acceleration_modes: CachedComputePipelineId,
+    wall_acceleration_trace: CachedComputePipelineId,
+    boundary_trapezoid_pins: CachedComputePipelineId,
 }
 
 #[derive(Resource)]
@@ -6583,6 +6641,11 @@ fn init_canonical_pipeline(
     let short_wave_stresses_second = queue("short_wave_stresses_second");
     let short_wave_predict = queue("short_wave_predict");
     let short_wave_apply_second = queue("short_wave_apply_second");
+    let wall_rate_modes = queue("wall_rate_modes_pass");
+    let wall_rate_trace = queue("wall_rate_trace_pass");
+    let wall_acceleration_modes = queue("wall_acceleration_modes_pass");
+    let wall_acceleration_trace = queue("wall_acceleration_trace_pass");
+    let boundary_trapezoid_pins = queue("boundary_trapezoid_pins");
     commands.insert_resource(CanonicalPipeline {
         layout,
         start_loss,
@@ -6642,6 +6705,11 @@ fn init_canonical_pipeline(
         short_wave_stresses_second,
         short_wave_predict,
         short_wave_apply_second,
+        wall_rate_modes,
+        wall_rate_trace,
+        wall_acceleration_modes,
+        wall_acceleration_trace,
+        boundary_trapezoid_pins,
     });
 
     let map_layout = BindGroupLayoutDescriptor::new(
@@ -7392,6 +7460,11 @@ fn compute_canonical_wave(
         pipeline.short_wave_stresses_second,
         pipeline.short_wave_predict,
         pipeline.short_wave_apply_second,
+        pipeline.wall_rate_modes,
+        pipeline.wall_rate_trace,
+        pipeline.wall_acceleration_modes,
+        pipeline.wall_acceleration_trace,
+        pipeline.boundary_trapezoid_pins,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -7666,9 +7739,18 @@ fn compute_canonical_wave(
             pass.set_pipeline(pipelines[44]);
             pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
         }
+        // The trapezoid rule's first kick: the walls' explicit half before
+        // the plain kick, which adds it; no solve.
+        let trapezoid_walls = handles.trapezoid_walls && handles.trace_count > 0;
+        if trapezoid_walls {
+            pass.set_pipeline(pipelines[2]);
+            pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            pass.set_pipeline(pipelines[3]);
+            pass.dispatch_workgroups(handles.trace_count, 1, 1);
+        }
         pass.set_pipeline(pipelines[1]);
         pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
-        if handles.trace_count > 0 {
+        if handles.trace_count > 0 && !trapezoid_walls {
             encode_boundary_kick(&mut pass, &pipelines, handles, false);
         }
         if handles.field_laws {
@@ -7684,6 +7766,14 @@ fn compute_canonical_wave(
             pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
             pass.set_pipeline(pipelines[41]);
             pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            // The walls' share of `ũ` along the trace, under the trapezoid
+            // rule: two applications of the wall's generator.
+            if trapezoid_walls {
+                for index in [53, 54, 55, 56] {
+                    pass.set_pipeline(pipelines[index]);
+                    pass.dispatch_workgroups(handles.trace_count, 1, 1);
+                }
+            }
         }
         pass.set_pipeline(pipelines[6]);
         pass.dispatch_workgroups(
@@ -7703,7 +7793,22 @@ fn compute_canonical_wave(
         }
         pass.set_pipeline(pipelines[7]);
         pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
-        if handles.trace_count > 0 {
+        if trapezoid_walls {
+            // The plain kick moved the trace; the implicit half solves from
+            // there over the whole step, and a prescribed trace's pins then
+            // return their shares.
+            pass.set_pipeline(pipelines[8]);
+            pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            pass.set_pipeline(pipelines[9]);
+            pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            encode_trace_solve(&mut pass, &pipelines, handles);
+            pass.set_pipeline(pipelines[10]);
+            pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            if handles.prescribed_trace {
+                pass.set_pipeline(pipelines[57]);
+                pass.dispatch_workgroups(handles.trace_count, 1, 1);
+            }
+        } else if handles.trace_count > 0 {
             encode_boundary_kick(&mut pass, &pipelines, handles, true);
         }
         // The short-wave split's second half: the field, the stresses on it,
@@ -8758,6 +8863,15 @@ mod tests {
     /// `inverted` builds the state a fixed generation packs; without it, the
     /// state a driven one packs, whose trace the device sweeps.
     fn plan_with_trace_lane(boundary: OuterBoundaryCondition, inverted: bool) -> CanonicalGpuPlan {
+        plan_with_state(boundary, inverted, |_, state| state)
+    }
+
+    /// The same, from the zero state as `adjust` leaves it.
+    fn plan_with_state(
+        boundary: OuterBoundaryCondition,
+        inverted: bool,
+        adjust: impl FnOnce(&CanonicalWaveOperator, CanonicalWaveState) -> CanonicalWaveState,
+    ) -> CanonicalGpuPlan {
         let scene = Scene::initial();
         let mesh = mesh_scene(
             &scene,
@@ -8777,6 +8891,7 @@ mod tests {
             CanonicalWaveState::zero_for_backend(&operator, dt)
         }
         .unwrap();
+        let state = adjust(&operator, state);
         let mut forcing = CanonicalForcing::none(&operator);
         forcing
             .push_source(
@@ -9493,6 +9608,58 @@ mod tests {
         assert_eq!(
             swept.manifest.dispatches_per_step,
             5 + 6 + 4 * swept.trace_sweeps + 3
+        );
+    }
+
+    /// Under the trapezoid wall step the walls take one solve a step: prepare
+    /// and reduce before the first kick, prepare, reduce, the solve and
+    /// finalize after the second, and between them the drift form's four
+    /// passes of the wall's acceleration. The leapfrog has no drift form, and
+    /// a first-order wall steps in the nodal kicks.
+    #[test]
+    fn the_trapezoid_wall_step_takes_one_solve_a_step() {
+        let trapezoid = |operator: &CanonicalWaveOperator, state: CanonicalWaveState| {
+            state
+                .with_wall_step(operator, CanonicalWallStep::Trapezoid)
+                .unwrap()
+        };
+        let direct = plan_with_state(OuterBoundaryCondition::SecondOrderOutgoing, true, trapezoid);
+        assert!(direct.trace_direct);
+        assert_ne!(direct.control.boundary_offsets.w & TRAPEZOID_WALL_FLAG, 0);
+        assert_eq!(direct.manifest.dispatches_per_step, 5 + 3 + (2 + 3 + 1 + 4));
+        let swept = plan_with_state(
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            false,
+            trapezoid,
+        );
+        assert!(!swept.trace_direct);
+        assert_eq!(
+            swept.manifest.dispatches_per_step,
+            5 + 3 + (2 + 3 + 2 * swept.trace_sweeps + 4)
+        );
+        let leapfrog = plan_with_state(
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            true,
+            |operator, state| {
+                trapezoid(
+                    operator,
+                    state.with_integrator(CanonicalIntegrator::Leapfrog),
+                )
+            },
+        );
+        assert_eq!(leapfrog.manifest.dispatches_per_step, 5 + (2 + 3 + 1));
+        let first_order =
+            plan_with_state(OuterBoundaryCondition::FirstOrderOutgoing, true, trapezoid);
+        assert_eq!(first_order.trace_count, 0);
+        assert_ne!(
+            first_order.control.boundary_offsets.w & TRAPEZOID_WALL_FLAG,
+            0
+        );
+        assert_eq!(
+            first_order.manifest.dispatches_per_step,
+            plan(OuterBoundaryCondition::FirstOrderOutgoing)
+                .manifest
+                .dispatches_per_step
         );
     }
 

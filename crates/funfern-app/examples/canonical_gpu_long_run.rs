@@ -20,7 +20,9 @@
 //! `LONG_RUN_WALLS=second` makes every outer wall second-order outgoing. The
 //! two together make an outgoing trace longer than the 1,024 nodes the device
 //! once refused: Phased array at 0.017 has 1,166 and Parametric pump 1,236.
-//! `LONG_RUN_LOSS` puts an
+//! `LONG_RUN_WALL_STEP=trapezoid` steps the walls by the trapezoid rule, the
+//! reference and the device alike; the device refuses it on a driven scene
+//! until stage C2. `LONG_RUN_LOSS` puts an
 //! electric loss of 0.6 on the scene's second material: `none` a constant
 //! one, a number a pump of that depth on the rate. On the pumped slab both
 //! failed before the device read its loss records: the constant one because a
@@ -53,7 +55,9 @@ use funfern_app::canonical_gpu::{
 use funfern_app::topology_editor::TopologyEditor;
 use funfern_app::topology_runtime::TopologyRuntime;
 use funfern_app::wave_gpu::WaveGpuPlugin;
-use funfern_core::{CanonicalTemporalWaveState, CanonicalWaveState, MeshingOptions, Point2};
+use funfern_core::{
+    CanonicalTemporalWaveState, CanonicalWallStep, CanonicalWaveState, MeshingOptions, Point2,
+};
 use std::time::{Duration, Instant};
 fn steps() -> u64 {
     std::env::var("LONG_RUN_STEPS")
@@ -126,6 +130,11 @@ fn main() -> AppExit {
             );
         }
     }
+    let wall_step = match std::env::var("LONG_RUN_WALL_STEP").as_deref() {
+        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
+        Ok(other) => panic!("LONG_RUN_WALL_STEP takes only trapezoid, not {other}"),
+        Err(_) => CanonicalWallStep::HalfKicks,
+    };
     let edge = document.presentation.mesh_edge;
     let domain = document.model.accepted.geometry.domain;
     let editor = TopologyEditor::from_document(document).unwrap();
@@ -170,7 +179,8 @@ fn main() -> AppExit {
             let seeded = CanonicalTemporalWaveState::zero(&op, dt)
                 .unwrap()
                 .pinned(&op, &forcing)
-                .unwrap();
+                .unwrap()
+                .with_wall_step(wall_step);
             let plan = CanonicalGpuPlan::compile_temporal(
                 &op,
                 &seeded,
@@ -197,7 +207,10 @@ fn main() -> AppExit {
         } else {
             let base = prepared.canonical_operator.clone();
             let dt = prepared.recommended_time_step();
-            let seeded = CanonicalWaveState::zero(&base, dt).unwrap();
+            let seeded = CanonicalWaveState::zero(&base, dt)
+                .unwrap()
+                .with_wall_step(&base, wall_step)
+                .unwrap();
             let plan = CanonicalGpuPlan::compile(
                 &base,
                 &seeded,

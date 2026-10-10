@@ -309,3 +309,25 @@ the caveat's: a pulse crossing the walls with the step alternating between
 a handoff under the trapezoid step, 25% under the half kicks. With the
 trapezoid step every state's default, the core's 517 tests pass, as they do
 with the half kicks'.
+
+**C1, done 11 October 2026: the device's fixed path.** Plan flag 1024, under
+either integrator. Before the first kick the trace's prepare and reduce leave
+the walls' rate of the state the step starts from, which the nodal kick adds;
+after the second, prepare, reduce, one solve over the whole step and finalize
+take the implicit half. Between them the drift form's `ũ` takes the wall's
+acceleration along the trace in four passes, and a prescribed trace's pins
+return their shares in one more. A first-order wall's halves are scalars in
+the nodal kicks. The ledger books the trapezoid of the walls' dissipation
+rate at the step's two ends, each formed by the pass that holds that end's
+state, and the reference books the same; it is not an identity, and its
+remainder, 7.7e-4 of the energy over the timing fixture's 144 steps, the
+reference leaves too. Against the f64 reference the state reads as the half
+kicks' does, `Q` and `b` within 1e-6 there with loss, forcing, pins, a gap,
+obstacles, events and the leapfrog, handoffs within 2.6e-7 and 1.4e-6, a
+thousand steps of Luneburg lens 3.5e-6 and 4.0e-6; the device's ledger holds
+to the reference's within 1.6e-7. A step costs one solve where the half kicks
+took two, plus six passes: with a fixed generation's inverse, two dispatches
+more a step, 0.229 against 0.212 ms on the timing fixture; where the solve
+sweeps, as beside a pinned trace, four fewer, 0.409 against 0.445 ms. At the
+app's plain-scene edge of 0.06 it is 0.271 against 0.259 ms, 5% more. A
+driven generation's walls stay refused on the device until C2.
