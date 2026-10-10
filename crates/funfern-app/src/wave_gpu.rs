@@ -6,7 +6,6 @@ use bevy::{
     render::{
         Render, RenderApp, RenderStartup, RenderSystems,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
-        gpu_readback::{Readback, ReadbackComplete},
         render_asset::RenderAssets,
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
@@ -28,7 +27,7 @@ use crate::canonical_gpu::{
     CanonicalGpuRequest, CanonicalGpuTemporalManifest, GpuCanonicalControl, GpuCanonicalNode,
     GpuCanonicalStateWord, GpuCanonicalTableWord,
 };
-use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
+use crate::paced_readback::{PacedReadback, PacedReadbackComplete, PacedReadbackPlugin};
 
 /// Independent complementary flux samples per enriched-quadratic element.
 const COMPLEMENTARY_SAMPLES: usize = 6;
@@ -438,7 +437,7 @@ impl WaveGpuRequest {
         self.probe_readback_entity = Some(
             commands
                 .spawn((
-                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
+                    PacedReadback::buffer(handles.output.clone()),
                     ProbeReadbackTag {
                         generation: self.generation,
                         revision: self.probe_revision,
@@ -543,7 +542,7 @@ impl WaveGpuRequest {
         self.vector_overlay_readback_entity = Some(
             commands
                 .spawn((
-                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
+                    PacedReadback::buffer(handles.output.clone()),
                     VectorOverlayReadbackTag {
                         generation: self.generation,
                         revision: self.vector_overlay_revision,
@@ -748,7 +747,7 @@ impl WaveGpuRequest {
         self.curve_probe_readback_entity = Some(
             commands
                 .spawn((
-                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
+                    PacedReadback::buffer(handles.output.clone()),
                     CurveProbeReadbackTag {
                         generation: self.generation,
                         revision: self.curve_probe_revision,
@@ -960,7 +959,7 @@ impl WaveGpuRequest {
         self.area_probe_readback_entity = Some(
             commands
                 .spawn((
-                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
+                    PacedReadback::buffer(handles.output.clone()),
                     AreaProbeReadbackTag {
                         generation: self.generation,
                         revision: self.area_probe_revision,
@@ -1117,7 +1116,7 @@ impl WaveGpuRequest {
         self.far_field_readback_entity = Some(
             commands
                 .spawn((
-                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
+                    PacedReadback::buffer(handles.output.clone()),
                     FarFieldReadbackTag {
                         generation: self.generation,
                         revision: self.far_field_revision,
@@ -1853,7 +1852,7 @@ pub(crate) fn differencing_sample_due(completed_step: u64, stride: u64, filterin
 }
 
 fn receive_probe_readback(
-    event: On<ReadbackComplete>,
+    event: On<PacedReadbackComplete>,
     tags: Query<&ProbeReadbackTag>,
     mut display: ResMut<ProbeDisplay>,
 ) {
@@ -1896,7 +1895,7 @@ fn receive_probe_readback(
 }
 
 fn receive_vector_overlay_readback(
-    event: On<ReadbackComplete>,
+    event: On<PacedReadbackComplete>,
     tags: Query<&VectorOverlayReadbackTag>,
     request: Res<WaveGpuRequest>,
     mut display: ResMut<VectorOverlayDisplay>,
@@ -1941,7 +1940,7 @@ fn receive_vector_overlay_readback(
 }
 
 fn receive_curve_probe_readback(
-    event: On<ReadbackComplete>,
+    event: On<PacedReadbackComplete>,
     tags: Query<&CurveProbeReadbackTag>,
     mut display: ResMut<CurveProbeDisplay>,
 ) {
@@ -1989,7 +1988,7 @@ fn receive_curve_probe_readback(
 }
 
 fn receive_area_probe_readback(
-    event: On<ReadbackComplete>,
+    event: On<PacedReadbackComplete>,
     tags: Query<&AreaProbeReadbackTag>,
     mut display: ResMut<AreaProbeDisplay>,
 ) {
@@ -2035,7 +2034,7 @@ fn receive_area_probe_readback(
 }
 
 fn receive_far_field_readback(
-    event: On<ReadbackComplete>,
+    event: On<PacedReadbackComplete>,
     tags: Query<&FarFieldReadbackTag>,
     mut display: ResMut<FarFieldDisplay>,
 ) {

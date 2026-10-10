@@ -1294,11 +1294,17 @@ filters retain their physical decay across timestep-changing handoffs. Camera
 changes coalesce behind at most one in-flight sampling-lattice replacement; the
 last completed world-space lattice remains drawable and is reprojected during
 pan/zoom or a mesh handoff until its replacement has actually arrived.
-Continuous buffer readback is completion-paced rather than frame-paced: a shared
-main/render-world token allows at most one staging copy per readback entity to be
-in flight, and a completion event rearms it. Requested full-state snapshots use
-the token once, while handoff admission polls its pending marker through the same
-bounded gate until the transfer pipeline has run. Independently, the host request
+Continuous buffer readback is the application's own (`paced_readback`), not
+Bevy's `Readback`: a readback entity names a buffer or a range of one, the render
+world claims one of at most three slots per entity and a pooled staging buffer,
+encodes the copy after the frame's rendering, maps it once the frame is
+submitted, and the next extraction triggers the completion event on the main
+world and frees the slot. A map that fails - the device lost - frees the slot
+and delivers nothing, where Bevy's mapping panicked inside the render schedule,
+so a lost device reaches the render error handler instead. Requested full-state
+snapshots map their own buffer the same tolerant way, while handoff admission
+polls its pending marker through the same bounded gate until the transfer
+pipeline has run. Independently, the host request
 clock and render-world encoded clock stay within one 64-step interactive batch of
 the last GPU-completed boundary. A slow or background-throttled GPU therefore
 loses obsolete wall-time catch-up and reports a speed shortfall instead of

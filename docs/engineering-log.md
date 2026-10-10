@@ -21668,3 +21668,55 @@ under the headers in 62 s, without the pool in 65 s, on the Pages path cold and
 warm in 118 s and on the single-threaded bundle cold and warm in 123 s, every
 reading the same digits on every path, the cavity Q 6.242e-7 and the refusal
 at step 788; about sixteen minutes with the builds, six without.
+
+## 2026-10-10 — The application owns its readbacks, so a lost device is not a panic
+
+The device-loss behaviour the testing review asked for began with a plan to
+stop honestly - rendering stopped, the page told, the document autosaved -
+and an experiment before the first commit: a throwaway render-world system
+destroying the application's own device after a hundred frames, natively,
+under a scratch HOME. The handler never ran. Bevy's `GpuReadbackPlugin` maps
+every finished staging copy with `res.expect("Failed to map buffer")`; a lost
+device fails every map in flight, and the panic inside `map_buffers`, in the
+render schedule, ended the process with exit 1 and a trace before Bevy's own
+error handler polled the lost-device callback. funfern always has copies in
+flight: its state, control, status, integrated and handoff-receipt readbacks
+all ran through Bevy's `Readback` components, behind the `PacedReadback`
+backpressure this crate added. In the browser the same panic would trap, and
+the page's handler would call it "most likely out of memory".
+
+`paced_readback` is now the application's readback plugin, Bevy's left
+registered with nothing to serve. A `PacedReadback` component names a buffer
+or a range of one; each frame `request_copies` claims one of at most three
+slots per entity and a staging buffer from a pool by size, `encode_copies`
+records the copies into the graph's encoder after `camera_driver`, where
+Bevy's own ran after the graph, `map_copies` asks for the maps in `Cleanup`
+once the frame is submitted, with a callback that takes a failed map as a
+copy that never arrives, and `deliver_copies`, at the next extraction,
+triggers `PacedReadbackComplete` on the main world for the maps that
+completed, returns their buffers and frees the slots; `to_shader_type` reads
+the bytes as Bevy's event did. The fourteen readback sites, nine of them the
+solver's and five the legacy wave's, ten observers and two tests swap the
+types and nothing else; the gate that removed Bevy's
+component in an exclusive system, whose ordering had once silently changed
+with unrelated systems, is gone, since the request is the application's. The
+first run of the experiment on this path found the second half of the
+problem: wgpu keeps a failed map's state on the buffer, so the staging buffer
+the pool reused the next frame asserted "Buffer is already mapped" in
+`map_async`. A buffer whose map failed is now dropped from the pool, never
+mapped again. The experiment then ran as it should: the destroy, validation
+errors from the dead device, Bevy's default handler's "Quitting the
+application due to Validation RenderError", a clean `AppExit`, no panic. On
+Metal the loss surfaced as validation errors before any lost-device callback,
+which never fired before the quit; whatever stops rendering, the handler that
+follows must speak to both.
+
+Verified bit for bit: the six end-to-end fixtures natively read every digit
+they read before - the cavity Q 6.242e-7 and its endpoint hash
+`15ba17d5782e69d1` the same in all four batchings, the handoff Q 9.879e-7,
+the refusal at step 788 - the device suite 49 of 49, and the browser suite on
+its four hosting paths. The architecture document's passage on readbacks,
+which still said one copy in flight, now says what the code does. Bevy's
+`expect` is worth an upstream issue: a lost device should not panic an
+application that has readbacks in flight, which is any application reading
+anything back.

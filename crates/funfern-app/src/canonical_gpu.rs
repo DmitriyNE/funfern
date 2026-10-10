@@ -19,7 +19,6 @@ use bevy::{
     render::{
         Render, RenderApp, RenderStartup, RenderSystems,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
-        gpu_readback::{Readback, ReadbackComplete},
         render_asset::{ExtractedAssets, RenderAssets, prepare_assets},
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
@@ -46,7 +45,7 @@ use funfern_core::{
 
 use crate::drawn_pacing::{DrawnFrame, DrawnPacingTrace, PacingNote};
 use crate::gpu_frame_timer::{GpuFrameReadings, GpuFrameTimer};
-use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
+use crate::paced_readback::{PacedReadback, PacedReadbackComplete, PacedReadbackPlugin};
 use crate::picture_playout::{PictureCopy, PicturePlayout};
 use crate::wave_gpu::{
     AreaProbeBindGroup, CurveProbeBindGroup, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS,
@@ -4353,19 +4352,16 @@ fn spawn_canonical_state_readback(
     full: bool,
 ) -> Entity {
     let readback = if full {
-        Readback::buffer(handles.state.clone())
+        PacedReadback::buffer(handles.state.clone())
     } else {
-        Readback::buffer_range(
+        PacedReadback::buffer_range(
             handles.live.clone(),
             0,
             u64::from(handles.node_count + 1) * size_of::<GpuCanonicalStateWord>() as u64,
         )
     };
     commands
-        .spawn((
-            PacedReadback::continuous(readback),
-            canonical_state_tag(handles, generation, full),
-        ))
+        .spawn((readback, canonical_state_tag(handles, generation, full)))
         .id()
 }
 
@@ -4514,7 +4510,7 @@ impl CanonicalGpuRequest {
         );
         let control_entity = commands
             .spawn((
-                PacedReadback::continuous(Readback::buffer(handles.control.clone())),
+                PacedReadback::buffer(handles.control.clone()),
                 CanonicalControlReadback {
                     generation,
                     stats: self.stats.clone(),
@@ -4523,7 +4519,7 @@ impl CanonicalGpuRequest {
             .id();
         let status_entity = commands
             .spawn((
-                PacedReadback::continuous(Readback::buffer(handles.status.clone())),
+                PacedReadback::buffer(handles.status.clone()),
                 CanonicalStatusReadback {
                     stats: self.stats.clone(),
                 },
@@ -4722,11 +4718,11 @@ impl CanonicalGpuRequest {
         let word = size_of::<GpuCanonicalStateWord>() as u64;
         let entity = commands
             .spawn((
-                PacedReadback::continuous(Readback::buffer_range(
+                PacedReadback::buffer_range(
                     handles.live.clone(),
                     u64::from(handles.node_count + 1) * word,
                     u64::from(handles.integrated_count + 1) * word,
-                )),
+                ),
                 CanonicalIntegratedReadback {
                     generation: self.generation,
                     integrated_count: handles.integrated_count,
@@ -5135,12 +5131,12 @@ impl CanonicalGpuRequest {
                 // The transfer pipelines may not be ready in the first render
                 // frame. Keep polling the transfer-buffer receipt prefix, but
                 // allow only one copy to be outstanding at a time.
-                PacedReadback::continuous(Readback::buffer_range(
+                PacedReadback::buffer_range(
                     transfer_handle.clone(),
                     0,
                     (added.handles.node_count as u64 + 1 + added.handles.integrated_count as u64)
                         * size_of::<GpuCanonicalTransferWord>() as u64,
-                )),
+                ),
                 CanonicalHandoffReceiptReadback {
                     stats: stats.clone(),
                     node_count: added.handles.node_count,
@@ -5235,7 +5231,7 @@ impl CanonicalGpuRequest {
         }
         let entity = commands
             .spawn((
-                PacedReadback::continuous(Readback::buffer(handles.status.clone())),
+                PacedReadback::buffer(handles.status.clone()),
                 CanonicalStatusReadback {
                     stats: self.stats.clone(),
                 },
@@ -5746,7 +5742,7 @@ fn receive_canonical_snapshot(
             }
             request.snapshot = None;
             // Decoded exactly as a readback's bytes are.
-            let words = ReadbackComplete {
+            let words = PacedReadbackComplete {
                 entity: Entity::PLACEHOLDER,
                 data,
             }
@@ -5770,7 +5766,7 @@ struct CanonicalIntegratedReadback {
 }
 
 fn receive_canonical_integrated(
-    event: On<ReadbackComplete>,
+    event: On<PacedReadbackComplete>,
     tags: Query<&CanonicalIntegratedReadback>,
     request: Res<CanonicalGpuRequest>,
     mut display: ResMut<CanonicalGpuDisplay>,
@@ -5865,7 +5861,7 @@ fn snapshot_metadata(word: GpuCanonicalStateWord) -> Option<(u32, u64)> {
 }
 
 fn receive_canonical_state(
-    event: On<ReadbackComplete>,
+    event: On<PacedReadbackComplete>,
     tags: Query<&CanonicalStateReadback>,
     request: Res<CanonicalGpuRequest>,
     mut display: ResMut<CanonicalGpuDisplay>,
@@ -5983,7 +5979,7 @@ fn begin_canonical_display_generation(display: &mut CanonicalGpuDisplay, generat
 }
 
 fn receive_canonical_control(
-    event: On<ReadbackComplete>,
+    event: On<PacedReadbackComplete>,
     tags: Query<&CanonicalControlReadback>,
     request: Res<CanonicalGpuRequest>,
     mut display: ResMut<CanonicalGpuDisplay>,
@@ -6108,7 +6104,10 @@ fn refresh_canonical_display(display: &mut CanonicalGpuDisplay) {
         }));
 }
 
-fn receive_canonical_status(event: On<ReadbackComplete>, tags: Query<&CanonicalStatusReadback>) {
+fn receive_canonical_status(
+    event: On<PacedReadbackComplete>,
+    tags: Query<&CanonicalStatusReadback>,
+) {
     let Ok(tag) = tags.get(event.entity) else {
         return;
     };
@@ -6127,7 +6126,7 @@ fn receive_canonical_status(event: On<ReadbackComplete>, tags: Query<&CanonicalS
 }
 
 fn receive_canonical_handoff_receipt(
-    event: On<ReadbackComplete>,
+    event: On<PacedReadbackComplete>,
     tags: Query<&CanonicalHandoffReceiptReadback>,
 ) {
     let Ok(tag) = tags.get(event.entity) else {
@@ -6223,7 +6222,7 @@ fn settle_canonical_handoff(
     );
     let control_entity = commands
         .spawn((
-            PacedReadback::continuous(Readback::buffer(target.control.clone())),
+            PacedReadback::buffer(target.control.clone()),
             CanonicalControlReadback {
                 generation,
                 stats: stats.clone(),
@@ -6232,7 +6231,7 @@ fn settle_canonical_handoff(
         .id();
     let status_entity = commands
         .spawn((
-            PacedReadback::continuous(Readback::buffer(target.status.clone())),
+            PacedReadback::buffer(target.status.clone()),
             CanonicalStatusReadback {
                 stats: stats.clone(),
             },
@@ -8425,7 +8424,7 @@ mod tests {
             .flat_map(|word| word.values.to_array())
             .flat_map(f32::to_le_bytes)
             .collect();
-        world.trigger(ReadbackComplete { entity, data });
+        world.trigger(PacedReadbackComplete { entity, data });
         world.flush();
         let mut display = world.remove_resource::<CanonicalGpuDisplay>().unwrap();
         display.release_pictures();
