@@ -36,11 +36,11 @@ use funfern_core::{
     CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
     CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalTemporalCoefficientSample,
     CanonicalTemporalLossSample, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWaveOperator,
-    CanonicalWaveState, CoefficientLawValues, FieldLawValues, FourthOrderForm,
-    GRID_SCALE_FILTER_CADENCE, GRID_SCALE_FILTER_LIMIT, LinearPrimaryContribution, MaterialId,
-    MaterialSwitchRuntime, Point2, PulseEnvelope, PulseTrain, QuadraticWaveOperator, RateLawValues,
-    RestoringLawValues, TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
+    CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWallStep,
+    CanonicalWaveOperator, CanonicalWaveState, CoefficientLawValues, FieldLawValues,
+    FourthOrderForm, GRID_SCALE_FILTER_CADENCE, GRID_SCALE_FILTER_LIMIT, LinearPrimaryContribution,
+    MaterialId, MaterialSwitchRuntime, Point2, PulseEnvelope, PulseTrain, QuadraticWaveOperator,
+    RateLawValues, RestoringLawValues, TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
 };
 
 use crate::drawn_pacing::{DrawnFrame, DrawnPacingTrace, PacingNote};
@@ -1859,6 +1859,14 @@ impl CanonicalGpuPlan {
             tables.push(GpuCanonicalTableWord::default());
         }
 
+        // The device kicks the walls by half-step Cayleys and packs the factor
+        // for them; the trapezoid wall step reaches it in stage C of
+        // `docs/spikes/funfern-outgoing-wall-step-spike.md`.
+        if state.wall_step() != CanonicalWallStep::HalfKicks {
+            return Err(CanonicalGpuBuildError::Unrepresentable(
+                "the device steps the walls by half kicks only",
+            ));
+        }
         let prescribed_trace = operator
             .outgoing_boundary()
             .map(|boundary| {

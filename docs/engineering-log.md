@@ -22080,3 +22080,41 @@ show it. The kick form's linear limit needs the wall's rate in the trace's
 `u̇`: without it 2.9 times production's error, with it 0.37 to 0.42 and
 `z²/24` at small steps, twice the drift form's at the app's step. The
 harness now runs 106 checks.
+
+## 2026-10-10 — The trapezoid wall step on the fixed path, beside the half kicks (stage B1)
+
+`CanonicalWallStep::{HalfKicks, Trapezoid}` on `CanonicalWaveState`, the half
+kicks the default; `with_wall_step` prepares the wall's factor again for the
+duration the step takes, the whole step under the trapezoid. Its step: the
+bulk's plain kick at every node, wall nodes included; the first kick adds
+the walls' explicit half `dt/2 · G X_n` - the trace through the generator,
+first-order walls node by node as scalars; the second kick is plain and the
+implicit half follows, today's trace solve at twice the duration and a
+division by `1 + dt/2 · D/M` at a first-order wall's node; the drift form's
+`ũ` gains the walls' share of `dt²/12 · ü`, two generator applications at the
+trace, with the force at the drift's middle taken as the first kick's
+advanced half a step by `K u` and a pinned node's rate read from its signal.
+Without a wall it steps exactly as the half kicks do. The ledger's wall loss
+is the trapezoid's dissipation at the step's mean state, a sum of squares;
+a pinned node gives back its share of it, and what the split leaves falls
+into the splitting residual, which halves to a quarter with the step (4.8e-4
+to 1.2e-4 over 1.5 s on a box, first- and second-order walls and a pinned
+trace alike - the bulk's own). The device refuses a trapezoid state until
+stage C.
+
+Measured on `an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`,
+which now runs both steps: the second-order band reads 1.0098 between free
+sides and 1.0105 between pinned ones (1.0979 and 1.0957 under the half
+kicks), held to 2%; the first-order band 0.998, held to 1%. At normal
+incidence the near-less-far reading is 6.5e-6 against 5.9e-6, but both
+steps converge to 3.9e-6 at a quarter of the step, so that reading is the
+two meshes' difference rather than the wall's step; on the same mesh the
+trapezoid step's run is 4.0e-7 of the pulse's energy from its quarter step
+against the half kicks' 4.1e-6, and the fixture holds it to a fifth. A box
+drained by either order of wall, under either integrator, books a loss that
+accounts for what left to 1%. The wall solve at the whole step's duration,
+across the gallery at edges 0.16, 0.08 and 0.05 at the app's step
+(`measure_the_wall_solves_contraction_across_the_gallery`, ignored):
+contraction at most 0.141 against 0.040, f64 sweeps at most 22 against 14,
+f32 sweeps at most 12 against 8 - one device solve of at most 12 sweeps a
+step where there were two of at most 8. Next: B2, the driven path.

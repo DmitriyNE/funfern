@@ -393,6 +393,12 @@ between electric walls in TM, where the field vanishes at the corners, the
 second-order wall's trace ends there and the mode reflects as it does between
 reflecting sides, to 2%
 (`an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`).
+The same runs under the trapezoid wall step, not yet the production one
+(`docs/spikes/funfern-outgoing-wall-step-spike.md`), read the second-order
+wall at 1.01 of its law, the mesh's own, held to 2%, and the first-order wall
+to 1%; at normal incidence the two meshes' difference hides the wall's step,
+so there the near run is held against its own run at a quarter of the step,
+to a fifth of the half kicks' distance (measured: a tenth).
 With the pinned corners kept on the trace it reflected 6.6 times its law. The
 box mode `cos(3π(x+1)/2) cos(3π(y+1)/2)` runs on the production path, the
 application's mesh of the reflecting box under its fourth-order step at its

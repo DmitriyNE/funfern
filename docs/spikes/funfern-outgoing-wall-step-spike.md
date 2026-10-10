@@ -260,3 +260,16 @@ Production carries the wall through more than the fixed linear path:
   must show to stay well inside the sweep's limits.
 
 The fixture's second-order band would then be held to about 1%.
+
+**B1, done 10 October 2026: the fixed path.** `CanonicalWallStep::Trapezoid`
+on `CanonicalWaveState`, beside the half kicks, which stay the default; the
+device refuses it until stage C. On the fixture the second-order band reads
+1.0098 between free sides and 1.0105 between pinned ones, against 1.0979 and
+1.0957, and the first-order band 0.998. At normal incidence the channel's
+near-less-far reading, 6.5e-6 against 5.9e-6, is the two meshes' difference
+more than the wall's step - both converge to 3.9e-6 at a quarter of the step
+- and on the same mesh the trapezoid step's run is ten times closer to its
+quarter step than the half kicks'. Across the gallery at the app's step the
+wall solve's contraction is at most 0.14 (0.04 under the half kicks), its
+sweeps at most 22 in f64 and 12 in f32 (14 and 8): one solve of at most 12
+device sweeps a step where there were two of at most 8.

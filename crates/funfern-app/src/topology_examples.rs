@@ -6061,6 +6061,57 @@ mod tests {
     /// Every law-carrying gallery scene behind such a wall used to be refused
     /// whole; with one side pinned, each steps on the reference, packs for the
     /// device and is estimated as the adaptation worker estimates it.
+    /// The trapezoid wall step solves the wall over the whole step, twice
+    /// the half kick's duration, and the sweep's contraction grows about as
+    /// the duration's square. Measured across the gallery at the app's step.
+    /// `cargo test -p funfern-app --release --lib measure_the_wall_solves -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn measure_the_wall_solves_contraction_across_the_gallery() {
+        for edge in [0.16, 0.08, 0.05] {
+            let mut worst = (0.0, String::new());
+            for example in catalog() {
+                let prepared = prepare(&example.document, edge);
+                let operator = &prepared.canonical_operator;
+                if operator.outgoing_boundary().is_none() {
+                    continue;
+                }
+                let dt = operator.recommended_time_step();
+                let measure = |wall_step| {
+                    let state = CanonicalWaveState::zero_for_backend(operator, dt)
+                        .unwrap()
+                        .with_wall_step(operator, wall_step)
+                        .unwrap();
+                    let factor = state.outgoing_midpoint_factor().unwrap();
+                    (
+                        factor.contraction(),
+                        factor.sweeps(),
+                        factor.device_sweeps(),
+                    )
+                };
+                let halves = measure(CanonicalWallStep::HalfKicks);
+                let trapezoid = measure(CanonicalWallStep::Trapezoid);
+                eprintln!(
+                    "edge {edge} {}: half kicks {:.3} ({} / {} sweeps), trapezoid {:.3} ({} / {} sweeps)",
+                    example.name,
+                    halves.0,
+                    halves.1,
+                    halves.2,
+                    trapezoid.0,
+                    trapezoid.1,
+                    trapezoid.2
+                );
+                if trapezoid.0 > worst.0 {
+                    worst = (trapezoid.0, example.name.to_string());
+                }
+            }
+            eprintln!(
+                "edge {edge}: worst trapezoid contraction {:.3} in {}",
+                worst.0, worst.1
+            );
+        }
+    }
+
     #[test]
     fn every_driven_gallery_scene_runs_with_a_side_pinned_beside_an_outgoing_wall() {
         let outgoing = OuterBoundaryCondition::SecondOrderOutgoing;
@@ -8853,12 +8904,14 @@ mod tests {
         prepare(&document, edge)
     }
 
-    /// The primary field at `points` after each of `steps` steps of `dt`.
+    /// The primary field at `points` after each of `steps` steps of `dt`,
+    /// the walls stepped `wall_step`'s way.
     fn wall_traces(
         prepared: &crate::topology_runtime::PreparedTopology,
         dt: f64,
         steps: usize,
         points: &[Point2],
+        wall_step: CanonicalWallStep,
     ) -> Vec<Vec<f64>> {
         let stencils = points
             .iter()
@@ -8874,7 +8927,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let operator = &prepared.canonical_operator;
-        let mut state = CanonicalWaveState::zero(operator, dt).unwrap();
+        let mut state = CanonicalWaveState::zero(operator, dt)
+            .unwrap()
+            .with_wall_step(operator, wall_step)
+            .unwrap();
         let mut traces = vec![Vec::with_capacity(steps); points.len()];
         for _ in 0..steps {
             state
@@ -8935,7 +8991,12 @@ mod tests {
     /// second-order wall's reads 1.10 of the passive law at the default step,
     /// 1.03 at half of it and 1.02 at a quarter, an excess in the stepping,
     /// not the law (`docs/plan.md`, Worth checking sometime), and is held to
-    /// 15%. Between electric walls in TM the field vanishes at the corners,
+    /// 15%. The trapezoid wall step
+    /// (`docs/spikes/funfern-outgoing-wall-step-spike.md`) reads 1.01, the
+    /// mesh's own, and is held to 2%; at normal incidence, where the two
+    /// meshes' difference hides it, its near run is held to a fifth of the
+    /// half kicks' distance from where both converge, a quarter of the step
+    /// on the same mesh. Between electric walls in TM the field vanishes at the corners,
     /// the wall's trace ends there, and `sin(2πy)` must reflect as `cos(2πy)`
     /// does between reflecting sides, within 2%: with the corners kept on the
     /// trace it reflected 6.6 times its law. Electric walls in TM and zero
@@ -8974,27 +9035,66 @@ mod tests {
             .map(|near| near.recommended_time_step())
             .fold(far.recommended_time_step(), f64::min);
         let steps = (3.6 / dt).ceil() as usize;
-        let far_traces = wall_traces(&far, dt, steps, &points);
+        let far_traces = wall_traces(&far, dt, steps, &points, CanonicalWallStep::HalfKicks);
+        let incident: f64 = far_traces.iter().flatten().map(|f| f * f).sum();
+        // The energy between two sets of traces, over the incident pulse's;
+        // `every` reads the other at each `every`-th sample.
+        let apart = |near: &[Vec<f64>], other: &[Vec<f64>], every: usize| {
+            near.iter()
+                .zip(other)
+                .flat_map(|(near, other)| {
+                    near.iter()
+                        .enumerate()
+                        .map(move |(step, n)| n - other[every * step + every - 1])
+                })
+                .map(|difference| difference * difference)
+                .sum::<f64>()
+                / incident
+        };
         let returned = nears.each_ref().map(|near| {
-            let (mut incident, mut returned) = (0.0, 0.0);
-            for (near, far) in wall_traces(near, dt, steps, &points)
-                .iter()
-                .zip(&far_traces)
-            {
-                for (n, f) in near.iter().zip(far) {
-                    incident += f * f;
-                    returned += (n - f) * (n - f);
-                }
-            }
-            returned / incident
+            apart(
+                &wall_traces(near, dt, steps, &points, CanonicalWallStep::HalfKicks),
+                &far_traces,
+                1,
+            )
         });
+        let second = [CanonicalWallStep::HalfKicks, CanonicalWallStep::Trapezoid]
+            .map(|wall_step| wall_traces(&nears[2], dt, steps, &points, wall_step));
+        let trapezoid = [
+            apart(
+                &wall_traces(&nears[1], dt, steps, &points, CanonicalWallStep::Trapezoid),
+                &far_traces,
+                1,
+            ),
+            apart(&second[1], &far_traces, 1),
+        ];
+        // Against the same mesh at a quarter of the step, the far mesh's own
+        // difference left out: how far each way of stepping the wall is from
+        // where both converge.
+        let quarter = wall_traces(
+            &nears[2],
+            0.25 * dt,
+            4 * steps,
+            &points,
+            CanonicalWallStep::Trapezoid,
+        );
+        let converged = second.each_ref().map(|traces| apart(traces, &quarter, 4));
         eprintln!(
-            "normal incidence: reflecting {:.4}, first order {:.2e}, second order {:.2e}",
-            returned[0], returned[1], returned[2]
+            "normal incidence: reflecting {:.4}, first order {:.2e}, second order {:.2e}; trapezoid wall step first {:.2e} second {:.2e}; second order from its quarter step: half kicks {:.2e}, trapezoid {:.2e}",
+            returned[0],
+            returned[1],
+            returned[2],
+            trapezoid[0],
+            trapezoid[1],
+            converged[0],
+            converged[1]
         );
         assert!((returned[0] - 1.0).abs() < 0.01, "{}", returned[0]);
         assert!(returned[1] < 2.0e-5, "{}", returned[1]);
         assert!(returned[2] < 2.0e-5, "{}", returned[2]);
+        assert!(trapezoid[0] < 2.0e-5, "{}", trapezoid[0]);
+        assert!(trapezoid[1] < 2.0e-5, "{}", trapezoid[1]);
+        assert!(converged[1] < 0.2 * converged[0], "{converged:?}");
 
         let signal = TimeSignal::pulsed(
             [0.0, 1.0, 2.2, 0.0],
@@ -9027,7 +9127,9 @@ mod tests {
             let steps = (7.5 / dt).ceil() as usize;
             let traces = nears
                 .each_ref()
-                .map(|near| wall_traces(near, dt, steps, &points));
+                .map(|near| wall_traces(near, dt, steps, &points, CanonicalWallStep::HalfKicks));
+            let trapezoid = [&nears[0], &nears[1]]
+                .map(|near| wall_traces(near, dt, steps, &points, CanonicalWallStep::Trapezoid));
             let spectrum = |trace: &[f64], hz: f64| {
                 let (mut re, mut im) = (0.0, 0.0);
                 for (step, u) in trace.iter().enumerate() {
@@ -9038,7 +9140,7 @@ mod tests {
                 (re, im)
             };
             let norm = |(re, im): (f64, f64)| re * re + im * im;
-            let mut returned = [0.0; 2];
+            let mut returned = [0.0; 4];
             let mut predicted = [0.0; 2];
             for tenth in 16..=22 {
                 let hz = f64::from(tenth) / 10.0;
@@ -9049,16 +9151,26 @@ mod tests {
                 ];
                 for point in 0..points.len() {
                     let at = traces.each_ref().map(|trace| spectrum(&trace[point], hz));
+                    let stepped = trapezoid
+                        .each_ref()
+                        .map(|trace| spectrum(&trace[point], hz));
                     let (n, d) = (at[2], at[3]);
                     let incident = (0.5 * (n.0 + d.0), 0.5 * (n.1 + d.1));
                     let unit = norm((0.5 * (n.0 - d.0), 0.5 * (n.1 - d.1)));
                     for wall in 0..2 {
                         returned[wall] += norm((at[wall].0 - incident.0, at[wall].1 - incident.1));
+                        returned[2 + wall] +=
+                            norm((stepped[wall].0 - incident.0, stepped[wall].1 - incident.1));
                         predicted[wall] += law[wall] * unit;
                     }
                 }
             }
-            [returned[0] / predicted[0], returned[1] / predicted[1]]
+            [
+                returned[0] / predicted[0],
+                returned[1] / predicted[1],
+                returned[2] / predicted[0],
+                returned[3] / predicted[1],
+            ]
         };
         let free = band("cos(2 * pi * y)", None);
         let pinned = band(
@@ -9074,6 +9186,10 @@ mod tests {
             "oblique, over the law: free sides first {:.4} second {:.4}; pinned sides first {:.4} second {:.4}",
             free[0], free[1], pinned[0], pinned[1]
         );
+        eprintln!(
+            "oblique, trapezoid wall step: free sides first {:.4} second {:.4}; pinned sides first {:.4} second {:.4}",
+            free[2], free[3], pinned[2], pinned[3]
+        );
         assert!((free[0] - 1.0).abs() < 0.01, "{}", free[0]);
         assert!(free[1] > 0.95 && free[1] < 1.15, "{}", free[1]);
         assert!((pinned[0] - 1.0).abs() < 0.01, "{}", pinned[0]);
@@ -9082,6 +9198,15 @@ mod tests {
             "{} / {}",
             pinned[1],
             free[1]
+        );
+        assert!((free[2] - 1.0).abs() < 0.01, "{}", free[2]);
+        assert!((free[3] - 1.0).abs() < 0.02, "{}", free[3]);
+        assert!((pinned[2] - 1.0).abs() < 0.01, "{}", pinned[2]);
+        assert!(
+            (pinned[3] / free[3] - 1.0).abs() < 0.02,
+            "{} / {}",
+            pinned[3],
+            free[3]
         );
 
         let resolved = [
