@@ -21831,3 +21831,61 @@ M1 Max: the suite's five variants pass, the seven fixtures reading the same
 digits on every path - the cavity Q 6.242e-7, the refusal at step 788, the
 device loss told 24 to 31 ms after it - the blocked one in 202 s for the seven
 twice, against 129 s on the Pages path with the pool.
+
+## 2026-10-10 — The browser fixtures on SwiftShader: the canvas lost the device, and the shaders take minutes
+
+The SwiftShader item stopped on 2026-10-09 after one platform, Playwright's
+arm64 image, where the app's device was lost as it started. Taken up again on
+x86_64, which CI's runner is, in Playwright 1.55's amd64 image: the same loss,
+and a twenty-line WebGPU page lost its device the same way - its compute
+dispatch read back `0 2 2046`, and the device went at the canvas. Chromium's
+own log said why: "Could not find SharedImageBackingFactory with params:
+usage: ...|WebgpuSwapChainTexture|..., format: BGRA_8888", then
+"SharedImageStub: Unable to create shared image". Dawn drew on SwiftShader's
+Vulkan while the compositor ran on ANGLE's GL, and no shared image serves
+both; Chromium dropped the page's WebGPU, and Dawn's word for a dropped
+instance is the message the app logged. Of nine flag sets on both Chromium
+builds only those that put the compositor on SwiftShader's Vulkan too keep the
+device - `--enable-features=Vulkan --use-vulkan=swiftshader
+--use-angle=swiftshader` beside the adapter's two flags - on x86_64 and arm64
+alike, a device asking every feature and the adapter's limits as Bevy's does
+included, the canvas holding the drawn colour before presentation and a
+screenshot of the composited page showing it. `FUNFERN_WEBGPU=swiftshader`
+sets them, and `npm run test:e2e:swiftshader` runs the spec with it.
+
+The app runs there: the cavity fixture passes at Q 6.347e-7 on x86_64 and
+6.152e-7 on arm64, on the x86 meshes, and cavity-batches' runs in steps of one
+and of seven land on the cavity's endpoint hash. It is slow. Natively on arm64
+the cavity took 7m43s, and a trace of its start puts 235 of 238 s in
+`createComputePipeline`: SwiftShader compiles the 77 compute pipelines,
+`kick_first` in 47 s, `kick_second` in 36 s, the point and area probes in 18
+and 17 s though the scene has none, `drift` in 16 s. Nothing carries over: a
+second page in the same context and a page in a fresh one each took 240 s.
+Running, it draws two to three frames a second, the GPU process blocked about
+0.4 s a frame in the map that waits for SwiftShader to finish the frame's
+work; a quarter of the viewport's pixels raises the rate only from 2.4 to 3.1,
+so the cost is the compute. On x86_64, CI's architecture, the same start
+reaches the first step in 56 s and the fixture passes in 2.9 min on an idle
+machine, under Rosetta; runs that shared the machine took twice that.
+Mesa's lavapipe, which runs the device job's fixtures in seconds, is no way
+round it: Dawn finds it and chrome://gpu lists it, but Chromium
+blocklists every CPU adapter save SwiftShader ("CPU adapters not fully tested
+or conformant"), `--enable-unsafe-webgpu` does not lift that, and with
+SwiftShader removed the page gets no adapter at all.
+
+So CI is to run the cavity alone on every push, a smoke check that the
+shipped bundle starts and draws in a browser and its shaders compile through
+Tint, and the seven on a schedule. The spec takes `FUNFERN_E2E_FIXTURES` to
+name the fixtures, failing on a name the device suite does not run; checks the
+adapter in each fixture's own page once its verdict is in - in the browser
+wgpu's adapter info is empty, so the app's log cannot say, and the separate
+test that loaded the app to ask set a four-minute compile going for nothing;
+and gives a fixture on the Pages paths twice its time, as it runs cold and
+warm there. Measured: Chrome on the M1 Max passes the seven as before in
+1.1 min, and the filter and an unknown name or mode behave; in the amd64
+container the cavity passes on SwiftShader isolated in 2.8 min and, with
+service workers refused, cold and warm in 7.2 min, the adapter SwiftShader's
+each time. One isolated run that shared the machine with the host's Chrome
+came up without its pool: the page's shared-memory check gave its worker five
+seconds and, starved, the worker took longer - a defect of its own, reported
+separately.

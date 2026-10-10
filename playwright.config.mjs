@@ -7,16 +7,35 @@ const isolationArgument = process.env.FUNFERN_TEST_ISOLATED === "0" ? "" : " --i
 const prefix = process.env.FUNFERN_TEST_PREFIX ?? "/";
 const prefixArgument = prefix === "/" ? "" : ` --prefix ${JSON.stringify(prefix)}`;
 const baseURL = `http://127.0.0.1:4173${prefix}`;
+// The WebGPU the browser runs on: the machine's GPU, or `FUNFERN_WEBGPU=swiftshader`
+// on a Linux machine without one, as CI's runner is - Chromium's bundled
+// software Vulkan, SwiftShader, as the page's adapter and as the compositor's
+// Vulkan too. With the compositor on anything else the canvas's swap chain finds
+// no shared image both sides can use, Chromium drops the page's WebGPU, and the
+// app's device is lost as it starts ("A valid external Instance reference no
+// longer exists"). Chromium offers no other software adapter: Dawn finds Mesa's
+// lavapipe, but Chromium blocklists every CPU adapter save SwiftShader.
+const webGpu = process.env.FUNFERN_WEBGPU ?? "native";
+if (!["native", "swiftshader"].includes(webGpu)) {
+  throw new Error(`FUNFERN_WEBGPU is native or swiftshader, not ${webGpu}`);
+}
 const webGpuArgs = ["--enable-unsafe-webgpu"];
-if (process.platform === "linux") {
+if (webGpu === "swiftshader") {
+  webGpuArgs.push(
+    "--use-webgpu-adapter=swiftshader",
+    "--enable-unsafe-swiftshader",
+    "--enable-features=Vulkan",
+    "--use-vulkan=swiftshader",
+    "--use-angle=swiftshader",
+  );
+} else if (process.platform === "linux") {
   webGpuArgs.push(
     "--enable-features=Vulkan",
     "--use-angle=vulkan",
     "--disable-vulkan-surface",
   );
 }
-// More flags for a run that needs them, space-separated: the software adapter's
-// `--use-webgpu-adapter=swiftshader`.
+// More flags for a run that needs them, space-separated.
 webGpuArgs.push(...(process.env.FUNFERN_CHROMIUM_ARGS ?? "").split(" ").filter(Boolean));
 
 export default defineConfig({

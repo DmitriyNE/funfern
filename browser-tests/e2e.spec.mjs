@@ -9,9 +9,20 @@ import { expectedBuildId } from "./build-id.mjs";
 // software-Vulkan and browser runs cannot part. `npm run test:e2e` serves
 // `dist-e2e`, built with
 //   TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --dist dist-e2e
-const fixtures = [
+const allFixtures = [
   ...readFileSync("scripts/device-suite.sh", "utf8").matchAll(/FUNFERN_E2E=([a-z-]+)/g),
 ].map((match) => match[1]);
+// The ones to run, comma-separated, or all of them: CI's run on every push
+// names `cavity`, which on SwiftShader takes minutes where Chrome takes seconds.
+const named = (process.env.FUNFERN_E2E_FIXTURES ?? "")
+  .split(",")
+  .map((name) => name.trim())
+  .filter(Boolean);
+const unknown = named.filter((name) => !allFixtures.includes(name));
+if (unknown.length > 0) {
+  throw new Error(`FUNFERN_E2E_FIXTURES names no fixture the device suite runs: ${unknown}`);
+}
+const fixtures = named.length > 0 ? named : allFixtures;
 const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // How the bundle is hosted: `isolated`, the test server sending the headers that
 // isolate the page; `pages`, as GitHub Pages serves the site - no headers, so the
@@ -54,29 +65,23 @@ const fatalConsolePatternFor = (fixture) =>
     : /Caught rendering error|Caught DeviceLost error|Quitting the application due to \w+ RenderError|panicked at|RuntimeError: unreachable|WebGPU initialization failed/i;
 
 test("the device suite names fixtures", () => {
-  expect(fixtures.length).toBeGreaterThan(0);
+  expect(allFixtures.length).toBeGreaterThan(0);
 });
 
-// A run meant for one adapter - SwiftShader in CI - must have it, or it has
-// not run what it is for: FUNFERN_EXPECT_ADAPTER names a word its description
-// holds.
-const expectedAdapter = process.env.FUNFERN_EXPECT_ADAPTER;
-if (expectedAdapter) {
-  test(`the page's WebGPU adapter is ${expectedAdapter}`, async ({ page }) => {
-    await page.goto("./");
-    const info = await page.evaluate(async () => {
-      const adapter = await navigator.gpu?.requestAdapter();
-      const info = adapter?.info ?? {};
-      return [info.vendor, info.architecture, info.device, info.description].join(" ");
-    });
-    console.log(`adapter: ${info}`);
-    expect(info.toLowerCase()).toContain(expectedAdapter.toLowerCase());
-  });
-}
+// A run meant for one adapter must have had it, or it has not run what it is
+// for: FUNFERN_EXPECT_ADAPTER names a word the adapter's description holds,
+// `swiftshader` by default on SwiftShader. The app's own log cannot say - in
+// the browser wgpu's adapter info is empty - so the fixture's page asks once
+// its verdict is in; before it, the request would queue behind the shader
+// compilation that holds SwiftShader's GPU process for minutes.
+const expectedAdapter =
+  process.env.FUNFERN_EXPECT_ADAPTER ??
+  (process.env.FUNFERN_WEBGPU === "swiftshader" ? "swiftshader" : "");
 
 for (const fixture of fixtures) {
   test(`${fixture} holds in the browser`, async ({ page }) => {
-    test.setTimeout((deadline + 90) * 1000);
+    // A start on Pages runs the fixture twice, cold and warm.
+    test.setTimeout((viaPages ? 2 : 1) * (deadline + 90) * 1000);
     const fatal = [];
     const lines = [];
     // A lost device or a render error stops the app before the driver can
@@ -133,6 +138,16 @@ for (const fixture of fixtures) {
       console.log(`${fixture} (${start}): ${verdict}: ${summary}`);
       for (const line of lines.splice(0)) {
         console.log(`  ${line}`);
+      }
+      if (expectedAdapter) {
+        const adapter = await page.evaluate(async () => {
+          const info = (await navigator.gpu?.requestAdapter())?.info ?? {};
+          return [info.vendor, info.architecture, info.device, info.description].join(" ");
+        });
+        console.log(`  adapter: ${adapter}`);
+        expect(adapter.toLowerCase(), `${start}: the page's WebGPU adapter`).toContain(
+          expectedAdapter.toLowerCase(),
+        );
       }
       const path = await page.evaluate(() => [
         crossOriginIsolated,

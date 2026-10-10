@@ -165,14 +165,28 @@ change to the web shell - `index.html`, the service worker, the Playwright
 specs, `scripts/trunk`, the wasm entry points - as the device suite is for a
 change to the shaders or the runtime.
 
-No CI job runs the browser fixtures yet. Chromium's software WebGPU, SwiftShader,
-found its adapter in Playwright's image on arm64 Linux, but lost the app's device
-as it started ("A valid external Instance reference no longer exists"), with the
-config's Linux flags and with none; the attempt is in the log of 2026-10-09 and
-the TODOs. For such a run the spec takes more Chromium flags from
-`FUNFERN_CHROMIUM_ARGS` and requires the page's adapter to name
-`FUNFERN_EXPECT_ADAPTER`, and a lost device or any other fatal console message
-fails a fixture at once rather than at its deadline.
+A machine without a GPU runs the fixtures on Chromium's bundled software
+Vulkan, SwiftShader. `npm run test:e2e:swiftshader` sets `FUNFERN_WEBGPU=swiftshader`,
+which gives Chromium SwiftShader as the page's adapter and as its compositor's
+Vulkan - with the compositor elsewhere the canvas has no shared image to draw
+into and the app's device is lost as it starts - and each fixture's page must
+then report SwiftShader's adapter once its verdict is in
+(`FUNFERN_EXPECT_ADAPTER` names another; `FUNFERN_CHROMIUM_ARGS` adds flags).
+It is slow: SwiftShader compiles the app's 77 compute pipelines before the
+first step, in under a minute a page on x86_64 and about four on arm64, where
+the two kicks alone take 47 and 36 s, and steps the cavity at a few frames a
+second, so its fixture takes about three minutes on x86_64 and eight on arm64
+where Chrome takes seconds. `FUNFERN_E2E_FIXTURES=cavity` runs only the fixtures named. It
+runs on Linux; on a Mac, in Playwright's image under Colima, which shares only
+the home directory, against a `dist-e2e` built from the checkout:
+
+    docker run --rm --platform linux/amd64 --ipc=host -v "$PWD":/src -w /src \
+      -e CI=1 -e FUNFERN_E2E_FIXTURES=cavity \
+      -e FUNFERN_EXPECT_BUILD=$(git rev-parse --short=12 HEAD) \
+      mcr.microsoft.com/playwright:v1.55.0-noble npm run test:e2e:swiftshader
+
+A lost device or any other fatal console message fails a fixture at once
+rather than at its deadline.
 
 `examples/` is an export of the gallery's catalog, which stays the source.
 `cargo test -p funfern-app --test examples` fails when a scene changes without
