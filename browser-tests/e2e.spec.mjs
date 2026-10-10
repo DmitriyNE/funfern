@@ -33,8 +33,13 @@ const query = (process.env.FUNFERN_E2E_QUERY ?? "")
   .map((parameter) => `&${parameter}`)
   .join("");
 // Bevy's render error handler logs each of these before it stops rendering.
-const fatalConsolePattern =
-  /Caught rendering error|Caught DeviceLost error|Quitting the application due to \w+ RenderError|panicked at|RuntimeError: unreachable|WebGPU initialization failed/i;
+// The device-loss fixture loses the device on purpose, so for it the caught
+// errors are expected; Bevy's quit is not, since the app's own handler
+// replaces it, and a panic never is.
+const fatalConsolePatternFor = (fixture) =>
+  fixture === "device-loss"
+    ? /Quitting the application due to \w+ RenderError|panicked at|RuntimeError: unreachable|WebGPU initialization failed/i
+    : /Caught rendering error|Caught DeviceLost error|Quitting the application due to \w+ RenderError|panicked at|RuntimeError: unreachable|WebGPU initialization failed/i;
 
 test("the device suite names fixtures", () => {
   expect(fixtures.length).toBeGreaterThan(0);
@@ -69,6 +74,7 @@ for (const fixture of fixtures) {
     const stopping = new Promise((resolve) => {
       stopped = resolve;
     });
+    const fatalConsolePattern = fatalConsolePatternFor(fixture);
     page.on("console", (message) => {
       const text = message.text();
       if (text.startsWith("e2e ")) {
@@ -131,6 +137,18 @@ for (const fixture of fixtures) {
       ]);
       expect(fatal, fatal.join("\n\n")).toEqual([]);
       expect(verdict, `${summary}\n${lines.join("\n")}`).toBe("pass");
+      if (fixture === "device-loss") {
+        // The page was told: the stop on the root element and the overlay
+        // back with the app's words.
+        await expect(root).toHaveAttribute("data-funfern-stopped", /^(device-lost|render-error)$/);
+        const overlay = await page.evaluate(() => [
+          document.getElementById("startup").hidden,
+          document.getElementById("startup-status").textContent,
+        ]);
+        expect(overlay[0]).toBe(false);
+        expect(overlay[1]).toContain("funfern stopped");
+        expect(overlay[1]).toContain("The document is saved");
+      }
     };
 
     await page.goto(`./?e2e=${fixture}&e2e-deadline=${deadline}${query}`);

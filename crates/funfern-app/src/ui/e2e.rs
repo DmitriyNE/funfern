@@ -27,6 +27,11 @@ use crate::canonical_gpu::{
     CANONICAL_FAILURE_INVERSE_DOMAIN, CanonicalGpuHandoffOutcome, CanonicalGpuRuntimeTransfer,
     canonical_failure_description,
 };
+use bevy::render::{
+    Render, RenderApp, RenderSystems,
+    extract_resource::{ExtractResource, ExtractResourcePlugin},
+    renderer::RenderDevice,
+};
 use bevy_egui::EguiPrimaryContextPass;
 use check::{within, worse};
 use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyDocument, TopologyEditor};
@@ -60,6 +65,7 @@ pub(crate) fn add(app: &mut App) {
         "handoff" => (Fixture::Handoff, vec![None]),
         "remesh" => (Fixture::Remesh, vec![None]),
         "rejection" => (Fixture::Rejection, vec![None]),
+        "device-loss" => (Fixture::DeviceLoss, vec![None]),
         _ => {
             let failure = format!("no fixture named {name:?}");
             report(&format!("e2e: {failure}"));
@@ -80,7 +86,26 @@ pub(crate) fn add(app: &mut App) {
         hashes: Vec::new(),
         deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(120)),
     })
-    .add_systems(EguiPrimaryContextPass, drive.before(frame));
+    .add_systems(EguiPrimaryContextPass, drive.before(frame))
+    .init_resource::<LoseDevice>()
+    .add_plugins(ExtractResourcePlugin::<LoseDevice>::default());
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app.add_systems(Render, lose_device.in_set(RenderSystems::Cleanup));
+    }
+}
+
+/// Asks the render world to destroy the application's own device, as
+/// [`Action::LoseDevice`] does: the loss then arrives as a real one, through
+/// wgpu's callbacks and Bevy's error handler, to the application's answer
+/// (`stopped`).
+#[derive(Resource, ExtractResource, Clone, Default)]
+struct LoseDevice(bool);
+
+fn lose_device(request: Res<LoseDevice>, device: Res<RenderDevice>, mut done: Local<bool>) {
+    if request.0 && !*done {
+        *done = true;
+        device.wgpu_device().destroy();
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -111,6 +136,11 @@ enum Fixture {
     /// the last accepted state kept, and Run retry it to the same refusal
     /// without moving a stored bit.
     Rejection,
+    /// The cavity, its own GPU device destroyed at step 128 of 256, after a
+    /// change to the document the autosave had not yet written: rendering
+    /// must stop and the app say so within two seconds, with the document,
+    /// change included, in the autosave, and nothing left pending.
+    DeviceLoss,
 }
 
 /// The meshes the fixtures run on, as [`mesh_hashes`] reads them: the cavity,
@@ -137,6 +167,9 @@ enum Action {
     Edit,
     /// The mesh's target edge set finer, as its preset or slider does.
     Remesh,
+    /// The view's grid toggled, a change for the autosave to carry, and the
+    /// device destroyed.
+    LoseDevice,
 }
 
 impl Fixture {
@@ -147,6 +180,8 @@ impl Fixture {
             Fixture::Switch => (&[(128, Action::Switch)], 256),
             Fixture::Handoff => (&[(128, Action::Edit)], 256),
             Fixture::Remesh => (&[(128, Action::Remesh)], 256),
+            // The endpoint is never reached: the device is gone at 128.
+            Fixture::DeviceLoss => (&[(128, Action::LoseDevice)], 256),
             // The endpoint is a ceiling the run must not reach.
             Fixture::Rejection => (&[], 4096),
         }
@@ -179,9 +214,11 @@ impl Fixture {
     /// The fixture's document, and the material its Switch throws.
     fn document(self) -> (TopologyDocument, Option<MaterialId>) {
         match self {
-            Fixture::Cavity | Fixture::CavityBatches | Fixture::Handoff | Fixture::Remesh => {
-                (cavity_document(), None)
-            }
+            Fixture::Cavity
+            | Fixture::CavityBatches
+            | Fixture::Handoff
+            | Fixture::Remesh
+            | Fixture::DeviceLoss => (cavity_document(), None),
             Fixture::Rejection => (rejection_document(), None),
             Fixture::Switch => {
                 let (document, material) = switch_document();
@@ -238,6 +275,12 @@ enum Phase {
         /// the runtime drops them once the generation is published.
         maps: Option<Arc<PreparedCanonicalTransfer>>,
     },
+    /// The device's loss was asked for at `asked`, with the document as it
+    /// was then; the app is to stop and say so.
+    Losing {
+        asked: Instant,
+        document: Box<TopologyDocument>,
+    },
     /// A full snapshot of the endpoint is asked for.
     Snapshot {
         reference: Reference,
@@ -265,6 +308,7 @@ impl Phase {
             Phase::Pulse { .. } => "waiting for the device to take the pulse",
             Phase::Run { .. } => "running to the next stop",
             Phase::Act { .. } => "waiting for the device to take the action",
+            Phase::Losing { .. } => "waiting for the app to stop after the device was lost",
             Phase::Snapshot { .. } => "waiting for the endpoint's snapshot",
             Phase::Refused { .. } => "waiting for the app to pause on the refusal",
             Phase::Done => "done",
@@ -372,13 +416,22 @@ fn drive(
     mut state: ResMut<Playground>,
     mut request: ResMut<CanonicalGpuRequest>,
     display: Res<CanonicalGpuDisplay>,
+    stopped: Option<Res<crate::stopped::RenderStopped>>,
+    mut lose: ResMut<LoseDevice>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if matches!(driver.phase, Phase::Done) {
         return;
     }
     let fixture = driver.fixture;
-    let run = match advance(&mut driver, &mut state, &mut request, &display) {
+    let run = match advance(
+        &mut driver,
+        &mut state,
+        &mut request,
+        &display,
+        stopped.as_deref(),
+        &mut lose,
+    ) {
         Some(run) => run,
         None if Instant::now() >= driver.deadline => Err(format!(
             "did not finish in time, at {}",
@@ -511,6 +564,8 @@ fn advance(
     state: &mut Playground,
     request: &mut CanonicalGpuRequest,
     display: &CanonicalGpuDisplay,
+    stopped: Option<&crate::stopped::RenderStopped>,
+    lose: &mut LoseDevice,
 ) -> Option<Result<Run, String>> {
     let (actions, endpoint) = driver.fixture.script();
     // The step the run holds at before the `next` action, or the endpoint.
@@ -724,6 +779,16 @@ fn advance(
                     }
                 }
                 Action::Remesh => state.editor.document.presentation.mesh_edge = 0.06,
+                Action::LoseDevice => {
+                    state.editor.document.presentation.grid =
+                        !state.editor.document.presentation.grid;
+                    lose.0 = true;
+                    driver.phase = Phase::Losing {
+                        asked: Instant::now(),
+                        document: Box::new(state.editor.document.clone()),
+                    };
+                    return None;
+                }
             }
             driver.phase = Phase::Act {
                 reference,
@@ -765,6 +830,10 @@ fn advance(
                         || !state.coordinator.pending_switches.is_empty()
                 }
                 Action::Edit | Action::Remesh => published.is_none(),
+                // The loss takes its own phase and never waits here.
+                Action::LoseDevice => {
+                    return Some(Err("the device's loss is not an action to wait for".into()));
+                }
             };
             if waiting {
                 driver.phase = Phase::Act {
@@ -783,6 +852,9 @@ fn advance(
                 reference.control = Some((reference.active.clone(), reference.state.clone()));
             }
             match action {
+                Action::LoseDevice => {
+                    return Some(Err("the device's loss is not an action to take here".into()));
+                }
                 Action::Switch => {
                     let Some(material) = driver.material else {
                         return Some(Err("a Switch with no material to throw".into()));
@@ -871,6 +943,43 @@ fn advance(
                 next: next + 1,
             };
             None
+        }
+        Phase::Losing { asked, document } => {
+            // The handler records the stop and the app acts on it once; both
+            // must have happened, within two seconds of the loss.
+            let Some(stopped) = stopped.filter(|stopped| stopped.announced()) else {
+                driver.phase = Phase::Losing { asked, document };
+                return None;
+            };
+            let elapsed = asked.elapsed();
+            if elapsed > std::time::Duration::from_secs(2) {
+                return Some(Err(format!(
+                    "the app stopped {:.0} ms after the device was lost",
+                    elapsed.as_secs_f64() * 1000.0
+                )));
+            }
+            // The document, the change the autosave had not written included.
+            let saved = crate::recovery::load()
+                .and_then(|bytes| bytes.ok_or_else(|| "no autosave".to_owned()))
+                .and_then(|bytes| funfern_app::topology_persistence::parse_document(&bytes));
+            let saved = match saved {
+                Ok(saved) => saved,
+                Err(error) => return Some(Err(format!("the autosave does not open: {error}"))),
+            };
+            if saved != *document {
+                return Some(Err(
+                    "the autosave does not hold the document as it was at the loss".to_owned(),
+                ));
+            }
+            Some(Ok(Run {
+                summary: format!(
+                    "the app stopped {:.0} ms after the device was lost ({}): {}; the autosave holds the document",
+                    elapsed.as_secs_f64() * 1000.0,
+                    stopped.attribute(),
+                    stopped.message()
+                ),
+                hash: 0,
+            }))
         }
         Phase::Snapshot { reference, seen } => {
             // Only a snapshot of this generation, stamped with the endpoint

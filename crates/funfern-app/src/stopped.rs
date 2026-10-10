@@ -28,6 +28,13 @@ pub(crate) enum StopKind {
 }
 
 impl RenderStopped {
+    /// Whether [`announce`] has acted on it, which the end-to-end fixture
+    /// that loses the device waits for.
+    #[cfg(feature = "e2e")]
+    pub(crate) fn announced(&self) -> bool {
+        self.announced
+    }
+
     /// The word the page's root element carries for it.
     pub(crate) fn attribute(&self) -> &'static str {
         match self.kind {

@@ -70,6 +70,7 @@ RUNS=(
   'FUNFERN_E2E=handoff funfern-app'
   'FUNFERN_E2E=remesh funfern-app'
   'FUNFERN_E2E=rejection funfern-app'
+  'FUNFERN_E2E=device-loss funfern-app'
 )
 
 pattern=${1:-}

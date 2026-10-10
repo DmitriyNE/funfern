@@ -101,7 +101,18 @@ run instead of passing on old code. In
 Chrome on the M1 Max (`PLAYWRIGHT_CHANNEL=chrome`), whose WebGPU runs on
 Metal, five fixtures read what the native app reads to every printed digit -
 the cavity Q `6.242e-7` - and the refusal lands at step 788 as natively. A
-reference a step short fails there as it does natively.
+reference a step short fails there as it does natively. A seventh fixture,
+`device-loss`, destroys the application's own GPU device at step 128, right
+after a change to the document the autosave had not yet written: within two
+seconds rendering must have stopped and the app said so - `data-funfern-stopped`
+on the page's root element, `device-lost` or `render-error`, and the startup
+overlay back with "funfern stopped … The document is saved; the running
+simulation is not." - and the autosave must open to the document as it was at
+the loss, change included; natively the process then exits by the fixture's
+verdict, and nothing stays pending. The browser spec, which fails a fixture at
+the first "Caught DeviceLost" or "Caught rendering error" on the console, lets
+this fixture have them and fails it on Bevy's "Quitting the application"
+instead, which the app's handler replaces.
 
 Each fixture also holds its mesh to the one recorded, to the bit: the
 triangles' vertices and regions, and every vertex's coordinates (`CAVITY_MESH`,

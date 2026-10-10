@@ -21759,3 +21759,35 @@ which this one replaces, and the autosave was on disk. A unit test
 holds the handler to recording the first error once, as the device lost, and
 keeping rendering stopped, and the message to one line; the fixture that
 loses the application's own device follows.
+
+## 2026-10-10 — A fixture loses the application's own device
+
+The last of the device-loss work: the fixture the review asked for. The
+`device-loss` fixture runs the cavity to step 128, toggles the view's grid -
+a change to the document the autosave's 0.8 s debounce has not written - and
+asks the render world to destroy the application's own device
+(`RenderDevice::wgpu_device().destroy()`, behind the `e2e` feature, on an
+extracted request), so the loss arrives as a real one: wgpu's callbacks,
+Bevy's error handler, the application's `stopped`. The driver then waits for
+`RenderStopped` to exist and to have been acted on, within two seconds of the
+request, reads the autosave back through `recovery::load` and
+`parse_document`, and holds it to the document as it was at the loss, toggle
+included; the verdict names the stop's kind, its message and the delay.
+Natively the driver exits 0 on a pass, the app's own exit on a stop deferring
+to it; in the browser the spec also holds the root element to
+`data-funfern-stopped` and the startup overlay to being back with the app's
+words. The spec's fatal console pattern, which fails a fixture at the first
+"Caught DeviceLost error" or "Caught rendering error", gives this fixture
+those lines and keeps Bevy's "Quitting the application" fatal, since the
+handler replaces it, and every panic. The fixture joins the device suite, so
+lavapipe in CI, the browser suite's four hosting paths and the Safari runner
+all take it from the list. Measured on the M1 Max: natively the app stopped
+13 ms after the loss was asked for, as `render-error` - on Metal the dead
+device's validation errors reach Bevy before any lost-device callback, so the
+message reads "The GPU stopped with a rendering error: Validation Error." -
+and the autosave held the document; in Chrome, where WebGPU reports the loss
+as what it is, 25 ms, as `device-lost`, "The GPU device was lost.", the root
+element reading `device-lost` and the startup overlay back with "funfern
+stopped … The document is saved"; the fixture takes four seconds. With the
+handler's forced autosave removed it fails natively on "the autosave does not
+hold the document as it was at the loss".
