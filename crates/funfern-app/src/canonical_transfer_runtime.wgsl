@@ -61,7 +61,49 @@ struct TransferWord { data: vec4<u32> }
 @group(0) @binding(7) var<storage, read_write> transfer: array<TransferWord>;
 
 fn reject(reason: u32) { atomicMax(&new_status.candidate, reason); }
-fn reduced_phase(value: f32) -> f32 { return atan2(sin(value), cos(value)); }
+// Portable trigonometry: this block is the same in every shader that needs
+// it, which `every_shader_carries_the_same_portable_trigonometry` holds.
+// WGSL promises its own sin and cos only to 2^-11 absolute, and SwiftShader's
+// are 1.9e-4 off everywhere, which carried a harmonic drive's field 2e-4 off
+// the reference. These are 9e-8 off from multiply-adds alone: the argument
+// loses its multiple of pi/2 in three parts, the first two short enough that
+// their products with it are exact, through fma - Metal's fast math folded
+// the plain differences back into one rounded pi/2 - and Cephes'
+// single-precision polynomials take the rest on [-pi/4, pi/4].
+const TRIG_TWO_OVER_PI: f32 = 0.63661975;
+const TRIG_HALF_PI_1: f32 = 1.5703125;
+const TRIG_HALF_PI_2: f32 = 4.837512969970703e-4;
+const TRIG_HALF_PI_3: f32 = 7.549790126404332e-8;
+
+fn portable_sin_cos(x: f32) -> vec2<f32> {
+    let k = round(x * TRIG_TWO_OVER_PI);
+    let r = fma(-k, TRIG_HALF_PI_3, fma(-k, TRIG_HALF_PI_2, fma(-k, TRIG_HALF_PI_1, x)));
+    let z = r * r;
+    let s = r + r * z * (-1.6666654611e-1 + z * (8.3321608736e-3 + z * -1.9515295891e-4));
+    let c = 1.0 - 0.5 * z
+        + z * z * (4.166664568298827e-2 + z * (-1.388731625493765e-3 + z * 2.443315711809948e-5));
+    let quadrant = i32(k) & 3;
+    let swap = (quadrant & 1) != 0;
+    let sine = select(s, c, swap);
+    let cosine = select(c, s, swap);
+    return vec2<f32>(
+        select(sine, -sine, (quadrant & 2) != 0),
+        select(cosine, -cosine, ((quadrant + 1) & 2) != 0),
+    );
+}
+
+fn portable_sin(x: f32) -> f32 { return portable_sin_cos(x).x; }
+
+fn portable_cos(x: f32) -> f32 { return portable_sin_cos(x).y; }
+
+// The angle `value` names, in [-pi, pi]: its multiple of 2 pi taken out as
+// above.
+fn reduced_phase(value: f32) -> f32 {
+    let k = round(value * (0.25 * TRIG_TWO_OVER_PI));
+    return fma(-k, 4.0 * TRIG_HALF_PI_3,
+        fma(-k, 4.0 * TRIG_HALF_PI_2, fma(-k, 4.0 * TRIG_HALF_PI_1, value)));
+}
+// End of the portable trigonometry.
 fn add_compensated(high: f32, low: f32, increment: f32) -> vec2<f32> {
     let sum = high + increment;
     let residual = (high - sum) + increment + low;
@@ -73,7 +115,7 @@ fn sinc(value: f32) -> f32 {
         let square = value * value;
         return 1.0 - square / 6.0 + square * square / 120.0;
     }
-    return sin(value) / value;
+    return portable_sin(value) / value;
 }
 fn old_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(old_tables[word].data[lane]);
@@ -124,12 +166,12 @@ fn old_drive(base: u32, elapsed: f32) -> f32 {
         old_float(base, 2u), old_float(base, 3u));
     let runtime = old_tables[base + 1u].data;
     if runtime.x != DRIVE_INTEGRATED {
-        return parameters.x + parameters.y * sin(parameters.w + parameters.z * elapsed);
+        return parameters.x + parameters.y * portable_sin(parameters.w + parameters.z * elapsed);
     }
     let half_phase = 0.5 * parameters.z * elapsed;
     return bitcast<f32>(runtime.y) + parameters.x * elapsed
         + parameters.y * elapsed * sinc(half_phase)
-            * sin(parameters.w + half_phase);
+            * portable_sin(parameters.w + half_phase);
 }
 // `canonical_wave.wgsl`'s `pulse_start_after`.
 fn pulse_start_after(window: vec4<f32>, elapsed: f32) -> f32 {
@@ -159,7 +201,7 @@ fn retain_drive(old_base: u32, new_base: u32, elapsed: f32) {
         let half_phase = 0.5 * parameters.z * elapsed;
         let next_anchor = bitcast<f32>(runtime.y) + parameters.x * elapsed
             + parameters.y * elapsed * sinc(half_phase)
-                * sin(parameters.w + half_phase);
+                * portable_sin(parameters.w + half_phase);
         runtime.y = bitcast<u32>(next_anchor);
     }
     parameters.w = reduced_phase(parameters.w + parameters.z * elapsed);

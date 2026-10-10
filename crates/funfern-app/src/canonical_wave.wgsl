@@ -334,7 +334,7 @@ fn set_candidate_auxiliary(index: u32, value: f32) {
 }
 
 fn harmonic_value(signal: vec4<f32>, local_time: f32) -> f32 {
-    return signal.x + signal.y * sin(signal.w + signal.z * local_time);
+    return signal.x + signal.y * portable_sin(signal.w + signal.z * local_time);
 }
 
 // A drive record holds, for each of the two runtime slots, the carrier, the
@@ -375,7 +375,7 @@ fn pulse_envelope(shape: u32, window: vec4<f32>, offset: f32) -> f32 {
     if shape == PULSE_FLAT_TOP {
         let inside = half - abs(offset);
         if inside >= window.w { return 1.0; }
-        return 0.5 - 0.5 * cos(PI * inside / window.w);
+        return 0.5 - 0.5 * portable_cos(PI * inside / window.w);
     }
     if shape == PULSE_GAUSSIAN {
         let ratio = offset / window.w;
@@ -383,8 +383,8 @@ fn pulse_envelope(shape: u32, window: vec4<f32>, offset: f32) -> f32 {
     }
     let angle = 2.0 * PI * window.w * offset;
     var sinc_value = 1.0 - angle * angle / 6.0;
-    if abs(angle) >= 1.0e-3 { sinc_value = sin(angle) / angle; }
-    return sinc_value * (0.5 + 0.5 * cos(PI * offset / half));
+    if abs(angle) >= 1.0e-3 { sinc_value = portable_sin(angle) / angle; }
+    return sinc_value * (0.5 + 0.5 * portable_cos(PI * offset / half));
 }
 
 // A pulse's carrier counts from the centre of the pulse, not from the epoch.
@@ -392,7 +392,7 @@ fn pulse_value(carrier: vec4<f32>, window: vec4<f32>, shape: u32, local_time: f3
     let offset = pulse_offset(window, local_time);
     let envelope = pulse_envelope(shape, window, offset);
     if envelope == 0.0 { return 0.0; }
-    return envelope * (carrier.x + carrier.y * sin(carrier.z * offset + carrier.w));
+    return envelope * (carrier.x + carrier.y * portable_sin(carrier.z * offset + carrier.w));
 }
 
 // A pulse's start once the epoch origin moves `elapsed` later, kept small: a
@@ -429,12 +429,52 @@ fn sinc(value: f32) -> f32 {
         let square = value * value;
         return 1.0 - square / 6.0 + square * square / 120.0;
     }
-    return sin(value) / value;
+    return portable_sin(value) / value;
 }
 
-fn reduced_phase(value: f32) -> f32 {
-    return atan2(sin(value), cos(value));
+// Portable trigonometry: this block is the same in every shader that needs
+// it, which `every_shader_carries_the_same_portable_trigonometry` holds.
+// WGSL promises its own sin and cos only to 2^-11 absolute, and SwiftShader's
+// are 1.9e-4 off everywhere, which carried a harmonic drive's field 2e-4 off
+// the reference. These are 9e-8 off from multiply-adds alone: the argument
+// loses its multiple of pi/2 in three parts, the first two short enough that
+// their products with it are exact, through fma - Metal's fast math folded
+// the plain differences back into one rounded pi/2 - and Cephes'
+// single-precision polynomials take the rest on [-pi/4, pi/4].
+const TRIG_TWO_OVER_PI: f32 = 0.63661975;
+const TRIG_HALF_PI_1: f32 = 1.5703125;
+const TRIG_HALF_PI_2: f32 = 4.837512969970703e-4;
+const TRIG_HALF_PI_3: f32 = 7.549790126404332e-8;
+
+fn portable_sin_cos(x: f32) -> vec2<f32> {
+    let k = round(x * TRIG_TWO_OVER_PI);
+    let r = fma(-k, TRIG_HALF_PI_3, fma(-k, TRIG_HALF_PI_2, fma(-k, TRIG_HALF_PI_1, x)));
+    let z = r * r;
+    let s = r + r * z * (-1.6666654611e-1 + z * (8.3321608736e-3 + z * -1.9515295891e-4));
+    let c = 1.0 - 0.5 * z
+        + z * z * (4.166664568298827e-2 + z * (-1.388731625493765e-3 + z * 2.443315711809948e-5));
+    let quadrant = i32(k) & 3;
+    let swap = (quadrant & 1) != 0;
+    let sine = select(s, c, swap);
+    let cosine = select(c, s, swap);
+    return vec2<f32>(
+        select(sine, -sine, (quadrant & 2) != 0),
+        select(cosine, -cosine, ((quadrant + 1) & 2) != 0),
+    );
 }
+
+fn portable_sin(x: f32) -> f32 { return portable_sin_cos(x).x; }
+
+fn portable_cos(x: f32) -> f32 { return portable_sin_cos(x).y; }
+
+// The angle `value` names, in [-pi, pi]: its multiple of 2 pi taken out as
+// above.
+fn reduced_phase(value: f32) -> f32 {
+    let k = round(value * (0.25 * TRIG_TWO_OVER_PI));
+    return fma(-k, 4.0 * TRIG_HALF_PI_3,
+        fma(-k, 4.0 * TRIG_HALF_PI_2, fma(-k, 4.0 * TRIG_HALF_PI_1, value)));
+}
+// End of the portable trigonometry.
 
 fn add_compensated(high: f32, low: f32, increment: f32) -> vec2<f32> {
     let sum = high + increment;
@@ -503,10 +543,10 @@ fn temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
     switch metadata.z {
         case TEMPORAL_DRIVE_NONE: {}
         case TEMPORAL_DRIVE_PUMP: {
-            swing = depth * cos(carrier);
+            swing = depth * portable_cos(carrier);
         }
         case TEMPORAL_DRIVE_CRYSTAL: {
-            let cosine = cos(carrier);
+            let cosine = portable_cos(carrier);
             var square: f32;
             if abs(shape) < 0.001 {
                 square = cosine * (1.0
@@ -517,7 +557,7 @@ fn temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
             swing = depth * square;
         }
         case TEMPORAL_DRIVE_TRAVELLING: {
-            swing = depth * cos(carrier - spatial_phase);
+            swing = depth * portable_cos(carrier - spatial_phase);
         }
         // Packed metadata admits only the four cases above. Zero makes any
         // corrupted record fail the subsequent positive-factor/non-finite
@@ -984,9 +1024,9 @@ fn uploaded_temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
     var swing = 0.0;
     switch metadata.z {
         case TEMPORAL_DRIVE_NONE: {}
-        case TEMPORAL_DRIVE_PUMP: { swing = depth * cos(carrier); }
+        case TEMPORAL_DRIVE_PUMP: { swing = depth * portable_cos(carrier); }
         case TEMPORAL_DRIVE_CRYSTAL: {
-            let cosine = cos(carrier);
+            let cosine = portable_cos(carrier);
             var square: f32;
             if abs(shape) < 0.001 {
                 square = cosine * (1.0
@@ -997,7 +1037,7 @@ fn uploaded_temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
             swing = depth * square;
         }
         case TEMPORAL_DRIVE_TRAVELLING: {
-            swing = depth * cos(carrier - spatial_phase);
+            swing = depth * portable_cos(carrier - spatial_phase);
         }
         default: { return 0.0; }
     }
@@ -1034,7 +1074,7 @@ fn source_drive(drive: u32, local_time: f32) -> f32 {
     let rate_anchor = table_float(base + 1u, 1u);
     let half_phase = 0.5 * signal.z * local_time;
     return rate_anchor + signal.x * local_time
-        + signal.y * local_time * sinc(half_phase) * sin(signal.w + half_phase);
+        + signal.y * local_time * sinc(half_phase) * portable_sin(signal.w + half_phase);
 }
 
 fn source_rate(node: u32, local_time: f32) -> f32 {
@@ -1113,7 +1153,7 @@ fn restoring_force_at(node: u32, r: f32) -> f32 {
         if entry.x == RESTORING_KLEIN_GORDON {
             result += mass * coefficient * r;
         } else if entry.x == RESTORING_SINE_GORDON {
-            result += mass * coefficient * sin(r);
+            result += mass * coefficient * portable_sin(r);
         } else if entry.x == RESTORING_PHI4 {
             if abs(r) > bitcast<f32>(entry.w) { reject(STATUS_RESTORING_DOMAIN); }
             result += mass * coefficient * (r * r - 1.0) * r;
@@ -1134,7 +1174,7 @@ fn restoring_potential_at(node: u32, r: f32) -> f32 {
         if entry.x == RESTORING_KLEIN_GORDON {
             result += 0.5 * mass * coefficient * r * r;
         } else if entry.x == RESTORING_SINE_GORDON {
-            let half = sin(0.5 * r);
+            let half = portable_sin(0.5 * r);
             result += 2.0 * mass * coefficient * half * half;
         } else if entry.x == RESTORING_PHI4 {
             let well = r * r - 1.0;
@@ -1172,7 +1212,7 @@ fn restoring_curvature(node: u32, second: bool) -> f32 {
         if entry.x == RESTORING_KLEIN_GORDON {
             result += mass * coefficient;
         } else if entry.x == RESTORING_SINE_GORDON {
-            result += mass * coefficient * cos(r);
+            result += mass * coefficient * portable_cos(r);
         } else if entry.x == RESTORING_PHI4 {
             result += mass * coefficient * (3.0 * r * r - 1.0);
         }
@@ -1509,7 +1549,7 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
                 let half_phase = 0.5 * parameters.z * elapsed;
                 let new_integral = parameters.x * elapsed
                     + parameters.y * elapsed * sinc(half_phase)
-                        * sin(parameters.w + half_phase);
+                        * portable_sin(parameters.w + half_phase);
                 runtime.y = bitcast<u32>(
                     source_drive(i, control.clock_f32.y) - new_integral);
             }

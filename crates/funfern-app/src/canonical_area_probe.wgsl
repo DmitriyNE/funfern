@@ -80,7 +80,49 @@ fn temporal_enabled() -> bool { return (control.runtime_slots.w & 1u) != 0u; }
 fn table_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(tables[word].data[lane]);
 }
-fn reduced_phase(value: f32) -> f32 { return atan2(sin(value), cos(value)); }
+// Portable trigonometry: this block is the same in every shader that needs
+// it, which `every_shader_carries_the_same_portable_trigonometry` holds.
+// WGSL promises its own sin and cos only to 2^-11 absolute, and SwiftShader's
+// are 1.9e-4 off everywhere, which carried a harmonic drive's field 2e-4 off
+// the reference. These are 9e-8 off from multiply-adds alone: the argument
+// loses its multiple of pi/2 in three parts, the first two short enough that
+// their products with it are exact, through fma - Metal's fast math folded
+// the plain differences back into one rounded pi/2 - and Cephes'
+// single-precision polynomials take the rest on [-pi/4, pi/4].
+const TRIG_TWO_OVER_PI: f32 = 0.63661975;
+const TRIG_HALF_PI_1: f32 = 1.5703125;
+const TRIG_HALF_PI_2: f32 = 4.837512969970703e-4;
+const TRIG_HALF_PI_3: f32 = 7.549790126404332e-8;
+
+fn portable_sin_cos(x: f32) -> vec2<f32> {
+    let k = round(x * TRIG_TWO_OVER_PI);
+    let r = fma(-k, TRIG_HALF_PI_3, fma(-k, TRIG_HALF_PI_2, fma(-k, TRIG_HALF_PI_1, x)));
+    let z = r * r;
+    let s = r + r * z * (-1.6666654611e-1 + z * (8.3321608736e-3 + z * -1.9515295891e-4));
+    let c = 1.0 - 0.5 * z
+        + z * z * (4.166664568298827e-2 + z * (-1.388731625493765e-3 + z * 2.443315711809948e-5));
+    let quadrant = i32(k) & 3;
+    let swap = (quadrant & 1) != 0;
+    let sine = select(s, c, swap);
+    let cosine = select(c, s, swap);
+    return vec2<f32>(
+        select(sine, -sine, (quadrant & 2) != 0),
+        select(cosine, -cosine, ((quadrant + 1) & 2) != 0),
+    );
+}
+
+fn portable_sin(x: f32) -> f32 { return portable_sin_cos(x).x; }
+
+fn portable_cos(x: f32) -> f32 { return portable_sin_cos(x).y; }
+
+// The angle `value` names, in [-pi, pi]: its multiple of 2 pi taken out as
+// above.
+fn reduced_phase(value: f32) -> f32 {
+    let k = round(value * (0.25 * TRIG_TWO_OVER_PI));
+    return fma(-k, 4.0 * TRIG_HALF_PI_3,
+        fma(-k, 4.0 * TRIG_HALF_PI_2, fma(-k, 4.0 * TRIG_HALF_PI_1, value)));
+}
+// End of the portable trigonometry.
 // `canonical_wave.wgsl`'s gate: the pulse window's offset and envelope, and
 // a record's carrier phase and gate at `local_time`.
 const TEMPORAL_RUNTIME_WORDS_PER_SLOT: u32 = 3u;
@@ -105,7 +147,7 @@ fn pulse_envelope(shape: u32, window: vec4<f32>, offset: f32) -> f32 {
     if shape == PULSE_FLAT_TOP {
         let inside = half - abs(offset);
         if inside >= window.w { return 1.0; }
-        return 0.5 - 0.5 * cos(PULSE_PI * inside / window.w);
+        return 0.5 - 0.5 * portable_cos(PULSE_PI * inside / window.w);
     }
     if shape == PULSE_GAUSSIAN {
         let ratio = offset / window.w;
@@ -113,8 +155,8 @@ fn pulse_envelope(shape: u32, window: vec4<f32>, offset: f32) -> f32 {
     }
     let angle = 2.0 * PULSE_PI * window.w * offset;
     var sinc_value = 1.0 - angle * angle / 6.0;
-    if abs(angle) >= 1.0e-3 { sinc_value = sin(angle) / angle; }
-    return sinc_value * (0.5 + 0.5 * cos(PULSE_PI * offset / half));
+    if abs(angle) >= 1.0e-3 { sinc_value = portable_sin(angle) / angle; }
+    return sinc_value * (0.5 + 0.5 * portable_cos(PULSE_PI * offset / half));
 }
 fn temporal_carrier(
     metadata: vec4<u32>, runtime_root: u32, runtime_word: u32,
@@ -158,9 +200,9 @@ fn temporal_factor(
     var swing = 0.0;
     switch metadata.z {
         case TEMPORAL_DRIVE_NONE: {}
-        case TEMPORAL_DRIVE_PUMP: { swing = depth * cos(carrier); }
+        case TEMPORAL_DRIVE_PUMP: { swing = depth * portable_cos(carrier); }
         case TEMPORAL_DRIVE_CRYSTAL: {
-            let cosine = cos(carrier);
+            let cosine = portable_cos(carrier);
             var square: f32;
             if abs(shape) < 0.001 {
                 square = cosine * (1.0
@@ -171,7 +213,7 @@ fn temporal_factor(
             swing = depth * square;
         }
         case TEMPORAL_DRIVE_TRAVELLING: {
-            swing = depth * cos(carrier - spatial_phase);
+            swing = depth * portable_cos(carrier - spatial_phase);
         }
         default: { return 0.0; }
     }
@@ -352,7 +394,7 @@ fn contribution_potential(contribution: AreaContribution, local: u32, r: f32) ->
     switch entry.x {
         case 1u: { return 0.5 * coefficient * r * r; }
         case 2u: {
-            let half = sin(0.5 * r);
+            let half = portable_sin(0.5 * r);
             return 2.0 * coefficient * half * half;
         }
         case 3u: {

@@ -125,3 +125,75 @@ fn the_literal_scan_finds_what_safari_rejects_and_nothing_else() {
         assert!(literals_webkit_rejects(accepted).is_empty(), "{accepted}");
     }
 }
+
+/// The block of portable trigonometry in `source`, from its opening comment to
+/// its closing one.
+fn portable_trigonometry(source: &str) -> Option<&str> {
+    let start = source.find("// Portable trigonometry:")?;
+    let end = start + source[start..].find("// End of the portable trigonometry.")?;
+    Some(&source[start..end])
+}
+
+/// Whether `source`, its comments set aside, calls one of WGSL's own sine,
+/// cosine or tangent.
+fn calls_builtin_trigonometry(source: &str) -> bool {
+    source.lines().any(|line| {
+        let code = line.split("//").next().unwrap_or("");
+        ["sin(", "cos(", "tan("].iter().any(|call| {
+            code.match_indices(call).any(|(at, _)| {
+                !code[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|before| before.is_ascii_alphanumeric() || before == '_')
+            })
+        })
+    })
+}
+
+/// WGSL promises its own sine and cosine only to 2^-11, and SwiftShader's are
+/// that coarse, so the shaders take theirs from one block of multiply-adds,
+/// copied into each: every copy must be the same, and no shader may go back
+/// to the builtins.
+#[test]
+fn every_shader_carries_the_same_portable_trigonometry() {
+    let mut first: Option<(String, String)> = None;
+    let mut carriers = 0;
+    for path in shaders() {
+        let name = path.file_name().and_then(|value| value.to_str()).unwrap();
+        let source = std::fs::read_to_string(&path).expect("a readable shader");
+        let without_block = match portable_trigonometry(&source) {
+            Some(block) => {
+                carriers += 1;
+                match &first {
+                    Some((first_name, first_block)) => assert_eq!(
+                        block, first_block,
+                        "{name}'s portable trigonometry differs from {first_name}'s"
+                    ),
+                    None => first = Some((name.to_owned(), block.to_owned())),
+                }
+                source.replacen(block, "", 1)
+            }
+            None => source.clone(),
+        };
+        assert!(
+            !calls_builtin_trigonometry(&without_block),
+            "{name} calls WGSL's own sine, cosine or tangent"
+        );
+    }
+    assert!(carriers >= 6, "only {carriers} shaders carry the block");
+}
+
+#[test]
+fn the_builtin_scan_finds_calls_and_not_their_names() {
+    assert!(calls_builtin_trigonometry("let a = sin(x);"));
+    assert!(calls_builtin_trigonometry("let a = 1.0+cos(x);"));
+    for accepted in [
+        "let a = portable_sin(x);",
+        "let a = asin(x);",
+        "let a = tanh(x);",
+        "let a = x; // sin(x) in a comment",
+        "let sin_x = 1.0;",
+    ] {
+        assert!(!calls_builtin_trigonometry(accepted), "{accepted}");
+    }
+}

@@ -1181,6 +1181,17 @@ safeguarded, bracketed Newton at a declared tolerance (`8ε` in f64, `4ε₃₂`
 the device). A solve outside its domain fails the step and leaves the accepted
 state unchanged.
 
+The shaders take no sine or cosine from WGSL. Its builtins are promised only to
+2⁻¹¹ absolute, and a conformant device can be that coarse: SwiftShader's are
+1.9e-4 off everywhere, which put a harmonically driven field 2e-4 off the
+reference where Metal's 4e-7 kept it at 7e-7. Every shader that needs them
+carries one block of `portable_sin_cos`, `portable_sin`, `portable_cos` and
+`reduced_phase`, built from multiply-adds alone - a three-part reduction by
+π/2 through `fma`, which fast math cannot fold, and single-precision minimax
+polynomials - good to about 1e-7 to ten thousand radians on any device. A test
+holds the copies identical and the builtins out, and the browser's shader spec
+measures the block on the page's device.
+
 The laws compile into a `CanonicalTemporalWaveOperator` over the same base as
 the fixed operator, which the application assembles from the law-stripped
 model. Every coefficient is evaluated at its own stage instant. Named loss

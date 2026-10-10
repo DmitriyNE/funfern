@@ -21943,3 +21943,47 @@ device suite passes, 50 of 50. No fixture holds the render past the loss:
 in an end-to-end build that would cost the device-loss fixture its two-second
 bound on a device as slow as SwiftShader, and the nightly SwiftShader run met
 the race in both of its legs.
+
+## 2026-10-10 — The shaders compute their own sine and cosine, as WGSL promises its builtins only to 2⁻¹¹
+
+The full browser run on SwiftShader failed the rejection fixture in both legs
+at Q 2.074e-4 and b 4.830e-4 after 788 steps, against 5e-6 - the same digits
+on the runner and in the container, so arithmetic, not a race - where Metal
+reads 7.2e-7 and lavapipe 7.3e-7. It is the one fixture driven by a harmonic
+source, `amplitude·sin(phase + ωt)` on the device each step. A probe page
+measured the builtins against f64 at the same f32 arguments: SwiftShader's
+`sin` and `cos` are 1.9e-4 off everywhere, inside [-π, π] too, where Metal's
+are 4e-7 (3e-6 to 30 rad); division, `sqrt`, `exp` and `tanh` agree to 1e-7
+relative on both. WGSL promises its sine and cosine only to 2⁻¹¹ absolute
+inside [-π, π] and nothing outside, so SwiftShader is conformant and the app
+leaned on more than the specification gives: the drive's 1.9e-4 is the
+field's 2e-4. Every one of the shaders' sines and cosines carried it - the
+drives and pulse envelopes, the temporal carriers, the sine-Gordon law, the
+probes' spectra and the far field's rays.
+
+Each shader that needs them now carries one block: `portable_sin_cos` takes
+out the nearest multiple of π/2 in three parts - 8 and 11 significant bits
+for the first two, so their products with the multiple are exact to about
+twelve thousand radians - and Cephes' single-precision polynomials take the
+rest on [-π/4, π/4]; `portable_sin`, `portable_cos` and a `reduced_phase` that
+takes out 2π the same way replace the builtins and the old
+`atan2(sin, cos)`. The first version wrote the reduction as plain
+differences, and Chrome's Metal folded them back into one rounded π/2: 7.9e-7
+off to 30 rad and 1.1e-3 at nine thousand, where SwiftShader's compiler left
+them and read 8.8e-8. Through `fma`, which no fast math reassociates and which
+an unfused device evaluates exactly anyway since the products are exact, both
+devices read 8.8e-8 to 30 rad, at the same arguments, and under 9e-8 to nine
+thousand. `every_shader_carries_the_same_portable_trigonometry` holds the six
+copies identical and the builtins out of every shader - a changed digit in one
+copy and a `sin(` put back each fail it - and the browser's shader spec
+measures the block on the page's device to ten thousand radians: 8.9e-8 for
+the sine, 8.3e-8 for the cosine and 1.2e-7 for the phase, the same digits on
+Metal through Chrome and on SwiftShader. On SwiftShader the rejection fixture
+reads Q 7.103e-7 where it read 2.074e-4, and all seven pass in the container;
+natively the device suite passes 50 of 50, the rejection fixture moving from
+7.270e-7 to 7.030e-7 and the cavity's endpoint hash unchanged; Chrome's browser
+suite passes its five variants, the rejection fixture from 7.204e-7 to
+7.074e-7. The step costs what it did: over 20,000 steps, medians of three
+rounds in alternating order, the driven fixture 297.5 µs before and 298.3
+after, the sine-Gordon oscillator, with two of the calls per node a stage,
+313.3 and 319.4, and the fixed control, which takes none, 300.2 and 297.1.
