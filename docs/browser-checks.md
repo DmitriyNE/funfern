@@ -17,7 +17,7 @@ plain `trunk` builds the cooperative static-host variant.
   service worker, on the Pages path with service workers refused, and on the
   single-threaded bundle, each page the build this checkout is.
 - [ ] On iOS Safari, or wherever the page's shared-memory growth check fails, the
-  app starts without its background pool: the console warns once,
+  app starts without its background pool: the console says once why,
   `data-funfern-preparation-worker` reads `unavailable`, and the simulation runs.
   Elsewhere the attribute reaches `active`.
 - [ ] Initial view fills the window with the square, rounded loop, grid, control

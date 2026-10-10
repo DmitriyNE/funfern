@@ -225,7 +225,9 @@ so the threaded bundle's first bulk copy into memory its workers grew traps insi
 the allocator, and the page freezes on its splash. `index.html` checks for exactly
 this on a two-page memory before the app starts its background pool, and where
 the check fails the app runs without the pool, its preparation and adaptation on
-the main thread. An iPhone is driven like desktop Safari, with
+the main thread. The page says on the console why it refused: the trap, a
+worker that failed, or one that did not answer within 20 s - a starved machine's
+worker can take seconds to start, and five turned the pool off there. An iPhone is driven like desktop Safari, with
 `platformName: iOS` and Remote Automation on in its Safari settings; it reaches
 a local bundle only over HTTPS, through a tunnel such as
 `cloudflared tunnel --url`.

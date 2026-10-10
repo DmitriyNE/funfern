@@ -21889,3 +21889,32 @@ each time. One isolated run that shared the machine with the host's Chrome
 came up without its pool: the page's shared-memory check gave its worker five
 seconds and, starved, the worker took longer - a defect of its own, reported
 separately.
+
+## 2026-10-10 — The page's shared-memory check gives a slow worker twenty seconds, and each refusal says why
+
+The SwiftShader runs found it: an isolated cavity run in the Linux VM, sharing
+the machine with Chrome on the host, came up without its worker pool,
+`data-funfern-preparation-worker` reading `unavailable` where the runs before
+and after had it. The page's check of whether the main thread sees a worker
+grow a shared memory - there for iOS Safari 26.2, whose main thread does not -
+gave its worker five seconds to answer and counted silence as a refusal, and
+the app then warned that "this browser's main thread does not see a worker's
+growth of shared memory". Timed from the page in the amd64 container, the
+check answered in 0.5 to 0.7 s on an idle VM; with its eight CPUs three times
+over-subscribed it answered in 3.6 to 8.3 s, and two of four loads lost their
+pool, each with that false warning. A slow phone or a busy laptop, where the
+worker starts while the 30 MB module compiles, is where a user would meet it:
+the app works, but its preparation and adaptation run on the main thread for
+the session, and the console blames the browser.
+
+The worker now has 20 s - the app waits on the check to start, and the splash
+gives up at 30, so a worker that never answers still leaves the app time to
+start without its pool - and each refusal says once on the console why:
+`?e2e-pool=off`, no workers or no WebAssembly, a worker the check could not
+start or that failed, one that did not answer within 20 s, or the trap the
+check is for. The app's own warning, which named the trap whatever the cause,
+is gone. A page that is not isolated adds nothing, as the isolation gate warns
+where it gives up; before, the app blamed the trap there too. Measured: under
+the same load the four loads keep their pool, the check answering in 2.3 to
+5.6 s, one past the old five; `?e2e-pool=off` says so and the pool stays off;
+and the browser suite's five variants pass in Chrome, in 66 to 201 s.

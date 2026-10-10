@@ -130,11 +130,20 @@
   -->
   <script>
     window.funfernSharedMemoryGrowthVisible = (function () {
+      // Each refusal says why, once: the app turns the pool off on any of them.
+      var refuse = function (reason) {
+        console.warn('funfern: ' + reason + ', so the background pool stays off and its work runs on the main thread');
+        return false;
+      };
       if (new URLSearchParams(location.search).get('e2e-pool') === 'off') {
+        return Promise.resolve(refuse('?e2e-pool=off asks for the main-thread path'));
+      }
+      // The isolation gate above says so where it gives up on isolating.
+      if (!window.crossOriginIsolated) {
         return Promise.resolve(false);
       }
-      if (!window.crossOriginIsolated || !window.Worker || typeof WebAssembly !== 'object') {
-        return Promise.resolve(false);
+      if (!window.Worker || typeof WebAssembly !== 'object') {
+        return Promise.resolve(refuse('this browser has no workers or no WebAssembly'));
       }
       var worker, url, fill, module, memory;
       try {
@@ -159,7 +168,7 @@
         ], { type: 'text/javascript' }));
         worker = new Worker(url);
       } catch (e) {
-        return Promise.resolve(false);
+        return Promise.resolve(refuse('the check could not start its worker (' + e + ')'));
       }
       return new Promise(function (resolve) {
         var settle = function (visible) {
@@ -168,15 +177,21 @@
           URL.revokeObjectURL(url);
           resolve(visible);
         };
-        // A worker that never answers could not run the pool either.
-        var timer = setTimeout(function () { settle(false); }, 5000);
-        worker.onerror = function () { settle(false); };
+        // A worker that never answers could not run the pool either, but a
+        // slow or busy machine starts one late: in a Linux VM with its CPUs
+        // three times over-subscribed the answer took 3.6 to 8.3 s, and five
+        // seconds turned the pool off there. The app waits on this to start,
+        // and the splash gives up at 30 s.
+        var timer = setTimeout(function () {
+          settle(refuse("the check's worker did not answer within 20 s"));
+        }, 20000);
+        worker.onerror = function () { settle(refuse("the check's worker failed")); };
         worker.onmessage = function () {
           try {
             fill(65536, 0, 65536);
             settle(true);
           } catch (e) {
-            settle(false);
+            settle(refuse("this browser's main thread does not see a worker's growth of shared memory"));
           }
         };
         worker.postMessage({ module: module, memory: memory });
