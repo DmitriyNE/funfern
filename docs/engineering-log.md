@@ -22023,3 +22023,38 @@ bound by, for a saving the measurement does not show. Accuracy over the
 hardware's speed, in every shader alike. The decision and its reasons are now
 in the block's own comment, the same words in all six shaders, and in the
 architecture's paragraph on the device's trigonometry.
+
+## 2026-10-10 — The outgoing wall's excess is the step's own, and one Cayley over the whole step removes it (spike)
+
+Plan.md's weak todo on the second-order wall's dt excess, taken up as a
+spike with no production change:
+[docs/spikes/funfern-outgoing-wall-step-spike.md](spikes/funfern-outgoing-wall-step-spike.md),
+harness `experiments/material-laws-spike/wall_step.py` (run with
+`run-wall-step.sh`, 76 checks, results in `wall-step-results.json`). The
+harness steps the scattering spike's Bloch strip by a one-step map built
+from its stages, so a wall update is a few lines; a strip of cell 0.025
+reproduces the fixture at its own steps, 1.077 against 1.098 for the
+fourth-order step and 0.918 against 0.911 for the leapfrog.
+
+What it found: the excess is not the second-order wall's. Every outgoing
+wall reflects 1e-3 to 2e-3 of the incident amplitude by its stepping, at
+every angle; against the second-order wall's small law that reads as 7% to
+14%. The two half-step Cayley kicks leave the trace node's mass off by
+`w²/16`, `w` the wall's rate times the step, which is about one at the
+app's step, so the error is first order in `ω·dt` at a fixed CFL. A Padé
+kick makes the wall fourth order but leaves half the floor at the app's
+step. The fourth-order interior equation factors exactly as an invertible
+operator times the semidiscrete one, which gives the wall's exact target:
+the drift's corrected field must carry the wall's own acceleration, and
+the wall must take one Cayley over the whole step. Since the response
+depends only on the full-step map and the total force weight, that is
+plain kicks at the trace and one wall solve after them - one solve a step
+instead of two. It leaves `(ω·dt)²/24` at any step: the fixture's band goes
+to 1.0006 on the strip, the error falls as `h²` at a fixed CFL instead of
+`h`, and it is at most 0.36 of production's anywhere in the sweep. Stable
+from 0.2 to 1.22 of the bound with every loss case. One caveat for stage B:
+a field already at the wall when a generation starts is read differently,
+and the second-order wall's static memory keeps four times too much of it,
+so handoffs and remeshes must carry the wall's state in the update's terms.
+
+Next: plan stage B (both CPU paths) for the user.

@@ -1434,18 +1434,21 @@ is next touched.
   most 5 for any eigenvalue, 1.7 on average. LAPACK's `dsteqr` budgets 30·n
   for the whole solve instead, so an eigenvalue that stalls borrows from the
   others; that, and a message naming the way out, would be the change.
-- The second-order outgoing wall returns more energy than its law says, by
-  the stepping, not the law: met by a channel's second transverse mode at 27°
-  to 39°, between free sides, it reads 1.10 of the passive law's energy
-  reflection at the default step, 1.03 at half the step and 1.02 at a quarter
-  on one mesh, and 1.07 at edge 0.035 with its own step - about 4x per
-  halving of the step at a fixed mesh, about linearly along a fixed CFL - the
-  same for sine and cosine modes, so no corner effect. In amplitude it is
-  about 1e-3 of the incident wave. The first-order wall matches its law to
-  0.5% at every step. The kick is the scattering spike's corrected,
-  force-coupled update, so this is not the split that spike replaced. Fixture
-  `an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`
-  holds the second-order band to 15% over its law; the first-order band to 1%.
+- The outgoing walls' stepping reflects on its own, 1e-3 to 2e-3 of the
+  incident amplitude at the app's step, at every angle and for both orders.
+  Against the second-order wall's small law it reads as 1.10 of its energy
+  reflection in fixture
+  `an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`'s
+  band, 27° to 39°; against the first-order wall's larger law it hardly shows.
+  [The wall-step spike](spikes/funfern-outgoing-wall-step-spike.md) found the
+  cause - the two half-step Cayley kicks leave the trace node's mass off by
+  `w²/16`, `w` the wall's rate times the step, and the wall's rates are stiff,
+  so the error is first order in `ω·dt` at a fixed CFL - and a fix: plain
+  kicks at the trace, one Cayley over the wall for the whole step, and the
+  wall's acceleration in the drift's corrected field. On the spike's strip
+  that takes the band from 1.077 to 1.0006 and leaves `(ω·dt)²/24` at any
+  step. Stages B (CPU) and C (device) are next; the fixture holds the
+  second-order band to 15% until then.
 
 ## Working practice
 

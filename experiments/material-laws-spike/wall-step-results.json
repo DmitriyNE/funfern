@@ -1,0 +1,1772 @@
+{
+  "baseline": "beca47e0d05c9b24945ef632b00c5cc16f80c8a0",
+  "summary": {
+    "passed": 76,
+    "failed": 0,
+    "failed_cases": [],
+    "seconds": 202.27784929203335
+  },
+  "results": [
+    {
+      "name": "step map against the closed-form leapfrog response",
+      "value": 1.139416625490212e-13,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "strip bound at the fixture-like cell",
+      "observation": {
+        "cell": 0.025,
+        "bound": 0.005463575999163957,
+        "fixture_step_over_it": 0.9920974835582841
+      }
+    },
+    {
+      "name": "fixture band reproduced",
+      "observation": {
+        "production_1_2": [
+          1.0253786106724534,
+          1.0660572508094477,
+          1.1380039317020643
+        ],
+        "production_mean": 1.0764799310613218,
+        "fixture_production": 1.098,
+        "leapfrog_0_9": [
+          0.9721388812083809,
+          0.9284144844541419,
+          0.8541950646160213
+        ],
+        "leapfrog_mean": 0.9182494767595147,
+        "fixture_leapfrog": 0.911,
+        "first_order_production": [
+          1.0001768021200017,
+          1.0004723931319872,
+          1.0010756292483796
+        ]
+      }
+    },
+    {
+      "name": "production reproduces the second-order excess",
+      "value": 1.0764799310613218,
+      "limit": 1.05,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "leapfrog reproduces the second-order deficit",
+      "value": 0.9182494767595147,
+      "limit": 0.95,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz production",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0015619499824498465,
+          0.00027767212689243376,
+          6.357980426872445e-05,
+          1.5545355292241863e-05
+        ],
+        "orders": [
+          2.491893985673603,
+          2.126741884485635,
+          2.0320849849838245
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz production",
+      "value": 0.032084984983824505,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz pade22 halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0008012850368050982,
+          4.5955652797589025e-05,
+          2.8240147468839504e-06,
+          1.7580130487021443e-07
+        ],
+        "orders": [
+          4.124001299109448,
+          4.02442280440676,
+          4.0057299384056435
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz pade22 halves",
+      "value": 0.005729938405643509,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz exact halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0008135564545156813,
+          4.691073523384946e-05,
+          2.8872361558851202e-06,
+          1.7981042983077975e-07
+        ],
+        "orders": [
+          4.116252443689956,
+          4.022157092471561,
+          4.0051405035139815
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz exact halves",
+      "value": 0.0051405035139815425,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz sqrt of full-step pade",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.000575334719113028,
+          3.0853572203005915e-05,
+          1.863453971716787e-06,
+          1.1549971570926597e-07
+        ],
+        "orders": [
+          4.220892095347285,
+          4.0493864438731295,
+          4.012017978476194
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz sqrt of full-step pade",
+      "value": 0.01201797847619357,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz sqrt of full-step cayley",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.004524638683378674,
+          0.0010183466455339968,
+          0.0002487433393504364,
+          6.18358406326117e-05
+        ],
+        "orders": [
+          2.1515738509885556,
+          2.033498938928701,
+          2.0081427096094426
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz sqrt of full-step cayley",
+      "value": 0.008142709609442633,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz wall acceleration only",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.003941153741361559,
+          0.0008042707786793598,
+          0.00018921877160355455,
+          4.657227297544482e-05
+        ],
+        "orders": [
+          2.292864819876822,
+          2.0876260844796937,
+          2.022512019317075
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz wall acceleration only",
+      "value": 0.022512019317074916,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz taylor-derived pair, pade halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.003766581484013165,
+          0.00022794396582452917,
+          1.4147669754850996e-05,
+          8.82751617246114e-07
+        ],
+        "orders": [
+          4.046504616559192,
+          4.010042865188984,
+          4.002413078808814
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz taylor-derived pair, pade halves",
+      "value": 0.0024130788088143618,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz taylor-derived pair, cayley halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.012706497562045404,
+          0.0006591679853775312,
+          3.961793233312708e-05,
+          2.452966250735141e-06
+        ],
+        "orders": [
+          4.268776433221943,
+          4.056420682281496,
+          4.013554297934336
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz taylor-derived pair, cayley halves",
+      "value": 0.013554297934335935,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz full-step cayley + wall acceleration",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.000225282522004364,
+          3.711570369568707e-05,
+          8.027238066297935e-06,
+          1.9294124787661615e-06
+        ],
+        "orders": [
+          2.601633762924935,
+          2.2090541320897397,
+          2.0567420822844547
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz full-step cayley + wall acceleration",
+      "value": 0.056742082284454654,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz leapfrog",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0029665044359383093,
+          0.0007415463216736096,
+          0.00018538140834133306,
+          4.6345025953883754e-05
+        ],
+        "orders": [
+          2.0001552196569876,
+          2.000040250130355,
+          2.0000101522560345
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz leapfrog",
+      "value": 1.0152256034512419e-05,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 1.6 Hz leapfrog, full-step cayley",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.00014372306811659812,
+          3.592770961613924e-05,
+          8.98173635546892e-06,
+          2.2454221201287383e-06
+        ],
+        "orders": [
+          2.0001227667158132,
+          2.0000306869269298,
+          2.0000076899543715
+        ]
+      }
+    },
+    {
+      "name": "order first 1.6 Hz leapfrog, full-step cayley",
+      "value": 7.68995437150366e-06,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz production",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0021743064524410286,
+          0.000386382731787063,
+          8.846643831520618e-05,
+          2.162992996473996e-05
+        ],
+        "orders": [
+          2.4924527680945787,
+          2.1268284726265336,
+          2.032101246939322
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz production",
+      "value": 0.032101246939321815,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz pade22 halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0011164432920671074,
+          6.401512537415972e-05,
+          3.933553467261291e-06,
+          2.4486605603654236e-07
+        ],
+        "orders": [
+          4.124353340755505,
+          4.024507723835235,
+          4.0057684909575615
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz pade22 halves",
+      "value": 0.0057684909575614896,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz exact halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0011334956030383456,
+          6.53425876820887e-05,
+          4.021427436655207e-06,
+          2.504385757758314e-07
+        ],
+        "orders": [
+          4.116611395298335,
+          4.022243996037833,
+          4.005178981057041
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz exact halves",
+      "value": 0.0051789810570408434,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz sqrt of full-step pade",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0008026586895224,
+          4.3037188743954834e-05,
+          2.599205698958418e-06,
+          1.6109830648705313e-07
+        ],
+        "orders": [
+          4.221130901249557,
+          4.049441124774435,
+          4.012057578802602
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz sqrt of full-step pade",
+      "value": 0.012057578802601832,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz sqrt of full-step cayley",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.006296716497012997,
+          0.001416995876398561,
+          0.00034610631246114246,
+          8.603884663895807e-05
+        ],
+        "orders": [
+          2.151764153124787,
+          2.033548400419129,
+          2.0081551638382082
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz sqrt of full-step cayley",
+      "value": 0.008155163838208246,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz wall acceleration only",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.005489581194613446,
+          0.0011199571396583521,
+          0.00026348010892116757,
+          6.484995547088198e-05
+        ],
+        "orders": [
+          2.2932525669090205,
+          2.087677565187347,
+          2.022516562672965
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz wall acceleration only",
+      "value": 0.02251656267296509,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz taylor-derived pair, pade halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.003857814819581465,
+          0.00023289295391901478,
+          1.4448684663958437e-05,
+          9.01446308362612e-07
+        ],
+        "orders": [
+          4.050044996528573,
+          4.010656923991211,
+          4.002552787825156
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz taylor-derived pair, pade halves",
+      "value": 0.002552787825155889,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz taylor-derived pair, cayley halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.012893311482343956,
+          0.0006681891057624934,
+          4.0156469516837295e-05,
+          2.4862733447006115e-06
+        ],
+        "orders": [
+          4.270222577870474,
+          4.05655212011265,
+          4.013575613435866
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz taylor-derived pair, cayley halves",
+      "value": 0.013575613435865996,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz full-step cayley + wall acceleration",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.00043110726861101745,
+          7.101221008075691e-05,
+          1.5357694556855903e-05,
+          3.6913437420013533e-06
+        ],
+        "orders": [
+          2.601907874089172,
+          2.2091054478321346,
+          2.0567436656972258
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz full-step cayley + wall acceleration",
+      "value": 0.056743665697225776,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz leapfrog",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.004135434756259365,
+          0.0010336938580381779,
+          0.0002584127291557148,
+          6.460250454627655e-05
+        ],
+        "orders": [
+          2.0002300313049735,
+          2.0000599332706352,
+          2.000015135184638
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz leapfrog",
+      "value": 1.5135184638026544e-05,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error first 2.2 Hz leapfrog, full-step cayley",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.00031937218599844864,
+          7.982853544126444e-05,
+          1.995622713655233e-05,
+          4.989000101859387e-06
+        ],
+        "orders": [
+          2.000262226148441,
+          2.000065548269803,
+          2.0000163910154685
+        ]
+      }
+    },
+    {
+      "name": "order first 2.2 Hz leapfrog, full-step cayley",
+      "value": 1.639101546846433e-05,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz production",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0012449941134381683,
+          0.00022156920741071438,
+          5.069541203776499e-05,
+          1.2392053984764363e-05
+        ],
+        "orders": [
+          2.4903096191504597,
+          2.127830303151364,
+          2.0324398542412383
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz production",
+      "value": 0.0324398542412383,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz pade22 halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0006428819020687142,
+          3.70970126753371e-05,
+          2.2806524198665875e-06,
+          1.4198243997156742e-07
+        ],
+        "orders": [
+          4.1151788174270125,
+          4.02378451880898,
+          4.005662174164207
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz pade22 halves",
+      "value": 0.005662174164206668,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz exact halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0006525683419053192,
+          3.786356627719702e-05,
+          2.3315258192788964e-06,
+          1.4521017917311628e-07
+        ],
+        "orders": [
+          4.107246793069436,
+          4.021463990117309,
+          4.005059911834644
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz exact halves",
+      "value": 0.005059911834644382,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz sqrt of full-step pade",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0004632030069739239,
+          2.4949490559827336e-05,
+          1.5071514911653367e-06,
+          9.341476403846034e-08
+        ],
+        "orders": [
+          4.214562356110892,
+          4.049114016005006,
+          4.0120300429726985
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz sqrt of full-step pade",
+      "value": 0.012030042972698496,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz sqrt of full-step cayley",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.003576209318156147,
+          0.0008104676583658143,
+          0.00019819948307101015,
+          4.928417048395089e-05
+        ],
+        "orders": [
+          2.1416046595953193,
+          2.031801416483631,
+          2.0077569509535134
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz sqrt of full-step cayley",
+      "value": 0.007756950953513364,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz wall acceleration only",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.003222891375111866,
+          0.0006519217380015874,
+          0.00015322045666409207,
+          3.770516454243334e-05
+        ],
+        "orders": [
+          2.3055848772801504,
+          2.089089855751997,
+          2.0227748756209514
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz wall acceleration only",
+      "value": 0.022774875620951374,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz taylor-derived pair, pade halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0031388473271144824,
+          0.00019003955330570928,
+          1.1780193951175433e-05,
+          7.347430636689944e-07
+        ],
+        "orders": [
+          4.045863232362484,
+          4.011864523502445,
+          4.002979647722605
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz taylor-derived pair, pade halves",
+      "value": 0.002979647722605172,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz taylor-derived pair, cayley halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.010293840009545285,
+          0.0005425676585535074,
+          3.2573437832688956e-05,
+          2.0158782722231466e-06
+        ],
+        "orders": [
+          4.245834400914851,
+          4.058035157484668,
+          4.014215561044409
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz taylor-derived pair, cayley halves",
+      "value": 0.014215561044409242,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz full-step cayley + wall acceleration",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0001613998138457095,
+          2.5628813075175468e-05,
+          5.4937112074624615e-06,
+          1.318368138760972e-06
+        ],
+        "orders": [
+          2.6548003436357366,
+          2.2219136877457535,
+          2.0590277908579404
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz full-step cayley + wall acceleration",
+      "value": 0.05902779085794041,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz leapfrog",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.002413584907561049,
+          0.0006007297011988036,
+          0.00015002152846027228,
+          3.7495413061919575e-05
+        ],
+        "orders": [
+          2.0063896799998155,
+          2.0015464492832766,
+          2.000383524030391
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz leapfrog",
+      "value": 0.00038352403039088045,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 1.6 Hz leapfrog, full-step cayley",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.00010285897601491743,
+          2.571343241006288e-05,
+          6.428276282009606e-06,
+          1.607063927752408e-06
+        ],
+        "orders": [
+          2.0000735872749393,
+          2.0000183628210753,
+          2.0000046167472947
+        ]
+      }
+    },
+    {
+      "name": "order passive 1.6 Hz leapfrog, full-step cayley",
+      "value": 4.616747294683421e-06,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz production",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0019168254808492368,
+          0.0003417703619473534,
+          7.82501031871959e-05,
+          1.9131097724547984e-05
+        ],
+        "orders": [
+          2.48761979328925,
+          2.1268627334587866,
+          2.032172997950851
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz production",
+      "value": 0.032172997950850935,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz pade22 halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0009860838661135787,
+          5.689430570324794e-05,
+          3.497685102545237e-06,
+          2.1774773806599837e-07
+        ],
+        "orders": [
+          4.115354180595744,
+          4.023811952831717,
+          4.0056707714207525
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz pade22 halves",
+      "value": 0.005670771420752452,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz exact halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.001000944390147247,
+          5.807038774288862e-05,
+          3.5757392648812015e-06,
+          2.2270013315781403e-07
+        ],
+        "orders": [
+          4.107415346692174,
+          4.021489219830136,
+          4.0050672163154655
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz exact halves",
+      "value": 0.005067216315465473,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz sqrt of full-step pade",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0007106154933111253,
+          3.8268144382814054e-05,
+          2.3116085816659137e-06,
+          1.432741672607927e-07
+        ],
+        "orders": [
+          4.214853291881726,
+          4.049174910572354,
+          4.0120467147808965
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz sqrt of full-step pade",
+      "value": 0.012046714780896473,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz sqrt of full-step cayley",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.005517349368374105,
+          0.0012510700032355244,
+          0.0003059899354029305,
+          7.608984222258795e-05
+        ],
+        "orders": [
+          2.140812820061559,
+          2.031606411519318,
+          2.0077084246724124
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz sqrt of full-step cayley",
+      "value": 0.007708424672412395,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz wall acceleration only",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.004937436233161677,
+          0.0009978818865082773,
+          0.00023446832194335874,
+          5.7695143430800815e-05
+        ],
+        "orders": [
+          2.306821148599592,
+          2.089476042946373,
+          2.0228712310500723
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz wall acceleration only",
+      "value": 0.02287123105007227,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz taylor-derived pair, pade halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.003562764659746288,
+          0.00021517943534424397,
+          1.33336656133401e-05,
+          8.3157046859285e-07
+        ],
+        "orders": [
+          4.049385077137246,
+          4.012394849057705,
+          4.003091117063677
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz taylor-derived pair, pade halves",
+      "value": 0.0030911170636773733,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz taylor-derived pair, cayley halves",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.011580483487207915,
+          0.0006080526470484473,
+          3.650255049336066e-05,
+          2.2590439767385875e-06
+        ],
+        "orders": [
+          4.251355435125658,
+          4.058127065896278,
+          4.014213009978263
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz taylor-derived pair, cayley halves",
+      "value": 0.014213009978263358,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz full-step cayley + wall acceleration",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.00035127815520744803,
+          5.531003483214836e-05,
+          1.1721650163486003e-05,
+          2.8006359087610406e-06
+        ],
+        "orders": [
+          2.667000707335761,
+          2.2383655652257946,
+          2.065349339437654
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz full-step cayley + wall acceleration",
+      "value": 0.06534933943765386,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz leapfrog",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.0036981216603341493,
+          0.0009205114517154389,
+          0.0002298849706859402,
+          5.745618700068104e-05
+        ],
+        "orders": [
+          2.0062851123276064,
+          2.001523520394603,
+          2.00037799055965
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz leapfrog",
+      "value": 0.00037799055965015427,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error passive 2.2 Hz leapfrog, full-step cayley",
+      "observation": {
+        "steps": [
+          0.0054204,
+          0.0027102,
+          0.0013551,
+          0.00067755
+        ],
+        "errors": [
+          0.00026246003488303635,
+          6.560064322054907e-05,
+          1.6399263281445297e-05,
+          4.099759715550205e-06
+        ],
+        "orders": [
+          2.000315892741286,
+          2.0000789558363214,
+          2.0000197430055784
+        ]
+      }
+    },
+    {
+      "name": "order passive 2.2 Hz leapfrog, full-step cayley",
+      "value": 1.9743005578387596e-05,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "normal incidence: full-step cayley + acceleration at z^2/24",
+      "value": 0.013472701087014816,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "normal incidence: leapfrog with full-step cayley at z^2/16",
+      "value": 2.074526298667667e-05,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "the wall after the kicks responds as the square-root halves",
+      "value": 2.9398477363793667e-10,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "error at 1.2 of each mesh bound, first, h = .05 to .00625",
+      "observation": {
+        "production": [
+          0.007880955072272936,
+          0.0039252989868732895,
+          0.0019600869466057966,
+          0.0009797005845448915
+        ],
+        "pade22 halves": [
+          0.005179107207891427,
+          0.0025656620655642574,
+          0.001279414572100667,
+          0.000639265640495115
+        ],
+        "full-step cayley + wall acceleration": [
+          0.0029758963711571823,
+          0.0007437987606465343,
+          0.00018587756429930301,
+          4.6463848541591727e-05
+        ]
+      }
+    },
+    {
+      "name": "fixed-CFL refinement first: full-step cayley + acceleration falls as h^2",
+      "value": 4.000477148011454,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fixed-CFL refinement first: production falls as h",
+      "value": 2.007733703503319,
+      "limit": 2.2,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "error at 1.2 of each mesh bound, passive, h = .05 to .00625",
+      "observation": {
+        "production": [
+          0.006919715218615773,
+          0.003440196388106174,
+          0.00171819338093655,
+          0.0008591477569641889
+        ],
+        "pade22 halves": [
+          0.0045593828307933975,
+          0.0022473022625852665,
+          0.0011192854385623325,
+          0.0005591212167500504
+        ],
+        "full-step cayley + wall acceleration": [
+          0.002460413497059786,
+          0.0006142547146604471,
+          0.00015354352122027277,
+          3.8394986543424906e-05
+        ]
+      }
+    },
+    {
+      "name": "fixed-CFL refinement passive: full-step cayley + acceleration falls as h^2",
+      "value": 3.999051309644668,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fixed-CFL refinement passive: production falls as h",
+      "value": 2.011430290008842,
+      "limit": 2.2,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "sweep fixture step first: error over production",
+      "observation": {
+        "target_worst": 0.20151802420206502,
+        "target_median": 0.14425308259471567,
+        "pade_worst": 0.5138968848615661,
+        "pade_best": 0.5125689373615451
+      }
+    },
+    {
+      "name": "sweep fixture step first: full-step cayley + acceleration at most 0.4 of production",
+      "value": 0.20151802420206502,
+      "limit": 0.4,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "sweep fixture step passive: error over production",
+      "observation": {
+        "target_worst": 0.3583120681205752,
+        "target_median": 0.15786386212248488,
+        "pade_worst": 0.5360935445636705,
+        "pade_best": 0.5119164303106911
+      }
+    },
+    {
+      "name": "sweep fixture step passive: full-step cayley + acceleration at most 0.4 of production",
+      "value": 0.3583120681205752,
+      "limit": 0.4,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "sweep 1.2 of the strip bound first: error over production",
+      "observation": {
+        "target_worst": 0.19289252001377286,
+        "target_median": 0.13790100927613563,
+        "pade_worst": 0.6540201905378481,
+        "pade_best": 0.6526653036138519
+      }
+    },
+    {
+      "name": "sweep 1.2 of the strip bound first: full-step cayley + acceleration at most 0.4 of production",
+      "value": 0.19289252001377286,
+      "limit": 0.4,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "sweep 1.2 of the strip bound passive: error over production",
+      "observation": {
+        "target_worst": 0.3161092770864689,
+        "target_median": 0.14033223306612833,
+        "pade_worst": 0.6746352842363043,
+        "pade_best": 0.6506230389213656
+      }
+    },
+    {
+      "name": "sweep 1.2 of the strip bound passive: full-step cayley + acceleration at most 0.4 of production",
+      "value": 0.3161092770864689,
+      "limit": 0.4,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fixture band, second order",
+      "observation": {
+        "target": [
+          0.9983524722265462,
+          0.9990576341233901,
+          1.0044965193759445
+        ],
+        "target_mean": 1.000635541908627,
+        "pade": [
+          1.013148282027447,
+          1.0339533073612766,
+          1.0703558408055431
+        ],
+        "pade_mean": 1.0391524767314222
+      }
+    },
+    {
+      "name": "fixture band, second order, within 1% of its law",
+      "value": 0.0006355419086270242,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess production lossless, 0.2 to 1.22 of the bound",
+      "value": 6.8833827526759706e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak production lossless",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess production both loss, 0.2 to 1.22 of the bound",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak production both loss",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess production old loss counterexample, 0.2 to 1.22 of the bound",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak production old loss counterexample",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess production spatial loss, 0.2 to 1.22 of the bound",
+      "value": 2.4868995751603507e-14,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak production spatial loss",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess full-step cayley + wall acceleration lossless, 0.2 to 1.22 of the bound",
+      "value": 1.3766765505351941e-14,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak full-step cayley + wall acceleration lossless",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess full-step cayley + wall acceleration both loss, 0.2 to 1.22 of the bound",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak full-step cayley + wall acceleration both loss",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess full-step cayley + wall acceleration old loss counterexample, 0.2 to 1.22 of the bound",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak full-step cayley + wall acceleration old loss counterexample",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D spectral excess full-step cayley + wall acceleration spatial loss, 0.2 to 1.22 of the bound",
+      "value": 1.4210854715202004e-14,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D long-run peak full-step cayley + wall acceleration spatial loss",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D pulse: energy in the box at the small step",
+      "observation": {
+        "target": [
+          0.002684628026224279,
+          0.0001996050185981893
+        ],
+        "production": [
+          0.002687271992410804,
+          0.00019970847506217183
+        ]
+      }
+    },
+    {
+      "name": "2D pulse at 1.2 of the bound, production",
+      "observation": {
+        "energy": [
+          0.003306463918333444,
+          0.00031867821909402154
+        ],
+        "relative_to_small_step": [
+          0.23041654423940572,
+          0.5957170520420472
+        ]
+      }
+    },
+    {
+      "name": "2D pulse at 1.2 of the bound, full-step cayley + wall acceleration",
+      "observation": {
+        "energy": [
+          0.0028313243339339895,
+          0.00019541049861464274
+        ],
+        "relative_to_small_step": [
+          0.05464306647950323,
+          -0.02101410081271682
+        ]
+      }
+    },
+    {
+      "name": "2D pulse: full-step cayley + acceleration within 10% of its small step",
+      "value": 0.05464306647950323,
+      "limit": 0.1,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "2D data with a field at the wall: energy at t = 100",
+      "observation": {
+        "production": {
+          "1.2": 0.0012094546215565783,
+          "0.3": 0.0011491637185197603,
+          "0.075": 0.0011513594101918853
+        },
+        "full-step cayley + wall acceleration": {
+          "1.2": 0.004953529850737105,
+          "0.3": 0.0012483422859400977,
+          "0.075": 0.0011568037886004543
+        }
+      }
+    }
+  ]
+}
