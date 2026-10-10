@@ -8216,6 +8216,104 @@ mod tests {
         }
     }
 
+    /// The estimate's outgoing-history term checks the wall's state over the
+    /// last step against the trapezoid relation `ΔX = dt (G X̂ + E (s̄ − F̄))`.
+    /// The trapezoid wall step satisfies that relation, so the term reads
+    /// roundoff on either path where the half kicks leave a defect: the
+    /// trace's law holds exactly in discrete time.
+    #[test]
+    fn the_trapezoid_wall_step_leaves_no_outgoing_history_defect() {
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let inert =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let base = inert.base();
+        let time_step = inert.recommended_time_step();
+        let primary = base
+            .node_points()
+            .iter()
+            .map(|point| 0.05 * (1.7 * point.x - 0.9 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.03 * (1.1 * point.x + 1.4 * point.y).cos())
+            .collect::<Vec<_>>();
+        let forcing = CanonicalForcing::none(base);
+        let auxiliary_of = |state: &CanonicalWaveState| match state.auxiliaries() {
+            crate::CanonicalAuxiliaryState::Linear(auxiliaries) => auxiliaries
+                .thin_gap_jump()
+                .iter()
+                .chain(auxiliaries.outgoing_z())
+                .copied()
+                .collect::<Vec<_>>(),
+            crate::CanonicalAuxiliaryState::None => Vec::new(),
+        };
+        let defect = |wall_step| {
+            let mut state = CanonicalWaveState::from_primary_and_potential(
+                base, time_step, &primary, &potential,
+            )
+            .unwrap()
+            .with_wall_step(base, wall_step)
+            .unwrap();
+            for _ in 0..20 {
+                state.step_with_forcing(base, &forcing).unwrap();
+            }
+            let mut next = state.clone();
+            next.step_with_forcing(base, &forcing).unwrap();
+            let snapshot = CanonicalIndicatorSnapshot {
+                mesh_revision: mesh.mesh_revision,
+                primary_flux: next.primary_flux().to_vec(),
+                previous_primary_flux: state.primary_flux().to_vec(),
+                complementary_flux: next.complementary_flux().to_vec(),
+                previous_complementary_flux: state.complementary_flux().to_vec(),
+                auxiliary: auxiliary_of(&next),
+                previous_auxiliary: auxiliary_of(&state),
+                integrated_field: vec![],
+                previous_integrated_field: vec![],
+                time: next.time(),
+                time_step,
+            };
+            let fixed =
+                crate::canonical_indicator_supplement(&mesh, base, &forcing, &snapshot).unwrap();
+            let temporal = canonical_temporal_indicator_supplement(
+                &mesh,
+                &inert,
+                &forcing,
+                &snapshot,
+                &inert.initial_runtime(),
+                0.0,
+            )
+            .unwrap();
+            (fixed.outgoing_contribution, temporal.outgoing_contribution)
+        };
+        let halves = defect(CanonicalWallStep::HalfKicks);
+        let trapezoid = defect(CanonicalWallStep::Trapezoid);
+        assert!(halves.0 > 0.0 && halves.1 > 0.0, "{halves:?}");
+        assert!(
+            trapezoid.0 < 1.0e-12 * halves.0,
+            "{trapezoid:?} against {halves:?}"
+        );
+        assert!(
+            trapezoid.1 < 1.0e-12 * halves.1,
+            "{trapezoid:?} against {halves:?}"
+        );
+    }
+
     /// What an application holding a law-carrying document actually hits.
     #[test]
     fn a_law_carrying_scene_needs_a_stripped_base_the_temporal_operator_can_reuse() {
@@ -8328,8 +8426,13 @@ mod tests {
             .iter()
             .map(|point| 0.03 * (1.1 * point.x + 1.4 * point.y).cos())
             .collect::<Vec<_>>();
+        // The half kicks leave a defect against the trapezoid relation the
+        // outgoing-history term checks; the trapezoid wall step leaves none
+        // (`the_trapezoid_wall_step_leaves_no_outgoing_history_defect`).
         let state =
             CanonicalWaveState::from_primary_and_potential(base, time_step, &primary, &potential)
+                .unwrap()
+                .with_wall_step(base, CanonicalWallStep::HalfKicks)
                 .unwrap();
         let forcing = CanonicalForcing::none(base);
         let mut next = state.clone();
@@ -10387,8 +10490,11 @@ mod tests {
             CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap();
         let (primary, complementary) = strong_fluxes(&operator, 6.0);
         let time_step = 0.4 * operator.maximum_time_step();
-        let state =
-            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary).unwrap();
+        // Stepped by the half kicks, so the outgoing-history term has a defect
+        // to read; see `open_boundary_supplement_matches_the_fixed_one_when_inert`.
+        let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+            .unwrap()
+            .with_wall_step(CanonicalWallStep::HalfKicks);
         let mut next = state.clone();
         next.step(&operator).unwrap();
         let snapshot = CanonicalIndicatorSnapshot {
@@ -14925,144 +15031,147 @@ mod tests {
     /// halves off the trace nodes, it does not measure the order.
     #[test]
     fn the_temporal_rate_is_the_trajectorys_own_derivative() {
-        let mut pumped = Scene::default();
-        pumped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
-        let mut stiffness_pumped = Scene::default();
-        stiffness_pumped.materials[0].stiffness_law.drive = pump(0.25, 0.7, -0.3);
-        let mut lossy_pumped = pumped.clone();
-        lossy_pumped.materials[0].damping = ScalarField::constant(0.45);
-        let mut kerr_medium = Scene::default();
-        kerr_medium.materials[0].mass_law.field = kerr(0.8);
-        kerr_medium.materials[0].stiffness_law.field = kerr(20.0);
-        let mut kerr_pumped = kerr_medium.clone();
-        kerr_pumped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
-        let (_, mut gapped, _) = filter_compositions().remove(3);
-        gapped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
-        let mut short_wave = Scene::default();
-        short_wave.materials[0].short_wave_loss = 1.0;
-        let mut short_wave_pumped = short_wave.clone();
-        short_wave_pumped.materials[0].stiffness_law.drive = pump(0.25, 0.7, -0.3);
-        // Label, generation, prescribed wall, uniform state, least ratio.
-        let cases = [
-            (
-                "pumped mass, first-order wall",
-                walled(OuterBoundaryCondition::FirstOrderOutgoing, &pumped),
-                false,
-                false,
-                3.5,
-            ),
-            (
-                "pumped stiffness, second-order wall",
-                walled(
-                    OuterBoundaryCondition::SecondOrderOutgoing,
-                    &stiffness_pumped,
+        crate::canonical_wave::under_each_wall_step(|_| {
+            let mut pumped = Scene::default();
+            pumped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
+            let mut stiffness_pumped = Scene::default();
+            stiffness_pumped.materials[0].stiffness_law.drive = pump(0.25, 0.7, -0.3);
+            let mut lossy_pumped = pumped.clone();
+            lossy_pumped.materials[0].damping = ScalarField::constant(0.45);
+            let mut kerr_medium = Scene::default();
+            kerr_medium.materials[0].mass_law.field = kerr(0.8);
+            kerr_medium.materials[0].stiffness_law.field = kerr(20.0);
+            let mut kerr_pumped = kerr_medium.clone();
+            kerr_pumped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
+            let (_, mut gapped, _) = filter_compositions().remove(3);
+            gapped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
+            let mut short_wave = Scene::default();
+            short_wave.materials[0].short_wave_loss = 1.0;
+            let mut short_wave_pumped = short_wave.clone();
+            short_wave_pumped.materials[0].stiffness_law.drive = pump(0.25, 0.7, -0.3);
+            // Label, generation, prescribed wall, uniform state, least ratio.
+            let cases = [
+                (
+                    "pumped mass, first-order wall",
+                    walled(OuterBoundaryCondition::FirstOrderOutgoing, &pumped),
+                    false,
+                    false,
+                    3.5,
                 ),
-                false,
-                false,
-                3.5,
-            ),
-            (
-                "pumped mass, loss, prescribed wall",
-                walled(OuterBoundaryCondition::Reflecting, &lossy_pumped),
-                true,
-                false,
-                3.5,
-            ),
-            (
-                "Kerr, first-order wall",
-                walled(OuterBoundaryCondition::FirstOrderOutgoing, &kerr_medium),
-                false,
-                false,
-                3.5,
-            ),
-            (
-                "Kerr, second-order wall",
-                walled(OuterBoundaryCondition::SecondOrderOutgoing, &kerr_medium),
-                false,
-                false,
-                3.5,
-            ),
-            (
-                "pumped Kerr",
-                walled(OuterBoundaryCondition::Reflecting, &kerr_pumped),
-                false,
-                false,
-                3.5,
-            ),
-            (
-                "pumped mass, thin gap",
-                walled(OuterBoundaryCondition::Reflecting, &gapped),
-                false,
-                false,
-                3.5,
-            ),
-            (
-                "Klein-Gordon",
-                restoring_operator(klein_gordon(3.0), 0.3),
-                false,
-                false,
-                3.5,
-            ),
-            (
-                "van der Pol, uniform",
-                van_der_pol_operator(4.0, 0.05, 3.0),
-                false,
-                true,
-                3.5,
-            ),
-            (
-                "van der Pol, with a gradient",
-                van_der_pol_operator(4.0, 0.05, 3.0),
-                false,
-                false,
-                3.5,
-            ),
-            (
-                "short-wave loss, second-order wall",
-                walled(OuterBoundaryCondition::SecondOrderOutgoing, &short_wave),
-                false,
-                false,
-                3.5,
-            ),
-            (
-                "short-wave loss, pumped stiffness, prescribed wall",
-                walled(OuterBoundaryCondition::Reflecting, &short_wave_pumped),
-                true,
-                false,
-                3.5,
-            ),
-        ];
-        for (label, operator, prescribed, uniform, least_ratio) in cases {
-            let forcing = if prescribed {
-                let signals = operator
-                    .base()
-                    .node_points()
-                    .iter()
-                    .map(|point| {
-                        (point.x < -0.999).then_some(TimeSignal::Harmonic {
-                            offset: 0.02,
-                            amplitude: 0.05,
-                            frequency_hz: 0.8,
-                            phase_radians: 0.4,
+                (
+                    "pumped stiffness, second-order wall",
+                    walled(
+                        OuterBoundaryCondition::SecondOrderOutgoing,
+                        &stiffness_pumped,
+                    ),
+                    false,
+                    false,
+                    3.5,
+                ),
+                (
+                    "pumped mass, loss, prescribed wall",
+                    walled(OuterBoundaryCondition::Reflecting, &lossy_pumped),
+                    true,
+                    false,
+                    3.5,
+                ),
+                (
+                    "Kerr, first-order wall",
+                    walled(OuterBoundaryCondition::FirstOrderOutgoing, &kerr_medium),
+                    false,
+                    false,
+                    3.5,
+                ),
+                (
+                    "Kerr, second-order wall",
+                    walled(OuterBoundaryCondition::SecondOrderOutgoing, &kerr_medium),
+                    false,
+                    false,
+                    3.5,
+                ),
+                (
+                    "pumped Kerr",
+                    walled(OuterBoundaryCondition::Reflecting, &kerr_pumped),
+                    false,
+                    false,
+                    3.5,
+                ),
+                (
+                    "pumped mass, thin gap",
+                    walled(OuterBoundaryCondition::Reflecting, &gapped),
+                    false,
+                    false,
+                    3.5,
+                ),
+                (
+                    "Klein-Gordon",
+                    restoring_operator(klein_gordon(3.0), 0.3),
+                    false,
+                    false,
+                    3.5,
+                ),
+                (
+                    "van der Pol, uniform",
+                    van_der_pol_operator(4.0, 0.05, 3.0),
+                    false,
+                    true,
+                    3.5,
+                ),
+                (
+                    "van der Pol, with a gradient",
+                    van_der_pol_operator(4.0, 0.05, 3.0),
+                    false,
+                    false,
+                    3.5,
+                ),
+                (
+                    "short-wave loss, second-order wall",
+                    walled(OuterBoundaryCondition::SecondOrderOutgoing, &short_wave),
+                    false,
+                    false,
+                    3.5,
+                ),
+                (
+                    "short-wave loss, pumped stiffness, prescribed wall",
+                    walled(OuterBoundaryCondition::Reflecting, &short_wave_pumped),
+                    true,
+                    false,
+                    3.5,
+                ),
+            ];
+            for (label, operator, prescribed, uniform, least_ratio) in cases {
+                let forcing = if prescribed {
+                    let signals = operator
+                        .base()
+                        .node_points()
+                        .iter()
+                        .map(|point| {
+                            (point.x < -0.999).then_some(TimeSignal::Harmonic {
+                                offset: 0.02,
+                                amplitude: 0.05,
+                                frequency_hz: 0.8,
+                                phase_radians: 0.4,
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>();
-                CanonicalForcing::from_prescribed(operator.base(), signals).unwrap()
-            } else {
-                CanonicalForcing::none(operator.base())
-            };
-            let time_step = 0.25 * operator.maximum_time_step();
-            let coarse = rate_against_trajectory(&operator, &forcing, time_step, 2, uniform);
-            let fine = rate_against_trajectory(&operator, &forcing, 0.5 * time_step, 4, uniform);
-            println!(
-                "{label}: {coarse:.3e} then {fine:.3e}, ratio {:.2}",
-                coarse / fine
-            );
-            assert!(
-                fine < 0.025 && coarse / fine > least_ratio,
-                "{label}: the rate missed the trajectory by {coarse:.3e}, then {fine:.3e}"
-            );
-        }
+                        .collect::<Vec<_>>();
+                    CanonicalForcing::from_prescribed(operator.base(), signals).unwrap()
+                } else {
+                    CanonicalForcing::none(operator.base())
+                };
+                let time_step = 0.25 * operator.maximum_time_step();
+                let coarse = rate_against_trajectory(&operator, &forcing, time_step, 2, uniform);
+                let fine =
+                    rate_against_trajectory(&operator, &forcing, 0.5 * time_step, 4, uniform);
+                println!(
+                    "{label}: {coarse:.3e} then {fine:.3e}, ratio {:.2}",
+                    coarse / fine
+                );
+                assert!(
+                    fine < 0.025 && coarse / fine > least_ratio,
+                    "{label}: the rate missed the trajectory by {coarse:.3e}, then {fine:.3e}"
+                );
+            }
+        });
     }
 
     /// The wall flux is the outward `σ·n` of the flux the direct state holds,

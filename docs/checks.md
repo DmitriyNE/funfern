@@ -405,7 +405,14 @@ the fixed path on inert generations - run under both wall steps
 (`under_each_wall_step`), and `measure_the_kick_forms_wall_against_its_law`
 (ignored: seventeen minutes, a field law sending every node through its
 inverse) reads the kick form's band at 1.0195 of its law against the half
-kicks' 1.0532.
+kicks' 1.0532. The adaptation estimate's outgoing-history term reads
+roundoff under the trapezoid step, which satisfies the trapezoid relation it
+checks (`the_trapezoid_wall_step_leaves_no_outgoing_history_defect`;
+`measure_what_the_wall_step_does_to_the_estimate`, ignored, finds the term at
+most 0.04% of the estimate across the gallery), and a handoff every 25
+steps beside a wall leaves 7% more behind under it than without one, against
+the half kicks' 25%
+(`a_handoff_beside_a_wall_leaves_less_behind_under_the_trapezoid_step`).
 With the pinned corners kept on the trace it reflected 6.6 times its law. The
 box mode `cos(3π(x+1)/2) cos(3π(y+1)/2)` runs on the production path, the
 application's mesh of the reflecting box under its fourth-order step at its

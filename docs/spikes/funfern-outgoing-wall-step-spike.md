@@ -291,3 +291,21 @@ driven-path wall tests now run under both steps. On a kick-form generation,
 a stiffness-side Kerr law of `χ = 1e-9`, at its own step of 0.9 of the
 bound, the channel's second-order band reads 1.0195 of its law against the
 half kicks' 1.0532: twice the drift form's residue, as the strip said.
+
+**B3, done 11 October 2026: what reads the wall.** The primary rate reads
+the state at a step's end, which under the trapezoid step is the bulk's
+kind, and its order test holds under both steps. The adaptation estimate's
+outgoing-history term checks the wall's state over the last step against
+the trapezoid relation, which the trapezoid step satisfies: the term reads
+roundoff where the half kicks leave a defect, the trace's law holding
+exactly in discrete time. Across the gallery's 34 scenes behind a
+second-order wall, three seconds from rest, that term was at most 0.04% of
+the estimate's total; the global indicator moved by at most 0.6% and the
+refinement candidates by at most four of hundreds. The estimate keeps its
+formula; the tests that need the term to read something step by the half
+kicks on purpose. Handoffs carry a state near the wall's equilibrium, not
+the caveat's: a pulse crossing the walls with the step alternating between
+1.2 and 0.9 of the bound every 25 steps leaves 7% more behind than without
+a handoff under the trapezoid step, 25% under the half kicks. With the
+trapezoid step every state's default, the core's 517 tests pass, as they do
+with the half kicks'.

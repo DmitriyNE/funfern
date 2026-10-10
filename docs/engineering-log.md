@@ -22155,3 +22155,41 @@ field law sending every node through its inverse, so
 measurement had been placed between another test and its doc comment; the
 comment is back on its test. Next: B3, the AMR indicator, the primary rate
 and handoffs.
+
+## 2026-10-11 — What reads the wall, under the trapezoid wall step (stage B3)
+
+The primary rate rebuilds a wall node's rate from the state at a step's end,
+`s − F + (G X)_Q`, which under the trapezoid step is the mean of the two
+drift instants around it, as at every other node; its order test now runs
+under both steps and holds. The adaptation estimate's outgoing-history term
+checks the wall's state over the last step against
+`ΔX = dt (G X̂ + E (s̄ − F̄))`, the trapezoid relation, which the trapezoid
+step satisfies: the term reads roundoff (1e-33 where the half kicks read
+1e-12 to 1e-4) - the trace's law holds exactly in discrete time, so there is
+no residual to report; a nonlinear trace, read at the discrete gradient,
+keeps a small one. Measured across the gallery's 34 scenes behind a
+second-order wall, three seconds from rest, at edge 0.16
+(`measure_what_the_wall_step_does_to_the_estimate`, ignored, 21 s): the term
+was at most 0.04% of the total residual (Symmetry breaking), the global
+indicator moved by at most 0.6% (Plasma skin depth) and mostly under 0.1%,
+the refinement candidates by at most four of hundreds; the elements that
+moved by more than 10% (none in most scenes, 92 of 696 in Symmetry
+breaking) moved with the field, not the term. So the estimate keeps its
+formula. The fixtures that need the term to read something - the parity of
+the fixed and driven estimates behind an open wall, and the nonlinear
+estimate's snapshots - now step by the half kicks on purpose, and
+`the_trapezoid_wall_step_leaves_no_outgoing_history_defect` holds the
+trapezoid step's term below 1e-12 of the half kicks' on both paths.
+
+Handoffs: the spike's caveat was a field started at the wall out of
+equilibrium, and a handoff hands over a state near the wall's equilibrium.
+A pulse crossing a box's second-order walls while the step alternates
+between 1.2 and 0.9 of the bound every 25 steps, a fresh state each time
+with the flux, the complementary flux and the pole currents carried, leaves
+2.72e-7 of the pulse's 6.28e-2 behind at t = 8 under the trapezoid step,
+6.7% over the same run without a handoff, where the half kicks leave 3.17e-7,
+24.8% over; `a_handoff_beside_a_wall_leaves_less_behind_under_the_trapezoid_step`
+holds the trapezoid's surplus below half the half kicks'. No equilibration is
+needed. With the trapezoid made every state's default, all 517 of the core's
+tests pass, as they do with the half kicks as the default. Next: stage C, the
+device.

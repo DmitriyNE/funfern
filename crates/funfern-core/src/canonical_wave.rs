@@ -8122,4 +8122,78 @@ mod tests {
             }
         }
     }
+
+    /// A handoff carries the wall's flux and its pole currents into a new
+    /// generation as it carries the bulk's, read at the step's end, and the
+    /// trapezoid wall step stores there the mean of the drift instants around
+    /// it, as the bulk does. A pulse from the inside crosses the walls while
+    /// the step alternates between 1.2 and 0.9 of the bound every 25 steps, a
+    /// fresh state each time: what is left once it has gone exceeds the same
+    /// run without a handoff by 25% under the half kicks and 7% under the
+    /// trapezoid step (2.5e-7 of the pulse's 6.3e-2 without one). The spike's
+    /// caveat - a field started at the wall out of equilibrium - is not what
+    /// a handoff hands over.
+    #[test]
+    fn a_handoff_beside_a_wall_leaves_less_behind_under_the_trapezoid_step() {
+        let operator = walled_square(OuterBoundaryCondition::SecondOrderOutgoing, 0.2);
+        let bound = operator.maximum_time_step();
+        let fourth = CanonicalIntegrator::FourthOrder;
+        let end = 8.0;
+        let memory = |state: &CanonicalWaveState| {
+            0.5 * state.outgoing_z().iter().map(|z| z * z).sum::<f64>()
+        };
+        let mut surplus = Vec::new();
+        for wall_step in [CanonicalWallStep::HalfKicks, CanonicalWallStep::Trapezoid] {
+            let fresh = |state: &CanonicalWaveState, fraction: f64| {
+                let mut next = CanonicalWaveState::new(
+                    &operator,
+                    fraction * bound,
+                    state.primary_flux().to_vec(),
+                    state.complementary_flux().to_vec(),
+                )
+                .unwrap()
+                .with_integrator(fourth)
+                .with_wall_step(&operator, wall_step)
+                .unwrap();
+                let carried = state.outgoing_physical_memory(&operator).unwrap().unwrap();
+                next.set_outgoing_physical_memory(&operator, &carried)
+                    .unwrap();
+                next
+            };
+            let mut steady = walled_state(&operator, 1.2, fourth, wall_step);
+            let initial = steady.energy(&operator).unwrap();
+            let mut handed = steady.clone();
+            let (mut steady_time, mut handed_time) = (0.0, 0.0);
+            let mut fraction = 1.2;
+            while steady_time < end {
+                steady.step(&operator).unwrap();
+                steady_time += steady.time_step();
+            }
+            let mut steps = 0;
+            while handed_time < end {
+                if steps > 0 && steps % 25 == 0 {
+                    fraction = if fraction == 1.2 { 0.9 } else { 1.2 };
+                    handed = fresh(&handed, fraction);
+                }
+                handed.step(&operator).unwrap();
+                handed_time += handed.time_step();
+                steps += 1;
+            }
+            let (left, handed_left) = (
+                steady.energy(&operator).unwrap(),
+                handed.energy(&operator).unwrap(),
+            );
+            eprintln!(
+                "{wall_step:?}: left at t = {end}: steady {:.4e} ({:.3e} in the wall's memory), handed {:.4e} ({:.3e}); of {initial:.4e}; handed over steady {:+.3e}",
+                left,
+                memory(&steady),
+                handed_left,
+                memory(&handed),
+                handed_left / left - 1.0
+            );
+            surplus.push(handed_left / left - 1.0);
+        }
+        assert!(surplus[0] > 0.0, "{surplus:?}");
+        assert!(surplus[1].abs() < 0.5 * surplus[0], "{surplus:?}");
+    }
 }

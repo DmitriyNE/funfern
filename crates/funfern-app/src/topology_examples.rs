@@ -6055,6 +6055,199 @@ mod tests {
         );
     }
 
+    /// The adaptation estimate with the walls stepped `wall_step`'s way, as
+    /// the worker estimates it, after `end` seconds from rest: the report and
+    /// the per-element indicators.
+    fn estimate_after(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        wall_step: CanonicalWallStep,
+        end: f64,
+    ) -> (funfern_core::SolutionIndicatorReport, Vec<f64>) {
+        let forcing = prepared.canonical_forcing.clone();
+        let dt = prepared.recommended_time_step();
+        let steps = (end / dt).ceil() as usize;
+        let (snapshot, supplement, velocity, displacement, runtime) =
+            if let Some(operator) = prepared.canonical_temporal_operator.clone() {
+                let mut state = CanonicalTemporalWaveState::zero(&operator, dt)
+                    .unwrap()
+                    .pinned(&operator, &forcing)
+                    .unwrap()
+                    .with_wall_step(wall_step);
+                let auxiliary_of = |state: &CanonicalTemporalWaveState| {
+                    state
+                        .thin_gap_jump()
+                        .iter()
+                        .chain(state.outgoing_pole_currents())
+                        .copied()
+                        .collect::<Vec<_>>()
+                };
+                let mut previous = state.clone();
+                for _ in 0..steps {
+                    previous = state.clone();
+                    state.step_with_forcing(&operator, &forcing).unwrap();
+                }
+                let snapshot = funfern_core::CanonicalIndicatorSnapshot {
+                    mesh_revision: prepared.mesh.mesh_revision,
+                    primary_flux: state.primary_flux().to_vec(),
+                    previous_primary_flux: previous.primary_flux().to_vec(),
+                    complementary_flux: state.complementary_flux().to_vec(),
+                    previous_complementary_flux: previous.complementary_flux().to_vec(),
+                    auxiliary: auxiliary_of(&state),
+                    previous_auxiliary: auxiliary_of(&previous),
+                    integrated_field: state.integrated_field().to_vec(),
+                    previous_integrated_field: previous.integrated_field().to_vec(),
+                    time: state.time(),
+                    time_step: dt,
+                };
+                let supplement = funfern_core::canonical_temporal_indicator_supplement(
+                    &prepared.mesh,
+                    &operator,
+                    &forcing,
+                    &snapshot,
+                    state.runtime(),
+                    0.0,
+                )
+                .unwrap();
+                let velocity = funfern_core::canonical_temporal_primary_rate(
+                    &operator,
+                    &forcing,
+                    &snapshot,
+                    state.runtime(),
+                )
+                .unwrap();
+                let displacement = operator
+                    .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                    .unwrap();
+                (
+                    snapshot,
+                    supplement,
+                    velocity,
+                    displacement,
+                    Some(state.runtime().clone()),
+                )
+            } else {
+                let operator = &prepared.canonical_operator;
+                let mut state = CanonicalWaveState::zero(operator, dt)
+                    .unwrap()
+                    .with_wall_step(operator, wall_step)
+                    .unwrap();
+                let auxiliary_of = |state: &CanonicalWaveState| match state.auxiliaries() {
+                    CanonicalAuxiliaryState::Linear(auxiliaries) => auxiliaries
+                        .thin_gap_jump()
+                        .iter()
+                        .chain(auxiliaries.outgoing_z())
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+                let mut previous = state.clone();
+                for _ in 0..steps {
+                    previous = state.clone();
+                    state.step_with_forcing(operator, &forcing).unwrap();
+                }
+                let snapshot = funfern_core::CanonicalIndicatorSnapshot {
+                    mesh_revision: prepared.mesh.mesh_revision,
+                    primary_flux: state.primary_flux().to_vec(),
+                    previous_primary_flux: previous.primary_flux().to_vec(),
+                    complementary_flux: state.complementary_flux().to_vec(),
+                    previous_complementary_flux: previous.complementary_flux().to_vec(),
+                    auxiliary: auxiliary_of(&state),
+                    previous_auxiliary: auxiliary_of(&previous),
+                    integrated_field: Vec::new(),
+                    previous_integrated_field: Vec::new(),
+                    time: state.time(),
+                    time_step: dt,
+                };
+                let supplement = funfern_core::canonical_indicator_supplement(
+                    &prepared.mesh,
+                    operator,
+                    &forcing,
+                    &snapshot,
+                )
+                .unwrap();
+                let velocity =
+                    funfern_core::canonical_primary_rate(operator, &forcing, &snapshot).unwrap();
+                let displacement = state.primary_field(operator).unwrap();
+                (snapshot, supplement, velocity, displacement, None)
+            };
+        let count = displacement.len();
+        let defaults = crate::document::AdaptationSettings::default();
+        let mut job = SolutionIndicatorJob::new_topology(
+            prepared.mesh.clone(),
+            prepared.operator.clone(),
+            &prepared.bundle.plan,
+            prepared.bundle.model(),
+            QuadraticSolutionSnapshot {
+                mesh_revision: prepared.mesh.mesh_revision,
+                displacement,
+                velocity,
+                acceleration: vec![0.0; count],
+                auxiliary: vec![0.0; count],
+                volume_acceleration: vec![0.0; count],
+                time: snapshot.time,
+                time_step: dt,
+            },
+            SolutionIndicatorOptions {
+                minimum_edge_length: defaults.minimum_edge,
+                maximum_edge_length: defaults.maximum_edge,
+                relative_tolerance: defaults.accuracy_percent / 100.0,
+                elements_per_wavelength: defaults.elements_per_wavelength,
+                ..Default::default()
+            },
+        )
+        .with_canonical_supplement(supplement);
+        if let Some(runtime) = runtime {
+            job = job.with_instantaneous_materials(runtime);
+        }
+        loop {
+            if let Some(result) = job.advance(1 << 16) {
+                let result = result.unwrap();
+                break (result.report, result.element_indicators);
+            }
+        }
+    }
+
+    /// How much of the adaptation estimate the trapezoid wall step changes:
+    /// its second-order trace satisfies the trapezoid relation the estimate's
+    /// outgoing-history term checks, so that term falls to roundoff. Across
+    /// the gallery's second-order walls after three seconds from rest.
+    /// `cargo test -p funfern-app --release --lib measure_what_the_wall_step_does_to_the_estimate -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn measure_what_the_wall_step_does_to_the_estimate() {
+        for example in catalog() {
+            let prepared = prepare(&example.document, 0.16);
+            if prepared.canonical_operator.outgoing_boundary().is_none() {
+                continue;
+            }
+            let [(halves, halves_elements), (trapezoid, trapezoid_elements)] =
+                [CanonicalWallStep::HalfKicks, CanonicalWallStep::Trapezoid]
+                    .map(|wall_step| estimate_after(&prepared, wall_step, 3.0));
+            let largest = halves_elements.iter().fold(0.0_f64, |m, v| m.max(*v));
+            let moved = halves_elements
+                .iter()
+                .zip(&trapezoid_elements)
+                .filter(|(a, b)| (*a - *b).abs() > 0.1 * a.abs().max(**b).max(1e-3 * largest))
+                .count();
+            eprintln!(
+                "{}: outgoing {:.2e} -> {:.2e}, boundary {:.3e} -> {:.3e}, total {:.3e} -> {:.3e}, global {:.4} -> {:.4}, refine {} -> {}, elements moved >10%: {} of {}",
+                example.name,
+                halves.outgoing_history_contribution,
+                trapezoid.outgoing_history_contribution,
+                halves.boundary_residual_contribution,
+                trapezoid.boundary_residual_contribution,
+                halves.total_residual,
+                trapezoid.total_residual,
+                halves.global_indicator,
+                trapezoid.global_indicator,
+                halves.refine_candidates,
+                trapezoid.refine_candidates,
+                moved,
+                halves_elements.len()
+            );
+        }
+    }
+
     /// The kick form, which a generation with a stiffness-side field law
     /// steps with, against the second-order wall's law: the channel's second
     /// transverse mode as in
