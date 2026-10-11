@@ -6,12 +6,16 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
+#[cfg(test)]
+use crate::trace_eigen::{
+    EIGEN_ITERATIONS_PER_EIGENVALUE, EIGEN_UNIT_WORK, EIGENSOLVE_DID_NOT_CONVERGE, portable_hypot,
+};
 use crate::{
     CompiledVolumeSources, DirectionalWaveCoefficients, ElectromagneticPolarization, Material,
     MaterialFrame, OuterBoundaryCondition, OuterSide, OwnedTopologyWaveModel, PhysicsModel, Point2,
     PointSource, QuadraticWaveOperator, Scene, SymmetricTensor2, ThinGapSample, TimeSignal,
     TopologyWaveModel, TriMesh, VolumeSource, WaveError, enriched_quadratic_basis_gradients,
-    source_reach::point_source_squared_distances,
+    source_reach::point_source_squared_distances, trace_eigen::BandedEigenJob,
 };
 
 const LOCAL_NODES: usize = 7;
@@ -4780,15 +4784,16 @@ fn outgoing_signature(
     }))
 }
 
-/// Cooperative compiler for the dense non-local outgoing boundary. The trace
+/// Cooperative compiler for the non-local outgoing boundary. The trace
 /// eigensolve used to run inside the canonical assembly's final work unit; its
 /// cubic cost made that single supposedly time-budgeted unit hundreds of
-/// milliseconds on an adapted mesh.
+/// milliseconds on an adapted mesh. The solve is [`BandedEigenJob`], which
+/// works from the operator's nonzeros; the modes it hands out are dense.
 struct CanonicalOutgoingBoundaryJob {
     signature: CanonicalOutgoingSignature,
     trace_nodes: Vec<u32>,
     damping: Vec<f64>,
-    eigen: Option<SymmetricEigenJob>,
+    eigen: Option<BandedEigenJob>,
     eigenvalues: Vec<f64>,
     eigenvectors: Vec<f64>,
     largest: f64,
@@ -4805,33 +4810,19 @@ impl CanonicalOutgoingBoundaryJob {
         let trace_nodes = signature.trace_nodes.clone();
         let damping = signature.damping.clone();
         let count = trace_nodes.len();
-        let mut normalized = vec![0.0; count * count];
-        for &(row, column, value) in &signature.entries {
-            let row = row as usize;
-            let column = column as usize;
-            normalized[row * count + column] = value / (damping[row] * damping[column]).sqrt();
-        }
-        let matrix_scale = normalized
+        let normalized = signature
+            .entries
             .iter()
-            .map(|value| value.abs())
-            .sum::<f64>()
-            .max(1.0);
-        for row in 0..count {
-            for column in 0..row {
-                if (normalized[row * count + column] - normalized[column * count + row]).abs()
-                    > 2.0e-11 * matrix_scale
-                {
-                    return Err(WaveError::InvalidMesh(
-                        "the outgoing normalized trace operator is not symmetric",
-                    ));
-                }
-            }
-        }
+            .map(|&(row, column, value)| {
+                let scale = (damping[row as usize] * damping[column as usize]).sqrt();
+                (row, column, value / scale)
+            })
+            .collect();
         Ok(Some(Self {
             signature,
             trace_nodes,
             damping,
-            eigen: Some(SymmetricEigenJob::new(normalized, count)?),
+            eigen: Some(BandedEigenJob::new(normalized, count)?),
             eigenvalues: Vec::new(),
             eigenvectors: Vec::new(),
             largest: 1.0,
@@ -5048,38 +5039,19 @@ pub(crate) fn apply_outgoing_generator(
     Ok(derivative)
 }
 
-/// Inner iterations one work unit of [`SymmetricEigenJob`] may spend. A unit
-/// is a block of columns or rotations sized to this, or one step whose own
-/// cost is linear in the trace, so a unit's time does not grow with the
-/// square of the trace the way a whole Householder step or QL iteration does.
-/// The assembly runs 32 units at a time: at 1,042 trace nodes such a step
-/// took 0.12 ms typically and 0.36 ms at the 99th percentile, well inside the
-/// 4 ms a browser frame lends preparation.
-const EIGEN_UNIT_WORK: usize = 1 << 13;
-
-/// Implicit QL iterations the whole solve may take, per eigenvalue: LAPACK's
-/// `dsteqr` budget of 30·n, under which an eigenvalue that stalls borrows from
-/// the others, where EISPACK's `tql2` refuses the solve at 30 on any one. The
-/// trace operators here take under two on average and five at most.
-const EIGEN_ITERATIONS_PER_EIGENVALUE: usize = 30;
-
-/// Why a refused solve was refused, and the way out. The solve is
-/// deterministic, so the same trace fails every time it is prepared: the
-/// document holds the change, the running generation keeps running, and the
-/// trace is only prepared again when something along the boundary changes it.
-const EIGENSOLVE_DID_NOT_CONVERGE: &str = "the outgoing trace eigensolve did not converge; the document keeps the change, but the solver runs without it until a new mesh edge, other walls or an edit along them change the outgoing boundary";
-
-/// Dependency-free, cooperative eigensolver for the symmetric trace oracle:
-/// Householder tridiagonalization, then implicit QL, as EISPACK's `tred2` and
-/// `tql2` in the form JAMA gives them. It replaced a cyclic Jacobi solve that
-/// took 25 s at 1,042 trace nodes; this one takes about 1.2 s there, with
-/// eigen residuals near 1e-14 of the matrix where the Jacobi's tolerance left
-/// 4e-11. Its arithmetic is `sqrt` and the four operations, so the trace basis
-/// does not depend on a platform's transcendental functions.
+/// The dense eigensolver the trace used before [`BandedEigenJob`], kept as
+/// that solve's oracle under test: Householder tridiagonalization, then
+/// implicit QL, as EISPACK's `tred2` and `tql2` in the form JAMA gives them.
+/// It replaced a cyclic Jacobi solve that took 25 s at 1,042 trace nodes and
+/// took about 1.0 s there itself, its eigenvector work the cube of the trace;
+/// the banded solve takes the operator's sparsity instead. Its arithmetic is
+/// `sqrt` and the four operations, like the banded solve's, so the two can be
+/// compared to roundoff on any platform.
 ///
 /// `vectors` is column-major, `vectors[column * count + row]`: it starts as
 /// the matrix, holds the accumulated transformations, and ends as one
 /// eigenvector per contiguous column. Eigenpairs come out ascending.
+#[cfg(test)]
 struct SymmetricEigenJob {
     vectors: Vec<f64>,
     /// `d`: the Householder vector and scales while reducing, then the
@@ -5101,6 +5073,7 @@ struct SymmetricEigenJob {
     rotations: Vec<(f64, f64)>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EigenPhase {
     ReduceSetup {
@@ -5143,19 +5116,10 @@ enum EigenPhase {
     Done,
 }
 
+#[cfg(test)]
 type SymmetricEigenResult = (Vec<f64>, Vec<f64>);
 
-/// `sqrt(a^2 + b^2)` without overflow, from `sqrt` alone.
-fn portable_hypot(a: f64, b: f64) -> f64 {
-    let (a, b) = (a.abs(), b.abs());
-    let (large, small) = if a > b { (a, b) } else { (b, a) };
-    if large == 0.0 {
-        return 0.0;
-    }
-    let ratio = small / large;
-    large * (1.0 + ratio * ratio).sqrt()
-}
-
+#[cfg(test)]
 impl SymmetricEigenJob {
     fn new(matrix: Vec<f64>, count: usize) -> Result<Self, WaveError> {
         if matrix.len() != count * count || matrix.iter().any(|value| !value.is_finite()) {
@@ -6242,6 +6206,110 @@ mod tests {
             }
         }
         [residual / norm, orthogonality]
+    }
+
+    /// The banded solve against the dense one it replaced, on a trace
+    /// operator from a meshed scene with four second-order walls, on a ring
+    /// and on a general matrix: the same eigenvalues to roundoff, an
+    /// orthonormal basis that rebuilds the operator, and the same vector up to
+    /// sign wherever an eigenvalue stands alone. Where eigenvalues repeat,
+    /// as a square's symmetry makes them, either basis of the pair serves.
+    #[test]
+    fn the_banded_trace_eigensolve_agrees_with_the_dense_oracle() {
+        use crate::trace_eigen::tests as banded;
+        let scene = Scene::initial();
+        let mesh = crate::mesh_scene(
+            &scene,
+            1,
+            crate::MeshingOptions {
+                target_edge_length: 0.16,
+                ..crate::MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let signature = outgoing_signature(&quadratic).unwrap().unwrap();
+        let count = signature.trace_nodes.len();
+        assert!(count > 100, "{count} trace nodes");
+        let mut trace = vec![0.0; count * count];
+        for &(row, column, value) in &signature.entries {
+            let scale =
+                (signature.damping[row as usize] * signature.damping[column as usize]).sqrt();
+            trace[row as usize * count + column as usize] = value / scale;
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut random = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        let general_count = 40;
+        let mut general = vec![0.0; general_count * general_count];
+        for row in 0..general_count {
+            for column in 0..=row {
+                let value = random();
+                general[row * general_count + column] = value;
+                general[column * general_count + row] = value;
+            }
+        }
+        for (name, matrix, count) in [
+            ("trace", trace, count),
+            ("ring", banded::ring(160), 160),
+            ("general", general, general_count),
+        ] {
+            let norm = (0..count)
+                .map(|row| {
+                    (0..count)
+                        .map(|column| matrix[row * count + column].abs())
+                        .sum::<f64>()
+                })
+                .fold(0.0, f64::max);
+            let (dense_values, dense_vectors, _, _) = eigensolve(&matrix, count);
+            let (values, vectors, _, _) = banded::eigensolve(&matrix, count);
+            for (value, dense) in values.iter().zip(&dense_values) {
+                assert!(
+                    (value - dense).abs() <= 1.0e-12 * norm,
+                    "{name}: {value} against {dense}"
+                );
+            }
+            let [residual, orthogonality] = banded::eigen_errors(&matrix, count, &values, &vectors);
+            let rebuilt = banded::reconstruction_error(&matrix, count, &values, &vectors);
+            assert!(residual < 1.0e-14, "{name}: {residual:e}");
+            assert!(orthogonality < 1.0e-13, "{name}: {orthogonality:e}");
+            assert!(rebuilt < 1.0e-13, "{name}: {rebuilt:e}");
+            let mut alone = 0;
+            let mut worst = 0.0_f64;
+            for mode in 0..count {
+                let gap = [mode.checked_sub(1), (mode + 1 < count).then_some(mode + 1)]
+                    .into_iter()
+                    .flatten()
+                    .map(|other| (values[other] - values[mode]).abs())
+                    .fold(f64::INFINITY, f64::min);
+                if gap <= 1.0e-6 * norm {
+                    continue;
+                }
+                alone += 1;
+                let banded = &vectors[mode * count..(mode + 1) * count];
+                let dense = &dense_vectors[mode * count..(mode + 1) * count];
+                let sign = if banded.iter().zip(dense).map(|(a, b)| a * b).sum::<f64>() >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for (a, b) in banded.iter().zip(dense) {
+                    worst = worst.max((a - sign * b).abs());
+                }
+            }
+            // The ring's spectrum is all pairs but its ends.
+            assert!(alone >= 2, "{name}: {alone} of {count} eigenvalues alone");
+            assert!(worst < 1.0e-9, "{name}: vectors agree to {worst:e}");
+        }
     }
 
     /// A closed trace is a ring: its tangential operator has one zero mode and

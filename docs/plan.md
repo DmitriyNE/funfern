@@ -1289,6 +1289,22 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   Whether this was the 25.7 s "constitutive compile" of 2026-09-26 is not
   checked.
 
+- [x] The outgoing trace's eigensolve was still cubic in the trace, 1.0 s of
+  a 1.13 s compile at 1,062 trace nodes (edge 0.02), all of it the dense
+  eigenvector work. Done on 2026-10-12 (`docs/engineering-log.md`): the
+  operator has at most five nonzeros a row, so `trace_eigen::BandedEigenJob`
+  orders each connected piece by reverse Cuthill-McKee (a four-walled trace
+  is one cycle of bandwidth 4), reduces the band to a tridiagonal by Givens
+  rotations, takes the eigenvalues by scalar QL and each eigenvector by
+  inverse iteration on the band, LAPACK's `dstein` rules with a window in
+  place of its chained groups. The solve takes 137 ms at 1,062 nodes and 8
+  at 276, the compile 242 and 16 ms where it took 1,134 and 25; residuals
+  3e-15 of the matrix and orthogonality 4e-15 where the dense solve gave
+  1.7e-14 and 1e-13, checked against it as the oracle under test. Left: the
+  banded LU and its two substitutions are about three quarters of the solve;
+  a cycle ordered along itself with its wrap as a border would halve the
+  bandwidth, and a second preparation thread would halve the wall time again.
+
 - [x] Adaptation keeps running while the simulation is paused. Reported by
   the user on 2026-10-03, not yet reproduced. `refresh_amr`
   (`crates/funfern-app/src/ui/amr.rs`) stops for adaptation being off, a

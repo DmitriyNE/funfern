@@ -19,6 +19,7 @@ mod spline;
 mod spline_patch;
 mod topology;
 mod topology_scene;
+mod trace_eigen;
 mod transfer;
 mod volume_source;
 mod wave;

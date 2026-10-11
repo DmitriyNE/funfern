@@ -3456,7 +3456,7 @@ Submitting solver work outside the render graph, investigated and closed:
 
 Outgoing-boundary construction, not urgent:
 
-- [ ] The second-order outgoing assembly is the dominant reassembly cost -
+- [x] The second-order outgoing assembly is the dominant reassembly cost -
   `280.88 ms` against `4.99 ms` without that boundary on an 8938-DOF mesh, about
   ninety-eight per cent of the compile, and it is a dense symmetric
   eigendecomposition of the tangential operator over the trace. Worth attacking
@@ -3468,6 +3468,11 @@ Outgoing-boundary construction, not urgent:
   approximation with fixed residues and already drops modes whose decay falls
   below a threshold; whether the accuracy can be raised mid-run without
   disturbing the accepted history is the part to check first.
+  Done on 2026-10-12 (see that day's entry): the 280 ms was from before the
+  Householder solver, which measured 19 ms at 276 trace nodes and 1,020 ms
+  at 1,062; the solve now works from the operator's five nonzeros a row,
+  banded and quadratic, and takes 8 and 137 ms there, the compile 16 and
+  242 ms where it took 25 and 1,134. The Krylov idea was not needed.
 
 Reported 2026-09-23, not yet reproduced or diagnosed:
 
@@ -22708,6 +22713,112 @@ began and stand.
   and the encroachment search over every boundary edge with
   `boundary_relevant_to_region`, 18%. The Maintenance item names the last
   two.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
+
+## 2026-10-12 — The outgoing trace's eigensystem from its sparsity
+
+The backlog had the second-order outgoing assembly as the dominant
+reassembly cost at 280 ms, a figure from before the Householder solver.
+Measured again first, then made quadratic in the trace.
+
+- **Measured.** On the empty 2 × 2 domain with four second-order walls, the
+  canonical compile in one call on one core, with the walls and without
+  them, and the eigensolve's share:
+
+  | Edge | Trace | Compile, walls / none | Eigensolve |
+  |---|---|---|---|
+  | 0.08 | 276 | 25 / 7 ms | 19 ms |
+  | 0.04 | 496 | 128 / 23 ms | 103 ms |
+  | 0.03 | 662 | 291 / 44 ms | 249 ms |
+  | 0.02 | 1,062 | 1,134 / 105 ms | 1,020 ms |
+
+  At 1,062 nodes the Householder accumulation into the vectors took 42% of
+  the solve, the QL rotations on the vectors 33% and the reduction 22%: all
+  of it the cube of the trace, in the eigenvector work. Natively that runs
+  on the preparation thread in 8 ms quanta, so an adaptation or a wall edit
+  at that size landed a second late; in the static browser bundle's 4 ms
+  slices the 28 September entry measured 3.4 s. Reuse already covers edits
+  that leave the mesh alone, and every remesh renumbers the trace.
+- **The structure.** The normalized trace operator has at most five
+  nonzeros a row: each node is coupled to the nodes of the one or two
+  boundary edges it sits on. Four outgoing walls meet at the corners and
+  make one cycle, which reverse Cuthill-McKee orders at bandwidth 4; an
+  internal outgoing span is a piece of its own. The dense solve saw none of
+  that.
+- **Change.** `trace_eigen::BandedEigenJob` replaces `SymmetricEigenJob` in
+  `CanonicalOutgoingBoundaryJob`, which hands it the normalized nonzeros
+  instead of a dense matrix. Each connected piece is ordered by reverse
+  Cuthill-McKee from a node of least degree, neighbours by degree then
+  index, and solved on its own: the band is reduced to a tridiagonal by
+  Givens rotations chasing each bulge off the end, Schwarz's algorithm,
+  without accumulating the rotations; the eigenvalues come from implicit QL
+  on the scalars alone, EISPACK's `tql1`, under the same 30·n budget; and
+  each eigenvector comes from inverse iteration on the banded operator
+  itself, LAPACK's `dstein` rules on a band rather than a tridiagonal: a
+  banded LU with partial pivoting at the eigenvalue, consecutive shifts kept
+  ten units of roundoff apart so a repeated eigenvalue gets a factorization
+  of its own, a start vector from an integer generator seeded by the
+  position, and a vector accepted after its second pass at the earliest
+  when its residual is within 1e-9 of the piece's norm. Doing the iteration
+  on the band is what keeps the whole solve quadratic: there is no
+  back-transformation. Eigenpairs merge ascending over the pieces, ties by
+  piece then rank, with the largest entry of each vector positive. The
+  arithmetic is `sqrt` and the four operations. The dense solver stays under
+  test as the oracle.
+- **Two passes, not one.** After one inverse-iteration pass the ring of 160
+  read a residual of 2.3e-13 and an orthogonality of 2.7e-11: the start
+  vector's share of every other eigenvector, scaled by the eigenvalue's
+  roundoff over the gap. The second pass takes that out, `dstein`'s extra
+  iteration: 1.7e-16 and 8.3e-15 on the ring, and on a 144-node trace from
+  a meshed scene 2.7e-15, 3.7e-15 and a reconstruction `Σ λ v vᵀ` of the
+  operator to 1.9e-15, where the dense solve gave 1.7e-14 and 9.9e-14.
+- **A window, not dstein's groups.** `dstein` chains eigenvalues closer than
+  a thousandth of the norm into groups and orthogonalizes each vector
+  against its whole group. A trace spectrum's mean gap is about that share,
+  so the chains ran through most of it and the vectors were cubic again,
+  389 of 453 ms at 1,062 nodes. Orthogonalizing against the earlier vectors
+  within that distance instead gives the same bound, roundoff over the
+  share between any two further apart; the window held 6.6 vectors on
+  average and 42 at most there. Indexing the band rotation directly took
+  the reduction from 44 to 16 ms.
+- **After.** The same compile, and the solve as the difference:
+
+  | Edge | Trace | Compile, walls / none | Eigensolve |
+  |---|---|---|---|
+  | 0.08 | 276 | 16 / 8 ms | 8 ms |
+  | 0.04 | 496 | 53 / 25 ms | 28 ms |
+  | 0.03 | 662 | 93 / 44 ms | 49 ms |
+  | 0.02 | 1,062 | 242 / 105 ms | 137 ms |
+
+  At 1,062 nodes the reduction takes 16 ms, the scalar QL 19 and the
+  vectors the rest: per vector about 39 µs for the factorization, 39 for
+  the two substitutions, 15 for the orthogonalization and 13 for the
+  residual, the band of 4 and the serial dependency of a substitution. A
+  cycle ordered along itself with its wrap as a border would halve the
+  bandwidth, and a second preparation thread the wall time again; both
+  left.
+- **Tests.** `trace_eigen`: the ring of 160 to 1e-13 with residual under
+  1e-14, orthogonality and reconstruction under 1e-13, more units than
+  vectors and under three QL iterations a value; a trace in three pieces
+  with a node coupled to nothing, a general symmetric matrix whose band is
+  the whole matrix, a diagonal out of order, one and two nodes; an empty
+  trace, an asymmetric one and a repeated entry. `canonical_wave`:
+  `the_banded_trace_eigensolve_agrees_with_the_dense_oracle` runs both
+  solves on the trace of `Scene::initial` meshed at 0.16 with second-order
+  walls (144 nodes), the ring and a random matrix: eigenvalues equal to
+  1e-12 of the norm, residual under 1e-14, orthogonality and reconstruction
+  under 1e-13, and wherever an eigenvalue stands alone the same vector up
+  to sign to 1e-9 (5.5e-11 on the trace). The dense solver's own tests stay.
+- **Device.** `scripts/device-suite.sh`: 76 of 76 runs pass. Of the 24 runs
+  with second-order walls, 18 read what they read on 11 October to the last
+  digit shown; the six `canonical_gpu_timing` runs with those walls moved as
+  a new basis for the same boundary does, as they did on 28 September: the
+  Q error by at most 2.6%, 8.31e-7 to 8.53e-7, b by 0.9%, the auxiliary
+  error by up to 75% at 4.5e-7 to 7.8e-7 relative, and the energy residual
+  within 1e-7 either way. The first-order run read the same to the last
+  digit, and every other run did.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
