@@ -614,9 +614,10 @@ fn temporal_inverse_primary_mass(node: u32, local_time: f32) -> f32 {
 // The share multiplies the flux every stage, so what matters is its absolute
 // error, and the direct form's is half an f32 unit of one whatever `x` is,
 // with the same sign stage after stage. Its series therefore runs up to
-// 0.02, as its siblings' do: switching at 1e-3 left a common half-step rate
+// 0.5, as its siblings' do: switching at 1e-3 left a common half-step rate
 // such as 3.3e-3 (1/s at h = 6.6e-3) biased by 2e-8 a stage, a linear drift
-// of 4e-5 in 1000 steps against the reference.
+// of 4e-5 in 1000 steps against the reference, and switching at 0.02 left
+// the self-sustained emitter's gain, 0.046 a half step, biased by 6e-8.
 fn one_minus_exp_neg(x: f32) -> f32 {
     return -exp_minus_one(-x);
 }
@@ -662,11 +663,22 @@ fn short_wave_offset() -> u32 {
     return tables[control.runtime_slots.z + 2u].data.w;
 }
 
-// `e^{−x}`'s complement over `x`, `(1 − e^{−x})/x`, by its series where f32
-// would cancel the direct form away.
+// `e^{−x}`'s complement over `x`, `(1 − e^{−x})/x`, by its degree-8 series
+// below |x| = 0.5 and the direct form above. The direct form divides its
+// cancellation by `x`: against f64 it is off by 3.1e-6 between 0.02 and 0.1,
+// 6.4e-7 to 0.3 and 2.6e-7 to 0.5, where the series holds 6.6e-8, 8.3e-8 and
+// 1.0e-7, an f32 unit of a value near one. It keeps a series of its own
+// rather than dividing `exp_minus_one` by `x`, which a flushed denormal `x`
+// would make 0/0.
 fn one_minus_exp_neg_over(x: f32) -> f32 {
-    if abs(x) < 0.02 {
-        return 1.0 - x * (0.5 - x * (1.0 / 6.0 - x * (1.0 / 24.0 - x / 120.0)));
+    if abs(x) < 0.5 {
+        return 1.0
+            - x * (0.5
+                - x * (1.0 / 6.0
+                    - x * (1.0 / 24.0
+                        - x * (1.0 / 120.0
+                            - x * (1.0 / 720.0
+                                - x * (1.0 / 5040.0 - x * (1.0 / 40320.0 - x / 362880.0)))))));
     }
     return (1.0 - exp(-x)) / x;
 }
@@ -730,14 +742,25 @@ fn bernoulli_step(flux: f32, beta: f32, k: f32, duration: f32) -> f32 {
     return flux + flux * (d1 + d2 + d1 * d2);
 }
 
-// `e^{z} − 1`, by its series where f32 would cancel the direct form away.
-// Past 0.02 the direct form is off by up to half an f32 unit of one, with the
-// same sign every stage: a rate that fast drifts from the reference by about
-// 1.2e-7 a step, a rate error of a few 1e-5/s. Not fully accurate, and left
-// so; see "Worth checking sometime" in `docs/plan.md`.
+// `e^{z} − 1`, by its degree-9 series below |z| = 0.5 and the direct form
+// above. The direct form is off by up to half an f32 unit of one whatever `z`
+// is, with the same sign every stage, and the series by an f32 unit of the
+// result: against f64 the series reads 1.4e-8 at worst up to 0.1, 5.4e-8 up
+// to 0.3 and 9.3e-8 up to 0.5, where the direct form's 6.1e-8 to 8.5e-8 meets
+// it; a shorter series falls behind the direct form before 0.5, degree 7
+// past 0.3 and degree 5 past 0.1. Until 2026-10-11 the series stopped at
+// 0.02, and a rate past it drifted from the reference by up to 1.2e-7 a step
+// while a field grew, a rate error of a few 1e-5/s.
 fn exp_minus_one(z: f32) -> f32 {
-    if abs(z) < 0.02 {
-        return z * (1.0 + z * (0.5 + z * (1.0 / 6.0 + z * (1.0 / 24.0 + z / 120.0))));
+    if abs(z) < 0.5 {
+        return z
+            * (1.0
+                + z * (0.5
+                    + z * (1.0 / 6.0
+                        + z * (1.0 / 24.0
+                            + z * (1.0 / 120.0
+                                + z * (1.0 / 720.0
+                                    + z * (1.0 / 5040.0 + z * (1.0 / 40320.0 + z / 362880.0))))))));
     }
     return exp(z) - 1.0;
 }

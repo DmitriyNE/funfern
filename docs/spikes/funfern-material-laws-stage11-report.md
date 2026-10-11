@@ -149,7 +149,7 @@ traps in the gallery window.
 | Point and line probes | record `u` only, no `r` channel; the point energy density lacks `V(r)` |
 | Law patches on an oscillator generation | take a new generation |
 | `NONLINEAR_WALL=2` with `NONLINEAR_FORCED=1` | pins on the second-order trace bypass `prescribed_on_trace` and miss by 0.16; predates the stage; awaiting a decision |
-| Device `exp_minus_one` above 0.02 per half step | kept as a known inaccuracy: the emitter reads 5.2e-5 at 500 steps; such scenes are bounded at 1e-4 (`docs/plan.md`, "Worth checking sometime") |
+| Device `exp_minus_one` above 0.02 per half step | kept as a known inaccuracy: the emitter reads 5.2e-5 at 500 steps; such scenes are bounded at 1e-4 (`docs/plan.md`, "Worth checking sometime"). Fixed on 2026-10-11: the series runs to 0.5 per half step and every scene is held to 3e-5; see the log |
 | f32 accumulation of `r` | kept: 5.4e-5 in a rebuilt `b` across an opened-ground handoff, bounded at 1e-4 |
 | Constitutive compile time | 25.7 s of 28 s at 123,422 DOFs, 11× the time for 4× the DOFs. On the empty 2×2 domain at 0.02 with second-order walls, 30.7 s of 33 s was the outgoing trace's dense Jacobi eigensolve, against 0.25 s with reflecting walls. Replaced on 28 September by Householder and QL: that preparation takes 3.4 s. Whether the reported scene's time was the same is not checked |
 | The device's outgoing-trace cap, 1,024 nodes | removed on 28 September: nothing on the device read it, and the device matches the reference at 1,166 and 1,236 trace nodes. The one limit left is the 65,535 workgroups a dispatch launches, one per trace node. See the log |

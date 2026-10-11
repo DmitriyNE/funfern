@@ -1392,15 +1392,6 @@ Known inaccuracies judged not worth fixing now. Nothing on screen shows them,
 but each is a real departure from the reference, worth a look when its area
 is next touched.
 
-- The device's `exp_minus_one` (`crates/funfern-app/src/canonical_wave.wgsl`)
-  runs its series below |z| = 0.02 and `exp(z) − 1` above, which is off by up
-  to half an f32 unit of one with the same sign every stage. A loss or gain
-  past 0.02 per half step (13.5/s at the emitter's step) drifts by about
-  1.2e-7 a step, a rate error of a few 1e-5/s, which compounds against the
-  reference while a field grows: the self-sustained emitter reads 5.2e-5 at
-  500 steps against the Stage 0 3e-5. `canonical_gpu_long_run` holds such
-  scenes to 1e-4. A degree-9 series to |z| = 0.5 would fix it at the same
-  cost and branch structure.
 - The device accumulates the integrated field `r` in f32, and a handoff that
   rebuilds `b` about the new `r` carries that rounding amplified through the
   gradient: 5.4e-5 in `canonical_gpu_oscillator_handoff`'s opened mode

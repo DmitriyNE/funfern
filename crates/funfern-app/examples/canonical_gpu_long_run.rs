@@ -33,15 +33,16 @@
 //! scene's own sensitivity lets the f32 trajectory part from the f64 one
 //! faster than roundoff alone, and the figure is printed, not judged.
 //!
-//! A scene with a loss or gain rate past 0.02 per half step is held to 1e-4
-//! instead. The device forms `e^z − 1` there as `exp(z) − 1`, which is off by
-//! up to half an f32 unit of one with the same sign every stage, so its
-//! multipliers drift from the reference's by about 1.2e-7 a step. That is a
-//! rate error of a few 1e-5/s, which nothing on screen shows, but it
-//! compounds against the reference until the dynamics forget it: the
-//! self-sustained emitter's gain of 15 reads 5.2e-5 at 500 steps while it
-//! grows, and 1.5e-5 by 1000 once it has saturated. Not fully accurate; it
-//! is under "Worth checking sometime" in `docs/plan.md`.
+//! Every scene is held to that bound. Until 2026-10-11 a scene with a loss or
+//! gain rate past 0.02 per half step was held to 1e-4 instead: the device
+//! formed `e^z − 1` there as `exp(z) − 1`, off by up to half an f32 unit of
+//! one with the same sign every stage, so its multipliers drifted from the
+//! reference's by up to 1.2e-7 a step while a field grew, and the
+//! self-sustained emitter read 5.2e-5 at 500 steps on 2026-09-25. The
+//! device's series now runs to 0.5 per half step. The emitter, whose fastest
+//! rate is 0.076, reads Q 1.3e-6 at 500 steps and 2.4e-6 at 1000; the same
+//! day's shader before the change read 7.9e-6 and 1.1e-5 there, the scene
+//! and the step having moved since the 5.2e-5 was taken.
 
 #[path = "support/check.rs"]
 mod check;
@@ -68,6 +69,10 @@ fn steps() -> u64 {
 struct Pending {
     plan: Option<CanonicalGpuPlan>,
 }
+
+/// The Stage 0 f32 bound, every scene's.
+const STAGE_ZERO_BOUND: f64 = 3.0e-5;
+
 #[derive(Resource)]
 struct Expected {
     primary: Vec<f64>,
@@ -75,7 +80,6 @@ struct Expected {
     /// The largest norm each lane of the reference reached over the run,
     /// which the device's error is measured against.
     peak: Peak,
-    bound: f64,
     started: Instant,
     deadline: Instant,
     finished: bool,
@@ -163,12 +167,11 @@ fn main() -> AppExit {
         .canonical_operator
         .outgoing_boundary()
         .map_or(0, |boundary| boundary.trace_nodes().len());
-    let mut fastest_rate = 0.0_f64;
     let mut peak = Peak::default();
     let (plan, primary, complementary) =
         if let Some(op) = prepared.canonical_temporal_operator.clone() {
             let dt = prepared.recommended_time_step();
-            fastest_rate = op
+            let fastest_rate = op
                 .primary_loss_samples()
                 .chain(op.complementary_loss_samples())
                 .map(|sample| sample.base_rate.abs())
@@ -250,7 +253,6 @@ fn main() -> AppExit {
         primary,
         complementary,
         peak,
-        bound: if fastest_rate > 0.02 { 1.0e-4 } else { 3.0e-5 },
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(300),
         finished: false,
@@ -331,7 +333,7 @@ fn drive(
     expected.finished = true;
     // The Stage 0 f32 gate, where it is a claim.
     if steps() <= 1000
-        && (!within(primary, expected.bound) || !within(complementary, expected.bound))
+        && (!within(primary, STAGE_ZERO_BOUND) || !within(complementary, STAGE_ZERO_BOUND))
     {
         expected.failed = true;
     }

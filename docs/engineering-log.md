@@ -22570,3 +22570,38 @@ began and stand.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-11 — The device's exp-minus-one series runs to 0.5 per half step
+
+- **Changed.** `exp_minus_one` in `canonical_wave.wgsl` formed `e^z − 1` by
+  a degree-5 series below |z| = 0.02 and as `exp(z) − 1` above, where the
+  direct form is off by up to half an f32 unit of one whatever `z` is, with
+  the same sign every stage. It is now a degree-9 series below 0.5, the
+  direct form above; `one_minus_exp_neg_over`, `(1 − e^{−x})/x` in the van
+  der Pol map, a degree-8 series below 0.5 likewise. Same cost and branch
+  structure, as the plan entry proposed; the series keep to multiplies and
+  adds, so a device's `exp` no longer enters below 0.5.
+- **Measured in f32 against f64 on the host**, 800,000 points a band, both
+  signs. `e^z − 1`: the degree-9 series reads 1.4e-8 at worst up to 0.1,
+  5.4e-8 up to 0.3 and 9.3e-8 up to 0.5, where the direct form's 6.1e-8 to
+  8.5e-8 meets it, an f32 unit of the result; degree 7 falls behind the
+  direct form past 0.3 and degree 5 past 0.1, so 0.5 is as far as a short
+  series pays. `(1 − e^{−x})/x`: the direct form divides its cancellation by
+  `x` and is off by 3.1e-6 between 0.02 and 0.1, 6.4e-7 to 0.3 and 2.6e-7 to
+  0.5, where the degree-8 series holds 6.6e-8, 8.3e-8 and 1.0e-7. It keeps a
+  series of its own rather than `exp_minus_one` over `x`, which a flushed
+  denormal `x` would make 0/0.
+- **On the device.** The self-sustained emitter, gain 15 and magnetic loss
+  25, its fastest rate 0.076 per half step: before the change today it read
+  Q 7.9e-6 at 500 steps and 1.1e-5 at 1,000 against the reference, after it
+  1.3e-6 and 2.4e-6 (b 1.4e-6 and 2.9e-6), with or without the short-wave
+  loss of 0.25. The 5.2e-5 at 500 steps recorded on 2026-09-25 no longer
+  reproduces on the shader before the change: the scene and the step have
+  moved since, and the fixture's figures are today's.
+- **The fixture.** `canonical_gpu_long_run` held a scene whose fastest rate
+  passed 0.02 per half step to 1e-4; every scene is held to the Stage 0
+  3e-5 now, as one constant. The "Worth checking sometime" entry in
+  `docs/plan.md` is gone, and the stage 11 report's row says so.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the device suite, 76 of 76 pass.
