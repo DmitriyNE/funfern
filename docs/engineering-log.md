@@ -22543,3 +22543,30 @@ behind its nonlinear first-order wall 0.893 against 1.67 ms, 47% less. The
 ratios are D's; the spike's D paragraph carries these figures now. C1's
 figures (0.271 against 0.259 at the edge) were taken before the recording
 began and stand.
+
+## 2026-10-11 — The trace eigensolve budgets its iterations over the whole solve, and its refusal names the way out
+
+- **Changed.** The implicit QL solve for the outgoing trace's modes refused
+  the solve when any one eigenvalue took more than 30 iterations, EISPACK's
+  `tql2` rule. It now budgets 30·n over the whole solve, LAPACK's `dsteqr`
+  rule, so an eigenvalue that stalls borrows from the others, and the counter
+  no longer resets between eigenvalues. The constant is
+  `EIGEN_ITERATIONS_PER_EIGENVALUE`; the two refusal sites share one message.
+- **The message.** The solve is deterministic, so a trace that fails fails at
+  every preparation, and the 2026-09-29 entry recorded that the message did
+  not say so: the preparation's refusal reached the diagnostics as "the
+  outgoing trace eigensolve did not converge" and nothing more. It now goes
+  on: "the document keeps the change, but the solver runs without it until a
+  new mesh edge, other walls or an edit along them change the outgoing
+  boundary".
+- **Measured.** The counter, read in the tests through a `cfg(test)`
+  accessor: the 160-node ring spends 260 iterations, 1.6 an eigenvalue, the
+  57-node general symmetric matrix 125, 2.2 an eigenvalue, and the diagonal,
+  one-node and two-node cases 0, 0 and 1. Both tests hold the total under
+  3·n, a tenth of the budget, which pins the counter as a total. Nothing can
+  make a symmetric tridiagonal QL fail to converge on purpose, so the refusal
+  itself stays untested, as before.
+- **Docs.** The "Worth checking sometime" entry in `docs/plan.md` is gone.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

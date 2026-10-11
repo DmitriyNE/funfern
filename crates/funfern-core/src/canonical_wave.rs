@@ -5057,11 +5057,17 @@ pub(crate) fn apply_outgoing_generator(
 /// 4 ms a browser frame lends preparation.
 const EIGEN_UNIT_WORK: usize = 1 << 13;
 
-/// Implicit QL iterations one eigenvalue may take before the solve is refused.
-/// EISPACK's bound; the trace operators here take under two on average and
-/// five at most. LAPACK's `dsteqr` budgets 30·n for the whole solve instead;
-/// see "Worth checking sometime" in `docs/plan.md`.
-const EIGEN_MAXIMUM_ITERATIONS: usize = 30;
+/// Implicit QL iterations the whole solve may take, per eigenvalue: LAPACK's
+/// `dsteqr` budget of 30·n, under which an eigenvalue that stalls borrows from
+/// the others, where EISPACK's `tql2` refuses the solve at 30 on any one. The
+/// trace operators here take under two on average and five at most.
+const EIGEN_ITERATIONS_PER_EIGENVALUE: usize = 30;
+
+/// Why a refused solve was refused, and the way out. The solve is
+/// deterministic, so the same trace fails every time it is prepared: the
+/// document holds the change, the running generation keeps running, and the
+/// trace is only prepared again when something along the boundary changes it.
+const EIGENSOLVE_DID_NOT_CONVERGE: &str = "the outgoing trace eigensolve did not converge; the document keeps the change, but the solver runs without it until a new mesh edge, other walls or an edit along them change the outgoing boundary";
 
 /// Dependency-free, cooperative eigensolver for the symmetric trace oracle:
 /// Householder tridiagonalization, then implicit QL, as EISPACK's `tred2` and
@@ -5088,6 +5094,7 @@ struct SymmetricEigenJob {
     /// QL's accumulated shift `f` and its running negligibility scale `tst1`.
     shift: f64,
     negligible: f64,
+    /// QL iterations spent so far, over the whole solve.
     iterations: usize,
     /// One QL iteration's plane rotations `(c, s)`, from row `m - 1` down to
     /// `l`, kept so their application to the vectors can be split into units.
@@ -5204,11 +5211,15 @@ impl SymmetricEigenJob {
             .chain(&vectors)
             .any(|value| !value.is_finite())
         {
-            return Err(WaveError::InvalidMesh(
-                "the outgoing trace eigensolve did not converge",
-            ));
+            return Err(WaveError::InvalidMesh(EIGENSOLVE_DID_NOT_CONVERGE));
         }
         Ok((values, vectors))
+    }
+
+    /// QL iterations spent so far, over the whole solve.
+    #[cfg(test)]
+    fn iterations(&self) -> usize {
+        self.iterations
     }
 
     /// `V[row][column]`.
@@ -5390,7 +5401,6 @@ impl SymmetricEigenJob {
                 if m == l {
                     self.settle(l);
                 } else {
-                    self.iterations = 0;
                     self.phase = EigenPhase::Sweep {
                         eigenvalue: l,
                         end: m,
@@ -5404,10 +5414,8 @@ impl SymmetricEigenJob {
                 end: m,
             } => {
                 self.iterations += 1;
-                if self.iterations > EIGEN_MAXIMUM_ITERATIONS {
-                    return Err(WaveError::InvalidMesh(
-                        "the outgoing trace eigensolve did not converge",
-                    ));
+                if self.iterations > EIGEN_ITERATIONS_PER_EIGENVALUE * self.count {
+                    return Err(WaveError::InvalidMesh(EIGENSOLVE_DID_NOT_CONVERGE));
                 }
                 let d = &mut self.diagonal;
                 let e = &mut self.off_diagonal;
@@ -6187,13 +6195,14 @@ mod tests {
 
     /// Runs the cooperative eigensolve to completion, one unit at a time, and
     /// returns its result with the number of units it took.
-    fn eigensolve(matrix: &[f64], count: usize) -> (Vec<f64>, Vec<f64>, usize) {
+    /// The eigenpairs, the units the solve took, and the QL iterations it spent.
+    fn eigensolve(matrix: &[f64], count: usize) -> (Vec<f64>, Vec<f64>, usize, usize) {
         let mut job = SymmetricEigenJob::new(matrix.to_vec(), count).unwrap();
         let mut units = 1;
         loop {
             if let Some(result) = job.advance(1) {
                 let (values, vectors) = result.unwrap();
-                return (values, vectors, units);
+                return (values, vectors, units, job.iterations());
             }
             units += 1;
         }
@@ -6237,8 +6246,9 @@ mod tests {
 
     /// A closed trace is a ring: its tangential operator has one zero mode and
     /// every other eigenvalue twice, `2 - 2 cos(2 pi k / n)` for a uniform one.
-    /// The solve finds them to roundoff, with orthonormal vectors, and yields
-    /// many times on the way instead of spending one long unit.
+    /// The solve finds them to roundoff, with orthonormal vectors, yields
+    /// many times on the way instead of spending one long unit, and spends a
+    /// tenth of its iteration budget, which is counted over the whole solve.
     #[test]
     fn the_trace_eigensolve_finds_a_rings_spectrum_in_bounded_units() {
         let count = 160;
@@ -6249,7 +6259,7 @@ mod tests {
             matrix[row * count + next] = -1.0;
             matrix[next * count + row] = -1.0;
         }
-        let (values, vectors, units) = eigensolve(&matrix, count);
+        let (values, vectors, units, iterations) = eigensolve(&matrix, count);
         let mut expected = (0..count)
             .map(|k| 2.0 - 2.0 * (std::f64::consts::TAU * k as f64 / count as f64).cos())
             .collect::<Vec<_>>();
@@ -6266,6 +6276,10 @@ mod tests {
         assert!(orthogonality < 1.0e-13, "{orthogonality:e}");
         // One unit per Householder and accumulation step at the least.
         assert!(units > 2 * count, "{units}");
+        assert!(
+            iterations <= 3 * count,
+            "{iterations} iterations for {count}"
+        );
     }
 
     /// A trace in pieces, with a node coupled to nothing, is block diagonal:
@@ -6312,7 +6326,11 @@ mod tests {
         cases.push((vec![4.0], 1));
         cases.push((vec![2.0, -1.0, -1.0, 2.0], 2));
         for (matrix, count) in cases {
-            let (values, vectors, _) = eigensolve(&matrix, count);
+            let (values, vectors, _, iterations) = eigensolve(&matrix, count);
+            assert!(
+                iterations <= 3 * count,
+                "{iterations} iterations for {count}"
+            );
             assert_eq!(values.len(), count);
             assert!(
                 values.windows(2).all(|pair| pair[0] <= pair[1]),
@@ -6324,7 +6342,7 @@ mod tests {
             assert!(residual < 1.0e-14, "{count}: {residual:e}");
             assert!(orthogonality < 1.0e-13, "{count}: {orthogonality:e}");
         }
-        let (values, _, _) = eigensolve(&[2.0, -1.0, -1.0, 2.0], 2);
+        let (values, _, _, _) = eigensolve(&[2.0, -1.0, -1.0, 2.0], 2);
         assert!((values[0] - 1.0).abs() < 1.0e-15 && (values[1] - 3.0).abs() < 1.0e-15);
     }
 
