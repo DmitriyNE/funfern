@@ -22420,3 +22420,43 @@ trapezoid 8 to 55), and 20,000 outlast the example's 300-second deadline
 under the half kicks. It is to be read on a quiet host. Behind the first-order
 wall the dispatches are the same either way. Next: D, the default switched
 on both.
+
+## 2026-10-11 — A fixed pin holds its signal through the loss stage
+
+A fixed generation's step pins at its start and then runs the first loss
+stage, which decays every node's flux, a pin's among them; the kicks pin
+again at their own instants. Between the two the first kick's wall read a
+pinned trace node's field from the decayed flux: the half kicks' carried
+pin field, the mean of the flux carried in and the one pinned to, and the
+trapezoid step's explicit half and the start of its loss. Beside a loss
+that put a pin `γ·dt/2` low into the wall's input, and a pinned
+second-order trace stepped at first order under either wall step - 2.08
+and 2.12 under the half kicks, 2.04 and 2.10 under the trapezoid - where it
+is second order without the loss, and lossy pins beside reflecting or
+first-order walls are second order already, nothing else reading a pin's
+flux before it is pinned again. The CPU reference and the device did the
+same, so no device gate could see it; C2a found its driven twin.
+
+The pin now holds its signal through the stage: the reference pins again
+after its opening loss stage, and the device's opening stage writes a
+fixed pin back to the flux it pinned at the step's start. The stage still
+books what it takes from the pin as loss, and the pin gives it back in the
+prescribed lane, where the first kick's own exchange booked it before, so
+the ledger keeps its meaning and closes as it did. A driven generation
+reads its pins at each stage's signal already (C2a) and is unchanged.
+`a_pinned_trace_beside_a_loss_steps_at_second_order` reads 4.02 and 4.03
+under the half kicks and 4.06 and 4.04 under the trapezoid step, and fails
+without the fix. On the device `canonical_gpu_timing --loss --forcing` behind
+either wall order and none, under either wall step, reads `Q` within 9.9e-7
+and its ledger within 3.1e-8 beside the reference's; the pinned-sides
+handoffs within 2.2e-7 and 1.4e-6. The half kicks' checksums after 2,000
+steps change on exactly the three of eighteen fixtures that put a loss on a
+pin (`--loss --forcing` behind each wall order and none) and match HEAD's on
+the other fifteen, the driven ones among them. The device suite runs the
+half kicks' second-order case too, and passed 73 of 74. The one,
+`canonical_gpu_temporal_timing --outgoing`, timed out at exit in wgpu's
+wait on its last submission while the desktop's screen recording held the
+GPU, every run in that suite some eight times its usual time a step; C2a's
+build, before this fix and C2b, failed the same way beside it (11.1 ms a
+step, against 1.1 on a quiet host). An unfenced timing run can exit with
+that much queued; not changed here.

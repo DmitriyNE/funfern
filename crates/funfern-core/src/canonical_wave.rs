@@ -2173,6 +2173,11 @@ impl CanonicalWaveState {
         let (primary_loss, complementary_loss) = self.apply_loss(operator, half_step)?;
         accounting.primary_loss += primary_loss;
         accounting.complementary_loss += complementary_loss;
+        // The loss stage decays a pin's flux with every other node's; the pin
+        // holds its signal through it, giving back what the stage took. The
+        // first kick's wall reads a pinned trace node's field from its flux,
+        // and the decayed one made the step first order beside a loss.
+        accounting.prescribed_exchange += self.enforce_prescribed(operator, forcing, start_time)?;
 
         // Without a wall the trapezoid step is the half-kick step, to the bit.
         let trapezoid = self.wall_step == CanonicalWallStep::Trapezoid && operator.has_walls();
@@ -7941,6 +7946,95 @@ mod tests {
 
     /// A box behind walls of one order, meshed at `edge`, for the trapezoid
     /// wall step's tests: the default scene's `[-1, 1]²`.
+    /// Prescribed data on a second-order wall's trace beside a loss. The loss
+    /// stage decays every node's flux, a pin's among them, and the first
+    /// kick's wall read a pinned trace node's field from that decayed flux
+    /// rather than its signal: these ratios read 2.08 and 2.12 under the half
+    /// kicks and 2.04 and 2.10 under the trapezoid step that way, first order.
+    /// A pin now holds its signal through the loss stage.
+    #[test]
+    fn a_pinned_trace_beside_a_loss_steps_at_second_order() {
+        let mut scene = Scene::default();
+        scene.materials[0].magnetic_loss = Some(crate::LossChannel {
+            base_rate: crate::ScalarField::constant(2.0),
+            law: crate::DampingLaw {
+                rate: crate::RateLaw::Constant,
+                drive: crate::TimeDrive::None,
+                gate: None,
+            },
+        });
+        let mesh = crate::mesh_scene(
+            &scene,
+            31,
+            crate::MeshingOptions {
+                target_edge_length: 0.3,
+                minimum_angle_degrees: 14.0,
+                ..crate::MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 37).unwrap();
+        let prescribed = operator
+            .node_points()
+            .iter()
+            .map(|point| {
+                (point.x < -0.999 && point.y.abs() < 0.1)
+                    .then_some(crate::TimeSignal::harmonic(1.0, 0.2, 1.3, 0.2))
+            })
+            .collect::<Vec<_>>();
+        let boundary = operator.outgoing_boundary().unwrap();
+        let pinned = boundary
+            .trace_nodes()
+            .iter()
+            .filter(|node| prescribed[**node as usize].is_some())
+            .count();
+        assert!(
+            pinned > 0 && pinned < boundary.trace_nodes().len() / 4,
+            "the fixture pins a few trace nodes"
+        );
+        let forcing = CanonicalForcing::from_prescribed(&operator, prescribed).unwrap();
+        for wall_step in [CanonicalWallStep::HalfKicks, CanonicalWallStep::Trapezoid] {
+            let run = |steps: u64| {
+                let mut state = CanonicalWaveState::zero(&operator, 0.3 / steps as f64)
+                    .unwrap()
+                    .with_wall_step(&operator, wall_step)
+                    .unwrap();
+                for _ in 0..steps {
+                    state.step_with_forcing(&operator, &forcing).unwrap();
+                }
+                state
+            };
+            let reference = run(2000);
+            let error = |steps| {
+                let state = run(steps);
+                let complementary = state
+                    .complementary_flux()
+                    .iter()
+                    .zip(reference.complementary_flux())
+                    .map(|(a, b)| (*a - *b).norm());
+                state
+                    .primary_flux()
+                    .iter()
+                    .zip(reference.primary_flux())
+                    .map(|(a, b)| (a - b).abs())
+                    .chain(complementary)
+                    .fold(0.0_f64, f64::max)
+            };
+            let (coarse, middle, fine) = (error(50), error(100), error(200));
+            assert!(
+                coarse / middle > 3.6,
+                "{wall_step:?}: {coarse:e} {middle:e}"
+            );
+            assert!(middle / fine > 3.6, "{wall_step:?}: {middle:e} {fine:e}");
+        }
+    }
+
     fn walled_square(condition: OuterBoundaryCondition, edge: f64) -> CanonicalWaveOperator {
         let scene = Scene::default();
         let mesh = crate::mesh_scene(

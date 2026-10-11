@@ -39,6 +39,7 @@ RUNS=(
   'FAILURE_LAW=phi4 canonical_gpu_nonlinear_failure'
   'canonical_gpu_timing --second-order --trapezoid'
   'canonical_gpu_timing --second-order --loss --forcing --trapezoid'
+  'canonical_gpu_timing --second-order --loss --forcing'
   'canonical_gpu_timing --first-order --loss --forcing --trapezoid'
   'canonical_gpu_timing --second-order --leapfrog --trapezoid'
   'canonical_gpu_timing --second-order --law-patch --trapezoid'

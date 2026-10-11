@@ -2386,14 +2386,24 @@ fn start_loss(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         var next = owned - owned * node_loss_fraction(i, false);
         if node_is_active(i) { next = active_loss_map(i, owned, false); }
-        set_candidate_q(i, next);
+        let stage_time = control.clock_f32.y;
+        let lost = stage_primary_energy(i, owned, stage_time)
+            - stage_primary_energy(i, next, stage_time);
+        // The stage decays a fixed pin's flux with every other node's; the
+        // pin holds its signal through it, giving back what the stage took,
+        // since the first kick's wall reads a pinned trace node's field from
+        // its flux. The reference re-pins after its loss stage.
+        var held = next;
+        if nodes[i].boundary.z != 0u && !temporal_enabled() {
+            held = owned;
+            exchange += lost;
+        }
+        set_candidate_q(i, held);
         if use_force_cache() {
             set_candidate_force(i, accepted_force(i));
         }
         scratch[i].values.y = exchange;
-        let stage_time = control.clock_f32.y;
-        scratch[i].values.z = stage_primary_energy(i, owned, stage_time)
-            - stage_primary_energy(i, next, stage_time);
+        scratch[i].values.z = lost;
     } else if i < node_count + sample_count {
         let sample_index = i - node_count;
         let old = accepted_b(sample_index);
