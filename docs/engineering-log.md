@@ -22274,3 +22274,16 @@ trace's mode loss into the prescribed lane as well, where the same deficit
 cancels it in their residual, while the trapezoid returns the pin's share by
 node, so its residual shows it: 4.2e-5 at 20,000 steps, inside the 2e-4 gate.
 Next: C2, the driven path on the device.
+
+## 2026-10-11 — A staged law patch carries its loss flags
+
+`stage_linear_loss_patch` set the plan's loss-stage and force-cache flags
+but not the event word the device's commit reads them from, which a live
+patch's upload fills. Committing a staged patch therefore cleared both: a
+nonzero rate stopped running its loss stages, and `canonical_gpu_timing
+--loss --law-patch` read `Q` 1.1e-2 from the reference under either wall
+step. The writer now leaves the live patch's word, `Q` there reads 6.1e-7,
+`a_staged_law_patch_carries_the_live_patch_flags` compares the two words
+across the four zero and nonzero rate pairs and fails without the line, and
+the device suite runs that fixture. Only the timing example and a packing
+test stage a patch this way; the app's patches are live.

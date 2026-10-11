@@ -71,6 +71,7 @@ RUNS=(
   'canonical_gpu_temporal_rollback'
   'canonical_gpu_timing'
   'canonical_gpu_timing --failure'
+  'canonical_gpu_timing --loss --law-patch'
   # The app itself, driven through its own handlers (src/ui/e2e.rs).
   'FUNFERN_E2E=cavity funfern-app'
   'FUNFERN_E2E=cavity-batches funfern-app'

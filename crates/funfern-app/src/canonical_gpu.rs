@@ -2277,6 +2277,9 @@ impl CanonicalGpuPlan {
         flags |= u32::from(self.needs_accounting) << 1;
         flags |= u32::from(complementary_rates.iter().all(|rate| *rate == 0.0)) << 2;
         self.control.boundary_offsets.w = flags;
+        // The device's commit takes the loss-stage and force-cache flags from
+        // the event word, as a live patch's upload carries them.
+        self.control.event.w = flags & 0b101;
         self.manifest.dispatches_per_step = 4
             + fourth_order_dispatches(flags)
             + SHORT_WAVE_DISPATCHES * usize::from(self.short_wave)
@@ -9737,6 +9740,32 @@ mod tests {
             .stage_maintenance(&vec![0.0; maintenance.node_count], 4)
             .unwrap();
         assert_eq!(maintenance.manifest.event_dispatches, 4);
+    }
+
+    /// The device's commit reads a law patch's loss flags from the event
+    /// word, so a staged patch must leave there what a live one uploads.
+    #[test]
+    fn a_staged_law_patch_carries_the_live_patch_flags() {
+        let base = plan(OuterBoundaryCondition::Reflecting);
+        for (primary, complementary) in [(0.0, 0.0), (0.4, 0.0), (0.0, 0.3), (0.4, 0.3)] {
+            let primary_rates = vec![primary; base.node_count];
+            let complementary_rates = vec![complementary; base.sample_count];
+            let mut staged = base.clone();
+            staged
+                .stage_linear_loss_patch(&primary_rates, &complementary_rates, 3)
+                .unwrap();
+            let live = CanonicalGpuLiveEvent::linear_loss_patch(
+                base.time_step,
+                &primary_rates,
+                &complementary_rates,
+                3,
+            )
+            .unwrap();
+            assert_eq!(
+                staged.control.event.w, live.upload[0].data.w,
+                "rates {primary} and {complementary}"
+            );
+        }
     }
 
     #[test]
