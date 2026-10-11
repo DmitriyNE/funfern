@@ -16,6 +16,11 @@
 //! or `van-der-pol`, Klein-Gordon with a self-oscillating loss on the skin's
 //! primary channel. The oscillator runs also seed and compare the integrated
 //! field `r`.
+//!
+//! `DRIVEN_WALLS=outgoing` keeps the document's second-order outgoing walls,
+//! whose trace the device sweeps at each stage's mass, and
+//! `DRIVEN_WALL_STEP=trapezoid` steps them by the trapezoid rule, the
+//! reference and the device alike.
 
 #[path = "support/check.rs"]
 mod check;
@@ -31,9 +36,9 @@ use funfern_app::topology_editor::TopologyEditor;
 use funfern_app::topology_runtime::TopologyRuntime;
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
-    CanonicalTemporalWaveState, DampingLaw, ElectromagneticPolarization, LossChannel,
-    MeshingOptions, PhysicsModel, Point2, RateLaw, ScalarField, TimeDrive, apply_restoring_preset,
-    restoring_presets,
+    CanonicalTemporalWaveState, CanonicalWallStep, DampingLaw, ElectromagneticPolarization,
+    LossChannel, MeshingOptions, PhysicsModel, Point2, RateLaw, ScalarField, TimeDrive,
+    apply_restoring_preset, restoring_presets,
 };
 
 fn steps() -> u64 {
@@ -115,11 +120,8 @@ fn main() -> AppExit {
             other => panic!("unknown DRIVEN_LAW {other}"),
         }
     }
-    // The document's default walls are second-order outgoing, which a driven
-    // medium cannot yet use: that boundary's trace factorization is built from
-    // the nodal mass and the device has no way to refresh it. The plan
-    // compiler refuses the combination, so this fixture runs reflecting walls
-    // and `DRIVEN_WALLS=outgoing` asks for the refusal instead.
+    // The document's default walls are second-order outgoing; this fixture
+    // runs reflecting ones unless `DRIVEN_WALLS=outgoing` keeps them.
     if !std::env::var("DRIVEN_WALLS").is_ok_and(|value| value == "outgoing") {
         let walls = funfern_core::OuterBoundaryConditions::uniform(
             funfern_core::OuterBoundaryCondition::Reflecting,
@@ -198,8 +200,14 @@ fn main() -> AppExit {
         .map(|point| 0.03 * (0.9 * point.x + 1.2 * point.y).cos())
         .collect::<Vec<_>>();
     let complementary = base.compatible_flux(&potential).expect("compatible flux");
+    let wall_step = match std::env::var("DRIVEN_WALL_STEP").as_deref() {
+        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
+        Ok(other) => panic!("DRIVEN_WALL_STEP takes only trapezoid, not {other}"),
+        Err(_) => CanonicalWallStep::HalfKicks,
+    };
     let mut seeded = CanonicalTemporalWaveState::new(&temporal, time_step, primary, complementary)
-        .expect("seeded state");
+        .expect("seeded state")
+        .with_wall_step(wall_step);
     if temporal.has_restoring() {
         let integrated = base
             .node_points()

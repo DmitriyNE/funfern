@@ -1254,11 +1254,14 @@ impl CanonicalGpuPlan {
                 "the temporal state, clock and operator must share one boundary",
             ));
         }
-        // A driven generation's walls reach the trapezoid rule on the device
-        // in stage C2 of `docs/spikes/funfern-outgoing-wall-step-spike.md`.
-        if state.wall_step() != CanonicalWallStep::HalfKicks {
+        // A nonlinear wall reaches the trapezoid rule on the device in stage
+        // C2b of `docs/spikes/funfern-outgoing-wall-step-spike.md`.
+        if state.wall_step() == CanonicalWallStep::Trapezoid
+            && operator.has_field_laws()
+            && operator.base().has_walls()
+        {
             return Err(CanonicalGpuBuildError::Unrepresentable(
-                "the device steps a driven generation's walls by half kicks only",
+                "the device steps a nonlinear generation's walls by half kicks only",
             ));
         }
         if state.thin_gap_jump().iter().any(|jump| *jump != 0.0)
@@ -1270,13 +1273,16 @@ impl CanonicalGpuPlan {
         }
         // A driven generation's device path solves the trace by sweeping,
         // because its mass moves; the inverted lane a stepping state carries
-        // could not be used even if it were built.
+        // could not be used even if it were built. Its wall's tables come
+        // from a factor prepared for the duration the state's wall step
+        // solves over, as the reference prepares one at each stage.
         let fixed_state = CanonicalWaveState::for_backend(
             operator.base(),
             state.time_step(),
             state.primary_flux().to_vec(),
             state.complementary_flux().to_vec(),
-        )?;
+        )?
+        .with_wall_step(operator.base(), state.wall_step())?;
         let mut plan = Self::compile(operator.base(), &fixed_state, forcing, clock)?;
         plan.attach_temporal_bulk(operator, state, clock)?;
         plan.apply_integrator(
@@ -1359,10 +1365,11 @@ impl CanonicalGpuPlan {
                     "a nonlinear wall's trace mass moves, so it cannot apply a packed inverse",
                 ));
             }
-            self.control.boundary_offsets.w |= NONLINEAR_TRACE_FLAG;
+            let flags = self.control.boundary_offsets.w;
             self.manifest.dispatches_per_step = self.manifest.dispatches_per_step
-                - trace_dispatches(self.trace_count, self.trace_sweeps, false)
-                + nonlinear_trace_dispatches(self.trace_count, self.trace_sweeps);
+                - self.wall_dispatches(flags)
+                + self.wall_dispatches(flags | NONLINEAR_TRACE_FLAG);
+            self.control.boundary_offsets.w = flags | NONLINEAR_TRACE_FLAG;
         }
         // The filter composes wherever the stepper does, as the fixed plan
         // this one extends already admits it: the correction keeps pins, pole
@@ -9283,6 +9290,14 @@ mod tests {
     }
 
     fn media_plan(boundary: OuterBoundaryCondition, kerr: bool) -> CanonicalGpuPlan {
+        media_plan_stepping(boundary, kerr, CanonicalWallStep::HalfKicks).unwrap()
+    }
+
+    fn media_plan_stepping(
+        boundary: OuterBoundaryCondition,
+        kerr: bool,
+        wall_step: CanonicalWallStep,
+    ) -> Result<CanonicalGpuPlan, CanonicalGpuBuildError> {
         let mut scene = Scene::initial();
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.2),
@@ -9311,14 +9326,54 @@ mod tests {
         let operator =
             CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
         let time_step = 0.4 * operator.maximum_time_step();
-        let state = CanonicalTemporalWaveState::zero(&operator, time_step).unwrap();
+        let state = CanonicalTemporalWaveState::zero(&operator, time_step)
+            .unwrap()
+            .with_wall_step(wall_step);
         CanonicalGpuPlan::compile_temporal(
             &operator,
             &state,
             &CanonicalForcing::none(operator.base()),
             CanonicalGpuClock::initial(time_step).unwrap(),
         )
-        .unwrap()
+    }
+
+    /// A driven generation's linear wall steps by the trapezoid rule as a
+    /// fixed one does, its trace swept at each stage's mass: one solve over
+    /// the whole step, its sweeps counted for that duration, where the half
+    /// kicks take two over half a step each. A first-order wall steps in the
+    /// nodal kicks, and a nonlinear wall waits for stage C2b.
+    #[test]
+    fn a_driven_wall_takes_one_solve_a_step_under_the_trapezoid_rule() {
+        let second_order = OuterBoundaryCondition::SecondOrderOutgoing;
+        let halves = media_plan(second_order, false);
+        let trapezoid =
+            media_plan_stepping(second_order, false, CanonicalWallStep::Trapezoid).unwrap();
+        assert!(!trapezoid.trace_direct);
+        assert_ne!(
+            trapezoid.control.boundary_offsets.w & TRAPEZOID_WALL_FLAG,
+            0
+        );
+        assert_ne!(trapezoid.control.boundary_offsets.w & FOURTH_ORDER_FLAG, 0);
+        assert_eq!(trapezoid.control.boundary_offsets.w & KICK_FORM_FLAG, 0);
+        assert!(trapezoid.trace_sweeps >= halves.trace_sweeps);
+        assert_eq!(
+            trapezoid.manifest.dispatches_per_step,
+            halves.manifest.dispatches_per_step - (6 + 4 * halves.trace_sweeps)
+                + (2 + 3 + 2 * trapezoid.trace_sweeps + 4)
+        );
+        let first_order = OuterBoundaryCondition::FirstOrderOutgoing;
+        let first = media_plan_stepping(first_order, false, CanonicalWallStep::Trapezoid).unwrap();
+        assert_ne!(first.control.boundary_offsets.w & TRAPEZOID_WALL_FLAG, 0);
+        assert_eq!(
+            first.manifest.dispatches_per_step,
+            media_plan(first_order, false).manifest.dispatches_per_step
+        );
+        for boundary in [first_order, second_order] {
+            assert!(matches!(
+                media_plan_stepping(boundary, true, CanonicalWallStep::Trapezoid),
+                Err(CanonicalGpuBuildError::Unrepresentable(_))
+            ));
+        }
     }
 
     /// A pin on a driven generation's outgoing trace packs as a held row of

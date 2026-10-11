@@ -22287,3 +22287,76 @@ step. The writer now leaves the live patch's word, `Q` there reads 6.1e-7,
 across the four zero and nonzero rate pairs and fails without the line, and
 the device suite runs that fixture. Only the timing example and a packing
 test stage a patch this way; the app's patches are live.
+
+## 2026-10-11 — The trapezoid wall step on the device, driven generations behind linear walls (stage C2a)
+
+`compile_temporal` no longer refuses `CanonicalWallStep::Trapezoid` behind
+linear walls. The fixed state it compiles the shared tables from now carries
+the driven state's wall step, so the wall's modal words and its sweep count
+come from a factor prepared for the whole step the trapezoid's one solve
+covers; the trace is swept at each stage's mass, as under the half kicks.
+C1's passes already read the mass at their stage's instant on a driven
+generation, the start's for the explicit half and the end's for the
+implicit one - the reference's B2. A field law beside a wall stays refused
+until C2b. That moves the kick form's wall rate there too: only a
+stiffness-side field law brings the kick form, so C2a cannot reach it.
+`attach_temporal_bulk` now swaps the wall's dispatches by the plan's own
+wall step when a field law makes the trace nonlinear, where it subtracted
+the half kicks' count whatever the step.
+
+A pinned trace found a fault in the reference. On a driven generation the
+loss stage decays every node's flux, pins included, and the kicks pin again
+at their own instants; the half kicks therefore read a pinned trace node's
+field as its signal at the kick (`TracePinField::Staged`), and so does the
+device under either step. B2's trapezoid read the decayed flux instead, in
+the explicit half's `wall_rate_at` and in its loss, so beside a loss its
+wall saw a pin `γ·dt/2` low: `a_pinned_trace_under_a_pump_steps_at_second_order`,
+with a loss of 2 added, read 2.02 and 2.09 under the trapezoid step and
+4.02 and 4.03 under the half kicks. Both now read the field the walls see
+through `wall_field_at`, a pin's signal at the stage, and the lossy case
+reads 4.07 and 4.05; the test keeps it. One balance case then read its
+coarsest pair just under its floor: a pinned trace beside van der Pol,
+under the trapezoid step and the leapfrog, whose ledger leaves 1.4e-6 there,
+a hundredth of its neighbours', read 1.70, then 1.92 and 1.98 over two more
+refinements (HEAD's reference read 1.77 and 1.94 from 1.9e-6). The leading
+term nearly cancels, so that pair stands before the asymptote;
+`balance_is_second_order_with` now holds the coarsest pair to 1.6 and the
+finest to 1.7. The device takes a driven pin's
+signal in the same places: the walls' share of `ũ`, the first kick's pin
+share and the pins pass. The device runs found it as `Q` 1.5e-5 and `b`
+6.7e-5 from the reference over 200 steps of a pumped, lossy, pinned trace,
+which the half kicks held to 7e-7. The fixed path keeps its own
+convention, a pin held at both ends of its dissipation, and is unchanged.
+
+`canonical_gpu_temporal_forced` gains `FORCED_WALLS=second`, which also puts
+`FORCED_PINNED_LOSS`'s pinned lossy side on a second-order trace, and
+`FORCED_WALL_STEP=trapezoid`, and now holds the device's wall-loss and
+source lanes to the reference's sums, 1e-4 relative; `DRIVEN_WALL_STEP`,
+`TEMPORAL_AMR_WALL_STEP` and `--trapezoid` do the same on
+`canonical_gpu_driven_document`, `canonical_gpu_temporal_amr` and
+`canonical_gpu_temporal_timing`, and `canonical_gpu_long_run` takes its wall
+step on a driven scene. The driven document's comment that a driven medium
+cannot use second-order walls was stale - the suite has run them since the
+swept trace - and now says what `DRIVEN_WALLS=outgoing` does. Device runs
+under the trapezoid: forced behind a first-order wall `Q` 2.4e-7 and `b`
+4.6e-7, behind a second-order one 2.5e-7 and 4.6e-7, pinned and lossy
+behind one 2.7e-7 and 4.7e-7, the lanes within 1.6e-7 of the reference's
+(3.9e-7 under the half kicks); the driven document behind second-order walls
+4.5e-7 and 4.8e-7 with a pump, 7.1e-7 at most with van der Pol and
+sine-Gordon; the driven AMR fixture behind lossy walls passes its estimate
+gates; Parametric pump behind second-order walls 1,000 steps 4.71e-6 and
+4.52e-6 (4.71e-6 and 4.53e-6 under the half kicks).
+`a_driven_wall_takes_one_solve_a_step_under_the_trapezoid_rule` pins the
+dispatch count and the refusal, and the device suite gains eight runs, the
+nonlinear example's linear forced fixture among them with
+`NONLINEAR_WALL_STEP=trapezoid`, which caught the fault above.
+
+On `canonical_gpu_temporal_timing --outgoing`, 328 trace nodes at six sweeps
+either way at its step, a step takes 21 wall dispatches where the half kicks
+take 30: 1.076 against 1.139 ms (20,000 steps, medians of three, rotated),
+5.6% less. Behind its default first-order wall the two read 0.439 against
+0.433 ms, inside the run-to-run spread. The half kicks keep their bits: the
+state checksums after 2,000 steps of nine fixed fixtures and eight driven
+ones (`canonical_gpu_timing`, `canonical_gpu_temporal_timing --checksum`,
+both wall orders, loss, forcing, a gap, obstacles, field laws, oscillators)
+match HEAD's. Next: C2b, the nonlinear walls.

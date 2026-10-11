@@ -2530,10 +2530,15 @@ fn kick_trapezoid_node(
     let source_work = duration * midpoint * source;
     let force_work = duration * midpoint * held_force;
     // The walls' dissipation at this kick's end of the step: the start's
-    // field on the first, the end's on the second.
+    // field on the first, the end's on the second. A driven pin's is its
+    // signal, as the walls read it: the flux it carries in was pinned at
+    // the other stage and decayed by any loss stage since.
     var field = old * inverse_mass;
     if second {
         field = next * inverse_mass;
+    }
+    if pinned && temporal_enabled() {
+        field = prescribed_value(node, target_time);
     }
     var dissipation = 0.0;
     if !second || !on_trace {
@@ -3272,6 +3277,15 @@ fn boundary_finalize_second(
 // reference's `wall_acceleration`.
 fn wall_drift_instant() -> f32 { return control.clock_f32.y + 0.5 * control.clock_f32.x; }
 
+// `A = dU/dQ` at a trace node's drift field on a driven generation: the
+// inverse mass in force, or a field law's slope there.
+fn wall_drift_slope(node: u32, field: f32, inverse_mass: f32) -> f32 {
+    if node_is_nonlinear(node) {
+        return 1.0 / primary_site(node, wall_drift_instant(), abs(field)).y;
+    }
+    return inverse_mass;
+}
+
 // First pass, a mode: the state's `w + memory` and its pole currents' rate.
 fn wall_rate_modes(mode: u32, local: u32) {
     let participating = !stopped() && mode < control.counts_b.z;
@@ -3279,8 +3293,15 @@ fn wall_rate_modes(mode: u32, local: u32) {
     if participating {
         for (var trace = local; trace < control.counts_b.y; trace += WORKGROUP_SIZE) {
             let trace_word = boundary[control.table_offsets.z + trace].data;
-            partial += trace_coefficient(mode, trace) * candidate_q(trace_word.x)
-                * trace_inverse_mass(trace_word, wall_drift_instant());
+            // A driven generation's trace reads the drift's own field, a
+            // pin's signal at its instant among it.
+            if temporal_enabled() {
+                partial += trace_coefficient(mode, trace)
+                    * temporal_drift_field(trace_word.x, wall_drift_instant());
+            } else {
+                partial += trace_coefficient(mode, trace) * candidate_q(trace_word.x)
+                    * trace_inverse_mass(trace_word, wall_drift_instant());
+            }
         }
     }
     let modal = reduce_boundary_scalar(local, partial);
@@ -3337,9 +3358,14 @@ fn wall_rate_trace(trace: u32, local: u32) {
         rate = (prescribed_value(node, middle + 0.5 * h) - prescribed_value(node, middle - 0.5 * h))
             / h;
     } else {
-        let inverse_mass = trace_inverse_mass(trace_word, middle);
+        var inverse_mass = trace_inverse_mass(trace_word, middle);
         let damping = bitcast<f32>(trace_word.z);
-        let held = -damping * candidate_q(node) * inverse_mass - coupling;
+        var held = -damping * candidate_q(node) * inverse_mass - coupling;
+        if temporal_enabled() {
+            let field = temporal_drift_field(node, middle);
+            inverse_mass = wall_drift_slope(node, field, inverse_mass);
+            held = -damping * field - coupling;
+        }
         let force_middle = kick_force(node, false)
             + 0.5 * h * scratch[fourth_order_node_offset() + node].values.w;
         rate = inverse_mass * (held + source_rate(node, middle) - force_middle);
@@ -3390,7 +3416,11 @@ fn wall_acceleration_trace(trace: u32, local: u32) {
     let node = trace_word.x;
     if nodes[node].boundary.z != 0u { return; }
     let h = control.clock_f32.x;
-    let inverse_mass = trace_inverse_mass(trace_word, wall_drift_instant());
+    var inverse_mass = trace_inverse_mass(trace_word, wall_drift_instant());
+    if temporal_enabled() {
+        inverse_mass = wall_drift_slope(
+            node, temporal_drift_field(node, wall_drift_instant()), inverse_mass);
+    }
     let damping = bitcast<f32>(trace_word.z);
     let acceleration = -damping * scratch[trace_solution_offset() + trace].values.z - coupling;
     let share = h * h / 12.0 * inverse_mass * acceleration;
@@ -3416,7 +3446,10 @@ fn boundary_trapezoid_pin(trace: u32, local: u32) {
     let trace_word = boundary[control.table_offsets.z + trace].data;
     let node = trace_word.x;
     if nodes[node].boundary.z == 0u { return; }
-    let field = candidate_q(node) * trace_inverse_mass(trace_word, boundary_instant(true));
+    var field = candidate_q(node) * trace_inverse_mass(trace_word, boundary_instant(true));
+    if temporal_enabled() {
+        field = prescribed_value(node, boundary_instant(true));
+    }
     let rate = -bitcast<f32>(trace_word.z) * field - coupling;
     scratch[node].values.y -= 0.5 * control.clock_f32.x * field * rate;
 }

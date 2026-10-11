@@ -12,6 +12,11 @@
 //! exists today and wrong the moment a source or a wall meets a pump. The
 //! f64 reference is the oracle; disagreement localizes to whichever stage the
 //! fixture turns on.
+//!
+//! `FORCED_WALLS=second` makes the walls second-order outgoing, whose trace
+//! the device sweeps at each stage's mass - beside `FORCED_PINNED_LOSS=1` a
+//! pinned and lossy trace - and `FORCED_WALL_STEP=trapezoid` steps them by
+//! the trapezoid rule, the reference and the device alike.
 
 #[path = "support/check.rs"]
 mod check;
@@ -26,8 +31,8 @@ use funfern_app::canonical_gpu::{
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
     CanonicalForcing, CanonicalSource, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CoefficientLaw, MeshingOptions, OuterBoundaryCondition, Point2, QuadraticWaveOperator,
-    ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
+    CanonicalWallStep, CoefficientLaw, MeshingOptions, OuterBoundaryCondition, Point2,
+    QuadraticWaveOperator, ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
 };
 
 const TOTAL_STEPS: u64 = 48;
@@ -41,6 +46,9 @@ struct Pending {
 struct Expected {
     primary: Vec<f64>,
     complementary: Vec<Point2>,
+    /// What the reference's wall carried out and its source put in.
+    escaped: f64,
+    injected: f64,
     started: Instant,
     deadline: Instant,
     finished: bool,
@@ -134,7 +142,9 @@ fn main() -> AppExit {
     let scalar = QuadraticWaveOperator::assemble_scene(
         &mesh,
         &fixed_scene,
-        if bare {
+        if std::env::var("FORCED_WALLS").is_ok_and(|value| value == "second") {
+            OuterBoundaryCondition::SecondOrderOutgoing
+        } else if bare {
             OuterBoundaryCondition::Reflecting
         } else {
             OuterBoundaryCondition::FirstOrderOutgoing
@@ -149,10 +159,7 @@ fn main() -> AppExit {
         "the fixture must exercise the widened admission"
     );
     assert!(
-        bare || base
-            .first_order_boundary_damping()
-            .iter()
-            .any(|value| *value != 0.0),
+        bare || base.has_walls(),
         "the fixture needs an absorbing wall"
     );
     assert!(
@@ -198,10 +205,16 @@ fn main() -> AppExit {
     let complementary = base
         .compatible_flux(&potential)
         .expect("compatible forced flux");
+    let wall_step = match std::env::var("FORCED_WALL_STEP").as_deref() {
+        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
+        Ok(other) => panic!("FORCED_WALL_STEP takes only trapezoid, not {other}"),
+        Err(_) => CanonicalWallStep::HalfKicks,
+    };
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("forced temporal state")
         .pinned(&operator, &forcing)
-        .expect("pinned forced state");
+        .expect("pinned forced state")
+        .with_wall_step(wall_step);
 
     let mut oracle = state.clone();
     let mut escaped = 0.0;
@@ -246,6 +259,8 @@ fn main() -> AppExit {
     .insert_resource(Expected {
         primary: oracle.primary_flux().to_vec(),
         complementary: oracle.complementary_flux().to_vec(),
+        escaped,
+        injected,
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(120),
         finished: false,
@@ -328,6 +343,21 @@ fn drive(
     // one misses by the modulation depth, which is percent-level, not this.
     if !within(primary, 2.0e-4) || !within(complementary, 2.0e-4) {
         expected.failed = true;
+    }
+    // The lanes book what the reference books, the walls' loss and the
+    // source's work, each by its own quadrature.
+    if expected.escaped > 0.0 {
+        let wall = (f64::from(display.accounting[4]) - expected.escaped).abs() / expected.escaped;
+        let source = (f64::from(display.accounting[0]) - expected.injected).abs()
+            / expected.injected.abs().max(1.0e-12);
+        println!(
+            "forced temporal lanes: wall {:.6e} against {:.6e} ({wall:.2e}), source {:.6e} \
+             against {:.6e} ({source:.2e})",
+            display.accounting[4], expected.escaped, display.accounting[0], expected.injected
+        );
+        if !within(wall, 1.0e-4) || !within(source, 1.0e-4) {
+            expected.failed = true;
+        }
     }
 }
 

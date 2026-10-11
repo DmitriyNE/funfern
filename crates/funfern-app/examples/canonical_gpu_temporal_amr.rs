@@ -22,6 +22,8 @@
 //! the estimate reads from the direct state itself: the drift defect with the
 //! step's contraction of `b` taken out, and the wall residual from the
 //! solver's own flux against the impedance the step freezes.
+//! `TEMPORAL_AMR_WALL_STEP=trapezoid` steps those walls by the trapezoid
+//! rule, both generations and the reference alike.
 
 #[path = "support/check.rs"]
 mod check;
@@ -40,8 +42,8 @@ use funfern_core::{
     CanonicalForcing, CanonicalIndicatorSnapshot, CanonicalMaterialRuntimeState,
     CanonicalOutgoingHistoryTransferMap, CanonicalPrimaryTransferMap,
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferMap, CoefficientLaw, DampingLaw, LossChannel, MeshAdaptationJob,
-    MeshAdaptationOptions, MeshAdaptationState, MeshSizeField, MeshingOptions,
+    CanonicalVectorTransferMap, CanonicalWallStep, CoefficientLaw, DampingLaw, LossChannel,
+    MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshSizeField, MeshingOptions,
     OuterBoundaryCondition, OuterBoundaryConditions, Point2, QuadraticSolutionSnapshot,
     QuadraticTransferMap, QuadraticWaveOperator, RateLaw, ScalarField, Scene, SolutionIndicatorJob,
     SolutionIndicatorOptions, SolutionIndicatorResult, TimeDrive, TriMesh,
@@ -205,8 +207,14 @@ fn main() -> AppExit {
         .base()
         .compatible_flux(&potential)
         .expect("compatible temporal AMR flux");
+    let wall_step = match std::env::var("TEMPORAL_AMR_WALL_STEP").as_deref() {
+        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
+        Ok(other) => panic!("TEMPORAL_AMR_WALL_STEP takes only trapezoid, not {other}"),
+        Err(_) => CanonicalWallStep::HalfKicks,
+    };
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
-        .expect("temporal AMR state");
+        .expect("temporal AMR state")
+        .with_wall_step(wall_step);
     let gpu_state = state.clone();
 
     // The f64 oracle runs the same trajectory and is estimated the same way.
@@ -345,7 +353,8 @@ fn main() -> AppExit {
         target_complementary.clone(),
         oracle_state.time(),
     )
-    .expect("target temporal oracle state");
+    .expect("target temporal oracle state")
+    .with_wall_step(wall_step);
     *target_state.runtime_mut() = oracle_state.runtime().clone();
     let mut target_previous_primary = target_state.primary_flux().to_vec();
     let mut target_previous_complementary = target_state.complementary_flux().to_vec();
@@ -380,7 +389,8 @@ fn main() -> AppExit {
     // Only a layout template for the target plan; the device fills it from
     // the transfer, and the host's own copy of that result is the oracle.
     let target_placeholder = CanonicalTemporalWaveState::zero(&target_operator, time_step)
-        .expect("target placeholder state");
+        .expect("target placeholder state")
+        .with_wall_step(wall_step);
     let target_plan =
         CanonicalGpuPlan::compile_temporal_bulk(&target_operator, &target_placeholder, clock)
             .expect("target temporal GPU plan");

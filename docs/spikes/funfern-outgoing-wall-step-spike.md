@@ -331,3 +331,24 @@ more a step, 0.229 against 0.212 ms on the timing fixture; where the solve
 sweeps, as beside a pinned trace, four fewer, 0.409 against 0.445 ms. At the
 app's plain-scene edge of 0.06 it is 0.271 against 0.259 ms, 5% more. A
 driven generation's walls stay refused on the device until C2.
+
+**C2a, done 11 October 2026: the device's driven path behind linear
+walls.** A driven generation's plan takes the state's wall step, its wall's
+tables from a factor prepared for the whole step; the trace is swept at
+each stage's mass as under the half kicks, and the shader's stages already
+read the start's mass for the explicit half and the end's for the implicit
+one, as B2 does. A pinned trace beside a loss found B2 reading a pin's
+field from the flux the loss stage had decayed, where its half kicks read
+the signal; the reference now reads the signal there too, and that case
+steps at second order again (2.02 to 4.07 in the order test's ratio).
+Against the f64 reference behind a pump the forced fixture
+reads `Q` and `b` within 2.5e-7 and 4.6e-7 behind either wall order, its
+wall-loss and source lanes within 1.6e-7 of the reference's; the driven
+document behind second-order walls within 7.1e-7 (a pump, van der Pol,
+sine-Gordon); a thousand steps of Parametric pump behind second-order walls
+4.7e-6 and 4.5e-6. On the driven timing fixture, whose trace takes six
+sweeps either way at its step, a step takes 21 wall dispatches where the
+half kicks take 30, 1.076 against 1.139 ms; behind a first-order wall the
+two read alike, 0.439 against 0.433 ms. A field law beside a wall stays
+refused until C2b: its nonlinear sites, and the kick form, which only a
+stiffness-side law brings.

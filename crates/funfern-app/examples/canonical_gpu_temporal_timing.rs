@@ -18,6 +18,9 @@
 //! to the driven medium, at an amplitude where both maps depart from linear,
 //! so the step pays every inverse and, with `--outgoing`, the wall's Newton.
 //!
+//! `--trapezoid` steps the wall by the trapezoid rule: one solve a step over
+//! the whole step where the half kicks take two over half of it each.
+//!
 //! `--filter` turns the resident grid filter on, which runs every sixteenth
 //! step, so the figure includes its amortized cost.
 //!
@@ -61,9 +64,9 @@ use funfern_app::canonical_gpu::{
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
-    CanonicalForcing, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw,
-    MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, ScalarField, Scene, TimeDrive,
-    mesh_scene,
+    CanonicalForcing, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalWallStep,
+    CoefficientLaw, MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, ScalarField,
+    Scene, TimeDrive, mesh_scene,
 };
 
 const STEPS: u64 = 2_000;
@@ -101,6 +104,11 @@ fn main() -> AppExit {
     let gated = std::env::args().any(|argument| argument == "--gated");
     let short_wave = std::env::args().any(|argument| argument == "--short-wave");
     let checksum = std::env::args().any(|argument| argument == "--checksum");
+    let wall_step = if std::env::args().any(|argument| argument == "--trapezoid") {
+        CanonicalWallStep::Trapezoid
+    } else {
+        CanonicalWallStep::HalfKicks
+    };
     let steps = std::env::args()
         .find_map(|argument| argument.strip_prefix("--steps=")?.parse().ok())
         .unwrap_or(STEPS);
@@ -217,7 +225,8 @@ fn main() -> AppExit {
         .collect::<Vec<_>>();
     let complementary = base.compatible_flux(&potential).expect("timing flux");
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
-        .expect("timing state");
+        .expect("timing state")
+        .with_wall_step(wall_step);
     let clock = CanonicalGpuClock::initial(time_step).expect("timing clock");
     let forcing = CanonicalForcing::none(base);
     let plan = CanonicalGpuPlan::compile_temporal(&operator, &state, &forcing, clock)

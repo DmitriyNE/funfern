@@ -16,7 +16,10 @@
 //! `NONLINEAR_WALL=1` or `=2` replaces the reflecting walls with a first- or
 //! second-order outgoing wall, so the Kerr trace kicks through its discrete
 //! gradient: a scalar Newton at an absorbing node, or a budget of Newton
-//! linearizations around the linear trace solve.
+//! linearizations around the linear trace solve. `NONLINEAR_WALL_STEP=trapezoid`
+//! steps that wall by the trapezoid rule, the reference and the device alike;
+//! until stage C2b the device takes it only beside `NONLINEAR_LINEAR=1`.
+//! Either way the wall's loss lane is held to the reference's sum.
 //!
 //! `NONLINEAR_FILTER=1` turns the resident grid filter on, so the device
 //! freezes every site's tangent and filters every sixteenth step beside
@@ -42,8 +45,8 @@ use funfern_app::canonical_gpu::{
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
     BACKGROUND_REGION, CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalSource,
-    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, DampingLaw,
-    FieldLaw, GRID_SCALE_FILTER_CADENCE, InternalBoundary, InternalBoundaryCoupling,
+    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalWallStep, CoefficientLaw,
+    DampingLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE, InternalBoundary, InternalBoundaryCoupling,
     InternalBoundaryId, InternalBoundaryLaw, LossChannel, MeshingOptions, OpenCubicSpline,
     OuterBoundaryCondition, Point2, QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive,
     TimeSignal, mesh_scene,
@@ -64,6 +67,8 @@ struct Expected {
     /// The reference's summed primary and short-wave loss lanes, which the
     /// device books together, when a short-wave loss is authored.
     lost: Option<f64>,
+    /// The reference's summed wall loss, behind an outgoing wall.
+    escaped: Option<f64>,
     started: Instant,
     deadline: Instant,
     finished: bool,
@@ -203,20 +208,28 @@ fn main() -> AppExit {
     let complementary = base
         .compatible_flux(&potential)
         .expect("compatible nonlinear flux");
+    let wall_step = match std::env::var("NONLINEAR_WALL_STEP").as_deref() {
+        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
+        Ok(other) => panic!("NONLINEAR_WALL_STEP takes only trapezoid, not {other}"),
+        Err(_) => CanonicalWallStep::HalfKicks,
+    };
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("nonlinear state")
         .pinned(&operator, &forcing)
-        .expect("pinned nonlinear state");
+        .expect("pinned nonlinear state")
+        .with_wall_step(wall_step);
 
     let mut oracle = state.clone();
     let initial = oracle.energy(&operator).expect("initial energy");
     let (mut filters, mut skipped, mut removed) = (0, 0, 0.0);
     let mut lost = 0.0;
+    let mut escaped = 0.0;
     for step in 1..=TOTAL_STEPS {
         let accounting = oracle
             .step_with_forcing(&operator, &forcing)
             .expect("f64 nonlinear step");
         lost += accounting.primary_loss + accounting.short_wave_loss;
+        escaped += accounting.boundary_loss;
         if filter && step.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
             filters += 1;
             // A candidate that gains energy is not taken, on either side.
@@ -298,6 +311,7 @@ fn main() -> AppExit {
         primary: oracle.primary_flux().to_vec(),
         complementary: oracle.complementary_flux().to_vec(),
         lost: short_wave.map(|_| lost),
+        escaped: base.has_walls().then_some(escaped),
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(120),
         finished: false,
@@ -395,6 +409,18 @@ fn drive(
             display.accounting[2]
         );
         if !within(error, 1.0e-3) {
+            expected.failed = true;
+        }
+    }
+    // The wall's lane books what the reference's does, each kick's by the
+    // same quadrature: within 5e-7 under either wall step.
+    if let Some(escaped) = expected.escaped {
+        let error = (f64::from(display.accounting[4]) - escaped).abs() / escaped.abs().max(1.0e-12);
+        println!(
+            "nonlinear wall lane: {:.6e} against {escaped:.6e} ({error:.2e})",
+            display.accounting[4]
+        );
+        if !within(error, 1.0e-5) {
             expected.failed = true;
         }
     }

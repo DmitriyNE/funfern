@@ -45,6 +45,14 @@ RUNS=(
   'canonical_gpu_handoff --second-order --trapezoid'
   'canonical_gpu_handoff --second-order --pinned-sides --trapezoid'
   'LONG_RUN_SCENE="Luneburg lens" LONG_RUN_WALLS=second LONG_RUN_WALL_STEP=trapezoid LONG_RUN_STEPS=1000 canonical_gpu_long_run'
+  'FORCED_WALLS=second canonical_gpu_temporal_forced'
+  'FORCED_WALL_STEP=trapezoid canonical_gpu_temporal_forced'
+  'FORCED_WALLS=second FORCED_WALL_STEP=trapezoid canonical_gpu_temporal_forced'
+  'FORCED_PINNED_LOSS=1 FORCED_WALLS=second FORCED_WALL_STEP=trapezoid canonical_gpu_temporal_forced'
+  'NONLINEAR_WALL=2 NONLINEAR_FORCED=1 NONLINEAR_LINEAR=1 NONLINEAR_WALL_STEP=trapezoid canonical_gpu_nonlinear'
+  'DRIVEN_WALLS=outgoing DRIVEN_WALL_STEP=trapezoid canonical_gpu_driven_document'
+  'TEMPORAL_AMR_LOSSY_WALLS=1 TEMPORAL_AMR_WALL_STEP=trapezoid canonical_gpu_temporal_amr'
+  'LONG_RUN_WALLS=second LONG_RUN_WALL_STEP=trapezoid LONG_RUN_STEPS=1000 canonical_gpu_long_run'
   # Each other example as it stands, and the rejections and rollbacks the
   # device performs for real.
   'canonical_gpu_handoff'
