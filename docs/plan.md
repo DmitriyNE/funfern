@@ -1346,16 +1346,27 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   where mobile Safari is the risk, so the check is an iPhone through a
   tunnel, as for the iOS start-up fix of 2026-09-27.
 
-- Enable fat LTO and `codegen-units = 1` for the native release build. The
-  browser bundle already gets both through `scripts/trunk`, which exports
-  `CARGO_PROFILE_RELEASE_LTO` and `CARGO_PROFILE_RELEASE_CODEGEN_UNITS`; that
-  took 822 KB off its gzipped size. They were deliberately kept out of
-  `[profile.release]` because the same profile builds the benchmarks, so turning
-  them on there invalidates the timings recorded in the engineering log against
-  the current codegen settings. Doing it therefore means re-baselining
-  `mesh_timing`, `mesh_edit_timing`, `--mesh-edit-benchmark` and the
-  `--wave-gpu-check` throughput figure in the same change, and accepting a
-  slower native release build in CI.
+- [x] Enable fat LTO and `codegen-units = 1` for the native release build, as
+  the browser bundle has had through `scripts/trunk` since that took 822 KB
+  off its gzipped size. Measured on 2026-10-11 (`docs/engineering-log.md`)
+  and left off: the clean app build takes 449 s against 150, the release
+  test build that the gate and the device suite link 1025 s against 124, for
+  30% off a binary nobody downloads, 7 to 9% off the driven temporal step
+  and parity elsewhere; `cargo test --release` builds under the release
+  profile, so the setting would reach them. The mesher read 1.75 times
+  slower under it until the one inlining decision behind that was found and
+  settled with a hint, which the browser bundle gains too. Fat LTO stays
+  with the web bundle, where it buys size.
+
+- Refinement locates each insertion by scanning every live triangle
+  (`containing_triangle` in `crates/funfern-core/src/mesh.rs`), up to three
+  times an insertion - the circumcenter's region check, the frozen-edge
+  check and the insertion itself - and its coincidence check scans the
+  vertices once more, so meshing is quadratic: the scan is 42% of a
+  `mesh_timing` run's samples. The constraint-point path already walks to
+  its point from a grid neighbour (`walk_to_point`; the grid lives only
+  between `begin_constraint_points` and its end), and refinement's candidate
+  comes from the bad triangle itself, so a walk from there needs no grid.
 
 - Narrow what each `ui` submodule touches. `crates/funfern-app/src/ui.rs` is now
   1,883 lines over 28 submodules, with every test beside the code it exercises,

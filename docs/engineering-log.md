@@ -22605,3 +22605,61 @@ began and stand.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the device suite, 76 of 76 pass.
+
+## 2026-10-11 — Fat LTO measured for the native build, and the one inlining decision that made the mesher slow under it
+
+- **Asked.** The Maintenance item: fat LTO and one codegen unit for the
+  native release build, as the browser bundle has had through
+  `scripts/trunk` since it took 822 KB off the gzipped download. The
+  workspace has no profile section, so release is thin local LTO over 16
+  codegen units. Clean builds in target directories of their own, default
+  against `CARGO_PROFILE_RELEASE_LTO=fat` with
+  `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`, on the quiet host; the four CPU
+  benchmarks three rounds each in alternating order, medians.
+- **Build.** The clean app build 150 s → 449 s; the release test build on top
+  of it, nine test binaries and 37 examples, which is what the gate and the
+  device suite link, 124 s → 1025 s. `cargo test --release` builds under the
+  release profile, not bench: a bench-profile override was ignored and a
+  release one honoured. The binary 65.9 MB → 46.4 MB.
+- **Speed.** The CPU wave step unchanged (128 KDK steps 168.7 against 169.0
+  ms, the trace solve 126 against 125 µs); `canonical_temporal_timing`'s
+  driven step 7 to 9% faster (bulk 3647 → 3373 µs), the fixed one the same;
+  the edit harness's active time 0.83 to 1.07 of default. The mesher
+  slower: `mesh_timing --wave --slices` 2.24 → 3.92 s on one obstacle at
+  h = 0.02, 3.57 → 5.01 s on 32, 0.22 → 0.33 s at h = 0.04, and the edit
+  harness's full build 2.45 → 3.98 s at h = 0.02.
+- **Which setting.** The mesher examples alone under each: one codegen unit
+  by itself reads 3.96 s on the h = 0.02 obstacle, as much as both together
+  (3.99; default 2.28); fat LTO alone over 16 units 2.76; thin LTO 2.27.
+  Thin LTO buys nothing else: the app binary 67.8 MB, 3% larger, the app
+  build 170 s, the test build 1409 s since each of the 46 binaries then runs
+  its own cross-crate pass, the fine edits 8 to 14% faster and the driven
+  temporal step within 2%.
+- **The decision the compiler got wrong.** Sampled for six seconds under
+  each build. Point location is a linear scan, `containing_triangle` over
+  every live triangle calling `point_in_triangle`, which opens with a
+  bounding-box rejection that nearly every call ends at. With 16 units
+  `orient2d` lives in another unit, `point_in_triangle` stays small and is
+  inlined into the scan: 2102 of 4986 samples in the scan, 315 in `orient2d`
+  on its own. With one unit LLVM inlines `orient2d`'s expansion arithmetic
+  into `point_in_triangle` first, which is then too big to inline into the
+  scan, and every triangle pays a call to fail a box test: 2808 samples in
+  `point_in_triangle` and 850 in the scan, 1.74 times the default's, the
+  whole slowdown measured. Bottom-up inlining at the wrong level.
+- **The hint.** `#[inline]` on `point_in_triangle`. Rebuilt and re-timed,
+  three rounds each: default 2280 ms on the h = 0.02 obstacle as before, one
+  codegen unit 3964 → 2250, fat LTO with one unit 3987 → 2205, 3% under
+  default there and at 32 obstacles; the edit harness's full builds the same
+  under all three. The browser bundle builds under the losing setting, so
+  its mesher most likely paid the same and gets it back; not measured on
+  wasm.
+- **Decision**, the user's. The gain is negligible against the build cost,
+  so the native release profile stays as it is and fat LTO stays with the
+  web bundle, where it buys size. The Maintenance item records the figures.
+  Seen on the way and filed there: refinement scans every live triangle up
+  to three times an insertion, and the vertices once more for coincidence,
+  so meshing is quadratic; the scan is 42% of a run's samples, and the
+  constraint-point path already has the walk that would replace it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

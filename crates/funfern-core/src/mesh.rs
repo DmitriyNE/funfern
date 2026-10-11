@@ -612,6 +612,7 @@ pub fn locate_in_polygon(point: Point2, polygon: &[Point2]) -> PolygonLocation {
     }
 }
 
+#[inline]
 fn point_in_triangle(point: Point2, triangle: [Point2; 3]) -> PolygonLocation {
     if point.x < triangle[0].x.min(triangle[1].x).min(triangle[2].x)
         || point.x > triangle[0].x.max(triangle[1].x).max(triangle[2].x)
