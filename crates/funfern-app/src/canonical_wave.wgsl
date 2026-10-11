@@ -2438,6 +2438,11 @@ fn kick_node(node: u32, second: bool) {
         old = short_wave_applied(node, old, false);
     }
     if temporal_enabled() && node_is_nonlinear(node) {
+        if trapezoid_walls() && (on_trace || nodes[node].damping_support.x != 0.0) {
+            kick_trapezoid_nonlinear_node(
+                node, second, old, net, source, held_force, target_time, on_trace);
+            return;
+        }
         kick_nonlinear_node(node, old, net, source, held_force, duration, target_time);
         if second { inject_at(node); }
         return;
@@ -2557,6 +2562,108 @@ fn kick_trapezoid_node(
     set_candidate_q(node, next);
     if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
     // The second kick's injection at a trace node comes after the solve.
+    if second && !on_trace { inject_at(node); }
+}
+
+// `kick_trapezoid_node` at a node whose map follows its field: the walls'
+// halves read the field `U(Q)`, not `Q/M`. The trace's start field is the one
+// its field pass left in the trace word; a first-order wall's implicit half
+// solves `Q′ + dt/2 · D U(Q′) = Q` by the safeguarded Newton of the
+// discrete-gradient kick below, the reference's `implicit_damped_site`. The
+// lanes charge the plain kick's work at the field of its mean flux, as that
+// kick does.
+fn kick_trapezoid_nonlinear_node(
+    node: u32,
+    second: bool,
+    old: f32,
+    net: f32,
+    source: f32,
+    held_force: f32,
+    target_time: f32,
+    on_trace: bool,
+) {
+    let duration = control.evolution.z;
+    let h = control.clock_f32.x;
+    let pinned = nodes[node].boundary.z != 0u;
+    var damping = nodes[node].damping_support.x;
+    var wall_rate = 0.0;
+    var start_field = 0.0;
+    if on_trace {
+        let trace_word = boundary[control.table_offsets.z + nodes[node].boundary.x].data;
+        damping = bitcast<f32>(trace_word.z);
+        if !second {
+            wall_rate = scratch[trace_solution_offset() + nodes[node].boundary.x].values.x;
+            start_field = bitcast<f32>(trace_word.y);
+        }
+    } else if !second {
+        // A pin's field is its signal, as the walls read it.
+        if pinned {
+            start_field = prescribed_value(node, target_time);
+        } else {
+            start_field = temporal_primary_field(node, old, target_time);
+        }
+        wall_rate = -damping * start_field;
+    }
+    var kicked = old + duration * (net + wall_rate);
+    if pinned {
+        kicked = temporal_primary_flux_of_field(
+            node, prescribed_value(node, target_time), target_time);
+    }
+    var next = kicked;
+    var end_field = 0.0;
+    if second && !on_trace {
+        if pinned {
+            end_field = prescribed_value(node, target_time);
+        } else {
+            // `f(Q) = Q − kicked + τD·U(Q)` rises with slope at least one, so
+            // a trial point `x` and `x − f(x)` bracket the root.
+            let admittance = duration * damping;
+            end_field = temporal_primary_field(node, next, target_time);
+            let first = admittance * end_field;
+            var low = min(next, next - first);
+            var high = max(next, next - first);
+            var converged = first == 0.0;
+            for (var iteration = 0u; iteration < INVERSE_ITERATIONS && !converged; iteration += 1u) {
+                let residual = next - kicked + admittance * end_field;
+                if residual > 0.0 { high = min(high, next); } else { low = max(low, next); }
+                let slope = 1.0 / primary_site(node, target_time, abs(end_field)).y;
+                var candidate = next - residual / (1.0 + admittance * slope);
+                if !(candidate >= low && candidate <= high) { candidate = 0.5 * (low + high); }
+                let step = abs(candidate - next);
+                next = candidate;
+                end_field = temporal_primary_field(node, next, target_time);
+                converged = step <= max(4.0 * 1.1920929e-7 * max(abs(next), abs(kicked)), F32_MIN_NORMAL);
+            }
+            if !converged { reject(STATUS_INVERSE_CONVERGENCE); }
+        }
+    }
+    var work_field = 0.0;
+    if pinned {
+        work_field = prescribed_value(node, target_time);
+    } else if source != 0.0 {
+        work_field = temporal_primary_field(node, 0.5 * (old + kicked), target_time);
+    }
+    let source_work = duration * work_field * source;
+    let force_work = duration * work_field * held_force;
+    var dissipation = 0.0;
+    if !second {
+        dissipation = 0.5 * h * damping * start_field * start_field;
+    } else if !on_trace {
+        dissipation = 0.5 * h * damping * end_field * end_field;
+    }
+    scratch[node].values.x += source_work;
+    scratch[node].values.w += dissipation;
+    if pinned {
+        let energy_change = temporal_primary_energy(node, kicked, target_time)
+            - temporal_primary_energy(node, old, target_time);
+        var share = dissipation;
+        if !second {
+            share = -0.5 * h * start_field * wall_rate;
+        }
+        scratch[node].values.y += energy_change - source_work + force_work + share;
+    }
+    set_candidate_q(node, next);
+    if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
     if second && !on_trace { inject_at(node); }
 }
 
@@ -2785,7 +2892,11 @@ fn boundary_prepare(mode: u32, local: u32, second: bool) {
             boundary_float(mode_word(mode, 1u), 0u),
             boundary_float(mode_word(mode, 1u), 1u),
             boundary_float(mode_word(mode, 1u), 2u));
-        memory = dot(residue, old_z);
+        // A nonlinear wall's Newton under the trapezoid rule carries its
+        // offset `U_k − U′_k Q_k` through the generator, and the offset has
+        // no pole currents: it enters by the input column alone.
+        let newton = trapezoid_walls() && second && nonlinear_trace();
+        memory = select(dot(residue, old_z), 0.0, newton);
         let loss_coefficient = vec3<f32>(
             boundary_float(mode_word(mode, 11u), 0u),
             boundary_float(mode_word(mode, 11u), 1u),
@@ -2803,10 +2914,12 @@ fn boundary_prepare(mode: u32, local: u32, second: bool) {
         // second kick's right holds none: the implicit half solves from the
         // state the plain kick left.
         var explicit_part = control.evolution.w;
+        var input_part = control.evolution.w;
         if trapezoid_walls() {
             explicit_part = select(control.evolution.z, 0.0, second);
+            input_part = select(explicit_part, control.evolution.z, newton);
         }
-        var right_z = old_z + explicit_part * input_gain * modal;
+        var right_z = old_z + input_part * input_gain * modal;
         for (var row = 0u; row < 3u; row += 1u) {
             let generator = vec3<f32>(
                 boundary_float(mode_word(mode, 3u + row), 0u),
@@ -2891,6 +3004,9 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
     if !trapezoid_walls() {
         reduced = old + control.evolution.w * derivative
             + control.evolution.z * (source - held_force);
+    } else if nonlinear_trace() {
+        // Newton's offset through the generator, `dt/2 · (G (U_k − U′_k Q_k))_Q`.
+        reduced = old + control.evolution.z * derivative;
     }
     if nodes[node].boundary.z != 0u {
         reduced = pinned_trace_flux(node, boundary_instant(second));
@@ -3028,7 +3144,15 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
         let inverse_mass = scratch[trace_solution_offset() + i].values.y;
         let damping = bitcast<f32>(trace_word.z);
         let next = scratch[trace_solution_offset() + i].values.x;
-        let field = next * inverse_mass;
+        var field = next * inverse_mass;
+        if nonlinear_trace() {
+            // As under the half kicks, the last Newton step must have settled.
+            let iterate = scratch[nonlinear_trace_offset() + i].values.x;
+            if abs(next - iterate) > 1.0e-5 * max(trace_scale, 1.0e-30) {
+                reject(STATUS_INVERSE_CONVERGENCE);
+            }
+            field = temporal_primary_field(node, next, boundary_instant(true));
+        }
         set_candidate_q(node, next);
         scratch[node].values.w += 0.5 * control.clock_f32.x * damping * field * field;
         if !finite_scalar(next) { reject(STATUS_NON_FINITE); }
@@ -3122,7 +3246,13 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
             // The trapezoid rule's second end of the walls' dissipation, at
             // the state the step ends with, and that state's `w + memory`,
             // which the pins pass reads.
-            var at_end = new_modal;
+            // A nonlinear wall's field is the linearization's, its offset's
+            // share as the last prepare reduced it.
+            var field_modal = new_modal;
+            if nonlinear_trace() {
+                field_modal += scratch[mode_modal_offset() + mode].values.x;
+            }
+            var at_end = field_modal;
             var generator_memory = 0.0;
             if mode_header.z != 0u {
                 let auxiliary = mode_header.y;
@@ -3143,7 +3273,7 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
             }
             scratch[mode_accounting_offset() + mode].values.w +=
                 0.5 * control.clock_f32.x * at_end * at_end;
-            scratch[mode_modal_offset() + mode].values.x = new_modal + generator_memory;
+            scratch[mode_modal_offset() + mode].values.x = field_modal + generator_memory;
             return;
         }
         let old_modal = scratch[mode_modal_offset() + mode].values.x;
@@ -3172,9 +3302,49 @@ fn boundary_linearize(trace: u32, second: bool, first_iteration: bool) {
         iterate = scratch[trace_solution_offset() + trace].values.x;
         step = abs(iterate - scratch[region].values.x);
     }
+    // The trapezoid rule's implicit half reads the field the step ends with:
+    // Newton on `U ≈ U_k + U′_k (Q − Q_k)`, the solve at the per-node mass
+    // `1/U′_k` with the offset `U_k − U′_k Q_k` in place of the old field,
+    // the reference's `trapezoid_trace_implicit_half`. A linear node's offset
+    // is zero.
+    if trapezoid_walls() {
+        let instant = boundary_instant(true);
+        let field = temporal_primary_field(node, iterate, instant);
+        var slope = temporal_inverse_primary_mass(node, instant);
+        if node_is_nonlinear(node) {
+            slope = 1.0 / primary_site(node, instant, abs(field)).y;
+        }
+        boundary[word_index].data.y = bitcast<u32>(field - slope * iterate);
+        scratch[region].values = vec4<f32>(iterate, field, slope, step);
+        return;
+    }
     let gradient = trace_gradient(node, old, iterate, boundary_instant(second));
     boundary[word_index].data.y = bitcast<u32>(2.0 * (gradient.x - gradient.y * iterate));
     scratch[region].values = vec4<f32>(iterate, gradient.x, 2.0 * gradient.y, step);
+}
+
+// The trapezoid wall step's field at a trace node, left in the trace word
+// where the prepare and reduce passes read a nonlinear wall's field: before
+// the first kick `U` of the state the step starts from, at its start; before
+// the kick form's second rate `U` of the state the drift left, at the step's
+// end; a pin's signal at either, as the reference's `wall_field_at` has it.
+fn boundary_wall_field(trace: u32, second: bool) {
+    if stopped() || trace >= control.counts_b.y { return; }
+    let word_index = control.table_offsets.z + trace;
+    let node = boundary[word_index].data.x;
+    let flux = trace_entry_flux(node, second);
+    let field = temporal_primary_field(node, flux, boundary_instant(second));
+    boundary[word_index].data.y = bitcast<u32>(field);
+}
+
+@compute @workgroup_size(128)
+fn boundary_wall_field_first(@builtin(global_invocation_id) id: vec3<u32>) {
+    boundary_wall_field(id.x, false);
+}
+
+@compute @workgroup_size(128)
+fn boundary_wall_field_second(@builtin(global_invocation_id) id: vec3<u32>) {
+    boundary_wall_field(id.x, true);
 }
 
 @compute @workgroup_size(128)
@@ -3454,6 +3624,71 @@ fn boundary_trapezoid_pin(trace: u32, local: u32) {
     scratch[node].values.y -= 0.5 * control.clock_f32.x * field * rate;
 }
 
+// The kick form's wall rate before the second kick, `(G X)_Q` of the state
+// the drift left at the step's end, from the fields the field pass left in
+// the trace words: a mode's `w + memory`, then a trace row's rate, which that
+// kick's rate pass adds to `u̇`. The reference's `wall_rate_at`.
+fn kick_wall_rate_modes(mode: u32, local: u32) {
+    let participating = !stopped() && mode < control.counts_b.z;
+    var partial = 0.0;
+    if participating {
+        for (var trace = local; trace < control.counts_b.y; trace += WORKGROUP_SIZE) {
+            partial += trace_coefficient(mode, trace)
+                * bitcast<f32>(boundary[control.table_offsets.z + trace].data.y);
+        }
+    }
+    let modal = reduce_boundary_scalar(local, partial);
+    if !participating || local != 0u { return; }
+    let mode_header = boundary[mode_word(mode, 0u)].data;
+    var memory = 0.0;
+    if mode_header.z != 0u {
+        let auxiliary = mode_header.y;
+        let z = vec3<f32>(
+            candidate_auxiliary(auxiliary),
+            candidate_auxiliary(auxiliary + 1u),
+            candidate_auxiliary(auxiliary + 2u));
+        let residue = vec3<f32>(
+            boundary_float(mode_word(mode, 1u), 0u),
+            boundary_float(mode_word(mode, 1u), 1u),
+            boundary_float(mode_word(mode, 1u), 2u));
+        memory = dot(residue, z);
+    }
+    scratch[mode_modal_offset() + mode].values.x = modal + memory;
+}
+
+fn kick_wall_rate_trace(trace: u32, local: u32) {
+    let participating = !stopped() && trace < control.counts_b.y;
+    var partial = 0.0;
+    if participating {
+        for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
+            partial += trace_coefficient_transposed(trace, mode)
+                * scratch[mode_modal_offset() + mode].values.x;
+        }
+    }
+    let coupling = reduce_boundary_scalar(local, partial);
+    if !participating || local != 0u { return; }
+    let trace_word = boundary[control.table_offsets.z + trace].data;
+    let rate = -bitcast<f32>(trace_word.z) * bitcast<f32>(trace_word.y) - coupling;
+    scratch[trace_solution_offset() + trace].values.x = rate;
+    if !finite_scalar(rate) { reject(STATUS_NON_FINITE); }
+}
+
+@compute @workgroup_size(128)
+fn kick_wall_rate_modes_pass(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    kick_wall_rate_modes(group.x, local.x);
+}
+
+@compute @workgroup_size(128)
+fn kick_wall_rate_trace_pass(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    kick_wall_rate_trace(group.x, local.x);
+}
+
 @compute @workgroup_size(128)
 fn wall_rate_modes_pass(
     @builtin(workgroup_id) group: vec3<u32>,
@@ -3679,7 +3914,23 @@ fn fourth_order_rate(node: u32, second: bool) {
     if nodes[node].boundary.z != 0u {
         rate = (prescribed_value(node, time + h) - prescribed_value(node, time - h)) / (2.0 * h);
     } else {
-        rate = (step_source(node, time) - held) * temporal_inverse_primary_mass(node, time);
+        // Under the trapezoid wall step a wall node's rate carries the
+        // wall's own `G X` beside `s − F`: the trace's as the wall's passes
+        // left it, a first-order wall's `−D U` here.
+        var wall = 0.0;
+        if trapezoid_walls() {
+            let trace = nodes[node].boundary.x;
+            let damping = nodes[node].damping_support.x;
+            if trace != NO_INDEX {
+                wall = scratch[trace_solution_offset() + trace].values.x;
+            } else if damping != 0.0 {
+                let flux = select(
+                    accepted_q(node), candidate_q(node), second || has_loss_stages());
+                wall = -damping * temporal_primary_field(node, flux, time);
+            }
+        }
+        rate = (step_source(node, time) - held + wall)
+            * temporal_inverse_primary_mass(node, time);
     }
     scratch[fourth_order_node_offset() + node].values.y = rate;
     scratch[fourth_order_node_offset() + node].values.w = held;

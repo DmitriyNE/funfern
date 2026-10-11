@@ -17,9 +17,10 @@
 //! second-order outgoing wall, so the Kerr trace kicks through its discrete
 //! gradient: a scalar Newton at an absorbing node, or a budget of Newton
 //! linearizations around the linear trace solve. `NONLINEAR_WALL_STEP=trapezoid`
-//! steps that wall by the trapezoid rule, the reference and the device alike;
-//! until stage C2b the device takes it only beside `NONLINEAR_LINEAR=1`.
-//! Either way the wall's loss lane is held to the reference's sum.
+//! steps that wall by the trapezoid rule, the reference and the device alike,
+//! its halves reading the field `U(Q)`: the medium's saturable stiffness
+//! brings the kick form, whose rate then carries the wall's. Either way the
+//! wall's loss lane is held to the reference's sum.
 //!
 //! `NONLINEAR_FILTER=1` turns the resident grid filter on, so the device
 //! freezes every site's tangent and filters every sixteenth step beside

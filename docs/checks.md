@@ -581,9 +581,11 @@ driven generation `FORCED_WALL_STEP=trapezoid` on
 `canonical_gpu_temporal_forced`, with `FORCED_WALLS=second` for a
 second-order wall, `DRIVEN_WALL_STEP=trapezoid` on
 `canonical_gpu_driven_document`, `TEMPORAL_AMR_WALL_STEP=trapezoid` on
-`canonical_gpu_temporal_amr` and `NONLINEAR_WALL_STEP=trapezoid` on
-`canonical_gpu_nonlinear` do the same; the forced and nonlinear examples
-also hold the device's wall-loss lane to the reference's.
+`canonical_gpu_temporal_amr`, `NONLINEAR_WALL_STEP=trapezoid` on
+`canonical_gpu_nonlinear` and `OSCILLATOR_WALL_STEP=trapezoid` on
+`canonical_gpu_oscillator` do the same, the last two behind nonlinear walls
+- the nonlinear example's medium in the kick form; the forced and nonlinear
+examples also hold the device's wall-loss lane to the reference's.
 
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.

@@ -1447,11 +1447,10 @@ is next touched.
   Cayley over the wall for the whole step, split as the trapezoid rule around
   the kicks, and the wall's acceleration in the drift's corrected field. On the spike's strip
   that takes the band from 1.077 to 1.0006 and leaves `(ω·dt)²/24` at any
-  step. Stage B (CPU, both paths), C1 (the device's fixed path) and C2a (its
-  driven path behind linear walls) are done beside the half kicks, which stay
-  the default; C2b (the device's nonlinear walls) and then D (the default
-  switched on both, the fixture's band held to 2%) are next. The fixture
-  holds the second-order band to 15% until then.
+  step. Stage B (CPU, both paths) and C (the device's fixed and driven
+  paths, nonlinear walls among them) are done beside the half kicks, which
+  stay the default; D (the default switched on both, the fixture's band held
+  to 2%) is next. The fixture holds the second-order band to 15% until then.
 
 ## Working practice
 

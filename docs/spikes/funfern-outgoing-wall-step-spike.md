@@ -352,3 +352,25 @@ half kicks take 30, 1.076 against 1.139 ms; behind a first-order wall the
 two read alike, 0.439 against 0.433 ms. A field law beside a wall stays
 refused until C2b: its nonlinear sites, and the kick form, which only a
 stiffness-side law brings.
+
+**C2b, done 11 October 2026: the device's nonlinear walls.** A nonlinear
+wall's halves read the field `U(Q)`, as B2's do. Before the first kick a
+pass caches each trace node's field at the step's start, from which prepare
+and reduce take the explicit half; a nonlinear node's plain kick adds it,
+and a first-order wall's node `−D U` of its own. After the second kick the
+implicit half is Newton on `U ≈ U_k + U′_k (Q − Q_k)` within the half
+kicks' budget of four linearizations, each solving at the per-node mass
+`1/U′_k` with the offset `U_k − U′_k Q_k` carried through the generator's
+input column; a first-order wall's node solves `Q′ + dt/2 · D U(Q′) = Q`
+by the safeguarded scalar Newton. The drift form's `ũ` reads `A = U′` at
+the drift's field. The kick form takes the walls' rate in `u̇`: the first
+kick's prepare and reduce run ahead of its rate pass, and before the second
+a field pass and two reductions form it at the step's end. Against the f64
+reference over 200 steps of a Kerr and saturable medium, which brings the
+kick form, the state reads within 1.2e-6 behind either wall order, a pinned
+trace with a source, loss and a pump among them, and the wall's loss lane
+within 1.7e-7 of the reference's; a Kerr oscillator in the drift form
+within 1.2e-6 behind either order and a pinned trace, beside van der Pol
+too. Behind the driven timing fixture's nonlinear second-order wall, six
+sweeps a solve, a step takes 67 wall dispatches where the half kicks take
+122; its time a step is still to be read on a quiet host.

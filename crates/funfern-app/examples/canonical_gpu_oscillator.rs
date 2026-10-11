@@ -35,7 +35,8 @@
 //! `OSCILLATOR_FIELD_LAW=kerr` or `saturable` puts that field law on the
 //! medium's mass row, whatever the medium: beside `van-der-pol` the stage
 //! reads the node's field through its own map, in two secant passes on both
-//! sides.
+//! sides. `OSCILLATOR_WALL_STEP=trapezoid` steps `wall1`, `wall2` or
+//! `wall2-pins` by the trapezoid rule, the reference and the device alike.
 
 #[path = "support/check.rs"]
 mod check;
@@ -50,8 +51,8 @@ use funfern_app::canonical_gpu::{
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
     BACKGROUND_REGION, CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalSource,
-    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, DampingLaw,
-    FieldLaw, GRID_SCALE_FILTER_CADENCE, InternalBoundary, InternalBoundaryCoupling,
+    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalWallStep, CoefficientLaw,
+    DampingLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE, InternalBoundary, InternalBoundaryCoupling,
     InternalBoundaryId, InternalBoundaryLaw, LoopRole, LossChannel, Material, MaterialFrame,
     MaterialId, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition, Point2,
     QuadraticWaveOperator, RateLaw, Region, RegionId, RestoringLaw, ScalarField, Scene, TimeDrive,
@@ -335,12 +336,18 @@ fn main() -> AppExit {
     let complementary = base
         .compatible_flux(&integrated)
         .expect("compatible oscillator flux");
+    let wall_step = match std::env::var("OSCILLATOR_WALL_STEP").as_deref() {
+        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
+        Ok(other) => panic!("OSCILLATOR_WALL_STEP takes only trapezoid, not {other}"),
+        Err(_) => CanonicalWallStep::HalfKicks,
+    };
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("oscillator state")
         .with_integrated_field(&operator, integrated)
         .expect("oscillator integrated field")
         .pinned(&operator, &forcing)
-        .expect("pinned oscillator state");
+        .expect("pinned oscillator state")
+        .with_wall_step(wall_step);
 
     let mut oracle = state.clone();
     let initial = oracle.energy(&operator).expect("initial energy");

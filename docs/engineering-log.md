@@ -22360,3 +22360,63 @@ state checksums after 2,000 steps of nine fixed fixtures and eight driven
 ones (`canonical_gpu_timing`, `canonical_gpu_temporal_timing --checksum`,
 both wall orders, loss, forcing, a gap, obstacles, field laws, oscillators)
 match HEAD's. Next: C2b, the nonlinear walls.
+
+## 2026-10-11 — The trapezoid wall step on the device, nonlinear walls (stage C2b)
+
+`compile_temporal` now takes `CanonicalWallStep::Trapezoid` beside a field
+law too. A nonlinear wall's halves read the field `U(Q)`, as the
+reference's B2 does. Before the first kick a field pass caches each trace
+node's `U` at the step's start in its trace word, where prepare and reduce
+read a nonlinear wall's field, and they leave the explicit half; a
+nonlinear node's plain kick adds it (`kick_trapezoid_nonlinear_node`), and a
+first-order wall's node adds `−D U` of its own. After the second kick the
+trace's implicit half is Newton on `U ≈ U_k + U′_k (Q − Q_k)` within the
+half kicks' budget of four linearizations: the linearization stores
+`U_k − U′_k Q_k` where the half kicks store their discrete gradient's
+offset, prepare carries it through the generator's input column alone - the
+offset has no pole currents - reduce adds its half-step share to the
+trace's right side, and the solve runs at the per-node mass `1/U′_k`.
+Finalize books the end's dissipation at the exact `U(Q′)` and the modes' at
+the linearization's field, and holds the last Newton step to the half
+kicks' settling test. A first-order wall's node solves `Q′ + dt/2 · D U(Q′)
+= Q` after the plain kick by the safeguarded scalar Newton of the
+discrete-gradient kick, the reference's `implicit_damped_site`. The drift
+form's share reads `A = U′` at the drift's field (C2a's passes). The kick
+form, which a stiffness-side law brings, takes the walls' rate in `u̇`: the
+first kick's field pass, prepare and reduce now run ahead of its rate pass,
+which adds the trace's rate and a first-order node's `−D U`, and before the
+second a field pass at the step's end and two reductions form the rate of
+the state the drift left. Pins read their signal at each stage, the
+reference's `wall_field_at` (C2a). A step's wall dispatches under the
+trapezoid are `[nonlinear] + 2 + implicit + 1 + [pins] + 4·[drift] +
+3·[kick form]`, with `implicit` four Newton passes of three plus the solve
+on a nonlinear wall; `a_driven_wall_takes_one_solve_a_step_under_the_trapezoid_rule`
+now pins Kerr's drift form and a saturable stiffness's kick form too.
+
+Device runs under the trapezoid, 200 steps against the f64 reference:
+`canonical_gpu_nonlinear` (Kerr mass, saturable stiffness, the kick form)
+behind a first-order wall `Q` 1.08e-6 and `b` 8.5e-7, behind a second-order
+one 1.19e-6 and 8.7e-7, with a source, pins on the trace, both losses and a
+pump 9.5e-7 and 7.9e-7, pumped at 1.5 times the amplitude 9.7e-7 and
+7.1e-7, the wall's lane within 1.7e-7 of the reference's throughout;
+`canonical_gpu_oscillator`'s Kerr sine-Gordon (the drift form) behind a
+first-order wall 3.8e-7 and 1.14e-6, a second-order one 3.7e-7 and
+1.13e-6, a pinned second-order one 3.9e-7 and 6.7e-7; van der Pol with Kerr
+behind pinned second-order walls 4.9e-7 and 6.0e-7, its gain lane within
+3.4e-7; a pumped saturable mass row behind second-order walls 4.2e-7 and
+1.10e-6; Kerr behind a first-order wall with a short-wave loss 6.4e-7 and
+1.73e-6. The half kicks read as before on every one. The half kicks keep
+their bits: the seventeen fixtures' checksums after 2,000 steps match
+HEAD's. The device suite gains six runs.
+
+On `canonical_gpu_temporal_timing --outgoing --nonlinear`, 328 trace nodes
+at six sweeps a solve, a step takes 67 wall dispatches where the half kicks
+take 122: one field pass, the explicit half's two, four Newton passes of
+three and the solve's twelve, finalize and the kick form's three, against
+two kicks of four such passes and a finalize each. Its time a step is not
+given: the runs at 4,000 steps, taken while the desktop was in use, spread
+up to sevenfold between repeats of one build (the half kicks 25 to 47 ms, the
+trapezoid 8 to 55), and 20,000 outlast the example's 300-second deadline
+under the half kicks. It is to be read on a quiet host. Behind the first-order
+wall the dispatches are the same either way. Next: D, the default switched
+on both.

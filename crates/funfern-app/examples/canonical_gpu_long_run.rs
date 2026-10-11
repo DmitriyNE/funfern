@@ -21,8 +21,7 @@
 //! two together make an outgoing trace longer than the 1,024 nodes the device
 //! once refused: Phased array at 0.017 has 1,166 and Parametric pump 1,236.
 //! `LONG_RUN_WALL_STEP=trapezoid` steps the walls by the trapezoid rule, the
-//! reference and the device alike; the device refuses it beside a field law
-//! until stage C2b. `LONG_RUN_LOSS` puts an
+//! reference and the device alike. `LONG_RUN_LOSS` puts an
 //! electric loss of 0.6 on the scene's second material: `none` a constant
 //! one, a number a pump of that depth on the rate. On the pumped slab both
 //! failed before the device read its loss records: the constant one because a
