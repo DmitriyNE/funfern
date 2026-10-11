@@ -22663,3 +22663,51 @@ began and stand.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-11 — Refinement walks to its insertion points
+
+- **Changed.** Refinement located each insertion by scanning every live
+  triangle, `containing_triangle`, up to three times an insertion - the
+  circumcenter's region check, the frozen-edge check and the insertion
+  itself - and its coincidence check scanned every vertex, so meshing was
+  quadratic. Each candidate is now located once, by a walk from the element
+  being refined (`walk_from`, the body of the constraint-point path's
+  `walk_to_point`, which starts at a vertex's fan and now wraps it), and the
+  location serves the checks and the insertion, which takes it as an
+  argument (`insert_located_point`). The coincidence check goes through the
+  vertex grid (`coincides_with_vertex`): the grid comes alive at the first
+  refinement insertion, `add_vertex` keeps it current wherever a vertex is
+  added, the insertion's constrained-edge retreat removes the popped vertex
+  from it, and it is rebuilt when the vertices pass twice what it was sized
+  for, amortized constant. The constraint-point path's own grid insert went
+  with that.
+- **Same mesh.** The walk is an accelerator: inside a triangle the answer is
+  unique, on an edge it takes the lower-numbered live neighbour as the scan
+  does, and it gives up - the caller scans, counted in
+  `MeshingStats::location_scans` - when it leaves the mesh, meets a frozen
+  triangle, runs too long, or reaches a point lying on two edges at once, a
+  vertex, where the scan's lowest incident triangle is not the edge's. Under
+  test every walk that answers is asserted equal to the scan and every grid
+  query to the vertex scan, on every meshing test, as the constraint path
+  was already held; `the_refinement_walk_answers_as_the_scan_or_gives_up`
+  covers each case on a lattice. The 519 core tests pass, the determinism
+  and cooperative-job equalities among them, and `mesh_timing`'s other
+  counters (quality evaluations, edge tests, flips, insertions) are the same
+  before and after on all six configurations.
+- **Measured**, `mesh_timing --wave --slices` against a worktree of 9bb8bf4,
+  three rounds alternating, medians: at h = 0.02 one obstacle 2.28 → 0.64 s,
+  eight 2.45 → 0.98, 32 3.58 → 2.12; at h = 0.04 0.23 → 0.13, 0.27 → 0.17,
+  0.59 → 0.50. `mesh_edit_timing --paced`: the full build 2.48 → 0.96 s at
+  h = 0.02 and 0.25 → 0.16 at 0.04, the edits' active time 0.85 to 1.02 of
+  before. `location_scans` read 0 on every configuration: the walk never fell
+  back.
+- **Left**, from a profile of the new build: `orient2d` 18%, the predicate
+  work itself; the job's own per-unit bookkeeping 18%; `region_at`'s polygon
+  test 15%, which locates the candidate's region by every domain polygon
+  where the containing triangle already knows it for a point inside one;
+  and the encroachment search over every boundary edge with
+  `boundary_relevant_to_region`, 18%. The Maintenance item names the last
+  two.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

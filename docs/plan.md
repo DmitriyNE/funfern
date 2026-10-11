@@ -1358,15 +1358,19 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   settled with a hint, which the browser bundle gains too. Fat LTO stays
   with the web bundle, where it buys size.
 
-- Refinement locates each insertion by scanning every live triangle
+- [x] Refinement located each insertion by scanning every live triangle
   (`containing_triangle` in `crates/funfern-core/src/mesh.rs`), up to three
-  times an insertion - the circumcenter's region check, the frozen-edge
-  check and the insertion itself - and its coincidence check scans the
-  vertices once more, so meshing is quadratic: the scan is 42% of a
-  `mesh_timing` run's samples. The constraint-point path already walks to
-  its point from a grid neighbour (`walk_to_point`; the grid lives only
-  between `begin_constraint_points` and its end), and refinement's candidate
-  comes from the bad triangle itself, so a walk from there needs no grid.
+  times an insertion, and its coincidence check scanned the vertices once
+  more, so meshing was quadratic: the scan was 42% of a `mesh_timing` run's
+  samples. Done on 2026-10-11 (`docs/engineering-log.md`): each candidate is
+  located once by a walk from the element being refined, the scan kept as
+  the walk's fallback and, under test, its oracle on every meshing test, and
+  the coincidence check goes through the vertex grid, now kept current by
+  `add_vertex` and rebuilt when outgrown. The mesh is unchanged; a full mesh
+  at h = 0.02 takes 0.64 s instead of 2.28 on one obstacle and 2.12 instead
+  of 3.58 on 32, and the walk never fell back. Left, from the profile after:
+  `region_at`'s polygon test (15%) and the encroachment search over every
+  boundary edge (18%).
 
 - Narrow what each `ui` submodule touches. `crates/funfern-app/src/ui.rs` is now
   1,883 lines over 28 submodules, with every test beside the code it exercises,

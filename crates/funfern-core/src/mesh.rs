@@ -377,6 +377,8 @@ struct VertexGrid {
     cell: Point2,
     dimension: usize,
     cells: Vec<Vec<usize>>,
+    /// The vertex count the cells were sized for, about one a cell.
+    sized_for: usize,
 }
 
 impl VertexGrid {
@@ -406,6 +408,7 @@ impl VertexGrid {
             cell: Point2::new(width(maximum.x - minimum.x), width(maximum.y - minimum.y)),
             dimension,
             cells: vec![Vec::new(); dimension * dimension],
+            sized_for: vertices.len(),
         };
         for (index, vertex) in vertices.iter().enumerate() {
             grid.insert(index, vertex.point);
@@ -430,9 +433,19 @@ impl VertexGrid {
     }
 
     fn moved(&mut self, vertex: usize, from: Point2, to: Point2) {
-        let [x, y] = self.bin(from);
-        self.cells[y * self.dimension + x].retain(|candidate| *candidate != vertex);
+        self.remove(vertex, from);
         self.insert(vertex, to);
+    }
+
+    fn remove(&mut self, vertex: usize, point: Point2) {
+        let [x, y] = self.bin(point);
+        self.cells[y * self.dimension + x].retain(|candidate| *candidate != vertex);
+    }
+
+    /// Whether `count` vertices have outgrown the cells, twice what they were
+    /// sized for; a rebuild then costs what the insertions since did.
+    fn crowded(&self, count: usize) -> bool {
+        count > 2 * self.sized_for
     }
 
     /// Every vertex binned in a cell the box of half-width `radius` around
@@ -484,6 +497,9 @@ pub struct MeshingStats {
     pub edge_tests: usize,
     pub edge_flips: usize,
     pub refinement_insertions: usize,
+    /// Refinement points the walk from their element could not locate, so
+    /// every live triangle was scanned for them.
+    pub location_scans: usize,
 }
 
 fn edge_key(a: usize, b: usize) -> (usize, usize) {
@@ -873,6 +889,9 @@ impl MeshBuilder {
         self.incident.push(BTreeSet::new());
         if let Some(region) = &mut self.repair_region {
             region.push(true);
+        }
+        if let Some(grid) = &mut self.vertex_grid {
+            grid.insert(index, point);
         }
         Ok(index)
     }
@@ -1327,8 +1346,10 @@ impl MeshBuilder {
         )
     }
 
-    /// Locates a point among the triangles that may still change. Frozen
-    /// imported triangles are skipped: no insertion may land in them.
+    /// Locates a point among the triangles that may still change, by scanning
+    /// every one of them. Frozen imported triangles are skipped: no insertion
+    /// may land in them. [`Self::walk_from`] answers the same in far fewer
+    /// steps; this is its fallback, and under test its oracle.
     fn containing_triangle(&self, point: Point2) -> Option<(usize, PolygonLocation)> {
         let mut boundary = None;
         for (index, triangle) in self
@@ -1417,10 +1438,23 @@ impl MeshBuilder {
         Ok(())
     }
 
+    /// Inserts a refinement point where the scan finds it; the tests' way in.
+    #[cfg(test)]
     fn insert_point(&mut self, point: Point2) -> Result<(), MeshError> {
-        let (triangle_index, location) = self.containing_triangle(point).ok_or(
-            MeshError::Topology("refinement point is outside the domain"),
-        )?;
+        let located = self.containing_triangle(point);
+        self.insert_located_point(point, located)
+    }
+
+    /// Inserts a refinement point at `located`, its containing triangle and
+    /// whether it lies inside or on an edge, as [`Self::locate_from`] found it.
+    fn insert_located_point(
+        &mut self,
+        point: Point2,
+        located: Option<(usize, PolygonLocation)>,
+    ) -> Result<(), MeshError> {
+        let (triangle_index, location) = located.ok_or(MeshError::Topology(
+            "refinement point is outside the domain",
+        ))?;
         if location == PolygonLocation::Boundary
             && self.triangles[triangle_index]
                 .vertices
@@ -1450,6 +1484,9 @@ impl MeshBuilder {
                 self.incident.pop();
                 if let Some(region) = &mut self.repair_region {
                     region.pop();
+                }
+                if let Some(grid) = &mut self.vertex_grid {
+                    grid.remove(vertex, point);
                 }
                 if midpoint != point {
                     return Err(MeshError::Topology(
@@ -1489,6 +1526,39 @@ impl MeshBuilder {
 
     fn end_constraint_points(&mut self) {
         self.vertex_grid = None;
+    }
+    /// The vertex grid for refinement's coincidence checks: built when there
+    /// is none and rebuilt when the vertices have outgrown it, so its cells
+    /// stay about one vertex each. [`Self::add_vertex`] keeps it current.
+    fn ensure_vertex_grid(&mut self) {
+        if self
+            .vertex_grid
+            .as_ref()
+            .is_none_or(|grid| grid.crowded(self.vertices.len()))
+        {
+            self.vertex_grid = Some(VertexGrid::new(&self.vertices));
+        }
+    }
+    /// Whether a vertex the imports did not freeze lies within a tenth of the
+    /// curve tolerance of `point`: through the grid, held under test to the
+    /// scan of every vertex it replaced.
+    fn coincides_with_vertex(&mut self, point: Point2) -> bool {
+        self.ensure_vertex_grid();
+        let tolerance = self.options.curve_tolerance * 0.1;
+        let frozen = self.frozen_vertices;
+        let by_grid = self.vertex_grid.as_ref().is_some_and(|grid| {
+            grid.near(point, tolerance)
+                .any(|vertex| vertex >= frozen && (self.point(vertex) - point).norm() <= tolerance)
+        });
+        #[cfg(test)]
+        assert_eq!(
+            by_grid,
+            self.vertices
+                .iter()
+                .skip(frozen)
+                .any(|vertex| (vertex.point - point).norm() <= tolerance)
+        );
+        by_grid
     }
 
     /// The lowest-numbered vertex within a tenth of the curve tolerance of
@@ -1559,12 +1629,22 @@ impl MeshBuilder {
 
     /// The triangle holding `point`, as [`Self::containing_triangle`] answers
     /// it, found by walking from a triangle around `start` towards the point.
-    /// The point is not at a vertex, so it lies inside one triangle or on
-    /// the edge of two, and the scan takes the lower-numbered of those.
-    /// `None` when the walk leaves the mesh, meets a frozen triangle or
-    /// runs too long, and the caller scans.
+    /// `None` when the walk gives up, and the caller scans; see
+    /// [`Self::walk_from`].
     fn walk_to_point(&self, start: usize, point: Point2) -> Option<(usize, PolygonLocation)> {
-        let mut triangle = *self.incident.get(start)?.first()?;
+        self.walk_from(*self.incident.get(start)?.first()?, point)
+    }
+
+    /// The triangle holding `point`, as [`Self::containing_triangle`] answers
+    /// it, found by walking from triangle `start` towards the point, out
+    /// through an edge the point lies beyond at each step. A point inside one
+    /// triangle has that one; a point on the edge of two has the
+    /// lower-numbered, as the scan takes it. `None` when the walk leaves the
+    /// mesh, meets a frozen triangle, runs too long, or reaches a vertex,
+    /// where the scan's lowest incident triangle is not the edge's; the
+    /// caller scans then.
+    fn walk_from(&self, start: usize, point: Point2) -> Option<(usize, PolygonLocation)> {
+        let mut triangle = start;
         for _ in 0..self.triangles.len() {
             if triangle < self.frozen_triangles {
                 return None;
@@ -1574,10 +1654,11 @@ impl MeshBuilder {
             match point_in_triangle(point, corners) {
                 PolygonLocation::Inside => return Some((triangle, PolygonLocation::Inside)),
                 PolygonLocation::Boundary => {
-                    let edge = (0..3).find(|index| {
+                    let on_edge = (0..3).filter(|index| {
                         orient2d(corners[*index], corners[(index + 1) % 3], point)
                             == PredicateSign::Zero
-                    })?;
+                    });
+                    let [edge] = on_edge.collect::<Vec<_>>().try_into().ok()?;
                     let key = edge_key(vertices[edge], vertices[(edge + 1) % 3]);
                     let lowest = self
                         .adjacency
@@ -1604,6 +1685,19 @@ impl MeshBuilder {
             }
         }
         None
+    }
+
+    /// The triangle holding `point`, by the walk from `start` and by the scan
+    /// where the walk gives up, counted. Every meshing test holds the walk to
+    /// the scan.
+    fn locate_from(&mut self, start: usize, point: Point2) -> Option<(usize, PolygonLocation)> {
+        if let Some(found) = self.walk_from(start, point) {
+            #[cfg(test)]
+            assert_eq!(Some(found), self.containing_triangle(point));
+            return Some(found);
+        }
+        self.stats.location_scans += 1;
+        self.containing_triangle(point)
     }
 
     fn insert_constraint_point(
@@ -1687,9 +1781,6 @@ impl MeshBuilder {
             ));
         }
         let vertex = self.add_vertex(point, None)?;
-        if let Some(grid) = &mut self.vertex_grid {
-            grid.insert(vertex, point);
-        }
         if location == PolygonLocation::Boundary {
             let edge = (0..3)
                 .map(|index| [triangle.vertices[index], triangle.vertices[(index + 1) % 3]])
@@ -2359,17 +2450,26 @@ impl MeshBuilder {
         }
         let points = self.triangle_points(triangle);
         let centroid = (points[0] + points[1] + points[2]) / 3.0;
-        let circumcenter = self.circumcenter(triangle).filter(|point| {
-            self.containing_triangle(*point).is_some_and(|(index, _)| {
+        // Each candidate is located by a walk from the element being refined,
+        // once, and the location serves the checks below and the insertion.
+        let mut candidate = centroid;
+        let mut located = None;
+        if let Some(point) = self.circumcenter(triangle) {
+            let location = self.locate_from(triangle_index, point);
+            let in_region = location.is_some_and(|(index, _)| {
                 self.triangles[index].region == triangle.region
                     && self.repair_region.as_ref().is_none_or(|region| {
                         self.triangles[index].vertices.iter().all(|v| region[*v])
                     })
-            })
-        });
-        let mut candidate = circumcenter.unwrap_or(centroid);
+            });
+            if in_region {
+                candidate = point;
+                located = location;
+            }
+        }
         if self.region_at(candidate) != Some(triangle.region) {
             candidate = centroid;
+            located = None;
         }
         // Beside frozen triangles a circumcenter often falls outside the
         // cavity. Splitting such an element at its centroid instead only
@@ -2382,29 +2482,24 @@ impl MeshBuilder {
         // circumcenter can land exactly on the opposite trace even though it is
         // unrelated to the element being refined; use the element centroid in
         // that ambiguous geometric case.
-        let coincides = |builder: &Self, candidate: Point2| {
-            builder
-                .vertices
-                .iter()
-                .skip(builder.frozen_vertices)
-                .any(|vertex| {
-                    (vertex.point - candidate).norm() <= builder.options.curve_tolerance * 0.1
-                })
-        };
         for attempt in 0..8 {
-            if !coincides(self, candidate) {
+            if !self.coincides_with_vertex(candidate) {
                 break;
             }
             candidate = centroid.lerp(points[attempt % 3], 0.01 * (attempt + 1) as f64);
+            located = None;
         }
-        if coincides(self, candidate) {
+        if self.coincides_with_vertex(candidate) {
             self.drop_bad_triangle(triangle_index);
             return Ok(false);
         }
         // A candidate on an edge shared with a frozen triangle would split
         // that triangle; the band accepts the element as it is instead.
+        if self.frozen_triangles > 0 && located.is_none() {
+            located = self.locate_from(triangle_index, candidate);
+        }
         if self.frozen_triangles > 0
-            && let Some((index, PolygonLocation::Boundary)) = self.containing_triangle(candidate)
+            && let Some((index, PolygonLocation::Boundary)) = located
         {
             let host = self.triangles[index];
             let frozen = (0..3).any(|corner| {
@@ -2449,7 +2544,10 @@ impl MeshBuilder {
             }
             self.split_boundary_paired(edge_index)?;
         } else {
-            self.insert_point(candidate)?;
+            if located.is_none() {
+                located = self.locate_from(triangle_index, candidate);
+            }
+            self.insert_located_point(candidate, located)?;
         }
         self.stats.refinement_insertions += 1;
         Ok(false)
@@ -3573,6 +3671,57 @@ mod tests {
     /// scans: on a lattice edge and a diagonal, where the walk ends on an
     /// edge shared by two triangles, inside one far from the walk's start,
     /// on an existing vertex, and beside a free vertex that moves onto it.
+    /// The walk answers as the scan does inside a triangle and on an edge,
+    /// and gives up at a vertex, where the scan's lowest incident triangle is
+    /// not the edge's, and outside the mesh; the located lookup scans then.
+    #[test]
+    fn the_refinement_walk_answers_as_the_scan_or_gives_up() {
+        let mut b = MeshBuilder::new(MeshingOptions::default(), crate::DomainRect::default());
+        let n = 4;
+        for y in 0..=n {
+            for x in 0..=n {
+                let at = |i: usize| -1.0 + 2.0 * i as f64 / n as f64;
+                b.add_vertex(Point2::new(at(x), at(y)), None).unwrap();
+            }
+        }
+        let vertex = |x: usize, y: usize| y * (n + 1) + x;
+        for y in 0..n {
+            for x in 0..n {
+                for corners in [
+                    [vertex(x, y), vertex(x + 1, y), vertex(x + 1, y + 1)],
+                    [vertex(x, y), vertex(x + 1, y + 1), vertex(x, y + 1)],
+                ] {
+                    b.push_triangle(b.ccw_triangle(corners, BACKGROUND_REGION).unwrap())
+                        .unwrap();
+                }
+            }
+        }
+        let far = b.triangles.len() - 1;
+        let inside = Point2::new(-0.9, -0.95);
+        let on_edge = Point2::new(-0.5, -0.9);
+        let at_vertex = Point2::new(-0.5, -0.5);
+        let outside = Point2::new(1.5, 0.0);
+        assert!(matches!(
+            b.walk_from(far, inside),
+            Some((_, PolygonLocation::Inside))
+        ));
+        assert_eq!(b.walk_from(far, inside), b.containing_triangle(inside));
+        assert!(matches!(
+            b.walk_from(far, on_edge),
+            Some((_, PolygonLocation::Boundary))
+        ));
+        assert_eq!(b.walk_from(far, on_edge), b.containing_triangle(on_edge));
+        assert_eq!(b.walk_from(far, at_vertex), None);
+        assert_eq!(
+            b.locate_from(far, at_vertex),
+            b.containing_triangle(at_vertex)
+        );
+        assert_eq!(b.locate_from(far, outside), None);
+        assert_eq!(b.stats.location_scans, 2);
+        assert_eq!(b.locate_from(far, inside), b.containing_triangle(inside));
+        assert_eq!(b.stats.location_scans, 2);
+    }
+
     #[test]
     fn constraint_points_go_in_alike_with_and_without_the_vertex_grid() {
         let lattice = || {
