@@ -22506,3 +22506,40 @@ quiet reading is even. C2b's nonlinear timing, deferred for the same load,
 is the 45% above. The suite's runs of `canonical_gpu_temporal_timing
 --outgoing` that timed out at exit this afternoon were that load too; it
 passed here.
+
+## 2026-10-11 — Why the trapezoid step halves a nonlinear wall's cost, and the quiet host's figures
+
+Behind the driven timing fixture's nonlinear first-order wall the trapezoid
+step's dispatches are the half kicks' exactly, and its step still costs
+half. The two differ only at the wall's 328 nonlinear sites, 2% of the
+15,264 nodes: the half kicks run a discrete-gradient Newton there, two
+inverses an iteration, in both kicks; the trapezoid step one inverse in the
+first kick and a Newton of one inverse an iteration in the second. Measured
+by repeating the first kick's dispatch four extra times a step, which
+recomputes the same candidate from the accepted state - the state checksums
+after 2,000 steps are the same with and without, under either step - and
+reading the slope over 20,000 steps in two rotated rounds that agree to 1%:
+the first kick costs 741 and 735 µs a dispatch under the half kicks, 117 and
+107 under the trapezoid step, 6.6 times less, of steps of 1.72 and 0.91 ms.
+That is 630 of the 810 µs between the steps; the second kick's Newton, one
+inverse an iteration against two, is the rest. A pass ends when its slowest
+thread ends and the next cannot start before, so the wall's Newton sets the
+whole kick's duration however small its share of the work; the 328 wall
+nodes sit in 76 of the 477 lockstep groups of 32, and that share is not
+what matters. Reading a process's GPU time from the driver
+(`ioreg -r -c AGXDeviceUserClient -l -w0`, `accumulatedGPUTime`) is what
+found the afternoon's load, and it charges Core Animation to WindowServer:
+Telegram's animations read as WindowServer at 70% of the GPU and Telegram at
+none.
+
+D's figures were taken while that load remained, after the stuck screen
+recording and before Telegram was quit; its driven reference read 0.837 ms
+where the rebooted host reads 0.705. On the quiet host (20,000 steps,
+medians of three, rotated, the half kicks against the default): the app's
+plain scene at its edge of 0.06 costs 0.265 ms a step against 0.257, 3.1%
+more; the driven fixture behind its second-order wall 0.692 against 0.705
+ms; behind its nonlinear second-order wall 1.92 against 3.59 ms, 47% less;
+behind its nonlinear first-order wall 0.893 against 1.67 ms, 47% less. The
+ratios are D's; the spike's D paragraph carries these figures now. C1's
+figures (0.271 against 0.259 at the edge) were taken before the recording
+began and stand.

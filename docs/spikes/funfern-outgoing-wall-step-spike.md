@@ -381,12 +381,17 @@ state's own step; the half kicks stay for comparison, behind
 `--half-kicks` and `*_WALL_STEP=half-kicks` on the examples. The fixture's
 second-order band reads 1.01 of its law under the default and is held to
 2%. On a quiet host (20,000 steps, medians of three, rotated), a step at the
-app's plain-scene edge of 0.06 costs 0.308 ms against the half kicks' 0.297,
-3.7% more, the fixed inverse's two extra dispatches; behind the driven
-timing fixture's second-order wall 0.825 against 0.837 ms, even; behind its
-nonlinear second-order wall 2.34 against 4.30 ms, 67 wall dispatches against
-122; and behind its nonlinear first-order wall 1.01 against 1.97 ms, with the
-same dispatches either way: there the steps differ only at the wall's
-nonlinear sites, where the half kicks run a discrete-gradient Newton, two
-inverses an iteration, in both kicks, and the trapezoid step one Newton of
-one inverse an iteration in the second.
+app's plain-scene edge of 0.06 costs 0.265 ms against the half kicks' 0.257,
+3.1% more, the fixed inverse's two extra dispatches; behind the driven
+timing fixture's second-order wall 0.692 against 0.705 ms, even; behind its
+nonlinear second-order wall 1.92 against 3.59 ms, 67 wall dispatches against
+122; and behind its nonlinear first-order wall 0.893 against 1.67 ms, with
+the same dispatches either way. There the steps differ only at the wall's
+328 nonlinear sites, 2% of the nodes, where the half kicks run a
+discrete-gradient Newton, two inverses an iteration, in both kicks, and the
+trapezoid step one inverse in the first kick and a Newton of one inverse an
+iteration in the second. Repeating the first kick's dispatch, which leaves
+every bit as it was, reads its cost by the slope: 740 µs under the half
+kicks and 112 µs under the trapezoid step. A pass ends with its slowest
+thread, and the wall's Newton is that thread; the 76 of 477 lockstep groups
+it sits in do not come into it.
