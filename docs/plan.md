@@ -1434,23 +1434,6 @@ is next touched.
   most 5 for any eigenvalue, 1.7 on average. LAPACK's `dsteqr` budgets 30·n
   for the whole solve instead, so an eigenvalue that stalls borrows from the
   others; that, and a message naming the way out, would be the change.
-- The outgoing walls' stepping reflects on its own, 1e-3 to 2e-3 of the
-  incident amplitude at the app's step, at every angle and for both orders.
-  Against the second-order wall's small law it reads as 1.10 of its energy
-  reflection in fixture
-  `an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`'s
-  band, 27° to 39°; against the first-order wall's larger law it hardly shows.
-  [The wall-step spike](spikes/funfern-outgoing-wall-step-spike.md) found the
-  cause - the two half-step Cayley kicks leave the trace node's mass off by
-  `w²/16`, `w` the wall's rate times the step, and the wall's rates are stiff,
-  so the error is first order in `ω·dt` at a fixed CFL - and a fix: one
-  Cayley over the wall for the whole step, split as the trapezoid rule around
-  the kicks, and the wall's acceleration in the drift's corrected field. On the spike's strip
-  that takes the band from 1.077 to 1.0006 and leaves `(ω·dt)²/24` at any
-  step. Stage B (CPU, both paths) and C (the device's fixed and driven
-  paths, nonlinear walls among them) are done beside the half kicks, which
-  stay the default; D (the default switched on both, the fixture's band held
-  to 2%) is next. The fixture holds the second-order band to 15% until then.
 
 ## Working practice
 

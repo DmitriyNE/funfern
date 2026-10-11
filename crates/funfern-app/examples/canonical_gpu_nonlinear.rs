@@ -16,11 +16,12 @@
 //! `NONLINEAR_WALL=1` or `=2` replaces the reflecting walls with a first- or
 //! second-order outgoing wall, so the Kerr trace kicks through its discrete
 //! gradient: a scalar Newton at an absorbing node, or a budget of Newton
-//! linearizations around the linear trace solve. `NONLINEAR_WALL_STEP=trapezoid`
-//! steps that wall by the trapezoid rule, the reference and the device alike,
-//! its halves reading the field `U(Q)`: the medium's saturable stiffness
-//! brings the kick form, whose rate then carries the wall's. Either way the
-//! wall's loss lane is held to the reference's sum.
+//! linearizations around the linear trace solve, its halves reading the field
+//! `U(Q)` under the default trapezoid wall step: the medium's saturable
+//! stiffness brings the kick form, whose rate then carries the wall's.
+//! `NONLINEAR_WALL_STEP=half-kicks` steps the wall by the half kicks instead,
+//! the reference and the device alike. Either way the wall's loss lane is
+//! held to the reference's sum.
 //!
 //! `NONLINEAR_FILTER=1` turns the resident grid filter on, so the device
 //! freezes every site's tangent and filters every sixteenth step beside
@@ -210,9 +211,9 @@ fn main() -> AppExit {
         .compatible_flux(&potential)
         .expect("compatible nonlinear flux");
     let wall_step = match std::env::var("NONLINEAR_WALL_STEP").as_deref() {
-        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
-        Ok(other) => panic!("NONLINEAR_WALL_STEP takes only trapezoid, not {other}"),
-        Err(_) => CanonicalWallStep::HalfKicks,
+        Ok("half-kicks") => CanonicalWallStep::HalfKicks,
+        Ok(other) => panic!("NONLINEAR_WALL_STEP takes only half-kicks, not {other}"),
+        Err(_) => CanonicalWallStep::default(),
     };
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("nonlinear state")

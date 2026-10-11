@@ -18,8 +18,9 @@
 //! to the driven medium, at an amplitude where both maps depart from linear,
 //! so the step pays every inverse and, with `--outgoing`, the wall's Newton.
 //!
-//! `--trapezoid` steps the wall by the trapezoid rule: one solve a step over
-//! the whole step where the half kicks take two over half of it each.
+//! `--half-kicks` steps the wall by the half kicks, two solves a step over
+//! half of it each, where the default trapezoid rule takes one over the
+//! whole step.
 //!
 //! `--filter` turns the resident grid filter on, which runs every sixteenth
 //! step, so the figure includes its amortized cost.
@@ -104,10 +105,10 @@ fn main() -> AppExit {
     let gated = std::env::args().any(|argument| argument == "--gated");
     let short_wave = std::env::args().any(|argument| argument == "--short-wave");
     let checksum = std::env::args().any(|argument| argument == "--checksum");
-    let wall_step = if std::env::args().any(|argument| argument == "--trapezoid") {
-        CanonicalWallStep::Trapezoid
-    } else {
+    let wall_step = if std::env::args().any(|argument| argument == "--half-kicks") {
         CanonicalWallStep::HalfKicks
+    } else {
+        CanonicalWallStep::default()
     };
     let steps = std::env::args()
         .find_map(|argument| argument.strip_prefix("--steps=")?.parse().ok())

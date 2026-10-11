@@ -9338,15 +9338,15 @@ mod tests {
     /// its negative, so their mean is the incident wave and their
     /// half-difference what a wall of coefficient one returns. Over the band
     /// the first-order wall's energy reflection matches its law to 1%; the
-    /// second-order wall's reads 1.10 of the passive law at the default step,
-    /// 1.03 at half of it and 1.02 at a quarter, an excess in the stepping,
-    /// not the law (`docs/plan.md`, Worth checking sometime), and is held to
-    /// 15%. The trapezoid wall step
-    /// (`docs/spikes/funfern-outgoing-wall-step-spike.md`) reads 1.01, the
-    /// mesh's own, and is held to 2%; at normal incidence, where the two
-    /// meshes' difference hides it, its near run is held to a fifth of the
-    /// half kicks' distance from where both converge, a quarter of the step
-    /// on the same mesh. Between electric walls in TM the field vanishes at the corners,
+    /// second-order wall's, under the default trapezoid wall step
+    /// (`docs/spikes/funfern-outgoing-wall-step-spike.md`), reads 1.01, the
+    /// mesh's own, and is held to 2%. The half kicks it replaced read 1.10 of
+    /// the passive law at the default step, 1.03 at half of it and 1.02 at a
+    /// quarter, an excess in their stepping, not the law, and are held to 15%
+    /// for comparison; at normal incidence, where the two meshes' difference
+    /// hides it, the trapezoid step's near run is held to a fifth of the half
+    /// kicks' distance from where both converge, a quarter of the step on the
+    /// same mesh. Between electric walls in TM the field vanishes at the corners,
     /// the wall's trace ends there, and `sin(2πy)` must reflect as `cos(2πy)`
     /// does between reflecting sides, within 2%: with the corners kept on the
     /// trace it reflected 6.6 times its law. Electric walls in TM and zero
@@ -9534,7 +9534,7 @@ mod tests {
             )),
         );
         eprintln!(
-            "oblique, over the law: free sides first {:.4} second {:.4}; pinned sides first {:.4} second {:.4}",
+            "oblique, over the law, half kicks: free sides first {:.4} second {:.4}; pinned sides first {:.4} second {:.4}",
             free[0], free[1], pinned[0], pinned[1]
         );
         eprintln!(

@@ -35,8 +35,9 @@
 //! `OSCILLATOR_FIELD_LAW=kerr` or `saturable` puts that field law on the
 //! medium's mass row, whatever the medium: beside `van-der-pol` the stage
 //! reads the node's field through its own map, in two secant passes on both
-//! sides. `OSCILLATOR_WALL_STEP=trapezoid` steps `wall1`, `wall2` or
-//! `wall2-pins` by the trapezoid rule, the reference and the device alike.
+//! sides. `OSCILLATOR_WALL_STEP=half-kicks` steps `wall1`, `wall2` or
+//! `wall2-pins` by the half kicks instead of the default trapezoid rule, the
+//! reference and the device alike.
 
 #[path = "support/check.rs"]
 mod check;
@@ -337,9 +338,9 @@ fn main() -> AppExit {
         .compatible_flux(&integrated)
         .expect("compatible oscillator flux");
     let wall_step = match std::env::var("OSCILLATOR_WALL_STEP").as_deref() {
-        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
-        Ok(other) => panic!("OSCILLATOR_WALL_STEP takes only trapezoid, not {other}"),
-        Err(_) => CanonicalWallStep::HalfKicks,
+        Ok("half-kicks") => CanonicalWallStep::HalfKicks,
+        Ok(other) => panic!("OSCILLATOR_WALL_STEP takes only half-kicks, not {other}"),
+        Err(_) => CanonicalWallStep::default(),
     };
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("oscillator state")

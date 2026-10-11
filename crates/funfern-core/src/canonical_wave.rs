@@ -1646,12 +1646,12 @@ impl CanonicalIntegrator {
 /// are of the grid's order, about one over the step at the app's step, and
 /// the half-step Cayleys leave the trace node's mass off by `w²/16`,
 /// `w = g dt`: a reflection of its own, first order in `ω dt` at a fixed
-/// CFL. The trapezoid step leaves `(ω dt)²/24` whatever the wall's rate.
+/// CFL. The trapezoid step leaves `(ω dt)²/24` whatever the wall's rate, and
+/// is the default; the half kicks stay for comparison.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CanonicalWallStep {
     /// Each half-kick integrates the wall by a Cayley step of its own half,
     /// with the held force on the same right-hand side.
-    #[default]
     HalfKicks,
     /// The trapezoid rule over the whole step, cut around the kicks: the
     /// first kick takes the explicit half `(I + dt/2 G) X` beside the bulk's
@@ -1660,6 +1660,7 @@ pub enum CanonicalWallStep {
     /// drift's field at a wall node carries the wall's share of
     /// `dt²/12 · ü`. What a step stores at a wall node is then the mean of
     /// the two drift instants around it, as at every other node.
+    #[default]
     Trapezoid,
 }
 
@@ -1667,7 +1668,7 @@ pub enum CanonicalWallStep {
 thread_local! {
     /// The wall step a state is built with inside [`under_each_wall_step`].
     static TEST_WALL_STEP: std::cell::Cell<CanonicalWallStep> =
-        const { std::cell::Cell::new(CanonicalWallStep::HalfKicks) };
+        const { std::cell::Cell::new(CanonicalWallStep::Trapezoid) };
 }
 
 /// The wall step a new state takes: the default, or in a test the one
@@ -1684,15 +1685,15 @@ pub(crate) fn default_wall_step() -> CanonicalWallStep {
 }
 
 /// Runs `body` once under each wall step, every state built inside it
-/// taking that step, so a test written for the half kicks holds the
-/// trapezoid step to the same checks.
+/// taking that step, so the half kicks are held to the same checks as the
+/// default trapezoid step.
 #[cfg(test)]
 pub(crate) fn under_each_wall_step(body: impl Fn(CanonicalWallStep)) {
     for wall_step in [CanonicalWallStep::HalfKicks, CanonicalWallStep::Trapezoid] {
         TEST_WALL_STEP.with(|step| step.set(wall_step));
         body(wall_step);
     }
-    TEST_WALL_STEP.with(|step| step.set(CanonicalWallStep::HalfKicks));
+    TEST_WALL_STEP.with(|step| step.set(CanonicalWallStep::default()));
 }
 
 impl CanonicalWallStep {

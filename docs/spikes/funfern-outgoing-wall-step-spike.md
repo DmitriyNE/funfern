@@ -374,3 +374,19 @@ within 1.2e-6 behind either order and a pinned trace, beside van der Pol
 too. Behind the driven timing fixture's nonlinear second-order wall, six
 sweeps a solve, a step takes 67 wall dispatches where the half kicks take
 122; its time a step is still to be read on a quiet host.
+
+**D, done 11 October 2026: the default.** `CanonicalWallStep::Trapezoid` is
+every state's default, on the CPU and so on the device, which compiles the
+state's own step; the half kicks stay for comparison, behind
+`--half-kicks` and `*_WALL_STEP=half-kicks` on the examples. The fixture's
+second-order band reads 1.01 of its law under the default and is held to
+2%. On a quiet host (20,000 steps, medians of three, rotated), a step at the
+app's plain-scene edge of 0.06 costs 0.308 ms against the half kicks' 0.297,
+3.7% more, the fixed inverse's two extra dispatches; behind the driven
+timing fixture's second-order wall 0.825 against 0.837 ms, even; behind its
+nonlinear second-order wall 2.34 against 4.30 ms, 67 wall dispatches against
+122; and behind its nonlinear first-order wall 1.01 against 1.97 ms, with the
+same dispatches either way: there the steps differ only at the wall's
+nonlinear sites, where the half kicks run a discrete-gradient Newton, two
+inverses an iteration, in both kicks, and the trapezoid step one Newton of
+one inverse an iteration in the second.

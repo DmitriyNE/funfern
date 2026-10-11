@@ -19,8 +19,8 @@
 //!
 //! `DRIVEN_WALLS=outgoing` keeps the document's second-order outgoing walls,
 //! whose trace the device sweeps at each stage's mass, and
-//! `DRIVEN_WALL_STEP=trapezoid` steps them by the trapezoid rule, the
-//! reference and the device alike.
+//! `DRIVEN_WALL_STEP=half-kicks` steps them by the half kicks instead of the
+//! default trapezoid rule, the reference and the device alike.
 
 #[path = "support/check.rs"]
 mod check;
@@ -201,9 +201,9 @@ fn main() -> AppExit {
         .collect::<Vec<_>>();
     let complementary = base.compatible_flux(&potential).expect("compatible flux");
     let wall_step = match std::env::var("DRIVEN_WALL_STEP").as_deref() {
-        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
-        Ok(other) => panic!("DRIVEN_WALL_STEP takes only trapezoid, not {other}"),
-        Err(_) => CanonicalWallStep::HalfKicks,
+        Ok("half-kicks") => CanonicalWallStep::HalfKicks,
+        Ok(other) => panic!("DRIVEN_WALL_STEP takes only half-kicks, not {other}"),
+        Err(_) => CanonicalWallStep::default(),
     };
     let mut seeded = CanonicalTemporalWaveState::new(&temporal, time_step, primary, complementary)
         .expect("seeded state")

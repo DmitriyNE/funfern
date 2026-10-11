@@ -81,12 +81,12 @@ struct FailureSnapshot {
 fn main() -> AppExit {
     let second_order = std::env::args().any(|argument| argument == "--second-order");
     let first_order = std::env::args().any(|argument| argument == "--first-order");
-    // The walls stepped by the trapezoid rule, the reference and the device
-    // alike.
-    let wall_step = if std::env::args().any(|argument| argument == "--trapezoid") {
-        CanonicalWallStep::Trapezoid
-    } else {
+    // The walls stepped by the default trapezoid rule or, with
+    // `--half-kicks`, the half kicks, the reference and the device alike.
+    let wall_step = if std::env::args().any(|argument| argument == "--half-kicks") {
         CanonicalWallStep::HalfKicks
+    } else {
+        CanonicalWallStep::default()
     };
     // The leapfrog at its own step, where the production integrator is the
     // fourth-order step.

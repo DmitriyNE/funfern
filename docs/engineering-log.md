@@ -22460,3 +22460,49 @@ GPU, every run in that suite some eight times its usual time a step; C2a's
 build, before this fix and C2b, failed the same way beside it (11.1 ms a
 step, against 1.1 on a quiet host). An unfenced timing run can exit with
 that much queued; not changed here.
+
+## 2026-10-11 — The trapezoid wall step is the default (stage D)
+
+`CanonicalWallStep::Trapezoid` is now `CanonicalWallStep::default()`, so
+every fixed and driven state steps its walls by the trapezoid rule, and the
+device with it, since it compiles the state's own step. The half kicks stay
+for comparison: `--half-kicks` on `canonical_gpu_timing`,
+`canonical_gpu_handoff` and `canonical_gpu_temporal_timing`, and
+`*_WALL_STEP=half-kicks` on the long run, forced, driven-document,
+temporal AMR, nonlinear and oscillator examples, where those options asked
+for the trapezoid before. The device suite runs every wall under the
+default and keeps a half-kick line beside each family. The wall step is not
+part of a scene, and the app reads no ledger lane, so saved scenes are
+unchanged and the trapezoid's second-order ledger remainder raises no
+diagnostic.
+
+The fixture `an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`
+already measured both steps; its production reading is now the default's,
+1.01 of the second-order law and held to 2%, and the half kicks' 1.10 is
+held to 15% for comparison. The plan's "Worth checking sometime" entry for
+that excess is closed. The core's 518 tests and the app's 305 pass under
+the default; the one that read the half kicks' manifest,
+`second_order_manifest_contains_the_parallel_trace_factor`, now asks for
+them, and `under_each_wall_step` leaves states on the default afterwards.
+The device suite passed 76 of 76, the app's end-to-end fixtures among them,
+and 1,000 steps of five gallery scenes read alike under either step: Double
+slit `Q` 2.20e-6 and `b` 2.60e-6 against the half kicks' 2.18e-6 and
+2.53e-6, Luneburg lens 3.49e-6 and 3.99e-6 against 3.50e-6 and 3.98e-6,
+Self-sustained emitter 1.13e-5 and 1.28e-5 against 1.13e-5 and 1.28e-5,
+Phased array and Parametric pump, whose walls are not second-order, as
+before.
+
+Timed on a quiet host, 20,000 steps, medians of three, rotated: the app's
+plain scene at its edge of 0.06 costs 0.308 ms a step against the half
+kicks' 0.297, 3.7% more (C1 read 4.6%); the driven timing fixture behind its
+second-order wall 0.825 against 0.837 ms, even; behind its nonlinear
+second-order wall 2.34 against 4.30 ms, 45% less; and behind its nonlinear
+first-order wall 1.01 against 1.97 ms, 48% less, with the same dispatches,
+the steps differing only at the wall's nonlinear sites. That corrects two
+earlier entries. C2a's 5.6% less behind the driven second-order wall was
+timed while a macOS screen recording, stuck since about 11:20, held the GPU
+- its own reference read 1.14 ms where the quiet host reads 0.84 - and the
+quiet reading is even. C2b's nonlinear timing, deferred for the same load,
+is the 45% above. The suite's runs of `canonical_gpu_temporal_timing
+--outgoing` that timed out at exit this afternoon were that load too; it
+passed here.

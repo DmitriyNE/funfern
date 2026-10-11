@@ -6,8 +6,8 @@
 //!
 //! `--pinned-sides` pins the top and bottom sides to zero on both
 //! generations, so the `--second-order` wall's trace ends at the corners.
-//! `--trapezoid` steps the walls by the trapezoid rule on both generations,
-//! the reference and the device alike.
+//! `--half-kicks` steps the walls by the half kicks instead of the default
+//! trapezoid rule on both generations, the reference and the device alike.
 //!
 //! `--edit` gives the target generation's harmonic `--source` and
 //! `--prescribed` other numbers, phase included. Each carrier runs on from the
@@ -86,10 +86,10 @@ enum Phase {
 
 fn main() -> AppExit {
     let second_order = std::env::args().any(|argument| argument == "--second-order");
-    let wall_step = if std::env::args().any(|argument| argument == "--trapezoid") {
-        CanonicalWallStep::Trapezoid
-    } else {
+    let wall_step = if std::env::args().any(|argument| argument == "--half-kicks") {
         CanonicalWallStep::HalfKicks
+    } else {
+        CanonicalWallStep::default()
     };
     let same_mesh = std::env::args().any(|argument| argument == "--same-mesh");
     let thin_gap = std::env::args().any(|argument| argument == "--thin-gap");

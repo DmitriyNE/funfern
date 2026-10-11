@@ -9731,9 +9731,21 @@ mod tests {
         }
     }
 
+    /// The half kicks' manifest, which apply the trace's solve at each kick;
+    /// the default trapezoid step's is
+    /// `the_trapezoid_wall_step_takes_one_solve_a_step`.
     #[test]
     fn second_order_manifest_contains_the_parallel_trace_factor() {
-        let plan = plan(OuterBoundaryCondition::SecondOrderOutgoing);
+        let half_kicks = |operator: &CanonicalWaveOperator, state: CanonicalWaveState| {
+            state
+                .with_wall_step(operator, CanonicalWallStep::HalfKicks)
+                .unwrap()
+        };
+        let plan = plan_with_state(
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            true,
+            half_kicks,
+        );
         assert!(plan.trace_count > 0);
         assert_eq!(plan.trace_count, plan.mode_count);
         assert!(plan.boundary.len() > plan.trace_count + plan.mode_count * MODE_WORDS);
@@ -9743,7 +9755,11 @@ mod tests {
         // And the fourth-order drift form's three passes.
         assert_eq!(plan.manifest.dispatches_per_step, 5 + 6 + 2 + 3);
         let square = plan.trace_count * plan.trace_count;
-        let swept = plan_with_trace_lane(OuterBoundaryCondition::SecondOrderOutgoing, false);
+        let swept = plan_with_state(
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            false,
+            half_kicks,
+        );
         assert_eq!(
             plan.boundary.len(),
             swept.boundary.len() + square.div_ceil(4)

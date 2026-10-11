@@ -15,8 +15,9 @@
 //!
 //! `FORCED_WALLS=second` makes the walls second-order outgoing, whose trace
 //! the device sweeps at each stage's mass - beside `FORCED_PINNED_LOSS=1` a
-//! pinned and lossy trace - and `FORCED_WALL_STEP=trapezoid` steps them by
-//! the trapezoid rule, the reference and the device alike.
+//! pinned and lossy trace - and `FORCED_WALL_STEP=half-kicks` steps them by
+//! the half kicks instead of the default trapezoid rule, the reference and
+//! the device alike.
 
 #[path = "support/check.rs"]
 mod check;
@@ -206,9 +207,9 @@ fn main() -> AppExit {
         .compatible_flux(&potential)
         .expect("compatible forced flux");
     let wall_step = match std::env::var("FORCED_WALL_STEP").as_deref() {
-        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
-        Ok(other) => panic!("FORCED_WALL_STEP takes only trapezoid, not {other}"),
-        Err(_) => CanonicalWallStep::HalfKicks,
+        Ok("half-kicks") => CanonicalWallStep::HalfKicks,
+        Ok(other) => panic!("FORCED_WALL_STEP takes only half-kicks, not {other}"),
+        Err(_) => CanonicalWallStep::default(),
     };
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("forced temporal state")

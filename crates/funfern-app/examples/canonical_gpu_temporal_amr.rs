@@ -22,8 +22,9 @@
 //! the estimate reads from the direct state itself: the drift defect with the
 //! step's contraction of `b` taken out, and the wall residual from the
 //! solver's own flux against the impedance the step freezes.
-//! `TEMPORAL_AMR_WALL_STEP=trapezoid` steps those walls by the trapezoid
-//! rule, both generations and the reference alike.
+//! `TEMPORAL_AMR_WALL_STEP=half-kicks` steps those walls by the half kicks
+//! instead of the default trapezoid rule, both generations and the reference
+//! alike.
 
 #[path = "support/check.rs"]
 mod check;
@@ -208,9 +209,9 @@ fn main() -> AppExit {
         .compatible_flux(&potential)
         .expect("compatible temporal AMR flux");
     let wall_step = match std::env::var("TEMPORAL_AMR_WALL_STEP").as_deref() {
-        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
-        Ok(other) => panic!("TEMPORAL_AMR_WALL_STEP takes only trapezoid, not {other}"),
-        Err(_) => CanonicalWallStep::HalfKicks,
+        Ok("half-kicks") => CanonicalWallStep::HalfKicks,
+        Ok(other) => panic!("TEMPORAL_AMR_WALL_STEP takes only half-kicks, not {other}"),
+        Err(_) => CanonicalWallStep::default(),
     };
     let state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
         .expect("temporal AMR state")

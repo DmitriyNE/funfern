@@ -387,18 +387,19 @@ far off, and at normal incidence a reflecting wall returns everything, either
 outgoing order under 2e-5; met by the channel's second transverse mode at 27°
 to 39°, read on one mesh against reflecting and zero-Dirichlet references, the
 first-order wall returns `((1 − cos θ)/(1 + cos θ))²` of the energy to 1% and
-the second-order wall 1.10 of its passive law at the default step, an excess
-of the stepping listed under "Worth checking sometime" in `docs/plan.md`; and
-between electric walls in TM, where the field vanishes at the corners, the
-second-order wall's trace ends there and the mode reflects as it does between
-reflecting sides, to 2%
+the second-order wall 1.01 of its passive law, the mesh's own, held to 2%,
+under the default trapezoid wall step
+(`docs/spikes/funfern-outgoing-wall-step-spike.md`); and between electric
+walls in TM, where the field vanishes at the corners, the second-order
+wall's trace ends there and the mode reflects as it does between reflecting
+sides, to 2%
 (`an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`).
-The same runs under the trapezoid wall step, not yet the production one
-(`docs/spikes/funfern-outgoing-wall-step-spike.md`), read the second-order
-wall at 1.01 of its law, the mesh's own, held to 2%, and the first-order wall
-to 1%; at normal incidence the two meshes' difference hides the wall's step,
-so there the near run is held against its own run at a quarter of the step,
-to a fifth of the half kicks' distance (measured: a tenth). On the driven
+The half kicks that step replaced read the second-order wall at 1.10 of its
+law at the default step, an excess of their stepping, and are held to 15%
+for comparison; at normal incidence the two meshes' difference hides the
+wall's step, so there the trapezoid step's near run is held against its own
+run at a quarter of the step, to a fifth of the half kicks' distance
+(measured: a tenth). On the driven
 path twelve wall tests - second-order balance under pumps and pins,
 nonlinear walls' passivity, the strong Kerr pulse, a reversal, equality with
 the fixed path on inert generations - run under both wall steps
@@ -567,22 +568,24 @@ pump power computed from it, to match an f64 oracle. The Switch origin is
 stamped on the GPU, so this is the check that the accepted runtime reaches a
 consumer rather than being guessed from the clock.
 
-`--trapezoid` on `canonical_gpu_timing` and `canonical_gpu_handoff`, and
-`LONG_RUN_WALL_STEP=trapezoid` on `canonical_gpu_long_run`, step the walls by
-the trapezoid rule (`docs/spikes/funfern-outgoing-wall-step-spike.md`) on the
-reference and the device alike. That rule's ledger is not an exact identity:
-its split leaves a second-order remainder, `7.7e-4` of the energy over the
-timing fixture's 144 steps, which the reference leaves too. The timing example
-therefore holds the device's ledger to the reference's own remainder, which
-under the half kicks is roundoff. `--leapfrog` steps both at the leapfrog's
-own step instead of the production integrator's. `--law-patch` under the
-trapezoid rule is the check that a patch's commit keeps the wall step. On a
-driven generation `FORCED_WALL_STEP=trapezoid` on
+The walls step by the trapezoid rule
+(`docs/spikes/funfern-outgoing-wall-step-spike.md`) on the reference and the
+device alike; `--half-kicks` on `canonical_gpu_timing`,
+`canonical_gpu_handoff` and `canonical_gpu_temporal_timing`, and
+`LONG_RUN_WALL_STEP=half-kicks` on `canonical_gpu_long_run`, step them by the
+half kicks it replaced instead, for comparison. The trapezoid rule's ledger
+is not an exact identity: its split leaves a second-order remainder, `7.7e-4`
+of the energy over the timing fixture's 144 steps, which the reference
+leaves too. The timing example therefore holds the device's ledger to the
+reference's own remainder, which under the half kicks is roundoff.
+`--leapfrog` steps both at the leapfrog's own step instead of the production
+integrator's. `--law-patch` is the check that a patch's commit keeps the
+wall step. On a driven generation `FORCED_WALL_STEP=half-kicks` on
 `canonical_gpu_temporal_forced`, with `FORCED_WALLS=second` for a
-second-order wall, `DRIVEN_WALL_STEP=trapezoid` on
-`canonical_gpu_driven_document`, `TEMPORAL_AMR_WALL_STEP=trapezoid` on
-`canonical_gpu_temporal_amr`, `NONLINEAR_WALL_STEP=trapezoid` on
-`canonical_gpu_nonlinear` and `OSCILLATOR_WALL_STEP=trapezoid` on
+second-order wall, `DRIVEN_WALL_STEP=half-kicks` on
+`canonical_gpu_driven_document`, `TEMPORAL_AMR_WALL_STEP=half-kicks` on
+`canonical_gpu_temporal_amr`, `NONLINEAR_WALL_STEP=half-kicks` on
+`canonical_gpu_nonlinear` and `OSCILLATOR_WALL_STEP=half-kicks` on
 `canonical_gpu_oscillator` do the same, the last two behind nonlinear walls
 - the nonlinear example's medium in the kick form; the forced and nonlinear
 examples also hold the device's wall-loss lane to the reference's.

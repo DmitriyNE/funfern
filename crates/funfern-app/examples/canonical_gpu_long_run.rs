@@ -20,8 +20,8 @@
 //! `LONG_RUN_WALLS=second` makes every outer wall second-order outgoing. The
 //! two together make an outgoing trace longer than the 1,024 nodes the device
 //! once refused: Phased array at 0.017 has 1,166 and Parametric pump 1,236.
-//! `LONG_RUN_WALL_STEP=trapezoid` steps the walls by the trapezoid rule, the
-//! reference and the device alike. `LONG_RUN_LOSS` puts an
+//! `LONG_RUN_WALL_STEP=half-kicks` steps the walls by the half kicks instead
+//! of the default trapezoid rule, the reference and the device alike. `LONG_RUN_LOSS` puts an
 //! electric loss of 0.6 on the scene's second material: `none` a constant
 //! one, a number a pump of that depth on the rate. On the pumped slab both
 //! failed before the device read its loss records: the constant one because a
@@ -130,9 +130,9 @@ fn main() -> AppExit {
         }
     }
     let wall_step = match std::env::var("LONG_RUN_WALL_STEP").as_deref() {
-        Ok("trapezoid") => CanonicalWallStep::Trapezoid,
-        Ok(other) => panic!("LONG_RUN_WALL_STEP takes only trapezoid, not {other}"),
-        Err(_) => CanonicalWallStep::HalfKicks,
+        Ok("half-kicks") => CanonicalWallStep::HalfKicks,
+        Ok(other) => panic!("LONG_RUN_WALL_STEP takes only half-kicks, not {other}"),
+        Err(_) => CanonicalWallStep::default(),
     };
     let edge = document.presentation.mesh_edge;
     let domain = document.model.accepted.geometry.domain;
