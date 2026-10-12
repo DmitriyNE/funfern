@@ -1240,7 +1240,11 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   (2026-10-12). A0.1, the wall sweep, landed on 2026-10-12
   (`docs/engineering-log.md`): `crates/funfern-app/tests/wall_sweep.rs` over
   the gallery through the app's own path and a core twin over the `Scene`
-  path, with the two findings below.
+  path, with the two findings below, both fixed the same day. A0.2, the
+  regression scenes that prepare, landed the same day:
+  `tests/fixtures/scenes-regressions` with the 12 October autosave first,
+  and `tests/regression_scenes.rs` over it, the frozen scenes and the
+  gallery at their own edge.
 - [x] Configurations the editor accepts and the mesher cannot build, found by
   the wall sweep on 2026-10-12 and listed in its `KNOWN` table until fixed.
   Fixed the same day (`docs/engineering-log.md`): a span the face walks

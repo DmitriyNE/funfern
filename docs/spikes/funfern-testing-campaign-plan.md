@@ -178,6 +178,11 @@ the 45 frozen version-22 scenes and the gallery; today they are only opened.
 Done when every reported bug with a scene adds its file in the fix's commit;
 the rule goes into the gate memory and the README.
 
+**Done on 2026-10-12** (`docs/engineering-log.md`): the folder with the
+autosave of 12 October as its first file, `tests/regression_scenes.rs` over
+it, the 45 frozen scenes and the gallery at their own edge, 91 scenes in a
+second, and the rule in the README and in memory.
+
 ### A0.3 Audit of what the tests feed the solvers
 
 For each solver with an oracle test, the trace eigensolve, the transfer and

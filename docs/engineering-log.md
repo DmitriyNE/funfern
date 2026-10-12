@@ -23087,3 +23087,31 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — A0.2: regression scenes that prepare
+
+- **Change.** `crates/funfern-app/tests/fixtures/scenes-regressions/`, one
+  file per scene a user had open when something broke, saved as the app
+  saved it and named by date and defect, never edited or regenerated, with
+  a README in the frozen set's terms and the rule that a reported bug that
+  comes with a scene adds its file in the fix's commit. The first entry is
+  the autosave of this morning, the U outgoing along the inside of its arms
+  beside the line outgoing along one side, which the banded trace solve
+  refused as not positive semidefinite (9d19e20).
+  `tests/regression_scenes.rs` opens every file there, every frozen version
+  22 scene and every gallery scene, validates it to acceptance and prepares
+  it through `TopologyRuntime::request` at the document's own mesh edge,
+  the way the app does. Each must prepare, each prepared outgoing basis must
+  pass the trace report at the wall sweep's bounds, and a regression scene
+  is prepared twice from a fresh runtime, the same mesh hash and basis bit
+  for bit. `tests/frozen_scenes.rs` keeps checking that a file reads back
+  what it held; this checks what the solver does with it.
+- **Numbers.** 91 scenes, 1 regression, 45 frozen and 45 gallery, all at
+  edge 0.08, prepared in 1.0 s on ten threads; the regression scene has
+  1,517 vertices and 343 trace nodes in four pieces.
+- **Rule.** Recorded in the README and in the working memory beside
+  "reproduce before fixing": the scene of a reported bug becomes a fixture
+  in the commit that fixes it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

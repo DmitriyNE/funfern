@@ -602,5 +602,13 @@ runs one scene with its report, `FUNFERN_WALL_SWEEP_ALL=1` every scene,
 `FUNFERN_WALL_SWEEP_EDGE=<edge>` another edge, and
 `FUNFERN_WALL_SWEEP_PLAN=1` prints the case counts without preparing.
 
+`cargo test --release -p funfern-app --test regression_scenes -- --nocapture`
+is stage A0.2: every scene under `tests/fixtures/scenes-regressions`, one per
+reported bug that came with a scene, every frozen version 22 scene and every
+gallery scene, opened, validated and prepared through the app's own path at
+the document's own mesh edge, the prepared outgoing basis read back against
+its operator and the regression scenes prepared twice, bit for bit. It runs
+in the gate, about a second on ten threads.
+
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.
