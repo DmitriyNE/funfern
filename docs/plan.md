@@ -1230,6 +1230,14 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
 ## Maintenance
 
+- [ ] Testing campaign, structure first: configuration sweeps at the
+  preparation layer, regression scenes that prepare, an audit of what the
+  tests feed the solvers and mutations that prove the gate bites, then the
+  architecture's own physics (independent b, boundary memory through handoff),
+  then cavity modes and planar reflection, each a single three-level test
+  with its reference computed offline; the 11 October fixture list follows
+  under those rules. Plan: `docs/spikes/funfern-testing-campaign-plan.md`
+  (2026-10-12).
 - [x] A self-oscillating gain lased on the mesh's shortest waves, at a
   van der Pol region's rim. Fixed on 2026-09-25 by a short-wave viscosity
   on the self-oscillating elements (`docs/spikes/funfern-gate-o.md`, "The

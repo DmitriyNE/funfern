@@ -22892,3 +22892,37 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — The testing campaign, structure first
+
+- **Plan.** `docs/spikes/funfern-testing-campaign-plan.md`, with a pointer
+  under Maintenance in `docs/plan.md`. It reorders the campaign the user
+  drafted on 11 October, keeping its layering, its oracle rule and its
+  fixture identifiers.
+- **Why the order.** The nine defects of September and October are listed
+  with what found them: the band fill, the pinned corners on the trace, the
+  remesh that lost its component totals, the far-field ring's empty buckets,
+  the topology deletion defects, the libm bit, Metal's fast math, Safari's
+  f32 literals and the device's exp-minus-one series. None was a wrong
+  physical model, and one was found by a physical oracle. Two are the same
+  shape, a wall configuration no test had assembled, so stage A0 is a
+  configuration sweep at the preparation layer, regression scenes that
+  prepare, an audit of what the tests feed the solvers, mutations, and the
+  device suite keeping its own e2e binary. A1 is the architecture's own
+  physics, independent b and boundary memory through handoff; A2 is cavity
+  modes and planar reflection against the implemented law; B and C are the
+  11 October fixtures under three rules, one three-level Rust test each,
+  references computed offline, sweeps as scripts under `experiments/`.
+- **Tightened on review.** Generated cases are classed before they run,
+  must succeed, must refuse with the stated reason, or exploratory, with the
+  count of successes required to equal the count of must-succeed cases; the
+  mandatory coverage is spelled out, about 190 cases for a five-span scene,
+  and only a capped supplementary sample is omitted, with a report of what
+  was covered; each handoff kind in PH-10 has its own reference, and PH-03
+  demands invariance only on the fixed mesh, separating the physical
+  component from the transfer error and the coupling residual across a
+  remesh; a mutation counts as detected only when the mutated tree builds
+  and the named test fails at the targeted check for the intended reason.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
