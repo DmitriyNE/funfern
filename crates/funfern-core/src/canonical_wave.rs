@@ -1896,6 +1896,11 @@ pub struct CanonicalWaveState {
     boundary_prescribed_cache: Option<(Vec<bool>, Arc<CanonicalOutgoingFactorExport>)>,
     time_step: f64,
     steps: u64,
+    /// The time the state's clock started at: zero for a run from rest, the
+    /// time a run had reached for a state handed its running field, as the
+    /// device keeps a clock origin for each generation. The forcing reads
+    /// `time()`, origin and steps, so a signal carries its phase across.
+    time_origin: f64,
     integrator: CanonicalIntegrator,
     wall_step: CanonicalWallStep,
     /// Whether the wall's factor holds the dense trace inverse at the
@@ -1978,6 +1983,7 @@ impl CanonicalWaveState {
             boundary_prescribed_cache: None,
             time_step,
             steps: 0,
+            time_origin: 0.0,
             integrator: CanonicalIntegrator::default(),
             wall_step,
             inverted_trace: invert_trace,
@@ -2108,8 +2114,24 @@ impl CanonicalWaveState {
         self.steps
     }
 
+    /// The time the state has reached: its origin and its steps since.
     pub fn time(&self) -> f64 {
-        self.steps as f64 * self.time_step
+        self.time_origin + self.steps as f64 * self.time_step
+    }
+
+    pub fn time_origin(&self) -> f64 {
+        self.time_origin
+    }
+
+    /// The same state with its clock started at `origin`: a state handed a
+    /// running field takes the time the run had reached, so that the
+    /// forcing it steps under reads the clock the run was on.
+    pub fn with_time_origin(mut self, origin: f64) -> Result<Self, WaveError> {
+        if !origin.is_finite() {
+            return Err(WaveError::Unsupported("a time origin that is not finite"));
+        }
+        self.time_origin = origin;
+        Ok(self)
     }
 
     pub fn estimated_state_bytes(&self) -> usize {
@@ -8311,6 +8333,29 @@ mod tests {
             &compatible,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_time_origin_is_where_the_states_clock_starts() {
+        let (_, operator) = compile(&Scene::default());
+        let dt = 0.2 * operator.maximum_time_step();
+        let mut state = CanonicalWaveState::zero(&operator, dt)
+            .unwrap()
+            .with_time_origin(1.5)
+            .unwrap();
+        assert_eq!(state.time_origin(), 1.5);
+        assert_eq!(state.time(), 1.5);
+        state
+            .step_with_forcing(&operator, &CanonicalForcing::none(&operator))
+            .unwrap();
+        assert_eq!(state.steps(), 1);
+        assert!((state.time() - (1.5 + dt)).abs() < 1.0e-12);
+        assert!(
+            CanonicalWaveState::zero(&operator, dt)
+                .unwrap()
+                .with_time_origin(f64::NAN)
+                .is_err()
+        );
     }
 
     #[test]

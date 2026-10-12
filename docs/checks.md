@@ -69,7 +69,37 @@ uploaded. Q reads `9.9e-7`, the run without the edit `1.4` off; a reference left
 on the old step fails at 1.1. `remesh` sets the target edge finer at step 128,
 nothing else changed: the field is interpolated from 11,121 nodes onto 15,349 of
 the same geometry. Q reads `7.7e-7`, and a reference that drops the component
-totals the runtime keeps reads 2.5e-5 and fails. `rejection` makes the cavity's
+totals the runtime keeps reads 2.5e-5 and fails. The five `handoff-memory`
+fixtures, `-rebuild`, `-remesh`, `-edit`, `-timestep` and `-running`, give
+the cavity a second-order outgoing wall on its bottom side and a 0.8 Hz drive
+on its top, run the pulse into the wall, and at step 192, once the wall holds
+6.5e-4 of the field's energy, hand the running field over the way the name
+says: Remesh pressed with nothing changed, the edge set finer, the medium's
+mass density raised, or the speed halved, which shortens the time step, each
+held at the step and run to 384; or, in `-running`, the top side's drive
+switched on with the run not held, the device stepping on while the candidate
+is prepared, as it does for a user, so the handoff lands where the device has
+got to, step 202 on the M1 Max, read from the new generation's clock origin,
+and the run goes to 768. The
+reference carries the wall's memory the physical way, pole currents
+interpolated onto the new trace and projected onto the new basis, apart from
+the normalized matrix the device uses, and runs on under the generation's own
+forcing from a clock started where the run had got to. A snapshot at the
+handoff, before a step, reads the carry on its own: Q over the unpinned
+nodes, b, the pole states and the memory they represent agree to 4e-7 to
+7e-7 on every case. At the endpoint Q and b read 7e-7 to 1.1e-6, the wall's
+energy 1e-7 to 5e-7, the pole states 2e-6 to 1.9e-5 against their own 1e-4,
+the device integrating them in f32 beside a field a thousand times their
+size, and the clock within 1.4e-7 s of the reference's. The rebuild leaves
+the device where the uninterrupted run is, 7e-7 off; the others stand 0.8 to
+11 from it. The remesh's carry leaves 2.3e-2 of the memory outside the new
+basis and raises its energy by a fifth, which the fixture reports; see the
+log of 2026-10-13. A drive the new generation starts takes its phase moved on
+by the time between the candidate's preparation and its arrival, which the
+runtime transfer computes and a held run has none of: the mutation
+`drive-phase-reset-on-handoff` zeroes it, and `-running` reads Q 1.4 and
+fails where the held fixtures, whose drive is carried from the old
+generation's own clock, do not see it. `rejection` makes the cavity's
 medium defocusing Kerr with an amplitude bound of 0.2 and drives it with its
 point source at the (1, 1) mode until the field reaches the bound. The device
 refuses the step after 788 with the inverse-domain status, as the reference

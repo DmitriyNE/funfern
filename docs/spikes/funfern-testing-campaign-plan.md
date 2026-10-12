@@ -293,6 +293,18 @@ read, and the time origin must survive: `t = t_origin + N Δt` per
 generation, never a phase reset. An e2e fixture, `handoff-memory`, beside
 `handoff`.
 
+**Done on 2026-10-13** (`docs/engineering-log.md`): five fixtures,
+`handoff-memory-rebuild`, `-remesh`, `-edit`, `-timestep` and `-running`, on
+the cavity with a second-order wall and a driven side, the carry read at the
+handoff itself and the run read at the endpoint, the clock on every fixture,
+`CanonicalWaveState` given the time origin the reference needs, and the
+mutation `drive-phase-reset-on-handoff`, which only the running fixture
+sees: a held run has no time between the candidate's preparation and its
+arrival, and a carried drive takes its phase from the old clock. Found and
+reported: the remesh's carry raises the wall's stored energy by a fifth,
+2.3e-2 of the memory outside the new basis; the fixture reports both, and
+the bound on the energy's change waits on the diagnosis.
+
 ## 5. Stage A2: bulk propagation and planar walls
 
 **PH-01, rectangular cavity modes.** Neumann box, modes (1,0), (0,1), (1,2),

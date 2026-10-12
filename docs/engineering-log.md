@@ -23452,3 +23452,88 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-13 — PH-10: boundary memory and the time origin through a handoff
+
+- **Fixtures.** Five end-to-end fixtures, `handoff-memory-rebuild`,
+  `-remesh`, `-edit`, `-timestep` and `-running`, on the cavity with its
+  bottom side a second-order outgoing wall and its top side driven by a
+  0.8 Hz harmonic: the pulse runs into the wall, and at step 192, once the
+  wall holds 6.5e-4 of the field's energy, the pulse's front absorbed over
+  the last forty steps, the running field is handed to a new generation the
+  way the name says: Remesh pressed with nothing changed, the mesh edge set
+  finer, the medium's mass density raised, or the simulation speed halved,
+  which shortens the time step, each held at the step and run to 384; or
+  the top side's drive switched on with the run not held, the device
+  stepping on while the candidate is prepared, as it does for a user, the
+  handoff landing where the device has got to, read from the new
+  generation's clock origin, the reference stepping to that step first, and
+  the run going to 768. The reference carries its own state through the
+  maps the candidate was prepared with, as the `handoff` fixture does, and
+  the wall's memory the physical way: pole currents interpolated onto the
+  new trace through the candidate's field interpolation and projected onto
+  the new basis, apart from the normalized matrix the device uses. The
+  reference runs on under the generation's own forcing on a clock that
+  starts where the run had got to: `CanonicalWaveState` takes a time
+  origin, `with_time_origin`, as the device keeps a clock origin for each
+  generation; `time()` is origin and steps.
+- **Read.** At the handoff itself, through a snapshot of the new generation
+  before it steps: Q over the unpinned nodes, b, the pole states and the
+  memory they represent, each within 5e-6, so the device's carry is the
+  reference's. At the endpoint: Q, b, the wall's energy within 5e-6; the
+  pole states and the memory within 1e-4, their own tolerance; the device's
+  clock within 2e-5 s of the time the reference reached; the carry's own
+  share and residual within their floors; the run without the action a
+  hundred tolerances off, or, for the rebuild, the uninterrupted run where
+  the device is. Every fixture now reads the clock.
+- **Measured.** On the M1 Max, all four fixtures passing in 5 to 6 s each.
+  At the handoff, Q over the unpinned nodes 3.8e-7 to 4.5e-7, b 6.0e-7 to
+  6.1e-7, the pole states 4.0e-7 to 4.2e-7, the memory 5.6e-7 to 6.9e-7,
+  the wall's energy 8.5e-9 to 3.2e-7: the device's carry is the reference's
+  on every case, the identity ones and the ones that change the basis
+  alike. At the endpoint Q 7.0e-7 to 8.9e-7, b 8.9e-7 to 1.1e-6, the
+  wall's energy 1.0e-7 to 4.9e-7, the pole states 2.0e-6 to 5.8e-6 and the
+  memory 5.5e-6 to 1.9e-5, the f32 integration of pole states a thousand
+  times smaller than the field over 192 steps, which the carry itself does
+  not show and the wall's own tolerance of 1e-4 holds five times over; the
+  clock 3.2e-9 to 2.3e-7 s from the reference's 2.26 to 5.85 s. The
+  rebuild builds the same mesh to the bit and leaves the device 7.0e-7 from
+  the uninterrupted run; the edit, the timestep change and the drive stand 0.79,
+  2.0 and 11 from it. A first cut handed off at step 128 of 256, where the wall
+  held 7.7e-10, a millionth of what it holds at the endpoint: the pulse's
+  front reaches the wall near step 150. A first comparison at the handoff
+  put the pinned nodes in and read Q 2.9e-2 on the edit: the device pins
+  them to the signal on the new generation's clock as it takes the field,
+  the reference as it steps, and on the edited medium the two values differ
+  until that step; the pinned nodes are left out there, and nowhere else.
+  The reference's forcing was first shifted signal by signal to the new
+  clock, which dropped the point source channel every generation carries;
+  the time origin on the state replaced it.
+- **A finding.** The remesh's carry raises the wall's stored energy by a
+  fifth, 8.75e-5 to 1.046e-4, with 2.3e-2 of the memory outside the new
+  basis, and the edit's by 0.22 with nothing outside it, the same pole
+  currents on a basis built for a medium half again as heavy. The device
+  does the same, to 6e-7, so this is the carry's own, not the device's:
+  pole currents of the pulse's front, absorbed over forty steps, interpolated
+  onto a finer trace. The fixture reports the change and bounds the residual
+  at 5e-2; the energy's bound waits on a diagnosis, a plan item.
+- **Mutation.** The A0.4 mutation that zeroes the runtime transfer's
+  preparation delta, which no app fixture saw, is in the set again as
+  `drive-phase-reset-on-handoff`, named on `handoff-memory-running`: with
+  the delta zeroed the drive the new generation starts takes its authored
+  phase as if the handoff were at the candidate's preparation, and the
+  fixture reads Q 1.36, b 1.34, the pole states 0.13 off, and fails at the
+  pole states' check; clean it reads Q 1.5e-6, b 1.7e-6, the clock 2.3e-7
+  s off, twice the same bits, the handoff landing at step 202 on the
+  M1 Max, ten steps after the request. The four held fixtures do not see
+  the mutation, and the plan item that expected a driven wall to had the
+  shader's rule wrong: the delta shifts only what the new generation
+  starts, a drive switched on or a pulse, by the time the device ran on
+  while the candidate was prepared, and a held run has none; a drive the
+  new generation carries from the old takes its phase from the old
+  generation's own clock, which the held fixtures read. The edit fixture
+  ran under the mutation first and passed unchanged, which is how the rule
+  was found.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the device suite's fixtures.

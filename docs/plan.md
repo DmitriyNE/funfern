@@ -1275,14 +1275,28 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   lavapipe and mutation jobs on it, then the browser bundles from the page
   `scripts/fixtures-page.sh` writes, and the feature removed once nothing
   built it.
-- [ ] No fixture or device example hands off a generation with a driven
+- [x] No fixture or device example hands off a generation with a driven
   wall: a prescribed Dirichlet or Neumann node's carried phase across a
   handoff can be zeroed in the runtime transfer shader and nothing fails,
   found by the A0.4 mutations on 2026-10-12. The `handoff` fixture's cavity
   has a pulse and no prescribed node; the handoff examples drive a point
-  source, which the forcing carries by another path. PH-10, boundary memory
-  and the time origin through a handoff, takes a driven wall into its
-  fixture; until then the mutation that would prove it is not in the set.
+  source, which the forcing carries by another path. Closed on 2026-10-13
+  (`docs/engineering-log.md`): the five `handoff-memory` fixtures drive the
+  cavity's top side, and the mutation `drive-phase-reset-on-handoff` proves
+  `handoff-memory-running` fails on the zeroed delta. The delta shifts only
+  what the new generation starts, a drive switched on or a pulse, and only
+  by the time the device ran on during the candidate's preparation; a held
+  run has none of it, and a carried drive takes its phase from the old
+  generation's clock, which the four held fixtures read.
+- [ ] The remesh's carry of the wall's memory raises its stored energy by a
+  fifth: `handoff-memory-remesh` hands the cavity's field from the 0.07 mesh
+  to the 0.06 one with the wall holding 8.7e-5 of energy, and the physical
+  carry, pole currents interpolated onto the finer trace and projected onto
+  its basis, holds 1.05e-4 afterwards, 2.3e-2 of the memory outside the new
+  basis, which the device's normalized matrix reproduces to 6e-7. Found on
+  2026-10-13 by PH-10. The fixture reports the change and bounds the
+  residual at 5e-2; the bound on the energy's change waits on a diagnosis
+  of the carry, the interpolation onto a finer trace first.
 - [ ] `aligned_indicator_auxiliary` in `ui.rs` aligns the display's
   auxiliary lane for the AMR indicator with `snapshot_current +
   snapshot_current` where a trapezoid would take the previous snapshot,

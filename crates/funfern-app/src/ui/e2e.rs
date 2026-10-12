@@ -39,7 +39,7 @@ use check::{within, worse};
 use funfern_core::{
     CanonicalTemporalWaveState, CanonicalWaveState, OuterBoundaryCondition, OuterBoundaryConditions,
 };
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 /// Where an end-to-end fixture holds the run: the steps a running frame asks
 /// for stop at `limit`, counted on the running generation, and are `batch` a
@@ -64,6 +64,11 @@ pub(crate) fn add(app: &mut App) {
         "switch" => (Fixture::Switch, vec![None]),
         "handoff" => (Fixture::Handoff, vec![None]),
         "remesh" => (Fixture::Remesh, vec![None]),
+        "handoff-memory-rebuild" => (Fixture::HandoffMemory(MemoryHandoff::Rebuild), vec![None]),
+        "handoff-memory-remesh" => (Fixture::HandoffMemory(MemoryHandoff::Remesh), vec![None]),
+        "handoff-memory-edit" => (Fixture::HandoffMemory(MemoryHandoff::Edit), vec![None]),
+        "handoff-memory-timestep" => (Fixture::HandoffMemory(MemoryHandoff::Timestep), vec![None]),
+        "handoff-memory-running" => (Fixture::HandoffMemory(MemoryHandoff::Running), vec![None]),
         "rejection" => (Fixture::Rejection, vec![None]),
         "device-loss" => (Fixture::DeviceLoss, vec![None]),
         _ => {
@@ -130,6 +135,13 @@ enum Fixture {
     /// the field is interpolated onto another mesh of the same geometry, its
     /// component totals kept.
     Remesh,
+    /// The cavity with its bottom side a second-order outgoing wall and its
+    /// top side driven, the pulse run into the wall until its pole states
+    /// hold memory, then handed off at step 192 of 384 the way named: the
+    /// memory must come through the handoff, the drive keep its phase, and
+    /// the clock its origin, read against a reference that carries the memory
+    /// the physical way and runs on from the time reached.
+    HandoffMemory(MemoryHandoff),
     /// The cavity's medium made defocusing Kerr with an amplitude bound and
     /// driven at its resonance until the field reaches the bound: the device
     /// must refuse the step the reference refuses, the app pause on it with
@@ -141,6 +153,34 @@ enum Fixture {
     /// must stop and the app say so within two seconds, with the document,
     /// change included, in the autosave, and nothing left pending.
     DeviceLoss,
+}
+
+/// How [`Fixture::HandoffMemory`] hands the running field over at step 192.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryHandoff {
+    /// Remesh pressed with nothing changed: the same mesh built again, the
+    /// transfer an identity in effect, and the device must stand where the
+    /// uninterrupted run stands, pole states included.
+    Rebuild,
+    /// The mesh edge set finer: the memory carried onto another trace, read
+    /// in its physical representation within the carry's budget.
+    Remesh,
+    /// The medium's mass density raised: a new operator and a new wall basis
+    /// on the same mesh, the reference changed the same way at the same step.
+    Edit,
+    /// The simulation speed halved: the same state stepped on at a shorter
+    /// time step from the accepted step, the reference re-stepped at it.
+    Timestep,
+    /// The top side's drive switched on, with the run not held: the device
+    /// steps on while the candidate is prepared, as it does for a user, and
+    /// the handoff lands at whatever step it has reached, read from the new
+    /// generation's clock origin; the reference steps to that step and
+    /// carries from there. A drive the new generation starts takes its
+    /// authored phase moved on by the time between the candidate's
+    /// preparation and its arrival, which the runtime transfer computes; a
+    /// held run has none of that time, and a drive carried from the old
+    /// generation takes its phase from the old clock.
+    Running,
 }
 
 /// The meshes the fixtures run on, as [`mesh_hashes`] reads them: the cavity,
@@ -167,6 +207,14 @@ enum Action {
     Edit,
     /// The mesh's target edge set finer, as its preset or slider does.
     Remesh,
+    /// Remesh pressed, which builds the mesh again at the edge it has.
+    Rebuild,
+    /// The simulation speed halved, as its slider does, which shortens the
+    /// time step and hands the running field to a generation stepping at it.
+    Timestep,
+    /// The top side's law set to the driven Dirichlet, as the inspector's
+    /// picker does: a drive the new generation starts.
+    Drive,
     /// The view's grid toggled, a change for the autosave to carry, and the
     /// device destroyed.
     LoseDevice,
@@ -180,11 +228,29 @@ impl Fixture {
             Fixture::Switch => (&[(128, Action::Switch)], 256),
             Fixture::Handoff => (&[(128, Action::Edit)], 256),
             Fixture::Remesh => (&[(128, Action::Remesh)], 256),
+            // The pulse's front reaches the wall near step 150: the handoff
+            // comes once the wall holds memory, and the run goes on for as
+            // long again, so that what the wall gives back is in the field.
+            Fixture::HandoffMemory(MemoryHandoff::Rebuild) => (&[(192, Action::Rebuild)], 384),
+            Fixture::HandoffMemory(MemoryHandoff::Remesh) => (&[(192, Action::Remesh)], 384),
+            Fixture::HandoffMemory(MemoryHandoff::Edit) => (&[(192, Action::Edit)], 384),
+            Fixture::HandoffMemory(MemoryHandoff::Timestep) => (&[(192, Action::Timestep)], 384),
+            // The handoff lands wherever the device has got to while the
+            // candidate was prepared, and the endpoint must leave it room.
+            Fixture::HandoffMemory(MemoryHandoff::Running) => (&[(192, Action::Drive)], 768),
             // The endpoint is never reached: the device is gone at 128.
             Fixture::DeviceLoss => (&[(128, Action::LoseDevice)], 256),
             // The endpoint is a ceiling the run must not reach.
             Fixture::Rejection => (&[], 4096),
         }
+    }
+
+    /// Whether the run holds at the step an action is taken at until the
+    /// device has taken it. A fixture that does not lets the device step on
+    /// while an edit's candidate is prepared, and reads where the handoff
+    /// landed from the new generation's clock.
+    fn holds(self) -> bool {
+        !matches!(self, Fixture::HandoffMemory(MemoryHandoff::Running))
     }
 
     /// Whether a pulse at step 0 sets the field going. A field-dependent medium
@@ -220,6 +286,8 @@ impl Fixture {
             | Fixture::Remesh
             | Fixture::DeviceLoss => (cavity_document(), None),
             Fixture::Rejection => (rejection_document(), None),
+            Fixture::HandoffMemory(MemoryHandoff::Running) => (wall_document(false), None),
+            Fixture::HandoffMemory(_) => (wall_document(true), None),
             Fixture::Switch => {
                 let (document, material) = switch_document();
                 (document, Some(material))
@@ -271,15 +339,23 @@ enum Phase {
         next: usize,
         processed: u32,
         generation: u64,
-        /// The edit's handoff maps, taken from the candidate while it waits:
-        /// the runtime drops them once the generation is published.
-        maps: Option<Arc<PreparedCanonicalTransfer>>,
+        /// What the edit's candidate was prepared with, taken while it waits:
+        /// the runtime drops it once the generation is published.
+        carried: Option<Carried>,
     },
     /// The device's loss was asked for at `asked`, with the document as it
     /// was then; the app is to stop and say so.
     Losing {
         asked: Instant,
         document: Box<TopologyDocument>,
+    },
+    /// The handoff's generation holds at the step it took the field, and a
+    /// full snapshot of it is asked for, to read the carry on its own before
+    /// the run goes on.
+    Carried {
+        reference: Reference,
+        next: usize,
+        seen: u64,
     },
     /// A full snapshot of the endpoint is asked for.
     Snapshot {
@@ -309,12 +385,59 @@ impl Phase {
             Phase::Run { .. } => "running to the next stop",
             Phase::Act { .. } => "waiting for the device to take the action",
             Phase::Losing { .. } => "waiting for the app to stop after the device was lost",
+            Phase::Carried { .. } => "waiting for the handoff's snapshot",
             Phase::Snapshot { .. } => "waiting for the endpoint's snapshot",
             Phase::Refused { .. } => "waiting for the app to pause on the refusal",
             Phase::Done => "done",
         }
     }
 }
+
+/// What a candidate generation was prepared with, for the reference's own
+/// handoff: the maps the device's transfer compiles from, and the field's
+/// interpolation between the meshes, which the wall's memory goes through
+/// the physical way; none where the mesh is reused and the maps are
+/// identities.
+struct Carried {
+    maps: Arc<PreparedCanonicalTransfer>,
+    interpolation: Option<Arc<QuadraticTransferMap>>,
+}
+
+/// What the reference's wall memory went through at a handoff: the energy it
+/// held before and after, its share of the field's energy before, the
+/// carry's residual, `projection residual / ‖memory‖`, what the new basis
+/// could not hold of the old memory interpolated onto its trace, and the
+/// device's carry read against the reference's at the handoff itself, before
+/// a step is taken: Q, b, the pole states and the memory they represent.
+/// The device carries the memory through the normalized matrix its
+/// generation was prepared with, the same map in another form, so the two
+/// must agree to the fixture's tolerance there; the residual and the
+/// energy's change are the carry's own.
+#[derive(Clone, Copy, Debug, Default)]
+struct MemoryCarry {
+    source_energy: f64,
+    target_energy: f64,
+    share: f64,
+    residual: f64,
+    at_handoff: [f64; 4],
+}
+
+/// The least share of the field's energy the wall must hold at the handoff:
+/// a carry of nothing would prove nothing. At step 192 the wall holds
+/// 6.5e-4 of it, the pulse's front absorbed over the last forty steps; see
+/// the log of 2026-10-13.
+const MEMORY_SHARE_FLOOR: f64 = 1.0e-4;
+/// What the carry may leave behind of the memory, relative: the new basis
+/// holds the memory interpolated onto its trace up to this. The remesh from
+/// 0.07 to 0.06 reads 2.3e-2 on the pulse's front, the same-mesh carries
+/// roundoff; see the log of 2026-10-13.
+const CARRY_RESIDUAL: f64 = 5.0e-2;
+/// The relative L2 error the wall's pole states, and the memory they
+/// represent, may reach at the endpoint, 192 steps after the carry: the
+/// device integrates them in f32 beside a field a thousand times their
+/// size, and reads 2e-6 to 1.9e-5 where the carry itself reads under the
+/// tolerance; see the log of 2026-10-13.
+const WALL_TOLERANCE: f64 = 1.0e-4;
 
 /// The f64 reference, on the generation the app accepted, and the same run
 /// without the fixture's actions.
@@ -326,6 +449,9 @@ struct Reference {
     /// generation it started on.
     control: Option<(Arc<PreparedTopology>, State)>,
     steps: u64,
+    /// What the wall's memory went through at the last handoff, where the
+    /// generation has a wall.
+    carry: Option<MemoryCarry>,
 }
 
 #[derive(Clone)]
@@ -393,6 +519,36 @@ impl State {
         match self {
             State::Fixed(_) => &[],
             State::Temporal(state) => state.integrated_field(),
+        }
+    }
+
+    /// The wall's memory, its normalized pole states; empty where the
+    /// generation has no wall, or the state is time-varying, which no fixture
+    /// with a wall is.
+    fn outgoing_z(&self) -> &[f64] {
+        match self {
+            State::Fixed(state) => match state.auxiliaries() {
+                CanonicalAuxiliaryState::Linear(auxiliaries) => auxiliaries.outgoing_z(),
+                _ => &[],
+            },
+            State::Temporal(_) => &[],
+        }
+    }
+
+    fn time_step(&self) -> f64 {
+        match self {
+            State::Fixed(state) => state.time_step(),
+            State::Temporal(state) => state.time_step(),
+        }
+    }
+
+    /// The time the state has reached, on the clock its generation keeps:
+    /// its origin, the time the run had reached when the generation took
+    /// the field, and its steps since.
+    fn time(&self) -> f64 {
+        match self {
+            State::Fixed(state) => state.time(),
+            State::Temporal(state) => state.time(),
         }
     }
 }
@@ -498,6 +654,27 @@ fn cavity_document() -> TopologyDocument {
     document.presentation.grid_scale_filter = false;
     document
 }
+
+/// The cavity with its bottom side a second-order outgoing wall and, where
+/// `driven`, its top side driven by [`WALL_DRIVE`]: the pulse's wave reaches
+/// the wall before the handoff and leaves memory in its pole states, and the
+/// drive has turned more than a period by step 192, a phase a restarted
+/// clock would lose.
+fn wall_document(driven: bool) -> TopologyDocument {
+    let mut document = cavity_document();
+    let mut walls = OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+    walls.sides[OuterSide::Bottom.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
+    if driven {
+        walls.sides[OuterSide::Top.index()] =
+            OuterBoundaryCondition::Dirichlet { signal: WALL_DRIVE };
+    }
+    document.model.draft.outer_boundaries = walls;
+    document.model.accepted.outer_boundaries = walls;
+    document
+}
+
+/// The driven side's signal: a harmonic at 0.8 Hz from rest, amplitude 0.3.
+const WALL_DRIVE: TimeSignal = TimeSignal::harmonic(0.0, 0.3, 0.8, 0.0);
 
 /// The cavity's medium made defocusing Kerr, as the Advanced editor's field
 /// law row authors it - a negative cubic term needs a declared amplitude
@@ -637,6 +814,7 @@ fn advance(
                         state: reference,
                         control: None,
                         steps: 0,
+                        carry: None,
                     },
                     next: 0,
                 };
@@ -681,6 +859,7 @@ fn advance(
                     state: reference,
                     control: None,
                     steps: 0,
+                    carry: None,
                 },
                 processed: request.stats().processed_event(),
             };
@@ -779,6 +958,17 @@ fn advance(
                     }
                 }
                 Action::Remesh => state.editor.document.presentation.mesh_edge = 0.06,
+                Action::Rebuild => state.coordinator.remesh_requested = true,
+                Action::Timestep => state.editor.document.presentation.simulation_speed = 0.5,
+                Action::Drive => {
+                    let driven = state.editor.set_outer_condition(
+                        &BTreeSet::from([OuterSide::Top]),
+                        OuterBoundaryCondition::Dirichlet { signal: WALL_DRIVE },
+                    );
+                    if let Err(error) = driven {
+                        return Some(Err(format!("the drive did not apply: {error}")));
+                    }
+                }
                 Action::LoseDevice => {
                     state.editor.document.presentation.grid =
                         !state.editor.document.presentation.grid;
@@ -790,12 +980,15 @@ fn advance(
                     return None;
                 }
             }
+            if !driver.fixture.holds() {
+                state.e2e_steps.limit = Some(stop(next + 1));
+            }
             driver.phase = Phase::Act {
                 reference,
                 next,
                 processed,
                 generation,
-                maps: None,
+                carried: None,
             };
             None
         }
@@ -804,17 +997,22 @@ fn advance(
             next,
             processed,
             generation,
-            maps,
+            carried,
         } => {
             let (step, action) = actions[next];
-            let maps = maps.or_else(|| {
+            let carried = carried.or_else(|| {
                 state
                     .runtime
                     .ready()
                     .filter(|candidate| {
                         candidate.bundle.token.document_revision == state.editor.revision
                     })
-                    .and_then(|candidate| candidate.canonical_transfer.clone())
+                    .and_then(|candidate| {
+                        Some(Carried {
+                            maps: candidate.canonical_transfer.clone()?,
+                            interpolation: candidate.transfer.clone(),
+                        })
+                    })
             });
             // The generation published for the edit: of the document's
             // revision, nothing uploading, and on the display.
@@ -829,25 +1027,79 @@ fn advance(
                     request.stats().processed_event() == processed
                         || !state.coordinator.pending_switches.is_empty()
                 }
-                Action::Edit | Action::Remesh => published.is_none(),
+                Action::Edit
+                | Action::Remesh
+                | Action::Rebuild
+                | Action::Timestep
+                | Action::Drive => published.is_none(),
                 // The loss takes its own phase and never waits here.
                 Action::LoseDevice => {
                     return Some(Err("the device's loss is not an action to wait for".into()));
                 }
             };
             if waiting {
+                if !driver.fixture.holds() && request.stats().completed_steps() >= endpoint {
+                    return Some(Err(format!(
+                        "the device reached the endpoint at {endpoint} before the {action:?} \
+                         arrived"
+                    )));
+                }
                 driver.phase = Phase::Act {
                     reference,
                     next,
                     processed,
                     generation,
-                    maps,
+                    carried,
                 };
                 return None;
             }
-            if let Err(failure) = taken(request, &format!("the {action:?}"), step) {
-                return Some(Err(failure));
+            // The new generation's clock arrives with its first control
+            // readback, a frame or so after the display takes the generation.
+            if !driver.fixture.holds() && display.clock.is_none() {
+                driver.phase = Phase::Act {
+                    reference,
+                    next,
+                    processed,
+                    generation,
+                    carried,
+                };
+                return None;
             }
+            // Where the action landed: at the step the run holds at, or, with
+            // the run going on, at the step the new generation's clock
+            // origin names, which the reference then steps to.
+            let landed = if driver.fixture.holds() {
+                if let Err(failure) = taken(request, &format!("the {action:?}"), step) {
+                    return Some(Err(failure));
+                }
+                step
+            } else {
+                let rejection = request.stats().event_rejection();
+                if rejection != 0 {
+                    return Some(Err(format!(
+                        "the device refused the {action:?} (failure code {rejection})"
+                    )));
+                }
+                let Some(clock) = display.clock else {
+                    return Some(Err(
+                        "the display has no clock to read the handoff from".into()
+                    ));
+                };
+                let time_step = reference.state.time_step();
+                let landed = (clock.epoch_origin_seconds / time_step).round() as u64;
+                let off = (landed as f64 * time_step - clock.epoch_origin_seconds).abs();
+                if !within(off, CLOCK_TOLERANCE) || landed < step || landed >= endpoint {
+                    return Some(Err(format!(
+                        "the new generation's origin {:.6} s is {off:.1e} s from step {landed} \
+                         of the old clock, which must lie in {step}..{endpoint}",
+                        clock.epoch_origin_seconds
+                    )));
+                }
+                if let Err(error) = reference.advance_to(landed) {
+                    return Some(Err(format!("the reference did not step: {error}")));
+                }
+                landed
+            };
             if reference.control.is_none() {
                 reference.control = Some((reference.active.clone(), reference.state.clone()));
             }
@@ -887,14 +1139,25 @@ fn advance(
                         return Some(Err(format!("the reference did not switch: {error}")));
                     }
                 }
-                Action::Edit | Action::Remesh => {
+                Action::Edit
+                | Action::Remesh
+                | Action::Rebuild
+                | Action::Timestep
+                | Action::Drive => {
                     let target = published.expect("an edit waits for its generation");
                     let (from, to) = (
                         reference.active.canonical_operator.degrees_of_freedom(),
                         target.canonical_operator.degrees_of_freedom(),
                     );
-                    if matches!(action, Action::Remesh)
-                        && let Err(failure) = same_mesh(&target.mesh, FINER_CAVITY_MESH)
+                    // A remesh goes to the finer mesh recorded; a rebuild of
+                    // the same scene builds the same mesh to the bit.
+                    let recorded = match action {
+                        Action::Remesh => Some(FINER_CAVITY_MESH),
+                        Action::Rebuild => Some(driver.fixture.mesh()),
+                        _ => None,
+                    };
+                    if let Some(recorded) = recorded
+                        && let Err(failure) = same_mesh(&target.mesh, recorded)
                     {
                         return Some(Err(failure));
                     }
@@ -904,8 +1167,13 @@ fn advance(
                         )));
                     }
                     report(&format!(
-                        "e2e {:?}: handed off at step {step}, {from} nodes to {to}, mesh {}",
+                        "e2e {:?}: handed off at step {landed}{}, {from} nodes to {to}, mesh {}",
                         driver.fixture,
+                        if driver.fixture.holds() {
+                            ""
+                        } else {
+                            ", the run going on"
+                        },
                         mesh_hashes(&target.mesh)
                     ));
                     if request.handoff_outcome() != CanonicalGpuHandoffOutcome::Accepted {
@@ -914,28 +1182,113 @@ fn advance(
                             request.handoff_outcome()
                         )));
                     }
-                    let Some(maps) = maps else {
+                    let Some(carried) = carried else {
                         return Some(Err(
                             "the edit's candidate was never seen with its maps".into()
                         ));
                     };
-                    let carried = hand_off(
+                    let handed = hand_off(
                         &reference,
                         &target,
-                        &maps,
+                        &carried,
                         state.coordinator.uploaded_time_step,
                         display.runtime_serials,
                     );
-                    match carried {
-                        Ok(carried) => {
-                            reference.state = carried;
+                    match handed {
+                        Ok((handed, carry)) => {
+                            reference.state = handed;
+                            reference.carry = carry;
                             reference.active = target;
+                            if let Some(carry) = carry {
+                                report(&format!(
+                                    "e2e {:?}: the wall's memory carried at {:.4} s, energy {:.3e} \
+                                     to {:.3e}, {:.1e} of the field's, residual {:.1e}",
+                                    driver.fixture,
+                                    reference.state.time(),
+                                    carry.source_energy,
+                                    carry.target_energy,
+                                    carry.share,
+                                    carry.residual
+                                ));
+                            }
                         }
                         Err(error) => {
                             return Some(Err(format!("the reference was not handed off: {error}")));
                         }
                     }
                 }
+            }
+            if reference.carry.is_some() && driver.fixture.holds() {
+                let seen = display.full_readbacks;
+                request.request_full_state_readback();
+                driver.phase = Phase::Carried {
+                    reference,
+                    next,
+                    seen,
+                };
+                return None;
+            }
+            state.e2e_steps.limit = Some(stop(next + 1));
+            driver.phase = Phase::Run {
+                reference,
+                next: next + 1,
+            };
+            None
+        }
+        Phase::Carried {
+            mut reference,
+            next,
+            seen,
+        } => {
+            let (step, _) = actions[next];
+            let arrived = display.full_readbacks > seen
+                && display.generation == request.generation()
+                && display.full_snapshot_completed_steps() == step;
+            if !arrived {
+                request.request_full_state_readback();
+                driver.phase = Phase::Carried {
+                    reference,
+                    next,
+                    seen,
+                };
+                return None;
+            }
+            let tolerance = driver.fixture.tolerance();
+            // The prescribed nodes are left out of Q here: the device pins
+            // them to the signal on the new generation's clock as it takes
+            // the field, where the reference pins them as it steps, and on an
+            // edited medium the two values differ until that step.
+            let unpinned = reference
+                .active
+                .canonical_forcing
+                .prescribed()
+                .iter()
+                .map(Option::is_none)
+                .collect::<Vec<_>>();
+            let (q, b, _) = match field_errors(&reference, display, Some(&unpinned)) {
+                Ok(errors) => errors,
+                Err(failure) => return Some(Err(failure)),
+            };
+            let wall = match wall_errors(&reference, display) {
+                Ok(Some(wall)) => wall,
+                Ok(None) => return Some(Err("the carry's snapshot has no wall to read".into())),
+                Err(failure) => return Some(Err(failure)),
+            };
+            let summary = format!(
+                "at the handoff Q {q:.3e}, b {b:.3e}, wall z {:.3e}, memory {:.3e}, energy {:.3e}",
+                wall.z, wall.memory, wall.energy
+            );
+            report(&format!("e2e {:?}: {summary}", driver.fixture));
+            if !within(
+                worse(worse(q, b), worse(wall.z, worse(wall.memory, wall.energy))),
+                tolerance,
+            ) {
+                return Some(Err(format!(
+                    "{summary}: the device's carry stands from the reference's beyond {tolerance:.0e}"
+                )));
+            }
+            if let Some(carry) = &mut reference.carry {
+                carry.at_handoff = [q, b, wall.z, wall.memory];
             }
             state.e2e_steps.limit = Some(stop(next + 1));
             driver.phase = Phase::Run {
@@ -993,11 +1346,9 @@ fn advance(
                 return None;
             }
             Some(
-                compare(&reference, display, driver.fixture.tolerance(), endpoint).map(|summary| {
-                    Run {
-                        summary,
-                        hash: hash(&display.accepted_storage_bits()),
-                    }
+                compare(&reference, display, driver.fixture, endpoint).map(|summary| Run {
+                    summary,
+                    hash: hash(&display.accepted_storage_bits()),
                 }),
             )
         }
@@ -1067,11 +1418,10 @@ fn advance(
                             "the device refused the step after {step}, which the reference takes"
                         )));
                     }
-                    let summary =
-                        match compare(&reference, display, driver.fixture.tolerance(), step) {
-                            Ok(summary) => summary,
-                            Err(failure) => return Some(Err(failure)),
-                        };
+                    let summary = match compare(&reference, display, driver.fixture, step) {
+                        Ok(summary) => summary,
+                        Err(failure) => return Some(Err(failure)),
+                    };
                     report(&format!(
                         "e2e Rejection: refused after step {step} as the reference is, the app \
                          paused; {summary}"
@@ -1108,22 +1458,28 @@ fn advance(
 }
 
 /// The reference's state carried onto `target` as the device carries the
-/// running field: through `maps`, the ones the candidate was prepared with, each
+/// running field: through the maps the candidate was prepared with, each
 /// component's total kept where the app keeps it - on the same geometry, the
-/// shares of the source components the runtime transfer names - and stepped on
-/// at the step the app uploaded for it. The cavity has no thin gap and no
-/// outgoing wall, so the primary and vector fields are all there is to carry.
+/// shares of the source components the runtime transfer names - and stepped
+/// on at the step the app uploaded for it. Where the generation has an
+/// outgoing wall, the wall's memory goes the physical way, its pole currents
+/// interpolated onto the new trace and projected onto the new basis, apart
+/// from the device's normalized matrix, and the carry says how much that way
+/// could not hold. The state's clock runs on from the time the run reached,
+/// as the device's clock origin does, so the generation's forcing reads the
+/// phase the signals had got to.
 fn hand_off(
     reference: &Reference,
     target: &PreparedTopology,
-    maps: &PreparedCanonicalTransfer,
+    carried: &Carried,
     time_step: f64,
     runtime_serials: [u32; 4],
-) -> Result<State, String> {
+) -> Result<(State, Option<MemoryCarry>), String> {
     let source = &reference.active;
     let State::Fixed(running) = &reference.state else {
         return Err("a handoff of a time-varying reference".into());
     };
+    let maps = &carried.maps;
     let runtime = CanonicalGpuRuntimeTransfer::from_primary_transfer(
         &source.canonical_operator,
         &target.canonical_operator,
@@ -1173,13 +1529,97 @@ fn hand_off(
         .complementary
         .transfer(running.complementary_flux())
         .map_err(|error| error.to_string())?;
-    CanonicalWaveState::new(
+    let mut handed = CanonicalWaveState::new(
         &target.canonical_operator,
         time_step,
         primary,
         complementary,
     )
-    .map(State::Fixed)
+    .and_then(|handed| handed.with_time_origin(running.time()))
+    .map_err(|error| error.to_string())?;
+    let memory = running
+        .outgoing_physical_memory(&source.canonical_operator)
+        .map_err(|error| error.to_string())?;
+    let carry = match (memory, target.canonical_operator.outgoing_boundary()) {
+        (None, None) => None,
+        (Some(_), None) => return Err("the wall's memory has no wall to go to".into()),
+        (None, Some(_)) => return Err("the new generation has a wall the old had not".into()),
+        (Some(memory), Some(_)) => {
+            let interpolation = match &carried.interpolation {
+                Some(interpolation) => interpolation.clone(),
+                None => Arc::new(
+                    QuadraticTransferMap::identity_on_mesh(
+                        &target.mesh,
+                        &source.operator,
+                        &target.operator,
+                    )
+                    .map_err(|error| error.to_string())?,
+                ),
+            };
+            let map = CanonicalOutgoingHistoryTransferMap::prepare(
+                &interpolation,
+                &source.canonical_operator,
+                &target.canonical_operator,
+            )
+            .map_err(|error| error.to_string())?;
+            let (interpolated, _) = map
+                .transfer(
+                    &source.canonical_operator,
+                    &target.canonical_operator,
+                    Some(&memory),
+                )
+                .map_err(|error| error.to_string())?;
+            let interpolated =
+                interpolated.ok_or_else(|| "the wall's memory was lost in the carry".to_owned())?;
+            let projection = handed
+                .set_outgoing_physical_memory(&target.canonical_operator, &interpolated)
+                .map_err(|error| error.to_string())?;
+            let norm = memory
+                .pole_currents
+                .iter()
+                .flatten()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .sqrt();
+            let before = energies(&source.canonical_operator, running)?;
+            let after = energies(&target.canonical_operator, &handed)?;
+            Some(MemoryCarry {
+                source_energy: before.outgoing,
+                target_energy: after.outgoing,
+                share: before.outgoing / before.total(),
+                residual: if norm > 0.0 {
+                    projection.physical_residual_norm / norm
+                } else {
+                    0.0
+                },
+                at_handoff: [0.0; 4],
+            })
+        }
+    };
+    Ok((State::Fixed(handed), carry))
+}
+
+/// The energy a state holds, by component.
+fn energies(
+    operator: &CanonicalWaveOperator,
+    state: &CanonicalWaveState,
+) -> Result<CanonicalEnergyBreakdown, String> {
+    let auxiliary = match state.auxiliaries() {
+        CanonicalAuxiliaryState::None => Vec::new(),
+        CanonicalAuxiliaryState::Linear(auxiliaries) => auxiliaries
+            .thin_gap_jump()
+            .iter()
+            .chain(auxiliaries.outgoing_z())
+            .copied()
+            .collect(),
+        _ => return Err("an auxiliary state this fixture does not read".into()),
+    };
+    canonical_energy_breakdown(
+        operator,
+        state.primary_flux(),
+        state.complementary_flux(),
+        &auxiliary,
+    )
     .map_err(|error| error.to_string())
 }
 
@@ -1198,15 +1638,19 @@ fn taken(request: &CanonicalGpuRequest, what: &str, step: u64) -> Result<(), Str
     Ok(())
 }
 
-/// The endpoint's snapshot against the reference: the relative L2 error of Q,
-/// of b, and of r where the medium keeps one, each within `tolerance`; and,
-/// where the fixture acted, the device far from the run without its actions.
-fn compare(
+/// The clock the device reports may stand this far, in seconds, from the
+/// time the reference has reached: the origin is carried as a pair of f32
+/// and the local time as one, at a few seconds into a run.
+const CLOCK_TOLERANCE: f64 = 2.0e-5;
+
+/// The relative L2 errors of Q, b and r, where the medium keeps one, of the
+/// display's snapshot against the reference's state; Q over the nodes
+/// `included` names, where it names any.
+fn field_errors(
     reference: &Reference,
     display: &CanonicalGpuDisplay,
-    tolerance: f64,
-    endpoint: u64,
-) -> Result<String, String> {
+    included: Option<&[bool]>,
+) -> Result<(f64, f64, f64), String> {
     let expected = &reference.state;
     let integrated = display.integrated_field();
     if display.primary_flux.len() != expected.primary().len()
@@ -1223,13 +1667,23 @@ fn compare(
             expected.integrated().len()
         ));
     }
-    let primary = |state: &State| {
-        relative_l2(
-            display.primary_flux.iter().map(|value| f64::from(*value)),
-            state.primary().iter().copied(),
-        )
+    let q = match included {
+        Some(included) => relative_l2(
+            display
+                .primary_flux
+                .iter()
+                .zip(included)
+                .filter(|(_, included)| **included)
+                .map(|(value, _)| f64::from(*value)),
+            expected
+                .primary()
+                .iter()
+                .zip(included)
+                .filter(|(_, included)| **included)
+                .map(|(value, _)| *value),
+        ),
+        None => primary_error(display, expected),
     };
-    let q = primary(expected);
     let b = relative_l2(
         display
             .complementary_flux
@@ -1248,24 +1702,206 @@ fn compare(
             expected.integrated().iter().copied(),
         )
     };
+    Ok((q, b, r))
+}
+
+/// The relative L2 error of the display's Q against a state's.
+fn primary_error(display: &CanonicalGpuDisplay, state: &State) -> f64 {
+    relative_l2(
+        display.primary_flux.iter().map(|value| f64::from(*value)),
+        state.primary().iter().copied(),
+    )
+}
+
+/// The wall's pole states in the display's snapshot against the reference's:
+/// coefficient by coefficient, as the memory they represent, and as the
+/// energy they hold, relative to the reference's.
+struct WallErrors {
+    z: f64,
+    memory: f64,
+    energy: f64,
+    energy_expected: f64,
+}
+
+/// The wall's errors, where the generation has a wall.
+fn wall_errors(
+    reference: &Reference,
+    display: &CanonicalGpuDisplay,
+) -> Result<Option<WallErrors>, String> {
+    let operator = &reference.active.canonical_operator;
+    let Some(boundary) = operator.outgoing_boundary() else {
+        return Ok(None);
+    };
+    if !operator.thin_gap_samples().is_empty() {
+        return Err("a thin gap beside the wall, which this comparison does not read".into());
+    }
+    let expected = &reference.state;
+    let device = display
+        .history_auxiliary()
+        .iter()
+        .map(|value| f64::from(*value))
+        .collect::<Vec<_>>();
+    let z_expected = expected.outgoing_z();
+    if device.len() != boundary.auxiliary_count() || z_expected.len() != boundary.auxiliary_count()
+    {
+        return Err(format!(
+            "the wall has {} pole states where the snapshot holds {} and the reference {}",
+            boundary.auxiliary_count(),
+            device.len(),
+            z_expected.len()
+        ));
+    }
+    let z = relative_l2(device.iter().copied(), z_expected.iter().copied());
+    let physical = |lanes: &[f64]| {
+        boundary
+            .physical_memory(lanes)
+            .map(|memory| {
+                memory
+                    .pole_currents
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<f64>>()
+            })
+            .map_err(|error| error.to_string())
+    };
+    let memory = relative_l2(
+        physical(&device)?.into_iter(),
+        physical(z_expected)?.into_iter(),
+    );
+    let energy_device = canonical_energy_breakdown(
+        operator,
+        &display
+            .primary_flux
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect::<Vec<_>>(),
+        &display
+            .complementary_flux
+            .iter()
+            .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
+            .collect::<Vec<_>>(),
+        &device,
+    )
+    .map_err(|error| error.to_string())?
+    .outgoing;
+    let energy_expected = canonical_energy_breakdown(
+        operator,
+        expected.primary(),
+        expected.complementary(),
+        z_expected,
+    )
+    .map_err(|error| error.to_string())?
+    .outgoing;
+    Ok(Some(WallErrors {
+        z,
+        memory,
+        energy: (energy_device - energy_expected).abs() / energy_expected,
+        energy_expected,
+    }))
+}
+
+/// The endpoint's snapshot against the reference: the relative L2 error of Q,
+/// of b, and of r where the medium keeps one, each within the fixture's
+/// tolerance; where the generation has a wall, its pole states coefficient by
+/// coefficient and in the memory they represent within [`WALL_TOLERANCE`],
+/// their energy within the tolerance, and the last carry's own share and
+/// residual within their bounds; the device's clock at the time the
+/// reference has reached; and, where the fixture acted, the device far from
+/// the run without its actions, or, for a rebuild that changed nothing,
+/// where that run is.
+fn compare(
+    reference: &Reference,
+    display: &CanonicalGpuDisplay,
+    fixture: Fixture,
+    endpoint: u64,
+) -> Result<String, String> {
+    let tolerance = fixture.tolerance();
+    let expected = &reference.state;
+    let (q, b, r) = field_errors(reference, display, None)?;
     let mut summary = format!("Q {q:.3e}, b {b:.3e}, r {r:.3e} after {endpoint} steps");
-    if !within(worse(worse(q, b), r), tolerance) {
+    let mut worst = worse(worse(q, b), r);
+    if let Some(wall) = wall_errors(reference, display)? {
+        summary.push_str(&format!(
+            "; wall z {:.3e}, memory {:.3e}, energy {:.3e} of {:.3e}",
+            wall.z, wall.memory, wall.energy, wall.energy_expected
+        ));
+        if !within(worse(wall.z, wall.memory), WALL_TOLERANCE) {
+            return Err(format!(
+                "{summary}: the pole states stand from the reference's beyond {WALL_TOLERANCE:.0e}"
+            ));
+        }
+        worst = worse(worst, wall.energy);
+        if let Some(carry) = reference.carry {
+            let change = (carry.target_energy - carry.source_energy) / carry.source_energy;
+            summary.push_str(&format!(
+                "; carried {:.1e} of the field's energy, {:.3e} to {:.3e} ({change:+.1e}), \
+                 residual {:.1e}; at the handoff Q {:.1e}, b {:.1e}, z {:.1e}, memory {:.1e}",
+                carry.share,
+                carry.source_energy,
+                carry.target_energy,
+                carry.residual,
+                carry.at_handoff[0],
+                carry.at_handoff[1],
+                carry.at_handoff[2],
+                carry.at_handoff[3]
+            ));
+            if carry.share < MEMORY_SHARE_FLOOR {
+                return Err(format!(
+                    "{summary}: the wall held too little at the handoff to carry, under \
+                     {MEMORY_SHARE_FLOOR:.0e} of the field's energy"
+                ));
+            }
+            if !within(carry.residual, CARRY_RESIDUAL) {
+                return Err(format!(
+                    "{summary}: the carry left {:.3e} of the memory behind, beyond \
+                     {CARRY_RESIDUAL:.0e}",
+                    carry.residual
+                ));
+            }
+        }
+    }
+    if !within(worst, tolerance) {
         return Err(format!("{summary}, beyond {tolerance:.0e}"));
+    }
+    if let Some(clock) = display.clock {
+        let reached = expected.time();
+        let drift = (clock.absolute_seconds - reached).abs();
+        summary.push_str(&format!(
+            "; clock {:.4} s, {drift:.1e} from the run's",
+            clock.absolute_seconds
+        ));
+        if !within(drift, CLOCK_TOLERANCE) {
+            return Err(format!(
+                "{summary} {reached:.6} s, beyond {CLOCK_TOLERANCE:.0e}"
+            ));
+        }
     }
     if let Some((_, control)) = reference
         .control
         .as_ref()
         .filter(|(_, control)| control.primary().len() == expected.primary().len())
     {
-        // An action the device ignored would leave it where the control is;
-        // a hundred tolerances away, it did not. A remesh the device ignored
-        // would leave it on the other mesh, which the lengths already catch.
-        let apart = primary(control);
-        summary.push_str(&format!(
-            "; the run without its actions stands {apart:.3e} off"
-        ));
-        if !apart.is_finite() || apart <= 100.0 * tolerance {
-            return Err(format!("{summary}, too near to tell the action took"));
+        let apart = primary_error(display, control);
+        if matches!(fixture, Fixture::HandoffMemory(MemoryHandoff::Rebuild)) {
+            // A rebuild of the same mesh is to leave the device where the
+            // uninterrupted run is.
+            summary.push_str(&format!("; the uninterrupted run stands {apart:.3e} off"));
+            if !within(apart, tolerance) {
+                return Err(format!(
+                    "{summary}, where a rebuild of the same mesh should leave the device"
+                ));
+            }
+        } else {
+            // An action the device ignored would leave it where the control
+            // is; a hundred tolerances away, it did not. A remesh the device
+            // ignored would leave it on the other mesh, which the lengths
+            // already catch.
+            summary.push_str(&format!(
+                "; the run without its actions stands {apart:.3e} off"
+            ));
+            if !apart.is_finite() || apart <= 100.0 * tolerance {
+                return Err(format!("{summary}, too near to tell the action took"));
+            }
         }
     }
     Ok(summary)

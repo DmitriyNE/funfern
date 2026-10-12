@@ -1,0 +1,4 @@
+about: the runtime transfer shader's preparation delta is zeroed, so a drive the new generation starts takes its authored phase as if the handoff were at the candidate's preparation, not at the step the running device had reached
+test: scripts/e2e-fixture.sh handoff-memory-running
+expect: HandoffMemory\(Running\) failed: Q .*beyond
+needs: device
