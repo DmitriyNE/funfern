@@ -83,12 +83,10 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Run Clippy on the browser bundle's end-to-end feature
-        # The deprecated e2e feature on the shipped binary, which the browser
-        # fixtures still build until they move to the fixtures binary; the
-        # fixtures binary itself is among the workspace's bins above.
-        run: |
-          cargo clippy -p funfern-app --bins --target wasm32-unknown-unknown --features e2e --locked -- -D warnings
+      - name: Run Clippy for the browser
+        # The app's browser-only code, which no other step lints; both
+        # binaries, the shipped app and the fixtures one.
+        run: cargo clippy -p funfern-app --bins --target wasm32-unknown-unknown --locked -- -D warnings
 
       - name: Build tests
         # Release, as the local checks run them: the gallery's scene tests

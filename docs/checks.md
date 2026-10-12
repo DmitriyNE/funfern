@@ -93,8 +93,7 @@ The same fixtures run in the browser from the fixtures binary's bundle,
 --dist dist-e2e`: the page script writes `fixtures.html`, `index.html` with
 its rust link pointed at `funfern-fixtures`, generated and never committed,
 and Trunk writes the bundle's page as `index.html` as for the shipped one.
-The Pages bundle is the shipped binary's. The `e2e` feature is deprecated
-since 2026-10-12 and nothing builds it; it goes next. `npm run test:e2e` serves it
+The Pages bundle is the shipped binary's, which carries no driver. `npm run test:e2e` serves it
 cross-origin isolated and opens `?e2e=<fixture>` for each fixture the device
 suite names; the driver writes its verdict on the page's root element,
 `data-funfern-e2e` reading `pass` or `fail` beside `data-funfern-e2e-summary`,

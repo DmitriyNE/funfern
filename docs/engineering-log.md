@@ -23438,3 +23438,17 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — The e2e feature goes
+
+- **Change.** Nothing built the `e2e` feature once the browser fixtures
+  took the fixtures binary's page: it is removed from the app's manifest,
+  the shipped binary runs `Build::Shipped` outright, and CI's clippy step
+  on the feature, the one pass over the browser target, lints that target
+  without it, as the local gate now does. The driver is `funfern-fixtures`
+  alone, natively and in the
+  browser, and a plain build of `funfern-app` has nothing to drive. The
+  plan item is closed.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

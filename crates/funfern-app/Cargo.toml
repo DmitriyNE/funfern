@@ -9,11 +9,6 @@ publish.workspace = true
 [features]
 default = []
 browser-threads = ["dep:rayon", "dep:wasm-bindgen-rayon"]
-# End-to-end fixtures run by the app itself on the device, chosen with
-# Deprecated on 2026-10-12: the end-to-end driver (src/ui/e2e.rs) is the
-# `funfern-fixtures` binary's now, and this feature only adds it to the shipped
-# binary as it used to, until the browser fixtures have moved too; then it goes.
-e2e = []
 
 [lints]
 workspace = true

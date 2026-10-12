@@ -1262,7 +1262,7 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   adjacency", at every edge. Fixed the same day (`docs/engineering-log.md`):
   such an edge is expanded with two pieces at the least, on the full rebuild
   and the carving path alike, with no authored mesh changed.
-- [ ] The end-to-end fixture driver (`src/ui/e2e.rs`) lives in the shipped
+- [x] The end-to-end fixture driver (`src/ui/e2e.rs`) lives in the shipped
   binary behind the `e2e` feature, which is why a plain build could replace
   the suite's app under its fixtures on 2026-10-12. Move the fixtures out:
   a second binary that builds the same app with the driver added, for the
@@ -1273,8 +1273,8 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   complete. Done the same day (`docs/engineering-log.md`): the
   `funfern-fixtures` binary, the device suite, the fixture wrapper, the
   lavapipe and mutation jobs on it, then the browser bundles from the page
-  `scripts/fixtures-page.sh` writes. Left: the feature's removal, now that
-  nothing builds it.
+  `scripts/fixtures-page.sh` writes, and the feature removed once nothing
+  built it.
 - [ ] No fixture or device example hands off a generation with a driven
   wall: a prescribed Dirichlet or Neumann node's carried phase across a
   handoff can be zeroed in the runtime transfer shader and nothing fails,
