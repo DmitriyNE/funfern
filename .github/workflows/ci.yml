@@ -167,6 +167,60 @@ jobs:
           FUNFERN_WALL_SWEEP_EDGE: 0.2
         run: cargo test --release -p funfern-app --test wall_sweep --locked -- --nocapture
 
+  # Nightly: the mutations, one deliberate defect each, applied and reverted
+  # by scripts/mutations.sh; each must be caught by the test its manifest
+  # names, at the check it targets. The device ones run their fixture on
+  # lavapipe through scripts/e2e-fixture.sh.
+  mutations:
+    name: Mutations are detected
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies, lavapipe and a virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev \
+            mesa-vulkan-drivers \
+            libvulkan1 \
+            xvfb \
+            xauth \
+            libxcursor1 \
+            libxrandr2 \
+            libxi6 \
+            libx11-xcb1
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: device-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build the app with its end-to-end fixtures
+        run: cargo build -p funfern-app --release --locked --features e2e --bin funfern-app
+
+      - name: Run every mutation
+        run: scripts/mutations.sh
+
   web:
     name: Browser bundle
     if: github.event_name != 'schedule'

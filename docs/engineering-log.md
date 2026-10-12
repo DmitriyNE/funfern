@@ -23180,3 +23180,61 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — A0.4: mutations that prove the gate bites
+
+- **Change.** `scripts/mutations.sh` applies each mutation under
+  `tests/mutations/`, a deliberate defect as a patch beside a manifest
+  naming the test to run, whether it needs a device, and the pattern the
+  failing output must match, and runs it in four steps: the named test
+  unmutated must pass; the patch applies and the tree builds; the test
+  must fail with output matching the pattern; the patch is reverted and
+  the tree is clean again. A compile error, a panic elsewhere, a timeout
+  or no device, and a test that does not pass before the patch each count
+  as "not detected" and fail the run. `scripts/e2e-fixture.sh` runs one of
+  the app's fixtures the way the device suite does, on this machine's GPU
+  or, on Linux, on lavapipe through `scripts/e2e-lavapipe.sh`, so one
+  manifest serves both. A nightly job, `mutations`, runs every one on
+  Linux; locally, `scripts/mutations.sh` or a pattern of names.
+- **The six.** `band-fill-owner-check`, the band fill of 1bc6d82, caught by
+  the core wall sweep refusing the U-and-line scene as not positive
+  semidefinite. `wall-flux-sign`, the second-order wall's modal correction
+  with its sign changed in the midpoint factor, so the wall supplies energy:
+  caught by `a_nonlinear_trace_radiates_passively_and_balances_at_second_order`,
+  whose run into the wall blows up to an invalid state before its passivity
+  assertion. `wall-memory-never-charges`, the pole memory's input gain
+  zeroed in the factor: caught by the passivity test's check of the cached
+  factor against the generator it was prepared from. `component-totals-dropped`,
+  `corrects_component_totals` forced off: caught by the `remesh` fixture at
+  Q 2.5e-5 against its 5e-6, the drift the bound was set for.
+  `switch-thrown-twice`, the app queueing every Switch twice with the second
+  throwing it back: caught by the `switch` fixture, which waits for the
+  Switch the app recorded to be taken and never sees it, the second event's
+  serial having superseded it, so the wait runs out before the endpoint is
+  compared; the manifest names that check, the one that fires first.
+  `clock-forgotten-on-handoff`, the runtime transfer shader's preparation
+  delta zeroed, so every material drive and pulse restarts on the new
+  generation as if the handoff were at time zero: caught by
+  `canonical_gpu_temporal_handoff`'s accuracy gate, Q 6.1e-5 and b 2.5e-4
+  against its bound with the clock itself right at 1.4e-9 s, through
+  `scripts/e2e-fixture.sh --example`; detected through the runner as well, on Metal here. The switch, rerun
+  with its manifest reworded to the check that catches it: detected.
+- **A gap the clock found.** The first clock mutation zeroed the carried
+  phase of a prescribed source, a driven Dirichlet or Neumann node, across
+  a handoff, and nothing caught it: the `handoff` fixture's cavity has a
+  pulse at step 0 and no prescribed node, and the handoff examples drive a
+  point source, which the forcing carries by another path. No fixture or
+  example hands off a generation with a driven wall. That is PH-10's
+  ground, the time origin surviving a handoff, and is listed with it.
+- **What the first two wall mutations taught.** The outgoing generator,
+  `apply_outgoing_generator`, is the oracle, not the step; a mutation there
+  is caught only by the oracle's own consistency checks, and the production
+  wall is the midpoint factor. A device fixture compares the device with the
+  f64 reference on the same code, so a CPU-side production mutation is
+  invisible to it, and only a test against a law or a property, passivity
+  here, catches it. The wall's reflection against its law has no test yet;
+  PH-04 brings it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. The mutations are not in the gate, each
+  rebuilding the tree; they are the nightly's.

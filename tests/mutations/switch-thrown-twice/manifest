@@ -1,0 +1,4 @@
+about: the app queues every Switch twice, the second throwing it back; the fixture waits for the Switch the app recorded to be taken and the second event's serial supersedes it, so the wait runs out before the endpoint is compared
+test: scripts/e2e-fixture.sh switch
+expect: waiting for the device to take the action|beyond|too near to tell the action took|refused
+needs: device

@@ -1,0 +1,4 @@
+about: the second-order wall's modal correction changes sign in the midpoint factor, so the wall supplies energy instead of taking it, and a run into it blows up
+test: cargo test --release -p funfern-core --lib -- a_nonlinear_trace_radiates_passively_and_balances_at_second_order
+expect: InvalidState|boundary_loss >= 0.0
+needs: cpu

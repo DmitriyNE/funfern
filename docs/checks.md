@@ -612,5 +612,16 @@ fixed generation's device plan is packed both ways, through the production
 packer and the one the packer's own tests use, and the two must agree. It
 runs in the gate, about a second on ten threads.
 
+`scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
+holds a deliberate defect as a patch and a manifest naming the test that must
+catch it and the pattern its failure must match; the script applies each,
+runs the test before and after, requires the failure the manifest names, and
+reverts. A mutation that does not build, fails elsewhere, times out, or whose
+test does not pass before the patch is "not detected". Not in the gate, since
+each rebuilds the tree; the nightly runs all of them on Linux, the device
+ones on lavapipe through `scripts/e2e-fixture.sh`, which runs one fixture on
+this machine's GPU otherwise. `scripts/mutations.sh wall` runs the ones whose
+names match.
+
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.

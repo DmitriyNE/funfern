@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-app/src/ui/workers.rs b/crates/funfern-app/src/ui/workers.rs
+index 7ed4963..9ec576c 100644
+--- a/crates/funfern-app/src/ui/workers.rs
++++ b/crates/funfern-app/src/ui/workers.rs
+@@ -623,7 +623,7 @@ pub(super) fn spawn_amr_worker(
+ /// field; an edit to the geometry has no total to restore and takes what the
+ /// interpolation carries.
+ fn corrects_component_totals(candidate: &PreparedTopology, active: &PreparedTopology) -> bool {
+-    candidate.mesh.geometry_revision == active.mesh.geometry_revision
++    candidate.mesh.geometry_revision == active.mesh.geometry_revision && false
+ }
+ 
+ pub(super) fn compile_gpu_upload(

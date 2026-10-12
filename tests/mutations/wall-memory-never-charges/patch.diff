@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+index fc9b908..c71ea1e 100644
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -3903,7 +3903,7 @@ impl CanonicalOutgoingMidpointFactor {
+             };
+             let root_decay = mode.decay.sqrt();
+             let input_gain: [f64; 3] =
+-                std::array::from_fn(|row| root_decay * energy_transform[row].iter().sum::<f64>());
++                std::array::from_fn(|row| 0.0 * root_decay * energy_transform[row].iter().sum::<f64>());
+             let mut block = Vec::with_capacity(9);
+             for (row, transform_row) in energy_transform.iter().enumerate() {
+                 for column in [0, 1, 2] {

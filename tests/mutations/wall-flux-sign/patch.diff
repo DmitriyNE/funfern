@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+index fc9b908..415ab8e 100644
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -3938,7 +3938,7 @@ impl CanonicalOutgoingMidpointFactor {
+                     .map(|auxiliary| inverse[row][auxiliary] * azq_coefficient[auxiliary])
+                     .sum()
+             });
+-            modal_correction[mode_index] = -unit_aqz
++            modal_correction[mode_index] = unit_aqz
+                 .iter()
+                 .zip(solved_column_coefficient)
+                 .map(|(left, right)| left * right)

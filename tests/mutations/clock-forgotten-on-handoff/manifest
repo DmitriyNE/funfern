@@ -1,0 +1,4 @@
+about: the runtime transfer shader's preparation delta is zeroed, so every material drive and pulse restarts on the new generation as if the handoff were at time zero
+test: scripts/e2e-fixture.sh --example canonical_gpu_temporal_handoff
+expect: accuracy gate was exceeded
+needs: device

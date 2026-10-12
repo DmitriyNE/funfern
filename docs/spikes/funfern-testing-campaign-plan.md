@@ -226,6 +226,13 @@ six, each naming the fixture class that must catch it:
 
 Done when all six fail as named on Linux in the nightly.
 
+**Done on 2026-10-12** (`docs/engineering-log.md`): `scripts/mutations.sh`
+with the four-step detection rule, `scripts/e2e-fixture.sh` for the device
+ones on either platform, the six mutations under `tests/mutations/`, each
+detected as its manifest names, and the nightly `mutations` job. Two of the
+six catch at an earlier check than first intended, and the manifests name
+the check that fires.
+
 ### A0.5 The device suite keeps its own binary
 
 `scripts/device-suite.sh` copies the e2e build of `funfern-app` into its log

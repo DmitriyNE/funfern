@@ -1248,7 +1248,18 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   solvers, landed the same day: the GPU plan packer, the component-total
   correction and the outgoing boundary's reuse and refusals covered with
   production-shaped twins, the far-field recorder and the probe estimators
-  deferred to PH-18.
+  deferred to PH-18. A0.4, the mutations, landed the same day:
+  `scripts/mutations.sh` over six deliberate defects under `tests/mutations/`,
+  each caught by the test its manifest names, in a nightly job. A0.5, the
+  device suite keeping its own e2e binary, is the stage's last item.
+- [ ] No fixture or device example hands off a generation with a driven
+  wall: a prescribed Dirichlet or Neumann node's carried phase across a
+  handoff can be zeroed in the runtime transfer shader and nothing fails,
+  found by the A0.4 mutations on 2026-10-12. The `handoff` fixture's cavity
+  has a pulse and no prescribed node; the handoff examples drive a point
+  source, which the forcing carries by another path. PH-10, boundary memory
+  and the time origin through a handoff, takes a driven wall into its
+  fixture; until then the mutation that would prove it is not in the set.
 - [ ] `aligned_indicator_auxiliary` in `ui.rs` aligns the display's
   auxiliary lane for the AMR indicator with `snapshot_current +
   snapshot_current` where a trapezoid would take the previous snapshot,

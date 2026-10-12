@@ -1,0 +1,13 @@
+--- a/crates/funfern-app/src/canonical_transfer_runtime.wgsl
++++ b/crates/funfern-app/src/canonical_transfer_runtime.wgsl
+@@ -265,8 +265,8 @@
+     let target_drives = transfer[5].data.w;
+     let current_origin = add_compensated(
+         old_control.clock_origin.x, old_control.clock_origin.y, old_control.clock_f32.y);
+-    let preparation_delta = (current_origin.x - new_control.clock_origin.x)
+-        + (current_origin.y - new_control.clock_origin.y);
++    let preparation_delta = 0.0 * ((current_origin.x - new_control.clock_origin.x)
++        + (current_origin.y - new_control.clock_origin.y));
+     if i < target_nodes && new_nodes[i].boundary.z != 0u {
+         let mapping = mapped_index(transfer[4].data.z, i);
+         let record = new_nodes[i].boundary.z >> PRESCRIBED_RECORD_SHIFT;

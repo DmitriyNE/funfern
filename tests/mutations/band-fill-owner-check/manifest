@@ -1,0 +1,4 @@
+about: the band fill writes an entry between two pieces of the trace at the other piece's position, as 1bc6d82 did
+test: cargo test --release -p funfern-core --lib -- every_wall_law_on_every_side_of_the_scene_path_prepares
+expect: not positive semidefinite|did not converge
+needs: cpu

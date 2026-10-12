@@ -1,0 +1,4 @@
+about: the wall's pole memory never charges in the midpoint factor, so the factor no longer solves the generator it was prepared from
+test: cargo test --release -p funfern-core --lib -- passive_second_order_trace_has_normalized_memory_and_contracts_long_runs
+expect: maximum_difference\(&cached, &oracle\)
+needs: cpu

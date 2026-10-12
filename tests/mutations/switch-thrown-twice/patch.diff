@@ -1,0 +1,22 @@
+diff --git a/crates/funfern-app/src/ui/runtime.rs b/crates/funfern-app/src/ui/runtime.rs
+index c77e57b..f9bb793 100644
+--- a/crates/funfern-app/src/ui/runtime.rs
++++ b/crates/funfern-app/src/ui/runtime.rs
+@@ -1185,7 +1185,16 @@ impl Playground {
+         #[cfg(test)]
+         self.protocol_log.push(ProtocolNote::Switch(event.is_ok()));
+         request.queue_live_event(assets, event.map_err(LiveEventRefusal::Refused)?)?;
+-        self.coordinator.canonical_event_serial = serial;
++        let again = CanonicalGpuLiveEvent::temporal_switch_in(
++            &runtime,
++            material,
++            heading,
++            ramp,
++            serial.saturating_add(1),
++        )
++        .map_err(|error| format!("{error:?}"));
++        request.queue_live_event(assets, again.map_err(LiveEventRefusal::Refused)?)?;
++        self.coordinator.canonical_event_serial = serial.saturating_add(1);
+         self.coordinator.switch_targets.insert(material, !heading);
+         Ok(())
+     }
