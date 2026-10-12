@@ -23354,3 +23354,22 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — The lavapipe job takes the suite's run lines only
+
+- **Reported.** The user: CI on c997e3c fails in "Device fixtures on
+  software Vulkan" with `FAIL (2) 0 s no-such-fixture`, after the seven
+  fixtures.
+- **Cause.** `scripts/e2e-lavapipe.sh` builds its list from the device
+  suite with `grep -o "FUNFERN_E2E=[a-z-]*"`, so the two lists cannot part.
+  A0.5 added the suite's driver probe, which runs the linked binary with
+  `FUNFERN_E2E=no-such-fixture` to see it refuse, and the pattern matched
+  that line too: the job asked for the eighth name, the driver refused it
+  by name with exit 2, as the probe counts on, and the job failed. c997e3c's
+  run was the first with the probe.
+- **Change.** The list comes from the suite's run lines alone,
+  `'FUNFERN_E2E=<name> funfern-fixtures'`, and an empty list refuses. The
+  checks doc names the fixtures binary where it still said the feature.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

@@ -23,8 +23,15 @@ fi
 if [[ $# -gt 0 ]]; then
   fixtures=("$@")
 else
-  # The fixtures the device suite runs, so the two lists cannot part.
-  mapfile -t fixtures < <(grep -o "FUNFERN_E2E=[a-z-]*" scripts/device-suite.sh | cut -d= -f2)
+  # The fixtures the device suite runs, so the two lists cannot part: its run
+  # lines alone, not its probe, which asks the linked binary for a fixture
+  # that does not exist.
+  mapfile -t fixtures < <(grep -o "'FUNFERN_E2E=[a-z-]* funfern-fixtures'" scripts/device-suite.sh \
+    | sed "s/'FUNFERN_E2E=\([a-z-]*\) .*/\1/")
+  if [[ ${#fixtures[@]} -eq 0 ]]; then
+    echo "no fixture run lines found in scripts/device-suite.sh" >&2
+    exit 1
+  fi
 fi
 target=${CARGO_TARGET_DIR:-target}
 logs=$target/e2e-lavapipe

@@ -80,9 +80,9 @@ step short, or a retry that moves one bit, fails it.
 
 CI has no GPU, but it runs these fixtures on Mesa's software Vulkan, lavapipe,
 under a virtual X server: the job `Device fixtures on software Vulkan` builds
-the app with the feature and runs `scripts/e2e-lavapipe.sh`, which takes the
-fixture list from `scripts/device-suite.sh` and fails a run that did not report
-lavapipe's adapter. They read there as on the M1 Max - the cavity Q `6.4e-7` -
+the fixtures binary and runs `scripts/e2e-lavapipe.sh`, which takes the fixture
+list from the run lines of `scripts/device-suite.sh`, not its driver probe, and
+fails a run that did not report lavapipe's adapter. They read there as on the M1 Max - the cavity Q `6.4e-7` -
 each its own bits across batchings, in about forty seconds a fixture; the Pages
 deploy waits for the job. Lavapipe flushes subnormals to zero, which is how it
 found the nonlinear inverse's relative convergence tests unreachable near zero.
