@@ -151,6 +151,19 @@ and selection are documented in the test, and a sweep with the band fill of
 1bc6d82 reinstated fails on the U-and-line scene, which is the first
 mutation of A0.4.
 
+**Done on 2026-10-12** (`docs/engineering-log.md`): 40 scenes, 12,042
+mandatory and 1,600 supplementary cases, 113 s on ten threads at the Coarse
+preset, the five arrays of one obstacle in the nightly at 0.16 and 0.2; the
+refusals at a corner and at a shared node predicted from the draft and from
+the compiled plan rather than from the assembly; the adjacency reduced to
+one pair of spans per pair of curves, which an array would otherwise turn
+into thousands. The first run found 36 configurations the editor accepts and
+the mesher cannot build, every one a span changed between transmitting and
+separated, listed in the sweep's `KNOWN` table until fixed, and a Dirichlet
+refusal the assembly makes after acceptance; both are under Maintenance in
+`docs/plan.md`. The core twin fails with the band fill of 1bc6d82
+reinstated.
+
 ### A0.2 Regression scenes that prepare
 
 `crates/funfern-app/tests/fixtures/scenes-regressions/` beside `scenes-v22`,

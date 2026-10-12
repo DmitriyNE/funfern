@@ -696,6 +696,34 @@ struct CanonicalOutgoingSignature {
     entries: Vec<(u32, u32, f64)>,
 }
 
+/// What a modal basis says about itself, read back from the boundary alone:
+/// the normalized tangential operator rebuilt from the signature the basis
+/// was solved from, its connected pieces, the ends of its spectrum, and how
+/// far the modes are from being its orthonormal eigenvectors. A sweep over
+/// wall configurations reads this where the solve's internals are out of
+/// reach; a band that lost an entry, as the fill of 1bc6d82 did, shows here
+/// as a residual, since the modes then solve some other operator.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalOutgoingTraceReport {
+    pub trace_nodes: usize,
+    pub modes: usize,
+    /// Connected pieces of the trace under the operator's nonzero couplings.
+    pub pieces: usize,
+    pub smallest_eigenvalue: f64,
+    pub largest_eigenvalue: f64,
+    /// The worst mode's `|A v - λ v|` over the operator's largest row sum.
+    pub residual: f64,
+    /// The largest departure of the modes from orthonormality.
+    pub orthogonality: f64,
+    /// The largest relative departure of the modes' summed squares at a trace
+    /// node from that node's damping, which the transform `T = V^T D^(1/2)`
+    /// makes them equal when the basis is complete and orthonormal.
+    pub damping_defect: f64,
+    pub auxiliary_count: usize,
+    /// Three per mode that decays.
+    pub auxiliaries_expected: usize,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalOutgoingPhysicalMemory {
     /// One physical pole-current value per outgoing trace node, in `trace_nodes`
@@ -727,6 +755,114 @@ impl CanonicalOutgoingBoundary {
             .iter()
             .map(|mode| mode.trace.len() * std::mem::size_of::<f64>())
             .sum()
+    }
+
+    /// The basis checked against the operator it was solved from; see
+    /// [`CanonicalOutgoingTraceReport`]. Dense in the modes, so a diagnostic,
+    /// not a step.
+    pub fn trace_report(&self) -> CanonicalOutgoingTraceReport {
+        let count = self.trace_nodes.len();
+        let damping = &self.signature.damping;
+        let normalized = self
+            .signature
+            .entries
+            .iter()
+            .map(|&(row, column, value)| {
+                let scale = (damping[row as usize] * damping[column as usize]).sqrt();
+                (row as usize, column as usize, value / scale)
+            })
+            .collect::<Vec<_>>();
+        let mut row_sums = vec![0.0; count];
+        for &(row, _, value) in &normalized {
+            row_sums[row] += value.abs();
+        }
+        let norm = row_sums
+            .iter()
+            .copied()
+            .fold(0.0, f64::max)
+            .max(f64::MIN_POSITIVE);
+        // The pieces, by union-find over the nonzero couplings.
+        let mut parent = (0..count).collect::<Vec<_>>();
+        fn root(parent: &mut [usize], mut node: usize) -> usize {
+            while parent[node] != node {
+                parent[node] = parent[parent[node]];
+                node = parent[node];
+            }
+            node
+        }
+        for &(row, column, value) in &normalized {
+            if row != column && value != 0.0 {
+                let (a, b) = (root(&mut parent, row), root(&mut parent, column));
+                if a != b {
+                    parent[a] = b;
+                }
+            }
+        }
+        let pieces = (0..count)
+            .filter(|&node| root(&mut parent, node) == node)
+            .count();
+        let vectors = self
+            .modes
+            .iter()
+            .map(|mode| {
+                mode.trace
+                    .iter()
+                    .zip(damping)
+                    .map(|(entry, damping)| entry / damping.sqrt())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut residual = 0.0_f64;
+        let mut product = vec![0.0; count];
+        for (mode, vector) in self.modes.iter().zip(&vectors) {
+            product.iter_mut().for_each(|entry| *entry = 0.0);
+            for &(row, column, value) in &normalized {
+                product[row] += value * vector[column];
+            }
+            for (applied, component) in product.iter().zip(vector) {
+                residual = residual.max((applied - mode.eigenvalue * component).abs());
+            }
+        }
+        let mut orthogonality = 0.0_f64;
+        for (left, a) in vectors.iter().enumerate() {
+            for (right, b) in vectors.iter().enumerate().skip(left) {
+                let dot = a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+                let expected = if left == right { 1.0 } else { 0.0 };
+                orthogonality = orthogonality.max((dot - expected).abs());
+            }
+        }
+        let damping_defect = (0..count)
+            .map(|node| {
+                let summed = self
+                    .modes
+                    .iter()
+                    .map(|mode| mode.trace[node] * mode.trace[node])
+                    .sum::<f64>();
+                (summed - damping[node]).abs() / damping[node].max(f64::MIN_POSITIVE)
+            })
+            .fold(0.0, f64::max);
+        let (smallest_eigenvalue, largest_eigenvalue) = self.modes.iter().fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(smallest, largest), mode| {
+                (smallest.min(mode.eigenvalue), largest.max(mode.eigenvalue))
+            },
+        );
+        CanonicalOutgoingTraceReport {
+            trace_nodes: count,
+            modes: self.modes.len(),
+            pieces,
+            smallest_eigenvalue,
+            largest_eigenvalue,
+            residual: residual / norm,
+            orthogonality,
+            damping_defect,
+            auxiliary_count: self.auxiliary_count,
+            auxiliaries_expected: 3 * self
+                .modes
+                .iter()
+                .filter(|mode| mode.auxiliary_offset.is_some())
+                .count(),
+        }
     }
 
     fn matches_quadratic(&self, quadratic: &QuadraticWaveOperator) -> Result<bool, WaveError> {
@@ -6208,6 +6344,348 @@ mod tests {
         [residual / norm, orthogonality]
     }
 
+    /// The scene that failed to load on 12 October, in core terms: a U
+    /// outgoing along the inside of its arms, a line between the arms
+    /// outgoing along one side, the arms' ends 0.05 from the line's.
+    fn u_and_line_scene() -> Scene {
+        let one_sided = crate::InternalBoundaryLaw {
+            left: crate::FaceBoundaryCondition::SecondOrderOutgoing,
+            ..crate::InternalBoundaryLaw::REFLECTING
+        };
+        let mut scene = Scene::default();
+        scene.internal_boundaries.push(crate::InternalBoundary {
+            id: crate::InternalBoundaryId(1),
+            spline: crate::OpenCubicSpline::new_with_multiplicities(
+                vec![
+                    Point2::new(0.0, 0.6),
+                    Point2::new(-0.2833333333333333, 0.6),
+                    Point2::new(-0.5666666666666667, 0.6),
+                    Point2::new(-0.85, 0.6),
+                    Point2::new(-0.85, 0.2),
+                    Point2::new(-0.85, -0.2),
+                    Point2::new(-0.85, -0.6),
+                    Point2::new(-0.5666666666666667, -0.6),
+                    Point2::new(-0.2833333333333333, -0.6),
+                    Point2::new(0.0, -0.6),
+                ],
+                vec![0.85, 1.2, 0.85],
+                vec![3, 3],
+            )
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![one_sided, crate::InternalBoundaryLaw::REFLECTING, one_sided],
+        });
+        scene.internal_boundaries.push(crate::InternalBoundary {
+            id: crate::InternalBoundaryId(2),
+            spline: crate::OpenCubicSpline::uniform(vec![
+                Point2::new(0.0, -0.55),
+                Point2::new(0.0, -0.55 / 3.0),
+                Point2::new(0.0, 0.55 / 3.0),
+                Point2::new(0.0, 0.55),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![one_sided],
+        });
+        scene
+    }
+
+    /// The hole of `Scene::initial` moved to within an element of the top
+    /// wall, every span of it outgoing.
+    fn hole_by_the_wall_scene() -> Scene {
+        let mut scene = Scene::initial();
+        scene.obstacles[0].spline =
+            crate::PeriodicCubicSpline::rounded(Point2::new(0.0, 0.75), 0.15);
+        scene.obstacles[0].span_conditions =
+            vec![crate::FaceBoundaryCondition::SecondOrderOutgoing; 8];
+        scene
+    }
+
+    /// Meshes, assembles and compiles a scene at an edge sized for its
+    /// domain, as the sweep prepares every case.
+    fn prepare_scene(
+        scene: &Scene,
+        edge: f64,
+    ) -> Result<(crate::TriMesh, QuadraticWaveOperator, CanonicalWaveOperator), String> {
+        let mesh = crate::mesh_scene(
+            scene,
+            1,
+            crate::MeshingOptions {
+                target_edge_length: edge,
+                curve_tolerance: (edge * 0.02).min(5.0e-4),
+                ..crate::MeshingOptions::default()
+            }
+            .sized_for_area(scene.domain.width() * scene.domain.height()),
+        )
+        .map_err(|error| format!("meshing: {error}"))?;
+        let quadratic = QuadraticWaveOperator::assemble_scene_with_boundaries(
+            &mesh,
+            scene,
+            scene.outer_boundaries,
+        )
+        .map_err(|error| format!("assembly: {error}"))?;
+        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1)
+            .map_err(|error| format!("compile: {error}"))?;
+        Ok((mesh, quadratic, canonical))
+    }
+
+    /// The report a basis gives of itself, on the four-walled hole scene and
+    /// on the scene in four pieces: complete, orthonormal to roundoff, with
+    /// the residual at roundoff and the pieces counted, and the dense oracle
+    /// agreeing with the modes' eigenvalues.
+    #[test]
+    fn the_outgoing_trace_report_reads_the_basis_against_its_operator() {
+        for (name, scene, edge, pieces) in [
+            ("hole", Scene::initial(), 0.16, 1),
+            ("U and line", u_and_line_scene(), 0.08, 4),
+        ] {
+            let (_, quadratic, canonical) = prepare_scene(&scene, edge).unwrap();
+            let boundary = canonical.outgoing_boundary_handle().unwrap();
+            let report = boundary.trace_report();
+            assert_eq!(report.modes, report.trace_nodes, "{name}");
+            assert_eq!(report.pieces, pieces, "{name}");
+            assert!(report.smallest_eigenvalue >= 0.0, "{name}: {report:?}");
+            assert!(report.residual < 1.0e-13, "{name}: {report:?}");
+            assert!(report.orthogonality < 1.0e-12, "{name}: {report:?}");
+            assert!(report.damping_defect < 1.0e-12, "{name}: {report:?}");
+            assert_eq!(
+                report.auxiliary_count, report.auxiliaries_expected,
+                "{name}"
+            );
+            let signature = outgoing_signature(&quadratic).unwrap().unwrap();
+            let count = signature.trace_nodes.len();
+            let mut dense = vec![0.0; count * count];
+            for &(row, column, value) in &signature.entries {
+                let scale =
+                    (signature.damping[row as usize] * signature.damping[column as usize]).sqrt();
+                dense[row as usize * count + column as usize] = value / scale;
+            }
+            let (values, _, _, _) = eigensolve(&dense, count);
+            let norm = report.largest_eigenvalue.max(1.0);
+            for (mode, value) in boundary.modes().iter().zip(&values) {
+                assert!(
+                    (mode.eigenvalue - value).abs() <= 1.0e-12 * norm,
+                    "{name}: {} against {value}",
+                    mode.eigenvalue
+                );
+            }
+        }
+    }
+
+    /// Every wall law on every side of every span the `Scene` path authors,
+    /// obstacle spans and internal boundaries, and every outer law on each
+    /// side and on all four, over the hole scene, the U-and-line scene and
+    /// the hole beside the wall, meshed at 0.2. Each case is classed before
+    /// it runs: it must prepare, or it must be refused by the structural rule
+    /// that names it, a thin gap beside a side that is not reflecting. A case
+    /// that prepares has its basis checked by its own report and by the dense
+    /// oracle. The count of successes must equal the count of must-succeed
+    /// cases, so a solver that politely refuses everything cannot pass. The
+    /// gallery's counterpart, through the app's own path, is
+    /// `crates/funfern-app/tests/wall_sweep.rs`.
+    #[test]
+    fn every_wall_law_on_every_side_of_the_scene_path_prepares() {
+        use crate::{FaceBoundaryCondition as Face, OuterBoundaryCondition as Outer};
+        let driven = TimeSignal::Harmonic {
+            offset: 0.0,
+            amplitude: 1.0,
+            frequency_hz: 2.0,
+            phase_radians: 0.0,
+        };
+        let outer_laws = [
+            Outer::Reflecting,
+            Outer::FirstOrderOutgoing,
+            Outer::SecondOrderOutgoing,
+            Outer::ElectricWall,
+            Outer::MagneticWall,
+            Outer::Neumann {
+                signal: TimeSignal::ZERO,
+            },
+            Outer::Neumann { signal: driven },
+            Outer::Dirichlet {
+                signal: TimeSignal::ZERO,
+            },
+            Outer::Dirichlet { signal: driven },
+        ];
+        let face_laws = [
+            Face::Reflecting,
+            Face::Impedance { ratio: 0.5 },
+            Face::SecondOrderOutgoing,
+            Face::ElectricWall,
+            Face::MagneticWall,
+            Face::Neumann {
+                signal: TimeSignal::ZERO,
+            },
+            Face::Neumann { signal: driven },
+            Face::Dirichlet {
+                signal: TimeSignal::ZERO,
+            },
+            Face::Dirichlet { signal: driven },
+        ];
+        let mut tm = Scene::initial();
+        tm.physics = crate::PhysicsModel::Electromagnetic {
+            polarization: crate::ElectromagneticPolarization::Tm,
+        };
+        let scenes = [
+            ("hole", Scene::initial()),
+            ("hole, TM", tm),
+            ("U and line", u_and_line_scene()),
+            ("hole by the wall", hole_by_the_wall_scene()),
+        ];
+        let mut total_must_succeed = 0;
+        let mut total_succeeded = 0;
+        for (name, base) in &scenes {
+            // (label, scene, must succeed)
+            let mut cases: Vec<(String, Scene, bool)> = Vec::new();
+            for law in outer_laws {
+                for side in 0..4 {
+                    let mut scene = base.clone();
+                    scene.outer_boundaries.sides[side] = law;
+                    cases.push((format!("outer side {side} {law:?}"), scene, true));
+                }
+                let mut scene = base.clone();
+                scene.outer_boundaries = crate::OuterBoundaryConditions::uniform(law);
+                cases.push((format!("outer all {law:?}"), scene, true));
+            }
+            for (obstacle, authored) in base.obstacles.iter().enumerate() {
+                for span in 0..authored.span_conditions.len() {
+                    for law in face_laws {
+                        let mut scene = base.clone();
+                        scene.obstacles[obstacle].span_conditions[span] = law;
+                        cases.push((
+                            format!("obstacle {obstacle} span {span} {law:?}"),
+                            scene,
+                            true,
+                        ));
+                    }
+                }
+            }
+            for (boundary, authored) in base.internal_boundaries.iter().enumerate() {
+                for span in 0..authored.span_laws.len() {
+                    for law in face_laws {
+                        for (which, left, right) in [
+                            ("left", law, Face::Reflecting),
+                            ("right", Face::Reflecting, law),
+                            ("both", law, law),
+                        ] {
+                            let mut scene = base.clone();
+                            scene.internal_boundaries[boundary].span_laws[span] =
+                                crate::InternalBoundaryLaw {
+                                    left,
+                                    right,
+                                    coupling: crate::InternalBoundaryCoupling::Independent,
+                                };
+                            cases.push((
+                                format!("boundary {boundary} span {span} {which} {law:?}"),
+                                scene,
+                                true,
+                            ));
+                        }
+                    }
+                    let mut scene = base.clone();
+                    scene.internal_boundaries[boundary].span_laws[span] =
+                        crate::InternalBoundaryLaw {
+                            left: Face::SecondOrderOutgoing,
+                            right: Face::Reflecting,
+                            coupling: crate::InternalBoundaryCoupling::ThinGap {
+                                stiffness_ratio: 25.0,
+                            },
+                        };
+                    cases.push((
+                        format!("boundary {boundary} span {span} thin gap beside an outgoing side"),
+                        scene,
+                        false,
+                    ));
+                }
+            }
+            let must_succeed = cases.iter().filter(|case| case.2).count();
+            let mut succeeded = 0;
+            let mut refused_as_named = 0;
+            let mut with_walls = 0;
+            let mut pieces = 0;
+            let mut residual = 0.0_f64;
+            let mut orthogonality = 0.0_f64;
+            for (label, scene, expected) in &cases {
+                if !expected {
+                    assert!(
+                        !scene.structure_valid(),
+                        "{name}: {label}: the rule does not name this refusal"
+                    );
+                    let error = prepare_scene(scene, 0.2).err().unwrap_or_else(|| {
+                        panic!("{name}: {label} prepared although its law is invalid")
+                    });
+                    // The structural rule speaks through the mesher, which
+                    // checks the scene first, or through the assembly.
+                    assert!(
+                        error.contains("invalid IDs, materials, regions")
+                            || error.contains("self-consistent"),
+                        "{name}: {label}: refused for another reason: {error}"
+                    );
+                    refused_as_named += 1;
+                    continue;
+                }
+                let (_, quadratic, canonical) = prepare_scene(scene, 0.2)
+                    .unwrap_or_else(|error| panic!("{name}: {label}: {error}"));
+                let Some(boundary) = canonical.outgoing_boundary_handle() else {
+                    succeeded += 1;
+                    continue;
+                };
+                with_walls += 1;
+                let report = boundary.trace_report();
+                assert_eq!(report.modes, report.trace_nodes, "{name}: {label}");
+                assert!(
+                    report.smallest_eigenvalue >= -2.0e-11 * report.largest_eigenvalue.max(1.0),
+                    "{name}: {label}: {report:?}"
+                );
+                assert!(report.residual < 1.0e-12, "{name}: {label}: {report:?}");
+                assert!(
+                    report.orthogonality < 1.0e-11,
+                    "{name}: {label}: {report:?}"
+                );
+                assert!(
+                    report.damping_defect < 1.0e-11,
+                    "{name}: {label}: {report:?}"
+                );
+                assert_eq!(
+                    report.auxiliary_count, report.auxiliaries_expected,
+                    "{name}: {label}"
+                );
+                let signature = outgoing_signature(&quadratic).unwrap().unwrap();
+                let count = signature.trace_nodes.len();
+                let mut dense = vec![0.0; count * count];
+                for &(row, column, value) in &signature.entries {
+                    let scale = (signature.damping[row as usize]
+                        * signature.damping[column as usize])
+                        .sqrt();
+                    dense[row as usize * count + column as usize] = value / scale;
+                }
+                let (values, _, _, _) = eigensolve(&dense, count);
+                let norm = report.largest_eigenvalue.max(1.0);
+                for (mode, value) in boundary.modes().iter().zip(&values) {
+                    assert!(
+                        (mode.eigenvalue - value).abs() <= 1.0e-12 * norm,
+                        "{name}: {label}: {} against the dense {value}",
+                        mode.eigenvalue
+                    );
+                }
+                pieces = pieces.max(report.pieces);
+                residual = residual.max(report.residual);
+                orthogonality = orthogonality.max(report.orthogonality);
+                succeeded += 1;
+            }
+            eprintln!(
+                "{name}: {succeeded} of {must_succeed} prepared, {refused_as_named} of {} refused as named, {with_walls} with outgoing walls, pieces up to {pieces}, residual {residual:e}, orthogonality {orthogonality:e}",
+                cases.len() - must_succeed
+            );
+            assert_eq!(succeeded, must_succeed, "{name}");
+            assert_eq!(refused_as_named, cases.len() - must_succeed, "{name}");
+            total_must_succeed += must_succeed;
+            total_succeeded += succeeded;
+        }
+        assert!(total_must_succeed > 300, "{total_must_succeed} cases");
+        assert_eq!(total_succeeded, total_must_succeed);
+    }
+
     /// The banded solve against the dense one it replaced, on a trace
     /// operator from a meshed scene with four second-order walls, on the
     /// trace in four pieces of the scene that failed to load on 12 October,
@@ -6260,46 +6738,8 @@ mod tests {
         };
         let (trace, trace_entries, count, _) = trace_of(&Scene::initial(), 0.16);
         assert!(count > 100, "{count} trace nodes");
-        let one_sided = crate::InternalBoundaryLaw {
-            left: crate::FaceBoundaryCondition::SecondOrderOutgoing,
-            ..crate::InternalBoundaryLaw::REFLECTING
-        };
-        let mut pieces = Scene::default();
-        pieces.internal_boundaries.push(crate::InternalBoundary {
-            id: crate::InternalBoundaryId(1),
-            spline: crate::OpenCubicSpline::new_with_multiplicities(
-                vec![
-                    Point2::new(0.0, 0.6),
-                    Point2::new(-0.2833333333333333, 0.6),
-                    Point2::new(-0.5666666666666667, 0.6),
-                    Point2::new(-0.85, 0.6),
-                    Point2::new(-0.85, 0.2),
-                    Point2::new(-0.85, -0.2),
-                    Point2::new(-0.85, -0.6),
-                    Point2::new(-0.5666666666666667, -0.6),
-                    Point2::new(-0.2833333333333333, -0.6),
-                    Point2::new(0.0, -0.6),
-                ],
-                vec![0.85, 1.2, 0.85],
-                vec![3, 3],
-            )
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![one_sided, crate::InternalBoundaryLaw::REFLECTING, one_sided],
-        });
-        pieces.internal_boundaries.push(crate::InternalBoundary {
-            id: crate::InternalBoundaryId(2),
-            spline: crate::OpenCubicSpline::uniform(vec![
-                Point2::new(0.0, -0.55),
-                Point2::new(0.0, -0.55 / 3.0),
-                Point2::new(0.0, 0.55 / 3.0),
-                Point2::new(0.0, 0.55),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![one_sided],
-        });
-        let (pieces, pieces_entries, pieces_count, pieces_zeros) = trace_of(&pieces, 0.08);
+        let (pieces, pieces_entries, pieces_count, pieces_zeros) =
+            trace_of(&u_and_line_scene(), 0.08);
         assert!(pieces_zeros > 0, "no zero entries between the pieces");
         let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
         let mut random = move || {

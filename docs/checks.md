@@ -590,5 +590,18 @@ second-order wall, `DRIVEN_WALL_STEP=half-kicks` on
 - the nonlinear example's medium in the kick form; the forced and nonlinear
 examples also hold the device's wall-loss lane to the reference's.
 
+`cargo test --release -p funfern-app --test wall_sweep -- --nocapture` is the
+wall sweep of the testing campaign's stage A0.1
+(`docs/spikes/funfern-testing-campaign-plan.md`): every wall law on every
+side of every span and every outer side of every gallery scene, prepared
+through the app's own path at the Coarse preset, each case classed before it
+runs and the prepared ones' outgoing basis read back against its operator.
+It runs in the gate without the five arrays of one obstacle, which the
+nightly's `wall-sweep` job adds, at 0.16 and at 0.2. `FUNFERN_WALL_SWEEP=<name>`
+runs one scene with its report, `FUNFERN_WALL_SWEEP_ALL=1` every scene,
+`FUNFERN_WALL_SWEEP_EDGE=<edge>` another edge, and
+`FUNFERN_WALL_SWEEP_PLAN=1` prints the case counts without preparing. The
+configurations the mesher is known not to build are its `KNOWN` table.
+
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.

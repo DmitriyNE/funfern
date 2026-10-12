@@ -1237,7 +1237,34 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   then cavity modes and planar reflection, each a single three-level test
   with its reference computed offline; the 11 October fixture list follows
   under those rules. Plan: `docs/spikes/funfern-testing-campaign-plan.md`
-  (2026-10-12).
+  (2026-10-12). A0.1, the wall sweep, landed on 2026-10-12
+  (`docs/engineering-log.md`): `crates/funfern-app/tests/wall_sweep.rs` over
+  the gallery through the app's own path and a core twin over the `Scene`
+  path, with the two findings below.
+- [ ] Configurations the editor accepts and the mesher cannot build, found by
+  the wall sweep on 2026-10-12 and listed in its `KNOWN` table until fixed:
+  a span of the acoustic whispering gallery made transmitting (spans 2, 4, 5
+  and 7, at every edge: "ear clipping stalled", "could not recover an
+  internal-boundary segment", "edge has invalid triangle adjacency"); span
+  12 of the bent fiber made separated under any law, and its spans 9 and 11
+  made separated together where each alone is fine (every edge: "ear
+  clipping stalled", "face cycle is incomplete"); spans 4 and 7 of the
+  Fresnel zone plate made
+  transmitting at the Coarse preset ("face cycle is incomplete"); and at the
+  slider's coarsest reach, 0.2, the double slit's back wall made transmitting
+  ("zero-area triangle"), the Talbot grating's bars and two more zone-plate
+  spans. Every one is a change of a span between transmitting and separated,
+  so the topology plan's face cycles under that change are the first place
+  to look. Each fix removes its entry; a listed case that prepares fails the
+  sweep.
+- [ ] Two Dirichlet traces meeting at a trace vertex with different signals
+  are refused by the assembly, "Dirichlet conditions disagree at a shared
+  boundary node", after validation accepted the document: a driven Dirichlet
+  face beside a pinned one, or beside an electric wall in TM, reaches the
+  user as a diagnostics error rather than a refusal at acceptance, where the
+  corner rule for the outer sides already lives. The sweep predicts the
+  refusal from the compiled plan the way the assembly makes it; the same
+  walk at acceptance would refuse it there. Found on 2026-10-12.
 - [x] A self-oscillating gain lased on the mesh's shortest waves, at a
   van der Pol region's rim. Fixed on 2026-09-25 by a short-wave viscosity
   on the self-oscillating elements (`docs/spikes/funfern-gate-o.md`, "The

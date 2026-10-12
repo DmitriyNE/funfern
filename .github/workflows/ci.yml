@@ -115,6 +115,58 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --release --locked
 
+  # Nightly: the wall sweep over every gallery scene, the five arrays of one
+  # obstacle included, which carry two thirds of its cases and stay out of
+  # the gate (crates/funfern-app/tests/wall_sweep.rs).
+  wall-sweep:
+    name: Wall sweep, every scene
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal \
+            --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Sweep every scene at the Coarse preset
+        env:
+          FUNFERN_WALL_SWEEP_ALL: 1
+        run: cargo test --release -p funfern-app --test wall_sweep --locked -- --nocapture
+
+      - name: Sweep every scene at the slider's coarsest reach
+        env:
+          FUNFERN_WALL_SWEEP_ALL: 1
+          FUNFERN_WALL_SWEEP_EDGE: 0.2
+        run: cargo test --release -p funfern-app --test wall_sweep --locked -- --nocapture
+
   web:
     name: Browser bundle
     if: github.event_name != 'schedule'

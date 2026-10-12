@@ -22926,3 +22926,77 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — A0.1: every wall law on every side of every scene
+
+- **Change.** `CanonicalOutgoingBoundary::trace_report`, a diagnostic beside
+  the derivative one: the normalized tangential operator rebuilt from the
+  boundary's own signature, its pieces by union-find over the nonzero
+  couplings, the ends of its spectrum, the worst mode's eigen-residual over
+  the largest row sum, the modes' orthonormality defect, their summed squares
+  against the trace damping, and the auxiliary count against three per
+  decaying mode. A basis that solved some other operator, as the band fill of
+  1bc6d82 produced, shows here as a residual, with no dense solve and no
+  reach into the solve's internals. On it, two sweeps:
+  `crates/funfern-app/tests/wall_sweep.rs` over the gallery through the
+  app's own path, and `every_wall_law_on_every_side_of_the_scene_path_prepares`
+  in `canonical_wave` over the `Scene` path, which the dense oracle also
+  checks.
+- **The sweep.** Per scene: each of nine outer laws on each side and on all
+  four; each of nine face laws on each span's left, on its right with the
+  other side reflecting, and on both; each span transmitting and separated;
+  for every pair of curves with span ends within an edge of each other, the
+  closest pair of spans outgoing on the left and on both sides; a driven
+  Dirichlet beside a zero one on adjacent outer sides and a thin gap beside
+  an outgoing side, deliberately; and forty mixed cases from a fixed seed.
+  Every case is classed before it is prepared: must succeed; refused by the
+  editor's setter, by message; refused at acceptance by the corner rule,
+  predicted from the draft's outer sides resolved per physics; or refused by
+  the assembly at a shared node, predicted from the compiled plan's boundary
+  edges and trace vertices, walked with the accepted scene's laws the way
+  the assembly walks them, two Dirichlet traces meeting at a trace vertex
+  with different signals. The change goes through the editor's setters,
+  validation runs to acceptance, and `TopologyRuntime::request` prepares at
+  the Coarse preset, 0.16, sized for the domain. Every prepared case's basis
+  passes the report at a residual under 1e-12, and every fourth is prepared
+  twice from a fresh runtime, with the same mesh hash and the same basis bit
+  for bit. The count of successes must equal the count of must-succeed
+  cases, and the report says per scene and per class what was covered.
+- **Numbers.** 40 scenes, 333 spans, 12,042 mandatory and 1,600
+  supplementary cases; 12,943 prepared, 3,222 of them twice; 663 refused as
+  named, 333 by the editor, 173 at a corner, 157 at a shared node; 36 known
+  failures; 9,849 cases with outgoing walls, up to 8 pieces, residual
+  8.7e-15, orthogonality 6.3e-14; 113 s on ten threads. The five arrays of
+  one obstacle, the obstacle and phased arrays and the three crystals, hold
+  1,051 of the gallery's 1,384 spans and 32,000 of its 44,000 cases; they
+  run in the nightly alone, at 0.16 and at the slider's coarsest reach, 0.2.
+  The first run over everything at 0.2, with every pair of spans within an
+  edge rather than one pair per pair of curves, took 39 minutes. The core
+  twin, on the hole scene in Mechanical and TM, the U-and-line scene and a
+  hole beside the wall at 0.2: 504 cases prepared, 4 refused as named,
+  pieces up to 5, residual 5.9e-15, orthogonality 3.5e-14, 6.6 s; with the
+  band fill of 1bc6d82 reinstated it fails on the U-and-line scene, which is
+  the first mutation of A0.4.
+- **Findings.** The wall laws and the outgoing solve: no failure in 12,943
+  preparations. The mesher: configurations the editor accepts and the mesher
+  cannot build, every one a span changed between transmitting and separated,
+  a span of the acoustic whispering gallery made transmitting at every edge,
+  span 12 of the bent fiber made separated under any law and its spans 9
+  and 11 separated together where each alone is fine, spans 4 and 7 of the
+  Fresnel zone plate made transmitting at 0.16, and at 0.2 the double slit's
+  back wall, the Talbot grating's bars and two more zone-plate spans;
+  "ear clipping stalled", "face cycle is incomplete", "could not recover an
+  internal-boundary segment", "zero-area triangle". They are listed in the
+  sweep's `KNOWN` table, 36 cases at 0.16, counted apart and required to
+  keep failing with the mesher's refusal; a listed case that prepares fails
+  the sweep, so each fix removes its entry. Second, the assembly refuses two
+  Dirichlet traces that meet with different signals only after validation
+  accepted the document, 157 cases in the gallery: the drums' pinned rims
+  beside a driven face, and in TM an electric wall, which resolves to a zero
+  Dirichlet, beside a driven one. The sweep predicts the refusal from the
+  plan; the same walk at acceptance would refuse it there, beside the corner
+  rule. Both are items under Maintenance in `docs/plan.md`.
+- **CI.** A nightly job, `wall-sweep`, runs every scene at 0.16 and at 0.2.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
