@@ -6686,6 +6686,71 @@ mod tests {
         assert_eq!(total_succeeded, total_must_succeed);
     }
 
+    /// The three refusals the outgoing boundary's builder keeps against an
+    /// operator the assembly never produces, on operators crafted to produce
+    /// them from a real one: every trace impedance zeroed under a tangential
+    /// operator that is still there, a tangential entry coupling a trace row
+    /// to an interior node, and the tangential operator negated, which no
+    /// eigensolve can make positive semidefinite. Each is refused by name;
+    /// the operator as assembled builds.
+    #[test]
+    fn the_outgoing_builder_refuses_an_operator_the_assembly_never_produces() {
+        let scene = Scene::initial();
+        let (_, quadratic, _) = prepare_scene(&scene, 0.16).unwrap();
+        let build = |quadratic: &QuadraticWaveOperator| -> Result<(), String> {
+            let mut job = CanonicalOutgoingBoundaryJob::new(quadratic)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "no outgoing boundary".to_owned())?;
+            loop {
+                if let Some(result) = job.advance(1 << 12) {
+                    return result.map(|_| ()).map_err(|error| error.to_string());
+                }
+            }
+        };
+        build(&quadratic).expect("the operator as assembled");
+        let trace = quadratic
+            .second_order_boundary_damping()
+            .iter()
+            .enumerate()
+            .filter(|(_, damping)| **damping > 0.0)
+            .map(|(node, _)| node)
+            .collect::<Vec<_>>();
+        assert!(trace.len() > 100, "{} trace nodes", trace.len());
+
+        let mut no_impedance = quadratic.clone();
+        no_impedance
+            .second_order_boundary_damping_mut()
+            .iter_mut()
+            .for_each(|damping| *damping = 0.0);
+        assert_eq!(
+            build(&no_impedance).unwrap_err(),
+            "Cannot assemble wave operator: an outgoing tangential operator has no positive trace impedance"
+        );
+
+        let mut leaving = quadratic.clone();
+        let row = trace[trace.len() / 2];
+        let entry = (leaving.row_offsets()[row] as usize..leaving.row_offsets()[row + 1] as usize)
+            .find(|&entry| {
+                leaving.second_order_boundary_damping()[leaving.columns()[entry] as usize] == 0.0
+            })
+            .expect("a trace row couples to an interior node in the mesh pattern");
+        leaving.auxiliary_stiffness_values_mut()[entry] = 1.0;
+        assert_eq!(
+            build(&leaving).unwrap_err(),
+            "Cannot assemble wave operator: the outgoing tangential operator leaves its physical trace"
+        );
+
+        let mut negated = quadratic.clone();
+        negated
+            .auxiliary_stiffness_values_mut()
+            .iter_mut()
+            .for_each(|value| *value = -*value);
+        assert_eq!(
+            build(&negated).unwrap_err(),
+            "Cannot assemble wave operator: the outgoing tangential operator is not positive semidefinite"
+        );
+    }
+
     /// The banded solve against the dense one it replaced, on a trace
     /// operator from a meshed scene with four second-order walls, on the
     /// trace in four pieces of the scene that failed to load on 12 October,

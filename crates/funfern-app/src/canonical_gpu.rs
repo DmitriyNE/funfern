@@ -361,7 +361,7 @@ pub(crate) struct GpuCanonicalTableWord {
     pub data: UVec4,
 }
 
-#[derive(Clone, Copy, Default, ShaderType)]
+#[derive(PartialEq, Clone, Copy, Default, ShaderType)]
 pub(crate) struct GpuCanonicalScratchWord {
     pub values: Vec4,
 }
@@ -1105,6 +1105,119 @@ pub struct CanonicalGpuPlan {
 }
 
 impl CanonicalGpuPlan {
+    /// The two packers' plans compared, naming each part that differs: the
+    /// production packer reads the assembled stiffness rows where the
+    /// tests' packer rebuilds them from the samples, and a scene prepared
+    /// through the app can be packed both ways to show the two agree. The
+    /// stiffness rows are compared decoded and in column order, with the
+    /// residue of a cancelled pair left out, since the two sum a row's
+    /// terms in different orders and agree on everything but the last bits
+    /// of a coefficient that is zero up to rounding, which production also
+    /// drops when it is exactly zero. Everything else must match word for
+    /// word. A diagnostic, not a step.
+    pub fn table_differences(&self, other: &Self) -> Vec<&'static str> {
+        const RESIDUE: f32 = 1.0e-9;
+        let mut differences = Vec::new();
+        if self.manifest != other.manifest {
+            differences.push("manifest");
+        }
+        if (
+            self.node_count,
+            self.sample_count,
+            self.auxiliary_count,
+            self.trace_count,
+            self.mode_count,
+            self.integrated_count,
+        ) != (
+            other.node_count,
+            other.sample_count,
+            other.auxiliary_count,
+            other.trace_count,
+            other.mode_count,
+            other.integrated_count,
+        ) {
+            differences.push("counts");
+        }
+        let entries = |plan: &Self, start: u32, len: u32| -> Vec<GpuCanonicalTableWord> {
+            (0..len as usize)
+                .map(|k| plan.tables[start as usize + k * ENTRY_SLICE])
+                .collect()
+        };
+        let stiffness_row = |plan: &Self, node: &GpuCanonicalNode| -> Vec<(u32, f32)> {
+            let mut row = entries(plan, node.stiffness.x, node.stiffness.y)
+                .into_iter()
+                .map(|word| (word.data.x, f32::from_bits(word.data.z)))
+                .collect::<Vec<_>>();
+            row.sort_by_key(|(column, _)| *column);
+            row
+        };
+        let mut nodes = false;
+        let mut forces = false;
+        let mut sources = false;
+        let mut stiffness = false;
+        if self.nodes.len() != other.nodes.len() {
+            nodes = true;
+        }
+        for (mine, theirs) in self.nodes.iter().zip(&other.nodes) {
+            let mut masked_mine = *mine;
+            let mut masked_theirs = *theirs;
+            masked_mine.ranges = UVec4::ZERO;
+            masked_theirs.ranges = UVec4::ZERO;
+            masked_mine.stiffness = UVec4::ZERO;
+            masked_theirs.stiffness = UVec4::ZERO;
+            if masked_mine != masked_theirs {
+                nodes = true;
+            }
+            if entries(self, mine.ranges.x, mine.ranges.y)
+                != entries(other, theirs.ranges.x, theirs.ranges.y)
+            {
+                forces = true;
+            }
+            if entries(self, mine.ranges.z, mine.ranges.w)
+                != entries(other, theirs.ranges.z, theirs.ranges.w)
+            {
+                sources = true;
+            }
+            let (mine, theirs) = (stiffness_row(self, mine), stiffness_row(other, theirs));
+            let scale = mine
+                .iter()
+                .chain(&theirs)
+                .map(|(_, value)| value.abs())
+                .fold(0.0_f32, f32::max);
+            let kept = |row: &[(u32, f32)]| {
+                row.iter()
+                    .copied()
+                    .filter(|(_, value)| value.abs() > RESIDUE * scale)
+                    .collect::<Vec<_>>()
+            };
+            if kept(&mine) != kept(&theirs) {
+                stiffness = true;
+            }
+        }
+        if nodes {
+            differences.push("nodes");
+        }
+        if forces {
+            differences.push("force rows");
+        }
+        if sources {
+            differences.push("source rows");
+        }
+        if stiffness {
+            differences.push("stiffness rows");
+        }
+        if self.samples != other.samples {
+            differences.push("samples");
+        }
+        if self.scratch != other.scratch {
+            differences.push("scratch");
+        }
+        if self.boundary != other.boundary {
+            differences.push("boundary");
+        }
+        differences
+    }
+
     pub fn compile(
         operator: &CanonicalWaveOperator,
         state: &CanonicalWaveState,

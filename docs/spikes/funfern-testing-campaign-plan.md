@@ -122,8 +122,10 @@ In every class a panic is a failure. For every case that prepares:
   positive semidefinite, and its banded solve agrees with the dense oracle
   to 1e-12 of the norm in values and 1e-13 in residual;
 - a second assembly of the same configuration gives the same signature and
-  the same mesh hash, so the sweep doubles as a determinism check;
-- the GPU plan packs on the host.
+  the same mesh hash, so the sweep doubles as a determinism check.
+
+The GPU plan is packed on the host by A0.2's regression test rather than by
+the sweep, once per scene and both ways (A0.3).
 
 Coverage is stated, not sampled. The mandatory set per scene is: each outer
 law on each side alone and on all four at once; each face law on each
@@ -193,6 +195,12 @@ was not; a dense matrix has no explicit zeros. Each finding is either fixed
 in place or justified in a comment, and the list goes into the log entry.
 
 Done when the list is in the log and every item on it is closed.
+
+**Done on 2026-10-12** (`docs/engineering-log.md`): eight verdicts; the
+packer, the component-total correction and the outgoing boundary's reuse
+and refusals closed with production-shaped twins; the far-field recorder
+and the probe estimators deferred to PH-18 by name; the indicator's
+auxiliary alignment found dormant with a slip in it, listed for removal.
 
 ### A0.4 Mutations
 

@@ -2701,6 +2701,188 @@ mod tests {
         runtime.commit_ready(second).unwrap();
     }
 
+    /// An edit along the outgoing boundary rebuilds the modal basis rather
+    /// than reusing it, while the mesh, whose geometry did not change, is
+    /// reused: a side made first-order loses its trace nodes, and a side
+    /// pinned to zero drops the corners it shares from the trace. The basis
+    /// was known to be reused when it should be; this is the refusal.
+    #[test]
+    fn an_edit_along_the_outgoing_boundary_rebuilds_the_basis() {
+        for (name, condition) in [
+            (
+                "a side made first-order",
+                OuterBoundaryCondition::FirstOrderOutgoing,
+            ),
+            (
+                "a side pinned to zero",
+                OuterBoundaryCondition::Dirichlet {
+                    signal: TimeSignal::ZERO,
+                },
+            ),
+        ] {
+            let editor = TopologyEditor::default();
+            let mut runtime = TopologyRuntime::default();
+            let first = runtime
+                .request(
+                    1,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            prepare(&mut runtime).unwrap();
+            let original = runtime.commit_ready(first).unwrap();
+            let original_outgoing = original
+                .canonical_operator
+                .outgoing_boundary_handle()
+                .unwrap();
+            let mut document = editor.document.clone();
+            document.model.accepted.outer_boundaries.sides[OuterSide::Bottom.index()] = condition;
+            document.model.draft = document.model.accepted.clone();
+            let compiled = document.model.accepted.compile(7).unwrap();
+            let second = runtime
+                .request(2, &document, compiled, options(), false)
+                .unwrap();
+            assert_eq!(prepare(&mut runtime).unwrap(), second, "{name}");
+            let candidate = runtime.ready().unwrap();
+            assert!(
+                Arc::ptr_eq(&candidate.mesh, &original.mesh),
+                "{name}: the mesh was rebuilt"
+            );
+            let rebuilt = candidate
+                .canonical_operator
+                .outgoing_boundary_handle()
+                .unwrap();
+            assert!(
+                !Arc::ptr_eq(&original_outgoing, &rebuilt),
+                "{name}: the basis was reused"
+            );
+            assert!(
+                rebuilt.trace_nodes().len() < original_outgoing.trace_nodes().len(),
+                "{name}: {} trace nodes against {}",
+                rebuilt.trace_nodes().len(),
+                original_outgoing.trace_nodes().len()
+            );
+            let report = rebuilt.trace_report();
+            assert!(
+                report.modes == report.trace_nodes && report.residual < 1.0e-12,
+                "{name}: {report:?}"
+            );
+            runtime.commit_ready(second).unwrap();
+        }
+    }
+
+    /// A remesh of the same geometry keeps each component's total of the
+    /// primary flux, as the app keeps it: the runtime transfer built from the
+    /// prepared maps names each target component's share of the source
+    /// components, the pin mask comes from the candidate's forcing, and the
+    /// prepared primary map carries a field across. Here on the default
+    /// scene with one side pinned to zero, so the mask is not empty, with a
+    /// field that is not uniform, at an edge the mesh did not have. The
+    /// device fixture does the same on the cavity; this is the runtime's own
+    /// path, with the shares and the mask production uses, not ones a test
+    /// picked.
+    #[test]
+    fn a_remesh_of_the_same_geometry_keeps_each_components_total_through_the_prepared_maps() {
+        use crate::canonical_gpu::CanonicalGpuRuntimeTransfer;
+        let mut editor = TopologyEditor::default();
+        editor.document.model.accepted.outer_boundaries.sides[OuterSide::Left.index()] =
+            OuterBoundaryCondition::Dirichlet {
+                signal: TimeSignal::ZERO,
+            };
+        editor.document.model.draft = editor.document.model.accepted.clone();
+        let compiled = editor.document.model.accepted.compile(1).unwrap();
+        let mut runtime = TopologyRuntime::default();
+        let first = runtime
+            .request(1, &editor.document, compiled.clone(), options(), true)
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        let source = runtime.commit_ready(first).unwrap();
+        let finer = MeshingOptions {
+            target_edge_length: 0.14,
+            ..options()
+        };
+        let second = runtime
+            .request(2, &editor.document, compiled, finer, false)
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), second);
+        let target = runtime.ready().unwrap();
+        assert_ne!(target.mesh.mesh_revision, source.mesh.mesh_revision);
+        assert_eq!(target.mesh.geometry_revision, source.mesh.geometry_revision);
+        let maps = target
+            .canonical_transfer
+            .as_ref()
+            .expect("the prepared maps");
+        let runtime_transfer = CanonicalGpuRuntimeTransfer::from_primary_transfer(
+            &source.canonical_operator,
+            &target.canonical_operator,
+            &source.canonical_forcing,
+            &target.canonical_forcing,
+            &maps.primary,
+            [0; 4],
+        )
+        .unwrap();
+        let departing = source
+            .canonical_operator
+            .node_points()
+            .iter()
+            .map(|point| 1.0 + (2.0 * point.x).sin() * (1.5 * point.y).cos())
+            .collect::<Vec<_>>();
+        let mut totals = vec![0.0; source.canonical_operator.component_count()];
+        for (value, label) in departing
+            .iter()
+            .zip(source.canonical_operator.component_labels())
+        {
+            totals[*label as usize] += value;
+        }
+        let desired = runtime_transfer
+            .components
+            .iter()
+            .map(|component| {
+                (!component.sources.is_empty()).then(|| {
+                    component
+                        .sources
+                        .iter()
+                        .map(|(source, share)| share * totals[*source as usize])
+                        .sum::<f64>()
+                })
+            })
+            .collect::<Vec<Option<f64>>>();
+        assert!(desired.iter().any(Option::is_some), "no component to keep");
+        let prescribed = target
+            .canonical_forcing
+            .prescribed()
+            .iter()
+            .map(Option::is_some)
+            .collect::<Vec<_>>();
+        assert!(
+            prescribed.iter().any(|pinned| *pinned),
+            "the pinned side is in the mask"
+        );
+        let (arrived, _) = maps
+            .primary
+            .transfer(&departing, &desired, &prescribed)
+            .unwrap();
+        let mut arrived_totals = vec![0.0; target.canonical_operator.component_count()];
+        for (value, label) in arrived
+            .iter()
+            .zip(target.canonical_operator.component_labels())
+        {
+            arrived_totals[*label as usize] += value;
+        }
+        for (component, (arrived, desired)) in arrived_totals.iter().zip(&desired).enumerate() {
+            let Some(desired) = desired else {
+                continue;
+            };
+            assert!(
+                (arrived - desired).abs() <= 1.0e-9 * desired.abs().max(1.0),
+                "component {component}: {arrived} arrived against {desired} desired"
+            );
+        }
+        runtime.commit_ready(second).unwrap();
+    }
+
     /// A divider splitting the scene, a subdomain drawn over it and the
     /// divider's removal each give ground a region ID it did not have. The
     /// complementary flux there used to find no donor of the same region and

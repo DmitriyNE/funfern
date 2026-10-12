@@ -495,6 +495,19 @@ impl QuadraticWaveOperator {
         &self.auxiliary_active
     }
 
+    /// The trace damping, to be written by a test that crafts an operator
+    /// the assembly never produces, for the refusals that guard against one.
+    #[cfg(test)]
+    pub(crate) fn second_order_boundary_damping_mut(&mut self) -> &mut [f64] {
+        &mut self.second_order_boundary_damping
+    }
+
+    /// The tangential operator's entries, likewise.
+    #[cfg(test)]
+    pub(crate) fn auxiliary_stiffness_values_mut(&mut self) -> &mut [f64] {
+        &mut self.auxiliary_stiffness
+    }
+
     pub fn lumped_mass(&self) -> &[f64] {
         &self.lumped_mass
     }

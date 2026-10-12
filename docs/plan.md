@@ -1244,7 +1244,21 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   regression scenes that prepare, landed the same day:
   `tests/fixtures/scenes-regressions` with the 12 October autosave first,
   and `tests/regression_scenes.rs` over it, the frozen scenes and the
-  gallery at their own edge.
+  gallery at their own edge. A0.3, the audit of what the tests feed the
+  solvers, landed the same day: the GPU plan packer, the component-total
+  correction and the outgoing boundary's reuse and refusals covered with
+  production-shaped twins, the far-field recorder and the probe estimators
+  deferred to PH-18.
+- [ ] `aligned_indicator_auxiliary` in `ui.rs` aligns the display's
+  auxiliary lane for the AMR indicator with `snapshot_current +
+  snapshot_current` where a trapezoid would take the previous snapshot,
+  and the lane it aligns is a zero vector, resized and never written. What
+  it produces reaches the indicator's scalar snapshot, whose boundary term
+  reads it only for a second-order record, which the canonical estimator
+  skips: dormant since the scalar solver retired. Found by the A0.3 audit
+  on 2026-10-12. Remove the lane, the alignment and the scalar snapshot's
+  auxiliary with them, and test the snapshot builder on a prepared scene
+  once it builds only what the estimator reads.
 - [x] Configurations the editor accepts and the mesher cannot build, found by
   the wall sweep on 2026-10-12 and listed in its `KNOWN` table until fixed.
   Fixed the same day (`docs/engineering-log.md`): a span the face walks

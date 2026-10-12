@@ -8,12 +8,25 @@
 //! checks that a file reads back what it held; this checks what the solver
 //! does with it. The fixtures are under `tests/fixtures/scenes-regressions`,
 //! one per reported bug that came with a scene, added in the fix's commit.
+//!
+//! A fixed generation's device plan is packed both ways and the two must
+//! agree word for word: production packs through `compile_with_quadratic`,
+//! which reads the assembled stiffness rows, adds the thin-gap corrections
+//! and drops exact zeros; the packer's own tests pack through `compile`,
+//! which rebuilds the rows from the samples. A double slit with a thin gap
+//! on its baffle joins the gallery here for that comparison, since no
+//! gallery scene has one.
 
+use funfern_app::canonical_gpu::{CanonicalGpuClock, CanonicalGpuPlan};
 use funfern_app::topology_editor::{TopologyAcceptance, TopologyDocument, TopologyEditor};
 use funfern_app::topology_examples;
 use funfern_app::topology_persistence;
-use funfern_app::topology_runtime::TopologyRuntime;
-use funfern_core::{CanonicalOutgoingBoundary, MeshingOptions, TriMesh};
+use funfern_app::topology_runtime::{PreparedTopology, TopologyRuntime};
+use funfern_core::{
+    CanonicalOutgoingBoundary, CanonicalWaveState, InternalBoundaryCoupling, MeshingOptions,
+    SpanBehavior, TriMesh,
+};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -65,7 +78,47 @@ fn scenes() -> Vec<Scene> {
             regression: false,
         });
     }
+    scenes.push(Scene {
+        name: "gallery/Double slit, a thin gap on the baffle".into(),
+        document: thin_gap_double_slit(),
+        regression: false,
+    });
     scenes
+}
+
+/// The double slit with its baffle's span given a thin-gap coupling, the one
+/// configuration the production packer corrects the stiffness rows for.
+fn thin_gap_double_slit() -> TopologyDocument {
+    let example = topology_examples::catalog()
+        .iter()
+        .find(|example| example.name == "Double slit")
+        .expect("the double slit");
+    let mut editor = TopologyEditor::from_document(example.document.clone()).unwrap();
+    settle(&mut editor);
+    let baffle = editor
+        .document
+        .model
+        .draft
+        .geometry
+        .curves
+        .last()
+        .expect("the baffle")
+        .spans
+        .iter()
+        .find(|span| matches!(span.behavior, SpanBehavior::Separated { .. }))
+        .expect("a separated span")
+        .id;
+    editor
+        .set_span_coupling(
+            &BTreeSet::from([baffle]),
+            InternalBoundaryCoupling::ThinGap {
+                stiffness_ratio: 25.0,
+            },
+        )
+        .unwrap();
+    settle(&mut editor);
+    assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+    editor.document.clone()
 }
 
 fn settle(editor: &mut TopologyEditor) {
@@ -107,6 +160,44 @@ struct Prepared {
     vertices: usize,
     triangles: usize,
     boundary: Option<Arc<CanonicalOutgoingBoundary>>,
+    /// Whether the plan was packed both ways, which a driven generation is
+    /// not: its plan has one packer.
+    packed_both_ways: bool,
+}
+
+/// A fixed generation's plan through the production packer and through the
+/// packer's own tests' one, word for word the same.
+fn pack_both_ways(prepared: &PreparedTopology) -> Result<bool, String> {
+    if prepared.canonical_temporal_operator.is_some() {
+        return Ok(false);
+    }
+    let time_step = prepared.recommended_time_step();
+    let state = CanonicalWaveState::zero(&prepared.canonical_operator, time_step)
+        .map_err(|error| error.to_string())?;
+    let clock = CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?;
+    let production = CanonicalGpuPlan::compile_with_quadratic(
+        &prepared.canonical_operator,
+        &prepared.operator,
+        &state,
+        &prepared.canonical_forcing,
+        clock,
+    )
+    .map_err(|error| format!("the production packer: {error:?}"))?;
+    let rebuilt = CanonicalGpuPlan::compile(
+        &prepared.canonical_operator,
+        &state,
+        &prepared.canonical_forcing,
+        clock,
+    )
+    .map_err(|error| format!("the rebuilding packer: {error:?}"))?;
+    let differences = production.table_differences(&rebuilt);
+    if !differences.is_empty() {
+        return Err(format!(
+            "the packer's two branches differ in {}",
+            differences.join(", ")
+        ));
+    }
+    Ok(true)
 }
 
 /// The app's own preparation at the document's own mesh edge.
@@ -136,6 +227,7 @@ fn prepare(editor: &TopologyEditor) -> Result<Prepared, String> {
                 vertices: prepared.mesh.vertices.len(),
                 triangles: prepared.mesh.triangles.len(),
                 boundary: prepared.canonical_operator.outgoing_boundary_handle(),
+                packed_both_ways: pack_both_ways(prepared)?,
             });
         }
     }
@@ -185,11 +277,16 @@ fn check(scene: &Scene) -> Result<String, String> {
         }
     }
     Ok(format!(
-        "{}: edge {}, {} vertices, {} triangles, {walls}{}, {:.2} s",
+        "{}: edge {}, {} vertices, {} triangles, {walls}{}{}, {:.2} s",
         scene.name,
         scene.document.presentation.mesh_edge,
         prepared.vertices,
         prepared.triangles,
+        if prepared.packed_both_ways {
+            ", packed both ways alike"
+        } else {
+            ", driven"
+        },
         if scene.regression {
             ", prepared twice"
         } else {

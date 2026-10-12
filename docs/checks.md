@@ -607,8 +607,10 @@ is stage A0.2: every scene under `tests/fixtures/scenes-regressions`, one per
 reported bug that came with a scene, every frozen version 22 scene and every
 gallery scene, opened, validated and prepared through the app's own path at
 the document's own mesh edge, the prepared outgoing basis read back against
-its operator and the regression scenes prepared twice, bit for bit. It runs
-in the gate, about a second on ten threads.
+its operator and the regression scenes prepared twice, bit for bit; every
+fixed generation's device plan is packed both ways, through the production
+packer and the one the packer's own tests use, and the two must agree. It
+runs in the gate, about a second on ten threads.
 
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.

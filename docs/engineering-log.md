@@ -23115,3 +23115,68 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — A0.3: what the tests feed the solvers
+
+- **The audit.** For each solver with an oracle test, what production hands
+  it against what its tests hand it. Production-shaped already: the trace
+  eigensolve, since 9d19e20 and the sweeps; the transfer maps, on real
+  assemblies; the material-law tables, through `from_base` in the driven
+  fixtures. Reshaped, and closed here: the GPU plan packer, whose every unit
+  test packs through `compile`, rebuilding the stiffness rows from the
+  samples, where production packs through `compile_with_quadratic` from the
+  assembled rows with the thin-gap corrections and exact zeros dropped, two
+  branches no test compared; the transfer's component-total correction,
+  whose totals the tests picked by hand under an empty pin mask, the device
+  fixture apart; the outgoing boundary's reuse, tested only where it is
+  accepted, and three of its refusals with no test at all. Reshaped, and
+  deferred by name: the far-field recorder, which the device runs only on
+  dummy stencils while the CPU ring re-implements the shader, and the probe
+  estimators, which read hand-made records everywhere, both to PH-18, where
+  the observables get their analytical references and the whole-pulse CPU
+  truth already exists; and the AMR indicator's snapshot builder, below.
+- **The packer.** `CanonicalGpuPlan::table_differences` compares two plans
+  part by part, the stiffness rows decoded and in column order. On the
+  double slit the two packers agree on 8,439 of 8,621 rows word for word;
+  180 differ only in coefficients that are zero up to rounding, the residue
+  of a cancelled pair summed in two orders, 4.5e-16 against 5.0e-16, and 2
+  in an exact zero production drops. The comparison leaves residue below
+  1e-9 of the row out and requires the rest word for word; everything else
+  in the plan must match as it is. `tests/regression_scenes.rs` packs every
+  fixed generation both ways, and a double slit with a thin gap on its
+  baffle joins its scenes, since no gallery scene has one: 92 scenes, all
+  alike. `canonical_gpu_long_run` packs through production now.
+- **The totals.** `a_remesh_of_the_same_geometry_keeps_each_components_total_through_the_prepared_maps`:
+  the default scene with its left side pinned, remeshed at 0.14 from 0.18,
+  the runtime transfer built from the prepared maps as the app builds it,
+  the pin mask from the candidate's forcing, a field that is not uniform
+  carried across by the prepared primary map; each target component's total
+  is the shares' sum of the source totals to 1e-9.
+- **The boundary.** `an_edit_along_the_outgoing_boundary_rebuilds_the_basis`:
+  a side made first-order and a side pinned to zero each reuse the mesh and
+  rebuild the basis, with fewer trace nodes and a report at roundoff.
+  `the_outgoing_builder_refuses_an_operator_the_assembly_never_produces`:
+  from the assembled hole scene, every trace impedance zeroed, a tangential
+  entry moved onto an interior node, and the tangential operator negated,
+  through two `#[cfg(test)]` mutators on the quadratic operator; each is
+  refused by its own message.
+- **The indicator, reported.** `aligned_indicator_auxiliary` in `ui.rs`
+  subtracts half a step of `snapshot_current + snapshot_current` from the
+  display's auxiliary lane, where a trapezoid would take the previous
+  snapshot; and that lane is a zero vector, resized and never written. What
+  it aligns reaches the indicator's scalar snapshot, which the boundary term
+  reads only for a second-order record, and the canonical estimator skips
+  those records. So the slip is in code the canonical path computes and
+  never consumes: dormant, not a defect in what the user sees, and a
+  removal rather than a fix, listed under Maintenance in `docs/plan.md`.
+  The snapshot builder itself stays untested until that removal takes the
+  dead lane with it.
+- **Device.** `scripts/device-suite.sh`: 76 of 76 pass, the fixtures on the
+  e2e build. The five long-run runs, packed through production now, read
+  what they read this afternoon to the last digit shown, as do 69 others;
+  the two temporal AMR runs flip their transfer-alone complementary line
+  between -0.0 and 4.9e-8 once more, as noted under "Worth checking
+  sometime" in `docs/plan.md`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

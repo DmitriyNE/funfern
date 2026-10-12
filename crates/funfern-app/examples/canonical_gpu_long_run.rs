@@ -213,8 +213,10 @@ fn main() -> AppExit {
                 .unwrap()
                 .with_wall_step(&base, wall_step)
                 .unwrap();
-            let plan = CanonicalGpuPlan::compile(
+            // Packed as the app packs it, from the assembled stiffness rows.
+            let plan = CanonicalGpuPlan::compile_with_quadratic(
                 &base,
+                &prepared.operator,
                 &seeded,
                 &forcing,
                 CanonicalGpuClock::initial(dt).unwrap(),
