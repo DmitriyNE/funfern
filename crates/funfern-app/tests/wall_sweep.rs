@@ -39,11 +39,13 @@
 //! without preparing any. Every failure to prepare is collected and printed,
 //! scene by scene, before the test fails.
 //!
-//! The sweep's first run, on 12 October, found configurations the editor
-//! accepts and the mesher cannot build, all of them a span made
-//! transmitting or separated; they are listed in [`KNOWN`] with the edge
-//! they appear from, counted apart, and required to keep failing with the
-//! mesher's refusal until they are fixed, when their entry goes.
+//! The sweep's first run, on 12 October, found 36 configurations the editor
+//! accepted and the mesher could not build, every one a span changed between
+//! transmitting and separated: a transmitting chain the face walked out and
+//! back stayed in the face polygon. c3c58dc carried them in a `KNOWN` table,
+//! counted apart and required to keep failing until fixed; the fix emptied
+//! it the same day, and the table went with it. A configuration the mesher
+//! cannot build is a failure here again.
 
 use funfern_app::topology_editor::{TopologyAcceptance, TopologyEditor};
 use funfern_app::topology_examples::{self, TopologyExample};
@@ -63,119 +65,6 @@ const DEFAULT_EDGE: f64 = 0.16;
 /// and the two must agree bit for bit; the check is about the preparation,
 /// not the configuration, so a sample of the cases carries it.
 const DETERMINISM_EVERY: usize = 4;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum KnownKind {
-    /// Any one of the spans made transmitting.
-    Transmitting,
-    /// Any one of the spans made separated, under any law.
-    Separated,
-    /// All of the spans made separated at once, each alone being fine.
-    SeparatedTogether,
-}
-
-/// A configuration the editor accepts and the mesher cannot build, found by
-/// the sweep on 12 October: the scene, the edge it fails from, the spans
-/// and what is done to them. The refusal must read "Could not construct a
-/// constrained mesh"; a listed case that prepares fails the test, so the
-/// entry goes with the fix.
-struct Known {
-    scene: &'static str,
-    from_edge: f64,
-    spans: &'static [u64],
-    kind: KnownKind,
-}
-
-const KNOWN: [Known; 7] = [
-    Known {
-        scene: "Acoustic whispering gallery",
-        from_edge: 0.0,
-        spans: &[2, 4, 5, 7],
-        kind: KnownKind::Transmitting,
-    },
-    Known {
-        scene: "Bent fiber",
-        from_edge: 0.0,
-        spans: &[12],
-        kind: KnownKind::Separated,
-    },
-    Known {
-        scene: "Bent fiber",
-        from_edge: 0.0,
-        spans: &[9, 11],
-        kind: KnownKind::SeparatedTogether,
-    },
-    Known {
-        scene: "Fresnel zone plate",
-        from_edge: 0.16,
-        spans: &[4, 7],
-        kind: KnownKind::Transmitting,
-    },
-    Known {
-        scene: "Fresnel zone plate",
-        from_edge: 0.2,
-        spans: &[3, 6],
-        kind: KnownKind::Transmitting,
-    },
-    Known {
-        scene: "Talbot carpet",
-        from_edge: 0.2,
-        spans: &[3, 4, 5, 6, 7],
-        kind: KnownKind::Transmitting,
-    },
-    Known {
-        scene: "Double slit",
-        from_edge: 0.2,
-        spans: &[3],
-        kind: KnownKind::Transmitting,
-    },
-];
-
-const CONSTRAINED_MESH: &str = "Could not construct a constrained mesh";
-
-/// The span a change makes transmitting, or separated.
-fn made_transmitting(change: &Change) -> Option<u64> {
-    match change {
-        Change::Behavior(span, SpanBehavior::Transmitting) => Some(span.0),
-        _ => None,
-    }
-}
-
-fn made_separated(change: &Change) -> Option<u64> {
-    match change {
-        Change::Behavior(span, SpanBehavior::Separated { .. }) | Change::Face(span, _, _) => {
-            Some(span.0)
-        }
-        _ => None,
-    }
-}
-
-/// Whether a case touches a known configuration of its scene.
-fn known(scene: &str, case: &Case) -> bool {
-    KNOWN.iter().any(|known| {
-        if known.scene != scene || edge() < known.from_edge - 1.0e-12 {
-            return false;
-        }
-        match known.kind {
-            KnownKind::Transmitting => case
-                .changes
-                .iter()
-                .filter_map(made_transmitting)
-                .any(|span| known.spans.contains(&span)),
-            KnownKind::Separated => case
-                .changes
-                .iter()
-                .filter_map(made_separated)
-                .any(|span| known.spans.contains(&span)),
-            KnownKind::SeparatedTogether => known.spans.iter().all(|span| {
-                case.changes
-                    .iter()
-                    .filter_map(made_separated)
-                    .any(|made| made == *span)
-            }),
-        }
-    })
-}
 
 /// Arrays of one obstacle, run by the nightly alone.
 const NIGHTLY_ONLY: [&str; 5] = [
@@ -278,8 +167,6 @@ struct Report {
     by_editor: usize,
     by_corner: usize,
     by_shared_node: usize,
-    /// Cases in [`KNOWN`], which failed as listed.
-    known: usize,
     /// Must-succeed cases prepared twice and compared.
     determinism_checks: usize,
     with_walls: usize,
@@ -414,7 +301,7 @@ fn shared_node_conflict(editor: &TopologyEditor) -> bool {
     false
 }
 
-fn cases(editor: &TopologyEditor, scene: &str, seed: u64) -> Vec<Case> {
+fn cases(editor: &TopologyEditor, seed: u64) -> Vec<Case> {
     let mut cases = Vec::new();
     for law in outer_laws() {
         for side in OuterSide::ALL {
@@ -516,9 +403,7 @@ fn cases(editor: &TopologyEditor, scene: &str, seed: u64) -> Vec<Case> {
             });
         }
     }
-    // The supplementary sample: two face changes and an outer change at
-    // once, on spans whose separation the mesher is not known to refuse,
-    // since what a known span does beside other changes is not listed.
+    // The supplementary sample: two face changes and an outer change at once.
     let mut state = 0x9E37_79B9_7F4A_7C15_u64 ^ (seed + 1).wrapping_mul(0xD1B5_4A32_D192_ED03);
     let mut next = move |bound: usize| {
         state ^= state << 13;
@@ -531,23 +416,12 @@ fn cases(editor: &TopologyEditor, scene: &str, seed: u64) -> Vec<Case> {
         Some(CurveTraceSide::Right),
         None,
     ];
-    let sampled = spans
-        .iter()
-        .copied()
-        .filter(|span| {
-            !KNOWN.iter().any(|known| {
-                known.scene == scene
-                    && known.kind == KnownKind::Separated
-                    && known.spans.contains(&span.0)
-            })
-        })
-        .collect::<Vec<_>>();
     for sample in 0..SUPPLEMENTARY {
         let mut changes = Vec::new();
-        if !sampled.is_empty() {
+        if !spans.is_empty() {
             for _ in 0..2 {
                 changes.push(Change::Face(
-                    sampled[next(sampled.len())],
+                    spans[next(spans.len())],
                     sides[next(3)],
                     face_laws()[next(9)],
                 ));
@@ -685,7 +559,7 @@ fn sweep(example: &TopologyExample, seed: u64) -> Report {
         "{} is not valid as authored",
         example.name
     );
-    let cases = cases(&base, example.name, seed);
+    let cases = cases(&base, seed);
     let plan_only = std::env::var_os("FUNFERN_WALL_SWEEP_PLAN").is_some();
     let mut report = Report {
         scene: example.name.to_owned(),
@@ -774,19 +648,6 @@ fn sweep(example: &TopologyExample, seed: u64) -> Report {
             }
             continue;
         }
-        if known(name, case) {
-            report.known += 1;
-            match prepared {
-                Err(error) if error.contains(CONSTRAINED_MESH) => {}
-                Err(error) => report.failures.push(format!(
-                    "{label}: known, but refused for another reason: {error}"
-                )),
-                Ok(_) => report.failures.push(format!(
-                    "{label}: known to fail, but prepared: remove it from KNOWN"
-                )),
-            }
-            continue;
-        }
         report.must_succeed += 1;
         let (hash, boundary) = match prepared {
             Ok(prepared) => prepared,
@@ -841,7 +702,7 @@ fn sweep(example: &TopologyExample, seed: u64) -> Report {
 
 fn print(report: &Report) {
     eprintln!(
-        "{}: {} spans, {} mandatory + {} supplementary; {} of {} prepared ({} twice), {} of {} refused as named ({} by the editor, {} at a corner, {} at a shared node), {} known to fail, {} with outgoing walls, pieces up to {}, residual {:.1e}, orthogonality {:.1e}, {:.1} s",
+        "{}: {} spans, {} mandatory + {} supplementary; {} of {} prepared ({} twice), {} of {} refused as named ({} by the editor, {} at a corner, {} at a shared node), {} with outgoing walls, pieces up to {}, residual {:.1e}, orthogonality {:.1e}, {:.1} s",
         report.scene,
         report.spans,
         report.mandatory,
@@ -854,7 +715,6 @@ fn print(report: &Report) {
         report.by_editor,
         report.by_corner,
         report.by_shared_node,
-        report.known,
         report.with_walls,
         report.pieces,
         report.residual,
@@ -937,7 +797,6 @@ fn every_wall_law_on_every_side_of_every_gallery_scene_prepares() {
         totals.by_editor += report.by_editor;
         totals.by_corner += report.by_corner;
         totals.by_shared_node += report.by_shared_node;
-        totals.known += report.known;
         totals.determinism_checks += report.determinism_checks;
         totals.spans += report.spans;
         totals.with_walls += report.with_walls;
@@ -946,7 +805,7 @@ fn every_wall_law_on_every_side_of_every_gallery_scene_prepares() {
         totals.orthogonality = totals.orthogonality.max(report.orthogonality);
     }
     eprintln!(
-        "gallery at edge {}: {} scenes, {} spans, {} mandatory + {} supplementary cases, {} prepared ({} twice), {} refused as named ({} by the editor, {} at a corner, {} at a shared node), {} known to fail, {} with outgoing walls, pieces up to {}, residual {:.1e}, orthogonality {:.1e}, {:.1} s on {workers} threads",
+        "gallery at edge {}: {} scenes, {} spans, {} mandatory + {} supplementary cases, {} prepared ({} twice), {} refused as named ({} by the editor, {} at a corner, {} at a shared node), {} with outgoing walls, pieces up to {}, residual {:.1e}, orthogonality {:.1e}, {:.1} s on {workers} threads",
         edge(),
         reports.len(),
         totals.spans,
@@ -958,7 +817,6 @@ fn every_wall_law_on_every_side_of_every_gallery_scene_prepares() {
         totals.by_editor,
         totals.by_corner,
         totals.by_shared_node,
-        totals.known,
         totals.with_walls,
         totals.pieces,
         totals.residual,

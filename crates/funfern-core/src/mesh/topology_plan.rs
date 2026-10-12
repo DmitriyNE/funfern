@@ -539,9 +539,18 @@ fn prepare_topology_builder(
         for step in domain.steps.iter().flatten() {
             *edge_counts.entry(step.edge).or_default() += 1;
         }
+        // A span the face walks twice is a slit, whichever way it transmits:
+        // a separated one is cut afterwards, a transmitting one, a chain the
+        // face walks out along and back that encloses nothing, is recovered
+        // and labelled. Left in the polygon, a transmitting chain doubled
+        // back on itself gave ear clipping ears that straddled it, and a
+        // slit cutting it in two left a stretch that could not close.
         let is_slit = |step: &PlannedFaceStep| {
             edge_counts.get(&step.edge).copied().unwrap_or(0) > 1
-                && matches!(step.boundary.behavior, Some(SpanBehavior::Separated { .. }))
+                && matches!(
+                    step.boundary.behavior,
+                    Some(SpanBehavior::Separated { .. } | SpanBehavior::Transmitting)
+                )
         };
         for step in domain.steps.iter().flatten().filter(|step| is_slit(step)) {
             let PlannedBoundarySource::Curve { curve, .. } = step.boundary.source else {
@@ -941,7 +950,15 @@ pub(super) fn split_slit_runs(
         // preceding span's end and endpoint 1 is the following span's start.
         let right_trace_continues =
             previous_right.boundary.traces[0] == next_right.boundary.traces[1];
-        if !(parameter_continues && left_trace_continues && right_trace_continues) {
+        // A run is cut or labelled whole, so it changes where a separated
+        // span meets a transmitting one.
+        let kind_continues =
+            matches!(
+                previous.boundary.behavior,
+                Some(SpanBehavior::Separated { .. })
+            ) == matches!(step.boundary.behavior, Some(SpanBehavior::Separated { .. }));
+        if !(parameter_continues && left_trace_continues && right_trace_continues && kind_continues)
+        {
             runs.push(std::mem::take(&mut run_edges));
         }
         run_edges.push(step.edge);

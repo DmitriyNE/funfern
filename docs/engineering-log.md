@@ -23000,3 +23000,56 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — A transmitting chain the face walks out and back leaves the polygon
+
+- **Reported.** The wall sweep's first run (c3c58dc): 36 configurations the
+  editor accepted and the mesher refused, every one a span changed between
+  transmitting and separated. Four spans of the acoustic whispering gallery
+  made transmitting, span 12 of the bent fiber made separated and its spans
+  9 and 11 separated together, spans of the Fresnel zone plate, the double
+  slit's back wall and the Talbot grating's bars made transmitting: "ear
+  clipping stalled", "face cycle is incomplete", "could not recover an
+  internal-boundary segment", "zero-area triangle".
+- **Cause.** The face polygon. `prepare_topology_builder` leaves a span the
+  face walks twice out of the polygon only when it is separated, a free
+  slit, and cuts it back in afterwards; a transmitting span the face walks
+  out along and back, a probe path or the gap in a wall, stayed in the
+  polygon as a doubled chain for ear clipping to collapse. The clipper's
+  diagonal and containment tests exclude the candidate ear's vertices by
+  index, and a doubled chain's other side shares those indices, so an ear
+  across a curved chain passed both and clipped a triangle into zero width;
+  what remained could not be clipped, and on the double slit's straight wall
+  at 0.2 three collinear vertices made a zero-area triangle instead. With a
+  slit cutting the chain in two, the stretch between the removals held one
+  side of the chain alone and could not close on itself. The carving work of
+  2026-09-16 already treated a transmitting chain walked twice as a slit
+  that is recovered and labelled rather than cut, and the full rebuild's
+  cut stage has carried `label_transmitting_slit` since then; its polygon
+  preparation never sent anything there.
+- **Change.** `is_slit` takes a span the face walks twice whichever way it
+  transmits, and `split_slit_runs` breaks a run where a separated span meets
+  a transmitting one, since a run is cut or labelled whole. Three gallery
+  meshes change, the scenes with a free transmitting chain: the Brewster
+  angle, 1,461 to 1,488 vertices, the bent fiber, 1,481 to 1,477, and the
+  crystal bend, 1,581 to 1,592; the other 42 read the same bits.
+- **Tests.** `topology_mesher_recovers_a_transmitting_chain_beside_slits`:
+  a four-span open curve in the box as a gap in a wall, a wall on a probe
+  path, and two walls joined by a gap. Each meshes to the box's area with
+  every trace vertex of the plan in the mesh, the separated spans cut with a
+  trace on each side and the transmitting ones conforming, labelled as their
+  curve; on the old mesher all three fail. The wall sweep's `KNOWN` table is
+  empty and gone with its machinery: the 36 cases are must-succeed again and
+  prepare at 0.16 and at 0.2, and the five scenes read 1,330 cases prepared
+  between them with nothing refused that the rules do not name.
+- **Device.** `scripts/device-suite.sh`: 76 of 76 pass, the fixtures on the
+  e2e build. 74 runs read what they read this morning to the last digit
+  shown. The two `canonical_gpu_temporal_amr` runs differ in one line, the
+  transfer-alone diagnostic's complementary error, 4.9e-8 against -0.0 in
+  the one and -0.0 against 4.8e-8 in the other, with their state lanes,
+  energies and indicators identical: one readback frame's f32 rounding
+  between runs of the same build, not the mesh, which those lanes would
+  show. Listed under "Worth checking sometime" in `docs/plan.md`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

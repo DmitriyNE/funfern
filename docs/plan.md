@@ -1241,8 +1241,11 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   (`docs/engineering-log.md`): `crates/funfern-app/tests/wall_sweep.rs` over
   the gallery through the app's own path and a core twin over the `Scene`
   path, with the two findings below.
-- [ ] Configurations the editor accepts and the mesher cannot build, found by
-  the wall sweep on 2026-10-12 and listed in its `KNOWN` table until fixed:
+- [x] Configurations the editor accepts and the mesher cannot build, found by
+  the wall sweep on 2026-10-12 and listed in its `KNOWN` table until fixed.
+  Fixed the same day (`docs/engineering-log.md`): a span the face walks
+  twice leaves the polygon whichever way it transmits, as the carving path
+  had done since 2026-09-16, and the table is gone. As found:
   a span of the acoustic whispering gallery made transmitting (spans 2, 4, 5
   and 7, at every edge: "ear clipping stalled", "could not recover an
   internal-boundary segment", "edge has invalid triangle adjacency"); span
@@ -1255,8 +1258,7 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   ("zero-area triangle"), the Talbot grating's bars and two more zone-plate
   spans. Every one is a change of a span between transmitting and separated,
   so the topology plan's face cycles under that change are the first place
-  to look. Each fix removes its entry; a listed case that prepares fails the
-  sweep.
+  to look.
 - [ ] Two Dirichlet traces meeting at a trace vertex with different signals
   are refused by the assembly, "Dirichlet conditions disagree at a shared
   boundary node", after validation accepted the document: a driven Dirichlet
@@ -1465,6 +1467,11 @@ Known inaccuracies judged not worth fixing now. Nothing on screen shows them,
 but each is a real departure from the reference, worth a look when its area
 is next touched.
 
+- The `canonical_gpu_temporal_amr` example's transfer-alone diagnostic reads
+  its complementary error as 0 on some runs and 4.8e-8 on others of the same
+  build, with every other readout identical (2026-10-12, three device-suite
+  runs): which readback frame the comparison catches, presumably. Harmless,
+  within its bound, and the only line of the suite that moves between runs.
 - The device accumulates the integrated field `r` in f32, and a handoff that
   rebuilds `b` about the new `r` carries that rounding amplified through the
   gradient: 5.4e-5 in `canonical_gpu_oscillator_handoff`'s opened mode

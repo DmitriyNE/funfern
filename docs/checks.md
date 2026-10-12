@@ -600,8 +600,7 @@ It runs in the gate without the five arrays of one obstacle, which the
 nightly's `wall-sweep` job adds, at 0.16 and at 0.2. `FUNFERN_WALL_SWEEP=<name>`
 runs one scene with its report, `FUNFERN_WALL_SWEEP_ALL=1` every scene,
 `FUNFERN_WALL_SWEEP_EDGE=<edge>` another edge, and
-`FUNFERN_WALL_SWEEP_PLAN=1` prints the case counts without preparing. The
-configurations the mesher is known not to build are its `KNOWN` table.
+`FUNFERN_WALL_SWEEP_PLAN=1` prints the case counts without preparing.
 
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.
