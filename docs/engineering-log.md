@@ -23238,3 +23238,33 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. The mutations are not in the gate, each
   rebuilding the tree; they are the nightly's.
+
+## 2026-10-12 — A0.5: the device suite keeps its own binaries
+
+- **Change.** `scripts/device-suite.sh` hard-links every binary it will run
+  into its log directory, `target/device-suite/<time>/bin/`, and runs from
+  there. Cargo writes a new file and renames it in, so the link keeps the
+  one the suite built whatever a later build does to `target/release/`;
+  the link costs no copy and sits on the target directory's filesystem.
+  Before the fixtures the linked app is asked for a fixture that does not
+  exist and must refuse it as the driver does, exit 2 and "no fixture
+  named"; the plain app opens and waits instead, and the suite fails there
+  rather than three times at the timeout. `scripts/e2e-fixture.sh` links
+  its one binary the same way. This closes the morning's incident, where a
+  plain build during the GPU runs replaced the e2e app and the fixtures sat
+  in the first-run tour for 900 s each.
+- **Shown.** A plain app put to the driver probe runs on until the alarm,
+  no refusal, where the suite's check now stops. A plain
+  `cargo build --release -p funfern-app` started once the suite had built
+  and was running its first fixture replaced `target/release/funfern-app`
+  with an app carrying no driver while the fixtures ran; six of the seven
+  ran on the e2e build the suite linked, 4249c01 by their build line. The
+  seventh, device loss, sat until the 300 s timeout after it had opened its window and found the device, and
+  passed in 2 s when run alone straight after, as it had in every suite of
+  the day; one hang of that fixture, under "Worth checking sometime".
+- **Next.** The driver's place in the shipped binary is the hazard's root;
+  moving the fixtures out of it is the next item, and the links stay as the
+  guard for the examples.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

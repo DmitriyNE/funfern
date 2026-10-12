@@ -23,8 +23,11 @@ errors through `examples/support/check.rs`, since `error > tolerance` is false
 for a NaN and `f64::max` drops one. The examples open a window and read the
 autosave, so the script runs each with `HOME` pointed at a scratch directory,
 after building them with the real `HOME`; run one by hand the same way, or the
-toolchain is re-fetched into the scratch one. Nothing runs them in CI, which has
-no GPU.
+toolchain is re-fetched into the scratch one. Every binary it runs is
+hard-linked into the run's log directory first and run from there, so a build
+beside the suite cannot change what it runs, and the linked app is checked to
+carry the fixture driver before the fixtures start. Nothing runs them in CI,
+which has no GPU.
 
 The examples drive the device request directly. The app's own end-to-end
 fixtures (`src/ui/e2e.rs`) run the app as it ships, built with the `e2e` feature

@@ -30,7 +30,14 @@ fi
 home=$(mktemp -d)
 log=$(mktemp)
 trap 'rm -rf "$home" "$log"' EXIT
-mkdir -p "$home/Library/Application Support/funfern"
+mkdir -p "$home/Library/Application Support/funfern" "$home/bin"
+# The binary as built, kept by a link whatever a later build renames in; the
+# link needs the same filesystem, so it lives under the target directory.
+mkdir -p target/e2e-fixture
+linked="target/e2e-fixture/$(basename "$binary")-$$"
+ln -f "$binary" "$linked"
+trap 'rm -rf "$home" "$log" "$linked"' EXIT
+binary=$linked
 limit=${FIXTURE_TIMEOUT:-600}
 if [[ $(uname -s) == Linux ]]; then
   icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)

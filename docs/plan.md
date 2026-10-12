@@ -1250,8 +1250,20 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   production-shaped twins, the far-field recorder and the probe estimators
   deferred to PH-18. A0.4, the mutations, landed the same day:
   `scripts/mutations.sh` over six deliberate defects under `tests/mutations/`,
-  each caught by the test its manifest names, in a nightly job. A0.5, the
-  device suite keeping its own e2e binary, is the stage's last item.
+  each caught by the test its manifest names, in a nightly job. A0.5 landed
+  the same day: the suite hard-links every binary it runs into its log
+  directory and checks the linked app for its driver, and the fixture
+  wrapper links its binary too. Stage A0 is complete; A1 is next, after the
+  fixture driver leaves the shipped binary.
+- [ ] The end-to-end fixture driver (`src/ui/e2e.rs`) lives in the shipped
+  binary behind the `e2e` feature, which is why a plain build could replace
+  the suite's app under its fixtures on 2026-10-12. Move the fixtures out:
+  a second binary that builds the same app from the library with the driver
+  added, for the native suite, the lavapipe job and the mutation runner, and
+  a second browser bundle for the SwiftShader fixtures; switch every script
+  and job to it; then remove the feature from the main binary, once nothing
+  builds it. Deprecated from 2026-10-12: the feature stays only until the
+  move is complete.
 - [ ] No fixture or device example hands off a generation with a driven
   wall: a prescribed Dirichlet or Neumann node's carried phase across a
   handoff can be zeroed in the runtime transfer shader and nothing fails,
@@ -1497,6 +1509,10 @@ Known inaccuracies judged not worth fixing now. Nothing on screen shows them,
 but each is a real departure from the reference, worth a look when its area
 is next touched.
 
+- The `device-loss` fixture hung once to its 300 s timeout, on 2026-10-12
+  in a run started beside a plain rebuild of the app, after it had opened its window and found the device; it passed in
+  2 s when rerun alone and in every suite of the day. One occurrence; worth a
+  look if it recurs.
 - The `canonical_gpu_temporal_amr` example's transfer-alone diagnostic reads
   its complementary error as 0 on some runs and 4.8e-8 on others of the same
   build, with every other readout identical (2026-10-12, three device-suite

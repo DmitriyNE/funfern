@@ -240,6 +240,13 @@ directory right after building and runs the fixtures from there, so a plain
 build during the GPU runs cannot replace it; this morning one did, and the
 fixtures sat in the first-run tour for 900 s each.
 
+**Done on 2026-10-12** (`docs/engineering-log.md`): every binary the suite
+runs is hard-linked into its log directory and run from there, the linked
+app checked for its driver first; the fixture wrapper links its binary the
+same way. Stage A0 is complete. The driver's place in the shipped binary is
+the hazard's root, and moving the fixtures out of it follows as its own
+item.
+
 ## 4. Stage A1: the architecture's own physics
 
 These are the two fixtures that test what is unusual here, independent Q

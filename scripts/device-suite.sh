@@ -11,8 +11,16 @@
 # The examples open a window and read the autosave, so each runs with HOME
 # pointed at a scratch directory of its own. They are built first with the
 # real HOME, or the toolchain would be fetched again into the scratch one.
-# Logs go to target/device-suite/<time>/. A run past DEVICE_SUITE_TIMEOUT
-# seconds (default 900) is stopped and fails. Exits 1 if any run failed.
+# Every binary the suite runs is hard-linked into its log directory first and
+# run from there: a build in the meantime, a plain `cargo run` beside the
+# suite, renames a new file into target/release/ and the link keeps the one
+# the suite built, where on 12 October a plain build replaced the e2e app
+# under the fixtures and they sat in the first-run tour until the timeout.
+# Before the fixtures the linked app is asked for a fixture that does not
+# exist, and must refuse it as the driver does, so an app without the driver
+# fails the suite rather than opening. Logs go to target/device-suite/<time>/.
+# A run past DEVICE_SUITE_TIMEOUT seconds (default 900) is stopped and fails.
+# Exits 1 if any run failed.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -118,9 +126,22 @@ cargo build -p funfern-app --release --locked --examples || exit 1
 cargo build -p funfern-app --release --locked --features e2e --bin funfern-app || exit 1
 
 logs="target/device-suite/$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$logs"
+mkdir -p "$logs/bin"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
+# The app the fixtures run, linked and asked for a fixture that does not
+# exist: the driver refuses by name and exits 2, where the plain app would
+# open and wait.
+ln -f target/release/funfern-app "$logs/bin/funfern-app"
+probe="$scratch/probe"
+mkdir -p "$probe/Library/Application Support/funfern"
+env HOME="$probe" FUNFERN_E2E=no-such-fixture \
+  perl -e 'alarm shift @ARGV; exec @ARGV or die "$!\n"' 60 \
+  "$logs/bin/funfern-app" >"$logs/00-driver-check.log" 2>&1
+if [[ $? -ne 2 ]] || ! grep -q "no fixture named" "$logs/00-driver-check.log"; then
+  echo "the app the suite linked has no fixture driver; see $logs/00-driver-check.log" >&2
+  exit 1
+fi
 results=()
 failed=0
 index=0
@@ -137,6 +158,9 @@ for run in "${selected[@]}"; do
   shift
   binary="target/release/examples/$example"
   [[ $example == funfern-app ]] && binary=target/release/funfern-app
+  # The binary as built, kept by a link whatever a later build renames in.
+  ln -f "$binary" "$logs/bin/$example"
+  binary="$logs/bin/$example"
   log="$logs/$(printf %02d "$index")-$example.log"
   home="$scratch/$index"
   mkdir -p "$home/Library/Application Support/funfern"
