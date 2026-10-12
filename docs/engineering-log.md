@@ -23394,3 +23394,19 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — The browser tests take the suite's run lines only
+
+- **Reported.** Found while fixing the lavapipe job's list: the browser
+  fixture spec (`browser-tests/e2e.spec.mjs`) and the Safari runner
+  (`browser-tests/safari-e2e.mjs`) take their fixture names from the device
+  suite with the same bare pattern, `FUNFERN_E2E=([a-z-]+)`, and so read the
+  driver probe's `no-such-fixture` as an eighth fixture. CI's push run names
+  `cavity` alone and never reached it; the nightly's full run and
+  `scripts/browser-suite.sh` run every name and would have.
+- **Change.** Both match the suite's run lines alone,
+  `'FUNFERN_E2E=<name> funfern-fixtures'`, as the lavapipe script does since
+  f0e2a91. The three readers of the list now agree on what a run line is.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

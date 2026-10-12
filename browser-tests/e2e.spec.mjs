@@ -5,12 +5,14 @@ import { expectedBuildId } from "./build-id.mjs";
 // The app's end-to-end fixtures (crates/funfern-app/src/ui/e2e.rs) in the
 // browser: a bundle built with the e2e feature runs the fixture `?e2e=` names
 // through the app's own handlers on the page's WebGPU device and writes its
-// verdict on the root element. The list is the device suite's, so the native,
-// software-Vulkan and browser runs cannot part. `npm run test:e2e` serves
-// `dist-e2e`, built with
+// verdict on the root element. The list is the device suite's run lines, not
+// its driver probe, so the native, software-Vulkan and browser runs cannot
+// part. `npm run test:e2e` serves `dist-e2e`, built with
 //   TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --dist dist-e2e
 const allFixtures = [
-  ...readFileSync("scripts/device-suite.sh", "utf8").matchAll(/FUNFERN_E2E=([a-z-]+)/g),
+  ...readFileSync("scripts/device-suite.sh", "utf8").matchAll(
+    /'FUNFERN_E2E=([a-z-]+) funfern-fixtures'/g,
+  ),
 ].map((match) => match[1]);
 // The ones to run, comma-separated, or all of them: CI's run on every push
 // names `cavity`, which on SwiftShader takes minutes where Chrome takes seconds.

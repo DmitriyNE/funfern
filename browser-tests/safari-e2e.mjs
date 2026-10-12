@@ -22,9 +22,11 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 const named = process.argv.slice(2);
 const fixtures = named.length
   ? named
-  : [...readFileSync("scripts/device-suite.sh", "utf8").matchAll(/FUNFERN_E2E=([a-z-]+)/g)].map(
-      (match) => match[1],
-    );
+  : [
+      ...readFileSync("scripts/device-suite.sh", "utf8").matchAll(
+        /'FUNFERN_E2E=([a-z-]+) funfern-fixtures'/g,
+      ),
+    ].map((match) => match[1]);
 
 const server = spawn(
   "python3",
