@@ -23053,3 +23053,37 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — Two Dirichlet signals on one trace vertex are refused at acceptance
+
+- **Reported.** The wall sweep's first run (c3c58dc): 157 gallery cases the
+  editor accepted and the assembly refused, "Dirichlet conditions disagree
+  at a shared boundary node". The drums' pinned rims beside a driven face,
+  and in TM an electric wall, which resolves to a zero Dirichlet, beside a
+  driven one. The refusal reached the user as a diagnostics error after
+  validation had accepted the document, where the corner rule for the outer
+  sides already refused the same disagreement at a corner.
+- **Change.** `TopologyScene::validate_dirichlet_traces`, run by `compile`
+  and by the cooperative job once the plan is built: over the plan's
+  boundary edges, each source's law, the outer side's condition or the
+  span's face on the side the edge names, taken from the plan's own
+  behaviour, which is not always the authored one, resolved per physics,
+  and two different Dirichlet signals on one trace vertex refuse the
+  document with `TopologySceneIssue::DirichletTraces`, "two Dirichlet
+  conditions with different signals meet on one node". The assembly's rule
+  stays as the backstop it was.
+- **Tests.** `dirichlet_signals_that_meet_on_a_trace_vertex_are_refused_at_acceptance`:
+  on the loop scene, a driven Dirichlet face beside a zero one on the same
+  side is refused, and so is a driven one beside an electric wall; the same
+  signal on both spans is accepted, and so is a driven left beside a zero
+  right, which meet at the junction through different sectors and so on
+  different trace vertices; each case through `compile` and through the
+  resumable job. The wall sweep predicts the refusal from the draft before
+  validation runs, building the draft's plan itself from the public
+  topology compile and face resolution and walking it as the assembly
+  does, and expects validation's refusal by message: the drum modes read
+  39 refusals at a shared node and the fisheye 2, as before, now all at
+  acceptance.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

@@ -160,9 +160,10 @@ one pair of spans per pair of curves, which an array would otherwise turn
 into thousands. The first run found 36 configurations the editor accepts and
 the mesher cannot build, every one a span changed between transmitting and
 separated, carried in the sweep's `KNOWN` table until the mesher fix the
-same day emptied it (the log), and a Dirichlet refusal the assembly makes
-after acceptance; both are under Maintenance in `docs/plan.md`. The core
-twin fails with the band fill of 1bc6d82 reinstated.
+same day emptied it (the log), and a Dirichlet refusal the assembly made
+after acceptance, which validation makes since the same day; both are
+ticked under Maintenance in `docs/plan.md`. The core twin fails with the
+band fill of 1bc6d82 reinstated.
 
 ### A0.2 Regression scenes that prepare
 

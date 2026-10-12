@@ -8,11 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     BACKGROUND_REGION, CompiledEdge, CompiledEdgeSource, CurveId, CurveSpanId, CurveTraceSide,
-    DEFAULT_MATERIAL, FaceId, FaceRegionAssignment, MAX_MATERIALS, MAX_TOPOLOGY_FACES,
-    MAX_VOLUME_SOURCES, Material, MaterialFrame, MaterialFrameAttachment, MaterialId,
-    OuterBoundaryConditions, OuterSide, PhysicsModel, Region, RegionId, TopologyGeometry,
-    TopologyIssue, TopologyJob, TopologyMeshPlan, TopologyMeshPlanError, TopologySnapshot,
-    VolumeSource, compile_topology,
+    DEFAULT_MATERIAL, FaceBoundaryCondition, FaceId, FaceRegionAssignment, MAX_MATERIALS,
+    MAX_TOPOLOGY_FACES, MAX_VOLUME_SOURCES, Material, MaterialFrame, MaterialFrameAttachment,
+    MaterialId, OuterBoundaryConditions, OuterSide, PhysicsModel, PlannedBoundarySource, Region,
+    RegionId, SpanBehavior, TimeSignal, TopologyGeometry, TopologyIssue, TopologyJob,
+    TopologyMeshPlan, TopologyMeshPlanError, TopologySnapshot, TraceVertexId, VolumeSource,
+    compile_topology,
 };
 
 /// A stable locator for one side of a user-authored boundary.
@@ -406,12 +407,67 @@ impl TopologyScene {
         let assignments = self.resolve_face_assignments(&topology)?;
         let plan =
             TopologyMeshPlan::new(&topology, &assignments).map_err(TopologySceneIssue::Plan)?;
+        self.validate_dirichlet_traces(&plan)?;
         Ok(CompiledTopologyScene {
             geometry: self.geometry.clone(),
             topology,
             assignments,
             plan,
         })
+    }
+
+    /// Two Dirichlet conditions with different signals meeting on one trace
+    /// vertex of the plan, which the assembly refuses at that node: the
+    /// corner rule of `validate_structure`, for the outer sides, carried to
+    /// every boundary edge the plan holds, a span's side against the sides
+    /// it meets and against the outer side it ends on, with the laws the
+    /// plan gives them and resolved per physics, so an electric wall in TM is
+    /// the zero Dirichlet it becomes. The wall sweep found the gap: a driven
+    /// Dirichlet face beside a pinned one reached the user as a diagnostics
+    /// error after validation had accepted it.
+    pub fn validate_dirichlet_traces(
+        &self,
+        plan: &TopologyMeshPlan,
+    ) -> Result<(), TopologySceneIssue> {
+        let mut signal_at: BTreeMap<TraceVertexId, TimeSignal> = BTreeMap::new();
+        for boundary in &plan.boundaries {
+            let signal = match boundary.source {
+                PlannedBoundarySource::Outer(side) => {
+                    match self.outer_boundaries.sides[side.index()].resolved(self.physics) {
+                        crate::OuterBoundaryCondition::Dirichlet { signal } => Some(signal),
+                        _ => None,
+                    }
+                }
+                PlannedBoundarySource::Curve { side, .. } => match boundary.behavior {
+                    Some(SpanBehavior::Separated { left, right, .. }) => {
+                        let face = match side {
+                            CurveTraceSide::Left => left,
+                            CurveTraceSide::Right => right,
+                        };
+                        match face.resolved(self.physics) {
+                            FaceBoundaryCondition::Dirichlet { signal } => Some(signal),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                },
+            };
+            let Some(signal) = signal else {
+                continue;
+            };
+            for trace in boundary.traces {
+                match signal_at.get(&trace) {
+                    Some(previous) if *previous != signal => {
+                        return Err(TopologySceneIssue::DirichletTraces);
+                    }
+                    Some(_) => {}
+                    None => {
+                        signal_at.insert(trace, signal);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -493,14 +549,15 @@ impl TopologySceneJob {
                     self.scene
                         .resolve_face_assignments(&topology)
                         .and_then(|assignments| {
-                            TopologyMeshPlan::new(&topology, &assignments)
-                                .map_err(TopologySceneIssue::Plan)
-                                .map(|plan| CompiledTopologyScene {
-                                    geometry: self.scene.geometry.clone(),
-                                    topology,
-                                    assignments,
-                                    plan,
-                                })
+                            let plan = TopologyMeshPlan::new(&topology, &assignments)
+                                .map_err(TopologySceneIssue::Plan)?;
+                            self.scene.validate_dirichlet_traces(&plan)?;
+                            Ok(CompiledTopologyScene {
+                                geometry: self.scene.geometry.clone(),
+                                topology,
+                                assignments,
+                                plan,
+                            })
                         })
                 }
             }
@@ -516,6 +573,10 @@ pub enum TopologySceneIssue {
     Region(RegionId),
     VolumeSource(RegionId),
     OuterBoundaryCorner,
+    /// Two Dirichlet conditions with different signals meet on one trace
+    /// vertex: a span's side against the side it meets, or against the outer
+    /// side it ends on.
+    DirichletTraces,
     RevisionMismatch,
     FaceAnchor {
         index: usize,
@@ -543,6 +604,8 @@ impl std::fmt::Display for TopologySceneIssue {
             Self::OuterBoundaryCorner => {
                 formatter.write_str("the outer boundary conditions disagree at a corner")
             }
+            Self::DirichletTraces => formatter
+                .write_str("two Dirichlet conditions with different signals meet on one node"),
             Self::RevisionMismatch => {
                 formatter.write_str("the geometry changed while it was being assigned")
             }
@@ -603,6 +666,78 @@ mod tests {
             region: Some(RegionId(2)),
         });
         scene
+    }
+
+    /// A driven Dirichlet face beside a zero one on the same side of a
+    /// closed curve meet on the trace vertex between the spans, and so do a
+    /// driven one and an electric wall, which resolves to a zero Dirichlet:
+    /// both refused at acceptance, as the assembly would refuse them. The
+    /// same signal on both spans passes, and so does a driven left beside a
+    /// zero right: the two sides meet at the junction through different
+    /// sectors, so on different trace vertices.
+    #[test]
+    fn dirichlet_signals_that_meet_on_a_trace_vertex_are_refused_at_acceptance() {
+        let driven = TimeSignal::Harmonic {
+            offset: 0.0,
+            amplitude: 1.0,
+            frequency_hz: 2.0,
+            phase_radians: 0.0,
+        };
+        let face = |left, right| SpanBehavior::Separated {
+            left,
+            right,
+            coupling: crate::InternalBoundaryCoupling::Independent,
+        };
+        let pinned = FaceBoundaryCondition::Dirichlet {
+            signal: TimeSignal::ZERO,
+        };
+        let pushed = FaceBoundaryCondition::Dirichlet { signal: driven };
+        for (name, first, second, accepted) in [
+            (
+                "driven beside zero",
+                face(pushed, FaceBoundaryCondition::Reflecting),
+                face(pinned, FaceBoundaryCondition::Reflecting),
+                false,
+            ),
+            (
+                "driven beside an electric wall",
+                face(pushed, FaceBoundaryCondition::Reflecting),
+                face(
+                    FaceBoundaryCondition::ElectricWall,
+                    FaceBoundaryCondition::Reflecting,
+                ),
+                false,
+            ),
+            (
+                "the same signal on both",
+                face(pushed, FaceBoundaryCondition::Reflecting),
+                face(pushed, FaceBoundaryCondition::Reflecting),
+                true,
+            ),
+            (
+                "driven left beside zero right",
+                face(pushed, FaceBoundaryCondition::Reflecting),
+                face(FaceBoundaryCondition::Reflecting, pinned),
+                true,
+            ),
+        ] {
+            let mut scene = loop_scene();
+            scene.geometry.curves[0].spans[0].behavior = first;
+            scene.geometry.curves[0].spans[1].behavior = second;
+            let result = scene.compile(3);
+            match (result, accepted) {
+                (Ok(_), true) => {}
+                (Err(TopologySceneIssue::DirichletTraces), false) => {}
+                (result, _) => panic!("{name}: {:?}", result.map(|_| ())),
+            }
+            let mut job = TopologySceneJob::new(scene, 3);
+            let resumed = loop {
+                if let Some(result) = job.advance(16) {
+                    break result;
+                }
+            };
+            assert_eq!(resumed.map(|_| ()).is_ok(), accepted, "{name}, resumed");
+        }
     }
 
     #[test]

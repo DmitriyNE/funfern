@@ -20,14 +20,15 @@
 //! scene says what was covered; nothing mandatory is omitted. The `Scene`
 //! path's counterpart lives in `funfern-core`'s `canonical_wave` tests.
 //!
-//! Two refusals are predicted from the scene before any preparation, by the
+//! Two refusals are predicted from the draft before validation runs, by the
 //! rules that make them: a driven Dirichlet beside a differently driven one
 //! on adjacent outer sides, which validation refuses at the corner, and two
-//! Dirichlet traces meeting at a trace vertex of the compiled mesh plan with
-//! different signals, which the assembly refuses as "Dirichlet conditions
-//! disagree at a shared boundary node". The plan is production structure and
-//! the prediction walks it the way the assembly does; the assembly itself is
-//! not consulted.
+//! Dirichlet traces meeting at a trace vertex of the mesh plan with
+//! different signals, which validation refuses too since 12 October, as the
+//! assembly always had at that node. For the second the sweep builds the
+//! draft's plan itself, from the public topology compile and face
+//! resolution, and walks it the way the assembly does; validation's own
+//! check is not consulted.
 //!
 //! The gallery's three crystals and its two arrays, 5 scenes of 1,051 spans
 //! among the gallery's 1,384, are arrays of one obstacle and carry two
@@ -53,7 +54,8 @@ use funfern_app::topology_runtime::TopologyRuntime;
 use funfern_core::{
     CanonicalOutgoingBoundary, CurveId, CurveSpanId, CurveTraceSide, FaceBoundaryCondition,
     InternalBoundaryCoupling, MeshingOptions, OuterBoundaryCondition, OuterSide, PhysicsModel,
-    PlannedBoundarySource, Point2, SpanBehavior, TimeSignal, TraceVertexId, TriMesh,
+    PlannedBoundarySource, Point2, SpanBehavior, TimeSignal, TopologyMeshPlan, TraceVertexId,
+    TriMesh, compile_topology,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -143,7 +145,7 @@ enum Class {
 }
 
 const CORNER: &str = "the outer boundary conditions disagree at a corner";
-const SHARED_NODE: &str = "Dirichlet conditions disagree at a shared boundary node";
+const TRACES: &str = "two Dirichlet conditions with different signals meet on one node";
 
 struct Case {
     label: String,
@@ -249,21 +251,26 @@ fn corner_conflict(sides: [OuterBoundaryCondition; 4], physics: PhysicsModel) ->
     })
 }
 
-/// Whether two Dirichlet traces meet at a trace vertex of the compiled plan
-/// with different signals, which the assembly refuses: the walk the assembly
-/// makes, over the plan's boundary edges and their trace vertices, with the
-/// laws the accepted scene gives each source.
+/// Whether two Dirichlet traces meet at a trace vertex of the draft's plan
+/// with different signals, which validation refuses: the plan built here as
+/// validation builds it and walked as the assembly walks it, over its
+/// boundary edges and their trace vertices, with the laws the plan gives
+/// each source resolved per physics. A draft whose plan cannot be built
+/// predicts nothing; validation then refuses it for its own reason.
 fn shared_node_conflict(editor: &TopologyEditor) -> bool {
-    let scene = &editor.document.model.accepted;
+    let scene = &editor.document.model.draft;
     let physics = scene.physics;
-    let laws = scene
-        .geometry
-        .curves
-        .iter()
-        .flat_map(|curve| curve.spans.iter().map(|span| (span.id, span.behavior)))
-        .collect::<BTreeMap<_, _>>();
+    let Ok(topology) = compile_topology(&scene.geometry, editor.revision) else {
+        return false;
+    };
+    let Ok(assignments) = scene.resolve_face_assignments(&topology) else {
+        return false;
+    };
+    let Ok(plan) = TopologyMeshPlan::new(&topology, &assignments) else {
+        return false;
+    };
     let mut signal_at: BTreeMap<TraceVertexId, TimeSignal> = BTreeMap::new();
-    for boundary in &editor.compiled_accepted.plan.boundaries {
+    for boundary in &plan.boundaries {
         let signal = match boundary.source {
             PlannedBoundarySource::Outer(side) => {
                 match scene.outer_boundaries.sides[side.index()].resolved(physics) {
@@ -271,7 +278,7 @@ fn shared_node_conflict(editor: &TopologyEditor) -> bool {
                     _ => None,
                 }
             }
-            PlannedBoundarySource::Curve { span, side, .. } => match laws.get(&span) {
+            PlannedBoundarySource::Curve { side, .. } => match boundary.behavior {
                 Some(SpanBehavior::Separated { left, right, .. }) => {
                     let face = match side {
                         CurveTraceSide::Left => left,
@@ -600,17 +607,37 @@ fn sweep(example: &TopologyExample, seed: u64) -> Report {
             report.by_editor += 1;
             continue;
         }
-        // The corner rule, predicted from the draft's outer sides.
+        // The two rules validation applies, predicted from the draft: the
+        // corner rule from its outer sides, the trace rule from its own plan.
+        // The corner rule runs first in validation, so it is the one a draft
+        // that breaks both is refused by.
         let corner = corner_conflict(
             editor.document.model.draft.outer_boundaries.sides,
             editor.document.model.draft.physics,
         );
+        let shared = !corner && shared_node_conflict(&editor);
+        let expected = if corner {
+            Some((CORNER, "its outer sides disagree at a corner"))
+        } else if shared {
+            Some((
+                TRACES,
+                "two Dirichlet signals meet on one of its trace vertices",
+            ))
+        } else {
+            None
+        };
         settle(&mut editor);
-        match (&editor.acceptance, corner) {
-            (TopologyAcceptance::Invalid(issue), true) if issue.to_string() == CORNER => {
+        match (&editor.acceptance, expected) {
+            (TopologyAcceptance::Invalid(issue), Some((message, _)))
+                if issue.to_string() == message =>
+            {
                 report.must_refuse += 1;
                 report.refused_as_named += 1;
-                report.by_corner += 1;
+                if corner {
+                    report.by_corner += 1;
+                } else {
+                    report.by_shared_node += 1;
+                }
                 continue;
             }
             (TopologyAcceptance::Invalid(issue), _) => {
@@ -620,34 +647,16 @@ fn sweep(example: &TopologyExample, seed: u64) -> Report {
                     .push(format!("{label}: refused at acceptance: {issue}"));
                 continue;
             }
-            (_, true) => {
+            (_, Some((_, why))) => {
                 report.must_refuse += 1;
-                report.failures.push(format!(
-                    "{label}: accepted although its outer sides disagree at a corner"
-                ));
+                report
+                    .failures
+                    .push(format!("{label}: accepted although {why}"));
                 continue;
             }
             _ => {}
         }
-        // The assembly's rule, predicted from the compiled plan.
-        let shared = shared_node_conflict(&editor);
         let prepared = prepare(&editor);
-        if shared {
-            report.must_refuse += 1;
-            match prepared {
-                Err(error) if error.ends_with(SHARED_NODE) => {
-                    report.refused_as_named += 1;
-                    report.by_shared_node += 1;
-                }
-                Err(error) => report
-                    .failures
-                    .push(format!("{label}: refused for another reason: {error}")),
-                Ok(_) => report.failures.push(format!(
-                    "{label}: prepared although Dirichlet traces disagree at a trace vertex"
-                )),
-            }
-            continue;
-        }
         report.must_succeed += 1;
         let (hash, boundary) = match prepared {
             Ok(prepared) => prepared,

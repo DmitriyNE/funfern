@@ -1259,14 +1259,15 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   spans. Every one is a change of a span between transmitting and separated,
   so the topology plan's face cycles under that change are the first place
   to look.
-- [ ] Two Dirichlet traces meeting at a trace vertex with different signals
-  are refused by the assembly, "Dirichlet conditions disagree at a shared
-  boundary node", after validation accepted the document: a driven Dirichlet
-  face beside a pinned one, or beside an electric wall in TM, reaches the
-  user as a diagnostics error rather than a refusal at acceptance, where the
-  corner rule for the outer sides already lives. The sweep predicts the
-  refusal from the compiled plan the way the assembly makes it; the same
-  walk at acceptance would refuse it there. Found on 2026-10-12.
+- [x] Two Dirichlet traces meeting at a trace vertex with different signals
+  were refused by the assembly, "Dirichlet conditions disagree at a shared
+  boundary node", after validation had accepted the document: a driven
+  Dirichlet face beside a pinned one, or beside an electric wall in TM,
+  reached the user as a diagnostics error rather than a refusal at
+  acceptance, where the corner rule for the outer sides already lived. Found
+  by the wall sweep and fixed on 2026-10-12 (`docs/engineering-log.md`):
+  `TopologyScene::validate_dirichlet_traces` walks the plan as the assembly
+  does and refuses at acceptance; the assembly's rule stays as the backstop.
 - [x] A self-oscillating gain lased on the mesh's shortest waves, at a
   van der Pol region's rim. Fixed on 2026-09-25 by a short-wave viscosity
   on the self-oscillating elements (`docs/spikes/funfern-gate-o.md`, "The
