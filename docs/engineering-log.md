@@ -23537,3 +23537,56 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the device suite's fixtures.
+
+## 2026-10-13 — PH-03: a complementary mode on the device
+
+- **Example.** `canonical_gpu_complementary_mode`: a state with Q zero and
+  b in the discrete kernel of the coupling, the gradient of a potential that
+  vanishes on every wall, `cos(πx/2) cos(πy/2)` on the reflecting box and,
+  with `--baffle`, `sin(πx) cos(πy/2)` on the left of a reflecting baffle
+  drawn from the bottom side to the top as the editor draws one. The mode
+  is the sampled gradient less its compatible part. Stepped 400 steps in
+  f64 and on the device; with `--remesh` carried first onto a mesh 1.4
+  times finer through the maps the runtime prepares for the edit, as the
+  app's handoff carries the reference, and the device steps the carried
+  state. Four suite entries.
+- **Demands.** On the fixed mesh, exact: in f64, Q, the energy's change and
+  the right side's share within 1e-10 of the mode's energy; on the device, b
+  within 5e-6 of the reference, Q and the energy's change within 1e-8, and
+  the right side nothing to the bit. Across the carry the demand is not
+  invariance: the budget is the carry's own discretization error, the
+  carried flux against the mode sampled on the new mesh, relative; within
+  it the physical component, the flux's first moment `∫ x b_x dA`, which
+  for such a gradient is `−∫ φ dA` and no mesh owns, is kept; the coupling
+  residual, the carried flux's compatible share in the new space, and what
+  it pushes into Q over the 400 steps that follow, lie within it; the right
+  side's share lies within it; and the budget falls at least threefold from
+  the edge to half of it. The device follows the carried reference within
+  5e-6 in b, and keeps the right side within the budget.
+- **Measured.** On the M1 Max at edge 0.16, 2,153 and 2,202 degrees of
+  freedom, 400 steps. In f64 the mode holds: Q 1e-24 and 3e-25 of the
+  energy, the energy changed 4e-16 and 1e-16, the right side 0. On the
+  device b 2.6e-8 and 2.5e-8 from the reference, Q 1e-24 and 3e-25, the
+  energy 7.2e-10 and 2.0e-9, the right side 0.0 to the bit. The carry's
+  budget 4.0e-5 on the box and 1.5e-4 on the baffled box, 5.1e-6 and
+  1.9e-5 at edge 0.08, eightfold down; the first moment 1.6e-7 and 2.2e-6
+  off at 0.16; the compatible share 3.0e-10 and 4.6e-9; the leakage 1.3e-10
+  and 2.1e-9; the right side 0.0 at the carry and after. The device on the
+  carried state: b 5.2e-7 and 5.0e-7 from the reference, Q 1.3e-10 and
+  2.1e-9, the reference's own leakage, the energy 2.8e-9 and 3.0e-8, the
+  right side 0.0.
+- **Two turns on the way.** The baffled mode first took the box's potential
+  on the left of the baffle alone, and its compatible part was most of it:
+  the potential does not vanish on the baffle, and a tangential flux along
+  a wall is a force on it. The physical component was first the flux's
+  plain integral, which is zero for the gradient of any potential vanishing
+  on the walls and read a relative error of 8e5; the first moment is what
+  the mode carries.
+- **Not built.** The end-to-end fixture the plan named: the driver acts
+  through the app's handlers alone, and the app has no tool that authors a
+  complementary flux. A fixture would need a driver-only install, which
+  would make the driver something other than a user; the example compiles
+  its plan as the app does, from the assembled rows.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the four suite entries on this GPU.

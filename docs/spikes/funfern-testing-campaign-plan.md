@@ -269,6 +269,15 @@ Q over the following steps stays within that same budget. The component
 must stay on the side of the baffle it was on. Add a device suite entry
 and an e2e fixture.
 
+**Done on 2026-10-13** (`docs/engineering-log.md`): the device example
+`canonical_gpu_complementary_mode`, on the box and on the baffled box, on
+the fixed mesh and across the carry, four suite entries. The budget is the
+carry's own discretization error, measured and required to fall with the
+mesh. The e2e fixture is not built: the driver acts through the app's
+handlers alone, and the app has no tool that authors a complementary flux;
+a fixture would need a driver-only install, which would make the driver
+something other than a user.
+
 **PH-10, boundary memory through handoff.** Run a pulse into a second-order
 wall until its auxiliaries are nonzero, then perform a no-change rebuild, a
 remesh of the same geometry, a material change that needs a new generation,

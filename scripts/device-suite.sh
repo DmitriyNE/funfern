@@ -74,6 +74,10 @@ RUNS=(
   'LONG_RUN_WALLS=second LONG_RUN_WALL_STEP=half-kicks LONG_RUN_STEPS=1000 canonical_gpu_long_run'
   # Each other example as it stands, and the rejections and rollbacks the
   # device performs for real.
+  'canonical_gpu_complementary_mode'
+  'canonical_gpu_complementary_mode --baffle'
+  'canonical_gpu_complementary_mode --remesh'
+  'canonical_gpu_complementary_mode --baffle --remesh'
   'canonical_gpu_handoff'
   'canonical_gpu_handoff --source --prescribed --edit'
   'canonical_gpu_handoff --failure'

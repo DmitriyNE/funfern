@@ -606,6 +606,26 @@ pump power computed from it, to match an f64 oracle. The Switch origin is
 stamped on the GPU, so this is the check that the accepted runtime reaches a
 consumer rather than being guessed from the clock.
 
+`canonical_gpu_complementary_mode` is PH-03: a state with Q zero and b in
+the discrete kernel of the coupling, a curl-free flux that pushes no field,
+the gradient of a potential vanishing on every wall, on the reflecting box
+and, with `--baffle`, on a box a reflecting baffle divides from wall to wall,
+drawn as the editor draws one, the flux on the baffle's left alone. Stepped
+400 steps in f64 the mode is exact, Q at 1e-24 of its energy and the energy
+kept to 1e-16; on the device b stays within `2.6e-8` of the reference, Q at
+1e-24 and the energy within `2e-9`, where the bound is 1e-8, and the right
+side of the baffle holds nothing, to the bit. The carry onto a mesh 1.4 times
+finer, through the maps the runtime prepares for the edit, has its own
+budget, the carried flux against the mode sampled on the new mesh, `4.0e-5`
+on the box at edge 0.16 and `1.5e-4` on the baffled one, falling eightfold
+at half the edge; within it the flux's first moment is kept to 1.6e-7 and
+2.2e-6, the carried flux's compatible share in the new space is 3e-10 and
+5e-9, what that share pushes into Q over 400 steps is 1.3e-10 and 2e-9, and
+nothing crosses the baffle. With `--remesh` the device steps the carried
+state and stays within `5.2e-7` of the reference. The end-to-end fixture the
+plan named is not built: the driver acts through the app's handlers alone,
+and the app has no tool that authors a complementary flux.
+
 The walls step by the trapezoid rule
 (`docs/spikes/funfern-outgoing-wall-step-spike.md`) on the reference and the
 device alike; `--half-kicks` on `canonical_gpu_timing`,
