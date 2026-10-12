@@ -1304,6 +1304,13 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   banded LU and its two substitutions are about three quarters of the solve;
   a cycle ordered along itself with its wrap as a border would halve the
   bandwidth, and a second preparation thread would halve the wall time again.
+  The first scene with two pieces an element apart, the U's one-sided arms
+  beside the line between them, failed to load the same day: the mesh
+  pattern holds zeros between pieces, and one written at the other piece's
+  position erased an arm's diagonal. Entries between pieces are skipped, a
+  nonzero outside a band is refused in every build, and the oracle test
+  hands the solve the signature's entries, zeros included, with that scene
+  among them.
 
 - [x] Adaptation keeps running while the simulation is paused. Reported by
   the user on 2026-10-03, not yet reproduced. `refresh_amr`

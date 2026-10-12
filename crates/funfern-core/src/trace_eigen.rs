@@ -139,6 +139,24 @@ impl SymmetricBand {
         }
     }
 
+    /// Stores an operator entry. A zero outside the storage is nothing to
+    /// store; a nonzero there is refused, in every build: the ordering bounds
+    /// the band from the same entries, so one it does not hold is a defect
+    /// in the numbering, and a band missing an entry solves some other
+    /// operator with no residual to show for it.
+    fn place(&mut self, row: usize, column: usize, value: f64) -> Result<(), WaveError> {
+        match self.index(row, column) {
+            Some(index) => {
+                self.data[index] = value;
+                Ok(())
+            }
+            None if value == 0.0 => Ok(()),
+            None => Err(WaveError::InvalidMesh(
+                "the outgoing trace ordering left an entry outside its band",
+            )),
+        }
+    }
+
     /// `A x`.
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         let w = self.half_width;
@@ -524,7 +542,7 @@ impl BandedEigenJob {
     fn unit(&mut self) -> Result<(), WaveError> {
         match self.phase {
             Phase::Order => {
-                self.order_components();
+                self.order_components()?;
                 self.phase = self.after_reduction(0);
             }
             Phase::Reduce {
@@ -568,8 +586,12 @@ impl BandedEigenJob {
 
     /// Splits the trace into its connected pieces and orders each by reverse
     /// Cuthill-McKee from a node of least degree, neighbours by degree then
-    /// index, so the order is a function of the graph alone.
-    fn order_components(&mut self) {
+    /// index, so the order is a function of the graph alone. The pieces come
+    /// from the nonzero entries; an entry between two pieces is a zero the
+    /// mesh pattern holds between trace nodes no wall element couples, as a
+    /// wall's end beside another wall has, and it is not stored: its
+    /// column's position belongs to the other piece's numbering.
+    fn order_components(&mut self) -> Result<(), WaveError> {
         let count = self.count;
         let mut adjacency = vec![Vec::new(); count];
         for &(row, column, value) in &self.entries {
@@ -666,14 +688,19 @@ impl BandedEigenJob {
             }
         }
         for &(row, column, value) in &self.entries {
+            if owner[row as usize] != owner[column as usize] {
+                debug_assert_eq!(value, 0.0, "a nonzero entry between pieces");
+                continue;
+            }
             let component = &mut self.components[owner[row as usize]];
             let (r, c) = (position[row as usize], position[column as usize]);
-            component.band.set(r, c, value);
-            component.work.set(r, c, value);
+            component.band.place(r, c, value)?;
+            component.work.place(r, c, value)?;
         }
         for component in &mut self.components {
             component.one_norm = component.band.one_norm();
         }
+        Ok(())
     }
 
     /// The phase after `component`'s reduction, or the values phase.
@@ -1034,6 +1061,15 @@ pub(crate) mod tests {
             .filter(|&(row, column)| matrix[row * count + column] != 0.0)
             .map(|(row, column)| (row as u32, column as u32, matrix[row * count + column]))
             .collect();
+        eigensolve_entries(entries, count)
+    }
+
+    /// The same solve from the operator's entries as the assembly hands them
+    /// over, explicit zeros included.
+    pub(crate) fn eigensolve_entries(
+        entries: Vec<(u32, u32, f64)>,
+        count: usize,
+    ) -> (Vec<f64>, Vec<f64>, usize, usize) {
         let mut job = BandedEigenJob::new(entries, count).unwrap();
         let mut units = 1;
         loop {
@@ -1225,8 +1261,65 @@ pub(crate) mod tests {
         }
     }
 
+    /// The trace's entries follow the mesh pattern, which holds a zero
+    /// between trace nodes that share an element but no wall element, as a
+    /// wall's end beside another wall does. Such an entry joins two pieces
+    /// whose numberings have nothing to do with each other; written into a
+    /// piece's band at the other piece's position it landed on whatever
+    /// entry sat there, a diagonal of 1172 on the first scene that had one,
+    /// which read as an eigenvalue of -443. Zeros between the pieces at
+    /// every pair of positions leave the solve exactly as it is without
+    /// them.
+    #[test]
+    fn zeros_between_pieces_leave_the_solve_unchanged() {
+        let count = 23;
+        let mut matrix = vec![0.0; count * count];
+        // A chain of 10 coupled over one and two steps, as a quadratic
+        // trace is, and a ring of 13.
+        for row in 0..10 {
+            matrix[row * count + row] += 3.0;
+            for (step, coupling) in [(1, -1.0), (2, -0.5)] {
+                if row + step < 10 {
+                    matrix[row * count + row + step] += coupling;
+                    matrix[(row + step) * count + row] += coupling;
+                }
+            }
+        }
+        for k in 0..13 {
+            let row = 10 + k;
+            let next = 10 + (k + 1) % 13;
+            matrix[row * count + row] += 2.0;
+            matrix[row * count + next] -= 1.0;
+            matrix[next * count + row] -= 1.0;
+        }
+        let entries = |zeros_between: bool| {
+            let mut entries = (0..count)
+                .flat_map(|row| (0..count).map(move |column| (row, column)))
+                .filter(|&(row, column)| matrix[row * count + column] != 0.0)
+                .map(|(row, column)| (row as u32, column as u32, matrix[row * count + column]))
+                .collect::<Vec<_>>();
+            if zeros_between {
+                for chain in 0..10_u32 {
+                    for ring in 10..23_u32 {
+                        entries.push((chain, ring, 0.0));
+                        entries.push((ring, chain, 0.0));
+                    }
+                }
+            }
+            entries
+        };
+        let (plain_values, plain_vectors, _, _) = eigensolve_entries(entries(false), count);
+        let (values, vectors, _, _) = eigensolve_entries(entries(true), count);
+        assert_eq!(values, plain_values);
+        assert_eq!(vectors, plain_vectors);
+        let [residual, orthogonality] = eigen_errors(&matrix, count, &values, &vectors);
+        assert!(residual < 1.0e-14, "{residual:e}");
+        assert!(orthogonality < 1.0e-13, "{orthogonality:e}");
+    }
+
     /// An empty trace answers at once; an asymmetric one and one with a
-    /// repeated entry are refused.
+    /// repeated entry are refused, and so is a nonzero outside a band's
+    /// storage, where a zero is nothing to store.
     #[test]
     fn the_trace_eigensolve_refuses_what_is_not_a_symmetric_operator() {
         let mut empty = BandedEigenJob::new(Vec::new(), 0).unwrap();
@@ -1235,5 +1328,10 @@ pub(crate) mod tests {
         assert!(BandedEigenJob::new(vec![(0, 1, 1.0), (1, 0, 1.5)], 2).is_err());
         assert!(BandedEigenJob::new(vec![(0, 0, 1.0), (0, 0, 1.0)], 2).is_err());
         assert!(BandedEigenJob::new(vec![(0, 2, 1.0)], 2).is_err());
+        let mut band = SymmetricBand::new(3, 1);
+        assert!(band.place(0, 2, 0.0).is_ok());
+        assert!(band.place(0, 2, 1.0).is_err());
+        assert!(band.place(0, 1, 1.0).is_ok());
+        assert_eq!(band.get(0, 1), 1.0);
     }
 }

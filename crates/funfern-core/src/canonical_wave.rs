@@ -6209,39 +6209,98 @@ mod tests {
     }
 
     /// The banded solve against the dense one it replaced, on a trace
-    /// operator from a meshed scene with four second-order walls, on a ring
-    /// and on a general matrix: the same eigenvalues to roundoff, an
-    /// orthonormal basis that rebuilds the operator, and the same vector up to
-    /// sign wherever an eigenvalue stands alone. Where eigenvalues repeat,
-    /// as a square's symmetry makes them, either basis of the pair serves.
+    /// operator from a meshed scene with four second-order walls, on the
+    /// trace in four pieces of the scene that failed to load on 12 October,
+    /// on a ring and on a general matrix: the same eigenvalues to roundoff,
+    /// an orthonormal basis that rebuilds the operator, and the same vector
+    /// up to sign wherever an eigenvalue stands alone. Where eigenvalues
+    /// repeat, as a square's symmetry makes them, either basis of the pair
+    /// serves.
+    ///
+    /// The traces reach the banded solve as the assembly hands them over,
+    /// explicit zeros included; a dense copy would lose what the second
+    /// scene tests. Its U-shaped wall is outgoing along the inside of its
+    /// arms, the line between the arms along one side, and the arms' ends
+    /// are 0.05 from the line's: the mesh pattern holds zeros between the
+    /// pieces, and at the edge of 0.08 the solve wrote one over an arm's
+    /// diagonal of 1172, which gave the arm an eigenvalue of -443 and the
+    /// scene a refusal to load.
     #[test]
     fn the_banded_trace_eigensolve_agrees_with_the_dense_oracle() {
         use crate::trace_eigen::tests as banded;
-        let scene = Scene::initial();
-        let mesh = crate::mesh_scene(
-            &scene,
-            1,
-            crate::MeshingOptions {
-                target_edge_length: 0.16,
-                ..crate::MeshingOptions::default()
-            },
-        )
-        .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
-        )
-        .unwrap();
-        let signature = outgoing_signature(&quadratic).unwrap().unwrap();
-        let count = signature.trace_nodes.len();
+        let trace_of = |scene: &Scene, edge: f64| {
+            let mesh = crate::mesh_scene(
+                scene,
+                1,
+                crate::MeshingOptions {
+                    target_edge_length: edge,
+                    ..crate::MeshingOptions::default()
+                },
+            )
+            .unwrap();
+            let quadratic = QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                scene,
+                OuterBoundaryCondition::SecondOrderOutgoing,
+            )
+            .unwrap();
+            let signature = outgoing_signature(&quadratic).unwrap().unwrap();
+            let count = signature.trace_nodes.len();
+            let mut trace = vec![0.0; count * count];
+            let mut entries = Vec::with_capacity(signature.entries.len());
+            let mut zeros = 0;
+            for &(row, column, value) in &signature.entries {
+                let scale =
+                    (signature.damping[row as usize] * signature.damping[column as usize]).sqrt();
+                trace[row as usize * count + column as usize] = value / scale;
+                entries.push((row, column, value / scale));
+                zeros += usize::from(value == 0.0);
+            }
+            (trace, entries, count, zeros)
+        };
+        let (trace, trace_entries, count, _) = trace_of(&Scene::initial(), 0.16);
         assert!(count > 100, "{count} trace nodes");
-        let mut trace = vec![0.0; count * count];
-        for &(row, column, value) in &signature.entries {
-            let scale =
-                (signature.damping[row as usize] * signature.damping[column as usize]).sqrt();
-            trace[row as usize * count + column as usize] = value / scale;
-        }
+        let one_sided = crate::InternalBoundaryLaw {
+            left: crate::FaceBoundaryCondition::SecondOrderOutgoing,
+            ..crate::InternalBoundaryLaw::REFLECTING
+        };
+        let mut pieces = Scene::default();
+        pieces.internal_boundaries.push(crate::InternalBoundary {
+            id: crate::InternalBoundaryId(1),
+            spline: crate::OpenCubicSpline::new_with_multiplicities(
+                vec![
+                    Point2::new(0.0, 0.6),
+                    Point2::new(-0.2833333333333333, 0.6),
+                    Point2::new(-0.5666666666666667, 0.6),
+                    Point2::new(-0.85, 0.6),
+                    Point2::new(-0.85, 0.2),
+                    Point2::new(-0.85, -0.2),
+                    Point2::new(-0.85, -0.6),
+                    Point2::new(-0.5666666666666667, -0.6),
+                    Point2::new(-0.2833333333333333, -0.6),
+                    Point2::new(0.0, -0.6),
+                ],
+                vec![0.85, 1.2, 0.85],
+                vec![3, 3],
+            )
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![one_sided, crate::InternalBoundaryLaw::REFLECTING, one_sided],
+        });
+        pieces.internal_boundaries.push(crate::InternalBoundary {
+            id: crate::InternalBoundaryId(2),
+            spline: crate::OpenCubicSpline::uniform(vec![
+                Point2::new(0.0, -0.55),
+                Point2::new(0.0, -0.55 / 3.0),
+                Point2::new(0.0, 0.55 / 3.0),
+                Point2::new(0.0, 0.55),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![one_sided],
+        });
+        let (pieces, pieces_entries, pieces_count, pieces_zeros) = trace_of(&pieces, 0.08);
+        assert!(pieces_zeros > 0, "no zero entries between the pieces");
         let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
         let mut random = move || {
             seed ^= seed << 13;
@@ -6258,10 +6317,11 @@ mod tests {
                 general[column * general_count + row] = value;
             }
         }
-        for (name, matrix, count) in [
-            ("trace", trace, count),
-            ("ring", banded::ring(160), 160),
-            ("general", general, general_count),
+        for (name, matrix, entries, count) in [
+            ("trace", trace, Some(trace_entries), count),
+            ("pieces", pieces, Some(pieces_entries), pieces_count),
+            ("ring", banded::ring(160), None, 160),
+            ("general", general, None, general_count),
         ] {
             let norm = (0..count)
                 .map(|row| {
@@ -6271,7 +6331,10 @@ mod tests {
                 })
                 .fold(0.0, f64::max);
             let (dense_values, dense_vectors, _, _) = eigensolve(&matrix, count);
-            let (values, vectors, _, _) = banded::eigensolve(&matrix, count);
+            let (values, vectors, _, _) = match entries {
+                Some(entries) => banded::eigensolve_entries(entries, count),
+                None => banded::eigensolve(&matrix, count),
+            };
             for (value, dense) in values.iter().zip(&dense_values) {
                 assert!(
                     (value - dense).abs() <= 1.0e-12 * norm,

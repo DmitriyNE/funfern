@@ -22822,3 +22822,73 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — A zero between two pieces of the trace erased an arm's diagonal
+
+- **Reported.** The autosave refused to load the moment the U's arms and the
+  line between them were made outgoing along one side: "the outgoing
+  tangential operator is not positive semidefinite". Reproduced headlessly
+  on a copy of the file through `parse_document`,
+  `TopologyEditor::from_document` and `TopologyRuntime::request`; the commit
+  before the banded solve, f65ec0a, loaded the same scene, and a dense check
+  of the trace operator put its smallest eigenvalue at roundoff. The
+  operator was right and the solve of this morning was wrong.
+- **Cause.** With the one-sided walls the trace is four pieces: the outer
+  cycle of 268 nodes, the line's 29 and the arms' 23 each. The signature
+  carries the quadratic operator's pattern between trace nodes, and that
+  pattern holds explicit zeros between trace nodes that share a mesh
+  element but no wall element: an arm's end node and the line's end node,
+  0.05 apart. `order_components` wrote every entry into the row's piece at
+  the column's position, which for an entry between pieces is a position in
+  the other piece's numbering. Node 161 is position 1 of its arm and node
+  172 position 1 of the line, so the zero landed on the arm's diagonal and
+  erased 1172.3; the arm read an eigenvalue of -442.81 and the mode builder
+  refused it. The mirror arm has the same entries to the line, but there
+  the positions fell outside its band, where `set` drops a write silently
+  in a release build and only a debug assertion would have spoken.
+- **Why the tests missed it.** The test of a trace in pieces built
+  block-diagonal pieces with nothing between them. The oracle test turned
+  the signature into a dense matrix before handing it to the banded solve,
+  and a dense matrix has no explicit zeros. `Scene::initial`'s trace with
+  four second-order walls is one cycle. Nothing fed the solve what the
+  assembly feeds it, and nothing had two pieces an element apart.
+- **Change.** An entry between two pieces is skipped: the pieces are the
+  connected components of the nonzero entries, so such an entry is zero by
+  construction, and a debug assertion says so. The band is filled through
+  `SymmetricBand::place`, which stores a zero outside the storage as
+  nothing and refuses a nonzero there in every build, since a band missing
+  an entry solves some other operator with no residual to show for it;
+  `order_components` returns the refusal through `unit`. `set` stays for
+  the reduction's own zeroing.
+- **Unchanged where it loaded.** The trace of the same scene with the arms
+  reflecting, 297 nodes and 32 explicit zeros between its two pieces, all
+  of them outside the bands: eigenvalues and vectors are bit for bit what
+  they were, the same hash over every value before and after.
+- **Tests.** `trace_eigen`: `zeros_between_pieces_leave_the_solve_unchanged`
+  takes a chain of 10 coupled over one and two steps, as a quadratic trace
+  is, and a ring of 13, with a zero between every pair of nodes across the
+  two pieces in both directions; the solve must equal the one without the
+  zeros exactly, with residual under 1e-14, and before the fix it did not
+  converge. The refusal test checks `place` both ways. `canonical_wave`:
+  `the_banded_trace_eigensolve_agrees_with_the_dense_oracle` now hands the
+  banded solve the signature's entries as the assembly does, explicit zeros
+  included, and adds the scene that failed, built in core terms: the U
+  outgoing along the inside of its arms, the line between them outgoing
+  along one side, their ends 0.05 apart, meshed at 0.08, 343 trace nodes in
+  four pieces with 40 zero entries between them. Before the fix it read
+  -442.81 against the dense -7e-13. Fourteen placements of an outgoing hole
+  an element from the wall at three edge sizes never collided, which is why
+  the test carries the scene's own geometry; at an edge of 0.2 the same
+  scene failed by not converging instead. The throwaway load test is
+  deleted; the copy prepares in 66 ms, 1,517 vertices.
+- **Device.** `scripts/device-suite.sh`: the 69 GPU runs read what they
+  read this morning at 1bc6d82 to the last digit shown, state checksums
+  included, with only wall-clock timings differing, and the seven
+  end-to-end fixtures pass with the same readouts. The suite's first pass
+  ran the fixtures against a plain build of the app that replaced the e2e
+  binary at 08:17, during the GPU runs; they sat in the first-run tour
+  until the timeout and were rerun alone. The suite should keep its own
+  copy of that binary.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
