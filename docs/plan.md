@@ -1255,6 +1255,13 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   directory and checks the linked app for its driver, and the fixture
   wrapper links its binary too. Stage A0 is complete; A1 is next, after the
   fixture driver leaves the shipped binary.
+- [x] A separated span the mesher samples as one segment, its two sides the
+  same pair of trace vertices where transmitting neighbours merge the
+  junctions, could not be cut: every face-law case of every crystal rod in
+  the nightly wall sweep of 2026-10-12, "separated trace edge has invalid
+  adjacency", at every edge. Fixed the same day (`docs/engineering-log.md`):
+  such an edge is expanded with two pieces at the least, on the full rebuild
+  and the carving path alike, with no authored mesh changed.
 - [ ] The end-to-end fixture driver (`src/ui/e2e.rs`) lives in the shipped
   binary behind the `e2e` feature, which is why a plain build could replace
   the suite's app under its fixtures on 2026-10-12. Move the fixtures out:

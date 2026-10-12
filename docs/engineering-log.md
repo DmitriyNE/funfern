@@ -23268,3 +23268,49 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — A separated span sampled as one segment gets a midpoint on each side
+
+- **Reported.** The nightly wall sweep's first run, on 171f287, failed on
+  the three crystals, the scenes the gate leaves to it: 26,715 cases,
+  every face-law case of every rod, refused by the mesher as "separated
+  trace edge has invalid adjacency". The other 42 scenes read as they do
+  locally. The sweep at 0.2 never ran; the crystals took 445 to 1,382 s each
+  on the four-core runner.
+- **Cause.** A rod is a regular octagon of radius 0.04, its straight sides
+  0.03 long: one mesh segment at any edge, the Fine preset included, since a
+  chain is cut into `ceil(length / target)` pieces with a floor of one. A
+  separated span's two sides are expanded as chains of their own and cut
+  apart after the triangulation, each keeping its interior vertices between
+  the junctions they share. With a transmitting neighbour on each end the
+  junctions are one trace vertex each, both sides' chains were the same pair
+  of vertices, and the cut found one edge where it needed two. The same
+  octagon with a round spline passes, its curved spans subdivided for the
+  curve tolerance; a large octagon passes, its sides subdivided for the
+  edge; a drum's consecutive reflecting spans pass at any length, each
+  junction split into sectors so the sides never coincide; nesting a rod in
+  a subdomain changes nothing. On Metal at 0.16, 0.12, 0.08 and 0.04 alike,
+  so neither the Linux runner nor coarseness.
+- **Change.** `coinciding_separated_edges` names the edges of separated
+  spans whose two sides carry the same pair of trace vertices in the plan,
+  and `expand_step_chain` takes a minimum of two pieces for them, a
+  midpoint of its own on each side; the full rebuild and the carving path
+  both ask. A first version gave every separated edge two pieces and
+  changed eleven authored meshes, the drums from 470 to 588 vertices and the
+  obstacle array from 1,670 to 2,207, and failed three carving tests on
+  their requested sizes; the condition as landed changes no authored mesh,
+  all 92 of the regression test's reports identical to the last bit shown.
+- **Tests.** `topology_mesher_cuts_a_separated_span_shorter_than_an_element`:
+  the rod's octagon with one span separated, at 0.16 and 0.08, the box's
+  area with a trace on each side of the span; it fails on the old mesher
+  with the nightly's refusal. The photonic crystal through the wall sweep
+  at 0.16: 6,174 of 6,174 cases prepared, 1,543 of them twice, 211 refused
+  as the rules name, 334 s on ten threads, where the nightly prepared 455.
+- **Device.** `scripts/device-suite.sh`, run from its linked binaries: 76 of
+  76 pass, 73 of them reading what they read this afternoon to the last
+  digit shown; the three temporal AMR runs flip their transfer-alone
+  complementary line between -0.0 and 5e-8 as they do between any two runs
+  of one build, the item under "Worth checking sometime".
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

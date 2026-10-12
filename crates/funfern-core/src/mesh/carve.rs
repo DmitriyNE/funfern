@@ -1130,6 +1130,12 @@ impl TopologyCarveJob {
             .collect::<BTreeMap<_, _>>();
         let mut chains = BTreeMap::<(usize, Option<CurveTraceSide>), _>::new();
         let mut free_slits = BTreeMap::<(RegionId, CurveId), Vec<PlannedFaceStep>>::new();
+        let coinciding = super::topology_plan::coinciding_separated_edges(
+            self.plan
+                .domains
+                .iter()
+                .flat_map(|domain| domain.steps.iter().flatten()),
+        );
         for domain in &self.plan.domains {
             let mut edge_counts = BTreeMap::<usize, usize>::new();
             for step in domain.steps.iter().flatten() {
@@ -1206,11 +1212,17 @@ impl TopologyCarveJob {
                 };
                 let key = (step.edge, side);
                 if let std::collections::btree_map::Entry::Vacant(entry) = chains.entry(key) {
+                    let minimum_pieces = if coinciding.contains(&step.edge) {
+                        2
+                    } else {
+                        1
+                    };
                     entry.insert(expand_step_chain(
                         builder,
                         &trace_points,
                         &mut self.trace_vertices,
                         step,
+                        minimum_pieces,
                     )?);
                 }
                 let chain = &chains[&key];

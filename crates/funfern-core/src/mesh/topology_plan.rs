@@ -521,6 +521,43 @@ fn signed_polygon_area(builder: &MeshBuilder, polygon: &[usize]) -> f64 {
     0.5 * area
 }
 
+/// The edges of separated spans whose two sides share both trace vertices.
+/// A separated span's two sides are cut apart after the triangulation, each
+/// keeping its own interior vertices between the junctions they share; where
+/// the junctions are shared by both sides, a transmitting neighbour on each
+/// end merging the sectors a separated neighbour would keep apart, a span
+/// sampled as one segment leaves both sides the same pair of vertices, and
+/// the cut finds one edge where it needs two. Such an edge is expanded with
+/// two pieces at the least, a midpoint of its own on each side. A crystal's
+/// rods, octagons with sides of 0.03 and one span made separated, found
+/// this on 12 October, on every edge the slider offers.
+pub(super) fn coinciding_separated_edges<'a>(
+    steps: impl Iterator<Item = &'a PlannedFaceStep>,
+) -> BTreeSet<usize> {
+    let mut by_edge = BTreeMap::<usize, BTreeMap<CurveTraceSide, [TraceVertexId; 2]>>::new();
+    for step in steps {
+        let PlannedBoundarySource::Curve { side, .. } = step.boundary.source else {
+            continue;
+        };
+        if !matches!(step.boundary.behavior, Some(SpanBehavior::Separated { .. })) {
+            continue;
+        }
+        let mut traces = step.boundary.traces;
+        traces.sort();
+        by_edge.entry(step.edge).or_default().insert(side, traces);
+    }
+    by_edge
+        .into_iter()
+        .filter(|(_, sides)| {
+            matches!(
+                (sides.get(&CurveTraceSide::Left), sides.get(&CurveTraceSide::Right)),
+                (Some(left), Some(right)) if left == right
+            )
+        })
+        .map(|(edge, _)| edge)
+        .collect()
+}
+
 fn prepare_topology_builder(
     plan: &TopologyMeshPlan,
     builder: &mut MeshBuilder,
@@ -533,6 +570,11 @@ fn prepare_topology_builder(
     let mut trace_vertices = BTreeMap::new();
     let mut chains = BTreeMap::<(usize, Option<CurveTraceSide>), ExpandedChain>::new();
     let mut free_slits = BTreeMap::<(RegionId, CurveId), Vec<PlannedFaceStep>>::new();
+    let coinciding = coinciding_separated_edges(
+        plan.domains
+            .iter()
+            .flat_map(|domain| domain.steps.iter().flatten()),
+    );
 
     for domain in &plan.domains {
         let mut edge_counts = BTreeMap::<usize, usize>::new();
@@ -640,8 +682,18 @@ fn prepare_topology_builder(
                 }
                 let key = (step.edge, side);
                 if let std::collections::btree_map::Entry::Vacant(entry) = chains.entry(key) {
-                    let chain =
-                        expand_step_chain(builder, &trace_points, &mut trace_vertices, step)?;
+                    let minimum_pieces = if coinciding.contains(&step.edge) {
+                        2
+                    } else {
+                        1
+                    };
+                    let chain = expand_step_chain(
+                        builder,
+                        &trace_points,
+                        &mut trace_vertices,
+                        step,
+                        minimum_pieces,
+                    )?;
                     entry.insert(chain);
                 }
                 let chain = &chains[&key];
@@ -1695,18 +1747,21 @@ pub(super) fn trace_mesh_vertex(
     Ok(vertex)
 }
 
+/// `minimum_pieces` is 2 for a separated edge whose two sides share both
+/// trace vertices, see [`coinciding_separated_edges`], and 1 otherwise.
 pub(super) fn expand_step_chain(
     builder: &mut MeshBuilder,
     points: &BTreeMap<TraceVertexId, Point2>,
     trace_vertices: &mut BTreeMap<TraceVertexId, usize>,
     step: &PlannedFaceStep,
+    minimum_pieces: usize,
 ) -> Result<ExpandedChain, MeshError> {
     let boundary = step.boundary;
     let label = topology_label(boundary);
     let length = (boundary.points[1] - boundary.points[0]).norm();
-    let pieces = (length / builder.chain_target(boundary.points))
-        .ceil()
-        .max(1.0) as usize;
+    let pieces = ((length / builder.chain_target(boundary.points)).ceil() as usize)
+        .max(1)
+        .max(minimum_pieces);
     // The two sides of a separated span are expanded as separate chains that
     // run in opposite directions and must subdivide identically, so the
     // interior pieces are computed from the lower parameter to the higher one
@@ -3603,6 +3658,64 @@ mod tests {
         // so the exact junction node has one conforming trace even though the
         // branch itself has two separated faces away from the endpoint.
         assert_eq!(center_traces.len(), 1);
+    }
+
+    /// A separated span the mesher samples as one segment: a regular
+    /// octagon of radius 0.04, the crystals' rod, has sides of 0.03, one
+    /// segment at any edge, and with one side separated its two traces were
+    /// the same pair of junction vertices, so the cut found one edge where
+    /// it needed two: "separated trace edge has invalid adjacency", on every
+    /// face-law case of every rod in the nightly wall sweep of 12 October. A
+    /// separated edge now has two pieces at the least, a midpoint for each
+    /// side. The octagon meshes at the Coarse and Medium presets with the
+    /// span cut, a trace on each side, and the box's area.
+    #[test]
+    fn topology_mesher_cuts_a_separated_span_shorter_than_an_element() {
+        let eighth = std::f64::consts::TAU / 8.0;
+        let reach = 0.04 * (std::f64::consts::PI / (4.0 * eighth.sin())).sqrt();
+        let octagon = PeriodicCubicSpline::polygon(
+            (0..8)
+                .map(|index| {
+                    let angle = (index as f64 + 0.5) * eighth;
+                    Point2::new(0.1 + reach * angle.cos(), 0.1 + reach * angle.sin())
+                })
+                .collect(),
+        )
+        .unwrap();
+        let mut spans = spans(50, 8, SpanBehavior::Transmitting);
+        spans[0].behavior = SpanBehavior::REFLECTING;
+        let curve = TopologyCurve::new(CurveId(5), CurveSpline::Closed(octagon), spans).unwrap();
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![curve],
+                ..TopologyGeometry::default()
+            },
+            23,
+        )
+        .unwrap();
+        for edge in [0.16, 0.08] {
+            let mesh = mesh_snapshot_at(&topology, &assign_each_face(&topology), edge)
+                .unwrap_or_else(|error| panic!("edge {edge}: {error}"));
+            assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9, "edge {edge}");
+            let sides = mesh
+                .boundary_edges
+                .iter()
+                .filter_map(|boundary| match boundary.label {
+                    BoundaryLabel::Curve {
+                        span: CurveSpanId(50),
+                        side,
+                        separated,
+                        ..
+                    } => Some((side, separated)),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                sides,
+                BTreeSet::from([(CurveTraceSide::Left, true), (CurveTraceSide::Right, true)]),
+                "edge {edge}"
+            );
+        }
     }
 
     #[test]
