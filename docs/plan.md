@@ -1270,10 +1270,11 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   browser bundle for the SwiftShader fixtures; switch every script and job
   to it; then remove the feature from the main binary, once nothing builds
   it. Deprecated from 2026-10-12: the feature stays only until the move is
-  complete. Native half done the same day (`docs/engineering-log.md`): the
+  complete. Done the same day (`docs/engineering-log.md`): the
   `funfern-fixtures` binary, the device suite, the fixture wrapper, the
-  lavapipe and mutation jobs on it. Left: the browser bundles
-  (`scripts/browser-suite.sh`, the `dist-e2e` job), then the feature.
+  lavapipe and mutation jobs on it, then the browser bundles from the page
+  `scripts/fixtures-page.sh` writes. Left: the feature's removal, now that
+  nothing builds it.
 - [ ] No fixture or device example hands off a generation with a driven
   wall: a prescribed Dirichlet or Neumann node's carried phase across a
   handoff can be zeroed in the runtime transfer shader and nothing fails,

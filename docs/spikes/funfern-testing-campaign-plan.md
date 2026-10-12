@@ -245,8 +245,8 @@ runs is hard-linked into its log directory and run from there, the linked
 app checked for its driver first; the fixture wrapper links its binary the
 same way. Stage A0 is complete. The driver's place in the shipped binary is
 the hazard's root, and moving the fixtures out of it follows as its own
-item: the `funfern-fixtures` binary took the native consumers the same day,
-the browser bundles and the feature's removal follow.
+item: the `funfern-fixtures` binary took the native consumers and then the
+browser bundles the same day; the feature's removal follows.
 
 ## 4. Stage A1: the architecture's own physics
 

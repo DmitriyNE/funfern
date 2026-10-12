@@ -3,12 +3,12 @@ import { expect, test } from "@playwright/test";
 import { expectedBuildId } from "./build-id.mjs";
 
 // The app's end-to-end fixtures (crates/funfern-app/src/ui/e2e.rs) in the
-// browser: a bundle built with the e2e feature runs the fixture `?e2e=` names
-// through the app's own handlers on the page's WebGPU device and writes its
+// browser: the bundle of the `funfern-fixtures` binary runs the fixture `?e2e=`
+// names through the app's own handlers on the page's WebGPU device and writes its
 // verdict on the root element. The list is the device suite's run lines, not
 // its driver probe, so the native, software-Vulkan and browser runs cannot
 // part. `npm run test:e2e` serves `dist-e2e`, built with
-//   TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --dist dist-e2e
+//   scripts/fixtures-page.sh && scripts/trunk build fixtures.html --release --dist dist-e2e
 const allFixtures = [
   ...readFileSync("scripts/device-suite.sh", "utf8").matchAll(
     /'FUNFERN_E2E=([a-z-]+) funfern-fixtures'/g,
@@ -33,7 +33,7 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // blocks the site's storage refuses them, where the page runs without its
 // worker pool after one reload. `npm run test:e2e:pages` and
 // `test:e2e:pages-blocked` serve `dist-e2e-pages`, built with
-//   TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --public-url /funfern/ --dist dist-e2e-pages
+//   scripts/trunk build fixtures.html --release --public-url /funfern/ --dist dist-e2e-pages
 // under that prefix.
 const hosting = process.env.FUNFERN_E2E_HOSTING ?? "isolated";
 const viaPages = hosting === "pages" || hosting === "pages-blocked";

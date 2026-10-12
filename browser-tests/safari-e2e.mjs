@@ -2,7 +2,7 @@
 // browser runs Safari's WebGPU, so this runs by hand on a Mac with "Allow
 // remote automation" on in Safari's developer settings:
 //
-//   TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --dist dist-e2e
+//   scripts/fixtures-page.sh && scripts/trunk build fixtures.html --release --dist dist-e2e
 //   node browser-tests/safari-e2e.mjs            every fixture the device suite names
 //   node browser-tests/safari-e2e.mjs cavity     the ones named
 //

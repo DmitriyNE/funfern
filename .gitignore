@@ -3,6 +3,7 @@
 /dist-e2e/
 /dist-e2e-pages/
 /dist-e2e-plain/
+/fixtures.html
 /node_modules/
 /.playwright-browsers/
 /playwright-report/

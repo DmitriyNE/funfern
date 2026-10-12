@@ -88,12 +88,13 @@ runner, the rejection fixture the longest, under a driver deadline the script
 raises to 600 s for the software device; the Pages deploy waits for the job. Lavapipe flushes subnormals to zero, which is how it
 found the nonlinear inverse's relative convergence tests unreachable near zero.
 
-The same fixtures run in the browser from a bundle built with the `e2e`
-feature, `TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build
---release --dist dist-e2e`, which the Pages bundle is not. The feature is
-deprecated since 2026-10-12: it adds the driver to the shipped binary as it
-always did, and only the browser bundles still build it, until they move to
-the fixtures binary and it goes. `npm run test:e2e` serves it
+The same fixtures run in the browser from the fixtures binary's bundle,
+`scripts/fixtures-page.sh && scripts/trunk build fixtures.html --release
+--dist dist-e2e`: the page script writes `fixtures.html`, `index.html` with
+its rust link pointed at `funfern-fixtures`, generated and never committed,
+and Trunk writes the bundle's page as `index.html` as for the shipped one.
+The Pages bundle is the shipped binary's. The `e2e` feature is deprecated
+since 2026-10-12 and nothing builds it; it goes next. `npm run test:e2e` serves it
 cross-origin isolated and opens `?e2e=<fixture>` for each fixture the device
 suite names; the driver writes its verdict on the page's root element,
 `data-funfern-e2e` reading `pass` or `fail` beside `data-funfern-e2e-summary`,
@@ -141,8 +142,8 @@ The site itself is served another way: GitHub Pages sends no isolation
 headers, so the page installs `coi-serviceworker.js`, which adds them to every
 response, and reloads once. `npm run test:e2e:pages` runs the fixtures as the
 site runs them: a bundle built for the production path,
-`TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release
---public-url /funfern/ --dist dist-e2e-pages`, served under `/funfern/`
+`scripts/trunk build fixtures.html --release --public-url /funfern/ --dist
+dist-e2e-pages`, served under `/funfern/`
 (`server.py --prefix`) without the headers. On the cold start the first
 navigation registers the worker and the page reloads itself - two navigations
 of the main frame, then the page is cross-origin isolated, a worker controls
@@ -151,7 +152,7 @@ in one navigation, the worker already there, and passes again, the build
 attribute checked on both. The cooperative builds run the
 same way. `npm run test:e2e:plain` serves the single-threaded bundle, built by
 plain `trunk` without the wrapper's shared memory
-(`TRUNK_BUILD_FEATURES=e2e trunk build --release --public-url /funfern/ --dist
+(`trunk build fixtures.html --release --public-url /funfern/ --dist
 dist-e2e-plain`), on the Pages path, where such a bundle lives, and holds the
 fixtures with no worker pool on the page (`FUNFERN_EXPECT_BROWSER_WORKER=0`);
 `npm run test:e2e:nopool` serves the threaded bundle under the headers with

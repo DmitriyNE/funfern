@@ -466,8 +466,8 @@ jobs:
           trunk --version
 
       - name: Restore build cache
-        # The web job's, read and never saved here: the fixtures' feature
-        # changes the app's own crate alone, so everything under it is reused.
+        # The web job's, read and never saved here: the fixtures binary is
+        # the app's own crate alone, so everything under it is reused.
         uses: actions/cache/restore@v6
         with:
           path: |
@@ -478,11 +478,12 @@ jobs:
             target/
           key: web-${{ runner.os }}-${{ env.WEB_RUST_VERSION }}-${{ env.TRUNK_VERSION }}-${{ hashFiles('Cargo.lock', 'scripts/trunk', 'Trunk.toml') }}
 
-      - name: Build the browser bundle with its end-to-end fixtures
+      - name: Build the browser bundle of the fixtures binary
         env:
-          TRUNK_BUILD_FEATURES: browser-threads,e2e
           FUNFERN_BUILD_ID: ${{ github.sha }}
-        run: scripts/trunk build --release --locked --dist dist-e2e
+        run: |
+          scripts/fixtures-page.sh
+          scripts/trunk build fixtures.html --release --locked --dist dist-e2e
 
       - name: Install Playwright's Chromium
         run: |

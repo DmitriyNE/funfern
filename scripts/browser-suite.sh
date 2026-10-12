@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs the app's end-to-end fixtures (src/ui/e2e.rs) in the browser on every
+# Runs the app's end-to-end fixtures (src/ui/e2e.rs) in the browser, from the
+# bundles of the `funfern-fixtures` binary (scripts/fixtures-page.sh), on every
 # way the bundle is hosted, and reports each run's verdict: the threaded
 # bundle under the isolation headers a server sends; the same with its worker
 # pool refused, as on iOS Safari, the work on the main thread; the bundle as
@@ -49,9 +50,10 @@ if [[ ${#selected[@]} -eq 0 ]]; then
 fi
 
 if [[ $build -eq 1 ]]; then
-  TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --dist dist-e2e || exit 1
-  TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --public-url /funfern/ --dist dist-e2e-pages || exit 1
-  TRUNK_BUILD_FEATURES=e2e trunk build --release --public-url /funfern/ --dist dist-e2e-plain || exit 1
+  scripts/fixtures-page.sh || exit 1
+  scripts/trunk build fixtures.html --release --dist dist-e2e || exit 1
+  scripts/trunk build fixtures.html --release --public-url /funfern/ --dist dist-e2e-pages || exit 1
+  trunk build fixtures.html --release --public-url /funfern/ --dist dist-e2e-plain || exit 1
 fi
 
 logs="target/browser-suite/$(date +%Y%m%d-%H%M%S)"

@@ -23410,3 +23410,31 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — The browser fixtures build the fixtures binary
+
+- **Change.** The second half of the move out of the shipped binary. Trunk
+  takes the binary from the page's rust link alone, so
+  `scripts/fixtures-page.sh` writes `fixtures.html`: `index.html` with that
+  one attribute pointed at `funfern-fixtures`, refused unless it finds
+  exactly one link, generated and never committed, so it cannot drift from
+  the page the app ships. Trunk writes the bundle's page as `index.html`
+  whatever the source is called, so the three fixture bundles keep the
+  layout the tests serve. `scripts/browser-suite.sh` and the `dist-e2e` job
+  build them from that page without the feature; the browser test files,
+  the Playwright config, the Trunk wrapper and the checks doc say so.
+  Nothing builds the `e2e` feature now but CI's clippy step on it, which
+  goes with the feature.
+- **Verification.** `scripts/browser-suite.sh` on Chrome, the three bundles built
+  from the generated page in 1,903 s with the runs: every bundle's page
+  loads `funfern-fixtures-<hash>.js` and its wasm, the shipped name left
+  only in the crate-named snippet directory wasm-bindgen writes;
+  5 of 5 hosting runs pass, isolated 73 s, no pool 71, Pages 127, blocked
+  203, plain 134, every fixture in each, cold and warm on the Pages runs,
+  the readings those of the native suite's fixtures on this GPU: the cavity
+  Q 6.224e-7, the switch 7.430e-7, the handoff 1.014e-6, the remesh
+  7.807e-7, the rejection 6.996e-7 for Metal's 7.069e-7, and the device-loss
+  stop 24 to 34 ms after the loss.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
