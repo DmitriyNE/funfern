@@ -41,7 +41,11 @@ for fixture in "${fixtures[@]}"; do
   home=$(mktemp -d)
   log="$logs/$fixture.log"
   started=$SECONDS
+  # The driver's own deadline, 120 s unless set, is for a GPU: on lavapipe
+  # the rejection fixture takes 110 to 118 s on the four-core runner, and
+  # took 127 on 2026-10-12. Six hundred here, inside the outer 900.
   HOME=$home VK_ICD_FILENAMES=$icd WGPU_BACKEND=vulkan FUNFERN_E2E=$fixture \
+    FUNFERN_E2E_DEADLINE=${FUNFERN_E2E_DEADLINE:-600} \
     timeout 900 xvfb-run -a -s "-screen 0 1280x800x24" "$target/release/funfern-fixtures" >"$log" 2>&1
   status=$?
   rm -rf "$home"

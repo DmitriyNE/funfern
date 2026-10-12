@@ -23373,3 +23373,24 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — The lavapipe fixtures get a deadline for a software device
+
+- **Reported.** The user: the same CI run on c997e3c, `FAIL (1) 127 s
+  rejection`, "did not finish in time, at waiting for the app to pause on
+  the refusal", after the fixture had reached the refusal at step 788 as
+  the reference does and the app had paused.
+- **Cause.** The driver gives a run 120 s unless `FUNFERN_E2E_DEADLINE`
+  says otherwise, a bound for a GPU. On lavapipe the rejection fixture, the
+  longest with its 788 steps and the retry, took 110, 118, 118 and 113 s in
+  the day's passing runs on the four-core runner, 55 s on a faster one, and
+  127 s on c997e3c: a margin of seconds, spent by the runner. The browser
+  job on SwiftShader already raises the deadline to 1,200 s for the same
+  reason; the lavapipe script left the default and bounded only the process,
+  at 900 s.
+- **Change.** `scripts/e2e-lavapipe.sh` sets the driver's deadline to 600 s
+  unless the caller set it, inside its outer 900. The checks doc's "about
+  forty seconds a fixture" becomes the measured 80 to 120.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

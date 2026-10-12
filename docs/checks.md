@@ -83,8 +83,9 @@ under a virtual X server: the job `Device fixtures on software Vulkan` builds
 the fixtures binary and runs `scripts/e2e-lavapipe.sh`, which takes the fixture
 list from the run lines of `scripts/device-suite.sh`, not its driver probe, and
 fails a run that did not report lavapipe's adapter. They read there as on the M1 Max - the cavity Q `6.4e-7` -
-each its own bits across batchings, in about forty seconds a fixture; the Pages
-deploy waits for the job. Lavapipe flushes subnormals to zero, which is how it
+each its own bits across batchings, in 80 to 120 s a fixture on the four-core
+runner, the rejection fixture the longest, under a driver deadline the script
+raises to 600 s for the software device; the Pages deploy waits for the job. Lavapipe flushes subnormals to zero, which is how it
 found the nonlinear inverse's relative convergence tests unreachable near zero.
 
 The same fixtures run in the browser from a bundle built with the `e2e`
