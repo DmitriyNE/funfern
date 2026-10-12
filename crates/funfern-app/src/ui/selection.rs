@@ -1,13 +1,11 @@
 //! What is selected and where its pivot sits: marquee resolution, span and
 //! curve selection, and the continuity a selected knot reports.
 
+use crate::document::ProbeSamplingPreset;
+use crate::topology_editor::TopologyProbeTarget;
+use crate::topology_viewport::{ScreenPoint, TopologyHit, TopologySelection, TopologySpanTarget};
 use bevy::prelude::*;
 use bevy_egui::egui::{self};
-use funfern_app::document::ProbeSamplingPreset;
-use funfern_app::topology_editor::TopologyProbeTarget;
-use funfern_app::topology_viewport::{
-    ScreenPoint, TopologyHit, TopologySelection, TopologySpanTarget,
-};
 use funfern_core::*;
 use std::collections::BTreeSet;
 
@@ -292,7 +290,7 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_viewport::{TopologyHandle, TopologyHit};
+    use crate::topology_viewport::{TopologyHandle, TopologyHit};
 
     /// One finger on `point` from `time` for `held` seconds, slid by `slide`
     /// pixels and lifted, with the viewport shown every tenth of a second.

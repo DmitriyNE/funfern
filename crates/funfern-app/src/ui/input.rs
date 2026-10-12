@@ -1,12 +1,12 @@
 //! Viewport pointer and keyboard handling: one pass over the frame's input
 //! that decides what the gesture in progress does.
 
-use bevy::prelude::*;
-use bevy_egui::egui::{self, Rect};
-use funfern_app::topology_viewport::{
+use crate::topology_viewport::{
     RigidTransform, ScreenPoint, TopologyHandle, TopologyHit, TopologySelection,
     TopologySpanTarget, plan_axis_scale, plan_handle_drag, plan_rigid_transform,
 };
+use bevy::prelude::*;
+use bevy_egui::egui::{self, Rect};
 use funfern_core::*;
 
 use super::*;

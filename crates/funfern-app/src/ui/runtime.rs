@@ -7,15 +7,15 @@ use crate::canonical_gpu::{
 };
 use crate::drawn_pacing::PacingNote;
 use crate::gpu_frame_timer::GpuFrameReading;
+use crate::topology_editor::TopologyAcceptance;
+use crate::topology_runtime::{
+    PreparedSolverUpdate, PreparedTopology, TopologyPreparationPhase, TopologyPreparationTiming,
+    TopologyToken,
+};
 use crate::wave_gpu::{VectorOverlayDisplay, WaveGpuRequest};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
-use funfern_app::topology_editor::TopologyAcceptance;
-use funfern_app::topology_runtime::{
-    PreparedSolverUpdate, PreparedTopology, TopologyPreparationPhase, TopologyPreparationTiming,
-    TopologyToken,
-};
 use funfern_core::*;
 use funfern_protocol::Acceptance;
 use funfern_protocol::decisions::{
@@ -921,7 +921,6 @@ impl Playground {
                         steps,
                         ceiling_bound: false,
                     });
-                    #[cfg(feature = "e2e")]
                     let batch = self.e2e_steps.batch.map_or(batch, |steps| FrameBatch {
                         steps,
                         ceiling_bound: false,
@@ -933,7 +932,6 @@ impl Playground {
                     );
                     // An end-to-end fixture's endpoint: the steps asked for
                     // stop there.
-                    #[cfg(feature = "e2e")]
                     let admitted = self.e2e_steps.limit.map_or(admitted, |limit| {
                         admitted.min(limit.saturating_sub(request.requested_steps()))
                     });
@@ -1819,7 +1817,7 @@ mod tests {
             .editor
             .create_closed_curve(
                 PeriodicCubicSpline::rounded(Point2::new(-0.5, 0.3), 0.15),
-                funfern_app::topology_editor::ClosedCurvePurpose::Subdomain { material: second },
+                crate::topology_editor::ClosedCurvePurpose::Subdomain { material: second },
             )
             .unwrap();
         settle(&mut state.editor);

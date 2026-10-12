@@ -1,16 +1,16 @@
 //! The viewport frame: the interaction surface, the grid drawn under it, and
 //! the vector overlay lattice refreshed behind it.
 
+use crate::document::VectorOverlay;
 use crate::material_overlay::MaterialOverlay;
+use crate::topology_editor::TopologyAcceptance;
+use crate::topology_runtime::PreparedTopology;
+use crate::topology_viewport::SampledTopologyGeometry;
 use crate::wave_gpu::{VectorOverlayDisplay, WaveDisplay, WaveGpuRequest};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use bevy_egui::egui::{self, Color32, Pos2, Rect, Sense, Stroke};
-use funfern_app::document::VectorOverlay;
-use funfern_app::topology_editor::TopologyAcceptance;
-use funfern_app::topology_runtime::PreparedTopology;
-use funfern_app::topology_viewport::SampledTopologyGeometry;
 use funfern_core::*;
 use std::sync::Arc;
 
@@ -339,7 +339,7 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::ClosedCurvePurpose;
+    use crate::topology_editor::ClosedCurvePurpose;
 
     /// Both axes step upwards from the lower bound. The vertical one used to
     /// start at the top of the view and test against the bottom, so the grid

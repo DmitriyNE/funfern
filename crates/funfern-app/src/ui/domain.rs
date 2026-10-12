@@ -272,7 +272,7 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::TopologyProbeTarget;
+    use crate::topology_editor::TopologyProbeTarget;
 
     /// egui only reports a drag once the pointer has passed `max_click_dist`,
     /// so a grab radius must still cover the control from that far away.

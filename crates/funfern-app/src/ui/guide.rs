@@ -9,12 +9,12 @@
 //! and on the scene card; seen once is a marker beside the autosave.
 
 use super::*;
-use funfern_app::document::VectorOverlay;
-use funfern_app::topology_editor::TopologyAcceptance;
-use funfern_app::topology_examples::{
+use crate::document::VectorOverlay;
+use crate::topology_editor::TopologyAcceptance;
+use crate::topology_examples::{
     GUIDE_GLASS, GUIDE_OBSTACLE, GUIDE_REGION, GUIDE_REGION_CURVE, guide_scene,
 };
-use funfern_app::topology_viewport::TopologySpanTarget;
+use crate::topology_viewport::TopologySpanTarget;
 
 /// A control a step points at. The top bar and the panels record where they
 /// drew these this frame; a step asks for its controls in order of
@@ -1160,8 +1160,8 @@ pub(super) fn dim_except(screen: Rect, holes: &[Rect]) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::{OpenCurvePurpose, TopologyProbeTarget};
-    use funfern_app::topology_viewport::{
+    use crate::topology_editor::{OpenCurvePurpose, TopologyProbeTarget};
+    use crate::topology_viewport::{
         RigidTransform, TopologySpanTarget, plan_axis_scale, plan_rigid_transform,
     };
 

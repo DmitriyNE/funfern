@@ -633,7 +633,7 @@ fn stepped_since_handoff(start: &mut Option<(u64, u64)>, generation: u64, step: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::TopologyEditor;
+    use crate::topology_editor::TopologyEditor;
 
     /// An adaptation spans many frames while the user may remesh underneath
     /// it. Once the active mesh is no longer the one the job started from, the

@@ -1,12 +1,12 @@
 //! The floating readouts: probe plots and profiles, the curve waterfalls,
 //! and the far-field direction/time views.
 
+use crate::topology_editor::TopologyProbeTarget;
 use crate::wave_gpu::{
     AreaProbeRecord, CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldRecord, PointProbeRecord,
 };
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, Rect, Stroke};
-use funfern_app::topology_editor::TopologyProbeTarget;
 use funfern_core::*;
 
 use super::line_plot::zoomable_line_plot;
@@ -56,7 +56,7 @@ impl Playground {
 
     /// The spectrum settings under a readout's Plots grid: decibels, and the
     /// highest frequency drawn.
-    fn spectrum_settings(ui: &mut egui::Ui, readout: &mut funfern_app::document::ProbeReadout) {
+    fn spectrum_settings(ui: &mut egui::Ui, readout: &mut crate::document::ProbeReadout) {
         ui.separator();
         ui.horizontal(|ui| {
             ui.checkbox(&mut readout.spectrum_decibels, "Spectra in dB");
@@ -79,8 +79,8 @@ impl Playground {
     /// field is divided by, from `candidates`, or nothing.
     fn transfer_settings(
         ui: &mut egui::Ui,
-        readout: &mut funfern_app::document::ProbeReadout,
-        candidates: &[(funfern_app::document::TransferReference, String)],
+        readout: &mut crate::document::ProbeReadout,
+        candidates: &[(crate::document::TransferReference, String)],
     ) {
         let chosen = readout.transfer_from.map_or_else(
             || "none".to_owned(),
@@ -1796,7 +1796,7 @@ mod tests {
 
     #[test]
     fn only_what_the_user_changes_reaches_the_document() {
-        use funfern_app::document::ProbeReadout;
+        use crate::document::ProbeReadout;
         let stored = ProbeReadout {
             span: 4.0,
             ..ProbeReadout::default()
@@ -1833,7 +1833,7 @@ mod tests {
 
     #[test]
     fn the_plot_matrix_addresses_every_cell_exactly_once() {
-        let view = ProbeViewState::new(funfern_app::document::ProbeReadout::default());
+        let view = ProbeViewState::new(crate::document::ProbeReadout::default());
         let mut seen = BTreeSet::new();
         for quantity in LineProbeQuantity::ALL {
             for representation in LineProbeRepresentation::ALL {

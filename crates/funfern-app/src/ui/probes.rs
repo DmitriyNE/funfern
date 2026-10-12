@@ -2,6 +2,10 @@
 //! recorder configuration, and folding readbacks back into the traces.
 
 use crate::canonical_gpu::CanonicalGpuDisplayClock;
+use crate::document::{ProbeId, ProbeSamplingPreset};
+use crate::topology_editor::{TopologyBoundaryProbeTarget, TopologyProbeTarget, span_path};
+use crate::topology_runtime::{PreparedTopology, TopologyProbeCompilation, TopologyProbeStencil};
+use crate::topology_viewport::{TopologySelection, TopologySpanTarget};
 use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, CurveProbeDisplay, CurveProbeInput, FarFieldDisplay,
     FarFieldHandoff, FarFieldInput, ProbeDisplay, RecorderContext, RecorderHistory, WaveGpuRequest,
@@ -9,12 +13,6 @@ use crate::wave_gpu::{
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use bevy_egui::egui::{self};
-use funfern_app::document::{ProbeId, ProbeSamplingPreset};
-use funfern_app::topology_editor::{TopologyBoundaryProbeTarget, TopologyProbeTarget, span_path};
-use funfern_app::topology_runtime::{
-    PreparedTopology, TopologyProbeCompilation, TopologyProbeStencil,
-};
-use funfern_app::topology_viewport::{TopologySelection, TopologySpanTarget};
 use funfern_core::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -791,8 +789,8 @@ fn line_probe_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::topology_editor::ClosedCurvePurpose;
     use crate::wave_gpu::PointProbeRecord;
-    use funfern_app::topology_editor::ClosedCurvePurpose;
 
     fn probe_upload(token: TopologyToken, generation: u64, revision: u64) -> ProbeUpload {
         ProbeUpload {
@@ -1169,7 +1167,7 @@ mod tests {
                 TopologyProbeTarget::Boundary(target),
             )
             .unwrap();
-        funfern_app::topology_persistence::save(&state.editor.document).unwrap();
+        crate::topology_persistence::save(&state.editor.document).unwrap();
     }
 
     /// A driven plan records nothing through a stencil that does not address

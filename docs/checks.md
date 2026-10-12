@@ -30,13 +30,14 @@ carry the fixture driver before the fixtures start. Nothing runs them in CI,
 which has no GPU.
 
 The examples drive the device request directly. The app's own end-to-end
-fixtures (`src/ui/e2e.rs`) run the app as it ships, built with the `e2e` feature
-and chosen by `FUNFERN_E2E=<fixture>`: a driver beside the frame acts only
+fixtures (`src/ui/e2e.rs`) run the app as it ships through the
+`funfern-fixtures` binary, the same app from the library with the driver
+added, chosen by `FUNFERN_E2E=<fixture>`: a driver beside the frame acts only
 through the app's handlers - it opens a document, places a pulse, presses Run -
 and reads only what the device accepted, its accepted-step counter, the serial
 of the last event it processed, and a full snapshot stamped with the step it
 holds. The f64 reference steps on the generation the app accepted, so on the
-same mesh. The one thing the feature adds to the app is where a run stops, since
+same mesh. The one thing the driver adds to the app is where a run stops, since
 the app asks for steps by the wall clock. The process exits 0 when the fixture
 holds; the suite runs each. `cavity` strikes a closed reflecting box of the
 default medium, grid filter off, with one pulse at step 0 and compares Q and b
@@ -86,9 +87,12 @@ each its own bits across batchings, in about forty seconds a fixture; the Pages
 deploy waits for the job. Lavapipe flushes subnormals to zero, which is how it
 found the nonlinear inverse's relative convergence tests unreachable near zero.
 
-The same fixtures run in the browser from a bundle built with the feature,
-`TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build --release --dist
-dist-e2e`, which the Pages bundle is not. `npm run test:e2e` serves it
+The same fixtures run in the browser from a bundle built with the `e2e`
+feature, `TRUNK_BUILD_FEATURES=browser-threads,e2e scripts/trunk build
+--release --dist dist-e2e`, which the Pages bundle is not. The feature is
+deprecated since 2026-10-12: it adds the driver to the shipped binary as it
+always did, and only the browser bundles still build it, until they move to
+the fixtures binary and it goes. `npm run test:e2e` serves it
 cross-origin isolated and opens `?e2e=<fixture>` for each fixture the device
 suite names; the driver writes its verdict on the page's root element,
 `data-funfern-e2e` reading `pass` or `fail` beside `data-funfern-e2e-summary`,

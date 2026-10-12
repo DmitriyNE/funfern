@@ -7,11 +7,11 @@ use super::line_plot::{fitted_band, zoomable_line_plot};
 use super::probe_view::{DECIBEL_RANGE, ProbeViewState};
 use super::signals::SignalUse;
 use super::*;
-use crate::wave_gpu::PointProbeRecord;
 #[cfg(test)]
-use funfern_app::document::DEFAULT_TRANSFER_SEGMENT;
-use funfern_app::document::TransferReference;
-use funfern_app::topology_editor::TopologyProbeTarget;
+use crate::document::DEFAULT_TRANSFER_SEGMENT;
+use crate::document::TransferReference;
+use crate::topology_editor::TopologyProbeTarget;
+use crate::wave_gpu::PointProbeRecord;
 
 /// What a transfer divides by: a probe's record, or a source's signal and
 /// what it drives.

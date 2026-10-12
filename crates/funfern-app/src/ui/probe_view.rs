@@ -14,8 +14,8 @@ pub(super) struct ProbeTrace {
     pub(super) last_time: f64,
 }
 
-pub(super) use funfern_app::document::{LineProbeQuantity, LineProbeRepresentation};
-use funfern_app::document::{ProbeReadout, TransferReference};
+pub(super) use crate::document::{LineProbeQuantity, LineProbeRepresentation};
+use crate::document::{ProbeReadout, TransferReference};
 
 /// What the readout draws for each line-probe quantity: its name in this skin,
 /// its colour, and whether the skin has it.

@@ -8,15 +8,15 @@ use crate::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuGenerationLayout, CanonicalGpuPlan, CanonicalGpuRuntimeTransfer,
     CanonicalGpuTransferPlan,
 };
+use crate::topology_runtime::{
+    PreparedTopology, TopologyPreparationError, TopologyPreparationJob, TopologyPreparationPhase,
+    TopologyPreparationTiming, TopologyToken,
+};
 #[cfg(any(
     not(target_arch = "wasm32"),
     all(target_arch = "wasm32", feature = "browser-threads")
 ))]
 use bevy::platform::time::Instant;
-use funfern_app::topology_runtime::{
-    PreparedTopology, TopologyPreparationError, TopologyPreparationJob, TopologyPreparationPhase,
-    TopologyPreparationTiming, TopologyToken,
-};
 use funfern_core::*;
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
 use std::sync::atomic::Ordering;
@@ -813,7 +813,7 @@ pub(super) fn dispatch_gpu_upload_preparation(
 mod tests {
     use super::super::*;
     use super::*;
-    use funfern_app::topology_editor::TopologyAcceptance;
+    use crate::topology_editor::TopologyAcceptance;
 
     /// A handoff describes the running generation from its prepared operators
     /// instead of packing it again. That description has to be the one its
@@ -821,9 +821,9 @@ mod tests {
     /// fixed, driven, nonlinear and oscillating.
     #[test]
     fn a_generations_layout_reads_the_same_off_its_operators_as_off_its_plan() {
-        use funfern_app::topology_editor::TopologyEditor;
-        use funfern_app::topology_examples::catalog;
-        use funfern_app::topology_runtime::TopologyRuntime;
+        use crate::topology_editor::TopologyEditor;
+        use crate::topology_examples::catalog;
+        use crate::topology_runtime::TopologyRuntime;
         for example in catalog() {
             let editor = TopologyEditor::from_document(example.document.clone()).unwrap();
             let mut runtime = TopologyRuntime::default();
@@ -897,7 +897,7 @@ mod tests {
             panic!("topology preparation did not finish");
         }
         let mut state = Playground {
-            editor: funfern_app::topology_editor::TopologyEditor::default(),
+            editor: crate::topology_editor::TopologyEditor::default(),
             ..Playground::default()
         };
         test_support::settle(&mut state.editor);
@@ -907,7 +907,7 @@ mod tests {
             .editor
             .create_closed_curve(
                 PeriodicCubicSpline::rounded(Point2::new(0.3, 0.2), 0.2),
-                funfern_app::topology_editor::ClosedCurvePurpose::Hole,
+                crate::topology_editor::ClosedCurvePurpose::Hole,
             )
             .unwrap();
         test_support::settle(&mut state.editor);
@@ -969,7 +969,7 @@ mod tests {
             .drive_sources
         }
         let mut state = Playground {
-            editor: funfern_app::topology_editor::TopologyEditor::default(),
+            editor: crate::topology_editor::TopologyEditor::default(),
             ..Playground::default()
         };
         test_support::settle(&mut state.editor);

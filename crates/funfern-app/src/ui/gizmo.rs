@@ -1,10 +1,10 @@
 //! The transform gizmo and the cursors: what the pointer is over, what a
 //! click would do, and the ring and grips that say it.
 
-use bevy_egui::egui::{self, Color32, Pos2, Rect, Stroke};
-use funfern_app::topology_viewport::{
+use crate::topology_viewport::{
     RigidTransform, ScreenPoint, TopologyHit, TopologySpanTarget, plan_rigid_transform,
 };
+use bevy_egui::egui::{self, Color32, Pos2, Rect, Stroke};
 use funfern_core::*;
 use std::collections::BTreeSet;
 
@@ -46,36 +46,30 @@ impl Playground {
         let radius = updates
             .iter()
             .map(|update| match update {
-                funfern_app::topology_viewport::TopologyTransformUpdate::Control {
-                    point, ..
+                crate::topology_viewport::TopologyTransformUpdate::Control { point, .. }
+                | crate::topology_viewport::TopologyTransformUpdate::Vertex { point, .. } => {
+                    center.distance(self.screen(*point, r))
                 }
-                | funfern_app::topology_viewport::TopologyTransformUpdate::Vertex {
-                    point, ..
-                } => center.distance(self.screen(*point, r)),
             })
             .fold(22.0_f32, f32::max)
             + GIZMO_PADDING;
         let x_radius = updates
             .iter()
             .map(|update| match update {
-                funfern_app::topology_viewport::TopologyTransformUpdate::Control {
-                    point, ..
+                crate::topology_viewport::TopologyTransformUpdate::Control { point, .. }
+                | crate::topology_viewport::TopologyTransformUpdate::Vertex { point, .. } => {
+                    (self.screen(*point, r).x - center.x).abs()
                 }
-                | funfern_app::topology_viewport::TopologyTransformUpdate::Vertex {
-                    point, ..
-                } => (self.screen(*point, r).x - center.x).abs(),
             })
             .fold(22.0_f32, f32::max)
             + GIZMO_PADDING;
         let y_radius = updates
             .iter()
             .map(|update| match update {
-                funfern_app::topology_viewport::TopologyTransformUpdate::Control {
-                    point, ..
+                crate::topology_viewport::TopologyTransformUpdate::Control { point, .. }
+                | crate::topology_viewport::TopologyTransformUpdate::Vertex { point, .. } => {
+                    (self.screen(*point, r).y - center.y).abs()
                 }
-                | funfern_app::topology_viewport::TopologyTransformUpdate::Vertex {
-                    point, ..
-                } => (self.screen(*point, r).y - center.y).abs(),
             })
             .fold(22.0_f32, f32::max)
             + GIZMO_PADDING;
@@ -289,7 +283,7 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::TopologyAcceptance;
+    use crate::topology_editor::TopologyAcceptance;
 
     /// A cursor appears for an affordance the drawing does not announce, or one
     /// whose direction matters, and stays away from drawn handles that move

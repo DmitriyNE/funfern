@@ -30,7 +30,6 @@ pub(crate) enum StopKind {
 impl RenderStopped {
     /// Whether [`announce`] has acted on it, which the end-to-end fixture
     /// that loses the device waits for.
-    #[cfg(feature = "e2e")]
     pub(crate) fn announced(&self) -> bool {
         self.announced
     }
@@ -93,7 +92,7 @@ fn policy(error: &RenderError, main_world: &mut World, _: &mut World) -> RenderE
 pub(crate) fn announce(
     stopped: Option<ResMut<RenderStopped>>,
     mut playground: ResMut<crate::ui::Playground>,
-    #[cfg(feature = "e2e")] driver: Option<Res<crate::ui::e2e::Driver>>,
+    driver: Option<Res<crate::ui::e2e::Driver>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(mut stopped) = stopped else {
@@ -106,7 +105,6 @@ pub(crate) fn announce(
     playground.autosave_now();
     let message = stopped.message();
     tell_page(stopped.attribute(), &message);
-    #[cfg(feature = "e2e")]
     if driver.is_some() {
         return;
     }

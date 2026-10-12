@@ -1,15 +1,15 @@
 //! Finding and moving probes in the viewport: hit tolerance, markers and
 //! badges, drag handling, and the metadata each probe carries.
 
+use crate::document::ProbeId;
+use crate::topology_editor::{
+    TopologyBoundaryProbeTarget, TopologyProbeDefinition, TopologyProbeTarget,
+};
+use crate::topology_runtime::{TopologyProbeCompilation, TopologyProbeStencil};
+use crate::topology_viewport::TopologySpanTarget;
 use crate::wave_gpu::PointProbeRecord;
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, Pos2, Rect};
-use funfern_app::document::ProbeId;
-use funfern_app::topology_editor::{
-    TopologyBoundaryProbeTarget, TopologyProbeDefinition, TopologyProbeTarget,
-};
-use funfern_app::topology_runtime::{TopologyProbeCompilation, TopologyProbeStencil};
-use funfern_app::topology_viewport::TopologySpanTarget;
 use funfern_core::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -417,7 +417,7 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::{
+    use crate::topology_editor::{
         ClosedCurvePurpose, TopologyAcceptance, TopologyBoundaryProbeTarget, TopologyProbeTarget,
     };
 

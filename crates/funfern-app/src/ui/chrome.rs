@@ -2,9 +2,9 @@
 //! whichever inspector is open.
 
 use crate::files::{self};
+use crate::topology_viewport::{TopologySelection, TopologySpanTarget};
 use bevy::prelude::*;
 use bevy_egui::egui::{self};
-use funfern_app::topology_viewport::{TopologySelection, TopologySpanTarget};
 use funfern_core::*;
 
 use super::*;
@@ -670,8 +670,8 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::TopologyProbeTarget;
-    use funfern_app::topology_viewport::TopologyHandle;
+    use crate::topology_editor::TopologyProbeTarget;
+    use crate::topology_viewport::TopologyHandle;
 
     /// The top bar laid out alone on a screen `width` wide, in the app's look.
     fn bar_at(state: &mut Playground, context: &egui::Context, width: f32) -> ToolbarFit {

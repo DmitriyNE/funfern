@@ -3,12 +3,12 @@
 
 use crate::files::{self, FileEvent, SaveKind};
 use crate::recording::{DestinationRequest, RecordingEvent};
+use crate::topology_editor::{TopologyDocument, TopologyEditor};
+use crate::topology_persistence::{self as persistence};
+use crate::topology_viewport::TopologySelection;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::egui::{self};
-use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
-use funfern_app::topology_persistence::{self as persistence};
-use funfern_app::topology_viewport::TopologySelection;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::AtomicUsize;
 #[cfg(not(target_arch = "wasm32"))]
@@ -542,9 +542,9 @@ mod tests {
         assert!(!state.pulse_mode);
     }
 
+    use crate::topology_editor::TopologyEditor;
+    use crate::topology_viewport::TopologySpanTarget;
     use crate::ui::test_support::*;
-    use funfern_app::topology_editor::TopologyEditor;
-    use funfern_app::topology_viewport::TopologySpanTarget;
 
     /// Reported: a load that finished during a domain-edge drag left the
     /// drag on, and the rest of it resized the loaded domain from the old
@@ -574,9 +574,7 @@ mod tests {
         }
         assert!(state.drag.is_some(), "the edge drag is under way");
 
-        let loaded = funfern_app::topology_examples::catalog()[2]
-            .document
-            .clone();
+        let loaded = crate::topology_examples::catalog()[2].document.clone();
         state
             .sender
             .send(FileEvent::Loaded(
@@ -716,7 +714,7 @@ mod tests {
         state.sim_time_offset = 3.0;
         state.sim_time_step = 0.01;
         state.amr_status = "monitoring solution".into();
-        let example = &funfern_app::topology_examples::catalog()[0];
+        let example = &crate::topology_examples::catalog()[0];
         state
             .set_document(example.document.clone(), true, true)
             .unwrap();
@@ -750,7 +748,7 @@ mod tests {
         let mut state = Playground::default();
         state.field_exposure.update(34.8, 0.016);
         state.vector_overlay_exposure.update(2.0, 0.016);
-        let example = &funfern_app::topology_examples::catalog()[0];
+        let example = &crate::topology_examples::catalog()[0];
         state
             .set_document(example.document.clone(), true, true)
             .unwrap();
@@ -886,7 +884,7 @@ mod tests {
             ..Playground::default()
         };
         settle(&mut state.editor);
-        let example = &funfern_app::topology_examples::catalog()[0];
+        let example = &crate::topology_examples::catalog()[0];
         state
             .set_document(example.document.clone(), true, true)
             .unwrap();
@@ -983,7 +981,7 @@ mod tests {
     #[test]
     fn loading_a_document_asks_for_a_field_that_starts_at_zero() {
         let mut state = Playground::default();
-        let example = &funfern_app::topology_examples::catalog()[0];
+        let example = &crate::topology_examples::catalog()[0];
         state
             .set_document(example.document.clone(), false, true)
             .unwrap();
@@ -1006,14 +1004,14 @@ mod tests {
     /// A scene file as version 21 wrote it, as far as this version can tell:
     /// the header is what turns it away.
     fn version_21_bytes() -> Vec<u8> {
-        let saved = persistence::save(&funfern_app::topology_examples::catalog()[1].document);
+        let saved = persistence::save(&crate::topology_examples::catalog()[1].document);
         let mut value: serde_json::Value = serde_json::from_str(&saved.unwrap()).unwrap();
         value["version"] = 21.into();
         serde_json::to_vec(&value).unwrap()
     }
 
     fn example_bytes(index: usize) -> Vec<u8> {
-        let document = &funfern_app::topology_examples::catalog()[index].document;
+        let document = &crate::topology_examples::catalog()[index].document;
         persistence::save(document).unwrap().into_bytes()
     }
 
@@ -1059,7 +1057,7 @@ mod tests {
         assert_eq!(state.example_opened, None);
         assert_eq!(
             state.editor.document,
-            funfern_app::topology_examples::guide_scene()
+            crate::topology_examples::guide_scene()
         );
         assert!(state.notices.is_empty());
 
@@ -1080,7 +1078,7 @@ mod tests {
 
         let mut state = Playground::default();
         state.open_startup_scene(None, || Ok(Some(example_bytes(2))), true);
-        let expected = &funfern_app::topology_examples::catalog()[2].document;
+        let expected = &crate::topology_examples::catalog()[2].document;
         assert_eq!(&state.editor.document, expected);
         assert_eq!(state.example_opened, None);
         assert!(state.notices.is_empty());
@@ -1091,7 +1089,7 @@ mod tests {
     /// restores the last session rather than leaving it to be autosaved over.
     #[test]
     fn a_link_that_does_not_open_leaves_the_last_session_to_restore() {
-        let expected = &funfern_app::topology_examples::catalog()[2].document;
+        let expected = &crate::topology_examples::catalog()[2].document;
         for (link, reason) in [
             (Ok(version_21_bytes()), "version 21"),
             (Err("Shared scene data is damaged".to_string()), "damaged"),
@@ -1177,7 +1175,7 @@ mod tests {
             || panic!("the autosave was read under a link that opened"),
             true,
         );
-        let expected = &funfern_app::topology_examples::catalog()[3].document;
+        let expected = &crate::topology_examples::catalog()[3].document;
         assert_eq!(&state.editor.document, expected);
     }
 
@@ -1274,7 +1272,7 @@ mod tests {
         state.open_startup_scene(Some(Ok(example_bytes(3))), || Ok(None), true);
         state.open_example(2);
         state.refresh_link();
-        let expected = &funfern_app::topology_examples::catalog()[2].document;
+        let expected = &crate::topology_examples::catalog()[2].document;
         assert_eq!(&scene_in(&address().unwrap()), expected);
     }
 
@@ -1289,7 +1287,7 @@ mod tests {
             true,
         );
         state.refresh_link();
-        let expected = &funfern_app::topology_examples::catalog()[2].document;
+        let expected = &crate::topology_examples::catalog()[2].document;
         assert_eq!(&scene_in(&address().unwrap()), expected);
     }
 
@@ -1310,7 +1308,7 @@ mod tests {
         assert_eq!(state.message, "Scene link copied");
         state.open_example(4);
         state.refresh_link();
-        let expected = &funfern_app::topology_examples::catalog()[4].document;
+        let expected = &crate::topology_examples::catalog()[4].document;
         assert_eq!(&scene_in(&address().unwrap()), expected);
     }
 

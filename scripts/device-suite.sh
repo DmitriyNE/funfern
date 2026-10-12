@@ -100,13 +100,13 @@ RUNS=(
   'canonical_gpu_timing --failure'
   'canonical_gpu_timing --loss --law-patch'
   # The app itself, driven through its own handlers (src/ui/e2e.rs).
-  'FUNFERN_E2E=cavity funfern-app'
-  'FUNFERN_E2E=cavity-batches funfern-app'
-  'FUNFERN_E2E=switch funfern-app'
-  'FUNFERN_E2E=handoff funfern-app'
-  'FUNFERN_E2E=remesh funfern-app'
-  'FUNFERN_E2E=rejection funfern-app'
-  'FUNFERN_E2E=device-loss funfern-app'
+  'FUNFERN_E2E=cavity funfern-fixtures'
+  'FUNFERN_E2E=cavity-batches funfern-fixtures'
+  'FUNFERN_E2E=switch funfern-fixtures'
+  'FUNFERN_E2E=handoff funfern-fixtures'
+  'FUNFERN_E2E=remesh funfern-fixtures'
+  'FUNFERN_E2E=rejection funfern-fixtures'
+  'FUNFERN_E2E=device-loss funfern-fixtures'
 )
 
 pattern=${1:-}
@@ -123,7 +123,7 @@ if [[ ${#selected[@]} -eq 0 ]]; then
 fi
 
 cargo build -p funfern-app --release --locked --examples || exit 1
-cargo build -p funfern-app --release --locked --features e2e --bin funfern-app || exit 1
+cargo build -p funfern-app --release --locked --bin funfern-fixtures || exit 1
 
 logs="target/device-suite/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$logs/bin"
@@ -132,12 +132,12 @@ trap 'rm -rf "$scratch"' EXIT
 # The app the fixtures run, linked and asked for a fixture that does not
 # exist: the driver refuses by name and exits 2, where the plain app would
 # open and wait.
-ln -f target/release/funfern-app "$logs/bin/funfern-app"
+ln -f target/release/funfern-fixtures "$logs/bin/funfern-fixtures"
 probe="$scratch/probe"
 mkdir -p "$probe/Library/Application Support/funfern"
 env HOME="$probe" FUNFERN_E2E=no-such-fixture \
   perl -e 'alarm shift @ARGV; exec @ARGV or die "$!\n"' 60 \
-  "$logs/bin/funfern-app" >"$logs/00-driver-check.log" 2>&1
+  "$logs/bin/funfern-fixtures" >"$logs/00-driver-check.log" 2>&1
 if [[ $? -ne 2 ]] || ! grep -q "no fixture named" "$logs/00-driver-check.log"; then
   echo "the app the suite linked has no fixture driver; see $logs/00-driver-check.log" >&2
   exit 1
@@ -157,7 +157,7 @@ for run in "${selected[@]}"; do
   example=$1
   shift
   binary="target/release/examples/$example"
-  [[ $example == funfern-app ]] && binary=target/release/funfern-app
+  [[ $example == funfern-fixtures ]] && binary=target/release/funfern-fixtures
   # The binary as built, kept by a link whatever a later build renames in.
   ln -f "$binary" "$logs/bin/$example"
   binary="$logs/bin/$example"

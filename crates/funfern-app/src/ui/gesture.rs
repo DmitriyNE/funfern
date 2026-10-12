@@ -1,10 +1,10 @@
 //! What a pointer gesture is currently doing, and what it landed on: draw and
 //! drag state, marquee modes, and the gizmo and probe hit results.
 use super::DrawTool;
+use crate::document::ProbeId;
+use crate::topology_editor::{TopologyAttachment, TopologyProbeTarget};
+use crate::topology_viewport::{AttachmentHit, TopologyHandle, TopologySpanTarget};
 use bevy_egui::egui::Pos2;
-use funfern_app::document::ProbeId;
-use funfern_app::topology_editor::{TopologyAttachment, TopologyProbeTarget};
-use funfern_app::topology_viewport::{AttachmentHit, TopologyHandle, TopologySpanTarget};
 use funfern_core::*;
 use std::collections::BTreeSet;
 

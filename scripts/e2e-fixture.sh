@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Runs one of the app's end-to-end fixtures (src/ui/e2e.rs), or one of its
-# GPU-versus-reference examples, as the device suite runs them: built with
-# `--features e2e` where the app is the binary, under a scratch HOME of its
-# own, on this machine's GPU, or on lavapipe under a virtual X server on
-# Linux, where the run must report lavapipe's adapter or it fails. Exits as
+# Runs one of the app's end-to-end fixtures (src/ui/e2e.rs) through the
+# `funfern-fixtures` binary, or one of its GPU-versus-reference examples, as
+# the device suite runs them: under a scratch HOME of its own, on this
+# machine's GPU, or on lavapipe under a virtual X server on Linux, where the run must report lavapipe's adapter or it fails. Exits as
 # the fixture or example exits: 0 when it holds, 1 when it does not. The
 # mutation runner names a run through this, so one manifest serves both
 # platforms.
@@ -22,8 +21,8 @@ if [[ ${1:-} == --example ]]; then
   environment=()
 else
   fixture=${1:?name a fixture}
-  cargo build -p funfern-app --release --locked --features e2e --bin funfern-app || exit 1
-  binary=target/release/funfern-app
+  cargo build -p funfern-app --release --locked --bin funfern-fixtures || exit 1
+  binary=target/release/funfern-fixtures
   environment=("FUNFERN_E2E=$fixture")
   set --
 fi

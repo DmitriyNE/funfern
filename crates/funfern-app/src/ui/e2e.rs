@@ -1,9 +1,9 @@
 //! End-to-end fixtures: the app as it ships, driven through its own handlers
 //! on this machine's GPU and judged against the f64 reference stepped on the
-//! generation the app accepted. Built with the `e2e` feature and chosen by
-//! `FUNFERN_E2E=<fixture>`; the process exits 0 when the fixture holds, and 1
-//! when it does not or does not finish in time. In the browser the fixture is
-//! `?e2e=<fixture>`, and the verdict is the page's: `data-funfern-e2e` on its
+//! generation the app accepted. Added by the `funfern-fixtures` binary
+//! (`crate::Build::Fixtures`) and chosen by `FUNFERN_E2E=<fixture>`; the
+//! process exits 0 when the fixture holds, and 1 when it does not or does not
+//! finish in time. In the browser the fixture is `?e2e=<fixture>`, and the verdict is the page's: `data-funfern-e2e` on its
 //! root element reads `pass` or `fail`, with `data-funfern-e2e-summary` beside
 //! it, and the driver's lines go to the console.
 //!
@@ -27,6 +27,8 @@ use crate::canonical_gpu::{
     CANONICAL_FAILURE_INVERSE_DOMAIN, CanonicalGpuHandoffOutcome, CanonicalGpuRuntimeTransfer,
     canonical_failure_description,
 };
+use crate::topology_editor::{ClosedCurvePurpose, TopologyDocument, TopologyEditor};
+use crate::topology_runtime::PreparedCanonicalTransfer;
 use bevy::render::{
     Render, RenderApp, RenderSystems,
     extract_resource::{ExtractResource, ExtractResourcePlugin},
@@ -34,8 +36,6 @@ use bevy::render::{
 };
 use bevy_egui::EguiPrimaryContextPass;
 use check::{within, worse};
-use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyDocument, TopologyEditor};
-use funfern_app::topology_runtime::PreparedCanonicalTransfer;
 use funfern_core::{
     CanonicalTemporalWaveState, CanonicalWaveState, OuterBoundaryCondition, OuterBoundaryConditions,
 };
@@ -961,7 +961,7 @@ fn advance(
             // The document, the change the autosave had not written included.
             let saved = crate::recovery::load()
                 .and_then(|bytes| bytes.ok_or_else(|| "no autosave".to_owned()))
-                .and_then(|bytes| funfern_app::topology_persistence::parse_document(&bytes));
+                .and_then(|bytes| crate::topology_persistence::parse_document(&bytes));
             let saved = match saved {
                 Ok(saved) => saved,
                 Err(error) => return Some(Err(format!("the autosave does not open: {error}"))),

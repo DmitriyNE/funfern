@@ -1,12 +1,12 @@
 //! Attaching an open end: what a drag can join to, the highlights that say
 //! so, and the weld that commits it.
 
-use bevy::prelude::*;
-use bevy_egui::egui::{self, Color32, Pos2, Rect, Stroke};
-use funfern_app::topology_editor::{TopologyAttachment, TopologyWeldOutcome};
-use funfern_app::topology_viewport::{
+use crate::topology_editor::{TopologyAttachment, TopologyWeldOutcome};
+use crate::topology_viewport::{
     AttachmentHit, ScreenPoint, TopologyHandle, TopologySelection, weld_hit,
 };
+use bevy::prelude::*;
+use bevy_egui::egui::{self, Color32, Pos2, Rect, Stroke};
 use funfern_core::*;
 
 use super::*;
@@ -307,7 +307,7 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::{
+    use crate::topology_editor::{
         OpenCurvePurpose, TopologyAcceptance, TopologyAttachment, TopologyEditor,
     };
 

@@ -390,7 +390,7 @@ mod tests {
     /// leave the nodes above it room to read brighter still.
     #[test]
     fn the_default_gain_paints_the_reference_level_in_the_readable_band() {
-        let default = funfern_app::document::PresentationSettings::default().field_gain;
+        let default = crate::document::PresentationSettings::default().field_gain;
         let scale = default * FIELD_EXPOSURE_GAIN;
         let base = field_color(0.0, Color32::TRANSPARENT);
         let at_reference = field_color(scale, Color32::TRANSPARENT);
@@ -531,7 +531,7 @@ mod tests {
     /// was before there was one: the slider as the whole scale.
     #[test]
     fn turning_auto_exposure_off_restores_the_plain_gain() {
-        let default = funfern_app::document::PresentationSettings::default();
+        let default = crate::document::PresentationSettings::default();
         assert!(default.field_auto_exposure, "it should start on");
         assert_eq!(field_scale(2.0, Some(0.02), false), 2.0);
         assert_eq!(field_scale(0.25, None, false), 0.25);

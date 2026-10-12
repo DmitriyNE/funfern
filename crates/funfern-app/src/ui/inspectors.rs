@@ -1,12 +1,12 @@
 //! The Edit inspector: what a selected handle, span or region offers, and
 //! the prompts that resolve a removal or a merge.
 
-use bevy::prelude::*;
-use bevy_egui::egui::{self, Color32, Pos2, Rect, Stroke};
-use funfern_app::topology_viewport::{
+use crate::topology_viewport::{
     RigidTransform, TopologyHandle, TopologySelection, TopologySpanTarget, plan_handle_drag,
     plan_rigid_transform, span_context,
 };
+use bevy::prelude::*;
+use bevy_egui::egui::{self, Color32, Pos2, Rect, Stroke};
 use funfern_core::*;
 use std::collections::BTreeSet;
 
@@ -742,8 +742,8 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyEditor};
-    use funfern_app::topology_viewport::screen_side;
+    use crate::topology_editor::{ClosedCurvePurpose, TopologyEditor};
+    use crate::topology_viewport::screen_side;
 
     /// The picker lists one set of names and the two condition enums answer
     /// with their own, so a condition used to rename itself the moment it was

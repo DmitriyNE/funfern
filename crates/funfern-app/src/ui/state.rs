@@ -1,20 +1,18 @@
 //! The editor resource itself: every piece of state one Playground carries,
 //! and the scene it starts on.
 
+use crate::document::{ProbeId, VectorOverlay};
 use crate::field_paint::FieldPaintTopology;
 use crate::files::FileEvent;
 use crate::material_overlay::{MaterialOverlayJob, MaterialOverlaySnapshot};
 use crate::recording::VideoRecorder;
+use crate::topology_editor::{TopologyDocument, TopologyEditor};
+use crate::topology_persistence::TopologyLoadCandidate;
+use crate::topology_runtime::{TopologyRuntime, TopologyToken};
+use crate::topology_viewport::{SampledTopologyGeometry, TopologySelection, TopologySpanTarget};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Rect};
-use funfern_app::document::{ProbeId, VectorOverlay};
-use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
-use funfern_app::topology_persistence::TopologyLoadCandidate;
-use funfern_app::topology_runtime::{TopologyRuntime, TopologyToken};
-use funfern_app::topology_viewport::{
-    SampledTopologyGeometry, TopologySelection, TopologySpanTarget,
-};
 use funfern_core::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(not(target_arch = "wasm32"))]
@@ -53,7 +51,6 @@ pub struct Playground {
     #[cfg(test)]
     pub(super) protocol_log: Vec<ProtocolNote>,
     /// Where an end-to-end fixture holds the run.
-    #[cfg(feature = "e2e")]
     pub(super) e2e_steps: e2e::E2eSteps,
     pub(super) selection: TopologySelection,
     pub(super) inspector: Option<InspectorPanel>,
@@ -315,7 +312,7 @@ pub struct Playground {
     pub(super) amr_report: Option<MeshAdaptationReport>,
     pub(super) gpu_status: &'static str,
     /// The grid filter is asked for but the running generation does not admit
-    /// it; see [`funfern_app::canonical_gpu::CanonicalGpuRequest::grid_scale_filter_refused`].
+    /// it; see [`crate::canonical_gpu::CanonicalGpuRequest::grid_scale_filter_refused`].
     pub(super) grid_filter_refused: bool,
     pub(super) gpu_dispatches: u64,
     pub(super) canonical_gpu_bytes: Option<usize>,
@@ -346,9 +343,7 @@ pub struct Playground {
 
 impl Default for Playground {
     fn default() -> Self {
-        let document = funfern_app::topology_examples::catalog()[0]
-            .document
-            .clone();
+        let document = crate::topology_examples::catalog()[0].document.clone();
         let editor = TopologyEditor::from_document(document.clone()).unwrap_or_default();
         let (sender, receiver) = mpsc::channel();
         Self {
@@ -363,7 +358,6 @@ impl Default for Playground {
             pack_inline: false,
             #[cfg(test)]
             protocol_log: Vec::new(),
-            #[cfg(feature = "e2e")]
             e2e_steps: e2e::E2eSteps::default(),
             selection: TopologySelection::None,
             inspector: Some(InspectorPanel::Edit),
@@ -399,7 +393,7 @@ impl Default for Playground {
             region_name_typed: false,
             formula_help_open: false,
             examples_open: false,
-            example_previews: funfern_app::topology_examples::catalog()
+            example_previews: crate::topology_examples::catalog()
                 .iter()
                 .map(|_| None)
                 .collect(),
@@ -445,7 +439,7 @@ impl Default for Playground {
             probe_name_edit: None,
             probe_name_typed: false,
             probe_history_seconds: 10.0,
-            far_field_view: ProbeViewState::new(funfern_app::document::ProbeReadout::default()),
+            far_field_view: ProbeViewState::new(crate::document::ProbeReadout::default()),
             probe_readback: 0,
             curve_probe_readback: 0,
             area_probe_readback: 0,

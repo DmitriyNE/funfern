@@ -1,4 +1,4 @@
-pub use funfern_app::document::{MaterialOverlay, MaterialProperty};
+pub use crate::document::{MaterialOverlay, MaterialProperty};
 use funfern_core::{MaterialCoordinates, QuadraticWaveOperator, RegionId, TopologyScene, TriMesh};
 use std::collections::BTreeMap;
 use std::sync::Arc;

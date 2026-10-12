@@ -23314,3 +23314,43 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-12 — The end-to-end fixtures run from their own binary
+
+- **Reported.** The fixture driver (`src/ui/e2e.rs`) lived in the shipped
+  binary behind the `e2e` feature, so the device suite's app was a build of
+  `funfern-app` that a plain build could replace, as one did this morning
+  (A0.5). The move out of the shipped binary is the hazard's root cause
+  fixed, and the first of the two steps the deprecation names.
+- **Change.** The app moves into the library: `lib.rs` declares every module
+  and holds the root the binary held, with `Build { Shipped, Fixtures }`
+  naming what runs, `native_main(binary, build)` and `browser_main(build)`
+  public; `main.rs` is twenty lines and `bin/funfern-fixtures.rs` fifteen.
+  The driver module is compiled always, its five feature gates in `stopped`,
+  `runtime`, `state` and `ui` gone, and `Build::Fixtures` adds it. The
+  modules name their own crate, `crate::` for `funfern_app::` in 166 places,
+  which is the bulk of the diff and rustfmt's reflow of it. The device
+  suite, the fixture wrapper, the lavapipe script, and the mutation and
+  lavapipe jobs build and run `funfern-fixtures`; `--version` prints the
+  binary's own name. The feature is deprecated: `main.rs` maps it to
+  `Build::Fixtures` as before, only the browser bundles still build it, and
+  the native clippy pass on it leaves CI, the fixtures binary being among
+  the workspace's bins.
+- **Why the library.** A first cut shared the root between the two binaries
+  through `include!`, and compiled; rustfmt does not follow `include!`, and
+  `cargo fmt --check` passed with a malformed function in `stopped.rs`:
+  every module reached only through the binary's root had left the format
+  check, which nothing would have said. The library's root is followed, and
+  the same probe fails as it should.
+- **Device.** `scripts/device-suite.sh funfern-fixtures`, the seven fixtures
+  through the linked `funfern-fixtures`, the driver probe first: 7 of 7
+  pass in 114 s, every endpoint hash and reading the same as this
+  afternoon's run on the shipped binary, the device-loss stop at 14 ms for
+  11. The fixture wrapper's cavity through the same binary, Q 6.224e-7,
+  the same bits. The examples are not touched and were not rerun.
+- **Left.** The browser fixtures: `scripts/browser-suite.sh`, the `dist-e2e`
+  job and `browser-tests` build the shipped binary with the feature; a page
+  for the fixtures binary moves them, and then the feature goes.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

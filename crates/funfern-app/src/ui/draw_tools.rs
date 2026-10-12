@@ -1,14 +1,14 @@
 //! The drawing tools: placing points, finishing a curve, creating it in the
 //! topology, and deleting a selection back out of it.
 
-use bevy::prelude::*;
-use bevy_egui::egui::Rect;
-use funfern_app::topology_editor::{
+use crate::topology_editor::{
     ClosedCurvePurpose, OpenCurvePurpose, TopologyRemoval, TopologyRemovalTarget,
 };
-use funfern_app::topology_viewport::{
+use crate::topology_viewport::{
     ScreenPoint, TopologyHandle, TopologySelection, TopologySpanTarget,
 };
+use bevy::prelude::*;
+use bevy_egui::egui::Rect;
 use funfern_core::*;
 use std::collections::BTreeSet;
 
@@ -495,7 +495,7 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::{TopologyAcceptance, TopologyEditor};
+    use crate::topology_editor::{TopologyAcceptance, TopologyEditor};
 
     /// A selection made in one document is not a material of the next. An
     /// undo past the material's creation leaves the Materials panel pointing
@@ -671,7 +671,7 @@ mod tests {
     fn deleting_several_curves_is_one_history_entry() {
         // The default playground opens an example, which this test is not about.
         let mut state = Playground {
-            editor: funfern_app::topology_editor::TopologyEditor::default(),
+            editor: crate::topology_editor::TopologyEditor::default(),
             ..Playground::default()
         };
         let settle = |state: &mut Playground| {
@@ -1139,7 +1139,7 @@ mod tests {
     /// two, a line that could never be finished.
     #[test]
     fn a_refused_two_click_shape_takes_its_second_click_back() {
-        use funfern_app::topology_examples::guide_scene;
+        use crate::topology_examples::guide_scene;
         let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
         // Both overlap the round region at the bottom, which a subdomain may
         // not; the retries stay clear of it.

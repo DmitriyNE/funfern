@@ -3,10 +3,10 @@
 
 use super::pacing::MAX_STEPS_PER_FRAME;
 use crate::recording::{self};
+use crate::topology_editor::{TopologyAcceptance, TopologyDocument};
+use crate::topology_runtime::TopologyPreparationPhase;
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, Pos2, Sense, Stroke};
-use funfern_app::topology_editor::{TopologyAcceptance, TopologyDocument};
-use funfern_app::topology_runtime::TopologyPreparationPhase;
 use funfern_core::*;
 
 use super::*;
@@ -208,7 +208,7 @@ impl Playground {
         if !self.examples_open {
             return;
         }
-        let catalog = funfern_app::topology_examples::catalog();
+        let catalog = crate::topology_examples::catalog();
         // At most one preview is built per frame. The largest example takes
         // about twenty milliseconds to compile, so building all of them at once
         // would drop a frame outright; this way a tile shows its name
@@ -328,7 +328,7 @@ impl Playground {
     }
 
     pub(super) fn open_example(&mut self, index: usize) {
-        let catalog = funfern_app::topology_examples::catalog();
+        let catalog = crate::topology_examples::catalog();
         match self.set_document(catalog[index].document.clone(), true, true) {
             Ok(()) => {
                 self.example_opened = Some(index);
@@ -354,7 +354,7 @@ impl Playground {
     /// Opens a catalog entry at random, for a launch with nothing to restore,
     /// which is a first launch but for an autosave gone missing.
     pub(super) fn open_random_example(&mut self) {
-        let catalog = funfern_app::topology_examples::catalog();
+        let catalog = crate::topology_examples::catalog();
         let index = random_example_index(random_fraction(), catalog.len());
         if let Err(error) = self.set_document(catalog[index].document.clone(), false, true) {
             self.notify(error);
@@ -1117,8 +1117,8 @@ mod tests {
             .collect()
     }
     use crate::material_overlay::MaterialProperty;
+    use crate::topology_editor::TopologyEditor;
     use crate::ui::test_support::*;
-    use funfern_app::topology_editor::TopologyEditor;
     use std::sync::Arc;
 
     /// The status bar tells the user's work from the app's own: an edit's
@@ -1429,7 +1429,7 @@ mod tests {
     /// only an outline, and every quad lands inside the scene it came from.
     #[test]
     fn a_thumbnail_fills_the_faces_of_the_scene_it_previews() {
-        let example = &funfern_app::topology_examples::catalog()[0];
+        let example = &crate::topology_examples::catalog()[0];
         let preview = build_example_preview(example);
         let domain = example.document.model.accepted.geometry.domain;
         assert!(preview.quads.len() > PREVIEW_ROWS, "a face was not filled");
@@ -1460,7 +1460,7 @@ mod tests {
     /// read at the corners alone is one flat colour.
     #[test]
     fn a_radial_material_profile_reaches_the_thumbnail() {
-        let example = funfern_app::topology_examples::catalog()
+        let example = crate::topology_examples::catalog()
             .iter()
             .find(|example| example.name == "Luneburg lens")
             .expect("the catalog still carries the Luneburg lens");
@@ -1712,7 +1712,7 @@ mod tests {
             examples_open: true,
             ..Playground::default()
         };
-        let index = funfern_app::topology_examples::catalog()
+        let index = crate::topology_examples::catalog()
             .iter()
             .position(|example| example.name == "Double slit")
             .unwrap();
@@ -1721,9 +1721,7 @@ mod tests {
         assert_eq!(state.example_opened, Some(index));
         assert_eq!(
             state.editor.document.model,
-            funfern_app::topology_examples::catalog()[index]
-                .document
-                .model
+            crate::topology_examples::catalog()[index].document.model
         );
         state.new_scene();
         assert_eq!(state.example_opened, None, "the marker outlived its scene");
@@ -1734,7 +1732,7 @@ mod tests {
     #[test]
     fn every_example_previews_and_the_cache_fills_one_per_frame() {
         let mut state = Playground::default();
-        let total = funfern_app::topology_examples::catalog().len();
+        let total = crate::topology_examples::catalog().len();
         assert_eq!(state.example_previews.len(), total);
         assert!(state.example_previews.iter().all(Option::is_none));
         for filled in 1..=total {
@@ -1744,7 +1742,7 @@ mod tests {
                 .position(Option::is_none)
                 .expect("an unbuilt preview");
             state.example_previews[index] = Some(build_example_preview(
-                &funfern_app::topology_examples::catalog()[index],
+                &crate::topology_examples::catalog()[index],
             ));
             assert_eq!(
                 state
@@ -1760,7 +1758,7 @@ mod tests {
             assert!(
                 !preview.quads.is_empty(),
                 "{} previews as nothing",
-                funfern_app::topology_examples::catalog()[index].name
+                crate::topology_examples::catalog()[index].name
             );
         }
     }
@@ -1768,7 +1766,7 @@ mod tests {
     /// The random start has to land on every example and never off the end.
     #[test]
     fn the_random_start_stays_inside_the_catalog() {
-        let total = funfern_app::topology_examples::catalog().len();
+        let total = crate::topology_examples::catalog().len();
         let mut seen = BTreeSet::new();
         for step in 0..=1000 {
             let index = random_example_index(f64::from(step) / 1000.0, total);

@@ -1,17 +1,17 @@
 //! Everything the viewport paints from committed state: the field itself, the
 //! vector overlay, probe markers and the geometry handles over them.
 
+use crate::document::VectorOverlay;
 use crate::field_paint::{FieldPaintCallback, FieldPaintEdge, FieldPaintTopology};
 use crate::material_overlay::{MaterialOverlay, MaterialProperty};
-use crate::wave_gpu::{VectorOverlayDisplay, WaveDisplay};
-use bevy::prelude::*;
-use bevy_egui::egui::{self, Color32, Pos2, Rect, Stroke};
-use funfern_app::document::VectorOverlay;
-use funfern_app::topology_editor::{TopologyAcceptance, TopologyProbeTarget};
-use funfern_app::topology_viewport::{
+use crate::topology_editor::{TopologyAcceptance, TopologyProbeTarget};
+use crate::topology_viewport::{
     SampledTopologyGeometry, ScreenPoint, TopologyHandle, TopologySelection, TopologySpanTarget,
     selected_span_controls,
 };
+use crate::wave_gpu::{VectorOverlayDisplay, WaveDisplay};
+use bevy::prelude::*;
+use bevy_egui::egui::{self, Color32, Pos2, Rect, Stroke};
 use funfern_core::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1701,8 +1701,8 @@ fn low_pass_advance(state: &mut VectorFilterState, input: Point2, a: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::document::VectorOverlay;
-    use funfern_app::topology_editor::TopologyEditor;
+    use crate::document::VectorOverlay;
+    use crate::topology_editor::TopologyEditor;
 
     /// The arrows stand within √2 of the spacing asked for at every zoom.
     #[test]

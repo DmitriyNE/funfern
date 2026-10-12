@@ -41,9 +41,9 @@
 
 use super::*;
 use crate::canonical_gpu::{CANONICAL_FAILURE_NON_FINITE, CanonicalGpuHandoffOutcome};
+use crate::topology_editor::TopologyEditor;
+use crate::topology_runtime::{PreparedSolverUpdate, TopologyToken};
 use bevy::ecs::world::CommandQueue;
-use funfern_app::topology_editor::TopologyEditor;
-use funfern_app::topology_runtime::{PreparedSolverUpdate, TopologyToken};
 use funfern_protocol as model;
 
 /// One step of the interleaving.

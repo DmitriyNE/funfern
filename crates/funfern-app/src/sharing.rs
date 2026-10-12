@@ -1,9 +1,7 @@
+use crate::{topology_editor::TopologyDocument as Document, topology_persistence as persistence};
 #[cfg(any(target_arch = "wasm32", test))]
 use flate2::read::ZlibDecoder;
 use flate2::{Compression, write::ZlibEncoder};
-use funfern_app::{
-    topology_editor::TopologyDocument as Document, topology_persistence as persistence,
-};
 #[cfg(any(target_arch = "wasm32", test))]
 use std::io::Read;
 use std::io::Write;

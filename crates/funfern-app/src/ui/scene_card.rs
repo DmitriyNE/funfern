@@ -1,8 +1,8 @@
 //! The card in the viewport's top-left corner while a gallery example is
 //! open: which one it is, what it shows, and the way on to the next.
 
+use crate::topology_examples::catalog;
 use bevy_egui::egui::{self, Rect};
-use funfern_app::topology_examples::catalog;
 
 use super::*;
 

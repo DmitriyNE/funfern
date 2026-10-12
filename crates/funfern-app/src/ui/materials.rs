@@ -1,9 +1,9 @@
 //! The material library and subdomain assignment: the Materials inspector,
 //! its face and region listings, and the editor for one region's properties.
 
+use crate::topology_editor::REGION_NAME_LIMIT;
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32};
-use funfern_app::topology_editor::REGION_NAME_LIMIT;
 use funfern_core::*;
 use std::collections::BTreeSet;
 
@@ -1369,7 +1369,7 @@ fn switch_label(heading: Option<bool>) -> &'static str {
 mod tests {
     use super::super::test_support::{click, laid_out, settle};
     use super::*;
-    use funfern_app::topology_examples::{GUIDE_REGION, GUIDE_REGION_CURVE, guide_scene};
+    use crate::topology_examples::{GUIDE_REGION, GUIDE_REGION_CURVE, guide_scene};
 
     fn roster_pass(
         state: &mut Playground,
@@ -1431,7 +1431,7 @@ mod tests {
         // A scene without holes: the empty one New makes, in a context of
         // its own.
         let mut empty = Playground {
-            editor: funfern_app::topology_editor::TopologyEditor::default(),
+            editor: crate::topology_editor::TopologyEditor::default(),
             ..Playground::default()
         };
         let fresh = egui::Context::default();
@@ -1885,8 +1885,8 @@ mod tests {
             !state.material_advanced(other),
             "the view is the material's own"
         );
-        let saved = funfern_app::topology_persistence::save(&state.editor.document).unwrap();
-        let loaded = funfern_app::topology_persistence::parse_document(saved.as_bytes()).unwrap();
+        let saved = crate::topology_persistence::save(&state.editor.document).unwrap();
+        let loaded = crate::topology_persistence::parse_document(saved.as_bytes()).unwrap();
         assert!(loaded.presentation.advanced_materials.contains(selection));
         assert!(!loaded.presentation.advanced_materials.contains(other));
         // The last undo step is still the added material: the view made none.
@@ -1899,15 +1899,13 @@ mod tests {
     /// removes at least a control's height for each of its 53 faces.
     #[test]
     fn the_subdomain_listing_folds_away() {
-        let crystal = funfern_app::topology_examples::catalog()
+        let crystal = crate::topology_examples::catalog()
             .iter()
             .find(|example| example.name == "Disordered crystal")
             .expect("the catalog carries the disordered crystal");
         let mut state = Playground {
-            editor: funfern_app::topology_editor::TopologyEditor::from_document(
-                crystal.document.clone(),
-            )
-            .unwrap(),
+            editor: crate::topology_editor::TopologyEditor::from_document(crystal.document.clone())
+                .unwrap(),
             ..Playground::default()
         };
         let context = egui::Context::default();
@@ -2415,7 +2413,7 @@ mod tests {
             .editor
             .create_closed_curve(
                 PeriodicCubicSpline::rounded(Point2::new(-0.5, 0.3), 0.15),
-                funfern_app::topology_editor::ClosedCurvePurpose::Subdomain { material },
+                crate::topology_editor::ClosedCurvePurpose::Subdomain { material },
             )
             .unwrap();
         settle(&mut state.editor);
@@ -2551,7 +2549,7 @@ mod tests {
             .editor
             .create_closed_curve(
                 PeriodicCubicSpline::rounded(Point2::new(-0.5, 0.3), 0.15),
-                funfern_app::topology_editor::ClosedCurvePurpose::Subdomain { material },
+                crate::topology_editor::ClosedCurvePurpose::Subdomain { material },
             )
             .unwrap();
         settle(&mut state.editor);
@@ -2626,7 +2624,7 @@ mod tests {
     /// one was picked by hand.
     #[test]
     fn an_opened_scene_keeps_none_of_the_old_ones_materials_open() {
-        let catalog = funfern_app::topology_examples::catalog();
+        let catalog = crate::topology_examples::catalog();
         let materials = |index: usize| &catalog[index].document.model.draft.materials;
         // Two scenes with a material of the same id that differs between them.
         let (first, second, picked) = (0..catalog.len())
@@ -2793,9 +2791,9 @@ mod tests {
             .unwrap();
         driver.pass(click(apply), |ui| state.materials_panel(ui));
         let document = &state.editor.document;
-        let saved = funfern_app::topology_persistence::save(document).unwrap();
+        let saved = crate::topology_persistence::save(document).unwrap();
         assert_eq!(
-            &funfern_app::topology_persistence::parse_document(saved.as_bytes()).unwrap(),
+            &crate::topology_persistence::parse_document(saved.as_bytes()).unwrap(),
             document,
             "the applied material comes back from a file as it was"
         );
@@ -2874,7 +2872,7 @@ mod tests {
             .find(|record| record.material() == material.id)
             .expect("the Switch material has a runtime record");
         assert_eq!(record.switch().target_blend(), 0.0, "it starts at its base");
-        funfern_app::canonical_gpu::CanonicalGpuLiveEvent::temporal_switch_in(
+        crate::canonical_gpu::CanonicalGpuLiveEvent::temporal_switch_in(
             &runtime,
             material.id,
             true,

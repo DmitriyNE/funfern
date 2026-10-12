@@ -1,10 +1,10 @@
 //! Helpers shared by the tests of several ui submodules.
 
 use super::*;
+use crate::topology_editor::{TopologyAcceptance, TopologyEditor};
+use crate::topology_runtime::PreparedTopology;
+use crate::topology_viewport::TopologySpanTarget;
 use bevy_egui::egui::{self, Pos2, Rect};
-use funfern_app::topology_editor::{TopologyAcceptance, TopologyEditor};
-use funfern_app::topology_runtime::PreparedTopology;
-use funfern_app::topology_viewport::TopologySpanTarget;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

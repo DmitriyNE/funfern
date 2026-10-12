@@ -4,9 +4,15 @@ use crate::canonical_gpu::{
     CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuTemporalManifest,
     CanonicalGpuTransferPlan,
 };
+use crate::document::{ProbeId, ProbeSamplingPreset, VectorOverlayStyle};
 use crate::files::FileEvent;
 use crate::material_overlay::MaterialOverlay;
 use crate::recording::{self, RecordingSpec};
+use crate::topology_examples::ExampleGroup;
+use crate::topology_runtime::{PreparedTopology, TopologyPreparationTiming, TopologyToken};
+use crate::topology_viewport::{
+    SampledTopologyGeometry, ScreenPoint, TopologySelection, ViewportTransform,
+};
 use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, CurveProbeDisplay, CurveProbeInput, FarFieldDisplay,
     ProbeDisplay, RecorderContext, VectorOverlayDisplay, WaveDisplay, WaveGpuRequest,
@@ -18,12 +24,6 @@ use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy_egui::{
     EguiContexts,
     egui::{self, Color32, Pos2, Rect, Sense, Stroke},
-};
-use funfern_app::document::{ProbeId, ProbeSamplingPreset, VectorOverlayStyle};
-use funfern_app::topology_examples::ExampleGroup;
-use funfern_app::topology_runtime::{PreparedTopology, TopologyPreparationTiming, TopologyToken};
-use funfern_app::topology_viewport::{
-    SampledTopologyGeometry, ScreenPoint, TopologySelection, ViewportTransform,
 };
 use funfern_core::*;
 use funfern_protocol::decisions::starts_from_zero;
@@ -43,7 +43,8 @@ mod coordinator;
 mod diagnostics;
 mod domain;
 mod draw_tools;
-#[cfg(feature = "e2e")]
+/// The end-to-end fixtures and their driver, which `crate::Build::Fixtures`
+/// adds to the app.
 pub(crate) mod e2e;
 mod events;
 mod exposure;
@@ -507,12 +508,12 @@ enum ProtocolNote {
 struct PreparedInputs {
     accepted: TopologyScene,
     source: PointSource,
-    probes: Vec<funfern_app::topology_editor::TopologyProbeDefinition>,
-    far_field: funfern_app::document::FarFieldSettings,
+    probes: Vec<crate::topology_editor::TopologyProbeDefinition>,
+    far_field: crate::document::FarFieldSettings,
 }
 
 impl PreparedInputs {
-    fn of(document: &funfern_app::topology_editor::TopologyDocument) -> Self {
+    fn of(document: &crate::topology_editor::TopologyDocument) -> Self {
         let model = &document.model;
         Self {
             accepted: model.accepted.clone(),
@@ -522,7 +523,7 @@ impl PreparedInputs {
         }
     }
 
-    fn read(&self, document: &funfern_app::topology_editor::TopologyDocument) -> bool {
+    fn read(&self, document: &crate::topology_editor::TopologyDocument) -> bool {
         let model = &document.model;
         self.accepted == model.accepted
             && self.source == model.source
@@ -1764,9 +1765,7 @@ struct PreviewQuad {
 /// doubles the quads a shaded example costs and changes nothing that shows.
 const PREVIEW_ROWS: usize = 48;
 
-fn build_example_preview(
-    example: &funfern_app::topology_examples::TopologyExample,
-) -> ExamplePreview {
+fn build_example_preview(example: &crate::topology_examples::TopologyExample) -> ExamplePreview {
     let scene = &example.document.model.accepted;
     let Ok(compiled) = scene.compile(0) else {
         return ExamplePreview::default();
@@ -1910,7 +1909,7 @@ fn gallery_width(columns: usize) -> f32 {
 /// outlined in gold.
 fn example_tile(
     ui: &mut egui::Ui,
-    example: &funfern_app::topology_examples::TopologyExample,
+    example: &crate::topology_examples::TopologyExample,
     preview: Option<&ExamplePreview>,
     opened: bool,
 ) -> egui::Response {
@@ -1957,7 +1956,7 @@ fn example_tile(
 fn paint_example_thumbnail(
     painter: &egui::Painter,
     rect: Rect,
-    example: &funfern_app::topology_examples::TopologyExample,
+    example: &crate::topology_examples::TopologyExample,
     preview: Option<&ExamplePreview>,
 ) {
     let scene = &example.document.model.accepted;

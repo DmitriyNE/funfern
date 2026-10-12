@@ -33,13 +33,13 @@
 
 use super::test_support::*;
 use super::*;
-use bevy_egui::egui::accesskit::Role;
-use funfern_app::topology_editor::{
+use crate::topology_editor::{
     ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment, TopologyDocument,
     TopologyDocumentModel, TopologyProbeTarget,
 };
-use funfern_app::topology_persistence as persistence;
-use funfern_app::topology_viewport::{TopologyHandle, plan_handle_drag};
+use crate::topology_persistence as persistence;
+use crate::topology_viewport::{TopologyHandle, plan_handle_drag};
+use bevy_egui::egui::accesskit::Role;
 use proptest::prelude::*;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 

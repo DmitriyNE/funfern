@@ -1,6 +1,4 @@
-use funfern_app::{
-    topology_editor::TopologyDocument as Document, topology_persistence as persistence,
-};
+use crate::{topology_editor::TopologyDocument as Document, topology_persistence as persistence};
 
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "funfern.autosave.v1";

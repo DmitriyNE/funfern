@@ -1,4 +1,4 @@
-use funfern_app::topology_persistence::{MAX_FILE_BYTES, MAX_FILE_MIB};
+use crate::topology_persistence::{MAX_FILE_BYTES, MAX_FILE_MIB};
 use std::sync::mpsc::Sender;
 pub enum FileEvent {
     Loaded(Vec<u8>),

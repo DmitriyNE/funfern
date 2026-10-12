@@ -83,12 +83,11 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Run Clippy on the end-to-end fixtures
-        # The app's e2e feature (src/ui/e2e.rs), natively and for the browser,
-        # which no other step lints. The fixtures run in the device job below,
-        # in scripts/device-suite.sh and in browser-tests/e2e.spec.mjs.
+      - name: Run Clippy on the browser bundle's end-to-end feature
+        # The deprecated e2e feature on the shipped binary, which the browser
+        # fixtures still build until they move to the fixtures binary; the
+        # fixtures binary itself is among the workspace's bins above.
         run: |
-          cargo clippy -p funfern-app --bins --features e2e --locked -- -D warnings
           cargo clippy -p funfern-app --bins --target wasm32-unknown-unknown --features e2e --locked -- -D warnings
 
       - name: Build tests
@@ -215,8 +214,8 @@ jobs:
             target/
           key: device-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build the app with its end-to-end fixtures
-        run: cargo build -p funfern-app --release --locked --features e2e --bin funfern-app
+      - name: Build the fixtures binary
+        run: cargo build -p funfern-app --release --locked --bin funfern-fixtures
 
       - name: Run every mutation
         run: scripts/mutations.sh
@@ -386,8 +385,8 @@ jobs:
             target/
           key: device-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build the app with its end-to-end fixtures
-        run: cargo build -p funfern-app --release --locked --features e2e --bin funfern-app
+      - name: Build the fixtures binary
+        run: cargo build -p funfern-app --release --locked --bin funfern-fixtures
 
       - name: Save build cache
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.cache.outputs.cache-hit != 'true'

@@ -1265,12 +1265,15 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
 - [ ] The end-to-end fixture driver (`src/ui/e2e.rs`) lives in the shipped
   binary behind the `e2e` feature, which is why a plain build could replace
   the suite's app under its fixtures on 2026-10-12. Move the fixtures out:
-  a second binary that builds the same app from the library with the driver
-  added, for the native suite, the lavapipe job and the mutation runner, and
-  a second browser bundle for the SwiftShader fixtures; switch every script
-  and job to it; then remove the feature from the main binary, once nothing
-  builds it. Deprecated from 2026-10-12: the feature stays only until the
-  move is complete.
+  a second binary that builds the same app with the driver added, for the
+  native suite, the lavapipe job and the mutation runner, and a second
+  browser bundle for the SwiftShader fixtures; switch every script and job
+  to it; then remove the feature from the main binary, once nothing builds
+  it. Deprecated from 2026-10-12: the feature stays only until the move is
+  complete. Native half done the same day (`docs/engineering-log.md`): the
+  `funfern-fixtures` binary, the device suite, the fixture wrapper, the
+  lavapipe and mutation jobs on it. Left: the browser bundles
+  (`scripts/browser-suite.sh`, the `dist-e2e` job), then the feature.
 - [ ] No fixture or device example hands off a generation with a driven
   wall: a prescribed Dirichlet or Neumann node's carried phase across a
   handoff can be zeroed in the runtime transfer shader and nothing fails,

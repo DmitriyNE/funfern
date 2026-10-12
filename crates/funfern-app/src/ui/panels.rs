@@ -1,10 +1,10 @@
 //! The View and Simulation inspectors, including the adaptation accuracy
 //! controls and the advanced settings folded away beneath them.
 
+use crate::document::{VECTOR_LOWPASS_HZ_RANGE, VectorOverlay, VectorOverlayStyle};
 use crate::material_overlay::{MaterialOverlay, MaterialProperty};
 use bevy::prelude::*;
 use bevy_egui::egui::{self};
-use funfern_app::document::{VECTOR_LOWPASS_HZ_RANGE, VectorOverlay, VectorOverlayStyle};
 use funfern_core::*;
 
 use super::*;

@@ -3,8 +3,8 @@
 # lavapipe, under a virtual X server: the shipped shaders, render graph and
 # runtime on a second backend, where CI has no GPU. Linux only; expects
 # mesa-vulkan-drivers, xvfb and the X client libraries winit loads, and the app
-# built with `--features e2e` under the target directory (CARGO_TARGET_DIR, or
-# target).
+# `funfern-fixtures` binary built under the target directory (CARGO_TARGET_DIR,
+# or target).
 #
 #   scripts/e2e-lavapipe.sh            every fixture scripts/device-suite.sh runs
 #   scripts/e2e-lavapipe.sh cavity     the ones named
@@ -35,7 +35,7 @@ for fixture in "${fixtures[@]}"; do
   log="$logs/$fixture.log"
   started=$SECONDS
   HOME=$home VK_ICD_FILENAMES=$icd WGPU_BACKEND=vulkan FUNFERN_E2E=$fixture \
-    timeout 900 xvfb-run -a -s "-screen 0 1280x800x24" "$target/release/funfern-app" >"$log" 2>&1
+    timeout 900 xvfb-run -a -s "-screen 0 1280x800x24" "$target/release/funfern-fixtures" >"$log" 2>&1
   status=$?
   rm -rf "$home"
   if ! grep -q 'AdapterInfo { name: "llvmpipe' "$log"; then
