@@ -69,7 +69,11 @@ stage covers.
    bound stays for the short fixtures.
 7. **References are computed offline** and checked in as tables with their
    generator and the identities that validate them. The test runner is cargo;
-   CI runs no Python beyond the browser server.
+   CI runs no Python beyond the browser server. A reference that is a closed
+   form, a few lines of arithmetic in the test's own terms, lives in the test
+   instead, written from the physics and never from the solver's code
+   (amended on 2026-10-13: PH-01's modes and PH-04's implemented law are
+   closed forms).
 8. **Every category carries at least one mutation** that its fixture must
    fail, run as a scripted check outside the gate. A test that cannot fail is
    not a test; the oracle test of the banded solve was one until this
@@ -332,6 +336,13 @@ error, and the discrete energy's bounded oscillation. The fourth-order step's
 claimed temporal phase order is checked here. The references are closed
 forms computed in the test.
 
+**CPU half done on 2026-10-13** (`docs/engineering-log.md`): one test per
+physics model on a reflecting 2 × 1.4 box, so that no mode PH-01 runs is
+degenerate with another as on the square, the modes started at a third of a
+period with b from its closed form and each model's orientation, and the
+mutation `tm-orientation-flipped`. The device half is the example
+`canonical_gpu_cavity_modes`.
+
 **PH-04, planar reflection against the implemented law.** Promote the
 Bloch-strip methodology of `docs/spikes/funfern-boundary-scattering-spike.md`
 and the `wave_boundary_reflection` example into a three-level test: angles
@@ -369,6 +380,7 @@ with their reports in `docs/spikes/`.
   Python that generated each, and a check script that recomputes the
   identities the plan's section 6.4 asks for, precision refinement and
   limiting cases, run by hand when a table changes. A test reads its table.
+  A closed form stays in its test (rule 7).
 - **Runner and CI.** The gate stays one command. Every pull request runs the
   workspace tests, the Kani proofs, the device fixtures on software Vulkan
   and the SwiftShader cavity; the compact physics subset joins the workspace

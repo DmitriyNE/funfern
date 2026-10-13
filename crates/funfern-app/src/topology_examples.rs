@@ -9794,6 +9794,497 @@ mod tests {
         assert!(errors[2] < 1.0e-6, "{errors:?}");
     }
 
+    /// A mode `cos(mπ(x+1)/2) cos(nπ(y+0.7)/1.4)` of PH-01's reflecting
+    /// 2 × 1.4 box. The box is not square so that no mode PH-01 runs shares
+    /// its frequency with another: on the square (1,0) and (0,1), (1,2) and
+    /// (2,1), (2,3) and (3,2) are pairs an unstructured mesh mixes.
+    #[derive(Clone, Copy, Debug)]
+    struct BoxMode {
+        m: u32,
+        n: u32,
+    }
+
+    impl BoxMode {
+        fn wavenumbers(self) -> Point2 {
+            Point2::new(
+                f64::from(self.m) * std::f64::consts::PI / 2.0,
+                f64::from(self.n) * std::f64::consts::PI / 1.4,
+            )
+        }
+
+        fn wavenumber(self) -> f64 {
+            self.wavenumbers().norm()
+        }
+
+        fn shape(self, point: Point2) -> f64 {
+            let k = self.wavenumbers();
+            (k.x * (point.x + 1.0)).cos() * (k.y * (point.y + 0.7)).cos()
+        }
+
+        fn gradient(self, point: Point2) -> Point2 {
+            let k = self.wavenumbers();
+            let (x, y) = (k.x * (point.x + 1.0), k.y * (point.y + 0.7));
+            Point2::new(-k.x * x.sin() * y.cos(), -k.y * x.cos() * y.sin())
+        }
+    }
+
+    /// The modes PH-01 runs one at a time.
+    const BOX_MODES: [BoxMode; 4] = [
+        BoxMode { m: 1, n: 0 },
+        BoxMode { m: 0, n: 1 },
+        BoxMode { m: 1, n: 2 },
+        BoxMode { m: 2, n: 3 },
+    ];
+
+    /// The phase PH-01's modes start at, where Q and b are both nonzero.
+    const BOX_PHASE: f64 = std::f64::consts::FRAC_PI_3;
+
+    /// The wave speed and the orientation `η` of `ḃ = η R∇u`, `R(x, y) =
+    /// (−y, x)`, that each model's own law gives PH-01's medium, mass slot 2
+    /// and stiffness slot 0.5. Mechanical runs at `√(k/ρ) = 0.5` and maps to
+    /// the TE core; TM and TE at `1/√(εμ) = 1`, TM reading ε from the mass
+    /// slot and TE from the stiffness slot. In TM b is `B⊥` and
+    /// `∂B/∂t = −∇×E` is `R∇E_z`; in TE b is `D⊥` and `∂D/∂t = ∇×H` is
+    /// `−R∇H_z`. Written here from the physics, not read from the operator,
+    /// so a model that took its slots or its orientation the other way would
+    /// run its modes at another frequency or backwards.
+    fn box_law(physics: PhysicsModel) -> (f64, f64) {
+        match physics {
+            PhysicsModel::Mechanical => (0.5, -1.0),
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            } => (1.0, 1.0),
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            } => (1.0, -1.0),
+        }
+    }
+
+    /// PH-01's box in `physics`, every side reflecting, meshed at `edge` on
+    /// the application's own path, the source off.
+    fn mode_box(
+        physics: PhysicsModel,
+        edge: f64,
+    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let mut builder = Builder::new();
+        builder.scene.physics = physics;
+        builder.scene.geometry.domain = DomainRect {
+            min_x: -1.0,
+            max_x: 1.0,
+            min_y: -0.7,
+            max_y: 0.7,
+        };
+        builder.scene.materials[0].mass_density = ScalarField::constant(2.0);
+        builder.scene.materials[0].stiffness = ScalarField::constant(0.5);
+        builder.scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        prepare(&document, edge)
+    }
+
+    /// The state of `modes`, each `(mode, amplitude)`, at `BOX_PHASE` of
+    /// `u = φ cos(ωt + θ)`, from the closed forms alone: `Q = M u` at the
+    /// nodes, and at the complementary samples `b = η R∇ψ` of its time
+    /// integral `ψ = φ sin(ωt + θ)/ω`, less what of it lies in the coupling's
+    /// kernel, which never moves. A constant is a mode of no frequency and
+    /// no flux.
+    fn mode_state(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        physics: PhysicsModel,
+        modes: &[(BoxMode, f64)],
+        constant: f64,
+        integrator: CanonicalIntegrator,
+        dt: f64,
+    ) -> CanonicalWaveState {
+        let operator = &prepared.canonical_operator;
+        let (speed, orientation) = box_law(physics);
+        let primary = operator
+            .node_points()
+            .iter()
+            .zip(operator.primary_mass())
+            .map(|(point, mass)| {
+                let field = modes
+                    .iter()
+                    .map(|(mode, amplitude)| amplitude * mode.shape(*point))
+                    .sum::<f64>();
+                mass * (constant + field * BOX_PHASE.cos())
+            })
+            .collect::<Vec<_>>();
+        let sampled = operator
+            .constitutive_samples()
+            .iter()
+            .map(|sample| {
+                modes
+                    .iter()
+                    .fold(Point2::default(), |flux, (mode, amplitude)| {
+                        let gradient = mode.gradient(sample.point);
+                        let scale =
+                            orientation * amplitude * BOX_PHASE.sin() / (speed * mode.wavenumber());
+                        flux + Point2::new(-gradient.y, gradient.x) * scale
+                    })
+            })
+            .collect::<Vec<_>>();
+        let stationary = operator
+            .stationary_complementary_component(&sampled)
+            .unwrap();
+        let flux = sampled
+            .iter()
+            .zip(stationary)
+            .map(|(sampled, stationary)| *sampled - stationary)
+            .collect();
+        CanonicalWaveState::new(operator, dt, primary, flux)
+            .unwrap()
+            .with_integrator(integrator)
+    }
+
+    /// What a single-mode run reads off the mode's mass-weighted projection.
+    struct ModeRun {
+        /// The frequency the stepped mode has.
+        stepped: f64,
+        /// The phase the projection starts at, by a least-squares fit of
+        /// `a cos(ω t) + c sin(ω t)` at the stepped frequency.
+        phase: f64,
+        /// The amplitude at the end over the start.
+        envelope: f64,
+        /// The energy's largest relative excursion from its start.
+        excursion: f64,
+    }
+
+    /// Runs `mode` alone from `BOX_PHASE` for `periods` of the exact mode.
+    fn mode_run(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        physics: PhysicsModel,
+        mode: BoxMode,
+        integrator: CanonicalIntegrator,
+        dt: f64,
+        periods: f64,
+    ) -> ModeRun {
+        let operator = &prepared.canonical_operator;
+        let (speed, _) = box_law(physics);
+        let mut state = mode_state(prepared, physics, &[(mode, 1.0)], 0.0, integrator, dt);
+        let shape = operator
+            .node_points()
+            .iter()
+            .map(|point| mode.shape(*point))
+            .collect::<Vec<_>>();
+        let weights = shape
+            .iter()
+            .zip(operator.primary_mass())
+            .map(|(shape, mass)| shape * mass)
+            .collect::<Vec<_>>();
+        let norm = weights.iter().zip(&shape).map(|(w, s)| w * s).sum::<f64>();
+        let project = |state: &CanonicalWaveState| {
+            let field = state.primary_field(operator).unwrap();
+            weights.iter().zip(&field).map(|(w, u)| w * u).sum::<f64>() / norm
+        };
+        let omega = speed * mode.wavenumber();
+        let steps = (periods * std::f64::consts::TAU / omega / dt).ceil() as usize;
+        let start = state.energy(operator).unwrap();
+        let mut series = Vec::with_capacity(steps + 1);
+        series.push(project(&state));
+        let mut excursion: f64 = 0.0;
+        for _ in 0..steps {
+            state.step(operator).unwrap();
+            series.push(project(&state));
+            excursion = excursion.max((state.energy(operator).unwrap() / start - 1.0).abs());
+        }
+        let stepped = sampled_frequency(&series, dt);
+        let (mut cc, mut cs, mut ss, mut yc, mut ys) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for (index, value) in series.iter().enumerate() {
+            let (sin, cos) = (stepped * dt * index as f64).sin_cos();
+            cc += cos * cos;
+            cs += cos * sin;
+            ss += sin * sin;
+            yc += value * cos;
+            ys += value * sin;
+        }
+        let determinant = cc * ss - cs * cs;
+        let along_cos = (yc * ss - ys * cs) / determinant;
+        let along_sin = (ys * cc - yc * cs) / determinant;
+        let amplitude = |window: &[f64]| {
+            (window[1].powi(2) + ((window[2] - window[0]) / (2.0 * (stepped * dt).sin())).powi(2))
+                .sqrt()
+        };
+        ModeRun {
+            stepped,
+            phase: (-along_sin).atan2(along_cos),
+            envelope: amplitude(&series[series.len() - 3..]) / amplitude(&series[1..4]),
+            excursion,
+        }
+    }
+
+    /// What a run of every mode at once reads at its end against the closed
+    /// form `Σ a φ cos(ω t + θ) + c`.
+    struct SuperpositionRun {
+        /// The mass-weighted L2 error over the closed form's norm.
+        l2: f64,
+        /// The largest nodal error over the closed form's largest value.
+        linf: f64,
+        /// The energy's largest relative excursion from its start.
+        excursion: f64,
+        /// How far the total primary flux, which the constant carries, moved,
+        /// over its size.
+        total: f64,
+    }
+
+    /// The modes PH-01 runs together, each with its amplitude, and the
+    /// constant beside them.
+    const BOX_SUPERPOSITION: [(BoxMode, f64); 4] = [
+        (BoxMode { m: 1, n: 0 }, 1.0),
+        (BoxMode { m: 0, n: 1 }, 0.7),
+        (BoxMode { m: 1, n: 2 }, 0.5),
+        (BoxMode { m: 2, n: 3 }, 0.3),
+    ];
+    const BOX_CONSTANT: f64 = 0.4;
+
+    /// Runs every mode at once with the constant for one period of the
+    /// slowest, (1,0), at the production step.
+    fn superposition_run(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        physics: PhysicsModel,
+    ) -> SuperpositionRun {
+        let operator = &prepared.canonical_operator;
+        let (speed, _) = box_law(physics);
+        let dt = prepared.recommended_time_step();
+        let mut state = mode_state(
+            prepared,
+            physics,
+            &BOX_SUPERPOSITION,
+            BOX_CONSTANT,
+            CanonicalIntegrator::default(),
+            dt,
+        );
+        let slowest = speed * BOX_SUPERPOSITION[0].0.wavenumber();
+        let steps = (std::f64::consts::TAU / slowest / dt).ceil() as usize;
+        let total = |state: &CanonicalWaveState| state.primary_flux().iter().sum::<f64>();
+        let (start, total_start) = (state.energy(operator).unwrap(), total(&state));
+        let mut excursion: f64 = 0.0;
+        for _ in 0..steps {
+            state.step(operator).unwrap();
+            excursion = excursion.max((state.energy(operator).unwrap() / start - 1.0).abs());
+        }
+        let time = steps as f64 * dt;
+        let field = state.primary_field(operator).unwrap();
+        let (mut error, mut norm, mut largest_error, mut largest) = (0.0, 0.0, 0.0_f64, 0.0_f64);
+        for ((point, mass), read) in operator
+            .node_points()
+            .iter()
+            .zip(operator.primary_mass())
+            .zip(&field)
+        {
+            let exact = BOX_CONSTANT
+                + BOX_SUPERPOSITION
+                    .iter()
+                    .map(|(mode, amplitude)| {
+                        let omega = speed * mode.wavenumber();
+                        amplitude * mode.shape(*point) * (omega * time + BOX_PHASE).cos()
+                    })
+                    .sum::<f64>();
+            error += mass * (read - exact).powi(2);
+            norm += mass * exact * exact;
+            largest_error = largest_error.max((read - exact).abs());
+            largest = largest.max(exact.abs());
+        }
+        let magnitude = state
+            .primary_flux()
+            .iter()
+            .map(|value| value.abs())
+            .sum::<f64>();
+        SuperpositionRun {
+            l2: (error / norm).sqrt(),
+            linf: largest_error / largest,
+            excursion,
+            total: (total(&state) - total_start).abs() / magnitude,
+        }
+    }
+
+    /// PH-01, rectangular cavity modes (`docs/spikes/funfern-testing-campaign-plan.md`),
+    /// in each physics model on the production path: the application's mesh
+    /// of a reflecting 2 × 1.4 box, its medium mass slot 2 and stiffness slot
+    /// 0.5, modes (1,0), (0,1), (1,2) and (2,3) one at a time and all four
+    /// with a constant, each started at a third of a period, `θ = π/3`, its
+    /// Q and b from the closed forms.
+    ///
+    /// The three models read alike to the last digit shown, Mechanical at
+    /// half the speed and twice the step, as `box_law` says they must. In
+    /// space the semidiscrete frequency misses the closed form by 6.4e-8,
+    /// 9.1e-7, 2.1e-5 and 2.6e-5 at edge 0.16 and by 3.3e-10, 1.5e-9, 3.0e-8
+    /// and 1.9e-7 at 0.04, 139 to 674 times down over the two halvings, the
+    /// element's fourth order coming in; the phase starts within 7.6e-4 of
+    /// θ at the coarsest and 3.8e-5 at the finest, the envelope holds to
+    /// 2.7e-6 over three periods, and the energy wobbles by an eighth of
+    /// `(ω dt)²`. All four together, after a period of (1,0), stand 7.5e-4,
+    /// 1.1e-4 and 2.0e-5 from the closed form in L2, 1.5e-3, 2.3e-4 and
+    /// 3.8e-5 at worst, and the constant's total flux holds to 3e-15. In
+    /// time, on (2,3) at edge 0.08, leapfrog misses its semidiscrete
+    /// frequency by `ω_h³dt²/24` to 0.03% and the fourth-order step by
+    /// `−ω_h⁵dt⁴/720` to 0.07%, 1.4% at a quarter of its step where the
+    /// miss is 7e-10, and the semidiscrete frequency read through either
+    /// agrees over six steps to 1.2e-9.
+    ///
+    /// The closed-form b carries the law's orientation, so a model whose
+    /// operator took it the other way would start its modes at −θ;
+    /// `tests/mutations/tm-orientation-flipped` does that to TM.
+    fn box_modes_in(physics: PhysicsModel) {
+        let name = format!("{physics:?}");
+        let (speed, _) = box_law(physics);
+
+        // Space, at the production step: the semidiscrete frequency, read
+        // through the fourth-order step's dispersion relation, against the
+        // closed form, with the phase, the envelope and the energy beside it.
+        let mut errors = vec![Vec::new(); BOX_MODES.len()];
+        let mut together = Vec::new();
+        for edge in [0.16, 0.08, 0.04] {
+            let prepared = mode_box(physics, edge);
+            let dt = prepared.recommended_time_step();
+            for (index, mode) in BOX_MODES.iter().enumerate() {
+                let run = mode_run(
+                    &prepared,
+                    physics,
+                    *mode,
+                    CanonicalIntegrator::default(),
+                    dt,
+                    3.0,
+                );
+                let exact = speed * mode.wavenumber();
+                let inverted =
+                    semidiscrete_frequency(CanonicalIntegrator::default(), run.stepped, dt);
+                let case = format!("{name} edge {edge} ({},{})", mode.m, mode.n);
+                eprintln!(
+                    "{case}: ω_h off {:.3e}, phase off {:.2e}, envelope − 1 {:.1e}, energy excursion {:.2e} of (ω dt)² {:.2e}",
+                    inverted / exact - 1.0,
+                    run.phase - BOX_PHASE,
+                    run.envelope - 1.0,
+                    run.excursion,
+                    (exact * dt).powi(2)
+                );
+                assert!(
+                    (run.phase - BOX_PHASE).abs() < 1.0e-3,
+                    "{case}: phase {} for {BOX_PHASE}",
+                    run.phase
+                );
+                assert!(
+                    (run.envelope - 1.0).abs() < 1.0e-5,
+                    "{case}: envelope {}",
+                    run.envelope
+                );
+                assert!(
+                    run.excursion > 0.0 && run.excursion < 0.25 * (exact * dt).powi(2),
+                    "{case}: energy excursion {}",
+                    run.excursion
+                );
+                errors[index].push((inverted / exact - 1.0).abs());
+            }
+            let run = superposition_run(&prepared, physics);
+            eprintln!(
+                "{name} edge {edge} together: L2 {:.3e}, L∞ {:.3e}, energy excursion {:.2e}, total flux {:.1e}",
+                run.l2, run.linf, run.excursion, run.total
+            );
+            assert!(
+                run.total < 1.0e-13,
+                "{name} edge {edge}: total flux {}",
+                run.total
+            );
+            together.push(run);
+        }
+        for (mode, errors) in BOX_MODES.iter().zip(&errors) {
+            assert!(
+                errors[0] / errors[1] > 6.0 && errors[1] / errors[2] > 6.0,
+                "{name} ({},{}): ω_h errors {errors:?}",
+                mode.m,
+                mode.n
+            );
+            assert!(
+                errors[0] / errors[2] > 100.0 && errors[2] < 3.0e-7,
+                "{name} ({},{}): ω_h errors {errors:?}",
+                mode.m,
+                mode.n
+            );
+        }
+        for pair in together.windows(2) {
+            assert!(
+                pair[0].l2 / pair[1].l2 > 4.0 && pair[0].linf / pair[1].linf > 4.0,
+                "{name}: field errors L2 {} and {}, L∞ {} and {}",
+                pair[0].l2,
+                pair[1].l2,
+                pair[0].linf,
+                pair[1].linf
+            );
+            assert!(
+                pair[0].excursion / pair[1].excursion > 3.5,
+                "{name}: energy excursions {} and {}",
+                pair[0].excursion,
+                pair[1].excursion
+            );
+        }
+        assert!(together[2].l2 < 3.0e-5 && together[2].linf < 6.0e-5);
+
+        // Time, at one mesh, on the fastest mode: each integrator's stepped
+        // frequency misses the semidiscrete one by its own law, and the
+        // semidiscrete frequency read through either agrees at every step.
+        let prepared = mode_box(physics, 0.08);
+        let largest = prepared.canonical_operator.maximum_time_step();
+        let mode = BOX_MODES[3];
+        let mut semidiscrete = Vec::new();
+        for integrator in [
+            CanonicalIntegrator::Leapfrog,
+            CanonicalIntegrator::FourthOrder,
+        ] {
+            for fraction in [1.0, 0.5, 0.25] {
+                let dt = fraction * integrator.recommended() * largest;
+                let run = mode_run(&prepared, physics, mode, integrator, dt, 3.0);
+                let inverted = semidiscrete_frequency(integrator, run.stepped, dt);
+                let law = match integrator {
+                    CanonicalIntegrator::Leapfrog => inverted.powi(3) * dt * dt / 24.0,
+                    CanonicalIntegrator::FourthOrder => -inverted.powi(5) * dt.powi(4) / 720.0,
+                };
+                let case = format!("{name} {integrator:?} at {fraction} of its step");
+                eprintln!(
+                    "{case}: stepped − ω_h {:.3e} against {law:.3e}, phase off {:.2e}",
+                    run.stepped - inverted,
+                    run.phase - BOX_PHASE
+                );
+                assert!(
+                    (run.stepped - inverted - law).abs() < 1.0e-2 * law.abs() + 1.0e-10,
+                    "{case}: {} against {law}",
+                    run.stepped - inverted
+                );
+                assert!(
+                    (run.phase - BOX_PHASE).abs() < 1.0e-3,
+                    "{case}: phase {} for {BOX_PHASE}",
+                    run.phase
+                );
+                semidiscrete.push(inverted);
+            }
+        }
+        let spread = semidiscrete.iter().copied().fold(f64::MIN, f64::max)
+            - semidiscrete.iter().copied().fold(f64::MAX, f64::min);
+        assert!(
+            spread < 1.0e-8 * speed * mode.wavenumber(),
+            "{name}: ω_h spread {spread:.3e} over {semidiscrete:?}"
+        );
+    }
+
+    #[test]
+    fn box_modes_in_mechanical() {
+        box_modes_in(PhysicsModel::Mechanical);
+    }
+
+    #[test]
+    fn box_modes_in_tm() {
+        box_modes_in(PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        });
+    }
+
+    #[test]
+    fn box_modes_in_te() {
+        box_modes_in(PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        });
+    }
+
     /// Carries a fixed state from `source` to `target` through `maps`, as the
     /// application's handoff does on the reference: integrated flux through
     /// the primary map with its component totals kept when the geometry is

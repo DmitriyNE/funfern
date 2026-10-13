@@ -1,0 +1,4 @@
+about: TM's complementary flux takes the orientation TE and Mechanical have, so a TM field's B⊥ runs the wrong way round and a mode started from its closed form runs backwards from its phase
+test: cargo test --release -p funfern-app --lib -- box_modes_in_tm
+expect: phase .* for 1\.04
+needs: cpu

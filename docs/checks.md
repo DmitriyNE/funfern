@@ -468,7 +468,19 @@ over ten periods and the energy wobbles by a quarter of `(ω dt)²` without
 drifting
 (`a_box_mode_on_the_production_path_keeps_its_frequency_in_space_and_time`).
 A fourth-order correction of `dt²/13` instead of `dt²/12` fails it: the
-fourth-order run's semidiscrete frequency lands 7.6e-5 off leapfrog's. Edits the field
+fourth-order run's semidiscrete frequency lands 7.6e-5 off leapfrog's.
+PH-01 widens it to the three physics models (`box_modes_in_mechanical`,
+`box_modes_in_tm`, `box_modes_in_te`, about 35 s each, in parallel): a
+reflecting 2 × 1.4 box, so that no mode shares its frequency with another,
+one medium whose slots give Mechanical half the electromagnetic speed, and
+modes (1,0), (0,1), (1,2) and (2,3) started at a third of a period with Q
+and b from the closed forms, b carrying each model's orientation as its law
+writes it. The three read alike to the digit: the semidiscrete frequency
+falls 139 to 674 times over two halvings to 1.9e-7 at worst, the phase
+starts within 7.6e-4 of its closed form, the four modes together stand 2.0e-5
+from it in L2 at edge 0.04 with the constant's total flux held to 3e-15,
+and each integrator misses the semidiscrete frequency by its own law. The
+mutation `tm-orientation-flipped` starts TM's modes at −θ. Edits the field
 cannot tell run on the application's own path: a disc of the box's own
 medium drawn into the running box mode and erased three periods later, the
 state carried each time through the maps the runtime prepares for the edit,

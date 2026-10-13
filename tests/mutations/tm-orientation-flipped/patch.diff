@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+index 8415e35..d7e5559 100644
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -4617,7 +4617,7 @@ fn orientation(physics: PhysicsModel) -> f64 {
+     match physics {
+         PhysicsModel::Electromagnetic {
+             polarization: ElectromagneticPolarization::Tm,
+-        } => 1.0,
++        } => -1.0,
+         PhysicsModel::Mechanical
+         | PhysicsModel::Electromagnetic {
+             polarization: ElectromagneticPolarization::Te,

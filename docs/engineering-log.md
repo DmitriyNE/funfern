@@ -23764,3 +23764,57 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-13 — PH-01 on the CPU: cavity modes in three physics models
+
+- **Plan.** Stage A2 of `docs/spikes/funfern-testing-campaign-plan.md`,
+  agreed today: PH-01's CPU half first, its device example next, then
+  PH-04 after an f64 sizing run. Rule 7 is amended at the user's word: a
+  reference that is a closed form lives in its test, written from the
+  physics, and a table is for what is not.
+- **Tests.** `box_modes_in_mechanical`, `box_modes_in_tm` and
+  `box_modes_in_te` beside the (3,3) box-mode test, which stays, on the
+  application's path through `prepare`. The box is a reflecting 2 × 1.4
+  rectangle: on the square, (1,0) and (0,1), (1,2) and (2,1), (2,3) and
+  (3,2) share frequencies and an unstructured mesh mixes each pair. One
+  medium, mass slot 2 and stiffness slot 0.5, gives Mechanical `√(k/ρ) =
+  0.5` and TM and TE `1/√(εμ) = 1`, TE reading the slots the other way
+  round from TM. Modes (1,0), (0,1), (1,2) and (2,3) run one at a time for
+  three periods, and all four with a constant for one period of (1,0),
+  each started at `θ = π/3` with `Q = M φ cos θ` and b sampled from the
+  closed form `η R∇φ sin θ / ω`, less its part in the coupling's kernel,
+  with the orientation `η` written from each model's law, `+1` for TM,
+  whose b is `B⊥` under `∂B/∂t = −∇×E`, `−1` for TE and Mechanical. The
+  frequency is read through each integrator's dispersion relation as the
+  (3,3) test does; the phase by a least-squares fit at the stepped
+  frequency.
+- **Measured.** The three models alike to the last digit printed,
+  Mechanical at half the speed and twice the step. Space, at the
+  production step: the semidiscrete frequency misses the closed form by
+  6.4e-8, 9.1e-7, 2.1e-5 and 2.6e-5 at edge 0.16, 6.5e-9, 3.1e-8, 2.0e-7
+  and 2.9e-6 at 0.08, and 3.3e-10, 1.5e-9, 3.0e-8 and 1.9e-7 at 0.04, for
+  (1,0), (0,1), (1,2) and (2,3): 195, 605, 674 and 139 times down over
+  the two halvings, each halving at least 6.6, the element's fourth order
+  coming in. The phase starts 2.9e-5 to 7.6e-4 short of θ at 0.16 and
+  1.7e-6 to 3.8e-5 at 0.04, the fourth-order step's processing offset; the
+  envelope holds to 2.7e-6; the energy wobbles by an eighth of `(ω dt)²`,
+  four times less each halving. Together, after a period of (1,0): L2
+  7.5e-4, 1.1e-4 and 2.0e-5, L∞ 1.5e-3, 2.3e-4 and 3.8e-5, the total flux
+  the constant carries held to 3.5e-15. Time, on (2,3) at 0.08: leapfrog
+  misses its semidiscrete frequency by `ω_h³dt²/24` to 0.03% at 1, ½ and
+  ¼ of its step, the fourth-order step by `−ω_h⁵dt⁴/720` to 0.07%, 0.02%
+  and 1.4%, the last a miss of 7e-10 against a fit floor near 1e-11, and
+  the semidiscrete frequency agrees over the six runs to 1.2e-9. About 35 s
+  a model, the three in parallel.
+- **Bounds.** Phase within 1e-3, envelope 1e-5, energy wobble under a
+  quarter of `(ω dt)²`; the frequency error down at least 6 each halving,
+  100 over both and under 3e-7 at 0.04; the field errors down at least 4
+  each halving and under 3e-5 in L2 and 6e-5 at worst at 0.04; the total
+  flux to 1e-13; the time laws to 1% plus 1e-10, the spread to 1e-8.
+- **Mutation.** `tm-orientation-flipped`: TM's orientation taken as TE's.
+  The dynamics are the same under `b → −b`, so a self-consistent start
+  never sees it; the closed-form b does, and TM's (1,0) starts at
+  −1.04717 for 1.04720, failing on the phase.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
