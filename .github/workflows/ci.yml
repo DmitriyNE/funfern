@@ -164,6 +164,55 @@ jobs:
           FUNFERN_WALL_SWEEP_EDGE: 0.2
         run: cargo test --release -p funfern-app --test wall_sweep --locked -- --nocapture
 
+  # Nightly: PH-04, the first- and second-order walls' reflection against
+  # their law at 0°, 45° and 75° on three meshes, held to steady state; about
+  # 57 minutes on an M1 Max, 75° on the finest mesh alone 27, so longer here
+  # (crates/funfern-app/src/topology_examples.rs,
+  # planar_reflection_converges_to_its_law_at_three_angles).
+  planar-reflection:
+    name: Planar reflection, three angles
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal \
+            --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Reflect at three angles on three meshes
+        run: >-
+          cargo test --release -p funfern-app --lib --locked --
+          --ignored --nocapture planar_reflection_converges_to_its_law_at_three_angles
+
   # Nightly: the mutations, one deliberate defect each, applied and reverted
   # by scripts/mutations.sh; each must be caught by the test its manifest
   # names, at the check it targets. The device ones run their fixture on

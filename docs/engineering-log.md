@@ -23845,3 +23845,73 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the three suite entries.
+
+## 2026-10-14 — PH-04: planar reflection against the implemented law
+
+- **Geometry.** The solver has no periodic sides, so the scattering spike's
+  Bloch strip cannot run on the production path; a reflecting channel one
+  unit high carries a transverse mode `cos(nπ(y + ½))` that meets the wall
+  at `sin θ = nπ/ω`, as `an_outgoing_wall_returns_what_its_law_says_*` uses
+  it, and four runs on one mesh differ only in the wall: first-order,
+  second-order, reflecting and zero-pinned. The last two return the mode
+  whole, so their mean is the incident field and their half-difference a
+  unit reflection, and a wall's complex `R` is fitted over nine points from
+  `U = U_inc + R U_unit`. The law is a closed form in the test (rule 7 as
+  amended yesterday), `R = (cos θ − Y)/(cos θ + Y)` with the first-order
+  `Y = 1` and the passive second-order `Y(iω)`; the exact half-space relation
+  reflects nothing, so `|R_law|` is the approximation's distance from it.
+- **Sizing, a narrowband pulse.** First tried with the precedent's channel
+  `[−3, 1]` lengthened to `[−7, 1]` and a Gaussian pulse read by a DFT at its
+  carrier. 0° (the constant, 1.5 Hz) read 9.2e-4, 1.7e-4 and 4.0e-5 at
+  edges 0.1, 0.05 and 0.025; 45° (n = 2, 1.414 Hz, σ 2 s) 6.4e-4, 1.4e-4 and
+  3.4e-5 first-order and 4.5e-4, 9.9e-5 and 2.5e-5 second-order, 230 s at
+  0.025. 75° failed: its frequency lies 3.5% above the mode's cutoff, every
+  affordable band reaches frequencies that barely move, and at σ 8 s, a 74 s
+  run and a channel 16 long the field was still 12% to 26% of its peak at
+  the points when the run ended, the error 2e-2. 60° failed the same way,
+  near 1e-3 and not converging.
+- **Steady state.** The drive switched on smoothly and held, a sponge at the
+  channel's far end so that nothing returns, the medium's damping rising as
+  `A · smoothstep(1.5, L, −x)` (damping reaches the canonical primary loss
+  per point), and a lock-in over the run's last stretch. Found on the way:
+  a sponge of strength 4 over 6.5 units reflects 75°'s slow mode, its
+  first-order wall reading −0.523 for the law's −0.589; with the strength
+  0.4 over 12.5 units, 6.6e-2 fell to 8.4e-4, and a longer sponge kept
+  moving it, 4.5e-4 and 3.4e-4. To first order the sponge's reflection `C`
+  biases `R` by `C(1 − R²)`, and moving the whole sponge a quarter of the
+  wavelength along the channel turns `C` over, so every reading is now the
+  mean of two placements: a strong short sponge and a gentle long one then
+  agree to 1e-4, the strong one's `C²`. The fourth transverse mode, which
+  would halve the wavelength along the channel, was worse: at its frequency
+  the lower modes propagate too and the points disagreed by 1.2e-3. A Hann
+  lock-in over 80 s and a Blackman-Harris one over 120 s agree to 3e-5;
+  75° keeps the latter after a 60 s switch-on and 20 s of settling, 0° and
+  45° a few seconds of each.
+- **Tests.** `planar_reflection_meets_its_law_at_0_and_45_degrees` in the
+  gate, 25 s: edge 0.1, both walls, held to 1e-3, the points to 1e-3.
+  `planar_reflection_converges_to_its_law_at_three_angles`, ignored, run by
+  the new nightly job `planar-reflection` (timeout 300 minutes): the three
+  angles at edges 0.1, 0.07 and 0.05 at the production step, and 45° on 0.07
+  at 1, ½ and ¼ of it.
+- **Measured, M1 Max, `|R − R_law|` at 0.1, 0.07, 0.05.** 0°: 6.0e-4,
+  3.6e-4, 1.8e-4, both walls alike. 45°: 5.7e-4, 2.3e-4, 1.4e-4 first-order;
+  4.0e-4, 1.7e-4, 1.0e-4 second-order. 75°: 2.5e-4, 9.0e-5, 4.9e-5 and
+  3.7e-4, 1.6e-4, 8.0e-5. Each falls at every level, 3.3 to 5.1 times over
+  the halving; the trapezoid wall step's `(ω dt)²/24` at a fixed ratio of
+  step to mesh is most of it at 0°, 4.5e-4 at 0.1, with the mesh's own error
+  beside it and the meshes not nested: the coarse mesh alone, read with the
+  sponge moved by 0.1667 instead of 1/6, moved 0°'s reading by 3.5e-4. The
+  points agree to 2.1e-5 at 0.05. In time, 45° on 0.07: successive
+  differences 2.3e-4 and 4.0e-5 first-order, 1.6e-4 and 3.0e-5
+  second-order, 5.6 and 5.4 times apart. `|R_law|`: 0, 0.17 and 0.08, 0.59
+  and 0.48. 57 minutes, 75° at 0.05 alone 27.
+- **Bounds.** Nightly: each wall's error down at every level, at least 2.5
+  times over the halving and under 2.5e-4 at 0.05; the points within 5e-5
+  there; the time differences at least 3.5 times apart.
+- **Mutation.** `wall-memory-half-kick`: the trapezoid wall step's first
+  kick moves the second-order wall's memory by half its rate; 45°'s
+  second-order wall reads 7.6e-2 off its law in the gate test, the rest
+  unchanged.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the nightly study run twice by hand.

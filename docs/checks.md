@@ -434,6 +434,26 @@ walls in TM, where the field vanishes at the corners, the second-order
 wall's trace ends there and the mode reflects as it does between reflecting
 sides, to 2%
 (`an_outgoing_wall_returns_what_its_law_says_between_free_and_pinned_sides`).
+PH-04 reads the complex reflection itself against the law at 0°, 45° and
+75°, both orders: the channel's constant or second transverse mode driven
+at the frequency that puts it at the angle, held to steady state, a graded
+sponge in the medium's damping at the channel's far end, and a
+Blackman-Harris lock-in at nine points beside the wall, the reflecting and
+pinned runs giving the incident field and a unit reflection; the sponge's
+own small reflection biases R by `C(1 − R²)`, so every reading is the mean
+of two with the sponge a quarter wavelength apart, which turns `C` over.
+75° lies 3.5% above its mode's cutoff and takes a minute's switch-on, two
+minutes of lock-in and a gentle sponge; a pulse there never left the points.
+In the gate, `planar_reflection_meets_its_law_at_0_and_45_degrees`, 25 s,
+holds edge 0.1 to 1e-3 (measured 4.0e-4 to 6.0e-4). Nightly,
+`planar_reflection_converges_to_its_law_at_three_angles`, 57 minutes on the
+M1 Max, reads all three at edges 0.1, 0.07 and 0.05: each wall's error falls
+at every level, 3.3 to 5.1 times over the halving, to 4.9e-5 to 1.8e-4 at
+0.05, held under 2.5e-4, the points within 2.1e-5; at 45° on 0.07 at 1, ½
+and ¼ of the step the successive differences fall 5.4 times or more. The law
+is a closed form in the test; its distance from the exact half-space
+relation, which reflects nothing, is `|R_law|`, reported. The mutation
+`wall-memory-half-kick` puts 45°'s second-order wall 7.6e-2 off its law.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

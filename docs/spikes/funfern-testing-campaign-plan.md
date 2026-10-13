@@ -355,6 +355,17 @@ as a checked-in table with its generator; `R_exact` from the half-space
 relation is reported beside it. `E_discretization` must converge;
 `E_approximation` is a number in the report.
 
+**Done on 2026-10-14** (`docs/engineering-log.md`): the solver has no
+periodic sides, so the Bloch strip cannot run on the production path, and a
+reflecting channel's transverse mode meets the wall at the angle instead. A
+narrowband pulse served 0° and 45° and failed at 75°, 3.5% above its mode's
+cutoff, so the measurement is a steady state: a sponge in the damping, read
+twice a quarter wavelength apart to cancel its own reflection, and a
+lock-in. The law is a closed form in the test under the amended rule 7, not
+a table from `boundary.py`. The gate holds 0° and 45° on the coarsest mesh;
+the nightly job `planar-reflection` runs the three angles on three meshes and
+the 45° time series; the mutation `wall-memory-half-kick`.
+
 ## 6. Milestones B and C
 
 The remaining fixtures of the 11 October plan keep their identifiers and

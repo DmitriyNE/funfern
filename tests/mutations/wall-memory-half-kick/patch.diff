@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+index 8415e35..e85a2da 100644
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -2940,7 +2940,7 @@ impl CanonicalWaveState {
+                 .iter_mut()
+                 .zip(&derivative[trace_count..])
+             {
+-                *z += duration * rate;
++                *z += 0.5 * duration * rate;
+             }
+         }
+         let (source_work, prescribed_exchange) = self.plain_kick(

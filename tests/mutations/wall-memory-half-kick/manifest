@@ -1,0 +1,4 @@
+about: the trapezoid wall step's first kick moves the second-order wall's memory by half its rate, so a wave met at an angle finds a wall that lags its own law
+test: cargo test --release -p funfern-app --lib -- planar_reflection_meets_its_law_at_0_and_45_degrees
+expect: 45° second order: E_discretization
+needs: cpu

@@ -9592,6 +9592,479 @@ mod tests {
         assert_eq!(tm.primary_mass(), mechanical.primary_mass());
     }
 
+    /// A complex amplitude, `e^{iωt}` in time, for PH-04's phasors.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    struct Phasor {
+        re: f64,
+        im: f64,
+    }
+
+    impl Phasor {
+        const fn new(re: f64, im: f64) -> Self {
+            Self { re, im }
+        }
+
+        fn norm(self) -> f64 {
+            self.re.hypot(self.im)
+        }
+
+        fn conj(self) -> Self {
+            Self::new(self.re, -self.im)
+        }
+
+        fn scale(self, factor: f64) -> Self {
+            Self::new(self.re * factor, self.im * factor)
+        }
+    }
+
+    impl std::ops::Add for Phasor {
+        type Output = Self;
+        fn add(self, other: Self) -> Self {
+            Self::new(self.re + other.re, self.im + other.im)
+        }
+    }
+
+    impl std::ops::Sub for Phasor {
+        type Output = Self;
+        fn sub(self, other: Self) -> Self {
+            Self::new(self.re - other.re, self.im - other.im)
+        }
+    }
+
+    impl std::ops::Mul for Phasor {
+        type Output = Self;
+        fn mul(self, other: Self) -> Self {
+            Self::new(
+                self.re * other.re - self.im * other.im,
+                self.re * other.im + self.im * other.re,
+            )
+        }
+    }
+
+    impl std::ops::Div for Phasor {
+        type Output = Self;
+        fn div(self, other: Self) -> Self {
+            let denominator = other.re * other.re + other.im * other.im;
+            (self * other.conj()).scale(1.0 / denominator)
+        }
+    }
+
+    /// The implemented law's reflection of the primary field, written from
+    /// the boundary spike, never from the solver: a wall of admittance `Y`
+    /// met at `cos θ` from its normal returns `R = (cos θ − Y)/(cos θ + Y)`.
+    /// The first-order wall's `Y` is one; the second-order wall's is the
+    /// passive law `Y(s) = 1 + (6d/7)/s − (8d/7)/(s + d) + (2d/7)/(s + 2d)`
+    /// at `s = iω`, `d = √(7/8) k` for the tangential wavenumber `k`. The
+    /// exact half-space admittance is `cos θ` itself, so the exact `R` is
+    /// zero at every propagating angle, and the law's `|R|` is its distance
+    /// from exact transparency.
+    fn planar_law(cos: f64, omega: f64, tangential: f64, second: bool) -> Phasor {
+        let mut admittance = Phasor::new(1.0, 0.0);
+        if second && tangential > 0.0 {
+            let d = (7.0f64 / 8.0).sqrt() * tangential;
+            for (pole, residue) in [(0.0, 6.0 / 7.0), (d, -8.0 / 7.0), (2.0 * d, 2.0 / 7.0)] {
+                admittance = admittance + Phasor::new(residue * d, 0.0) / Phasor::new(pole, omega);
+            }
+        }
+        let cos = Phasor::new(cos, 0.0);
+        (cos - admittance) / (cos + admittance)
+    }
+
+    /// One of PH-04's angles, from the normal of a wall at the right end of a
+    /// reflecting channel one unit high: the channel mode `cos(nπ(y + ½))`
+    /// that meets the wall at that angle, `sin θ = nπ/ω`, the constant for
+    /// 0°; and what the angle asks of the measurement. A mode near its
+    /// cutoff moves slowly and a drive switched on excites the cutoff
+    /// itself, which lingers, so 75°, 3.5% above cutoff, takes a minute's
+    /// switch-on and two minutes of lock-in, and a gentle sponge: a steep
+    /// one reflects a slow mode, and a strength of 4 over 6.5 units read
+    /// 75°'s first-order wall at −0.523 for its law's −0.589.
+    #[derive(Clone, Copy, Debug)]
+    struct PlanarAngle {
+        degrees: f64,
+        mode: u32,
+        /// The sponge's damping rate at the channel's far end, and the
+        /// channel's length behind the wall's side, past the launcher.
+        sponge: f64,
+        length: f64,
+        /// Seconds of switch-on, of settling, and of lock-in.
+        ramp: f64,
+        settle: f64,
+        window: f64,
+    }
+
+    const PLANAR_ANGLES: [PlanarAngle; 3] = [
+        PlanarAngle {
+            degrees: 0.0,
+            mode: 0,
+            sponge: 2.0,
+            length: 8.0,
+            ramp: 4.0,
+            settle: 4.0,
+            window: 10.0,
+        },
+        PlanarAngle {
+            degrees: 45.0,
+            mode: 2,
+            sponge: 2.0,
+            length: 8.0,
+            ramp: 8.0,
+            settle: 6.0,
+            window: 20.0,
+        },
+        PlanarAngle {
+            degrees: 75.0,
+            mode: 2,
+            sponge: 0.4,
+            length: 14.0,
+            ramp: 60.0,
+            settle: 20.0,
+            window: 120.0,
+        },
+    ];
+
+    impl PlanarAngle {
+        fn tangential(self) -> f64 {
+            f64::from(self.mode) * std::f64::consts::PI
+        }
+
+        /// The drive's frequency: 1.5 Hz at normal incidence, and otherwise
+        /// the one that puts the mode at the angle.
+        fn hz(self) -> f64 {
+            if self.mode == 0 {
+                1.5
+            } else {
+                self.tangential() / (std::f64::consts::TAU * self.degrees.to_radians().sin())
+            }
+        }
+
+        fn omega(self) -> f64 {
+            std::f64::consts::TAU * self.hz()
+        }
+
+        fn cos(self) -> f64 {
+            self.degrees.to_radians().cos()
+        }
+
+        /// A quarter of the wavelength along the channel: moving the sponge
+        /// by it turns its reflection's round trip by half a period.
+        fn quarter(self) -> f64 {
+            0.5 * std::f64::consts::PI / (self.omega() * self.cos())
+        }
+
+        fn profile(self) -> String {
+            if self.mode == 0 {
+                "1".into()
+            } else {
+                format!("cos({} * pi * (y + 0.5))", self.mode)
+            }
+        }
+
+        fn law(self, second: bool) -> Phasor {
+            planar_law(self.cos(), self.omega(), self.tangential(), second)
+        }
+    }
+
+    /// The reflecting channel `[−L − shift, 1] × [−½, ½]` with `wall` on its
+    /// right end and its left end second-order outgoing, a launcher strip at
+    /// `x = −0.7` driving `angle`'s mode at its frequency, switched on over
+    /// `angle.ramp` seconds and held, and a sponge: the medium's damping
+    /// rising smoothly from nothing at `x = −1.5 − shift` to `angle.sponge`
+    /// at the far end, so what goes left is absorbed before it can return.
+    fn sponge_channel(
+        angle: PlanarAngle,
+        wall: OuterBoundaryCondition,
+        edge: f64,
+        shift: f64,
+        held: f64,
+    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let left = angle.length + shift;
+        let mut builder = Builder::new();
+        builder.scene.geometry.domain = DomainRect {
+            min_x: -left,
+            max_x: 1.0,
+            min_y: -0.5,
+            max_y: 0.5,
+        };
+        builder.scene.face_assignments[0].anchor = FaceAnchor::Outer {
+            side: OuterSide::Bottom,
+            fraction: left / (left + 1.0),
+        };
+        builder.scene.materials[0].damping = ScalarField::formula(format!(
+            "{} * smoothstep({}, {left}, -x)",
+            angle.sponge,
+            1.5 + shift
+        ))
+        .unwrap();
+        let mut boundaries = channel();
+        boundaries.sides[OuterSide::Right.index()] = wall;
+        builder.scene.outer_boundaries = boundaries;
+        builder.launcher(-0.7, INTERFACE_HZ, 1.0);
+        let launcher = builder.scene.volume_sources.last_mut().unwrap();
+        launcher.signal = TimeSignal::pulsed(
+            [0.0, 1.0, angle.hz(), 0.0],
+            PulseEnvelope::FlatTop {
+                duration: 2.0 * held,
+                edge: angle.ramp,
+            },
+            0.0,
+            0.0,
+        );
+        launcher.profile = ScalarField::formula(angle.profile()).unwrap();
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        prepare(&document, edge)
+    }
+
+    /// The walls' reflections at one angle, mesh and step, and how far the
+    /// nine points' own estimates stray from them.
+    #[derive(Clone, Copy, Debug)]
+    struct PlanarReading {
+        first: Phasor,
+        second: Phasor,
+        spread: f64,
+    }
+
+    /// PH-04's measurement at `angle` on meshes of `edge` and `fraction` of
+    /// the production step. Four runs share the channel, the drive and the
+    /// sponge, and differ in the right wall: first-order, second-order,
+    /// reflecting and zero-pinned. Held to steady state, each run's field at
+    /// nine points beside the wall is read by a Blackman-Harris lock-in at
+    /// the drive's frequency over the last `angle.window` seconds. The
+    /// reflecting and pinned runs return the mode whole, `R = ±1`, so their
+    /// mean is the incident field and their half-difference the reflection
+    /// of a unit wall, and a wall under test returns `R` where `U = U_inc +
+    /// R U_unit`, fitted in least squares over the points. The sponge's own
+    /// small reflection `C` would bias that by `C(1 − R²)`, so the whole
+    /// measurement runs twice with the sponge a quarter wavelength further
+    /// away, which turns `C` over, and the two are averaged.
+    fn planar_reflection(angle: PlanarAngle, edge: f64, fraction: f64) -> PlanarReading {
+        let walls = [
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            OuterBoundaryCondition::Reflecting,
+            OuterBoundaryCondition::Dirichlet {
+                signal: TimeSignal::ZERO,
+            },
+        ];
+        // A quarter of the mode's transverse period apart, where it is 0.7
+        // of its peak; the constant reads alike anywhere.
+        let quarter = 0.25 / f64::from(angle.mode.max(2));
+        let points = [0.3, 0.5, 0.7]
+            .into_iter()
+            .flat_map(|x| [quarter, -quarter, 3.0 * quarter].map(|y| Point2::new(x, y)))
+            .collect::<Vec<_>>();
+        // Long enough to switch on, for the mode to reach the wall and come
+        // back past the points, to settle and to be read.
+        let held = angle.ramp + 2.4 / angle.cos() + angle.settle + angle.window;
+        let omega = angle.omega();
+        let readings = [0.0, angle.quarter()].map(|shift| {
+            let prepared = walls.map(|wall| sponge_channel(angle, wall, edge, shift, held));
+            let dt = fraction
+                * prepared
+                    .iter()
+                    .map(|prepared| prepared.recommended_time_step())
+                    .fold(f64::INFINITY, f64::min);
+            let steps = (held / dt).ceil() as usize;
+            let traces = std::thread::scope(|scope| {
+                prepared
+                    .iter()
+                    .map(|prepared| {
+                        let points = &points;
+                        scope.spawn(move || {
+                            wall_traces(prepared, dt, steps, points, CanonicalWallStep::default())
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            let span = (angle.window / dt).round() as usize;
+            let lock_in = |trace: &[f64]| {
+                let first = steps - span;
+                let (mut sum, mut total) = (Phasor::default(), 0.0);
+                for (step, value) in trace.iter().enumerate().skip(first) {
+                    let x = std::f64::consts::TAU * (step - first) as f64 / span as f64;
+                    let weight = 0.35875 - 0.48829 * x.cos() + 0.14128 * (2.0 * x).cos()
+                        - 0.01168 * (3.0 * x).cos();
+                    let phase = omega * (step + 1) as f64 * dt;
+                    sum = sum + Phasor::new(phase.cos(), -phase.sin()).scale(weight * value);
+                    total += weight;
+                }
+                sum.scale(1.0 / total)
+            };
+            let phasors = traces
+                .iter()
+                .map(|run| run.iter().map(|trace| lock_in(trace)).collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            let reflection = |wall: usize| {
+                let (mut numerator, mut denominator) = (Phasor::default(), 0.0);
+                let mut estimates = Vec::new();
+                for ((open, pinned), tested) in
+                    phasors[2].iter().zip(&phasors[3]).zip(&phasors[wall])
+                {
+                    let incident = (*open + *pinned).scale(0.5);
+                    let unit = (*open - *pinned).scale(0.5);
+                    let returned = *tested - incident;
+                    estimates.push(returned / unit);
+                    numerator = numerator + returned * unit.conj();
+                    denominator += unit.norm().powi(2);
+                }
+                let fitted = numerator.scale(1.0 / denominator);
+                let spread = estimates
+                    .iter()
+                    .map(|estimate| (*estimate - fitted).norm())
+                    .fold(0.0, f64::max);
+                (fitted, spread)
+            };
+            let (first, first_spread) = reflection(0);
+            let (second, second_spread) = reflection(1);
+            PlanarReading {
+                first,
+                second,
+                spread: first_spread.max(second_spread),
+            }
+        });
+        PlanarReading {
+            first: (readings[0].first + readings[1].first).scale(0.5),
+            second: (readings[0].second + readings[1].second).scale(0.5),
+            spread: readings[0].spread.max(readings[1].spread),
+        }
+    }
+
+    /// Prints a reading against the law, and returns the two walls' errors.
+    fn planar_report(
+        angle: PlanarAngle,
+        edge: f64,
+        fraction: f64,
+        reading: PlanarReading,
+    ) -> [f64; 2] {
+        [false, true].map(|second| {
+            let read = if second { reading.second } else { reading.first };
+            let law = angle.law(second);
+            let error = (read - law).norm();
+            eprintln!(
+                "{}° {} order, edge {edge} at {fraction} of the step: R {:+.6}{:+.6}i, law {:+.6}{:+.6}i, \
+                 E_discretization {error:.3e}, E_approximation {:.4}, points within {:.1e}",
+                angle.degrees,
+                if second { "second" } else { "first" },
+                read.re,
+                read.im,
+                law.re,
+                law.im,
+                law.norm(),
+                reading.spread
+            );
+            error
+        })
+    }
+
+    /// PH-04 in the gate: the first- and second-order walls at 0° and 45°
+    /// on the coarsest mesh of the nightly study, read against their law;
+    /// see `planar_reflection` for the measurement and
+    /// `planar_reflection_converges_to_its_law_at_three_angles` for the
+    /// study.
+    #[test]
+    fn planar_reflection_meets_its_law_at_0_and_45_degrees() {
+        for angle in &PLANAR_ANGLES[..2] {
+            let reading = planar_reflection(*angle, 0.1, 1.0);
+            let errors = planar_report(*angle, 0.1, 1.0, reading);
+            for (error, order) in errors.into_iter().zip(["first", "second"]) {
+                assert!(
+                    error < 1.0e-3,
+                    "{}° {order} order: E_discretization {error:e}",
+                    angle.degrees
+                );
+            }
+            assert!(
+                reading.spread < 1.0e-3,
+                "{}°: {}",
+                angle.degrees,
+                reading.spread
+            );
+        }
+    }
+
+    /// PH-04, planar reflection against the implemented law
+    /// (`docs/spikes/funfern-testing-campaign-plan.md`): the first- and
+    /// second-order walls at 0°, 45° and 75° on meshes of edge 0.1, 0.07 and
+    /// 0.05 at the production step, and at 45° on 0.07 at 1, ½ and ¼ of it.
+    ///
+    /// Measured on the M1 Max, `|R − R_law|` at 0.1, 0.07 and 0.05: 0°
+    /// 6.0e-4, 3.6e-4 and 1.8e-4 for both walls, which agree there; 45°
+    /// 5.7e-4, 2.3e-4 and 1.4e-4 first-order and 4.0e-4, 1.7e-4 and 1.0e-4
+    /// second-order; 75° 2.5e-4, 9.0e-5 and 4.9e-5, and 3.7e-4, 1.6e-4 and
+    /// 8.0e-5. Each falls at every level, 3.3 to 5.1 times over the halving,
+    /// the trapezoid wall step's `(ω dt)²/24` with the mesh's own error
+    /// beside it, the meshes not nested; the nine points agree to 2.1e-5 at
+    /// 0.05. In time, at 45° on 0.07, successive differences fall 5.6 and 5.4
+    /// times a halving of the step. The law's own distance from exact
+    /// transparency, `|R_law|`, is 0, 0.17 and 0.08, and 0.59 and 0.48.
+    /// About 57 minutes, 75° at 0.05 alone 27; run nightly.
+    #[test]
+    #[ignore = "nightly: PH-04's three-angle study, about 50 minutes"]
+    fn planar_reflection_converges_to_its_law_at_three_angles() {
+        let edges = [0.1, 0.07, 0.05];
+        for angle in PLANAR_ANGLES {
+            let readings = edges.map(|edge| {
+                let reading = planar_reflection(angle, edge, 1.0);
+                (planar_report(angle, edge, 1.0, reading), reading.spread)
+            });
+            assert!(
+                readings[2].1 < 5.0e-5,
+                "{}°: the points stray {} at 0.05",
+                angle.degrees,
+                readings[2].1
+            );
+            let errors = readings.map(|(errors, _)| errors);
+            for (wall, order) in ["first", "second"].into_iter().enumerate() {
+                let series = errors.map(|errors| errors[wall]);
+                let case = format!("{}° {order} order", angle.degrees);
+                assert!(
+                    series[1] < series[0] && series[2] < series[1],
+                    "{case}: E_discretization {series:?}"
+                );
+                assert!(
+                    series[0] / series[2] > 2.5 && series[2] < 2.5e-4,
+                    "{case}: E_discretization {series:?}"
+                );
+                eprintln!(
+                    "{}° {order} order: E_discretization {}",
+                    angle.degrees,
+                    series
+                        .iter()
+                        .map(|error| format!("{error:.3e}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        let angle = PLANAR_ANGLES[1];
+        let readings = [1.0, 0.5, 0.25].map(|fraction| {
+            let reading = planar_reflection(angle, 0.07, fraction);
+            planar_report(angle, 0.07, fraction, reading);
+            reading
+        });
+        for second in [false, true] {
+            let read = |reading: &PlanarReading| {
+                if second {
+                    reading.second
+                } else {
+                    reading.first
+                }
+            };
+            let coarse = (read(&readings[0]) - read(&readings[1])).norm();
+            let fine = (read(&readings[1]) - read(&readings[2])).norm();
+            eprintln!(
+                "45° {} order in time: successive differences {coarse:.3e} and {fine:.3e}, ratio {:.3}",
+                if second { "second" } else { "first" },
+                coarse / fine
+            );
+            assert!(coarse / fine > 3.5, "45° in time: {coarse:e} and {fine:e}");
+        }
+    }
+
     /// The default scene's box with every side reflecting, meshed at `edge`
     /// on the application's own path, the source off.
     fn reflecting_box(edge: f64) -> Arc<crate::topology_runtime::PreparedTopology> {
