@@ -261,7 +261,6 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if transfer[0].data.x != TRANSFER_LAYOUT_VERSION { reject(STATUS_LAYOUT); return; }
     let target_nodes = transfer[1].data.y;
-    let source_drives = transfer[5].data.z;
     let target_drives = transfer[5].data.w;
     let current_origin = add_compensated(
         old_control.clock_origin.x, old_control.clock_origin.y, old_control.clock_f32.y);
@@ -368,7 +367,23 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
         write_material_runtime(new_root, phase, switch_state, frequency);
         start_material_gates(new_root, preparation_delta);
     }
-    if i != 0u { return; }
+}
+
+// The new generation's control, written once the runtime transfer has read
+// what it reads of it: a pass of its own, dispatched after `transfer_runtime`.
+// Every invocation there reads `new_control.clock_origin`, the origin the
+// host prepared the candidate against, for its preparation delta; written in
+// the same dispatch, as it was until 2026-10-13, the write overtook the
+// reads of the workgroups still to run on a device that runs them in turn,
+// lavapipe, and the drives a new generation starts took a delta of nothing.
+@compute @workgroup_size(1)
+fn transfer_clock(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x != 0u { return; }
+    if transfer[0].data.x != TRANSFER_LAYOUT_VERSION { reject(STATUS_LAYOUT); return; }
+    let source_drives = transfer[5].data.z;
+    let material_header = transfer[8].data;
+    let current_origin = add_compensated(
+        old_control.clock_origin.x, old_control.clock_origin.y, old_control.clock_f32.y);
     let epoch_low = old_control.clock_u32.x + 1u;
     let epoch_high = old_control.clock_u32.y + select(0u, 1u, epoch_low == 0u);
     if epoch_low == 0u && epoch_high == 0u { reject(STATUS_LAYOUT); return; }

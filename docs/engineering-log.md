@@ -23590,3 +23590,43 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the four suite entries on this GPU.
+
+## 2026-10-13 — A race in the runtime transfer, found by the running fixture on lavapipe
+
+- **Reported.** CI on 84498b4: the lavapipe job fails on
+  `handoff-memory-running` alone, Q 1.36, b 1.34, the pole states 0.13 off,
+  the four held fixtures and the rest passing there; the same fixture passes
+  on Metal.
+- **Reproduced.** In the CI container (Colima, amd64, lavapipe): the same
+  fixture fails, landing at step 202 as on Metal, with other numbers, Q 0.40
+  and b 1.21, and again at Q 0.31 with the run held. A snapshot eleven steps
+  after the landing, read against the reference stepped to it, puts the
+  error in the pinned nodes alone, 0.41, the bulk 0.20 behind them, and the
+  wall's pole states exact at 5.8e-7: the drive the new generation starts is
+  about ten steps of phase behind, and the amount varies run to run.
+- **Cause.** In `transfer_runtime`, every invocation reads
+  `new_control.clock_origin`, the origin the host prepared the candidate
+  against, to form the preparation delta that moves a new drive's phase to
+  the time the run has reached; and invocation 0 writes that same field at
+  the end of the same dispatch, the new generation's origin. A device that
+  runs the workgroups in turn, as lavapipe does, lets the write overtake the
+  reads of the workgroups still to run: their pins and drives take a delta
+  of nothing, and how many of them depends on the threads' order, which is
+  why the error varied. Metal runs the workgroups together and read the old
+  value every time. Shown by reading a constant origin in place of the
+  field: lavapipe then passes, the pinned nodes 4.5e-8 off.
+- **Change.** The control's write is a pass of its own, `transfer_clock`,
+  one invocation, dispatched after `transfer_runtime` on the same bind
+  group; the delta reads what nothing in its dispatch writes. The driver's
+  running fixture reports a reading after the handoff, the pinned nodes and
+  the rest apart, and `scripts/e2e-lavapipe.sh` prints a failed fixture's
+  whole account, where it printed its last two lines.
+- **Verified.** In the CI container on lavapipe the running fixture passes:
+  the pinned nodes 1.0e-7 off at the reading twenty-two steps after the
+  request, Q 1.4e-6, b 1.6e-6, the pole states 8.1e-6 at the endpoint, the
+  clock 1.1e-7 s. On the M1 Max all twelve fixtures pass, the held ones'
+  endpoint hashes the same bits as before the change, the running one Q
+  1.6e-6 and b 1.8e-6. Both clock mutations still apply to the shader.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the device suite's fixtures.

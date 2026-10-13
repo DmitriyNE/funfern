@@ -1218,7 +1218,7 @@ fn advance(
                     }
                 }
             }
-            if reference.carry.is_some() && driver.fixture.holds() {
+            if reference.carry.is_some() {
                 let seen = display.full_readbacks;
                 request.request_full_state_readback();
                 driver.phase = Phase::Carried {
@@ -1241,15 +1241,61 @@ fn advance(
             seen,
         } => {
             let (step, _) = actions[next];
+            // A held run's snapshot is the handoff's own step; a run going
+            // on is read at whatever step its snapshot stamps, the
+            // reference stepped to it.
+            let holds = driver.fixture.holds();
+            let stamped = display.full_snapshot_completed_steps();
             let arrived = display.full_readbacks > seen
                 && display.generation == request.generation()
-                && display.full_snapshot_completed_steps() == step;
+                && if holds {
+                    stamped == step
+                } else {
+                    stamped >= reference.steps && stamped <= endpoint
+                };
             if !arrived {
                 request.request_full_state_readback();
                 driver.phase = Phase::Carried {
                     reference,
                     next,
                     seen,
+                };
+                return None;
+            }
+            if !holds {
+                if let Err(error) = reference.advance_to(stamped) {
+                    return Some(Err(format!("the reference did not step: {error}")));
+                }
+                // Read, not judged: the pinned nodes and the rest apart, to
+                // tell a drive's phase from the field's carry.
+                let pinned = reference
+                    .active
+                    .canonical_forcing
+                    .prescribed()
+                    .iter()
+                    .map(Option::is_some)
+                    .collect::<Vec<_>>();
+                let unpinned = pinned.iter().map(|pinned| !pinned).collect::<Vec<_>>();
+                let on_pins = field_errors(&reference, display, Some(&pinned)).map(|e| e.0);
+                let off_pins = field_errors(&reference, display, Some(&unpinned));
+                let wall = wall_errors(&reference, display);
+                match (on_pins, off_pins, wall) {
+                    (Ok(on), Ok((off, b, _)), Ok(Some(wall))) => report(&format!(
+                        "e2e {:?}: read at step {stamped}, {} after the request: Q {on:.3e} on the \
+                         pinned nodes, {off:.3e} off them, b {b:.3e}, wall z {:.3e}, memory {:.3e}",
+                        driver.fixture,
+                        stamped - step,
+                        wall.z,
+                        wall.memory
+                    )),
+                    (Err(failure), _, _) | (_, Err(failure), _) | (_, _, Err(failure)) => {
+                        return Some(Err(failure));
+                    }
+                    (_, _, Ok(None)) => return Some(Err("no wall to read".into())),
+                }
+                driver.phase = Phase::Run {
+                    reference,
+                    next: next + 1,
                 };
                 return None;
             }

@@ -60,6 +60,12 @@ for fixture in "${fixtures[@]}"; do
     failed=$((failed + 1))
   fi
   printf '%-10s %4d s  %s\n' "$verdict" $((SECONDS - started)) "$fixture"
-  grep "^e2e " "$log" | tail -2 | sed 's/^/           /'
+  # A run that held: its last two lines; one that did not: every line of
+  # the driver's account, which is what there is to read.
+  if [[ $status -eq 0 ]]; then
+    grep "^e2e " "$log" | tail -2 | sed 's/^/           /'
+  else
+    grep "^e2e " "$log" | sed 's/^/           /'
+  fi
 done
 [[ $failed -eq 0 ]]

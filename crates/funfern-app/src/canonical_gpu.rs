@@ -6673,6 +6673,9 @@ struct CanonicalTransferPipeline {
     energy_layout: BindGroupLayoutDescriptor,
     invariant_layout: BindGroupLayoutDescriptor,
     transfer_runtime: CachedComputePipelineId,
+    /// The new generation's control, written after `transfer_runtime` has
+    /// read the candidate's clock origin in every workgroup.
+    transfer_clock: CachedComputePipelineId,
     transfer_primary: CachedComputePipelineId,
     transfer_vector: CachedComputePipelineId,
     transfer_gap: CachedComputePipelineId,
@@ -6947,6 +6950,12 @@ fn init_canonical_pipeline(
         transfer_runtime: queue_transfer(
             "canonical transfer runtime",
             "transfer_runtime",
+            runtime_layout.clone(),
+            runtime_shader.clone(),
+        ),
+        transfer_clock: queue_transfer(
+            "canonical transfer clock",
+            "transfer_clock",
             runtime_layout,
             runtime_shader,
         ),
@@ -8157,6 +8166,7 @@ fn compute_canonical_handoff(
         transfer.correct_primary,
         transfer.transfer_integrated,
         transfer.transfer_invariant,
+        transfer.transfer_clock,
     ];
     if ids.iter().any(|id| {
         matches!(
@@ -8191,6 +8201,10 @@ fn compute_canonical_handoff(
         1,
         1,
     );
+    // The new control's clock, once every workgroup above has read the
+    // origin the candidate was prepared against.
+    pass.set_pipeline(pipelines[17]);
+    pass.dispatch_workgroups(1, 1, 1);
 
     pass.set_bind_group(0, &groups.map, &[]);
     pass.set_pipeline(pipelines[1]);
