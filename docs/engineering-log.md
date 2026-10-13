@@ -23818,3 +23818,30 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-13 — PH-01 on the device
+
+- **Example.** `canonical_gpu_cavity_modes --physics mechanical|tm|te`, one
+  suite entry each: the 2 × 1.4 box and medium of `box_modes_in_*`, (1,2)
+  and (2,3) under the fourth-order step at edges 0.16, 0.08 and 0.04, and
+  (2,3) at 0.08 under leapfrog at 1, ½ and ¼ of its step, each from its
+  closed form at `θ = π/3`. Every run steps on the device and in f64 from
+  the same state; the device's series, the mode's projection `Σ φ Q / Σ M φ²`,
+  is read every twelfth of a period through a full readback at a known
+  step, one plan after another in one app, and its frequency comes from
+  the recurrence at that stride.
+- **Measured, M1 Max.** The three models alike. The series within 9e-8 to
+  5.7e-7 of the reference's, held to 5e-6; the frequency within 5e-9 to
+  2.9e-8 of the reference's, the f32 floor, held to 1e-7. The floor lies
+  under the frequency's own error on every mesh, so the device shows the
+  spatial convergence to the finest: (1,2) at 2.05e-5, 1.75e-7 and 2.5e-8
+  off the closed form, (2,3) at 2.59e-5, 2.91e-6 and 1.81e-7, each halving
+  held to at least sixfold; and leapfrog's second order in time, its
+  stepped frequency's successive differences 5.48e-4 and 1.37e-4 in TM,
+  4.001 times apart, held to 4 ± 0.1. The fourth-order step's time law,
+  a miss of 2e-8 at its own step, lies under the floor and is left to the
+  f64 tests. 43 to 56 s a model alone, 47 to 91 s in the suite. A first
+  cut read 24 times a period and took 170 s, waiting on readbacks.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the three suite entries.

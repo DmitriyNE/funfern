@@ -640,6 +640,18 @@ state and stays within `5.2e-7` of the reference. The end-to-end fixture the
 plan named is not built: the driver acts through the app's handlers alone,
 and the app has no tool that authors a complementary flux.
 
+`canonical_gpu_cavity_modes` is PH-01's device half, `--physics mechanical`,
+`tm` or `te`: the 2 × 1.4 box of `box_modes_in_*`, (1,2) and (2,3) under the
+fourth-order step at edges 0.16, 0.08 and 0.04, and (2,3) at 0.08 under
+leapfrog at 1, ½ and ¼ of its step, each from its closed form at a third of
+a period, stepped on the device and in f64 and read every twelfth of a
+period through a full readback at a known step. The device's series stands
+within `5.7e-7` of the reference's, its frequency within `2.9e-8`, the f32
+floor, held to 1e-7; that floor lies under the frequency's own error on
+every mesh, so the device shows the element's fourth order in space to the
+finest, (2,3) at 2.6e-5, 2.9e-6 and 1.8e-7, and leapfrog's second order in
+time, successive differences falling 4.001 times. 45 to 90 s a model.
+
 The walls step by the trapezoid rule
 (`docs/spikes/funfern-outgoing-wall-step-spike.md`) on the reference and the
 device alike; `--half-kicks` on `canonical_gpu_timing`,

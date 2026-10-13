@@ -340,8 +340,10 @@ forms computed in the test.
 physics model on a reflecting 2 × 1.4 box, so that no mode PH-01 runs is
 degenerate with another as on the square, the modes started at a third of a
 period with b from its closed form and each model's orientation, and the
-mutation `tm-orientation-flipped`. The device half is the example
-`canonical_gpu_cavity_modes`.
+mutation `tm-orientation-flipped`. **Device half done the same day**: the
+example `canonical_gpu_cavity_modes`, one suite entry per physics model; the
+device follows the f64 frequency to its f32 floor of 3e-8, which lies under
+every mesh's error, so its spatial convergence shows to the finest mesh.
 
 **PH-04, planar reflection against the implemented law.** Promote the
 Bloch-strip methodology of `docs/spikes/funfern-boundary-scattering-spike.md`
