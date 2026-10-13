@@ -2421,40 +2421,6 @@ fn barycentric_in(point: Point2, [a, b, c]: [Point2; 3]) -> Option<[f64; 3]> {
     Some(weights.map(|weight| weight / total))
 }
 
-fn aligned_indicator_auxiliary(
-    display: &WaveDisplay,
-    operator: &QuadraticWaveOperator,
-    time_step: f64,
-    completed_steps: u64,
-) -> Option<Vec<f64>> {
-    let count = operator.degrees_of_freedom();
-    if !time_step.is_finite()
-        || time_step <= 0.0
-        || display.snapshot_current.len() != count
-        || display.auxiliary.len() != count
-    {
-        return None;
-    }
-    Some(
-        (0..count)
-            .map(|node| {
-                if !operator.auxiliary_active()[node]
-                    || operator.dirichlet_signals()[node].is_some()
-                    || completed_steps == 0
-                {
-                    display.auxiliary[node] as f64
-                } else {
-                    display.auxiliary[node] as f64
-                        - 0.5
-                            * time_step
-                            * (display.snapshot_current[node] as f64
-                                + display.snapshot_current[node] as f64)
-                }
-            })
-            .collect(),
-    )
-}
-
 /// The maps a generation's readbacks are read through, when `departs` says
 /// they are not the fixed ones: its time-driven operator, the runtime the
 /// solver stepped with (the authored one until a snapshot and a clock agree),
@@ -2588,8 +2554,6 @@ fn refresh_canonical_wave_display(
     if display.generation != canonical.generation {
         display.complementary_flux.clear();
         display.snapshot_current.clear();
-        display.snapshot_previous.clear();
-        display.snapshot_velocity.clear();
         display.snapshot_integrated.clear();
         display.snapshot_completed_steps = 0;
     }
@@ -2612,8 +2576,6 @@ fn refresh_canonical_wave_display(
             &canonical.primary_flux,
             canonical.full_snapshot_seconds(),
         );
-        display.auxiliary.clear();
-        display.auxiliary.resize(operator.degrees_of_freedom(), 0.0);
         display.snapshot_completed_steps = canonical.full_snapshot_completed_steps();
         display.snapshot_integrated.clear();
         display

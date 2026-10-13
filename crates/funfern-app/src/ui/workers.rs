@@ -1116,7 +1116,6 @@ mod tests {
             displacement: vec![0.0; dofs],
             velocity: vec![0.0; dofs],
             acceleration: vec![0.0; dofs],
-            auxiliary: vec![0.0; dofs],
             volume_acceleration: vec![0.0; dofs],
             time: 0.01,
             time_step: 0.01,

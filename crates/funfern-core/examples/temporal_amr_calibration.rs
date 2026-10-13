@@ -876,7 +876,6 @@ fn estimate(
         displacement: current,
         velocity,
         acceleration: vec![0.0; count],
-        auxiliary: vec![0.0; count],
         volume_acceleration: vec![0.0; count],
         time: state.time(),
         time_step: state.time_step(),

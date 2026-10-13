@@ -19,8 +19,6 @@ pub struct QuadraticSolutionSnapshot {
     pub displacement: Vec<f64>,
     pub velocity: Vec<f64>,
     pub acceleration: Vec<f64>,
-    /// Second-order boundary memory aligned with `time` and `displacement`.
-    pub auxiliary: Vec<f64>,
     pub volume_acceleration: Vec<f64>,
     pub time: f64,
     pub time_step: f64,
@@ -1422,7 +1420,6 @@ impl SolutionIndicatorJob {
             || self.snapshot.displacement.len() != count
             || self.snapshot.velocity.len() != count
             || self.snapshot.acceleration.len() != count
-            || self.snapshot.auxiliary.len() != count
             || self.snapshot.volume_acceleration.len() != count
             || !self.snapshot.time.is_finite()
             || !self.snapshot.time_step.is_finite()
@@ -1433,7 +1430,6 @@ impl SolutionIndicatorJob {
                 .iter()
                 .chain(&self.snapshot.velocity)
                 .chain(&self.snapshot.acceleration)
-                .chain(&self.snapshot.auxiliary)
                 .chain(&self.snapshot.volume_acceleration)
                 .any(|value| !value.is_finite())
         {
@@ -2224,13 +2220,14 @@ impl SolutionIndicatorJob {
             return Ok(());
         }
         let record = self.boundary_records[index];
-        if self.canonical.is_some()
-            && (record.pair.is_some()
-                || matches!(record.condition, FaceBoundaryCondition::SecondOrderOutgoing))
+        if matches!(record.condition, FaceBoundaryCondition::SecondOrderOutgoing)
+            || (self.canonical.is_some() && record.pair.is_some())
         {
             // Direct gap and nonlocal outgoing states are assessed from their
             // accepted endpoint equations, not reinterpreted as the retired
-            // scalar auxiliary potential.
+            // scalar auxiliary potential. No state holds that potential any
+            // more, so a scalar estimate has no memory to read a second-order
+            // wall's residual from and leaves its edges out as well.
             self.report.boundary_edges_evaluated += 1;
             self.phase = IndicatorPhase::Boundary(index + 1);
             return Ok(());
@@ -2246,8 +2243,6 @@ impl SolutionIndicatorJob {
             return Err(SolutionIndicatorError::InvalidMesh);
         }
         let normal = outward_normal(geometry.points, edge_points);
-        let auxiliary_second =
-            line_second_derivative(&self.snapshot.auxiliary, record.nodes, length);
         let paired_nodes = if let Some((key, slot, spring)) = record.pair {
             let pair = self
                 .boundary_pairs
@@ -2274,10 +2269,6 @@ impl SolutionIndicatorJob {
         } else {
             None
         };
-        let middle_material =
-            self.material_at(record.region, edge_points[0].lerp(edge_points[1], 0.5))?;
-        let auxiliary_scale = middle_material.stiffness.determinant()
-            / (2.0 * middle_material.normal_impedance(normal));
         // Where the gradient terms read the solver's own flux, so does the
         // wall: `∇(Q/M)` carries a mass's lumping pattern and an oscillator's
         // nodal force, neither of which converges at a wall.
@@ -2356,11 +2347,8 @@ impl SolutionIndicatorJob {
                     let impedance = ratio * timed.authored.normal_impedance(normal);
                     flux + impedance * velocity
                 }
-                FaceBoundaryCondition::SecondOrderOutgoing => {
-                    let impedance = material.normal_impedance(normal);
-                    flux + impedance * velocity - auxiliary_scale * auxiliary_second
-                }
-                FaceBoundaryCondition::Dirichlet { .. } => unreachable!(),
+                FaceBoundaryCondition::Dirichlet { .. }
+                | FaceBoundaryCondition::SecondOrderOutgoing => unreachable!(),
                 FaceBoundaryCondition::ElectricWall | FaceBoundaryCondition::MagneticWall => {
                     unreachable!()
                 }
@@ -2676,10 +2664,6 @@ fn line_scalar(values: &[f64], nodes: [usize; 3], fraction: f64) -> f64 {
         .sum()
 }
 
-fn line_second_derivative(values: &[f64], nodes: [usize; 3], length: f64) -> f64 {
-    4.0 * (values[nodes[0]] - 2.0 * values[nodes[1]] + values[nodes[2]]) / (length * length)
-}
-
 fn line_quadrature() -> [(f64, f64); 3] {
     [
         (0.112_701_665_379_258_3, 5.0 / 18.0),
@@ -2819,7 +2803,6 @@ mod tests {
             displacement,
             velocity: zeros.clone(),
             acceleration: zeros.clone(),
-            auxiliary: zeros.clone(),
             volume_acceleration: zeros,
             time: 0.25,
             time_step: 0.01,
@@ -3196,6 +3179,10 @@ mod tests {
         }
     }
 
+    /// A field that meets each outer law has no boundary residual, and one that
+    /// breaks them has. The second-order top side is counted and left out:
+    /// its law needs the wall's memory, which no scalar snapshot holds, and
+    /// read without it the side would put a residual of one on every edge.
     #[test]
     fn manufactured_outer_laws_have_zero_boundary_residual_and_detect_mismatch() {
         let mut scene = Scene::default();
@@ -3212,11 +3199,6 @@ mod tests {
         let (mesh, operator, scene) = meshed_setup(scene, 71);
         let mut state = snapshot(&mesh, &operator, |point| point.x + 2.0 * point.y);
         state.velocity.fill(-1.0);
-        state.auxiliary = operator
-            .node_points()
-            .iter()
-            .map(|point| point.x * point.x)
-            .collect();
         let options = SolutionIndicatorOptions::default();
         let one = run(
             SolutionIndicatorJob::new(
@@ -3819,7 +3801,6 @@ mod tests {
                     .iter()
                     .map(|p| bump(*p) * (p.dot(*p) / sigma.powi(4) - 2.0 / (sigma * sigma)))
                     .collect(),
-                auxiliary: zeros.clone(),
                 volume_acceleration: zeros,
                 time: 0.25,
                 time_step: 0.01,
@@ -4080,23 +4061,7 @@ mod tests {
             SolutionIndicatorError::InvalidSnapshot
         );
         let mut state = snapshot(&mesh, &operator, |_| 0.0);
-        state.auxiliary.pop();
-        assert_eq!(
-            run(
-                SolutionIndicatorJob::new(
-                    mesh.clone(),
-                    operator.clone(),
-                    scene.clone(),
-                    state,
-                    SolutionIndicatorOptions::default(),
-                ),
-                100,
-            )
-            .unwrap_err(),
-            SolutionIndicatorError::InvalidSnapshot
-        );
-        let mut state = snapshot(&mesh, &operator, |_| 0.0);
-        state.auxiliary[0] = f64::NAN;
+        state.acceleration[0] = f64::NAN;
         assert_eq!(
             run(
                 SolutionIndicatorJob::new(

@@ -7021,7 +7021,6 @@ mod tests {
                     .map(|point| 0.05 * (0.9 * point.x + 1.4 * point.y).cos())
                     .collect(),
                 acceleration: vec![0.0; count],
-                auxiliary: vec![0.0; count],
                 volume_acceleration: vec![0.0; count],
                 time,
                 time_step: 1.0e-3,
@@ -7178,7 +7177,6 @@ mod tests {
             displacement: field,
             velocity: vec![0.0; count],
             acceleration: vec![0.0; count],
-            auxiliary: vec![0.0; count],
             volume_acceleration: vec![0.0; count],
             time: snapshot.time,
             time_step,
@@ -7299,7 +7297,6 @@ mod tests {
                 .map(|point| 0.05 * (0.9 * point.x + 1.4 * point.y).cos())
                 .collect(),
             acceleration: vec![0.0; count],
-            auxiliary: vec![0.0; count],
             volume_acceleration: vec![0.0; count],
             time: 0.37,
             time_step: 1.0e-3,
@@ -8738,7 +8735,6 @@ mod tests {
             velocity: vec![0.0; count],
             acceleration: vec![0.0; count],
             volume_acceleration: vec![0.0; count],
-            auxiliary: vec![0.0; count],
             time: 0.0,
             time_step: 0.4 * operator.maximum_time_step(),
         };
@@ -8840,7 +8836,6 @@ mod tests {
             velocity: vec![0.0; count],
             acceleration: vec![0.0; count],
             volume_acceleration: vec![0.0; count],
-            auxiliary: vec![0.0; count],
             time: 0.0,
             time_step: 0.4 * operator.maximum_time_step(),
         };
@@ -9247,7 +9242,6 @@ mod tests {
             velocity: vec![-omega * phase.sin(); count],
             acceleration: vec![0.0; count],
             volume_acceleration: vec![0.0; count],
-            auxiliary: vec![0.0; count],
             time: 0.0,
             time_step: 0.4 * operator.maximum_time_step(),
         };

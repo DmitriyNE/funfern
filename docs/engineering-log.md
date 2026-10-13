@@ -23696,3 +23696,35 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the device suite, 85 of 85 on the M1 Max.
+
+## 2026-10-13 — The indicator's dead auxiliary lane goes
+
+- **Found.** The A0.3 audit's report (2026-10-12): `aligned_indicator_auxiliary`
+  in `ui.rs` aligned the display's auxiliary lane for the AMR estimator, with
+  `snapshot_current` taken twice where a trapezoid would take the previous
+  snapshot, and the lane was a zero vector the display resized and never
+  wrote. What it made reached `QuadraticSolutionSnapshot::auxiliary`, which
+  the scalar estimator reads in one place, the residual of a second-order
+  wall, and the canonical estimator, the one the app runs, skips those
+  edges: it assesses the wall from its own state. Mapping it for the
+  removal found two more lanes of the same kind on `WaveDisplay`,
+  `snapshot_previous` and `snapshot_velocity`, cleared at a new generation
+  and neither written nor read.
+- **Change.** The three display lanes and the alignment are gone, and with
+  them the scalar snapshot's `auxiliary`: no state holds the retired
+  scalar auxiliary potential, so the scalar estimator leaves a second-order
+  wall's edges out, counted, as the canonical one does, and its snapshot
+  checks no longer ask for the field. The app keeps waiting on a time step
+  that is not positive, which the alignment used to refuse. Every snapshot
+  built in tests and the two calibration examples passed zeros there.
+- **Tests.** `manufactured_outer_laws_have_zero_boundary_residual_and_detect_mismatch`
+  keeps its second-order top side without a manufactured memory: read
+  without it, the side would put a residual of one on every edge, and the
+  estimate reads none, every edge counted. The invalid-snapshot cases lose
+  the two on the field; a NaN in the acceleration takes the NaN case's
+  place.
+- **Verified.** The twelve end-to-end fixtures pass on the M1 Max, the
+  display refresh they read through without the lanes.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

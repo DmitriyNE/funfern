@@ -404,7 +404,6 @@ impl Playground {
         if !request.ready()
             || display.generation != request.generation()
             || display.snapshot_current.len() != dofs
-            || display.auxiliary.len() != dofs
             || canonical.previous_primary_flux.len() != dofs
             || canonical.previous_complementary_flux.len()
                 != active.canonical_operator.complementary_degrees_of_freedom()
@@ -458,6 +457,10 @@ impl Playground {
             None => None,
         };
         let dt = self.solver_time_step();
+        if !dt.is_finite() || dt <= 0.0 {
+            self.amr_status = "waiting for aligned readback".into();
+            return;
+        }
         let time = canonical.clock.map_or(self.simulated_time(), |clock| {
             clock.absolute_seconds
                 + (step as f64 - f64::from(clock.accepted_steps)) * f64::from(clock.time_step)
@@ -545,17 +548,11 @@ impl Playground {
         // of paying for an unused sparse multiply at every estimate.
         let acceleration = vec![0.0; dofs];
         let volume_acceleration = vec![0.0; dofs];
-        let Some(auxiliary) = aligned_indicator_auxiliary(display, &active.operator, dt, step)
-        else {
-            self.amr_status = "waiting for aligned readback".into();
-            return;
-        };
         let snapshot = QuadraticSolutionSnapshot {
             mesh_revision: active.mesh.mesh_revision,
             displacement,
             velocity,
             acceleration,
-            auxiliary,
             volume_acceleration,
             time,
             time_step: dt,
@@ -923,7 +920,6 @@ mod tests {
                 displacement: vec![0.0; dofs],
                 velocity: vec![0.0; dofs],
                 acceleration: vec![0.0; dofs],
-                auxiliary: vec![0.0; dofs],
                 volume_acceleration: vec![0.0; dofs],
                 time: 0.01,
                 time_step: 0.01,

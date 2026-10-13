@@ -5925,7 +5925,6 @@ mod tests {
                 .map(|node| (after[node] - 2.0 * now[node] + before[node]) / (dt * dt))
                 .collect(),
             volume_acceleration: vec![0.0; count],
-            auxiliary: vec![0.0; count],
             time: state.time() - dt,
             time_step: dt,
         };
@@ -6025,7 +6024,6 @@ mod tests {
                 displacement,
                 velocity,
                 acceleration: vec![0.0; count],
-                auxiliary: vec![0.0; count],
                 volume_acceleration: vec![0.0; count],
                 time: state.time(),
                 time_step: dt,
@@ -6182,7 +6180,6 @@ mod tests {
                 displacement,
                 velocity,
                 acceleration: vec![0.0; count],
-                auxiliary: vec![0.0; count],
                 volume_acceleration: vec![0.0; count],
                 time: snapshot.time,
                 time_step: dt,
@@ -7881,7 +7878,6 @@ mod tests {
                 displacement: vec![0.0; count],
                 velocity: vec![0.0; count],
                 acceleration: vec![0.0; count],
-                auxiliary: vec![0.0; count],
                 volume_acceleration: vec![0.0; count],
                 time: 0.0,
                 time_step: prepared.recommended_time_step(),
