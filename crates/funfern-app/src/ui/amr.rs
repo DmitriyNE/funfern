@@ -441,122 +441,30 @@ impl Playground {
             self.amr_status = "monitoring solution".into();
             return;
         }
-        // A driven estimate is taken under the runtime the solver stepped the
-        // field with, decoded from the same snapshot. Until a snapshot and a
-        // clock agree on its epoch there is nothing safe to decode it against.
-        let temporal = match &active.canonical_temporal_operator {
-            Some(operator) => {
-                match canonical.accepted_material_runtime(&operator.initial_runtime()) {
-                    Some(runtime) => Some((operator.clone(), runtime)),
-                    None => {
-                        self.amr_status = "waiting for aligned readback".into();
-                        return;
-                    }
-                }
+        let snapshots = match indicator_snapshots(
+            active,
+            canonical,
+            display,
+            step,
+            self.solver_time_step(),
+            self.simulated_time(),
+        ) {
+            Ok(Some(snapshots)) => snapshots,
+            Ok(None) => {
+                self.amr_status = "waiting for aligned readback".into();
+                return;
             }
-            None => None,
-        };
-        let dt = self.solver_time_step();
-        if !dt.is_finite() || dt <= 0.0 {
-            self.amr_status = "waiting for aligned readback".into();
-            return;
-        }
-        let time = canonical.clock.map_or(self.simulated_time(), |clock| {
-            clock.absolute_seconds
-                + (step as f64 - f64::from(clock.accepted_steps)) * f64::from(clock.time_step)
-        });
-        let canonical_snapshot = CanonicalIndicatorSnapshot {
-            mesh_revision: active.mesh.mesh_revision,
-            primary_flux: canonical
-                .primary_flux
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect(),
-            previous_primary_flux: canonical
-                .previous_primary_flux
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect(),
-            complementary_flux: canonical
-                .complementary_flux
-                .iter()
-                .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
-                .collect(),
-            previous_complementary_flux: canonical
-                .previous_complementary_flux
-                .iter()
-                .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
-                .collect(),
-            auxiliary: canonical
-                .history_auxiliary()
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect(),
-            previous_auxiliary: canonical
-                .previous_history_auxiliary()
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect(),
-            // Gate O: the integrated field from the same snapshot, empty
-            // without a restoring law.
-            integrated_field: canonical
-                .integrated_field()
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect(),
-            previous_integrated_field: canonical
-                .previous_integrated_field()
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect(),
-            time,
-            time_step: dt,
-        };
-        let displacement = display
-            .snapshot_current
-            .iter()
-            .map(|value| f64::from(*value))
-            .collect::<Vec<_>>();
-        // A driven generation's rate is its own: the fixed operator's reads
-        // the authored mass and force, and knows no loss law or restoring
-        // force, which is not the field the solver stepped.
-        let velocity = match &temporal {
-            Some((operator, runtime)) => canonical_temporal_primary_rate(
-                operator,
-                &active.canonical_forcing,
-                &canonical_snapshot,
-                runtime,
-            ),
-            None => canonical_primary_rate(
-                &active.canonical_operator,
-                &active.canonical_forcing,
-                &canonical_snapshot,
-            ),
-        };
-        let velocity = match velocity {
-            Ok(velocity) => velocity,
             Err(error) => {
                 self.amr_status = "canonical estimate failed".into();
                 self.amr_error = Some(error.to_string());
                 return;
             }
         };
-        // The canonical estimator deliberately excludes the scalar strong cell
-        // residual: applying the semidiscrete stiffness and feeding it back as
-        // a pointwise acceleration produced a nonconvergent residual floor.
-        // Keep shape-valid placeholders for the shared resumable job instead
-        // of paying for an unused sparse multiply at every estimate.
-        let acceleration = vec![0.0; dofs];
-        let volume_acceleration = vec![0.0; dofs];
-        let snapshot = QuadraticSolutionSnapshot {
-            mesh_revision: active.mesh.mesh_revision,
-            displacement,
-            velocity,
-            acceleration,
-            volume_acceleration,
-            time,
-            time_step: dt,
-        };
+        let IndicatorSnapshots {
+            scalar: snapshot,
+            canonical: canonical_snapshot,
+            temporal,
+        } = snapshots;
         let patterns = scene_resolution_demand(&active.bundle.authored);
         let job = SolutionIndicatorJob::new_topology(
             active.mesh.clone(),
@@ -611,6 +519,140 @@ impl Playground {
         self.amr_last_started = Some(Instant::now());
         self.amr_status = "preparing estimate".into();
     }
+}
+
+/// The estimator's two snapshots of the generation's latest full readback,
+/// and the runtime a driven one was stepped under.
+pub(super) struct IndicatorSnapshots {
+    pub(super) scalar: QuadraticSolutionSnapshot,
+    pub(super) canonical: CanonicalIndicatorSnapshot,
+    pub(super) temporal: Option<(
+        Arc<CanonicalTemporalWaveOperator>,
+        CanonicalMaterialRuntimeState,
+    )>,
+}
+
+/// Builds the estimator's snapshots from what the displays hold of the latest
+/// full readback, of the solver's `step`: the canonical one from its state
+/// and the state a step earlier, the scalar one from its field and the rate
+/// the generation's own operator gives that pair. `None` while the snapshot
+/// cannot be read yet: a driven generation's runtime before a snapshot and a
+/// clock agree on its epoch, or a step that is not positive. The caller has
+/// checked the lanes belong to one generation and one snapshot.
+pub(super) fn indicator_snapshots(
+    active: &PreparedTopology,
+    canonical: &CanonicalGpuDisplay,
+    display: &WaveDisplay,
+    step: u64,
+    time_step: f64,
+    simulated_time: f64,
+) -> Result<Option<IndicatorSnapshots>, WaveError> {
+    let dofs = active.operator.degrees_of_freedom();
+    // A driven estimate is taken under the runtime the solver stepped the
+    // field with, decoded from the same snapshot. Until a snapshot and a
+    // clock agree on its epoch there is nothing safe to decode it against.
+    let temporal = match &active.canonical_temporal_operator {
+        Some(operator) => match canonical.accepted_material_runtime(&operator.initial_runtime()) {
+            Some(runtime) => Some((operator.clone(), runtime)),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    let dt = time_step;
+    if !dt.is_finite() || dt <= 0.0 {
+        return Ok(None);
+    }
+    let time = canonical.clock.map_or(simulated_time, |clock| {
+        clock.absolute_seconds
+            + (step as f64 - f64::from(clock.accepted_steps)) * f64::from(clock.time_step)
+    });
+    let canonical_snapshot = CanonicalIndicatorSnapshot {
+        mesh_revision: active.mesh.mesh_revision,
+        primary_flux: canonical
+            .primary_flux
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect(),
+        previous_primary_flux: canonical
+            .previous_primary_flux
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect(),
+        complementary_flux: canonical
+            .complementary_flux
+            .iter()
+            .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
+            .collect(),
+        previous_complementary_flux: canonical
+            .previous_complementary_flux
+            .iter()
+            .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
+            .collect(),
+        auxiliary: canonical
+            .history_auxiliary()
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect(),
+        previous_auxiliary: canonical
+            .previous_history_auxiliary()
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect(),
+        // Gate O: the integrated field from the same snapshot, empty
+        // without a restoring law.
+        integrated_field: canonical
+            .integrated_field()
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect(),
+        previous_integrated_field: canonical
+            .previous_integrated_field()
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect(),
+        time,
+        time_step: dt,
+    };
+    let displacement = display
+        .snapshot_current
+        .iter()
+        .map(|value| f64::from(*value))
+        .collect::<Vec<_>>();
+    // A driven generation's rate is its own: the fixed operator's reads
+    // the authored mass and force, and knows no loss law or restoring
+    // force, which is not the field the solver stepped.
+    let velocity = match &temporal {
+        Some((operator, runtime)) => canonical_temporal_primary_rate(
+            operator,
+            &active.canonical_forcing,
+            &canonical_snapshot,
+            runtime,
+        ),
+        None => canonical_primary_rate(
+            &active.canonical_operator,
+            &active.canonical_forcing,
+            &canonical_snapshot,
+        ),
+    }?;
+    // The canonical estimator deliberately excludes the scalar strong cell
+    // residual: applying the semidiscrete stiffness and feeding it back as
+    // a pointwise acceleration produced a nonconvergent residual floor.
+    // Keep shape-valid placeholders for the shared resumable job instead
+    // of paying for an unused sparse multiply at every estimate.
+    let scalar = QuadraticSolutionSnapshot {
+        mesh_revision: active.mesh.mesh_revision,
+        displacement,
+        velocity,
+        acceleration: vec![0.0; dofs],
+        volume_acceleration: vec![0.0; dofs],
+        time,
+        time_step: dt,
+    };
+    Ok(Some(IndicatorSnapshots {
+        scalar,
+        canonical: canonical_snapshot,
+        temporal,
+    }))
 }
 
 /// Whether `generation` has taken a step since the estimator first saw it at
@@ -1052,6 +1094,315 @@ mod tests {
                 _ => state.editor.document.presentation.adaptation.maximum_edge = 0.2,
             }
             assert_ne!(state.amr_settings(), before, "{name} is not watched");
+        }
+    }
+
+    /// The estimator's snapshots, built from the displays the way the app
+    /// builds them, are the state the solver stepped. The CPU reference's two
+    /// latest states, held on the canonical display as a readback decodes
+    /// them with the clock run on past them, refresh the wave display, and the
+    /// builder reads back the pair as held, the snapshot's time and the
+    /// runtime the generation stepped under, and the field and its rate to
+    /// 6e-8 and 1e-6, the f32 rounding; the estimate made from them is the
+    /// reference's own pair's to 3e-8. On the default scene, whose walls are
+    /// second-order outgoing so the pair carries their memory, and with the
+    /// parametric pump on its medium, which drives the generation and moves
+    /// its field's maps between the snapshot and the clock.
+    #[test]
+    fn the_estimators_snapshots_are_the_pair_the_displays_hold() {
+        for pumped in [false, true] {
+            let mut state = Playground::default();
+            if pumped {
+                let material = state.editor.document.model.draft.materials[0].clone();
+                let pump = law_presets()
+                    .iter()
+                    .find(|preset| {
+                        preset.name == "Parametric pump" && preset.row == LawPresetRow::Mass
+                    })
+                    .unwrap();
+                state
+                    .editor
+                    .update_material(apply_law_preset(pump, &material).unwrap())
+                    .unwrap();
+                settle(&mut state.editor);
+            }
+            let active = activate(&mut state);
+            assert!(active.canonical_operator.outgoing_boundary().is_some());
+            assert_eq!(active.canonical_temporal_operator.is_some(), pumped);
+            // A step the display's f32 clock holds exactly, so the
+            // snapshot's time is the reference's.
+            let dt = f64::from(active.recommended_time_step() as f32);
+            let steps = 60_u32;
+            let bump = active
+                .canonical_operator
+                .node_points()
+                .iter()
+                .map(|point| {
+                    let offset = *point - Point2::new(0.0, -0.6);
+                    (-offset.dot(offset) / (2.0 * 0.15 * 0.15)).exp()
+                })
+                .collect::<Vec<_>>();
+            let forcing = &active.canonical_forcing;
+            // Each state as the lanes hold it: primary, complementary, and the
+            // gap and wall histories, then the reference's field, its time
+            // and, for a driven generation, its runtime.
+            type Lanes = (Vec<f64>, Vec<Point2>, Vec<f64>);
+            let (current, previous, field, time, runtime): (
+                Lanes,
+                Lanes,
+                Vec<f64>,
+                f64,
+                Option<CanonicalMaterialRuntimeState>,
+            ) = match &active.canonical_temporal_operator {
+                None => {
+                    let operator = &active.canonical_operator;
+                    let lanes = |state: &CanonicalWaveState| {
+                        let CanonicalAuxiliaryState::Linear(auxiliaries) = state.auxiliaries()
+                        else {
+                            panic!("a linear generation's auxiliaries")
+                        };
+                        (
+                            state.primary_flux().to_vec(),
+                            state.complementary_flux().to_vec(),
+                            auxiliaries
+                                .thin_gap_jump()
+                                .iter()
+                                .chain(auxiliaries.outgoing_z())
+                                .copied()
+                                .collect::<Vec<_>>(),
+                        )
+                    };
+                    let mut state = CanonicalWaveState::zero(operator, dt).unwrap();
+                    state.apply_primary_pulse(operator, forcing, &bump).unwrap();
+                    let mut previous = state.clone();
+                    for _ in 0..steps {
+                        previous = state.clone();
+                        state.step_with_forcing(operator, forcing).unwrap();
+                    }
+                    (
+                        lanes(&state),
+                        lanes(&previous),
+                        state.primary_field(operator).unwrap(),
+                        state.time(),
+                        None,
+                    )
+                }
+                Some(temporal) => {
+                    let lanes = |state: &CanonicalTemporalWaveState| {
+                        (
+                            state.primary_flux().to_vec(),
+                            state.complementary_flux().to_vec(),
+                            state
+                                .thin_gap_jump()
+                                .iter()
+                                .chain(state.outgoing_pole_currents())
+                                .chain(state.integrated_field())
+                                .copied()
+                                .collect::<Vec<_>>(),
+                        )
+                    };
+                    let mut state = CanonicalTemporalWaveState::zero(temporal, dt).unwrap();
+                    state.apply_primary_pulse(temporal, forcing, &bump).unwrap();
+                    let mut previous = state.clone();
+                    for _ in 0..steps {
+                        previous = state.clone();
+                        state.step_with_forcing(temporal, forcing).unwrap();
+                    }
+                    assert!(state.integrated_field().is_empty());
+                    (
+                        lanes(&state),
+                        lanes(&previous),
+                        temporal
+                            .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                            .unwrap(),
+                        state.time(),
+                        Some(state.runtime().clone()),
+                    )
+                }
+            };
+            let wall = active.canonical_operator.thin_gap_samples().len();
+            assert!(
+                current.2[wall..].iter().any(|z| z.abs() > 1.0e-6),
+                "the pulse reached no wall"
+            );
+
+            let narrow = |lanes: &Lanes| {
+                (
+                    lanes
+                        .0
+                        .iter()
+                        .map(|value| *value as f32)
+                        .collect::<Vec<_>>(),
+                    lanes
+                        .1
+                        .iter()
+                        .map(|value| [value.x as f32, value.y as f32])
+                        .collect::<Vec<_>>(),
+                    lanes
+                        .2
+                        .iter()
+                        .map(|value| *value as f32)
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let (now, before) = (narrow(&current), narrow(&previous));
+            let request = CanonicalGpuRequest::default();
+            let mut canonical = CanonicalGpuDisplay::default();
+            canonical.generation = request.generation();
+            let records = active
+                .canonical_temporal_operator
+                .as_ref()
+                .map_or(0, |temporal| temporal.initial_runtime().records().len());
+            canonical.hold_full_snapshot_lanes(
+                steps,
+                dt as f32,
+                (&now.0, &now.1, &now.2),
+                (&before.0, &before.1, &before.2),
+                0,
+                records,
+            );
+            // The clock has run on past the snapshot, as it has by the time a
+            // full readback lands; a pumped medium's maps move with it.
+            let mut clock = canonical.clock.unwrap();
+            clock.accepted_steps += 37;
+            clock.step_in_epoch += 37;
+            clock.absolute_seconds += 37.0 * dt;
+            canonical.clock = Some(clock);
+            let mut display = WaveDisplay::default();
+            super::super::refresh_canonical_wave_display(
+                Some(&active),
+                &canonical,
+                &request,
+                &mut display,
+            );
+            assert_eq!(display.snapshot_completed_steps, u64::from(steps));
+            let built = indicator_snapshots(
+                &active,
+                &canonical,
+                &display,
+                display.snapshot_completed_steps,
+                dt,
+                0.0,
+            )
+            .unwrap()
+            .expect("a full snapshot at its clock reads");
+
+            // The pair as held, and the snapshot's time.
+            let widen = |values: &[f32]| -> Vec<f64> {
+                values.iter().map(|value| f64::from(*value)).collect()
+            };
+            let held = |lanes: &(Vec<f32>, Vec<[f32; 2]>, Vec<f32>)| {
+                (
+                    widen(&lanes.0),
+                    lanes
+                        .1
+                        .iter()
+                        .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
+                        .collect::<Vec<_>>(),
+                    widen(&lanes.2),
+                )
+            };
+            let (held_now, held_before) = (held(&now), held(&before));
+            let snapshot = &built.canonical;
+            assert_eq!(snapshot.mesh_revision, active.mesh.mesh_revision);
+            assert_eq!(snapshot.primary_flux, held_now.0);
+            assert_eq!(snapshot.previous_primary_flux, held_before.0);
+            assert_eq!(snapshot.complementary_flux, held_now.1);
+            assert_eq!(snapshot.previous_complementary_flux, held_before.1);
+            assert_eq!(snapshot.auxiliary, held_now.2);
+            assert_eq!(snapshot.previous_auxiliary, held_before.2);
+            assert!(snapshot.integrated_field.is_empty());
+            assert_eq!(snapshot.time_step, dt);
+            assert!(
+                (snapshot.time - time).abs() < 1.0e-12,
+                "{} for {time}",
+                snapshot.time
+            );
+            assert_eq!(built.scalar.time, snapshot.time);
+            assert_eq!(
+                built.temporal.as_ref().map(|(_, runtime)| runtime),
+                runtime.as_ref()
+            );
+
+            // The field and its rate, against the reference's own.
+            let reference = CanonicalIndicatorSnapshot {
+                mesh_revision: active.mesh.mesh_revision,
+                primary_flux: current.0.clone(),
+                previous_primary_flux: previous.0.clone(),
+                complementary_flux: current.1.clone(),
+                previous_complementary_flux: previous.1.clone(),
+                auxiliary: current.2.clone(),
+                previous_auxiliary: previous.2.clone(),
+                integrated_field: Vec::new(),
+                previous_integrated_field: Vec::new(),
+                time,
+                time_step: dt,
+            };
+            let rate = match (&active.canonical_temporal_operator, &runtime) {
+                (Some(temporal), Some(runtime)) => {
+                    canonical_temporal_primary_rate(temporal, forcing, &reference, runtime)
+                }
+                _ => canonical_primary_rate(&active.canonical_operator, forcing, &reference),
+            }
+            .unwrap();
+            let relative = |read: &[f64], expected: &[f64]| {
+                let scale = expected
+                    .iter()
+                    .fold(0.0_f64, |most, value| most.max(value.abs()));
+                read.iter()
+                    .zip(expected)
+                    .map(|(read, expected)| (read - expected).abs())
+                    .fold(0.0_f64, f64::max)
+                    / scale
+            };
+            let field_error = relative(&built.scalar.displacement, &field);
+            let rate_error = relative(&built.scalar.velocity, &rate);
+
+            // The estimate, from the built snapshots and from the reference's.
+            let estimate = |scalar: QuadraticSolutionSnapshot,
+                            canonical: CanonicalIndicatorSnapshot| {
+                let mut job = AmrIndicatorJob::with_canonical(
+                    SolutionIndicatorJob::new_topology(
+                        active.mesh.clone(),
+                        active.operator.clone(),
+                        &active.bundle.plan,
+                        active.bundle.model(),
+                        scalar,
+                        SolutionIndicatorOptions::default(),
+                    ),
+                    active.mesh.clone(),
+                    active.canonical_operator.clone(),
+                    built.temporal.clone(),
+                    active.canonical_forcing.clone(),
+                    canonical,
+                );
+                loop {
+                    if let Some(result) = job.advance(1 << 16) {
+                        break result.unwrap().report.global_indicator;
+                    }
+                }
+            };
+            let from_displays = estimate(built.scalar.clone(), built.canonical.clone());
+            let from_reference = estimate(
+                QuadraticSolutionSnapshot {
+                    mesh_revision: active.mesh.mesh_revision,
+                    displacement: field.clone(),
+                    velocity: rate.clone(),
+                    acceleration: vec![0.0; field.len()],
+                    volume_acceleration: vec![0.0; field.len()],
+                    time,
+                    time_step: dt,
+                },
+                reference,
+            );
+            let estimate_error = (from_displays - from_reference).abs() / from_reference;
+            eprintln!(
+                "pumped {pumped}: field {field_error:.2e}, rate {rate_error:.2e}, \
+                 estimate {from_displays:.6e} for {from_reference:.6e} ({estimate_error:.2e})"
+            );
+            assert!(field_error < 5.0e-7, "field {field_error:e}");
+            assert!(rate_error < 5.0e-6, "rate {rate_error:e}");
+            assert!(estimate_error < 1.0e-6, "estimate {estimate_error:e}");
         }
     }
 }

@@ -1300,7 +1300,7 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   unit length, the remesh moves the energy by -2.4e-3 with 4.8e-4 outside
   the basis, the edit's +0.22 goes with it, and the fixtures hold the
   energy's change to 1e-2.
-- [ ] `aligned_indicator_auxiliary` in `ui.rs` aligns the display's
+- [x] `aligned_indicator_auxiliary` in `ui.rs` aligns the display's
   auxiliary lane for the AMR indicator with `snapshot_current +
   snapshot_current` where a trapezoid would take the previous snapshot,
   and the lane it aligns is a zero vector, resized and never written. What
@@ -1309,7 +1309,12 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   skips: dormant since the scalar solver retired. Found by the A0.3 audit
   on 2026-10-12. Remove the lane, the alignment and the scalar snapshot's
   auxiliary with them, and test the snapshot builder on a prepared scene
-  once it builds only what the estimator reads.
+  once it builds only what the estimator reads. Done on 2026-10-13
+  (`docs/engineering-log.md`): the lane, the alignment and the field are
+  gone, with two more lanes of the kind, `snapshot_previous` and
+  `snapshot_velocity`, cleared and never written; the builder is
+  `indicator_snapshots` in `ui/amr.rs`, tested on the default scene and on
+  a pumped one.
 - [x] Configurations the editor accepts and the mesher cannot build, found by
   the wall sweep on 2026-10-12 and listed in its `KNOWN` table until fixed.
   Fixed the same day (`docs/engineering-log.md`): a span the face walks

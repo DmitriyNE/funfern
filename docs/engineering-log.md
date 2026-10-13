@@ -23728,3 +23728,39 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-13 — The AMR snapshot builder, tested on a prepared scene
+
+- **Change.** What the app hands the estimator, built inline in the AMR
+  refresh, is a function of its own, `indicator_snapshots` in `ui/amr.rs`:
+  from the prepared generation, the two displays and the snapshot's step,
+  the canonical snapshot of the latest full readback, its state and the
+  state a step earlier, and the scalar one, its field and the rate the
+  generation's own operator gives the pair, with the runtime a driven
+  generation stepped under; or a wait while a driven runtime cannot be
+  decoded, or a step that is not positive. The refresh calls it and keeps
+  its own checks, the lanes of one generation and one snapshot, a step
+  since the handoff, the filter's step, the cadence. The A0.3 audit left
+  the builder untested until the dead lane went (1f37753).
+- **Test.** `the_estimators_snapshots_are_the_pair_the_displays_hold`, on
+  the default scene, its walls second-order outgoing, and with the
+  parametric pump on its medium: the CPU reference stepped sixty steps from
+  a pulse that reaches the bottom wall, its last two states held on the
+  canonical display as a readback decodes them, through
+  `hold_full_snapshot_lanes`, a test helper that sets the decoded lanes and
+  leaves the device's word layout to the end-to-end fixtures, which read
+  it against the reference; the clock run thirty-seven steps past the
+  snapshot; the wave display refreshed as a frame does; then the builder.
+  It reads back the pair as held, the wall's pole states with it, the
+  snapshot's time and the reference's runtime exactly, the field to 6.0e-8
+  and 4.9e-8 and the rate to 9.5e-7 and 8.8e-7, the f32 rounding, and its
+  estimate, 3.443e-2 and 3.334e-2, is the reference pair's to 2.8e-8 and
+  1.8e-9; held to 5e-7, 5e-6 and 1e-6.
+- **Bites.** With the snapshot's field read at the latest clock instead of
+  its own step, the defect fixed on 2026-10-07, the pumped field
+  stands 0.18 off and the test fails; the estimate does not move, since
+  on these walls the canonical estimator reads its own fields, so the field
+  is the check that sees it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

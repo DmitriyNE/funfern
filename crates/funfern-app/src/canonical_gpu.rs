@@ -5520,6 +5520,52 @@ impl CanonicalGpuDisplay {
         self.full_readback_at = self.readbacks;
     }
 
+    /// Holds a full snapshot of `step` as the latest readback, its lanes as
+    /// the readback decodes them: `current` and `previous`, the accepted state
+    /// and the one a step earlier, each its primary flux, complementary flux
+    /// and auxiliary lanes, the integrated field the last `integrated` of the
+    /// auxiliary; a runtime bank of `records` slots of zeros; and a clock at
+    /// the snapshot, for host tests that have no render world. The device's
+    /// word layout is not here: the end-to-end fixtures read it against the
+    /// reference.
+    #[cfg(test)]
+    pub fn hold_full_snapshot_lanes(
+        &mut self,
+        step: u32,
+        time_step: f32,
+        current: (&[f32], &[[f32; 2]], &[f32]),
+        previous: (&[f32], &[[f32; 2]], &[f32]),
+        integrated: usize,
+        records: usize,
+    ) {
+        self.node_count = current.0.len();
+        self.sample_count = current.1.len();
+        self.integrated_count = integrated;
+        self.primary_flux = current.0.to_vec();
+        self.previous_primary_flux = previous.0.to_vec();
+        self.constitutive_force = vec![0.0; current.0.len()];
+        self.complementary_flux = current.1.to_vec();
+        self.previous_complementary_flux = previous.1.to_vec();
+        self.auxiliary = current.2.to_vec();
+        self.previous_auxiliary = previous.2.to_vec();
+        self.raw_material_runtime =
+            vec![GpuCanonicalStateWord::default(); records * TEMPORAL_RUNTIME_WORDS_PER_SLOT];
+        self.raw_state_completed_steps = u64::from(step);
+        let seconds = f64::from(step) * f64::from(time_step);
+        self.clock = Some(CanonicalGpuDisplayClock {
+            epoch: 0,
+            epoch_origin_seconds: 0.0,
+            absolute_seconds: seconds,
+            step_in_epoch: step,
+            accepted_steps: step,
+            local_seconds: seconds as f32,
+            time_step,
+            event_serial: 0,
+        });
+        self.readbacks = self.readbacks.saturating_add(1);
+        self.full_readback_at = self.readbacks;
+    }
+
     /// Holds a full snapshot of `generation` whose bank has every one of
     /// `records` Switches settled at its alternate, as the readbacks of an
     /// earlier generation still do until the next one arrives, for host tests
