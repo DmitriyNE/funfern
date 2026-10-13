@@ -23630,3 +23630,69 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the device suite's fixtures.
+
+## 2026-10-13 — The wall's memory carried as a density along the trace
+
+- **Found.** PH-10's `handoff-memory-remesh`: carried from the 0.07 mesh to
+  the 0.06 one, the wall's memory went from 8.75e-5 to 1.046e-4 of energy,
+  with 2.3e-2 of it outside the new basis; the device's normalized matrix
+  did the same to 6e-7, so the carry was the reference's own. The
+  `-edit` fixture's carry, the medium's mass density raised by half, put
+  0.22 on the memory with nothing outside the basis.
+- **Cause.** The handoff carried each pole's current as the nodal values
+  `m = V sqrt(d) x` and interpolated them as values. `V` diagonalizes the
+  trace operator normalized by the damping, so it is orthonormal over the
+  nodes, and each of its rows holds the square root of its node's damping,
+  the impedance times the length of trace the node stands for: a third of
+  an edge at a vertex and two thirds at a midpoint in the P2 trace. The
+  values zigzag with the node's length and shrink with the edge. Onto a
+  finer trace they carry the coarse trace's lengths, which raises the
+  energy and leaves the jagged part outside the new basis. On the default
+  scene's four walls, a smooth memory carried from 0.07 gained 0.28 onto
+  0.06, 0.44 onto 0.05 and 0.98 onto 0.035, 2e-2 to 3e-2 outside the
+  basis; divided by the square root of each node's damping before the
+  interpolation and multiplied by the new node's after, it kept its energy
+  to 1e-7 with 4e-8 to 9e-8 outside. The edit's 0.22 is the same nodal
+  values on a medium whose decay rates are smaller by the square root of
+  one and a half. The design contract wrote the carry this way
+  (`funfern-material-laws-stage0-contracts.md`, section 2).
+- **Choice.** A remesh asks for a density; an edit asks which density.
+  Measured on one mesh, with the mass density raised by half and with the
+  stiffness doubled, the memory's energy goes by 1.22 and 0.71 as the
+  nodal values were carried, by 1.5 and 1.0 holding the values over the
+  square root of the damping, by 1.0 and 2.0 holding the wall's velocity
+  history, and by 1.0 and 0.5 holding the flux each pole puts through the
+  wall per unit length. The last is the pole current the contract names,
+  and it is how the bulk crosses an edit: its fluxes Q and b are held, and
+  the new medium sets the fields and the energy, a held stress's strain
+  energy halving where the stiffness doubles.
+- **Change.** The quadratic assembly keeps, beside each node's
+  second-order trace damping, the length of trace the node stands for,
+  on the outer sides and on second-order faces alike, and the outgoing
+  boundary keeps it with its signature. `physical_memory` hands out each
+  pole's current as `L^(-1) D^(1/2) V sqrt(d) x`, the nodal flux over the
+  node's length, `project_physical_memory` takes it back through
+  `V^T D^(-1/2) L`, and the residual it reports is measured along the
+  trace, beside the memory's own norm there. The device's normalized
+  matrix composes the same carry: a source mode's trace row over each
+  node's length, interpolated, then projected through each target node's
+  length over its damping; the shaders do not change. The contract and
+  the architecture text say what is carried now.
+- **Tests.** `a_remesh_carries_the_walls_memory_at_its_energy`: the smooth
+  memory from 0.07 onto 0.06, 0.05 and 0.035 keeps its energy to 7.4e-8,
+  held to 1e-6, leaves 9e-8 outside the basis, held to 1e-6, the same
+  density sampled on either trace holds the same energy to 2.1e-8, and the
+  normalized matrix reproduces the carry to 1.6e-15.
+  `an_edit_holds_the_flux_the_walls_memory_puts_through_it`: the mass
+  density's edit keeps the energy and the stiffness's halves it, each to
+  1e-9.
+- **Fixtures.** On the M1 Max the remesh now moves the wall's energy by
+  -2.4e-3, 8.749e-5 to 8.727e-5, with 4.8e-4 outside the new basis, what
+  the finer trace resolves differently of the pulse's front; the edit by
+  -1.2e-13; the rebuild, the timestep and the running fixture by roundoff.
+  The carry's residual is held to 2e-3, from 5e-2, and its energy's change
+  to 1e-2, each fixture. At the endpoint they read as before: Q 7.0e-7 to
+  1.5e-6, b 8.9e-7 to 1.7e-6, the pole states 2.0e-6 to 8.0e-6.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the device suite, 85 of 85 on the M1 Max.

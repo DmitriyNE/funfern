@@ -1927,8 +1927,12 @@ struct CanonicalOutgoingNormalizedTransferWork {
     phase: CanonicalOutgoingNormalizedTransferPhase,
     source_count: usize,
     target_count: usize,
-    source_damping: Vec<f64>,
-    target_damping: Vec<f64>,
+    /// What turns a source mode's trace row into its pole-current density,
+    /// one over each node's length.
+    source_density: Vec<f64>,
+    /// What projects a target node's density onto a target mode's trace row,
+    /// its length over its damping.
+    target_projection: Vec<f64>,
     pole_transform: [[f64; 3]; 3],
     values: Vec<f64>,
 }
@@ -1939,8 +1943,8 @@ impl CanonicalOutgoingNormalizedTransferWork {
             phase: CanonicalOutgoingNormalizedTransferPhase::Validate,
             source_count: 0,
             target_count: 0,
-            source_damping: Vec::new(),
-            target_damping: Vec::new(),
+            source_density: Vec::new(),
+            target_projection: Vec::new(),
             pole_transform: [[0.0; 3]; 3],
             values: Vec::new(),
         }
@@ -2000,22 +2004,40 @@ impl CanonicalOutgoingNormalizedTransferWork {
                             .sum()
                     })
                 });
-                self.source_damping = (0..source.trace_nodes().len())
-                    .map(|trace| {
-                        source
-                            .modes()
-                            .iter()
-                            .map(|mode| mode.trace()[trace].powi(2))
-                            .sum::<f64>()
+                // The physical carry, `CanonicalOutgoingBoundary::physical_memory`,
+                // the trace map and `project_physical_memory`, composed: a
+                // source row over each node's length, interpolated, then
+                // projected through each target node's length over its damping.
+                let damping = |boundary: &CanonicalOutgoingBoundary, trace: usize| {
+                    boundary
+                        .modes()
+                        .iter()
+                        .map(|mode| mode.trace()[trace].powi(2))
+                        .sum::<f64>()
+                };
+                self.source_density = source
+                    .trace_lengths()
+                    .iter()
+                    .enumerate()
+                    .map(|(trace, length)| {
+                        if damping(source, trace) > 0.0 && *length > 0.0 {
+                            1.0 / length
+                        } else {
+                            0.0
+                        }
                     })
                     .collect();
-                self.target_damping = (0..target.trace_nodes().len())
-                    .map(|trace| {
-                        target
-                            .modes()
-                            .iter()
-                            .map(|mode| mode.trace()[trace].powi(2))
-                            .sum::<f64>()
+                self.target_projection = target
+                    .trace_lengths()
+                    .iter()
+                    .enumerate()
+                    .map(|(trace, length)| {
+                        let damping = damping(target, trace);
+                        if damping > 0.0 && *length > 0.0 {
+                            length / damping
+                        } else {
+                            0.0
+                        }
                     })
                     .collect();
                 self.phase = CanonicalOutgoingNormalizedTransferPhase::Pair(0);
@@ -2041,22 +2063,15 @@ impl CanonicalOutgoingNormalizedTransferWork {
                 ) {
                     let mut overlap = 0.0;
                     for (target_trace, mapping) in map.targets.iter().enumerate() {
-                        let target_weight = if self.target_damping[target_trace] > 0.0 {
-                            target_mode.trace()[target_trace]
-                                / self.target_damping[target_trace].sqrt()
-                        } else {
-                            0.0
-                        };
+                        let target_weight = target_mode.trace()[target_trace]
+                            * self.target_projection[target_trace];
                         let source_weight = match mapping {
                             TraceTarget::Map(donors) => donors
                                 .iter()
                                 .map(|(source_trace, weight)| {
-                                    if self.source_damping[*source_trace] > 0.0 {
-                                        weight * source_mode.trace()[*source_trace]
-                                            / self.source_damping[*source_trace].sqrt()
-                                    } else {
-                                        0.0
-                                    }
+                                    weight
+                                        * source_mode.trace()[*source_trace]
+                                        * self.source_density[*source_trace]
                                 })
                                 .sum::<f64>(),
                             TraceTarget::New => 0.0,
@@ -3581,5 +3596,164 @@ mod tests {
             (report.target_energy - report.source_energy - report.edit_exchange).abs()
                 < 1.0e-9 * report.source_energy
         );
+    }
+
+    /// Meshes, assembles and compiles a scene at an edge sized for its domain.
+    fn compile_at_edge(
+        scene: &Scene,
+        edge: f64,
+    ) -> (TriMesh, QuadraticWaveOperator, CanonicalWaveOperator) {
+        let mesh = mesh_scene(
+            scene,
+            1,
+            MeshingOptions {
+                target_edge_length: edge,
+                curve_tolerance: (edge * 0.02).min(5.0e-4),
+                ..MeshingOptions::default()
+            }
+            .sized_for_area(scene.domain.width() * scene.domain.height()),
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene_with_boundaries(
+            &mesh,
+            scene,
+            scene.outer_boundaries,
+        )
+        .unwrap();
+        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap();
+        (mesh, quadratic, canonical)
+    }
+
+    /// A smooth pole-current density, sampled at an operator's trace nodes.
+    fn smooth_pole_currents(operator: &CanonicalWaveOperator) -> CanonicalOutgoingPhysicalMemory {
+        let functions: [fn(Point2) -> f64; 3] = [
+            |p| (2.0 * p.x).sin() + 0.3 * (1.3 * p.y).cos(),
+            |p| 0.7 * (1.1 * p.y).cos() + 0.2 * p.x,
+            |p| 0.4 * (p.x * p.y).sin() - 0.5,
+        ];
+        let boundary = operator.outgoing_boundary().unwrap();
+        CanonicalOutgoingPhysicalMemory {
+            pole_currents: std::array::from_fn(|pole| {
+                boundary
+                    .trace_nodes()
+                    .iter()
+                    .map(|node| functions[pole](operator.node_points()[*node as usize]))
+                    .collect()
+            }),
+        }
+    }
+
+    /// The wall's pole currents are a density along the trace, so a remesh of
+    /// the same geometry carries the memory at its energy: a smooth memory on
+    /// the default scene's four walls, meshed at 0.07, keeps its energy to
+    /// 7e-8 onto the traces of meshes at 0.06, 0.05 and 0.035, and the new
+    /// basis represents all of it but 9e-8. Carried as the nodal
+    /// values `V sqrt(d) x`, each of which holds the square root of its
+    /// node's length, it gained 0.28, 0.44 and 0.98 and left 2e-2 to 3e-2
+    /// outside the new basis. The same density sampled on either trace
+    /// holds the same energy, and the device's normalized matrix composes
+    /// the carry the reference makes.
+    #[test]
+    fn a_remesh_carries_the_walls_memory_at_its_energy() {
+        let scene = Scene::default();
+        let (coarse_mesh, coarse_quadratic, coarse) = compile_at_edge(&scene, 0.07);
+        let coarse_boundary = coarse.outgoing_boundary().unwrap();
+        let (normalized, start) = coarse_boundary
+            .project_physical_memory(&smooth_pole_currents(&coarse))
+            .unwrap();
+        let memory = coarse_boundary.physical_memory(&normalized).unwrap();
+        for edge in [0.06, 0.05, 0.035] {
+            let (fine_mesh, fine_quadratic, fine) = compile_at_edge(&scene, edge);
+            let fine_boundary = fine.outgoing_boundary().unwrap();
+            assert!(fine_boundary.trace_nodes().len() > coarse_boundary.trace_nodes().len());
+            let sampled = fine_boundary
+                .project_physical_memory(&smooth_pole_currents(&fine))
+                .unwrap()
+                .1;
+            let interpolation = QuadraticTransferMap::build(
+                &coarse_mesh,
+                &coarse_quadratic,
+                &fine_mesh,
+                &fine_quadratic,
+            )
+            .unwrap();
+            let map = CanonicalOutgoingHistoryTransferMap::prepare(&interpolation, &coarse, &fine)
+                .unwrap();
+            let (carried, report) = map.transfer(&coarse, &fine, Some(&memory)).unwrap();
+            let (carried, projection) = fine_boundary
+                .project_physical_memory(&carried.unwrap())
+                .unwrap();
+            let matrix = map.normalized_matrix(&coarse, &fine).unwrap();
+            assert!(!matrix.identity);
+            let applied = (0..matrix.target_count)
+                .map(|row| {
+                    (0..matrix.source_count)
+                        .map(|column| {
+                            matrix.values[row * matrix.source_count + column] * normalized[column]
+                        })
+                        .sum::<f64>()
+                })
+                .collect::<Vec<_>>();
+            let norm =
+                |values: &[f64]| values.iter().map(|value| value * value).sum::<f64>().sqrt();
+            let matrix_error = norm(
+                &applied
+                    .iter()
+                    .zip(&carried)
+                    .map(|(applied, carried)| applied - carried)
+                    .collect::<Vec<_>>(),
+            ) / norm(&carried);
+            eprintln!(
+                "0.07 onto {edge}: sampled {:.3e}, carried {:.3e}, residual {:.3e}, matrix {matrix_error:.3e}",
+                sampled.projected_energy / start.projected_energy - 1.0,
+                report.target_energy / report.source_energy - 1.0,
+                projection.physical_residual_norm / projection.physical_norm,
+            );
+            assert!((sampled.projected_energy / start.projected_energy - 1.0).abs() < 1.0e-6);
+            assert!((report.target_energy / report.source_energy - 1.0).abs() < 1.0e-6);
+            assert!(projection.physical_residual_norm < 1.0e-6 * projection.physical_norm);
+            assert!(matrix_error < 1.0e-13, "{matrix_error:e}");
+        }
+    }
+
+    /// An edit holds the flux the wall's memory puts through the trace and
+    /// lets the new medium set the state, as the bulk's fluxes are held: a
+    /// medium half again as heavy keeps the memory's energy, its wave speed
+    /// and its impedance changing by reciprocal factors, and a medium twice
+    /// as stiff halves it, as a held stress halves its strain energy there.
+    #[test]
+    fn an_edit_holds_the_flux_the_walls_memory_puts_through_it() {
+        let base = Scene::default();
+        let (mesh, base_quadratic, source) = compile_at_edge(&base, 0.1);
+        let boundary = source.outgoing_boundary().unwrap();
+        let (normalized, _) = boundary
+            .project_physical_memory(&smooth_pole_currents(&source))
+            .unwrap();
+        let memory = boundary.physical_memory(&normalized).unwrap();
+        for (density, stiffness, expected) in [(1.5, 1.0, 1.0), (1.0, 2.0, 0.5)] {
+            let mut scene = Scene::default();
+            scene.materials[0].mass_density = crate::ScalarField::constant(density);
+            scene.materials[0].stiffness = crate::ScalarField::constant(stiffness);
+            let quadratic = QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &scene,
+                scene.outer_boundaries,
+            )
+            .unwrap();
+            let target =
+                CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            let identity =
+                QuadraticTransferMap::identity_on_mesh(&mesh, &base_quadratic, &quadratic).unwrap();
+            let map =
+                CanonicalOutgoingHistoryTransferMap::prepare(&identity, &source, &target).unwrap();
+            let (carried, report) = map.transfer(&source, &target, Some(&memory)).unwrap();
+            assert_eq!(carried.unwrap(), memory);
+            let ratio = report.target_energy / report.source_energy;
+            assert!(
+                (ratio - expected).abs() < 1.0e-9,
+                "density {density}, stiffness {stiffness}: {ratio}"
+            );
+            assert!(report.physical_residual_norm < 1.0e-12);
+        }
     }
 }

@@ -104,19 +104,30 @@ enter `zdot=T u`; they do not reset an existing gap history.
 
 The accepted state stores energy-normalized modal `z`. For transfer, first form
 raw pole state `x=H^(-1/2)z`. For each of the three poles form the physical
-pole-current trace
+pole-current density, the trace flux the pole's state puts through the wall
+per unit length
 
 ```text
-m_p = V diag(sqrt(d)) x_p.
+g_p = L^(-1) D^(1/2) V diag(sqrt(d)) x_p,
 ```
 
-This representation is invariant to modal signs, permutations, and rotations
-inside a degenerate eigenspace. Transfer each `m_p` by the stable physical trace
-map, then recover admitted new modes with the minimum-energy projection
+with `D` the trace damping and `L` the length of trace each node stands for,
+the damping's line weights without the impedance. This representation is
+invariant to modal signs, permutations, and rotations inside a degenerate
+eigenspace. Transfer each `g_p` by the stable physical trace map, then recover
+admitted new modes with the minimum-energy projection
 
 ```text
-x'_p = diag(sqrt(d'))^+ V'^T m'_p,    z'=H^(1/2)x'.
+x'_p = diag(sqrt(d'))^+ V'^T D'^(-1/2) L' g'_p,    z'=H^(1/2)x'.
 ```
+
+Corrected on 2026-10-13: the contract first carried the nodal values
+`m_p = V diag(sqrt(d)) x_p`. `V` is orthonormal over the nodes, so each of its
+rows holds the square root of its node's length, and interpolating `m_p` as
+values onto a finer trace raised the energy the memory held, by a fifth on the
+end-to-end remesh from 0.07 to 0.06. The density interpolates as a field does,
+and an edit holds the flux and lets the new medium set the state, as the
+bulk's fluxes are held.
 
 Zero-`d` modes carry no auxiliary current. Components not representable by the
 new operator and energy introduced/removed by the projection are explicit edit

@@ -81,8 +81,9 @@ switched on with the run not held, the device stepping on while the candidate
 is prepared, as it does for a user, so the handoff lands where the device has
 got to, step 202 on the M1 Max, read from the new generation's clock origin,
 and the run goes to 768. The
-reference carries the wall's memory the physical way, pole currents
-interpolated onto the new trace and projected onto the new basis, apart from
+reference carries the wall's memory the physical way, the pole currents'
+densities along the trace interpolated onto the new trace and projected onto
+the new basis, apart from
 the normalized matrix the device uses, and runs on under the generation's own
 forcing from a clock started where the run had got to. A snapshot at the
 handoff, before a step, reads the carry on its own: Q over the unpinned
@@ -92,9 +93,10 @@ energy 1e-7 to 5e-7, the pole states 2e-6 to 1.9e-5 against their own 1e-4,
 the device integrating them in f32 beside a field a thousand times their
 size, and the clock within 1.4e-7 s of the reference's. The rebuild leaves
 the device where the uninterrupted run is, 7e-7 off; the others stand 0.8 to
-11 from it. The remesh's carry leaves 2.3e-2 of the memory outside the new
-basis and raises its energy by a fifth, which the fixture reports; see the
-log of 2026-10-13. A drive the new generation starts takes its phase moved on
+11 from it. The carry keeps the wall's energy: the remesh's moves it by
+-2.4e-3 and leaves 4.8e-4 of the memory outside the new basis, the edit's
+moves it by 1e-13, the rest by roundoff, held to 1e-2 and 2e-3; see the log
+of 2026-10-13. A drive the new generation starts takes its phase moved on
 by the time between the candidate's preparation and its arrival, which the
 runtime transfer computes and a held run has none of: the mutation
 `drive-phase-reset-on-handoff` zeroes it, and `-running` reads Q 1.4 and

@@ -311,10 +311,12 @@ mutation `drive-phase-reset-on-handoff`, which only the running fixture
 sees: a held run has no time between the candidate's preparation and its
 arrival, and a carried drive takes its phase from the old clock. The running
 fixture found a race in the runtime transfer shader on lavapipe the day it
-ran there, fixed the same day. Found and reported: the remesh's carry raises
-the wall's stored energy by a fifth,
-2.3e-2 of the memory outside the new basis; the fixture reports both, and
-the bound on the energy's change waits on the diagnosis.
+ran there, fixed the same day. Found and reported: the remesh's carry raised
+the wall's stored energy by a fifth, 2.3e-2 of the memory outside the new
+basis, the carried pole currents being nodal values that hold the square
+root of each node's length; fixed the same day, the currents carried as the
+flux each pole puts through the wall per unit length, and the fixtures hold
+the energy's change to 1e-2.
 
 ## 5. Stage A2: bulk propagation and planar walls
 

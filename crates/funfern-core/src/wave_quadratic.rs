@@ -224,6 +224,7 @@ pub struct QuadraticWaveOperator {
     lumped_damping: Vec<f64>,
     first_order_boundary_damping: Vec<f64>,
     second_order_boundary_damping: Vec<f64>,
+    second_order_boundary_length: Vec<f64>,
     thin_gap_samples: Vec<ThinGapSample>,
     maximum_eigenvalue_bound: f64,
     maximum_time_step: f64,
@@ -528,6 +529,14 @@ impl QuadraticWaveOperator {
     /// Its auxiliary tangential operator is [`Self::auxiliary_stiffness_values`].
     pub fn second_order_boundary_damping(&self) -> &[f64] {
         &self.second_order_boundary_damping
+    }
+
+    /// The length of passive second-order trace each node stands for, the
+    /// same line weights as [`Self::second_order_boundary_damping`] without
+    /// the impedance: what turns a nodal trace flux into a flux per unit
+    /// length.
+    pub fn second_order_boundary_length(&self) -> &[f64] {
+        &self.second_order_boundary_length
     }
 
     pub fn thin_gap_samples(&self) -> &[ThinGapSample] {
@@ -1220,6 +1229,7 @@ struct BoundaryAssembly<'a> {
     damping: &'a mut [f64],
     first_order_boundary_damping: &'a mut [f64],
     second_order_boundary_damping: &'a mut [f64],
+    second_order_boundary_length: &'a mut [f64],
     thin_gap_samples: &'a mut Vec<ThinGapSample>,
 }
 
@@ -1717,6 +1727,7 @@ fn assemble_face_condition(
                 let contribution = impedance * length * weight;
                 assembly.damping[node] += contribution;
                 assembly.second_order_boundary_damping[node] += contribution;
+                assembly.second_order_boundary_length[node] += length * weight;
             }
             let coefficients = coefficients[1];
             assemble_auxiliary_line(
@@ -1808,6 +1819,7 @@ struct QuadraticAssemblyWork {
     damping: Vec<f64>,
     first_order_boundary_damping: Vec<f64>,
     second_order_boundary_damping: Vec<f64>,
+    second_order_boundary_length: Vec<f64>,
     thin_gap_samples: Vec<ThinGapSample>,
     maximum_wave_speed: f64,
     row_offsets: Vec<u32>,
@@ -1848,6 +1860,7 @@ impl QuadraticAssemblyWork {
             damping: Vec::new(),
             first_order_boundary_damping: Vec::new(),
             second_order_boundary_damping: Vec::new(),
+            second_order_boundary_length: Vec::new(),
             thin_gap_samples: Vec::new(),
             maximum_wave_speed: 0.0,
             row_offsets: Vec::new(),
@@ -1910,6 +1923,7 @@ impl QuadraticAssemblyWork {
             self.damping = vec![0.0; count];
             self.first_order_boundary_damping = vec![0.0; count];
             self.second_order_boundary_damping = vec![0.0; count];
+            self.second_order_boundary_length = vec![0.0; count];
             self.phase = AssemblyPhase::Elements(0);
             return Ok(());
         }
@@ -2100,6 +2114,7 @@ impl QuadraticAssemblyWork {
                         self.damping[node] += contribution;
                         if condition == OuterBoundaryCondition::SecondOrderOutgoing {
                             self.second_order_boundary_damping[node] += contribution;
+                            self.second_order_boundary_length[node] += weight;
                         } else {
                             self.first_order_boundary_damping[node] += contribution;
                         }
@@ -2134,6 +2149,7 @@ impl QuadraticAssemblyWork {
                 damping: &mut self.damping,
                 first_order_boundary_damping: &mut self.first_order_boundary_damping,
                 second_order_boundary_damping: &mut self.second_order_boundary_damping,
+                second_order_boundary_length: &mut self.second_order_boundary_length,
                 thin_gap_samples: &mut self.thin_gap_samples,
             };
             assemble_hole_boundary_conditions(mesh, scene, coefficients, &mut assembly)?;
@@ -2150,6 +2166,7 @@ impl QuadraticAssemblyWork {
                 damping: &mut self.damping,
                 first_order_boundary_damping: &mut self.first_order_boundary_damping,
                 second_order_boundary_damping: &mut self.second_order_boundary_damping,
+                second_order_boundary_length: &mut self.second_order_boundary_length,
                 thin_gap_samples: &mut self.thin_gap_samples,
             };
             assemble_topology_boundary_laws(mesh, plan, physics, coefficients, &mut assembly)?;
@@ -2279,6 +2296,7 @@ impl QuadraticAssemblyWork {
             lumped_damping: std::mem::take(&mut self.damping),
             first_order_boundary_damping: std::mem::take(&mut self.first_order_boundary_damping),
             second_order_boundary_damping: std::mem::take(&mut self.second_order_boundary_damping),
+            second_order_boundary_length: std::mem::take(&mut self.second_order_boundary_length),
             thin_gap_samples: std::mem::take(&mut self.thin_gap_samples),
             maximum_eigenvalue_bound: self.maximum_eigenvalue_bound,
             maximum_time_step,

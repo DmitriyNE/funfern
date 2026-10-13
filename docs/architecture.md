@@ -1827,7 +1827,10 @@ drift, rather than a separate boundary-only split.
 This is a genuinely nonlocal trace operation. Disconnected trace components are
 prepared separately, while corners share the assembled trace graph. Generation
 handoff maps physical trace histories and then composes the target modal basis;
-it never interpolates modal indices. Prescribed trace intersections use a cached
+it never interpolates modal indices. The histories are pole-current densities,
+the trace flux each pole's state puts through the wall per unit length, so a
+finer trace holds the same memory at the same energy, and an edit holds the
+flux while the new medium sets the state, as the bulk's fluxes are held. Prescribed trace intersections use a cached
 constrained factor and essential ownership wins at mixed junctions. A driven or
 nonlinear generation pins a trace node at its kick's own instant through the map
 in force there, and the node enters the wall's solve at that pinned flux, so its

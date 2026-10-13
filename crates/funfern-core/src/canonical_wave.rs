@@ -692,6 +692,8 @@ pub struct CanonicalOutgoingBoundary {
 struct CanonicalOutgoingSignature {
     trace_nodes: Vec<u32>,
     damping: Vec<f64>,
+    /// The length of trace each node stands for.
+    length: Vec<f64>,
     /// Sparse normalized-operator input before division by trace damping.
     entries: Vec<(u32, u32, f64)>,
 }
@@ -727,14 +729,21 @@ pub struct CanonicalOutgoingTraceReport {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalOutgoingPhysicalMemory {
     /// One physical pole-current value per outgoing trace node, in `trace_nodes`
-    /// order, for poles 0, 1, 2.
+    /// order, for poles 0, 1, 2: the trace flux the pole's state puts through
+    /// the wall at the node per unit length, before the pole's coefficient. A
+    /// density along the trace, so a handoff interpolates it onto another
+    /// trace as it is, and an edit holds the flux and lets the new medium set
+    /// the state, as the bulk's fluxes do.
     pub pole_currents: [Vec<f64>; 3],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CanonicalHistoryProjection {
     pub projected_energy: f64,
+    /// What the basis cannot represent, in the norm along the trace.
     pub physical_residual_norm: f64,
+    /// The projected memory's own norm along the trace.
+    pub physical_norm: f64,
 }
 
 impl CanonicalOutgoingBoundary {
@@ -748,6 +757,11 @@ impl CanonicalOutgoingBoundary {
 
     pub fn auxiliary_count(&self) -> usize {
         self.auxiliary_count
+    }
+
+    /// The length of trace each node stands for, in `trace_nodes` order.
+    pub fn trace_lengths(&self) -> &[f64] {
+        &self.signature.length
     }
 
     pub fn dense_transform_bytes(&self) -> usize {
@@ -921,6 +935,7 @@ impl CanonicalOutgoingBoundary {
         let (_, inverse) = pole_energy_transform()?;
         let node_count = self.trace_nodes.len();
         let damping = self.trace_damping(node_count);
+        let length = &self.signature.length;
         let mut pole_currents = std::array::from_fn(|_| vec![0.0; node_count]);
         for mode in &self.modes {
             let Some(offset) = mode.auxiliary_offset else {
@@ -933,12 +948,15 @@ impl CanonicalOutgoingBoundary {
                     .sum();
             }
             for node in 0..node_count {
-                if damping[node] == 0.0 {
+                if damping[node] == 0.0 || length[node] <= 0.0 {
                     continue;
                 }
-                let eigenvector = mode.trace[node] / damping[node].sqrt();
+                // The mode's nodal flux `D^(1/2) v` over the node's length:
+                // `v` alone carries the square root of each node's length,
+                // which no other trace shares.
+                let density = mode.trace[node] / length[node];
                 for pole in 0..3 {
-                    pole_currents[pole][node] += eigenvector * mode.decay.sqrt() * raw[pole];
+                    pole_currents[pole][node] += density * mode.decay.sqrt() * raw[pole];
                 }
             }
         }
@@ -957,6 +975,7 @@ impl CanonicalOutgoingBoundary {
         }
         let (transform, _) = pole_energy_transform()?;
         let damping = self.trace_damping(node_count);
+        let length = &self.signature.length;
         let mut normalized = vec![0.0; self.auxiliary_count];
         for mode in &self.modes {
             let Some(offset) = mode.auxiliary_offset else {
@@ -964,10 +983,13 @@ impl CanonicalOutgoingBoundary {
             };
             let mut raw = [0.0; 3];
             for (pole, raw_value) in raw.iter_mut().enumerate() {
+                // The minimum-energy projection `v^T m` of the nodal values
+                // `m = l D^(-1/2) g` the density `g` stands for at each node.
                 *raw_value = (0..node_count)
-                    .filter(|node| damping[*node] > 0.0)
+                    .filter(|node| damping[*node] > 0.0 && length[*node] > 0.0)
                     .map(|node| {
-                        mode.trace[node] / damping[node].sqrt() * memory.pole_currents[pole][node]
+                        mode.trace[node] * length[node] / damping[node]
+                            * memory.pole_currents[pole][node]
                     })
                     .sum::<f64>()
                     / mode.decay.sqrt();
@@ -978,18 +1000,28 @@ impl CanonicalOutgoingBoundary {
             }
         }
         let represented = self.physical_memory(&normalized)?;
+        let along_trace = |values: &[f64], node: usize| values[node] * length[node].max(0.0).sqrt();
         let residual_squared = represented
             .pole_currents
             .iter()
             .zip(&memory.pole_currents)
-            .flat_map(|(represented, input)| represented.iter().zip(input))
-            .map(|(represented, input)| (represented - input).powi(2))
+            .flat_map(|(represented, input)| {
+                (0..node_count)
+                    .map(|node| along_trace(represented, node) - along_trace(input, node))
+            })
+            .map(|difference| difference * difference)
+            .sum::<f64>();
+        let norm_squared = memory
+            .pole_currents
+            .iter()
+            .flat_map(|input| (0..node_count).map(|node| along_trace(input, node).powi(2)))
             .sum::<f64>();
         Ok((
             normalized.clone(),
             CanonicalHistoryProjection {
                 projected_energy: 0.5 * dot(&normalized, &normalized),
                 physical_residual_norm: residual_squared.sqrt(),
+                physical_norm: norm_squared.sqrt(),
             },
         ))
     }
@@ -4915,6 +4947,10 @@ fn outgoing_signature(
         .iter()
         .map(|node| quadratic.second_order_boundary_damping()[*node as usize])
         .collect::<Vec<_>>();
+    let length = trace_nodes
+        .iter()
+        .map(|node| quadratic.second_order_boundary_length()[*node as usize])
+        .collect::<Vec<_>>();
     let mut entries = Vec::new();
     for (trace_row, &node) in trace_nodes.iter().enumerate() {
         let row = node as usize;
@@ -4938,6 +4974,7 @@ fn outgoing_signature(
     Ok(Some(CanonicalOutgoingSignature {
         trace_nodes,
         damping,
+        length,
         entries,
     }))
 }

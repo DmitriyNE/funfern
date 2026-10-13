@@ -405,8 +405,9 @@ struct Carried {
 
 /// What the reference's wall memory went through at a handoff: the energy it
 /// held before and after, its share of the field's energy before, the
-/// carry's residual, `projection residual / ‖memory‖`, what the new basis
-/// could not hold of the old memory interpolated onto its trace, and the
+/// carry's residual, what the new basis could not hold of the old memory
+/// interpolated onto its trace relative to that memory, both measured along
+/// the trace, and the
 /// device's carry read against the reference's at the handoff itself, before
 /// a step is taken: Q, b, the pole states and the memory they represent.
 /// The device carries the memory through the normalized matrix its
@@ -429,9 +430,16 @@ struct MemoryCarry {
 const MEMORY_SHARE_FLOOR: f64 = 1.0e-4;
 /// What the carry may leave behind of the memory, relative: the new basis
 /// holds the memory interpolated onto its trace up to this. The remesh from
-/// 0.07 to 0.06 reads 2.3e-2 on the pulse's front, the same-mesh carries
+/// 0.07 to 0.06 reads 4.8e-4 on the pulse's front, the same-mesh carries
 /// roundoff; see the log of 2026-10-13.
-const CARRY_RESIDUAL: f64 = 5.0e-2;
+const CARRY_RESIDUAL: f64 = 2.0e-3;
+/// How far the carry may move the wall's energy, relative. The memory goes
+/// as a density along the trace and an edit holds the flux it puts through
+/// the wall, so a carry keeps the energy but for what a finer trace resolves
+/// differently of the pulse's front: the remesh reads -2.4e-3, the mass
+/// density's edit 1e-13, the rest roundoff. Carried as nodal values, the
+/// remesh read +0.20 and the edit +0.22; see the log of 2026-10-13.
+const CARRY_ENERGY: f64 = 1.0e-2;
 /// The relative L2 error the wall's pole states, and the memory they
 /// represent, may reach at the endpoint, 192 steps after the carry: the
 /// device integrates them in f32 beside a field a thousand times their
@@ -1620,21 +1628,14 @@ fn hand_off(
             let projection = handed
                 .set_outgoing_physical_memory(&target.canonical_operator, &interpolated)
                 .map_err(|error| error.to_string())?;
-            let norm = memory
-                .pole_currents
-                .iter()
-                .flatten()
-                .map(|value| value * value)
-                .sum::<f64>()
-                .sqrt();
             let before = energies(&source.canonical_operator, running)?;
             let after = energies(&target.canonical_operator, &handed)?;
             Some(MemoryCarry {
                 source_energy: before.outgoing,
                 target_energy: after.outgoing,
                 share: before.outgoing / before.total(),
-                residual: if norm > 0.0 {
-                    projection.physical_residual_norm / norm
+                residual: if projection.physical_norm > 0.0 {
+                    projection.physical_residual_norm / projection.physical_norm
                 } else {
                     0.0
                 },
@@ -1902,6 +1903,12 @@ fn compare(
                     "{summary}: the carry left {:.3e} of the memory behind, beyond \
                      {CARRY_RESIDUAL:.0e}",
                     carry.residual
+                ));
+            }
+            if !within(change.abs(), CARRY_ENERGY) {
+                return Err(format!(
+                    "{summary}: the carry moved the wall's energy by {change:+.3e}, beyond \
+                     {CARRY_ENERGY:.0e}"
                 ));
             }
         }
