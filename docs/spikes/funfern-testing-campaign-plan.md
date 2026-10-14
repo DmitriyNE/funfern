@@ -9,7 +9,8 @@ single Rust test at three discretization levels with its reference computed
 offline, and their parameter sweeps live under `experiments/` as scripts.
 This reorders the plan the user wrote on 11 October (its fixture identifiers
 PH, IV, AMR and RT are kept below so the two documents map onto each other);
-it keeps that plan's layering, its oracle rule and most of its fixtures.
+it keeps that plan's layering, its oracle rule and most of its fixtures. That
+plan is kept as written in `funfern-testing-plan-2026-10-11.md`.
 
 ## 1. Why structure first
 
@@ -345,6 +346,18 @@ example `canonical_gpu_cavity_modes`, one suite entry per physics model; the
 device follows the f64 frequency to its f32 floor of 3e-8, which lies under
 every mesh's error, so its spatial convergence shows to the finest mesh.
 
+**PH-02, plane-wave propagation and dispersion.** Left out of this plan when
+it was written, though the 11 October plan gives it P0; added on
+2026-10-14. Analytic plane waves, with prescribed boundaries or manufactured
+forcing where needed, swept over the propagation direction, the wavelength
+against the mesh size, constant isotropic and diagonal anisotropic media,
+the mesh's orientation and its elements' aspect ratio, and the step against
+its stability limit. Measured: the numerical dispersion relation, the group
+velocity, the field's reconstruction in each polarization and the phase
+error, so that the element's error and the integrator's are told apart.
+Passes when they converge to the physical dispersion relation as the spatial
+and temporal errors are predicted to. Its design is planned on its own.
+
 **PH-04, planar reflection against the implemented law.** Promote the
 Bloch-strip methodology of `docs/spikes/funfern-boundary-scattering-spike.md`
 and the `wave_boundary_reflection` example into a three-level test: angles
@@ -369,7 +382,7 @@ the 45° time series; the mutation `wall-memory-half-kick`.
 ## 6. Milestones B and C
 
 The remaining fixtures of the 11 October plan keep their identifiers and
-their content, under three rules: one parameterized Rust test per fixture at
+their content (`funfern-testing-plan-2026-10-11.md`), under three rules: one parameterized Rust test per fixture at
 three levels, references offline, sweeps as scripts under `experiments/`
 with their reports in `docs/spikes/`.
 
@@ -421,8 +434,10 @@ with their reports in `docs/spikes/`.
   residual reported apart; boundary memory and the time origin survive four
   kinds of handoff, each against its own reference.
 - **A2:** spatial and temporal convergence of the cavity modes demonstrated
-  on the device in three physics models; planar reflection converges to the
-  implemented law at three angles with the DtN gap reported.
+  on the device in three physics models; plane waves' numerical dispersion
+  converges to the physical relation, the element's part and the
+  integrator's told apart; planar reflection converges to the implemented
+  law at three angles with the DtN gap reported.
 - **B and C:** as the 11 October plan states per fixture, under the three
   rules of section 6.
 

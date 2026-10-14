@@ -23915,3 +23915,21 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the nightly study run twice by hand.
+
+## 2026-10-14 — The 11 October plan checked in, and PH-02 restored to A2
+
+- **Found.** Planning milestones B and C, the 11 October plan the campaign
+  plan reorders turned out to live only in a conversation, while the
+  campaign plan sends B and C to it for each fixture's content; and its P0
+  fixture PH-02, plane-wave propagation and dispersion, had been left out of
+  the campaign plan without a word, though it belongs with A2's bulk
+  propagation.
+- **Change.** The plan is checked in as written,
+  `docs/spikes/funfern-testing-plan-2026-10-11.md`, under a note that says
+  what it is; the campaign plan names it where it reorders the plan and
+  where B and C take their content from it, lists PH-02 under A2 with its
+  omission dated, and adds its demand to A2's definition of done. A2 is not
+  done until PH-02 lands; its design is planned on its own.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
