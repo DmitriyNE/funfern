@@ -1,0 +1,4 @@
+about: a curve's second-order wall takes its tangential stiffness without the factor of a half the law's operator carries, so its modes' memory decays faster than the law says and the wall returns waves its law would absorb
+test: cargo test --release -p funfern-app --lib -- circular_walls_meet_their_law_on_the_coarse_mesh
+expect: hole kR 5 m 2 second edge 0\.1: E_discretization .* beyond
+needs: cpu

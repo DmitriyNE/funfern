@@ -394,6 +394,30 @@ a table from `boundary.py`. The gate holds 0° and 45° on the coarsest mesh;
 the nightly job `planar-reflection` runs the three angles on three meshes and
 the 45° time series; the mutation `wall-memory-half-kick`.
 
+## 5a. Stage A3: circular walls
+
+**PH-06 and PH-07, the circular outgoing wall and the absorbing hole.**
+The 11 October plan gives both P0 and puts them in its milestone A; this plan
+had moved them into B, and on 2026-10-14 they came back to A ahead of the
+rest of B. An annulus whose outer circle is the wall, or a hole in a square
+whose own sides absorb, driven to steady state at one angular order from a
+source ring, each order's radial phasor fitted to `A H + B H′` with the
+Hankel functions from a checked-in table, and `B/A` read against the
+implemented law on a circle; `|B/A_law|`, the law's distance from the exact
+exterior DtN, reported beside it.
+
+**Done on 2026-10-15** (`docs/engineering-log.md`): its sizing found a
+defect, second-order walls on curves assembled with each edge's nodes out of
+order (fixed in d1316a9), and taught the measurement four things: the
+circle's shape is meshed at a curve tolerance of 5e-5 or it sets a floor
+the mesh cannot lower; one angular order a run, or the strong orders leak
+into the weak; the hole's square absorbs, or it rings; and the circle's
+small boundary elements set the time step, so each reading is extrapolated
+from the step and its half. The gate test reads order 2 at kR 5; the nightly
+jobs `outgoing-circle` and `absorbing-hole` run the thirteen propagating
+cases of kR 0.8 to 10 under both laws, kR 5 and 10 on three meshes. The
+mutation `curve-wall-stiffness-doubled`.
+
 ## 6. Milestones B and C
 
 The remaining fixtures of the 11 October plan keep their identifiers and
@@ -401,10 +425,8 @@ their content (`funfern-testing-plan-2026-10-11.md`), under three rules: one par
 three levels, references offline, sweeps as scripts under `experiments/`
 with their reports in `docs/spikes/`.
 
-- **B, physical subsystems:** PH-05 wall passivity across material laws,
-  PH-06 and PH-07 the circular outgoing wall and the absorbing hole, pass/fail
-  on `E_discretization` only, with `E_approximation` against the Hankel
-  relations reported, PH-08 rectangular radiation as a one-off experiment
+- **B, physical subsystems:** PH-05 wall passivity across material laws
+  (PH-06 and PH-07 moved to stage A3), PH-08 rectangular radiation as a one-off experiment
   rather than a regression test, since no nonlocal operator is planned,
   PH-09 transient DtN against the Laplace-domain kernel, PH-11 Fresnel,
   PH-12 cylinder scattering, PH-13 thin gaps, PH-14 and PH-15 temporal and
@@ -453,6 +475,10 @@ with their reports in `docs/spikes/`.
   converges to the physical relation, the element's part and the
   integrator's told apart; planar reflection converges to the implemented
   law at three angles with the DtN gap reported.
+- **A3:** the circular outgoing wall and the absorbing hole meet their law
+  on a circle within their budgets and converge where the discretization
+  error stands above the method's floor, the DtN gap reported, every hole
+  passive.
 - **B and C:** as the 11 October plan states per fixture, under the three
   rules of section 6.
 

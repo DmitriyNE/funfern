@@ -9696,6 +9696,568 @@ mod tests {
         }
     }
 
+    /// PH-06 and PH-07's reference: for each case, the radii it fits at and
+    /// the Hankel functions there and at the wall, written by
+    /// `tests/physics/references/cylinder_hankel.py` and checked there by
+    /// the Wronskian and at twice the precision.
+    #[derive(serde::Deserialize)]
+    struct HankelTable {
+        cases: Vec<HankelCase>,
+    }
+
+    #[derive(Clone, Debug, serde::Deserialize)]
+    struct HankelCase {
+        kind: String,
+        kr: f64,
+        m: u32,
+        radii: Vec<f64>,
+        h1: Vec<[f64; 2]>,
+        h2: Vec<[f64; 2]>,
+        wall: HankelWall,
+    }
+
+    #[derive(Clone, Copy, Debug, serde::Deserialize)]
+    struct HankelWall {
+        h1: [f64; 2],
+        h2: [f64; 2],
+        dh1: [f64; 2],
+        dh2: [f64; 2],
+    }
+
+    impl HankelCase {
+        fn hole(&self) -> bool {
+            self.kind == "hole"
+        }
+    }
+
+    /// The table's case, `"outgoing"` or `"hole"`, at `kr` and order `m`.
+    fn hankel_case(kind: &str, kr: f64, m: u32) -> HankelCase {
+        static TABLE: std::sync::OnceLock<HankelTable> = std::sync::OnceLock::new();
+        let table = TABLE.get_or_init(|| {
+            let path = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/physics/references/cylinder-hankel.json"
+            );
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        });
+        table
+            .cases
+            .iter()
+            .find(|case| case.kind == kind && case.kr == kr && case.m == m)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {kind} case at kR {kr}, m {m} in the table"))
+    }
+
+    /// The cases PH-06 and PH-07 run: each kR with the angular orders that
+    /// propagate at the wall.
+    const CIRCULAR_CASES: [(f64, &[u32]); 4] = [
+        (0.8, &[0]),
+        (2.0, &[0, 1, 2]),
+        (5.0, &[0, 1, 2, 4]),
+        (10.0, &[0, 1, 2, 4, 8]),
+    ];
+
+    /// A tabled complex value as a phasor.
+    fn tabled([re, im]: [f64; 2]) -> Phasor {
+        Phasor::new(re, im)
+    }
+
+    /// The implemented law's `B/A` on a circle of radius one at unit speed,
+    /// in the `e^{−iωt}` convention of the 11 October plan. The wall
+    /// imposes `∂_n u = iω Y u`, `Y` the law's admittance at `s = −iω` with
+    /// the tangential wavenumber `m` of the order on the unit circle, one for
+    /// the first-order law and `1 + (6d/7)/s − (8d/7)/(s + d) + (2d/7)/(s +
+    /// 2d)`, `d = √(7/8) m`, for the second. Outside an outgoing circle the
+    /// field is `A H1 + B H2` and the normal is `r̂`, so `B/A = −(H1′ − iY
+    /// H1)/(H2′ − iY H2)`; outside a hole it is `A H2 + B H1` with the normal
+    /// `−r̂`, so `B/A = −(H2′ + iY H2)/(H1′ + iY H1)`. The exact exterior
+    /// DtN returns nothing, `B = 0`, so `|B/A|` here is the law's distance
+    /// from it.
+    fn circular_law(case: &HankelCase, second: bool) -> Phasor {
+        let omega = case.kr;
+        let mut admittance = Phasor::new(1.0, 0.0);
+        if second && case.m > 0 {
+            let s = Phasor::new(0.0, -omega);
+            let d = (7.0f64 / 8.0).sqrt() * f64::from(case.m);
+            for (pole, residue) in [(0.0, 6.0 / 7.0), (d, -8.0 / 7.0), (2.0 * d, 2.0 / 7.0)] {
+                admittance =
+                    admittance + Phasor::new(residue * d, 0.0) / (s + Phasor::new(pole, 0.0));
+            }
+        }
+        let iy = Phasor::new(0.0, 1.0) * admittance;
+        let wall = case.wall;
+        let (h1, h2, dh1, dh2) = (
+            tabled(wall.h1),
+            tabled(wall.h2),
+            tabled(wall.dh1),
+            tabled(wall.dh2),
+        );
+        let minus = Phasor::new(-1.0, 0.0);
+        if case.hole() {
+            minus * (dh2 + iy * h2) / (dh1 + iy * h1)
+        } else {
+            minus * (dh1 - iy * h1) / (dh2 - iy * h2)
+        }
+    }
+
+    /// `cos mθ` as the formula language writes it, `T_m(x/r)`.
+    fn angular_profile(m: u32) -> &'static str {
+        match m {
+            0 => "1",
+            1 => "x / sqrt(x^2 + y^2)",
+            2 => "(x^2 - y^2) / (x^2 + y^2)",
+            4 => "(x^4 - 6 * x^2 * y^2 + y^4) / (x^2 + y^2)^2",
+            8 => "(x^8 - 28 * x^6 * y^2 + 70 * x^4 * y^4 - 28 * x^2 * y^6 + y^8) / (x^2 + y^2)^4",
+            _ => panic!("no profile for order {m}"),
+        }
+    }
+
+    /// The curve tolerance PH-06 and PH-07 mesh their circles at. At the
+    /// default 5e-4 the circle becomes the same polygon at every mesh and
+    /// its shape held `B/A` 5e-5 to 2e-4 off the law however fine the
+    /// elements; at 5e-5 that floor fell under 4e-6, and tighter tolerances
+    /// build the same mesh.
+    const CIRCULAR_TOLERANCE: f64 = 5.0e-5;
+
+    /// PH-06's or PH-07's scene for `case`, the wall under the first- or
+    /// second-order law, meshed at `edge`, its source switched on over two
+    /// periods and held for `held` seconds. PH-06: a circle of radius one
+    /// whose inner side is the wall, the corners outside it meshed but cut
+    /// off, and a source ring a twentieth thick where the order radiates,
+    /// `k a` near `m`. PH-07: a hole of radius one whose outer side is the
+    /// wall, in a square of side 5.2 whose own sides absorb to first order,
+    /// so that it does not ring, and a source ring from 2 to 2.15. The ring
+    /// drives `cos mθ`.
+    fn circular_scene(
+        case: &HankelCase,
+        second: bool,
+        edge: f64,
+        held: f64,
+    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let law = if second {
+            FaceBoundaryCondition::SecondOrderOutgoing
+        } else {
+            FaceBoundaryCondition::Impedance { ratio: 1.0 }
+        };
+        let half = if case.hole() { 2.6 } else { 1.2 };
+        let mut builder = Builder::new();
+        builder.scene.geometry.domain = DomainRect {
+            min_x: -half,
+            max_x: half,
+            min_y: -half,
+            max_y: half,
+        };
+        builder.scene.outer_boundaries = OuterBoundaryConditions::uniform(if case.hole() {
+            OuterBoundaryCondition::FirstOrderOutgoing
+        } else {
+            OuterBoundaryCondition::Reflecting
+        });
+        let material = Some((builder.scene.regions[0].material, MaterialFrame::world()));
+        let ring = if case.hole() {
+            let (_, ring) =
+                builder.closed(round_circle(2.15, 64), SpanBehavior::Transmitting, material);
+            builder.closed(round_circle(2.0, 64), SpanBehavior::Transmitting, material);
+            builder.closed(
+                round_circle(1.0, 64),
+                SpanBehavior::Separated {
+                    left: FaceBoundaryCondition::Reflecting,
+                    right: law,
+                    coupling: InternalBoundaryCoupling::Independent,
+                },
+                None,
+            );
+            ring
+        } else {
+            builder.closed(
+                round_circle(1.0, 64),
+                SpanBehavior::Separated {
+                    left: law,
+                    right: FaceBoundaryCondition::Reflecting,
+                    coupling: InternalBoundaryCoupling::Independent,
+                },
+                material,
+            );
+            let inner = (0.75 * f64::from(case.m) / case.kr).clamp(0.25, 0.6);
+            let (_, ring) = builder.closed(
+                round_circle(inner + 0.05, 64),
+                SpanBehavior::Transmitting,
+                material,
+            );
+            builder.closed(
+                round_circle(inner, 64),
+                SpanBehavior::Transmitting,
+                material,
+            );
+            ring
+        };
+        let period = std::f64::consts::TAU / case.kr;
+        builder.scene.volume_sources.push(VolumeSource {
+            region: ring.unwrap(),
+            enabled: true,
+            profile: ScalarField::formula(angular_profile(case.m)).unwrap(),
+            parameters: vec![],
+            signal: TimeSignal::pulsed(
+                [0.0, 1.0, case.kr / std::f64::consts::TAU, 0.0],
+                PulseEnvelope::FlatTop {
+                    duration: 2.0 * held,
+                    edge: 2.0 * period,
+                },
+                0.0,
+                0.0,
+            ),
+        });
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        let editor = TopologyEditor::from_document(document.clone()).unwrap();
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                1,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                MeshingOptions {
+                    target_edge_length: edge,
+                    curve_tolerance: CIRCULAR_TOLERANCE,
+                    ..MeshingOptions::default()
+                }
+                .sized_for_area(4.0 * half * half),
+                true,
+            )
+            .unwrap();
+        loop {
+            if let Some(result) = runtime.advance(1 << 16) {
+                result.unwrap();
+                break;
+            }
+        }
+        runtime.commit_ready(token).unwrap()
+    }
+
+    /// What one run of a circular wall reads: `B/A` and the share of the
+    /// phasors the fit leaves unexplained.
+    #[derive(Clone, Copy, Debug)]
+    struct CircularReading {
+        ratio: Phasor,
+        residual: f64,
+    }
+
+    /// One run of `case` on meshes of `edge` at `fraction` of the production
+    /// step: switched on over two periods and held to steady state, three
+    /// seconds and two periods for PH-06, fifteen and two for PH-07, whose
+    /// square takes longer to settle; then a Blackman-Harris lock-in at the
+    /// drive's frequency over four periods, eight for PH-07, at 64 points on
+    /// each of the case's circles, the order's `cos mθ` projection on each,
+    /// and those fitted in least squares to `A H + B H′` from the table.
+    fn circular_run(case: &HankelCase, second: bool, edge: f64, fraction: f64) -> CircularReading {
+        let tau = std::f64::consts::TAU;
+        let omega = case.kr;
+        let period = tau / omega;
+        let (settle, window) = if case.hole() {
+            (15.0 + 2.0 * period, 8.0 * period)
+        } else {
+            (3.0 + 2.0 * period, 4.0 * period)
+        };
+        let held = 2.0 * period + settle + window;
+        let prepared = circular_scene(case, second, edge, held);
+        let angles = 64usize;
+        let stencils = case
+            .radii
+            .iter()
+            .flat_map(|radius| {
+                (0..angles).map(move |j| direction(j as f64 * tau / angles as f64) * *radius)
+            })
+            .map(|point| {
+                QuadraticPointStencil::build_topology(
+                    &prepared.mesh,
+                    &prepared.operator,
+                    &prepared.bundle.plan,
+                    prepared.fixed_model(),
+                    Point2::default() + point,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let operator = &prepared.canonical_operator;
+        let dt = fraction * prepared.recommended_time_step();
+        let steps = (held / dt).ceil() as usize;
+        let span = (window / dt).round() as usize;
+        let first = steps - span;
+        let mut state = CanonicalWaveState::zero(operator, dt).unwrap();
+        let mut sums = vec![Phasor::default(); stencils.len()];
+        let mut total = 0.0;
+        for step in 0..steps {
+            state
+                .step_with_forcing(operator, &prepared.canonical_forcing)
+                .unwrap();
+            if step < first {
+                continue;
+            }
+            let x = tau * (step - first) as f64 / span as f64;
+            let weight =
+                0.35875 - 0.48829 * x.cos() + 0.14128 * (2.0 * x).cos() - 0.01168 * (3.0 * x).cos();
+            // e^{−iωt} phasors: u = Re(U e^{−iωt}) gives Σ u e^{iωt} = U/2.
+            let (sin, cos) = (omega * (step + 1) as f64 * dt).sin_cos();
+            let field = state.primary_field(operator).unwrap();
+            for (sum, stencil) in sums.iter_mut().zip(&stencils) {
+                let value = stencil
+                    .nodes
+                    .iter()
+                    .zip(stencil.value_weights)
+                    .map(|(node, weight)| weight * field[*node as usize])
+                    .sum::<f64>();
+                *sum = *sum + Phasor::new(cos, sin).scale(weight * value);
+            }
+            total += weight;
+        }
+        let projection = |ring: usize| {
+            let scale = if case.m == 0 { 1.0 } else { 2.0 } / (angles as f64 * total);
+            (0..angles).fold(Phasor::default(), |sum, j| {
+                let angle = f64::from(case.m) * j as f64 * tau / angles as f64;
+                sum + sums[ring * angles + j].scale(angle.cos() * scale)
+            })
+        };
+        let measured = (0..case.radii.len()).map(projection).collect::<Vec<_>>();
+        // Outside an outgoing circle the field is A H1 + B H2; outside a
+        // hole A H2 + B H1: A comes from the source, B from the wall.
+        let (from_source, from_wall) = if case.hole() {
+            (&case.h2, &case.h1)
+        } else {
+            (&case.h1, &case.h2)
+        };
+        let (mut a, mut b, mut d) = (0.0, Phasor::default(), 0.0);
+        let (mut r0, mut r1) = (Phasor::default(), Phasor::default());
+        for ((source, wall), value) in from_source.iter().zip(from_wall).zip(&measured) {
+            let (p, q) = (tabled(*source), tabled(*wall));
+            a += p.norm().powi(2);
+            d += q.norm().powi(2);
+            b = b + p.conj() * q;
+            r0 = r0 + p.conj() * *value;
+            r1 = r1 + q.conj() * *value;
+        }
+        let determinant = a * d - b.norm().powi(2);
+        let incoming = (r0.scale(d) - b * r1).scale(1.0 / determinant);
+        let returned = (r1.scale(a) - b.conj() * r0).scale(1.0 / determinant);
+        let (mut misfit, mut size) = (0.0, 0.0);
+        for ((source, wall), value) in from_source.iter().zip(from_wall).zip(&measured) {
+            let fitted = incoming * tabled(*source) + returned * tabled(*wall);
+            misfit += (fitted - *value).norm().powi(2);
+            size += value.norm().powi(2);
+        }
+        CircularReading {
+            ratio: returned / incoming,
+            residual: (misfit / size).sqrt(),
+        }
+    }
+
+    /// Runs `work` over `tasks` on every core, in the tasks' order.
+    fn in_parallel<T: Sync, R: Send>(tasks: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results = std::sync::Mutex::new((0..tasks.len()).map(|_| None).collect::<Vec<_>>());
+        let threads = std::thread::available_parallelism().map_or(4, |count| count.get());
+        std::thread::scope(|scope| {
+            for _ in 0..threads.min(tasks.len()) {
+                scope.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(task) = tasks.get(index) else { break };
+                        let result = work(task);
+                        results.lock().unwrap()[index] = Some(result);
+                    }
+                });
+            }
+        });
+        results
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|result| result.unwrap())
+            .collect()
+    }
+
+    /// One reading of PH-06 or PH-07 as the tests report it.
+    #[derive(Clone, Copy, Debug)]
+    struct CircularResult {
+        kind: &'static str,
+        kr: f64,
+        m: u32,
+        second: bool,
+        edge: f64,
+        /// `|B/A − law|`, the time step's share removed by extrapolating the
+        /// production step and its half, second order, to zero.
+        error: f64,
+        /// `|B/A|` at the production step and its half, apart: the time
+        /// step's share.
+        time: f64,
+        /// `|B/A|`, read: under one for a passive wall, which a sink must be.
+        magnitude: f64,
+        residual: f64,
+        approximation: f64,
+    }
+
+    /// Reads `cases`, each `(kind, kR, m, second, edge)`, in parallel at the
+    /// production step and, with `extrapolate`, half of it, which takes the
+    /// time step's share out.
+    fn circular_study(
+        cases: &[(&'static str, f64, u32, bool, f64)],
+        extrapolate: bool,
+    ) -> Vec<CircularResult> {
+        let fractions: &[f64] = if extrapolate { &[1.0, 0.5] } else { &[1.0] };
+        let tasks = cases
+            .iter()
+            .flat_map(|case| fractions.iter().map(|fraction| (*case, *fraction)))
+            .collect::<Vec<_>>();
+        let readings = in_parallel(&tasks, |((kind, kr, m, second, edge), fraction)| {
+            circular_run(&hankel_case(kind, *kr, *m), *second, *edge, *fraction)
+        });
+        cases
+            .iter()
+            .zip(readings.chunks(fractions.len()))
+            .map(|(&(kind, kr, m, second, edge), pair)| {
+                let case = hankel_case(kind, kr, m);
+                let law = circular_law(&case, second);
+                let (full, half) = (pair[0], *pair.last().unwrap());
+                let extrapolated = half.ratio + (half.ratio - full.ratio).scale(1.0 / 3.0);
+                let result = CircularResult {
+                    kind,
+                    kr,
+                    m,
+                    second,
+                    edge,
+                    error: (extrapolated - law).norm(),
+                    time: (full.ratio - half.ratio).norm(),
+                    magnitude: full.ratio.norm(),
+                    residual: full.residual.max(half.residual),
+                    approximation: law.norm(),
+                };
+                eprintln!(
+                    "{kind} kR {kr} m {m} {} edge {edge}: B/A {:+.6}{:+.6}i, law {:+.6}{:+.6}i, E_discretization {:.3e} (time step's share {:.1e}), E_approximation {:.4}, fit {:.1e}",
+                    if second { "second" } else { "first" },
+                    extrapolated.re,
+                    extrapolated.im,
+                    law.re,
+                    law.im,
+                    result.error,
+                    result.time,
+                    result.approximation,
+                    result.residual
+                );
+                result
+            })
+            .collect()
+    }
+
+    /// Holds a study's results to what was measured on 2026-10-15. Each case
+    /// within `5e-5 + 2e-3 |R_law|` of its law on its finest mesh: the
+    /// circle's shape, fixed by `CIRCULAR_TOLERANCE` and not by the mesh,
+    /// moves `B/A` by more where the wall returns more, 6e-5 to 2.4e-4 at
+    /// the near-grazing orders whose `|R_law|` reaches 0.2 and more, while
+    /// the rest read 2e-6 to 4.6e-5. Falling fivefold or more from 0.1 to
+    /// 0.05 at kR 10 for orders 0 to 2, measured 7.5 to 13.6: at kR 5 and
+    /// under the error lies at the method's floor, a few parts in a
+    /// million, on the coarsest mesh already, and order 4 and up come near
+    /// it at kR 10, the hole's falling 2.9 and 3.2 times to 3.7e-5 and
+    /// 1.6e-5. The fit within 5e-4,
+    /// measured 3.6e-4 at worst. And every hole passive, `|B/A| < 1`, the
+    /// power flowing into it.
+    fn hold_circular(results: &[CircularResult]) {
+        for result in results {
+            let kind = result.kind;
+            let case = format!(
+                "{kind} kR {} m {} {} edge {}",
+                result.kr,
+                result.m,
+                if result.second { "second" } else { "first" },
+                result.edge
+            );
+            assert!(result.residual < 5.0e-4, "{case}: fit {}", result.residual);
+            if kind == "hole" {
+                assert!(result.magnitude < 1.0, "{case}: |B/A| {}", result.magnitude);
+            }
+            let same = results.iter().filter(|other| {
+                other.kind == kind
+                    && other.kr == result.kr
+                    && other.m == result.m
+                    && other.second == result.second
+            });
+            let finest = same
+                .clone()
+                .map(|other| other.edge)
+                .fold(f64::INFINITY, f64::min);
+            if result.edge == finest {
+                let bound = 5.0e-5 + 2.0e-3 * result.approximation;
+                assert!(
+                    result.error < bound,
+                    "{case}: E_discretization {} beyond {bound}",
+                    result.error
+                );
+            }
+            if result.kr == 10.0 && result.m <= 2 && result.edge == 0.05 {
+                let coarse = same.clone().find(|other| other.edge == 0.1).unwrap();
+                assert!(
+                    coarse.error / result.error > 5.0,
+                    "{case}: E_discretization {} at 0.1, {} at 0.05",
+                    coarse.error,
+                    result.error
+                );
+            }
+        }
+    }
+
+    /// Every case of `kind`: kR 5 and 10 on edges 0.1, 0.07 and 0.05, kR 0.8
+    /// and 2, whose error already lies under the method's floor on the
+    /// coarsest mesh, on 0.1 alone.
+    fn circular_sweep(kind: &'static str) -> Vec<CircularResult> {
+        let mut cases = Vec::new();
+        for (kr, orders) in CIRCULAR_CASES {
+            let edges: &[f64] = if kr >= 5.0 {
+                &[0.1, 0.07, 0.05]
+            } else {
+                &[0.1]
+            };
+            for m in orders {
+                for second in [false, true] {
+                    for edge in edges {
+                        cases.push((kind, kr, *m, second, *edge));
+                    }
+                }
+            }
+        }
+        circular_study(&cases, true)
+    }
+
+    /// PH-06 and PH-07 in the gate: order 2 at kR 5 on the coarsest mesh, a
+    /// hole under either law and an outgoing circle under the first-order
+    /// one, at the production step alone, the time step's share left in;
+    /// see `circular_run` for the measurement.
+    #[test]
+    fn circular_walls_meet_their_law_on_the_coarse_mesh() {
+        let results = circular_study(
+            &[
+                ("hole", 5.0, 2, false, 0.1),
+                ("hole", 5.0, 2, true, 0.1),
+                ("outgoing", 5.0, 2, false, 0.1),
+            ],
+            false,
+        );
+        hold_circular(&results);
+    }
+
+    /// PH-06, outgoing radiation through a circular outer boundary.
+    #[test]
+    #[ignore = "nightly: PH-06's sweep"]
+    fn outgoing_circles_converge_to_their_law() {
+        let results = circular_sweep("outgoing");
+        hold_circular(&results);
+    }
+
+    /// PH-07, inward radiation into an absorbing circular hole.
+    #[test]
+    #[ignore = "nightly: PH-07's sweep"]
+    fn absorbing_holes_converge_to_their_law() {
+        let results = circular_sweep("hole");
+        hold_circular(&results);
+    }
+
     /// A complex amplitude, `e^{iωt}` in time, for PH-04's phasors.
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     struct Phasor {

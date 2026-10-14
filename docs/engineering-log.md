@@ -24045,3 +24045,77 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the device suite.
+
+
+## 2026-10-15 — PH-06 and PH-07: the circular outgoing wall and the absorbing hole
+
+- **Order.** The 11 October plan gives PH-06 and PH-07 P0 and puts them in
+  its milestone A; the campaign plan had moved them into B. On the user's
+  word they came next, as stage A3.
+- **Geometry and reference.** A circle of radius one as a 64-control
+  periodic spline. PH-06: its inner side the wall, a separated curve whose
+  outer side reflects into the cut-off corners. PH-07: its outer side the
+  wall, a hole in a square of side 5.2. Speed one, so kR is the frequency.
+  For each angular order the steady field between the source and the wall is
+  `A H1 + B H2` outside the outgoing circle and `A H2 + B H1` outside the
+  hole, in the plan's `e^{−iωt}`, and `B/A` is the wall's alone. The law on
+  the circle: `∂_n u = iω Y u`, `Y = 1` for the first order and the passive
+  law at `s = −iω` with `d = √(7/8) m` for the second, so `B/A = −(H1′ − iY
+  H1)/(H2′ − iY H2)` outside the circle and `−(H2′ + iY H2)/(H1′ + iY H1)`
+  outside the hole; the exact exterior DtN returns nothing. The Hankel
+  functions come from `tests/physics/references/cylinder-hankel.json`,
+  written by `cylinder_hankel.py` with mpmath and checked there by the
+  Wronskian and against a second evaluation at twice the precision: the
+  first table under rule 7, since a Hankel function is not a closed form.
+- **Sizing.** It found the defect d1316a9 fixed on 14 October, a curve's
+  second-order wall assembled with each edge's nodes out of order, and four
+  things about the measurement. (1) At the test helper's curve tolerance of
+  5e-4 the circle is the same polygon on every mesh, and `B/A` stood 5e-5
+  to 2e-4 from the law however fine the elements; at 5e-5 the floor fell
+  under 4e-6, and 2e-5 to 1e-6 build the same mesh: 1,024 trace nodes on
+  the outgoing circle, 512 on the hole. (2) One source carrying orders 0, 1,
+  2, 4 and 8 left the weak high orders under the strong low ones' leakage,
+  order 4 stuck near 1e-3 and order 8 unreadable; weighting the orders
+  alike made the low orders as bad. One order a run, from a ring where it
+  radiates, `k a` near `m`, reads every order. (3) The hole's square, with
+  reflecting sides, rang: flat errors of 1e-3 to 8e-2 and fits that did not
+  close; with absorbing sides the fits close to 2e-7. (4) The circle's
+  small boundary elements set the step whatever the edge, so the hole's
+  error stood flat at 2e-4 at kR 10 until the step was halved, 2.6e-4,
+  1.2e-4 and 1.0e-4 at 1, ½ and ¼ of it: each reading is extrapolated from
+  the step and its half, second order. Orders evanescent at the wall, `kR <
+  m`, are left out, and the fit keeps the radii where `k r ≥ ¾ m`.
+- **Measurement.** Switched on over two periods and held, three seconds and
+  two periods for PH-06, fifteen and two for the hole; a Blackman-Harris
+  lock-in over four periods, eight for the hole, at 64 points on each fit
+  circle; the order's `cos mθ` projection, fitted in least squares.
+- **Measured, M1 Max.** Thirteen propagating cases of kR 0.8, 2, 5 and 10
+  under both laws. Within the law on the finest mesh: 2e-6 to 1.5e-5 on the
+  outgoing circle and 1e-5 to 4.6e-5 on the hole for orders far from
+  grazing; 6e-5 to 2.4e-4 at the near-grazing orders, the outgoing circle's
+  order 8 at kR 10 and the hole's order 4 at kR 5 and order 8 at kR 10, whose
+  law returns 0.2 and more, where the shape error the tolerance fixes moves
+  `B/A` most. Orders 0 to 2 at kR 10, where the discretization error stands
+  above the floor on the coarsest mesh, fall 7.5 to 13.2 times from edge 0.1
+  to 0.05 on the outgoing circle and 8.7 to 13.6 times on the hole; at kR 5
+  and under they lie at the floor already. The time step's share, removed:
+  2e-6 to 4e-5 on the outgoing circle, up to 1.7e-4 on the hole at kR 10.
+  Fit residuals under 3.6e-4. `|B/A_law|`, the law's distance from the exact
+  DtN, from 0.025 at kR 10, order 0, to 0.53 at kR 2, order 2, the hole's
+  second-order law; every hole passive.
+- **Tests.** `circular_walls_meet_their_law_on_the_coarse_mesh` in the gate,
+  32 s: order 2 at kR 5 on edge 0.1, the hole under both laws and the
+  outgoing circle under the first-order one, at the production step, 6.9e-6
+  to 7.5e-5 measured. `outgoing_circles_converge_to_their_law` and
+  `absorbing_holes_converge_to_their_law`, ignored, run by the new nightly
+  jobs `outgoing-circle` and `absorbing-hole`: 30 and 46 minutes here on ten
+  threads. Bounds: within `5e-5 + 2e-3 |R_law|` of the law on the finest
+  mesh; orders 0 to 2 at kR 10 fivefold down over the halving; fits within
+  5e-4; every hole `|B/A| < 1`.
+- **Mutation.** `curve-wall-stiffness-doubled`: a curve's second-order wall
+  takes its tangential stiffness without the factor of a half; the hole's
+  second-order order 2 at kR 5 reads 5.4e-2 off its law in the gate test.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the two nightly studies run twice by
+  hand.

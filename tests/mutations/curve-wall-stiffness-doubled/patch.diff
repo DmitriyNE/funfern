@@ -1,0 +1,14 @@
+diff --git a/crates/funfern-core/src/wave_quadratic.rs b/crates/funfern-core/src/wave_quadratic.rs
+index 703dc8c..020e084 100644
+--- a/crates/funfern-core/src/wave_quadratic.rs
++++ b/crates/funfern-core/src/wave_quadratic.rs
+@@ -1738,8 +1738,7 @@ fn assemble_face_condition(
+             assemble_auxiliary_line(
+                 [nodes[0], nodes[2], nodes[1]],
+                 length,
+-                coefficients.stiffness.determinant()
+-                    / (2.0 * coefficients.normal_impedance(normal)),
++                coefficients.stiffness.determinant() / coefficients.normal_impedance(normal),
+                 assembly.auxiliary_rows,
+                 assembly.auxiliary_active,
+             );

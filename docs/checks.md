@@ -454,6 +454,25 @@ and ¼ of the step the successive differences fall 5.4 times or more. The law
 is a closed form in the test; its distance from the exact half-space
 relation, which reflects nothing, is `|R_law|`, reported. The mutation
 `wall-memory-half-kick` puts 45°'s second-order wall 7.6e-2 off its law.
+PH-06 and PH-07 read the same laws on a circle of radius one: an annulus
+whose outer circle is the wall, the corners outside it cut off, and a hole
+whose outer side is the wall in a square of side 5.2 whose own sides absorb.
+One angular order a run, 0 to 8 where it propagates at kR 0.8, 2, 5 and 10,
+driven from a source ring to steady state; each order's radial phasor
+fitted to `A H + B H′`, the Hankel functions read from
+`tests/physics/references/cylinder-hankel.json`; and `B/A` against the law
+with the order's tangential wavenumber on the circle, extrapolated to a
+step of nothing from the production step and its half, since the circle's
+small boundary elements, meshed at a curve tolerance of 5e-5, set the step
+whatever the edge. In the gate, `circular_walls_meet_their_law_on_the_coarse_mesh`,
+32 s, reads order 2 at kR 5 on edge 0.1. Nightly, the jobs `outgoing-circle`
+and `absorbing-hole` (30 and 46 minutes on the M1 Max) run every case under
+both laws, kR 5 and 10 on edges 0.1, 0.07 and 0.05: within
+`5e-5 + 2e-3 |R_law|` of the law on the finest mesh, measured 2e-6 to
+4.6e-5 and 6e-5 to 2.4e-4 at the near-grazing orders whose shape error
+weighs most; orders 0 to 2 at kR 10 falling 7.5 to 13.6 times over the
+halving; every hole passive. The mutation `curve-wall-stiffness-doubled`
+puts the hole's second-order order 2 5.4e-2 off its law.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

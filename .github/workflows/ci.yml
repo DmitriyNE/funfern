@@ -213,6 +213,100 @@ jobs:
           cargo test --release -p funfern-app --lib --locked --
           --ignored --nocapture planar_reflection_converges_to_its_law_at_three_angles
 
+  # Nightly: PH-06, a circular outgoing wall, both laws, kR 0.8 to 10 and
+  # the angular orders that propagate, kR 5 and 10 on three meshes; each
+  # reading at the production step and half of it (topology_examples.rs,
+  # outgoing_circles_converge_to_their_law).
+  outgoing-circle:
+    name: Outgoing circle, PH-06
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal \
+            --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Outgoing circle, PH-06
+        run: >-
+          cargo test --release -p funfern-app --lib --locked --
+          --ignored --nocapture outgoing_circles_converge_to_their_law
+
+  # Nightly: PH-07, an absorbing circular hole, the same cases
+  # (topology_examples.rs, absorbing_holes_converge_to_their_law).
+  absorbing-hole:
+    name: Absorbing hole, PH-07
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal \
+            --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Absorbing hole, PH-07
+        run: >-
+          cargo test --release -p funfern-app --lib --locked --
+          --ignored --nocapture absorbing_holes_converge_to_their_law
+
   # Nightly: the mutations, one deliberate defect each, applied and reverted
   # by scripts/mutations.sh; each must be caught by the test its manifest
   # names, at the check it targets. The device ones run their fixture on
