@@ -1,0 +1,46 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+index 8415e35..6e8df5b 100644
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -21,12 +21,12 @@ use crate::{
+ const LOCAL_NODES: usize = 7;
+ const QUADRATURE_SAMPLES: usize = 6;
+ const MASS_WEIGHTS: [f64; LOCAL_NODES] = [
+-    1.0 / 20.0,
+-    1.0 / 20.0,
+-    1.0 / 20.0,
+-    2.0 / 15.0,
+-    2.0 / 15.0,
+-    2.0 / 15.0,
++    1.0 / 15.0,
++    1.0 / 15.0,
++    1.0 / 15.0,
++    7.0 / 60.0,
++    7.0 / 60.0,
++    7.0 / 60.0,
+     9.0 / 20.0,
+ ];
+ 
+diff --git a/crates/funfern-core/src/wave_quadratic.rs b/crates/funfern-core/src/wave_quadratic.rs
+index da8ead1..17c0109 100644
+--- a/crates/funfern-core/src/wave_quadratic.rs
++++ b/crates/funfern-core/src/wave_quadratic.rs
+@@ -1994,12 +1994,12 @@ impl QuadraticAssemblyWork {
+         ];
+ 
+         const MASS_WEIGHTS: [f64; 7] = [
+-            1.0 / 20.0,
+-            1.0 / 20.0,
+-            1.0 / 20.0,
+-            2.0 / 15.0,
+-            2.0 / 15.0,
+-            2.0 / 15.0,
++            1.0 / 15.0,
++            1.0 / 15.0,
++            1.0 / 15.0,
++            7.0 / 60.0,
++            7.0 / 60.0,
++            7.0 / 60.0,
+             9.0 / 20.0,
+         ];
+         for local in 0..7 {

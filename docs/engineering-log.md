@@ -23933,3 +23933,73 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-14 — PH-02: plane-wave dispersion
+
+- **Design.** Without periodic sides a lone plane wave cannot run on the
+  production path, so a reflecting box's modes carry the wavevectors, each
+  `cos(k_x x) cos(k_y y)` the sum of four plane waves, and PH-01's reading
+  of the semidiscrete frequency through each integrator's dispersion
+  relation tells the element's error from the integrator's. Seven modes of
+  a 2 × 1.06 box point from 0° to 90° at wavenumbers 5.6 to 8.6, five to
+  twenty elements a wavelength at edges 0.16 to 0.04; that height keeps
+  each of them 2.5% or more in frequency from every other mode of the box.
+  On the 2 × 1.4 box most candidates near `k = 8` lay within 1% of another
+  mode, and over three periods the beat with a neighbour the mesh mixes in
+  does not average out: it would move the frequency measured by up to half
+  of its error.
+- **Aspect ratio without structured meshes.** The user asked whether a
+  structured mesh should carry the 11 October plan's mesh orientation and
+  aspect ratio; agreed not: the application never makes one. The mesher's
+  triangles have no orientation, which the seven directions cover. And
+  `ρ ü = ∂ₓ(κₓ ∂ₓ u) + ∂ᵧ(κᵧ ∂ᵧ u)` is the isotropic equation in `X =
+  x/√κₓ`, `Y = y/√κᵧ`, while the elements are affine (lumped mass by area,
+  stiffness and samples by the map), so an axis ratio `r` (`κₓ/κᵧ = r²`) on
+  a box `2√r × 1.06/√r` is exactly the isotropic box on the mesher's
+  elements stretched `r` times along y: the same modes at the same
+  frequencies.
+- **Refactor.** PH-01's `BoxMode` carries its box and `BoxMedium` its
+  physics, slots and axis ratio, which give each mode's frequency
+  `c √(r k_x² + k_y²/r)`; PH-01 reads the same digits as before. Its
+  superposition also reads the complementary flux against the closed form
+  `η R∇ψ`, less its part in the coupling's kernel: `B⊥` in TM and `D⊥` in TE,
+  9.0e-4, 1.1e-4 and 1.6e-5 at the three meshes in every model, PH-02's
+  field reconstruction in each polarization, held to fivefold a halving and
+  3e-5.
+- **Measured, isotropic.** Each mode's semidiscrete frequency is low, fourth
+  order: (4,2) at 1.0e-4, 4.0e-6 and 3.6e-7, every mode 121 to 282 times
+  down over the two halvings, 9.3 times or more a halving; the coefficient
+  `|ε|/(k h)⁴` at 0.04 is 2.1e-5 to 2.5e-5 in every direction.
+- **Measured, stretched.** Fourth order holds at aspect 2 and 4, every mode
+  47 times down or more over the two halvings, a coarse error crossing zero
+  in places; but a wave along the stretch disperses 10 times as much at
+  aspect 2, 7.6e-7 at 90° for 7.2e-8, and 175 times at aspect 4, 1.3e-5,
+  where the coarser resolution would account for 4 and 16: the stretched
+  element's own constant grows as well. Waves across the stretch disperse
+  less than on unstretched elements, (5,0) at 4.7e-8 for 2.0e-7 at aspect 4.
+- **Measured, time and group velocity.** Mode (4,2) on 0.08: leapfrog and
+  the fourth-order step follow `ω_h³dt²/24` and `−ω_h⁵dt⁴/720` to 0.1% at ¼,
+  ½ and 1 of their steps and at 0.999 of their stability limits, the
+  energy wobbling by an eighth of `(ω dt)²` there; the semidiscrete
+  frequency agrees over the eight runs to 4e-9. The group velocity from the
+  semidiscrete frequency at `k`, `2k` and `3k`: 2.5e-4, 1.9e-5 and 1.1e-6
+  off along 62°, 1.6e-4, 1.7e-5 and 6.9e-7 along 90°.
+- **Tests.** `plane_waves_disperse_as_the_element_does_in_every_direction`,
+  `plane_waves_disperse_on_elements_stretched_twofold`, `_fourfold`,
+  `plane_waves_keep_each_integrators_dispersion_up_to_its_stability_limit`,
+  `plane_waves_travel_at_their_group_velocity`: about 35 s together in the
+  gate. Bounds: sixfold from 0.08 to 0.04 and thirtyfold from 0.16, under
+  5e-7, 1.5e-6 and 2.5e-5 at 0.04 by aspect; the coefficient's spread over
+  directions within 1.5; the laws to 1% plus 1e-10 and the spread to 1e-8;
+  the group velocity sixfold a halving and under 2e-6.
+- **Mutation.** `lumping-midpoints-to-vertices` moves lumped mass from the
+  edge midpoints to the vertices in both the scalar assembly and the
+  canonical compile: the canonical copy alone is refused at compile, its
+  masses no longer the scalar ones; both together leave constants exact and
+  drop the dispersion to second order, (5,0) at 6.7e-4, 1.4e-4 and 3.4e-5.
+- **A2.** Done with PH-02: the cavity modes on the device in three models,
+  the plane waves' dispersion with the element's and the integrator's parts
+  apart, and planar reflection at three angles.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

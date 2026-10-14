@@ -500,7 +500,21 @@ falls 139 to 674 times over two halvings to 1.9e-7 at worst, the phase
 starts within 7.6e-4 of its closed form, the four modes together stand 2.0e-5
 from it in L2 at edge 0.04 with the constant's total flux held to 3e-15,
 and each integrator misses the semidiscrete frequency by its own law. The
-mutation `tm-orientation-flipped` starts TM's modes at −θ. Edits the field
+mutation `tm-orientation-flipped` starts TM's modes at −θ. The
+complementary flux, `B⊥` in TM and `D⊥` in TE, stands 9.0e-4, 1.1e-4 and
+1.6e-5 from its closed form there, PH-02's field reconstruction in each
+polarization. PH-02 sweeps the plane-wave dispersion on the same path
+(`plane_waves_*`, five tests, about 35 s together): seven modes of a
+2 × 1.06 box from 0° to 90° at five to twenty elements a wavelength, their
+semidiscrete frequency fourth order, 121 to 282 times down over two
+halvings, its coefficient `|ε|/(k h)⁴` within 25% in every direction;
+the same modes in a medium of axis ratio 2 and 4, which is the isotropic
+medium on the mesher's elements stretched twofold and fourfold, still
+fourth order but ten and 175 times the dispersion along the stretch; each
+integrator's law to 0.1% up to its stability limit; and the group velocity
+from three wavenumbers along a direction, fourth order to 1.1e-6. The
+mutation `lumping-midpoints-to-vertices` drops the dispersion to second
+order. Edits the field
 cannot tell run on the application's own path: a disc of the box's own
 medium drawn into the running box mode and erased three periods later, the
 state carried each time through the maps the runtime prepares for the edit,

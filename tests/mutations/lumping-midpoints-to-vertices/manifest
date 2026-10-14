@@ -1,0 +1,4 @@
+about: the element's lumped mass moves weight from its edge midpoints to its vertices, in the scalar assembly and the canonical compile alike: constants still integrate exactly, but the lumping's quadrature drops a degree and a plane wave's dispersion falls to second order
+test: cargo test --release -p funfern-app --lib -- plane_waves_disperse_as_the_element_does_in_every_direction
+expect: r 1, \([0-9],[0-9]\): ε \[
+needs: cpu

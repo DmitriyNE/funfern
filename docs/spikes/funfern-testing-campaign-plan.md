@@ -358,6 +358,21 @@ error, so that the element's error and the integrator's are told apart.
 Passes when they converge to the physical dispersion relation as the spatial
 and temporal errors are predicted to. Its design is planned on its own.
 
+**Done on 2026-10-14** (`docs/engineering-log.md`): without periodic sides a
+lone plane wave cannot run on the production path, so a reflecting box's
+modes, each the sum of four plane waves, carry the wavevectors: seven
+directions from 0° to 90° on a 2 × 1.06 box whose modes keep 2.5% apart in
+frequency. The mesh's orientation and its elements' aspect ratio are not
+built as structured meshes, which the application never makes: the mesher's
+triangles have no orientation, which the directions cover, and a diagonal
+anisotropic medium of axis ratio `r` on the box stretched to `2√r × 1.06/√r`
+is, by the elements' affine invariance, the isotropic medium on the
+mesher's elements stretched `r` times, so ratios 2 and 4 read elements of
+aspect 2 and 4 on meshes the application builds. The field's reconstruction
+in each polarization is PH-01's complementary flux in TM and TE, held in
+those tests. The mutation `lumping-midpoints-to-vertices`. With PH-02, stage
+A2 is done.
+
 **PH-04, planar reflection against the implemented law.** Promote the
 Bloch-strip methodology of `docs/spikes/funfern-boundary-scattering-spike.md`
 and the `wave_boundary_reflection` example into a three-level test: angles
