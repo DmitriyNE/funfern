@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/wave_quadratic.rs b/crates/funfern-core/src/wave_quadratic.rs
+--- a/crates/funfern-core/src/wave_quadratic.rs
++++ b/crates/funfern-core/src/wave_quadratic.rs
+@@ -1736,7 +1736,7 @@
+             // second-order wall on a curve solved a scrambled tangential
+             // operator, its modes' memory decaying 1.5 times too fast.
+             assemble_auxiliary_line(
+-                [nodes[0], nodes[2], nodes[1]],
++                nodes,
+                 length,
+                 coefficients.stiffness.determinant()
+                     / (2.0 * coefficients.normal_impedance(normal)),

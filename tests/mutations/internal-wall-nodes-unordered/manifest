@@ -1,0 +1,4 @@
+about: a curve's second-order wall assembles its tangential stiffness with each edge's nodes in the order they reach the face, endpoint, midpoint, endpoint, where the line stiffness takes its endpoints first, so the wall solves a scrambled operator and absorbs by a law it was not built to
+test: cargo test --release -p funfern-app --lib -- an_internal_second_order_wall_solves_its_own_traces_tangential_operator
+expect: m 1: \[
+needs: cpu

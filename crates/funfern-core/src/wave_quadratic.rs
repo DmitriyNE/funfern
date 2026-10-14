@@ -1730,8 +1730,13 @@ fn assemble_face_condition(
                 assembly.second_order_boundary_length[node] += length * weight;
             }
             let coefficients = coefficients[1];
+            // The face's nodes run endpoint, midpoint, endpoint along the
+            // edge; the line stiffness takes its endpoints first. Passed as
+            // they came, the midpoint took an endpoint's row and every
+            // second-order wall on a curve solved a scrambled tangential
+            // operator, its modes' memory decaying 1.5 times too fast.
             assemble_auxiliary_line(
-                nodes,
+                [nodes[0], nodes[2], nodes[1]],
                 length,
                 coefficients.stiffness.determinant()
                     / (2.0 * coefficients.normal_impedance(normal)),
@@ -2374,6 +2379,8 @@ impl QuadraticAssemblyJob {
     }
 }
 
+/// The quadratic line element's tangential stiffness, `scale` times
+/// `∫ φ_i′ φ_j′`, with `nodes` its two endpoints first and its midpoint last.
 fn assemble_auxiliary_line(
     nodes: [usize; 3],
     length: f64,

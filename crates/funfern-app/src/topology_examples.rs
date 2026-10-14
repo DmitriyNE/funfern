@@ -9592,6 +9592,110 @@ mod tests {
         assert_eq!(tm.primary_mass(), mechanical.primary_mass());
     }
 
+    /// A circle of radius `radius` about the origin as a periodic spline of
+    /// `controls` uniform controls, reached out by the factor the uniform
+    /// cubic B-spline draws a circle's controls in by, `(2 + cos(2π/n))/3`.
+    fn round_circle(radius: f64, controls: usize) -> PeriodicCubicSpline {
+        let step = std::f64::consts::TAU / controls as f64;
+        let reach = radius / ((2.0 + step.cos()) / 3.0);
+        PeriodicCubicSpline::uniform(
+            (0..controls)
+                .map(|index| Point2::default() + direction(index as f64 * step) * reach)
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    /// The eigenvalues of a generation's outgoing trace, ascending.
+    fn trace_spectrum(prepared: &crate::topology_runtime::PreparedTopology) -> Vec<f64> {
+        let mut eigenvalues = prepared
+            .canonical_operator
+            .outgoing_boundary()
+            .unwrap()
+            .modes()
+            .iter()
+            .map(|mode| mode.eigenvalue)
+            .collect::<Vec<_>>();
+        eigenvalues.sort_by(f64::total_cmp);
+        eigenvalues
+    }
+
+    /// A second-order wall on a curve inside the domain solves its own
+    /// trace's tangential operator, as an outer side's does
+    /// (`a_zero_pinned_side_ends_the_outgoing_trace_and_a_driven_one_does_not`):
+    /// on a circle of radius one, at unit speed and impedance, the modes
+    /// pair as `cos mθ` and `sin mθ` at `λ_m = m²/2`; on a straight curve one
+    /// long, floating in a box, they are its cosines, `λ_n = (nπ)²/2`. Each
+    /// edge's nodes reach the face's assembly as endpoint, midpoint,
+    /// endpoint, and the line stiffness takes its endpoints first; passed as
+    /// they came, the circle read `2λ` 2.28, 9.09, 20.3 and 35.7 for
+    /// `m²` 1, 4, 9 and 16, every second-order wall on a curve absorbing by a
+    /// law it was not built to (found by PH-06's sizing, 2026-10-14).
+    #[test]
+    fn an_internal_second_order_wall_solves_its_own_traces_tangential_operator() {
+        let wall = SpanBehavior::Separated {
+            left: FaceBoundaryCondition::SecondOrderOutgoing,
+            right: FaceBoundaryCondition::Reflecting,
+            coupling: InternalBoundaryCoupling::Independent,
+        };
+        let reflecting_box = |half: f64| {
+            let mut builder = Builder::new();
+            builder.scene.geometry.domain = DomainRect {
+                min_x: -half,
+                max_x: half,
+                min_y: -half,
+                max_y: half,
+            };
+            builder.scene.outer_boundaries =
+                OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+            builder
+        };
+
+        let mut circle = reflecting_box(1.2);
+        let material = circle.scene.regions[0].material;
+        circle.closed(
+            round_circle(1.0, 64),
+            wall,
+            Some((material, MaterialFrame::world())),
+        );
+        let mut document = circle.document();
+        document.model.source.enabled = false;
+        let spectrum = trace_spectrum(&prepare(&document, 0.1));
+        assert_eq!(spectrum[0], 0.0);
+        for m in 1..=5 {
+            let exact = f64::from(m * m) / 2.0;
+            let pair = [spectrum[2 * m as usize - 1], spectrum[2 * m as usize]];
+            eprintln!("circle m {m}: λ {pair:?} for {exact}");
+            for eigenvalue in pair {
+                assert!((eigenvalue / exact - 1.0).abs() < 1.0e-3, "m {m}: {pair:?}");
+            }
+        }
+
+        let mut line = reflecting_box(1.0);
+        line.open_curve(
+            OpenCubicSpline::polyline(vec![
+                Point2::new(0.0, -0.5),
+                Point2::new(0.0, 0.0),
+                Point2::new(0.0, 0.5),
+            ])
+            .unwrap(),
+            &[wall, wall],
+        );
+        let mut document = line.document();
+        document.model.source.enabled = false;
+        let spectrum = trace_spectrum(&prepare(&document, 0.1));
+        assert_eq!(spectrum[0], 0.0);
+        for n in 1..=3 {
+            let exact = (f64::from(n) * std::f64::consts::PI).powi(2) / 2.0;
+            eprintln!("line n {n}: λ {} for {exact}", spectrum[n as usize]);
+            assert!(
+                (spectrum[n as usize] / exact - 1.0).abs() < 1.0e-3,
+                "n {n}: {}",
+                spectrum[n as usize]
+            );
+        }
+    }
+
     /// A complex amplitude, `e^{iωt}` in time, for PH-04's phasors.
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     struct Phasor {

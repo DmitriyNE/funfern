@@ -24003,3 +24003,45 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-14 — Second-order walls on curves solved a scrambled operator
+
+- **Found.** PH-06's sizing: an annulus whose outer circle, radius one, is a
+  separated curve with the second-order law on its inner side, driven from
+  a source disk at its centre with the angular orders 0, 1, 2, 4 and 8, held
+  to steady state and each order's radial phasor fitted to `A H⁽¹⁾ + B H⁽²⁾`.
+  The first-order law matched its prediction `B/A` at every order, 5e-5 to
+  1.5e-4 at kR 2 and 5 on edge 0.1; the second-order law matched at order 0
+  and missed at every other, at kR 2 by 0.11, 0.49 and 0.29 for orders 1, 2
+  and 4, the second order reflecting 0.49 where its law says 0.15.
+- **Cause.** The circle's outgoing trace read `2λ` 2.28, 9.09, 20.3 and 35.7
+  for `m²` 1, 4, 9 and 16, where the tangential operator at unit speed and
+  impedance has `λ = (m/R)²/2`, so each mode's memory decayed 1.5 times as
+  fast as the law's `d = √(7λ/4)`. `assemble_face_condition`, which every
+  curve's face law goes through, receives each edge's nodes as endpoint,
+  midpoint, endpoint, and its damping weights `[1/6, 2/3, 1/6]` follow
+  that; it passed the same array to `assemble_auxiliary_line`, whose local
+  matrix takes its two endpoints first and its midpoint last, as the outer
+  sides' path passes them. Every second-order wall on a curve, a hole's, a
+  separated span's, the gallery's double-slit box and Luneburg lens among
+  them and any curve a user sets to the second-order law, solved the
+  operator of a line element with a midpoint and an endpoint swapped: still
+  symmetric and passive, a permutation of a correct one, so nothing ever
+  ran away, and the trace report found nothing, since the basis solves the
+  operator it was given. The outer sides were never affected; nor was the
+  first-order law, which reads only the damping.
+- **Change.** The face passes its nodes endpoints first. The circle then
+  reads `2λ` 1.0002, 4.0008, 9.0018, 16.003 and 25.005, and the
+  second-order `B/A` meets its law to 5e-5 to 2e-4 at orders 0 to 2, 2e-3
+  to 4e-3 at order 4, where the fit is the limit.
+- **Test.** `an_internal_second_order_wall_solves_its_own_traces_tangential_operator`:
+  a circle of radius one as a 64-control spline, its trace's modes in
+  pairs at `m²/2` to 2e-4 for m 1 to 5, held to 1e-3; a straight curve one
+  long floating in a box, its cosines at `(nπ)²/2` to 6e-4 for n 1 to 3.
+  The mutation `internal-wall-nodes-unordered` puts the nodes back as they
+  came, and the circle's first pair reads 1.141 for 0.5.
+- **Verified.** Workspace tests 1294 passed, none moved past its bound; the
+  device suite 88 of 88 on the M1 Max.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the device suite.
