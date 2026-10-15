@@ -466,8 +466,19 @@ complementary row with its own loss booking its pump work at first order
 **PH-05 done on 2026-10-15**: the wall oracle beside every medium in each
 skin and a slow near field under the law's pole at zero, in the gate. It
 found a source on a wall booking its work at first order, on both paths and
-the device (fixed in 204f355); its mutation `wall-loss-without-memory`. The
-device half and the long runs remain.
+the device (fixed in 204f355); its mutation `wall-loss-without-memory`.
+
+**Device half and long runs done on 2026-10-15.** The device's lanes were
+already held to the reference's by the device examples, all but one: the
+edit lane, which nothing read. The three handoff examples now hold it to the
+energy each handoff moves, each side valued by its own generation; on a
+time-driven generation it booked the stores neither generation holds, and
+nothing of the restoring potential (fixed in da83bc0, mutation
+`handoff-store-authored`). The nightly job `energy-long-runs` holds the
+conservative media's energy to its band over a thousand seconds, the passive
+media's and the walls' envelope to never rising over four hundred, the slow
+near field's ledger over twenty periods, and a Kerr medium's known drift
+under the splitting to where it stands. With these, stage B1 is done.
 
 ## 7. Infrastructure
 

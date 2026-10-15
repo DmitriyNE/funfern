@@ -619,6 +619,25 @@ wall's loss, puts the second-order wall's lane 8.3e-2 of the energy off. PH-05
 found a source on a wall booking its work at first order; the mutation
 `wall-source-work-before-its-half` restores it.
 
+The handoff examples hold the device's edit lane, the energy a handoff
+itself moves, to the reference: `canonical_gpu_handoff` in every suite
+variant, `canonical_gpu_temporal_handoff` (pumped, gated and into a
+nonlinear target) and `canonical_gpu_oscillator_handoff` (remesh, identity,
+from and to a linear medium, an opened hole), each side valued at the handoff
+by its own generation's law, restoring potential included. They agree to
+1.9e-8 to 2.6e-7 of the energy, held to 1e-6; Klein-Gordon handed to a plain
+medium books the 10.7, half its energy, that dropping `r` takes. The
+mutation `handoff-store-authored` values the stores quadratically again, and
+the pumped edit reads 0 for -3.0e-5. Nightly, `energy-long-runs` runs PH-17
+and PH-05 long (`long_run_*`, half a minute): a linear medium in two skins
+and Klein-Gordon a thousand seconds under either integrator, the energy's
+excursion the same over the last quarter as the first (3.65e-4 and 4.3e-4);
+weak loss, either wall and a wall beside a gap four hundred seconds in each
+skin, the peak of each 20 s window never above the last; the slow near field
+twenty periods, its residual where its switch-on left it; and Kerr's known
+gain under the splitting held to 0.15 by t = 160 (measured 9.5e-2), which
+by t = 1000 takes this strong a field past its declared bound.
+
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
 reflecting-box problem. It crosses the driven constitutive row against the

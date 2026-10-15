@@ -24445,3 +24445,36 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-15 — PH-05 and PH-17 over long runs
+
+- **What.** The last of stage B1: the conservative, passive and walled
+  configurations run long at the production step, one level each, nightly
+  in the new job `energy-long-runs` (`long_run_*`, 23 s of tests here).
+- **Conservative.** A linear medium in Mechanical and TM and Klein-Gordon in
+  TE, a thousand seconds under the leapfrog and the fourth-order step, 17,000
+  to 47,000 steps: the energy's excursion over the last quarter 3.649e-4 to
+  4.327e-4, against 3.648e-4 to 4.326e-4 over the first; the end within
+  1.2e-4 of the start. Held: the last within 1.05 of the first, the end
+  within the first's band.
+- **Kerr.** Under the fourth-order step PH-17's TM Kerr box, `χ₂ = 0.5` on a
+  unit field, gains 9.5e-2 of its energy by t = 160 and by t = 1000 leaves
+  its declared amplitude bound of 4, the step refused; under the leapfrog it
+  had gained 2.2 times its energy by then. The fourth-order step's spike
+  measured the same gain, +5.4e-2 by t = 160 for Kerr on the density row,
+  and keeps field-dependent generations at 0.9 of the ceiling for it. Held
+  to 0.15 at t = 160 so that a worse drift shows; reported, not fixed.
+- **Passive.** Weak loss, the first- and second-order walls, and a wall
+  beside a gap and a weak loss, four hundred seconds in each skin. Step to
+  step, late in a run the energy rises by up to 4.3e-2 of itself: what is
+  left then is the mesh's fastest content, whose breathing about the store
+  is a large share of a small energy. The peak of each 20 s window never
+  rises above the last one's - it falls by 7.8e-6 to 26% - held under
+  1e-4; the residual against the oracle stays at the switch-on's, at most
+  2.3e-3 at the production step, held to 5e-3.
+- **Slow near field,** twenty periods: residual 2.19e-3 as after one, memory
+  within 1e-10 of the oracle's poles, the wall giving back at 463 and 2,598
+  steps.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

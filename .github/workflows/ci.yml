@@ -261,6 +261,54 @@ jobs:
           cargo test --release -p funfern-app --lib --locked --
           --ignored --nocapture outgoing_circles_converge_to_their_law
 
+  # Nightly: PH-05 and PH-17 over long runs, the conservative media to a
+  # thousand seconds, the passive ones and the walls to four hundred, Kerr's
+  # known drift to 160; about half a minute on an M1 Max
+  # (crates/funfern-app/src/topology_examples.rs, long_run_*).
+  energy-long-runs:
+    name: Energy over long runs, PH-05 and PH-17
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal \
+            --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Energy over long runs, PH-05 and PH-17
+        run: >-
+          cargo test --release -p funfern-app --lib --locked --
+          --ignored --nocapture long_run_
+
   # Nightly: PH-07, an absorbing circular hole, the same cases
   # (topology_examples.rs, absorbing_holes_converge_to_their_law).
   absorbing-hole:

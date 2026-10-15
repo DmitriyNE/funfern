@@ -13455,6 +13455,8 @@ mod tests {
         memory_error: f64,
         /// The steps at which the field took energy back from the wall.
         returned: usize,
+        /// The stored energy after each step.
+        energies: Vec<f64>,
     }
 
     fn ledger_level(
@@ -13480,6 +13482,7 @@ mod tests {
             _ => (0.0, 0.0),
         };
         let mut returned = 0;
+        let mut energies = Vec::with_capacity(steps);
         let first_jumps = before.jumps.clone();
         let mut integrated_jumps = vec![0.0; gaps.len()];
         let mut powers_before = ledger_powers(config, prepared, &before);
@@ -13511,6 +13514,7 @@ mod tests {
                 *integral += 0.5 * dt * (difference(&before) + difference(&now));
             }
             excursion = excursion.max((now.energy - start).abs());
+            energies.push(now.energy);
             largest_jump = now
                 .jumps
                 .iter()
@@ -13540,6 +13544,7 @@ mod tests {
             excursion,
             memory_error: (before.memory - poles) / start,
             returned,
+            energies,
         }
     }
 
@@ -14046,6 +14051,182 @@ mod tests {
             for level in &levels {
                 assert!(level.returned > 0, "{physics:?}: the wall never gave back");
             }
+        }
+    }
+
+    /// One long run of `config` at the production step for `duration`.
+    fn long_ledger(
+        config: &Ledgered,
+        integrator: CanonicalIntegrator,
+        duration: f64,
+    ) -> LedgerLevel {
+        let prepared = ledger_box(config, 0.25);
+        let production = prepared.recommended_time_step() * integrator.recommended()
+            / CanonicalIntegrator::default().recommended();
+        let steps = (duration / production).ceil();
+        ledger_level(config, &prepared, integrator, duration / steps, duration)
+    }
+
+    /// The largest rise from one window's peak energy to the next's, relative
+    /// to the earlier: a passive run's envelope cannot rise. Within a window
+    /// the stored energy breathes about its conserved store by the step's own
+    /// second-order offset, which late in a run, when what is left is the
+    /// mesh's fastest content, is a large share of a small energy; the peaks
+    /// of windows longer than that breathing do not see it.
+    fn envelope_rise(energies: &[f64], window: usize) -> f64 {
+        let peaks = energies
+            .chunks(window)
+            .map(|chunk| chunk.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+            .collect::<Vec<_>>();
+        peaks
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]) / pair[0])
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    /// The energy's largest departure from the start over a stretch of its
+    /// record, relative to the start.
+    fn excursion_over(level: &LedgerLevel, range: std::ops::Range<usize>) -> f64 {
+        level.energies[range].iter().fold(0.0_f64, |band, energy| {
+            band.max((energy - level.start).abs())
+        }) / level.start
+    }
+
+    /// PH-17's long conservative runs: a linear medium in two skins and
+    /// Klein-Gordon, a thousand seconds at the production step under either
+    /// integrator, 17,000 to 47,000 steps. The energy breathes about its
+    /// conserved store and goes nowhere: its excursion over the last quarter
+    /// stands where it stood over the first (3.65e-4 under the leapfrog, 4.3e-4
+    /// under the fourth-order step, the two within 3e-4 of each other), and
+    /// it ends inside that band.
+    #[test]
+    #[ignore = "nightly: energy-long-runs"]
+    fn long_run_conservative_media_hold_their_energy_over_a_thousand_seconds() {
+        for config in [
+            Ledgered::plain("linear", PhysicsModel::Mechanical),
+            Ledgered::plain("linear", LEDGER_TM),
+            Ledgered {
+                restoring: Some(1.5),
+                ..Ledgered::plain("Klein-Gordon", LEDGER_TE)
+            },
+        ] {
+            for integrator in [
+                CanonicalIntegrator::Leapfrog,
+                CanonicalIntegrator::FourthOrder,
+            ] {
+                let level = long_ledger(&config, integrator, 1000.0);
+                let quarter = level.energies.len() / 4;
+                let first = excursion_over(&level, 0..quarter);
+                let last = excursion_over(&level, 3 * quarter..level.energies.len());
+                let end = level.end / level.start - 1.0;
+                let what = format!("{:?} {} {integrator:?}", config.physics, config.name);
+                eprintln!(
+                    "{what}: excursion {first:.3e} first quarter, {last:.3e} last, end {end:.3e}"
+                );
+                assert!(
+                    last < 1.05 * first,
+                    "{what}: {first:.3e} grew to {last:.3e}"
+                );
+                assert!(
+                    end.abs() < first,
+                    "{what}: ends {end:.3e} outside {first:.3e}"
+                );
+            }
+        }
+    }
+
+    /// A Kerr medium's known drift, held where it stands: a field-dependent
+    /// medium gains energy under the splitting at the production step, which
+    /// `docs/spikes/funfern-fourth-order-step.md` measured at +5.4e-2 by
+    /// t = 160 for Kerr on the density row. PH-17's TM box, its Kerr strong
+    /// at χ₂ = 0.5 on a unit field, gains 9.5e-2 by then, and by t = 1000 its
+    /// field leaves the declared amplitude bound of 4 and the step is refused.
+    /// Held to 0.15 so that a worse drift shows.
+    #[test]
+    #[ignore = "nightly: energy-long-runs"]
+    fn long_run_kerr_gains_no_more_than_its_known_drift() {
+        let config = Ledgered {
+            kerr: Some(0.5),
+            ..Ledgered::plain("Kerr", LEDGER_TM)
+        };
+        let level = long_ledger(&config, CanonicalIntegrator::FourthOrder, 160.0);
+        let gain = level.end / level.start - 1.0;
+        eprintln!("TM Kerr by t = 160: {gain:.3e}");
+        assert!(gain < 0.15, "Kerr gained {gain:.3e}");
+    }
+
+    /// PH-17 and PH-05's long passive runs, 400 s at the production step in
+    /// each skin: weak loss, either wall, and a wall beside a gap and a weak
+    /// loss. The peak energy of each 20 s window never exceeds the last one's,
+    /// measured falling by 7.8e-6 to 26% from one to the next, and the
+    /// ledger's residual against the oracle stays at the switch-on's, 2.3e-3
+    /// of the energy at most, against 5e-3.
+    #[test]
+    #[ignore = "nightly: energy-long-runs"]
+    fn long_run_passive_media_and_walls_never_raise_their_envelope() {
+        let second = Some(OuterBoundaryCondition::SecondOrderOutgoing);
+        let first = Some(OuterBoundaryCondition::FirstOrderOutgoing);
+        for physics in [PhysicsModel::Mechanical, LEDGER_TM, LEDGER_TE] {
+            for config in [
+                Ledgered {
+                    electric: Some(LossRate::Constant(0.01)),
+                    magnetic: Some(LossRate::Rising(0.005)),
+                    ..Ledgered::plain("weak loss", physics)
+                },
+                Ledgered {
+                    wall: first,
+                    ..Ledgered::plain("first-order wall", physics)
+                },
+                Ledgered {
+                    wall: second,
+                    ..Ledgered::plain("second-order wall", physics)
+                },
+                Ledgered {
+                    wall: second,
+                    gap: Some(40.0),
+                    electric: Some(LossRate::Constant(0.01)),
+                    ..Ledgered::plain("wall, gap, weak loss", physics)
+                },
+            ] {
+                let level = long_ledger(&config, CanonicalIntegrator::default(), 400.0);
+                let window = (20.0 / level.dt).round() as usize;
+                let rise = envelope_rise(&level.energies, window);
+                let residual = level.residual / level.start;
+                let what = format!("{physics:?} {}", config.name);
+                eprintln!("{what}: envelope rise {rise:.3e}, residual {residual:.3e}");
+                assert!(rise < 1.0e-4, "{what}: the envelope rose {rise:.3e}");
+                assert!(residual.abs() < 5.0e-3, "{what}: residual {residual:.3e}");
+            }
+        }
+    }
+
+    /// PH-05's slow near field for twenty periods of its drive, 400 s: the
+    /// wall keeps storing and giving back, its memory meets the oracle's
+    /// poles, and the ledger's residual stays at the switch-on's, 2.2e-3.
+    #[test]
+    #[ignore = "nightly: energy-long-runs"]
+    fn long_run_slow_near_field_keeps_its_ledger_over_twenty_periods() {
+        for physics in [PhysicsModel::Mechanical, LEDGER_TM] {
+            let level = long_ledger(
+                &slow_near_field(physics),
+                CanonicalIntegrator::default(),
+                400.0,
+            );
+            let residual = level.residual / level.start;
+            eprintln!(
+                "{physics:?} slow near field: residual {residual:.3e}, memory {:.3e}, returned at {}",
+                level.memory_error, level.returned
+            );
+            assert!(
+                residual.abs() < 5.0e-3,
+                "{physics:?}: residual {residual:.3e}"
+            );
+            assert!(
+                level.memory_error.abs() < 1.0e-6,
+                "{physics:?}: memory {:.3e}",
+                level.memory_error
+            );
+            assert!(level.returned > 0, "{physics:?}: the wall never gave back");
         }
     }
 
