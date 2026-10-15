@@ -1,4 +1,4 @@
-"""Hankel functions for PH-06 and PH-07, the circular walls.
+"""Hankel functions for PH-06, PH-07 and PH-09, the circular walls.
 
 Writes cylinder-hankel.json beside this file: for every case the tests run,
 an outgoing circle or an absorbing hole of radius one at wavenumber k (the
@@ -7,8 +7,18 @@ H1_m(k r), H2_m(k r) there, and H1_m, H2_m and their derivatives at the wall,
 k r = k. The radii are the test's own rule, written here so the table carries
 them and the test reads them back rather than recomputing them.
 
+And cylinder-hankel-dense.json: for PH-09's pulses, H1_m and its derivative
+at the wall on a uniform grid of k, for each order its transients run, from
+k = max(3/2, m): where the order propagates at the wall, and clear of the low
+end, where Y_m's derivatives grow too fast for the grid. The pulses carry
+nothing below it. H2 is H1's conjugate on the real axis. The test interpolates between grid points
+by cubic Hermite, the derivative given and the second from Bessel's equation,
+H'' = -H'/x - (1 - m^2/x^2) H.
+
 Checks before writing: at every point the Wronskian J Y' - J' Y = 2/(pi x),
-and every value against a second evaluation at twice the precision.
+and every value against a second evaluation at twice the precision; on the
+dense grid also the Hermite interpolation at every midpoint against a direct
+evaluation, to 1e-9 of the value, far under what a transient reads.
 
 Run by hand when the cases change, with mpmath (not a test dependency):
     python3 -m venv /tmp/hankel && /tmp/hankel/bin/pip install mpmath
@@ -92,3 +102,54 @@ with open(path, "w") as out:
                "radius": 1.0, "cases": cases}, out, indent=1)
     out.write("\n")
 print(f"{len(cases)} cases written to {path}")
+
+# PH-09's grid: orders 0 to 4 by 0.01 in kR to 14, each from max(3/2, m). A
+# pulse's spectrum lives above where its order reaches the wall and below
+# what the meshes resolve.
+DENSE_ORDERS = [0, 1, 2, 3, 4]
+DENSE_STEP, DENSE_END = 0.01, 14.0
+
+
+def dense_start(m):
+    return float(max(1.5, m))
+
+
+def second(m, x, h, dh):
+    return -dh / x - (1 - m * m / (x * x)) * h
+
+
+def hermite(m, x0, h0, d0, x1, h1, d1, x):
+    """Cubic Hermite of H on [x0, x1] at x, from H and H' at the ends."""
+    width = x1 - x0
+    t = (x - x0) / width
+    t2, t3 = t * t, t * t * t
+    return ((2 * t3 - 3 * t2 + 1) * h0 + (t3 - 2 * t2 + t) * width * d0
+            + (-2 * t3 + 3 * t2) * h1 + (t3 - t2) * width * d1)
+
+
+dense = []
+for m in DENSE_ORDERS:
+    start = dense_start(m)
+    count = int(round((DENSE_END - start) / DENSE_STEP)) + 1
+    grid = [round(start + DENSE_STEP * i, 12) for i in range(count)]
+    points = [checked(m, x) for x in grid]
+    h = [v[0] for v in points]
+    dh = [v[2] for v in points]
+    for i in range(count - 1):
+        x0, x1 = grid[i], grid[i + 1]
+        middle = 0.5 * (x0 + x1)
+        exact = values(m, middle, 30)
+        value = hermite(m, x0, h[i], dh[i], x1, h[i + 1], dh[i + 1], middle)
+        slope = hermite(m, x0, dh[i], second(m, x0, h[i], dh[i]),
+                        x1, dh[i + 1], second(m, x1, h[i + 1], dh[i + 1]), middle)
+        assert abs(value - exact[0]) <= 1e-9 * abs(exact[0]), (m, middle, value, exact[0])
+        assert abs(slope - exact[2]) <= 1e-9 * max(abs(exact[2]), abs(exact[0])), (m, middle)
+    dense.append({"m": m, "start": start, "count": count,
+                  "h1": [pair(v) for v in h], "dh1": [pair(v) for v in dh]})
+
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cylinder-hankel-dense.json")
+with open(path, "w") as out:
+    json.dump({"generator": "tests/physics/references/cylinder_hankel.py", "mpmath": mp.__version__,
+               "radius": 1.0, "step": DENSE_STEP, "orders": dense}, out, separators=(",", ":"))
+    out.write("\n")
+print(f"{len(DENSE_ORDERS)} orders, {sum(o['count'] for o in dense)} points written to {path}")

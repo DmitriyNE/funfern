@@ -14,3 +14,8 @@ tables.
   outgoing wall and the absorbing hole, at the radii each case fits at and at
   the wall, each checked by the Wronskian and against a second evaluation at
   twice the precision.
+- `cylinder-hankel-dense.json`, from the same generator: `H1_m` and its
+  derivative on the unit circle for orders 0 to 4 on a grid of kR by 0.01,
+  each from `max(3/2, m)` to 14, for PH-09's pulses, which the test
+  interpolates by cubic Hermite. Checked by the Wronskian, at twice the
+  precision, and by that interpolation at every midpoint to 1e-9.

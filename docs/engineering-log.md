@@ -24478,3 +24478,27 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-15 — The Hankel table on a dense grid, for PH-09
+
+- **Why.** PH-09 reads the circular wall's transient against its law at
+  every frequency a pulse carries: the reflecting and the pinned walls as
+  references, the tested one is `U_N + ρ(ω)(U_D − U_N)`, and `ρ` needs
+  `H_m` and `H_m′` at the wall for every frequency of the record's
+  spectrum, which no case table holds.
+- **What.** `cylinder_hankel.py` also writes `cylinder-hankel-dense.json`:
+  `H1_m` and `H1_m′` at `kR` on a grid by 0.01, orders 0 to 4, each from
+  `max(3/2, m)` to 14 (5,805 points, 490 kB); `H2` is the conjugate. Below
+  that start an order is evanescent at the wall and `Y_m`'s derivatives
+  outgrow the grid: from 0.2, 0.5 and 1.5 the generator's interpolation
+  check failed at 8e-7, 2e-8 and 1.4e-9; at `max(3/2, m)` every midpoint
+  meets it under 3e-10. The case table regenerates byte for byte.
+- **Read** by `wall_hankel`, cubic Hermite between points, the derivative
+  interpolated with the second from Bessel's equation. Held by
+  `the_dense_hankel_table_meets_the_case_table`: on the grid against the case
+  table's own evaluations (505 values, 2e-15), and between points by Bessel's
+  recurrences across three interpolated orders at an irrational stride,
+  8.3e-11.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

@@ -9748,6 +9748,134 @@ mod tests {
             .unwrap_or_else(|| panic!("no {kind} case at kR {kr}, m {m} in the table"))
     }
 
+    /// PH-09's reference: `H1_m` and its derivative at the wall, on a uniform
+    /// grid of kR for each order from `max(3/2, m)` to 14, written by the same
+    /// generator and checked there by the Wronskian, at twice the precision
+    /// and by `wall_hankel`'s interpolation at every midpoint.
+    #[derive(serde::Deserialize)]
+    struct DenseHankelTable {
+        step: f64,
+        orders: Vec<DenseHankelOrder>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DenseHankelOrder {
+        m: u32,
+        start: f64,
+        count: usize,
+        h1: Vec<[f64; 2]>,
+        dh1: Vec<[f64; 2]>,
+    }
+
+    /// `H1_m(kR)` and `H1_m′(kR)` on the unit circle, by cubic Hermite between
+    /// the dense table's points: the value from the value and the derivative
+    /// there, the derivative from the derivative and the second, which
+    /// Bessel's equation gives, `H″ = −H′/x − (1 − m²/x²) H`. `H2` is the
+    /// conjugate.
+    fn wall_hankel(m: u32, kr: f64) -> (Phasor, Phasor) {
+        static TABLE: std::sync::OnceLock<DenseHankelTable> = std::sync::OnceLock::new();
+        let table = TABLE.get_or_init(|| {
+            let path = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/physics/references/cylinder-hankel-dense.json"
+            );
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        });
+        let order = table
+            .orders
+            .iter()
+            .find(|order| order.m == m)
+            .unwrap_or_else(|| panic!("no order {m} in the dense table"));
+        assert_eq!(order.h1.len(), order.count);
+        let position = (kr - order.start) / table.step;
+        assert!(
+            (-1.0e-9..=(order.count - 1) as f64 + 1.0e-9).contains(&position),
+            "kR {kr} lies outside order {m}'s grid"
+        );
+        let index = (position.max(0.0).floor() as usize).min(order.count - 2);
+        let x0 = order.start + index as f64 * table.step;
+        let x1 = x0 + table.step;
+        let t = (kr - x0) / table.step;
+        let hermite = |f0: Phasor, g0: Phasor, f1: Phasor, g1: Phasor| {
+            let (t2, t3) = (t * t, t * t * t);
+            f0.scale(2.0 * t3 - 3.0 * t2 + 1.0)
+                + g0.scale((t3 - 2.0 * t2 + t) * table.step)
+                + f1.scale(-2.0 * t3 + 3.0 * t2)
+                + g1.scale((t3 - t2) * table.step)
+        };
+        let second = |x: f64, value: Phasor, slope: Phasor| {
+            slope.scale(-1.0 / x) - value.scale(1.0 - f64::from(m * m) / (x * x))
+        };
+        let (h0, d0) = (tabled(order.h1[index]), tabled(order.dh1[index]));
+        let (h1, d1) = (tabled(order.h1[index + 1]), tabled(order.dh1[index + 1]));
+        (
+            hermite(h0, d0, h1, d1),
+            hermite(d0, second(x0, h0, d0), d1, second(x1, h1, d1)),
+        )
+    }
+
+    /// The dense table, as `wall_hankel` reads it, against the case table's
+    /// own evaluations - at the wall, value and derivative, and at every fit
+    /// radius the cases hold, `kR` there being `k r`, all of which fall on its
+    /// grid - and between its points by Bessel's recurrences across three
+    /// orders, `H_{m−1} + H_{m+1} = (2m/x) H_m` and `H_m′ = H_{m−1} − (m/x)
+    /// H_m`: each to 1e-9 of the value, the generator's own check.
+    #[test]
+    fn the_dense_hankel_table_meets_the_case_table() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/physics/references/cylinder-hankel.json"
+        );
+        let table: HankelTable =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut compared = 0;
+        let mut worst = 0.0_f64;
+        for case in table.cases.iter().filter(|case| case.m <= 4) {
+            let start = f64::from(case.m).max(1.5);
+            if case.kr >= start {
+                let (value, slope) = wall_hankel(case.m, case.kr);
+                for (read, tabled_value) in [(value, case.wall.h1), (slope, case.wall.dh1)] {
+                    let error = (read - tabled(tabled_value)).norm() / tabled(case.wall.h1).norm();
+                    worst = worst.max(error);
+                    compared += 1;
+                }
+            }
+            for (radius, h1) in case.radii.iter().zip(&case.h1) {
+                let kr = case.kr * radius;
+                if (start..=14.0).contains(&kr) {
+                    let error =
+                        (wall_hankel(case.m, kr).0 - tabled(*h1)).norm() / tabled(*h1).norm();
+                    worst = worst.max(error);
+                    compared += 1;
+                }
+            }
+        }
+        eprintln!("{compared} values on the grid, worst {worst:.2e}");
+        assert!(compared > 100);
+        assert!(worst < 1.0e-9, "{worst:e}");
+
+        let mut between = 0.0_f64;
+        for m in 1..=3_u32 {
+            let start = f64::from(m + 1).max(1.5);
+            for step in 0..400 {
+                // Off the grid: an irrational stride.
+                let x = start + 0.0313 * std::f64::consts::SQRT_2 * f64::from(step);
+                if x > 14.0 {
+                    break;
+                }
+                let (below, _) = wall_hankel(m - 1, x);
+                let (value, slope) = wall_hankel(m, x);
+                let (above, _) = wall_hankel(m + 1, x);
+                let scale = value.norm();
+                let recurrence = (below + above - value.scale(2.0 * f64::from(m) / x)).norm();
+                let derivative = (slope - (below - value.scale(f64::from(m) / x))).norm();
+                between = between.max(recurrence.max(derivative) / scale);
+            }
+        }
+        eprintln!("between the points, the recurrences hold to {between:.2e}");
+        assert!(between < 1.0e-9, "{between:e}");
+    }
+
     /// The cases PH-06 and PH-07 run: each kR with the angular orders that
     /// propagate at the wall.
     const CIRCULAR_CASES: [(f64, &[u32]); 4] = [
