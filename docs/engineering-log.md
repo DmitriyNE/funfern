@@ -24119,3 +24119,23 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the two nightly studies run twice by
   hand.
+
+## 2026-10-15 — Stale "not executable" notes, and the old law text removed
+
+- **Found** while planning PH-17: `RateLaw::VanDerPol`'s comment still called
+  it reserved authoring data, non-executable until Gate O closed; Gate O
+  closed and van der Pol runs (`van_der_pol_grows_to_its_limit_cycle`). Its
+  comment now says what it is: `u²/threshold² − 1` times the base rate, gain
+  below the threshold and loss above it.
+- **The same staleness** in `effective_law_lines`, which labelled every
+  restoring law "Reserved oscillator (not executable)". Nothing called it
+  outside its own tests: the editor reads `law_summary.rs`. Removed with
+  `LawTextStyle`, its text helpers and its three tests; `pulse_train_text`
+  and `number_text` stay, since the summary uses them. The one thing those
+  tests held that nothing else did, a gated row's wording, moved to
+  `law_summary.rs` as `a_gated_row_says_what_gates_it`.
+- **And** `material_law_summary`'s note that no path executes a driven loss
+  channel: the time-driven path does. The note keeps its other reason.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

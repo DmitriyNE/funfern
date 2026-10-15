@@ -91,9 +91,9 @@ const fn skin_names(physics: PhysicsModel) -> SkinNames {
 /// The effective-law text for one material: the constitutive rows that carry a
 /// law, and the restoring row when it is set.
 ///
-/// Loss channels are not here yet. Their slot is authored but no path executes
-/// a driven one, and naming the two channels in the mechanical skin is a
-/// question the advanced view has to settle rather than this function.
+/// Loss channels are not here yet: naming the two channels in the mechanical
+/// skin is a question the advanced view has to settle rather than this
+/// function.
 pub fn material_law_summary(
     material: &Material,
     physics: PhysicsModel,
@@ -522,6 +522,35 @@ mod tests {
             })
         );
         assert_eq!(row(crate::LawPresetRow::Both), None);
+    }
+
+    /// A gated drive swings by its envelope `g` on the train's own clock `τ`,
+    /// and the line says what the train is.
+    #[test]
+    fn a_gated_row_says_what_gates_it() {
+        let mut subject = material();
+        subject.mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(1.5),
+            phase_radians: ScalarField::constant(0.0),
+        };
+        subject.mass_law.gate = Some(crate::PulseTrain {
+            envelope: crate::PulseEnvelope::FlatTop {
+                duration: 0.8,
+                edge: 0.2,
+            },
+            start: 0.3,
+            repeat: 1.5,
+        });
+        assert_eq!(
+            named(&subject, PhysicsModel::Mechanical),
+            vec![LawSummaryLine {
+                subject: "ρ",
+                response: "ρ₀ · (1 + 0.2·g·cos(2π·1.5·τ + 0)), g: flat top 0.8 s, edges 0.2 s, \
+                           from 0.3 s, every 1.5 s"
+                    .into(),
+            }]
+        );
     }
 
     #[test]
