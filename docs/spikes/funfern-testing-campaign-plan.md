@@ -463,6 +463,12 @@ complementary row with its own loss booking its pump work at first order
 (fixed in 3d561a9); its mutations `loss-lanes-crossed`,
 `modulation-work-omitted` and `edit-exchange-dropped`.
 
+**PH-05 done on 2026-10-15**: the wall oracle beside every medium in each
+skin and a slow near field under the law's pole at zero, in the gate. It
+found a source on a wall booking its work at first order, on both paths and
+the device (fixed in 204f355); its mutation `wall-loss-without-memory`. The
+device half and the long runs remain.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

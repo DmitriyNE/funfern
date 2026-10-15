@@ -590,6 +590,35 @@ The mutations `loss-lanes-crossed`, `modulation-work-omitted` and
 restores the defect PH-17 found, a pumped complementary row with its own
 loss booking its pump work at first order.
 
+PH-05 holds the walls to their law's own equations the same way. The right
+side of PH-01's box is the wall, and the test assembles its trace from the
+geometry alone - vertex, midpoint, vertex along each quadratic edge on
+`x = 1` - with the trace damping `D = Z ℓ` lumped by Simpson's weights and
+the tangential stiffness `k²/(2Z)` times each edge's line stiffness,
+diagonalizes `D^{-½} A D^{-½}` by its own Jacobi rotations, and integrates
+each mode's three pole states of `docs/spikes/funfern-boundary-auxiliary-spike.md`
+exactly, the solver's trace field taken linear between states: the power
+into the wall `Σ w j`, its store `Σ xᵀHx/2`, its dissipation
+`Σ (w + √d ℓ·x)²`. In each skin, the first-order wall and the second-order
+one beside a lossless medium, electric, magnetic and rising loss, Kerr and a
+pumped density, three seconds at three steps: the wall's loss lane meets the
+oracle's dissipation to 4.5e-6 of the energy at the quarter step and its
+memory the oracle's poles to 7.9e-7, both at second order; the residual,
+with the oracle's poles in place of the wall's store, falls at second order
+to 4.3e-5 to 2.2e-4, held to 5e-4 for the trapezoid wall step's own
+remainder. In TM and TE the second-order wall gives energy back at 12 to 16
+of the production step's steps, its reactive part, which the law allows
+(`walls_book_what_their_law_takes_beside_every_medium`). A slow source
+beside the wall, varying along it as its third tangential mode at a tenth
+of that mode's `d` in Mechanical and a twentieth in TM, for one 20 s period:
+the wall gives back at a seventh of the steps in Mechanical and a third in
+TM, and the ledger closes as anywhere else
+(`a_slow_near_field_against_the_wall_keeps_its_ledger`; 7.5 s for both).
+The mutation `wall-loss-without-memory`, the poles' share left out of the
+wall's loss, puts the second-order wall's lane 8.3e-2 of the energy off. PH-05
+found a source on a wall booking its work at first order; the mutation
+`wall-source-work-before-its-half` restores it.
+
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
 reflecting-box problem. It crosses the driven constitutive row against the

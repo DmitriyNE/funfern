@@ -12804,15 +12804,18 @@ mod tests {
         magnetic: Option<LossRate>,
         mass: Option<RowDrive>,
         stiffness: Option<RowDrive>,
-        /// A harmonic volume source over the box, `(amplitude, hz)`, on the
-        /// profile `1 − x²/4`.
+        /// A harmonic volume source over the box, `(amplitude, hz)`, on
+        /// `profile`.
         source: Option<(f64, f64)>,
+        profile: &'static str,
         /// A thin gap across the box, at this stiffness ratio.
         gap: Option<f64>,
         /// Kerr on the density row, `1 + χ₂ f²`.
         kerr: Option<f64>,
         /// Klein-Gordon's restoring force at this cutoff `ω₀`.
         restoring: Option<f64>,
+        /// An outgoing wall on the box's right side, of this order.
+        wall: Option<OuterBoundaryCondition>,
     }
 
     impl Ledgered {
@@ -12825,9 +12828,11 @@ mod tests {
                 mass: None,
                 stiffness: None,
                 source: None,
+                profile: "1 - x * x / 4",
                 gap: None,
                 kerr: None,
                 restoring: None,
+                wall: None,
             }
         }
     }
@@ -12872,6 +12877,9 @@ mod tests {
         };
         builder.scene.outer_boundaries =
             OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        if let Some(wall) = config.wall {
+            builder.scene.outer_boundaries.sides[OuterSide::Right.index()] = wall;
+        }
         let material = &mut builder.scene.materials[0];
         material.mass_density = ScalarField::constant(medium.mass);
         material.stiffness = ScalarField::constant(medium.stiffness);
@@ -12900,7 +12908,7 @@ mod tests {
             builder.scene.volume_sources.push(VolumeSource {
                 region,
                 enabled: true,
-                profile: ScalarField::formula("1 - x * x / 4").unwrap(),
+                profile: ScalarField::formula(config.profile).unwrap(),
                 parameters: vec![],
                 signal: TimeSignal::harmonic(0.0, amplitude, hz, 0.0),
             });
@@ -12938,6 +12946,8 @@ mod tests {
         flux: Vec<Point2>,
         vector: Vec<Point2>,
         jumps: Vec<f64>,
+        /// The energy the solver's wall memory holds, `|z|²/2`.
+        memory: f64,
     }
 
     /// Energy by channel over a run, or its rate at an instant: what the
@@ -12950,20 +12960,26 @@ mod tests {
         gain: f64,
         primary_loss: f64,
         complementary_loss: f64,
+        /// What a wall dissipates, its memory's store apart.
+        wall_loss: f64,
     }
 
     impl Ledger {
         fn net(self) -> f64 {
-            self.source + self.pump + self.gain - self.primary_loss - self.complementary_loss
+            self.source + self.pump + self.gain
+                - self.primary_loss
+                - self.complementary_loss
+                - self.wall_loss
         }
 
-        fn lanes(self) -> [(&'static str, f64); 5] {
+        fn lanes(self) -> [(&'static str, f64); 6] {
             [
                 ("source", self.source),
                 ("pump", self.pump),
                 ("gain", self.gain),
                 ("primary loss", self.primary_loss),
                 ("complementary loss", self.complementary_loss),
+                ("wall loss", self.wall_loss),
             ]
         }
 
@@ -12973,6 +12989,7 @@ mod tests {
             self.gain += scale * other.gain;
             self.primary_loss += scale * other.primary_loss;
             self.complementary_loss += scale * other.complementary_loss;
+            self.wall_loss += scale * other.wall_loss;
         }
     }
 
@@ -13024,18 +13041,17 @@ mod tests {
                 Self::Fixed(operator, state) => {
                     let step = state.step_with_forcing(operator, forcing).unwrap();
                     assert_eq!(step.prescribed_exchange, 0.0);
-                    assert_eq!(step.boundary_loss, 0.0);
                     Ledger {
                         source: step.source_work,
                         primary_loss: step.primary_loss,
                         complementary_loss: step.complementary_loss,
+                        wall_loss: step.boundary_loss,
                         ..Ledger::default()
                     }
                 }
                 Self::Driven(operator, state) => {
                     let step = state.step_with_forcing(operator, forcing).unwrap();
                     assert_eq!(step.prescribed_exchange, 0.0);
-                    assert_eq!(step.boundary_loss, 0.0);
                     assert_eq!(step.short_wave_loss, 0.0);
                     Ledger {
                         source: step.source_work,
@@ -13043,6 +13059,7 @@ mod tests {
                         gain: step.active_gain,
                         primary_loss: step.primary_loss,
                         complementary_loss: step.complementary_loss,
+                        wall_loss: step.boundary_loss,
                     }
                 }
             }
@@ -13063,6 +13080,12 @@ mod tests {
                         }
                         _ => Vec::new(),
                     },
+                    memory: match state.auxiliaries() {
+                        CanonicalAuxiliaryState::Linear(auxiliaries) => {
+                            0.5 * auxiliaries.outgoing_z().iter().map(|z| z * z).sum::<f64>()
+                        }
+                        _ => 0.0,
+                    },
                 },
                 Self::Driven(operator, state) => {
                     let time = state.time();
@@ -13082,6 +13105,12 @@ mod tests {
                             )
                             .unwrap(),
                         jumps: state.thin_gap_jump().to_vec(),
+                        memory: 0.5
+                            * state
+                                .outgoing_pole_currents()
+                                .iter()
+                                .map(|z| z * z)
+                                .sum::<f64>(),
                     }
                 }
             }
@@ -13169,6 +13198,237 @@ mod tests {
         powers
     }
 
+    /// The eigenvalues and eigenvectors (as columns) of a small symmetric
+    /// matrix, by cyclic Jacobi rotations.
+    fn symmetric_eigen(mut matrix: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
+        let n = matrix.len();
+        let mut vectors = (0..n)
+            .map(|row| (0..n).map(|column| f64::from(row == column)).collect())
+            .collect::<Vec<Vec<f64>>>();
+        for _ in 0..100 {
+            let off = (0..n)
+                .flat_map(|row| {
+                    (0..n)
+                        .filter(move |column| *column != row)
+                        .map(move |column| (row, column))
+                })
+                .map(|(row, column)| matrix[row][column].powi(2))
+                .sum::<f64>();
+            let scale = (0..n)
+                .map(|index| matrix[index][index].powi(2))
+                .sum::<f64>();
+            if off <= 1.0e-30 * scale.max(f64::MIN_POSITIVE) {
+                break;
+            }
+            for p in 0..n {
+                for q in p + 1..n {
+                    if matrix[p][q] == 0.0 {
+                        continue;
+                    }
+                    let theta = (matrix[q][q] - matrix[p][p]) / (2.0 * matrix[p][q]);
+                    let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+                    let t = if theta == 0.0 { 1.0 } else { t };
+                    let c = 1.0 / (t * t + 1.0).sqrt();
+                    let s = t * c;
+                    for row in matrix.iter_mut() {
+                        let (a, b) = (row[p], row[q]);
+                        row[p] = c * a - s * b;
+                        row[q] = s * a + c * b;
+                    }
+                    let (upper, lower) = matrix.split_at_mut(q);
+                    for (a, b) in upper[p].iter_mut().zip(lower[0].iter_mut()) {
+                        let (x, y) = (*a, *b);
+                        *a = c * x - s * y;
+                        *b = s * x + c * y;
+                    }
+                    for row in vectors.iter_mut() {
+                        let (a, b) = (row[p], row[q]);
+                        row[p] = c * a - s * b;
+                        row[q] = s * a + c * b;
+                    }
+                }
+            }
+        }
+        ((0..n).map(|index| matrix[index][index]).collect(), vectors)
+    }
+
+    /// PH-05's wall, assembled here from the box's geometry and the authored
+    /// medium alone, never from the solver's trace. On the right side
+    /// `x = 1` the trace runs vertex, midpoint, vertex along each quadratic
+    /// edge. The first-order law damps it by `D = Z ℓ` lumped by Simpson's
+    /// weights, `Z = √(m k)` the medium's impedance from its mass slot `m`
+    /// and wave stiffness `k`; the second order adds the tangential
+    /// stiffness `A = k²/(2Z)` times the edge's line stiffness, so that
+    /// `D^{-½} A D^{-½}` has the eigenvalues `λ = c² k_τ²/2`. Each mode `w`
+    /// of `T = Vᵀ D^½` drives three pole states
+    /// (`docs/spikes/funfern-boundary-auxiliary-spike.md`):
+    /// `ẋ = −d diag(0,1,2) x + √d (1,1,1) w`, `d = √(7λ/4)`, which take
+    /// `j = w + √d (6/7, −8/7, 2/7)·x` from the field, store `xᵀHx/2` and
+    /// dissipate `(w + √d ℓ·x)²`. They are integrated here exactly, the trace
+    /// field taken linear between the run's states.
+    struct WallOracle {
+        nodes: Vec<usize>,
+        /// Per mode, `d` and its row of `T`.
+        modes: Vec<(f64, Vec<f64>)>,
+        poles: Vec<[f64; 3]>,
+    }
+
+    impl WallOracle {
+        fn new(
+            prepared: &crate::topology_runtime::PreparedTopology,
+            physics: PhysicsModel,
+            order: OuterBoundaryCondition,
+        ) -> Self {
+            let points = prepared.canonical_operator.node_points();
+            let mut nodes = (0..points.len())
+                .filter(|node| (points[*node].x - 1.0).abs() < 1.0e-9)
+                .collect::<Vec<_>>();
+            nodes.sort_by(|a, b| points[*a].y.total_cmp(&points[*b].y));
+            assert!(
+                nodes.len() % 2 == 1 && nodes.len() >= 3,
+                "{} trace nodes",
+                nodes.len()
+            );
+            let medium = BoxMedium::ph01(physics);
+            // The mass slot the primary field's flux sits over, and the wave
+            // stiffness its gradient is weighed by.
+            let (mass, stiffness) = match physics {
+                PhysicsModel::Mechanical => (medium.mass, medium.stiffness),
+                physics if physics == LEDGER_TM => (medium.mass, 1.0 / medium.stiffness),
+                _ => (medium.stiffness, 1.0 / medium.mass),
+            };
+            let impedance = (mass * stiffness).sqrt();
+            let count = nodes.len();
+            let mut damping = vec![0.0; count];
+            let mut tangential = vec![vec![0.0; count]; count];
+            for edge in 0..count / 2 {
+                let [first, middle, last] = [2 * edge, 2 * edge + 1, 2 * edge + 2];
+                let length = points[nodes[last]].y - points[nodes[first]].y;
+                for (local, weight) in [(first, 1.0 / 6.0), (middle, 2.0 / 3.0), (last, 1.0 / 6.0)]
+                {
+                    damping[local] += impedance * length * weight;
+                }
+                if order == OuterBoundaryCondition::SecondOrderOutgoing {
+                    let scale = stiffness * stiffness / (2.0 * impedance) / (3.0 * length);
+                    let line = [[7.0, 1.0, -8.0], [1.0, 7.0, -8.0], [-8.0, -8.0, 16.0]];
+                    let local = [first, last, middle];
+                    for (row, entries) in line.iter().enumerate() {
+                        for (column, entry) in entries.iter().enumerate() {
+                            tangential[local[row]][local[column]] += scale * entry;
+                        }
+                    }
+                }
+            }
+            let scaled = (0..count)
+                .map(|row| {
+                    (0..count)
+                        .map(|column| {
+                            tangential[row][column] / (damping[row] * damping[column]).sqrt()
+                        })
+                        .collect()
+                })
+                .collect();
+            let (eigenvalues, vectors) = symmetric_eigen(scaled);
+            let modes = eigenvalues
+                .iter()
+                .enumerate()
+                .map(|(mode, eigenvalue)| {
+                    let decay = (1.75 * eigenvalue.max(0.0)).sqrt();
+                    let row = (0..count)
+                        .map(|node| vectors[node][mode] * damping[node].sqrt())
+                        .collect();
+                    (decay, row)
+                })
+                .collect::<Vec<_>>();
+            let poles = vec![[0.0; 3]; modes.len()];
+            Self {
+                nodes,
+                modes,
+                poles,
+            }
+        }
+
+        /// Each mode's `w = T u` on the field `u`.
+        fn modal(&self, field: &[f64]) -> Vec<f64> {
+            self.modes
+                .iter()
+                .map(|(_, row)| {
+                    row.iter()
+                        .zip(&self.nodes)
+                        .map(|(weight, node)| weight * field[*node])
+                        .sum()
+                })
+                .collect()
+        }
+
+        /// The poles carried over `dt` from `before` to `after`, each mode's
+        /// `w` linear between them: exact for the pole's linear equation.
+        fn advance(&mut self, before: &[f64], after: &[f64], dt: f64) {
+            for ((x, (decay, _)), (start, end)) in self
+                .poles
+                .iter_mut()
+                .zip(&self.modes)
+                .zip(before.iter().zip(after))
+            {
+                let root = decay.sqrt();
+                for (pole, value) in x.iter_mut().enumerate() {
+                    let rate = pole as f64 * decay;
+                    let (keep, whole, ramp) = if rate * dt < 1.0e-8 {
+                        (1.0, dt, 0.5 * dt)
+                    } else {
+                        let keep = (-rate * dt).exp();
+                        let whole = (1.0 - keep) / rate;
+                        (keep, whole, 1.0 / rate - whole / (rate * dt))
+                    };
+                    *value = keep * *value + root * (start * (whole - ramp) + end * ramp);
+                }
+            }
+        }
+
+        fn weights() -> ([f64; 3], [f64; 3]) {
+            let b = (31.0_f64 / 7.0).sqrt();
+            (
+                [6.0 / 7.0, -8.0 / 7.0, 2.0 / 7.0],
+                [0.0, 1.0 - b, 2.0 * b - 4.0],
+            )
+        }
+
+        /// The poles' store, `Σ xᵀHx/2`.
+        fn energy(&self) -> f64 {
+            let (_, ell) = Self::weights();
+            self.poles
+                .iter()
+                .map(|x| {
+                    let mut energy = 6.0 / 7.0 * x[0] * x[0];
+                    for i in 1..3 {
+                        for j in 1..3 {
+                            energy += 2.0 * ell[i] * ell[j] / (i + j) as f64 * x[i] * x[j];
+                        }
+                    }
+                    0.5 * energy
+                })
+                .sum()
+        }
+
+        /// What the wall dissipates, `Σ (w + √d ℓ·x)²`, and what the field
+        /// puts into it, `Σ w j`, at the modes' `w`.
+        fn dissipation_and_power(&self, modal: &[f64]) -> (f64, f64) {
+            let (current, ell) = Self::weights();
+            self.poles.iter().zip(&self.modes).zip(modal).fold(
+                (0.0, 0.0),
+                |(dissipated, power), ((x, (decay, _)), w)| {
+                    let root = decay.sqrt();
+                    let dot = |weights: [f64; 3]| (0..3).map(|k| weights[k] * x[k]).sum::<f64>();
+                    let leak = w + root * dot(ell);
+                    (
+                        dissipated + leak * leak,
+                        power + w * (w + root * dot(current)),
+                    )
+                },
+            )
+        }
+    }
+
     /// One run of a PH-17 configuration at one step.
     struct LedgerLevel {
         dt: f64,
@@ -13190,6 +13450,11 @@ mod tests {
         end: f64,
         /// The stored energy's largest departure from its start.
         excursion: f64,
+        /// The solver's wall memory at the end less the oracle's poles', a
+        /// share of the starting energy.
+        memory_error: f64,
+        /// The steps at which the field took energy back from the wall.
+        returned: usize,
     }
 
     fn ledger_level(
@@ -13203,11 +13468,22 @@ mod tests {
         let steps = (duration / dt).round() as usize;
         let forcing = &prepared.canonical_forcing;
         let gaps = prepared.canonical_operator.thin_gap_samples();
+        let mut wall = config
+            .wall
+            .map(|order| WallOracle::new(prepared, config.physics, order));
         let mut before = run.instant();
         let start = before.energy;
+        assert_eq!(before.memory, 0.0);
+        let mut modal_before = wall.as_ref().map(|wall| wall.modal(&before.field));
+        let wall_before = match (&wall, &modal_before) {
+            (Some(wall), Some(modal)) => wall.dissipation_and_power(modal),
+            _ => (0.0, 0.0),
+        };
+        let mut returned = 0;
         let first_jumps = before.jumps.clone();
         let mut integrated_jumps = vec![0.0; gaps.len()];
         let mut powers_before = ledger_powers(config, prepared, &before);
+        powers_before.wall_loss = wall_before.0;
         let mut lanes = Ledger::default();
         let mut oracle = Ledger::default();
         let mut excursion = 0.0_f64;
@@ -13215,7 +13491,17 @@ mod tests {
         for _ in 0..steps {
             lanes.add_scaled(run.step(forcing), 1.0);
             let now = run.instant();
-            let powers_now = ledger_powers(config, prepared, &now);
+            let mut powers_now = ledger_powers(config, prepared, &now);
+            if let (Some(wall), Some(modal)) = (wall.as_mut(), modal_before.as_mut()) {
+                let modal_now = wall.modal(&now.field);
+                wall.advance(modal, &modal_now, dt);
+                let wall_now = wall.dissipation_and_power(&modal_now);
+                powers_now.wall_loss = wall_now.0;
+                if wall_now.1 < 0.0 {
+                    returned += 1;
+                }
+                *modal = modal_now;
+            }
             oracle.add_scaled(powers_before, 0.5 * dt);
             oracle.add_scaled(powers_now, 0.5 * dt);
             for (integral, gap) in integrated_jumps.iter_mut().zip(gaps) {
@@ -13241,15 +13527,19 @@ mod tests {
                 error.max((last - first - integral).abs())
             })
             / largest_jump.max(f64::MIN_POSITIVE);
+        // The oracle's poles hold the wall's store in place of the solver's.
+        let poles = wall.as_ref().map_or(0.0, WallOracle::energy);
         LedgerLevel {
             dt,
             start,
-            residual: before.energy - start - oracle.net(),
+            residual: before.energy - before.memory + poles - start - oracle.net(),
             lanes,
             oracle,
             jump_error,
             end: before.energy,
             excursion,
+            memory_error: (before.memory - poles) / start,
+            returned,
         }
     }
 
@@ -13303,13 +13593,15 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(", ");
             eprintln!(
-                "{:?} {} dt {:.3e}: residual {:.3e} of {:.4e}; {lanes}; jumps {:.2e}",
+                "{:?} {} dt {:.3e}: residual {:.3e} of {:.4e}; {lanes}; jumps {:.2e}; memory {:.2e}, returned at {} steps",
                 config.physics,
                 config.name,
                 level.dt,
                 level.residual / level.start,
                 level.start,
                 level.jump_error,
+                level.memory_error,
+                level.returned,
             );
         }
         levels
@@ -13437,6 +13729,10 @@ mod tests {
     /// stand under as roundoff: a lane the solver books by the oracle's own
     /// quadrature meets it there.
     fn second_order(what: &str, values: [f64; 3], start: f64) {
+        second_order_under(what, values, start, LEDGER_BOUND);
+    }
+
+    fn second_order_under(what: &str, values: [f64; 3], start: f64, bound: f64) {
         let roundoff = 1.0e-12 * start;
         if values[2].abs() < roundoff {
             return;
@@ -13450,7 +13746,7 @@ mod tests {
             values[2]
         );
         assert!(
-            values[2].abs() < LEDGER_BOUND * start,
+            values[2].abs() < bound * start,
             "{what}: {:.3e} of {start:.3e} at the quarter step",
             values[2]
         );
@@ -13466,7 +13762,7 @@ mod tests {
             [0, 1, 2].map(|index| levels[index].residual),
             start,
         );
-        for lane in 0..5 {
+        for lane in 0..levels[0].lanes.lanes().len() {
             let (name, _) = levels[0].lanes.lanes()[lane];
             second_order(
                 &format!("{what} {name}"),
@@ -13623,6 +13919,132 @@ mod tests {
                     config.name,
                     scientific(&excursions)
                 );
+            }
+        }
+    }
+
+    /// The configurations PH-05 reads its walls in.
+    fn wall_configurations() -> Vec<Ledgered> {
+        let second = Some(OuterBoundaryCondition::SecondOrderOutgoing);
+        let first = Some(OuterBoundaryCondition::FirstOrderOutgoing);
+        let mut configurations = Vec::new();
+        for physics in [PhysicsModel::Mechanical, LEDGER_TM, LEDGER_TE] {
+            let walled = |name, wall| Ledgered {
+                wall,
+                ..Ledgered::plain(name, physics)
+            };
+            configurations.extend([
+                walled("first-order wall", first),
+                walled("second-order wall", second),
+                Ledgered {
+                    electric: Some(LossRate::Constant(0.3)),
+                    ..walled("second-order wall, electric loss", second)
+                },
+                Ledgered {
+                    magnetic: Some(LossRate::Constant(0.2)),
+                    ..walled("second-order wall, magnetic loss", second)
+                },
+                Ledgered {
+                    electric: Some(LossRate::Rising(0.3)),
+                    magnetic: Some(LossRate::Rising(0.2)),
+                    ..walled("second-order wall, loss rising to it", second)
+                },
+                Ledgered {
+                    kerr: Some(0.5),
+                    ..walled("second-order wall, Kerr", second)
+                },
+                Ledgered {
+                    mass: Some(RowDrive::Pump {
+                        depth: 0.2,
+                        hz: 0.7,
+                        phase: 0.3,
+                    }),
+                    ..walled("second-order wall, pumped density", second)
+                },
+            ]);
+        }
+        configurations
+    }
+
+    /// A slow source beside the second-order wall, varying along it as its
+    /// third tangential mode: the field there is a near field at a tenth of
+    /// that mode's `d` in Mechanical and a twentieth in TM, where the law's
+    /// pole at zero makes the wall store and return rather than absorb.
+    fn slow_near_field(physics: PhysicsModel) -> Ledgered {
+        Ledgered {
+            wall: Some(OuterBoundaryCondition::SecondOrderOutgoing),
+            source: Some((0.3, 0.05)),
+            profile: "exp(-(x - 0.85) * (x - 0.85) / 0.01) * cos(6.732 * y)",
+            ..Ledgered::plain("slow near field", physics)
+        }
+    }
+
+    /// The share of the starting energy a walled run's residual may keep at
+    /// the quarter step: the trapezoid wall step's own split leaves a
+    /// second-order remainder (`docs/checks.md`), measured to 2.2e-4.
+    const WALL_BOUND: f64 = 5.0e-4;
+
+    /// A walled run: its residual against the oracle - the wall's store taken
+    /// as the oracle's poles - falls at second order under the walls' bound,
+    /// every lane against its channel under the ledger's, and the solver's
+    /// wall memory meets the oracle's poles at second order, to under 1e-5
+    /// of the energy.
+    fn hold_wall(config: &Ledgered, levels: &[LedgerLevel]) {
+        let what = format!("{:?} {}", config.physics, config.name);
+        let start = levels[0].start;
+        second_order_under(
+            &format!("{what} residual"),
+            [0, 1, 2].map(|index| levels[index].residual),
+            start,
+            WALL_BOUND,
+        );
+        for lane in 0..levels[0].lanes.lanes().len() {
+            let (name, _) = levels[0].lanes.lanes()[lane];
+            second_order(
+                &format!("{what} {name}"),
+                [0, 1, 2].map(|index| {
+                    levels[index].lanes.lanes()[lane].1 - levels[index].oracle.lanes()[lane].1
+                }),
+                start,
+            );
+        }
+        second_order_under(
+            &format!("{what} memory"),
+            [0, 1, 2].map(|index| levels[index].memory_error),
+            1.0,
+            1.0e-5,
+        );
+        assert!(
+            levels[2].lanes.wall_loss > 0.0,
+            "{what}: the wall took nothing"
+        );
+    }
+
+    /// PH-05: the walls' power, store and dissipation against their law's
+    /// own equations, integrated from the field the solver's trace carries,
+    /// beside every medium a wall can meet, in each skin, at the production
+    /// step, its half and its quarter.
+    #[test]
+    fn walls_book_what_their_law_takes_beside_every_medium() {
+        for config in wall_configurations() {
+            let levels = ledger_study(&config, CanonicalIntegrator::default(), 0.25, 3.0);
+            hold_wall(&config, &levels);
+        }
+    }
+
+    /// PH-05 near the law's pole at zero: a slow source beside the
+    /// second-order wall, under its third tangential mode's `d`, for one
+    /// period of the drive. The wall stores and gives back - the field takes
+    /// energy back at a share of the steps that holds as the step halves -
+    /// and the ledger closes as anywhere else.
+    #[test]
+    fn a_slow_near_field_against_the_wall_keeps_its_ledger() {
+        for physics in [PhysicsModel::Mechanical, LEDGER_TM] {
+            let config = slow_near_field(physics);
+            let levels = ledger_study(&config, CanonicalIntegrator::default(), 0.25, 20.0);
+            hold_wall(&config, &levels);
+            for level in &levels {
+                assert!(level.returned > 0, "{physics:?}: the wall never gave back");
             }
         }
     }

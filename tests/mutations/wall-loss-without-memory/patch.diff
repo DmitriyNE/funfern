@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+index ff37410..6e846dd 100644
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -3569,7 +3569,7 @@ pub(crate) fn modal_outgoing_loss(
+         } else {
+             0.0
+         };
+-        outgoing_loss += duration * (w + memory).powi(2);
++        outgoing_loss += duration * w.powi(2) + 0.0 * memory;
+     }
+     Ok(outgoing_loss)
+ }

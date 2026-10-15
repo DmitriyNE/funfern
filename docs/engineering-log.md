@@ -24322,3 +24322,51 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the device suite, 88 of 88.
+
+## 2026-10-15 — PH-05: the walls against their law's own equations
+
+- **What it adds.** PH-04, PH-06 and PH-07 read the walls' response at steady
+  state; the existing ledger tests check that the walls' lane adds up with
+  the others. PH-05 holds the lane and the walls' memory to the law itself:
+  the test assembles the right side's trace from the box's geometry -
+  vertex, midpoint, vertex along each quadratic edge on `x = 1` - with
+  `D = Z ℓ` by Simpson's weights, `Z = √(m k)` from the mass slot and the
+  wave stiffness (`k`, `1/μ`, `1/ε`), and `A = k²/(2Z)` times the edge's
+  line stiffness; diagonalizes `D^{-½} A D^{-½}` by its own Jacobi
+  rotations, `d = √(7λ/4)`; and integrates each mode's three poles exactly,
+  `w` linear between the run's states, for the power in `Σ w j`, the store
+  `Σ xᵀHx/2` and the dissipation `Σ (w + √d ℓ·x)²`. A first-order wall is
+  the same with `A = 0`.
+- **Measured** on PH-01's box at edge 0.25, three seconds at the production
+  step, its half and its quarter, in each skin, the first-order wall and the
+  second-order one beside a lossless medium, electric, magnetic and rising
+  loss, Kerr and a pumped density: the wall's loss lane within 4.5e-6 of the
+  oracle's dissipation at the quarter step and its memory within 7.9e-7 of
+  the oracle's poles, both falling four times a halving; the first-order
+  wall's lane is the oracle's own quadrature, to roundoff. The residual,
+  the oracle's poles standing for the wall's store, 4.3e-5 to 2.2e-4 at the
+  quarter step, second order: the trapezoid wall step's own remainder,
+  larger than PH-17's bulk, held to 5e-4. In TM and TE the second-order
+  wall gives energy back at 12 to 16 of the production step's steps; in
+  Mechanical, from these modes, never.
+- **Near the pole at zero.** A source beside the wall,
+  `exp(-(x - 0.85)²/0.01) cos(6.732 y)`, at 0.05 Hz: a tenth of the third
+  tangential mode's `d` in Mechanical, a twentieth in TM, one period, 20 s.
+  The wall gives back at a seventh of the steps in Mechanical and a third in
+  TM, the share holding as the step halves, and the residual reads 1.5e-4,
+  the wall's lane 1.1e-5, its memory 1.0e-7 and the source's 1.4e-7 at the
+  quarter step.
+- **Found:** the source's work on a wall's trace nodes booked at first order
+  (fixed in 204f355, logged above), first seen here as this source's lane
+  falling twice a halving. The finely meshed wall the plan named is not a
+  separate row: the wall's elements set the step, so `d dt` stays near the
+  step's own CFL number on any mesh the application builds. Nor the long
+  wall: its lowest mode's `d` is small, where the law tends to the first
+  order, which the first-order rows read.
+- **Tests,** in the gate: `walls_book_what_their_law_takes_beside_every_medium`
+  and `a_slow_near_field_against_the_wall_keeps_its_ledger`, 7.5 s together.
+  **Mutation:** `wall-loss-without-memory`, the poles' share left out of the
+  second-order wall's booked loss: its lane 8.3e-2 of the energy off.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

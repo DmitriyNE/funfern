@@ -1,0 +1,4 @@
+about: the second-order wall books its loss as the first-order part alone, leaving the poles' share of its dissipation out, so the wall's loss lane stops meeting what its law's own equations dissipate while the field runs as before
+test: cargo test --release -p funfern-app --lib -- walls_book_what_their_law_takes_beside_every_medium
+expect: wall loss: .* falls at order
+needs: cpu
