@@ -1904,6 +1904,46 @@ pub struct CanonicalOutgoingNormalizedTransfer {
     pub values: Vec<f64>,
 }
 
+impl CanonicalOutgoingNormalizedTransfer {
+    /// The target's normalized memory from the source's, as the device's
+    /// handoff applies the matrix: a wall that only the target has starts at
+    /// rest, and a wall the target lost takes its memory with it.
+    pub fn apply(&self, source: &[f64]) -> Result<Vec<f64>, WaveError> {
+        if source.len() != self.source_count || source.iter().any(|value| !value.is_finite()) {
+            return Err(WaveError::InvalidState);
+        }
+        if self.identity {
+            return Ok(source.to_vec());
+        }
+        if self.source_count == 0 || self.target_count == 0 {
+            return Ok(vec![0.0; self.target_count]);
+        }
+        if self.values.len() != self.source_count * self.target_count {
+            return Err(WaveError::InvalidState);
+        }
+        Ok(self
+            .values
+            .chunks_exact(self.source_count)
+            .map(|row| {
+                row.iter()
+                    .zip(source)
+                    .map(|(weight, value)| weight * value)
+                    .sum()
+            })
+            .collect())
+    }
+}
+
+/// The maps a generation's running state crosses to the next one through, as
+/// the topology transaction prepares them for the device.
+#[derive(Clone, Copy, Debug)]
+pub struct CanonicalHandoffMaps<'a> {
+    pub primary: &'a CanonicalPrimaryTransferMap,
+    pub complementary: &'a CanonicalVectorTransferMap,
+    pub thin_gap: &'a CanonicalThinGapHistoryTransferMap,
+    pub outgoing: &'a CanonicalOutgoingNormalizedTransfer,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CanonicalOutgoingNormalizedTransferPhase {
     Validate,
@@ -2499,9 +2539,10 @@ fn integrated_field_values(
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalWaveOperator, InternalBoundaryId,
+        BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalAuxiliaryState, CanonicalForcing,
+        CanonicalStepAccounting, CanonicalWaveOperator, CanonicalWaveState, InternalBoundaryId,
         MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, OuterBoundaryCondition, OuterSide,
-        QuadraticWaveOperator, Scene, mesh_scene,
+        QuadraticWaveOperator, Scene, TimeSignal, mesh_scene,
     };
 
     fn mesh(revision: u64, points: &[[f64; 2]], triangles: &[[usize; 3]]) -> TriMesh {
@@ -3755,5 +3796,312 @@ mod tests {
             );
             assert!(report.physical_residual_norm < 1.0e-12);
         }
+    }
+
+    /// The default scene with a thin gap across its middle, so a handoff has
+    /// every kind of state to carry: the bulk, the gap's jumps and the
+    /// walls' memory.
+    fn gapped_scene() -> Scene {
+        let mut scene = Scene::default();
+        scene.internal_boundaries.push(crate::InternalBoundary {
+            id: InternalBoundaryId(1),
+            spline: crate::OpenCubicSpline::uniform(vec![
+                Point2::new(-0.65, 0.0),
+                Point2::new(-0.2, 0.0),
+                Point2::new(0.2, 0.0),
+                Point2::new(0.65, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![crate::InternalBoundaryLaw {
+                coupling: crate::InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 120.0,
+                },
+                ..crate::InternalBoundaryLaw::REFLECTING
+            }],
+        });
+        scene
+    }
+
+    /// A smooth field and flux on `operator`, run long enough for the gap and
+    /// the walls to hold memory of their own.
+    fn running_state(operator: &CanonicalWaveOperator) -> CanonicalWaveState {
+        let primary = operator
+            .node_points()
+            .iter()
+            .zip(operator.primary_mass())
+            .map(|(point, mass)| mass * (1.4 * point.x - 0.9 * point.y).sin())
+            .collect();
+        let potential = operator
+            .node_points()
+            .iter()
+            .map(|point| 0.6 * (0.8 * point.x + 1.2 * point.y).cos())
+            .collect::<Vec<_>>();
+        let complementary = operator.compatible_flux(&potential).unwrap();
+        let mut state = CanonicalWaveState::new(
+            operator,
+            0.4 * operator.maximum_time_step(),
+            primary,
+            complementary,
+        )
+        .unwrap();
+        for _ in 0..40 {
+            state.step(operator).unwrap();
+        }
+        let CanonicalAuxiliaryState::Linear(auxiliaries) = state.auxiliaries() else {
+            panic!("a gapped, walled generation carries auxiliaries");
+        };
+        assert!(auxiliaries.thin_gap_jump().iter().any(|jump| *jump != 0.0));
+        assert!(auxiliaries.outgoing_z().iter().any(|z| *z != 0.0));
+        state
+    }
+
+    /// The maps a handoff from one compiled generation to another carries its
+    /// state through, prepared as the topology transaction prepares them.
+    struct Handoff {
+        primary: CanonicalPrimaryTransferMap,
+        complementary: CanonicalVectorTransferMap,
+        thin_gap: CanonicalThinGapHistoryTransferMap,
+        outgoing: CanonicalOutgoingNormalizedTransfer,
+    }
+
+    impl Handoff {
+        fn prepare(
+            source: (&TriMesh, &QuadraticWaveOperator, &CanonicalWaveOperator),
+            target: (&TriMesh, &QuadraticWaveOperator, &CanonicalWaveOperator),
+        ) -> Self {
+            let interpolation = if std::ptr::eq(source.0, target.0) {
+                QuadraticTransferMap::identity_on_mesh(target.0, source.1, target.1).unwrap()
+            } else {
+                QuadraticTransferMap::build(source.0, source.1, target.0, target.1).unwrap()
+            };
+            Self {
+                primary: CanonicalPrimaryTransferMap::prepare(&interpolation, source.2, target.2)
+                    .unwrap(),
+                complementary: CanonicalVectorTransferMap::prepare(
+                    source.0, source.2, target.0, target.2,
+                )
+                .unwrap(),
+                thin_gap: CanonicalThinGapHistoryTransferMap::prepare(
+                    source.2.thin_gap_samples(),
+                    target.2.thin_gap_samples(),
+                )
+                .unwrap(),
+                outgoing: CanonicalOutgoingHistoryTransferMap::prepare(
+                    &interpolation,
+                    source.2,
+                    target.2,
+                )
+                .unwrap()
+                .normalized_matrix(source.2, target.2)
+                .unwrap(),
+            }
+        }
+
+        fn maps(&self) -> CanonicalHandoffMaps<'_> {
+            CanonicalHandoffMaps {
+                primary: &self.primary,
+                complementary: &self.complementary,
+                thin_gap: &self.thin_gap,
+                outgoing: &self.outgoing,
+            }
+        }
+    }
+
+    fn component_totals(operator: &CanonicalWaveOperator, primary: &[f64]) -> Vec<f64> {
+        let mut totals = vec![0.0; operator.component_count()];
+        for (value, label) in primary.iter().zip(operator.component_labels()) {
+            totals[*label as usize] += value;
+        }
+        totals
+    }
+
+    /// Handed onto its own generation, a running state comes across bit for
+    /// bit - field, flux, the gap's jumps and the walls' memory - with its
+    /// clock, books no exchange, and runs on as the state it came from.
+    #[test]
+    fn a_handoff_onto_the_same_generation_carries_everything_and_books_nothing() {
+        let (mesh, quadratic, operator) = compile_at_edge(&gapped_scene(), 0.15);
+        let mut running = running_state(&operator);
+        let handoff = Handoff::prepare(
+            (&mesh, &quadratic, &operator),
+            (&mesh, &quadratic, &operator),
+        );
+        let (mut handed, accounting) = running
+            .handed_over(
+                &operator,
+                &operator,
+                &CanonicalForcing::none(&operator),
+                handoff.maps(),
+                &vec![None; operator.component_count()],
+                running.time_step(),
+            )
+            .unwrap();
+        assert_eq!(accounting, CanonicalStepAccounting::default());
+        assert_eq!(handed.time(), running.time());
+        for _ in 0..5 {
+            running.step(&operator).unwrap();
+            handed.step(&operator).unwrap();
+        }
+        assert_eq!(handed.primary_flux(), running.primary_flux());
+        assert_eq!(handed.complementary_flux(), running.complementary_flux());
+        assert_eq!(handed.auxiliaries(), running.auxiliaries());
+    }
+
+    /// Across a remesh the handoff books what the carry changed the stored
+    /// energy by, every part of it: the bulk's, the gap's - which the gap's
+    /// own map reports - and the walls' memory's. Each component keeps the
+    /// total it is handed, and the change is the transfer's error, not a
+    /// share of the energy.
+    #[test]
+    fn a_remesh_books_what_its_carry_changed_the_energy_by() {
+        let scene = gapped_scene();
+        let (coarse_mesh, coarse_quadratic, coarse) = compile_at_edge(&scene, 0.15);
+        let (fine_mesh, fine_quadratic, fine) = compile_at_edge(&scene, 0.1);
+        assert_eq!(coarse.component_count(), fine.component_count());
+        let running = running_state(&coarse);
+        let handoff = Handoff::prepare(
+            (&coarse_mesh, &coarse_quadratic, &coarse),
+            (&fine_mesh, &fine_quadratic, &fine),
+        );
+        let desired = component_totals(&coarse, running.primary_flux())
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let time_step = 0.4 * fine.maximum_time_step();
+        let (handed, accounting) = running
+            .handed_over(
+                &coarse,
+                &fine,
+                &CanonicalForcing::none(&fine),
+                handoff.maps(),
+                &desired,
+                time_step,
+            )
+            .unwrap();
+        let parts = |operator: &CanonicalWaveOperator, state: &CanonicalWaveState| {
+            let CanonicalAuxiliaryState::Linear(auxiliaries) = state.auxiliaries() else {
+                panic!("a gapped, walled generation carries auxiliaries");
+            };
+            let auxiliary = auxiliaries
+                .thin_gap_jump()
+                .iter()
+                .chain(auxiliaries.outgoing_z())
+                .copied()
+                .collect::<Vec<_>>();
+            crate::canonical_energy_breakdown(
+                operator,
+                state.primary_flux(),
+                state.complementary_flux(),
+                &auxiliary,
+            )
+            .unwrap()
+        };
+        let (before, after) = (parts(&coarse, &running), parts(&fine, &handed));
+        let (_, gap_report) = handoff
+            .thin_gap
+            .transfer(&running.thin_gap_memory(&coarse).unwrap())
+            .unwrap();
+        let bulk = after.primary + after.complementary - before.primary - before.complementary;
+        let memory = after.outgoing - before.outgoing;
+        eprintln!(
+            "0.15 onto 0.1: edit {:.3e} of {:.3e}; bulk {bulk:.3e}, gap {:.3e}, memory {memory:.3e}",
+            accounting.edit_exchange,
+            before.total(),
+            after.thin_gap - before.thin_gap,
+        );
+        assert_eq!(accounting.prescribed_exchange, 0.0);
+        let scale = before.total();
+        assert!(
+            (accounting.edit_exchange - (after.total() - before.total())).abs() < 1e-13 * scale
+        );
+        assert!(
+            (after.thin_gap - before.thin_gap - gap_report.edit_exchange).abs() < 1e-13 * scale
+        );
+        assert!(accounting.edit_exchange != 0.0);
+        assert!(accounting.edit_exchange.abs() < 1e-2 * scale);
+        for (total, desired) in component_totals(&fine, handed.primary_flux())
+            .into_iter()
+            .zip(&desired)
+        {
+            let desired = desired.unwrap();
+            assert!((total - desired).abs() < 1e-12 * desired.abs().max(1.0));
+        }
+        assert_eq!(handed.time(), running.time());
+        assert_eq!(handed.time_step(), time_step);
+    }
+
+    /// The new generation's prescribed nodes are held at their signals once
+    /// the state has crossed, and what holding them exchanged is booked apart
+    /// from the remesh's own change: the two lanes add to the energy's.
+    #[test]
+    fn a_handoff_books_its_prescribed_nodes_apart_from_the_edit() {
+        let scene = gapped_scene();
+        let (coarse_mesh, coarse_quadratic, coarse) = compile_at_edge(&scene, 0.15);
+        let (fine_mesh, fine_quadratic, fine) = compile_at_edge(&scene, 0.1);
+        let running = running_state(&coarse);
+        let handoff = Handoff::prepare(
+            (&coarse_mesh, &coarse_quadratic, &coarse),
+            (&fine_mesh, &fine_quadratic, &fine),
+        );
+        let held = 0.17;
+        let prescribed = fine
+            .node_points()
+            .iter()
+            .map(|point| {
+                (point.x < -0.999).then_some(TimeSignal::Harmonic {
+                    offset: held,
+                    amplitude: 0.0,
+                    frequency_hz: 0.0,
+                    phase_radians: 0.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(prescribed.iter().any(Option::is_some));
+        let forcing = CanonicalForcing::from_prescribed(&fine, prescribed).unwrap();
+        let desired = vec![None; fine.component_count()];
+        let time_step = 0.4 * fine.maximum_time_step();
+        let (handed, accounting) = running
+            .handed_over(
+                &coarse,
+                &fine,
+                &forcing,
+                handoff.maps(),
+                &desired,
+                time_step,
+            )
+            .unwrap();
+        let (free, unforced) = running
+            .handed_over(
+                &coarse,
+                &fine,
+                &CanonicalForcing::none(&fine),
+                handoff.maps(),
+                &desired,
+                time_step,
+            )
+            .unwrap();
+        for (node, signal) in forcing.prescribed().iter().enumerate() {
+            if signal.is_some() {
+                assert_eq!(
+                    handed.primary_flux()[node],
+                    fine.primary_mass()[node] * held
+                );
+            }
+        }
+        let before = running.energy(&coarse).unwrap();
+        let after = handed.energy(&fine).unwrap();
+        let pinned = after - free.energy(&fine).unwrap();
+        eprintln!(
+            "held at {held}: prescribed {:.3e}, edit {:.3e}",
+            accounting.prescribed_exchange, accounting.edit_exchange
+        );
+        assert!(accounting.prescribed_exchange.abs() > 1e-6 * before);
+        assert!((accounting.prescribed_exchange - pinned).abs() < 1e-13 * before);
+        assert!(
+            (accounting.prescribed_exchange + accounting.edit_exchange - (after - before)).abs()
+                < 1e-13 * before
+        );
+        assert!((accounting.edit_exchange - unforced.edit_exchange).abs() < 1e-13 * before);
     }
 }

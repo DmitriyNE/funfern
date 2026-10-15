@@ -24139,3 +24139,46 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-15 — A CPU handoff that books the remesh's energy
+
+- **Why.** PH-17 asks that a remesh's energy change be accounted for, not
+  hidden. The device books it: `account_handoff` and
+  `reduce_auxiliary_energy` add the change of the bulk's, the gaps' and the
+  walls' stored energy, less what the new prescribed nodes exchanged, to the
+  edit lane of its ledger. The CPU reference had no handoff of its own and no
+  such lane: the device fixtures composed the maps by hand in `e2e.rs`, and
+  `CanonicalStepAccounting` stopped at the filter.
+- **What.** `CanonicalWaveState::handed_over` carries a fixed-path state onto
+  the next generation through the maps the topology transaction prepares
+  (`CanonicalHandoffMaps`): `Q` with each component's total where it is told,
+  `b`, the gaps' jumps, and the walls' normalized memory through the device's
+  matrix (`CanonicalOutgoingNormalizedTransfer::apply`), the clock running on
+  and the backend's trace lane kept. It then holds the new prescribed nodes
+  and books what that exchanged as `prescribed_exchange` and every other
+  change as the new `edit_exchange`, as the device does.
+  `CanonicalGpuRuntimeTransfer::desired_totals` forms the totals the device
+  corrects to; `e2e.rs` uses it in place of its own copy. The fixtures' own
+  handoff stays: it carries the walls' memory the physical way, apart from
+  the device's matrix, as stage A1's check of that matrix.
+- **Not the time-driven state**, in this commit: its CPU state cannot take
+  wall memory or gap jumps, and the drive carriers, the switch, `r` and the
+  oscillator flux would make its handoff a second implementation of the
+  device's. The device's edit lane values the bulk by the reference
+  quadratic form, which is not what a pumped, nonlinear or restoring medium
+  stores; checking the device's state before and after against the CPU's
+  time-driven energy would test that without one.
+- **Measured.** The gapped default scene, walls on its four sides, run 40
+  steps and handed from edge 0.15 to 0.1: the carry changes the energy by
+  -2.16e-3 of 1.384 (bulk -1.82e-3, walls' memory -3.5e-4, gap +7e-6, the
+  gap's part as its own map reports it). Held at 0.17 on the left side, the
+  prescribed lane takes -9.6e-4 and the two lanes add to the energy's change
+  to 1e-13. Onto its own generation a state crosses bit for bit, books
+  nothing, and runs on as the one it left.
+- **Tests:** `a_handoff_onto_the_same_generation_carries_everything_and_books_nothing`,
+  `a_remesh_books_what_its_carry_changed_the_energy_by`,
+  `a_handoff_books_its_prescribed_nodes_apart_from_the_edit`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the device suite, 88 of 88, for the
+  fixtures' totals.

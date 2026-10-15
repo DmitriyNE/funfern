@@ -405,6 +405,33 @@ impl CanonicalGpuRuntimeTransfer {
         self
     }
 
+    /// The total each target component's flux keeps across the handoff, from
+    /// the source's `Q`: the shares of the source components it names, or
+    /// `None` where the interpolation sets it. The device forms the same
+    /// totals before its correction pass.
+    pub fn desired_totals(
+        &self,
+        source: &CanonicalWaveOperator,
+        primary_flux: &[f64],
+    ) -> Vec<Option<f64>> {
+        let mut totals = vec![0.0; source.component_count()];
+        for (value, label) in primary_flux.iter().zip(source.component_labels()) {
+            totals[*label as usize] += value;
+        }
+        self.components
+            .iter()
+            .map(|component| {
+                (!component.sources.is_empty()).then(|| {
+                    component
+                        .sources
+                        .iter()
+                        .map(|(source, share)| share * totals[*source as usize])
+                        .sum()
+                })
+            })
+            .collect()
+    }
+
     pub fn identity(
         source: &CanonicalWaveOperator,
         target: &CanonicalWaveOperator,

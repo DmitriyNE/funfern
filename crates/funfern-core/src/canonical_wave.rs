@@ -566,6 +566,10 @@ pub struct CanonicalStepAccounting {
     pub complementary_loss: f64,
     pub boundary_loss: f64,
     pub filter_removed: f64,
+    /// What a generation handoff changed the stored energy by, beyond what
+    /// holding the new generation's prescribed nodes exchanged: the remesh's
+    /// or the edit's own, either sign.
+    pub edit_exchange: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2296,6 +2300,81 @@ impl CanonicalWaveState {
         };
         auxiliaries.outgoing_z = normalized;
         Ok(projection)
+    }
+
+    /// The state carried onto `target` as the device carries it at a
+    /// generation handoff: `Q` through the primary map with each component's
+    /// total where `desired_totals` puts it, `b`, the gaps' jumps and the
+    /// wall's normalized memory through theirs, at the step `time_step`, the
+    /// clock running on from the time this state reached. The target's
+    /// prescribed nodes are then held at their signals. The accounting books
+    /// what holding them exchanged as `prescribed_exchange` and every other
+    /// change of the stored energy as `edit_exchange`, as the device's
+    /// handoff does.
+    pub fn handed_over(
+        &self,
+        source: &CanonicalWaveOperator,
+        target: &CanonicalWaveOperator,
+        target_forcing: &CanonicalForcing,
+        maps: crate::CanonicalHandoffMaps<'_>,
+        desired_totals: &[Option<f64>],
+        time_step: f64,
+    ) -> Result<(Self, CanonicalStepAccounting), WaveError> {
+        if target_forcing.prescribed.len() != target.degrees_of_freedom() {
+            return Err(WaveError::InvalidState);
+        }
+        let before = self.energy(source)?;
+        let prescribed = target_forcing
+            .prescribed
+            .iter()
+            .map(Option::is_some)
+            .collect::<Vec<_>>();
+        let (primary, _) =
+            maps.primary
+                .transfer(&self.primary_flux, desired_totals, &prescribed)?;
+        let (complementary, _) = maps.complementary.transfer(&self.complementary_flux)?;
+        validate_time_step(target, time_step, self.integrator)?;
+        target.validate_primary(&primary)?;
+        target.validate_complementary(&complementary)?;
+        // A generation keeps its backend: the trace's inverse lane stays where
+        // the source had it.
+        let mut handed = Self::assemble(
+            target,
+            time_step,
+            primary,
+            complementary,
+            self.inverted_trace,
+        )?
+        .with_time_origin(self.time())?
+        .with_integrator(self.integrator)
+        .with_wall_step(target, self.wall_step)?;
+        let (gaps, _) = maps.thin_gap.transfer(&self.thin_gap_memory(source)?)?;
+        handed.set_thin_gap_memory(target, &gaps, 1.0)?;
+        let memory = maps.outgoing.apply(self.outgoing_z())?;
+        if !memory.is_empty() {
+            let CanonicalAuxiliaryState::Linear(auxiliaries) = &mut handed.auxiliaries else {
+                return Err(WaveError::InvalidState);
+            };
+            if auxiliaries.outgoing_z.len() != memory.len() {
+                return Err(WaveError::InvalidState);
+            }
+            auxiliaries.outgoing_z = memory;
+        }
+        let carried = handed.energy(target)?;
+        let prescribed_exchange =
+            handed.enforce_prescribed(target, target_forcing, handed.time())?;
+        let edit_exchange = carried - before;
+        if !edit_exchange.is_finite() {
+            return Err(WaveError::InvalidState);
+        }
+        Ok((
+            handed,
+            CanonicalStepAccounting {
+                prescribed_exchange,
+                edit_exchange,
+                ..CanonicalStepAccounting::default()
+            },
+        ))
     }
 
     pub fn energy(&self, operator: &CanonicalWaveOperator) -> Result<f64, WaveError> {

@@ -1548,27 +1548,7 @@ fn hand_off(
     } else {
         runtime.without_total_correction()
     };
-    let mut totals = vec![0.0; source.canonical_operator.component_count()];
-    for (value, label) in running
-        .primary_flux()
-        .iter()
-        .zip(source.canonical_operator.component_labels())
-    {
-        totals[*label as usize] += value;
-    }
-    let desired = runtime
-        .components
-        .iter()
-        .map(|component| {
-            (!component.sources.is_empty()).then(|| {
-                component
-                    .sources
-                    .iter()
-                    .map(|(source, share)| share * totals[*source as usize])
-                    .sum()
-            })
-        })
-        .collect::<Vec<Option<f64>>>();
+    let desired = runtime.desired_totals(&source.canonical_operator, running.primary_flux());
     let prescribed = target
         .canonical_forcing
         .prescribed()
