@@ -4212,11 +4212,6 @@ impl CanonicalTemporalWaveState {
             return Err(WaveError::InvalidState);
         }
         let before = self.energy(operator)?;
-        let (_, complementary_rate_start) = operator.complementary_energy_and_rate(
-            &self.complementary_flux,
-            start_time,
-            &self.runtime,
-        )?;
 
         let form = self.fourth_order_form(operator);
         let mut primary = self.primary_flux.clone();
@@ -4241,6 +4236,14 @@ impl CanonicalTemporalWaveState {
             start_time + 0.25 * duration,
             &self.runtime,
         )?;
+        // The conservative core runs between the two half maps, so its
+        // temporal work is the trapezoid of the rate on the flux the first
+        // half leaves and the flux the second half finds. Read before the
+        // first half, a pumped complementary row with a loss of its own was
+        // booked at first order, the splitting residual taking the rest
+        // (found by PH-17, 2026-10-15).
+        let (_, complementary_rate_start) =
+            operator.complementary_energy_and_rate(&complementary, start_time, &self.runtime)?;
 
         // Both kicks pin and sample at their own stage instant, which is the
         // step's endpoints - the same two instants the autonomous extension
@@ -7551,6 +7554,54 @@ mod tests {
             .zip(fixed.complementary_flux())
         {
             assert!((*temporal - *fixed).norm() < 1.0e-12, "{condition:?}");
+        }
+    }
+
+    /// A pumped row whose own flux carries a loss: the complementary row in
+    /// each skin - the stiffness row in Mechanical and TM, the density row in
+    /// TE - with the loss on the field that row holds. The pump's work is the
+    /// trapezoid over the conservative core, which starts where the first
+    /// loss half leaves the flux; read before that half, it was booked at
+    /// first order, 1.3e-3 of the energy off over three seconds at the
+    /// production step, and the splitting residual took the difference
+    /// (PH-17, 2026-10-15).
+    #[test]
+    fn a_pumped_complementary_row_with_its_own_loss_balances_at_second_order() {
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let loss = || {
+            Some(LossChannel {
+                base_rate: ScalarField::constant(0.6),
+                law: DampingLaw::constant(),
+            })
+        };
+        for physics in [PhysicsModel::Mechanical, tm, te] {
+            let mut scene = Scene {
+                physics,
+                ..Scene::default()
+            };
+            let material = &mut scene.materials[0];
+            if physics == te {
+                material.mass_law.drive = pump(0.25, 1.3, 0.2);
+                material.electric_loss = loss();
+            } else {
+                material.stiffness_law.drive = pump(0.25, 1.3, 0.2);
+                if physics == tm {
+                    material.magnetic_loss = loss();
+                } else {
+                    material.electric_loss = loss();
+                }
+            }
+            let operator = compile(&scene).unwrap();
+            let forcing = CanonicalForcing::none(operator.base());
+            let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.6, 1.0);
+            assert!(total.temporal_work.abs() > 1.0e-4, "{physics:?}: {total:?}");
+            assert!(total.complementary_loss > 1.0e-4, "{physics:?}: {total:?}");
+            assert_eq!(total.primary_loss, 0.0, "{physics:?}: {total:?}");
         }
     }
 

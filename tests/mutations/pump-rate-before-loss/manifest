@@ -1,0 +1,4 @@
+about: the time-driven step reads a complementary row's pump rate at the step's start before the first loss half, where the conservative core whose work it books starts after it, so a pumped row with a loss of its own books its pump work at first order and the splitting residual takes the rest
+test: cargo test --release -p funfern-core --lib -- a_pumped_complementary_row_with_its_own_loss_balances_at_second_order
+expect: measured order
+needs: cpu

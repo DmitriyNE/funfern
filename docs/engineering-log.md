@@ -24182,3 +24182,35 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the device suite, 88 of 88, for the
   fixtures' totals.
+
+## 2026-10-15 — A pumped complementary row with its own loss booked its pump work at first order
+
+- **Found** by PH-17's oracle, which integrates each channel's power from the
+  authored law over the run's own states. On PH-01's box over three seconds
+  the pump lane stood off the oracle by 1.3e-3, 6.4e-4 and 3.2e-4 of the
+  energy at the production step, its half and its quarter, in exactly three
+  pairings: Mechanical's stiffness pump with an electric loss, TM's stiffness
+  pump with a magnetic loss, TE's density pump with an electric loss - the
+  complementary row pumped and lossy at once. Every other pairing was second
+  order or the oracle's own quadrature to roundoff, and the stored energy's
+  residual against the oracle was second order throughout: the field ran
+  right, the ledger did not, and its splitting residual took the difference.
+- **Cause.** The time-driven step books the complementary row's pump work as
+  the trapezoid of `∂E/∂t` over the conservative core, which runs between the
+  Strang loss halves. The end rate was read where the core ends, before the
+  second half; the start rate was read before the first half, on the flux
+  the core never starts from - `O(γ dt)` off at one endpoint each step. The
+  primary row's rate is read at the midpoint, inside the core, which is why
+  it was second order. The existing balance tests pair a pumped density with
+  an electric loss, two rows apart in Mechanical, so none met it.
+- **Fix.** The start rate is read on the flux the first half leaves, at the
+  same instant.
+- **Test:** `a_pumped_complementary_row_with_its_own_loss_balances_at_second_order`,
+  the pairing in each skin through the existing balance helper, both
+  integrators; on the old reading the fourth-order step measured order 1.29.
+  **Mutation:** `pump-rate-before-loss`, the old reading.
+- **The device** keeps no pump lane and nothing in the app reads this one,
+  so the device suite is not run.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

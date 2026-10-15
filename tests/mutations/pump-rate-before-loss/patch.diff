@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/canonical_temporal.rs b/crates/funfern-core/src/canonical_temporal.rs
+--- a/crates/funfern-core/src/canonical_temporal.rs
++++ b/crates/funfern-core/src/canonical_temporal.rs
+@@ -4243,7 +4243,7 @@
+         // booked at first order, the splitting residual taking the rest
+         // (found by PH-17, 2026-10-15).
+         let (_, complementary_rate_start) =
+-            operator.complementary_energy_and_rate(&complementary, start_time, &self.runtime)?;
++            operator.complementary_energy_and_rate(&self.complementary_flux, start_time, &self.runtime)?;
+ 
+         // Both kicks pin and sample at their own stage instant, which is the
+         // step's endpoints - the same two instants the autonomous extension
