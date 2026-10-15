@@ -2180,6 +2180,64 @@ fn resident_filter_commit() {
     publish_snapshot_metadata();
 }
 
+// The store a handoff carries, valued by the generation that holds it: the
+// bulk through the maps in force at `local_time` - a pumped or switched
+// coefficient's own value, a field law's store - and the restoring law's
+// potential. The gaps and the walls' memory the transfer values, the same on
+// either side. A handoff's edit is the target's less the source's; valued by
+// the authored quadratic stores, which are neither side's on a time-driven
+// generation, it booked nothing for a pumped medium's edit and missed the
+// potential `r` holds (found 2026-10-15).
+fn handoff_stored_energy(local: u32, accepted: bool, local_time: f32) -> f32 {
+    var energy = 0.0;
+    for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
+        energy += stage_primary_energy(
+            node, select(candidate_q(node), accepted_q(node), accepted), local_time);
+        if restoring() {
+            let index = integrated_index(node);
+            energy += restoring_potential_at(node, select(
+                candidate_auxiliary(index), accepted_auxiliary(index), accepted));
+        }
+    }
+    for (var sample = local; sample < control.counts_a.y; sample += WORKGROUP_SIZE) {
+        energy += stage_complementary_energy(
+            sample, select(candidate_b(sample), accepted_b(sample), accepted), local_time);
+    }
+    reduced_values[local] = energy;
+    workgroupBarrier();
+    var width = WORKGROUP_SIZE / 2u;
+    loop {
+        if width == 0u { break; }
+        if local < width {
+            reduced_values[local] += reduced_values[local + width];
+        }
+        workgroupBarrier();
+        width /= 2u;
+    }
+    return reduced_values[0];
+}
+
+// The source's store at the state it hands over, at its accepted instant, in
+// its reserved accounting word; `account_handoff` reads it there.
+@compute @workgroup_size(128)
+fn handoff_source_energy(@builtin(local_invocation_id) id: vec3<u32>) {
+    let energy = handoff_stored_energy(id.x, true, control.clock_f32.y);
+    if id.x == 0u {
+        control.accepted_accounting_c.y = energy;
+    }
+}
+
+// The target's store at the state it was handed, its pins set, at its epoch's
+// start where `handoff_finalize` pinned it; `account_handoff` reads it and
+// clears the word.
+@compute @workgroup_size(128)
+fn handoff_target_energy(@builtin(local_invocation_id) id: vec3<u32>) {
+    let energy = handoff_stored_energy(id.x, false, 0.0);
+    if id.x == 0u {
+        control.candidate_accounting_c.z = energy;
+    }
+}
+
 @compute @workgroup_size(128)
 fn handoff_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
@@ -2197,7 +2255,10 @@ fn handoff_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
                     - temporal_primary_energy(i, before, 0.0);
             } else {
                 next = nodes[i].mass_loss.x * prescribed_value(i, 0.0);
-                exchange = 0.5 * (next * next - before * before) * nodes[i].mass_loss.y;
+                // Valued as `handoff_target_energy` values the node, so the
+                // edit the handoff books is the store's change before the pin.
+                exchange = stage_primary_energy(i, next, 0.0)
+                    - stage_primary_energy(i, before, 0.0);
             }
             set_candidate_q(i, next);
         }

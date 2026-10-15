@@ -42,6 +42,11 @@ struct Expected {
     complementary: Vec<[f64; 2]>,
     absolute_time: f64,
     time_step: f64,
+    /// What the handoff changes the stored energy by, each side valued at
+    /// the handoff by its own generation's law, and the energy it starts
+    /// from: the device books the first in its edit lane.
+    edit: f64,
+    handoff_energy: f64,
     phase: Phase,
     settle_after: Option<u64>,
     started: Instant,
@@ -261,6 +266,17 @@ fn main() -> AppExit {
             handoff_time,
         )
         .expect("preserved target mass carrier");
+    let handoff_energy = source_state
+        .energy(&source_operator)
+        .expect("source energy at the handoff");
+    let edit = if reject {
+        0.0
+    } else {
+        target_state
+            .energy(&target_operator)
+            .expect("target energy at the handoff")
+            - handoff_energy
+    };
     for _ in 0..TARGET_STEPS {
         if reject {
             break;
@@ -338,6 +354,8 @@ fn main() -> AppExit {
             .collect(),
         absolute_time: target_state.time(),
         time_step,
+        edit,
+        handoff_energy,
         reject,
         phase: Phase::Warmup,
         settle_after: None,
@@ -498,12 +516,17 @@ fn validate(
                     .flat_map(|value| value.iter().copied()),
             );
             let clock_error = (clock.absolute_seconds - expected.absolute_time).abs();
+            // The edit lane against the energy the handoff moved, both sides
+            // valued at the handoff by their own generation's law.
+            let booked = f64::from(display.accounting[7]);
+            let edit_error = (booked - expected.edit).abs() / expected.handoff_energy;
             println!(
-                "temporal handoff completed in {:.2} ms: Q error {:.3e}, b error {:.3e}, clock error {:.3e}",
+                "temporal handoff completed in {:.2} ms: Q error {:.3e}, b error {:.3e}, clock error {:.3e}, edit {booked:.6e} against {:.6e} ({edit_error:.2e} of the energy)",
                 expected.started.elapsed().as_secs_f64() * 1_000.0,
                 q_error,
                 b_error,
                 clock_error,
+                expected.edit,
             );
             if !within(q_error, 8.0e-5)
                 || !within(b_error, 8.0e-5)
@@ -511,6 +534,11 @@ fn validate(
             {
                 expected.failed = true;
                 eprintln!("temporal handoff accuracy gate was exceeded");
+            }
+            // f32 reductions of either side's store: measured 3e-8 to 8e-8.
+            if !within(edit_error, 1.0e-6) {
+                expected.failed = true;
+                eprintln!("the handoff's edit lane books another energy than the handoff moved");
             }
             expected.phase = Phase::Done;
         }

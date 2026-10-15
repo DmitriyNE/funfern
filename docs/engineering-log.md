@@ -24370,3 +24370,48 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-15 — A time-driven handoff's edit lane valued the stores neither generation holds
+
+- **Found** in B1's device half. The device books a handoff's own change of
+  the stored energy in its edit lane; nothing read the lane against
+  anything. The three handoff examples now read it against the host's
+  `f64` reference: each side's state at the handoff valued by its own
+  generation's energy (the CPU's time-driven energy, restoring potential
+  included, on a time-driven generation).
+- **Reproduced.** Linear handoffs read 3e-8 to 2.6e-7 of the energy apart, every
+  suite variant. Time-driven ones did not: a material edit of a pumped
+  medium on one mesh booked 0 for -3.0e-5 (7e-3 of the energy), with gates
+  0 for -4.1e-5, into a field-dependent target 0 for -2.2e-4 (5e-2); the
+  sine-Gordon remesh -2.571e-3 for -2.339e-3, the moved hole +1.4e-3 for
+  -2.4e-3, and Klein-Gordon handed to a plain medium, which drops `r`, 0 for
+  -10.7, half the stored energy.
+- **Cause.** `account_handoff` valued both sides' bulk by the authored
+  quadratic stores - the reference mass, the reference constitutive tensor -
+  which are neither generation's on a time-driven one: a pumped or switched
+  coefficient has its own value at the handoff, a field law its own store.
+  On one mesh the two quadratic sums were the same and the edit read 0. And
+  nothing valued the restoring potential `V(r)` across a handoff: the
+  transfer's auxiliary reduction holds the gaps and the walls' memory only.
+- **Fix.** Each generation values its own store, where its law tables are
+  bound. `handoff_source_energy`, in the running generation's own group
+  after the runtime transfer, reduces its accepted state's bulk through
+  `stage_*_energy` at its accepted instant and `V(r)` into a reserved word
+  of its control; `handoff_target_energy`, after `handoff_finalize`, does
+  the same for the handed state at the new epoch's start. `account_handoff`
+  books the target's less the source's less the pins' exchange, and clears
+  the words. The pins' exchange in `handoff_finalize` is valued the same
+  way, so the edit stays the store's change before the pins on any
+  generation. The transfer-energy shader held all eight bindings and could
+  not take the law tables, which is why the valuing moved to the
+  generations rather than into it.
+- **Measured** after: time-driven 3.0e-8 to 8.3e-8 of the energy, the
+  restoring handoffs 1.9e-8 to 1.6e-7 (Klein-Gordon to plain now books the
+  -10.7), linear unchanged; every rejection still refused.
+- **Tests.** `canonical_gpu_handoff`, `canonical_gpu_temporal_handoff` and
+  `canonical_gpu_oscillator_handoff` hold the edit lane to 1e-6 of the
+  energy. **Mutation:** `handoff-store-authored`, the stores valued
+  quadratically again: the pumped edit reads 0 for -3.0e-5.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the device suite, 88 of 88.

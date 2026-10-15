@@ -6702,6 +6702,9 @@ struct CanonicalPipeline {
     handoff_reduce_prescribed: CachedComputePipelineId,
     handoff_clear_scratch: CachedComputePipelineId,
     handoff_commit: CachedComputePipelineId,
+    /// Each side's store at the handoff, valued by its own generation.
+    handoff_source_energy: CachedComputePipelineId,
+    handoff_target_energy: CachedComputePipelineId,
     live_event_stage: CachedComputePipelineId,
     resident_filter_begin: CachedComputePipelineId,
     resident_filter_commit: CachedComputePipelineId,
@@ -6825,6 +6828,8 @@ fn init_canonical_pipeline(
     let handoff_reduce_prescribed = queue("handoff_reduce_prescribed");
     let handoff_clear_scratch = queue("handoff_clear_scratch");
     let handoff_commit = queue("handoff_commit");
+    let handoff_source_energy = queue("handoff_source_energy");
+    let handoff_target_energy = queue("handoff_target_energy");
     let live_event_stage = queue("live_event_stage");
     let resident_filter_begin = queue("resident_filter_begin");
     let resident_filter_commit = queue("resident_filter_commit");
@@ -6893,6 +6898,8 @@ fn init_canonical_pipeline(
         handoff_reduce_prescribed,
         handoff_clear_scratch,
         handoff_commit,
+        handoff_source_energy,
+        handoff_target_energy,
         live_event_stage,
         resident_filter_begin,
         resident_filter_commit,
@@ -7122,6 +7129,8 @@ struct CanonicalHandoffBindGroups {
     energy: BindGroup,
     invariant: BindGroup,
     target: BindGroup,
+    /// The running generation's own group, for valuing what it hands over.
+    source: BindGroup,
 }
 
 #[derive(Resource)]
@@ -7336,6 +7345,9 @@ fn prepare_canonical_handoff_bind_groups(
         Some(old_nodes),
         Some(old_samples),
         Some(old_tables),
+        Some(old_status),
+        Some(old_scratch),
+        Some(old_boundary),
         Some(new_control),
         Some(new_status),
         Some(new_state),
@@ -7351,6 +7363,9 @@ fn prepare_canonical_handoff_bind_groups(
         get(&source.nodes),
         get(&source.samples),
         get(&source.tables),
+        get(&source.status),
+        get(&source.scratch),
+        get(&source.boundary),
         get(&target.control),
         get(&target.status),
         get(&target.state),
@@ -7434,6 +7449,20 @@ fn prepare_canonical_handoff_bind_groups(
             new_boundary.buffer.as_entire_buffer_binding(),
         )),
     );
+    let source_group = render_device.create_bind_group(
+        Some("canonical handoff source bind group"),
+        &pipeline_cache.get_bind_group_layout(&canonical_pipeline.layout),
+        &BindGroupEntries::sequential((
+            old_control.buffer.as_entire_buffer_binding(),
+            old_status.buffer.as_entire_buffer_binding(),
+            old_state.buffer.as_entire_buffer_binding(),
+            old_nodes.buffer.as_entire_buffer_binding(),
+            old_samples.buffer.as_entire_buffer_binding(),
+            old_tables.buffer.as_entire_buffer_binding(),
+            old_scratch.buffer.as_entire_buffer_binding(),
+            old_boundary.buffer.as_entire_buffer_binding(),
+        )),
+    );
     commands.insert_resource(CanonicalHandoffBindGroups {
         revision: request.revision,
         encoded: false,
@@ -7442,6 +7471,7 @@ fn prepare_canonical_handoff_bind_groups(
         energy,
         invariant,
         target: target_group,
+        source: source_group,
     });
 }
 
@@ -8240,6 +8270,8 @@ fn compute_canonical_handoff(
         transfer.transfer_integrated,
         transfer.transfer_invariant,
         transfer.transfer_clock,
+        canonical.handoff_source_energy,
+        canonical.handoff_target_energy,
     ];
     if ids.iter().any(|id| {
         matches!(
@@ -8277,6 +8309,11 @@ fn compute_canonical_handoff(
     // The new control's clock, once every workgroup above has read the
     // origin the candidate was prepared against.
     pass.set_pipeline(pipelines[17]);
+    pass.dispatch_workgroups(1, 1, 1);
+    // The source's store, in its own group, after the runtime transfer has
+    // copied its accounting, so that the word stays the source's.
+    pass.set_bind_group(0, &groups.source, &[]);
+    pass.set_pipeline(pipelines[18]);
     pass.dispatch_workgroups(1, 1, 1);
 
     pass.set_bind_group(0, &groups.map, &[]);
@@ -8318,6 +8355,9 @@ fn compute_canonical_handoff(
     pass.set_pipeline(pipelines[9]);
     pass.dispatch_workgroups(workgroups(target.state_count), 1, 1);
     pass.set_pipeline(pipelines[10]);
+    pass.dispatch_workgroups(1, 1, 1);
+    // The target's store, its pins set.
+    pass.set_pipeline(pipelines[19]);
     pass.dispatch_workgroups(1, 1, 1);
 
     pass.set_bind_group(0, &groups.energy, &[]);

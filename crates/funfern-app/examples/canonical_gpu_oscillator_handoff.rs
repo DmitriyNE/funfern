@@ -79,6 +79,11 @@ struct Expected {
     primary: Vec<f64>,
     complementary: Vec<Point2>,
     integrated: Vec<f64>,
+    /// What the handoff changes the stored energy by, each side valued at the
+    /// handoff by its own generation, restoring potential included, and the
+    /// energy it starts from: the device books the first in its edit lane.
+    edit: f64,
+    handoff_energy: f64,
     reject: bool,
     phase: Phase,
     started: Instant,
@@ -415,6 +420,17 @@ fn main() -> AppExit {
         Err(_) => CanonicalTemporalWaveState::zero(&target.operator, time_step)
             .expect("placeholder for the rejected target"),
     };
+    let handoff_energy = source_state
+        .energy(&source.operator)
+        .expect("source energy at the handoff");
+    let edit = if reject {
+        0.0
+    } else {
+        target_state
+            .energy(&target.operator)
+            .expect("target energy at the handoff")
+            - handoff_energy
+    };
     if !reject {
         for _ in 0..TARGET_STEPS {
             target_state
@@ -477,6 +493,8 @@ fn main() -> AppExit {
         primary: target_state.primary_flux().to_vec(),
         complementary: target_state.complementary_flux().to_vec(),
         integrated: target_state.integrated_field().to_vec(),
+        edit,
+        handoff_energy,
         reject,
         phase: Phase::Warmup,
         started: Instant::now(),
@@ -660,16 +678,26 @@ fn validate(
                     expected.integrated.iter().copied(),
                 )
             };
+            let booked = f64::from(display.accounting[7]);
+            let edit_error = (booked - expected.edit).abs() / expected.handoff_energy;
             println!(
                 "oscillator handoff errors after {:.2} ms: Q {primary:.3e}, b \
-                 {complementary:.3e}, r {integrated:.3e}",
-                expected.started.elapsed().as_secs_f64() * 1_000.0
+                 {complementary:.3e}, r {integrated:.3e}, edit {booked:.6e} against {:.6e} \
+                 ({edit_error:.2e} of the energy)",
+                expected.started.elapsed().as_secs_f64() * 1_000.0,
+                expected.edit
             );
             if !within(primary, 3.0e-5)
                 || !within(complementary, expected.complementary_bound)
                 || !within(integrated, 3.0e-5)
             {
                 expected.failed = true;
+            }
+            // f32 reductions of either side's store, the restoring potential
+            // in it: measured to 1.6e-7.
+            if !within(edit_error, 1.0e-6) {
+                expected.failed = true;
+                eprintln!("the handoff's edit lane books another energy than the handoff moved");
             }
             expected.phase = Phase::Done;
         }

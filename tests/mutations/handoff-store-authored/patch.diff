@@ -1,0 +1,24 @@
+diff --git a/crates/funfern-app/src/canonical_wave.wgsl b/crates/funfern-app/src/canonical_wave.wgsl
+--- a/crates/funfern-app/src/canonical_wave.wgsl
++++ b/crates/funfern-app/src/canonical_wave.wgsl
+@@ -2191,8 +2191,8 @@
+ fn handoff_stored_energy(local: u32, accepted: bool, local_time: f32) -> f32 {
+     var energy = 0.0;
+     for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
+-        energy += stage_primary_energy(
+-            node, select(candidate_q(node), accepted_q(node), accepted), local_time);
++        let flux = select(candidate_q(node), accepted_q(node), accepted);
++        energy += 0.5 * flux * flux * nodes[node].mass_loss.y;
+         if restoring() {
+             let index = integrated_index(node);
+             energy += restoring_potential_at(node, select(
+@@ -2200,8 +2200,7 @@
+         }
+     }
+     for (var sample = local; sample < control.counts_a.y; sample += WORKGROUP_SIZE) {
+-        energy += stage_complementary_energy(
+-            sample, select(candidate_b(sample), accepted_b(sample), accepted), local_time);
++        energy += b_energy(sample, select(candidate_b(sample), accepted_b(sample), accepted));
+     }
+     reduced_values[local] = energy;
+     workgroupBarrier();

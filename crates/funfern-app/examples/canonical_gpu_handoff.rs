@@ -56,6 +56,11 @@ struct Expected {
     primary: Vec<f64>,
     complementary: Vec<[f64; 2]>,
     auxiliary: Vec<f64>,
+    /// What the handoff changes the stored energy by, each side valued by
+    /// its own generation, and the energy it starts from: the device books
+    /// the first in its edit lane.
+    edit: f64,
+    handoff_energy: f64,
     time_step: f64,
     handoff_steps: u64,
     settlement_steps: u64,
@@ -506,6 +511,13 @@ fn main() -> AppExit {
             .set_outgoing_physical_memory(&target_operator, memory)
             .expect("target outgoing history");
     }
+    let handoff_energy = oracle
+        .energy(&source_operator)
+        .expect("source energy at the handoff");
+    let edit_energy = target_state
+        .energy(&target_operator)
+        .expect("target energy at the handoff")
+        - handoff_energy;
     // The target oracle's clock starts at zero at the handoff: a harmonic's
     // phase moves on by the time that took, and a pulse's start moves back.
     let shifted = |signal: TimeSignal| match signal {
@@ -630,6 +642,8 @@ fn main() -> AppExit {
                 .collect(),
             _ => panic!("unsupported auxiliary variant"),
         },
+        edit: edit_energy,
+        handoff_energy,
         time_step,
         handoff_steps,
         settlement_steps,
@@ -868,6 +882,12 @@ fn validate(
                     + expected.measured_steps) as f64
                     * expected.time_step)
                 .abs();
+            let booked = f64::from(display.accounting[7]);
+            let edit_error = (booked - expected.edit).abs() / expected.handoff_energy;
+            println!(
+                "handoff edit {booked:.6e} against {:.6e} ({edit_error:.2e} of the energy)",
+                expected.edit
+            );
             println!(
                 "handoff committed in {:.2} ms (admission + first display receipt {:.2} ms, source live); Q {:.3e}, b {:.3e}, auxiliary RMS {:.3e}, clock {:.3e} s",
                 expected.accepted_elapsed.unwrap().as_secs_f64() * 1_000.0,
@@ -879,10 +899,17 @@ fn validate(
                 auxiliary_error,
                 absolute_error,
             );
+            // The edit lane to the f32 reductions of either side's store, and
+            // to the host carrying the walls' memory the physical way beside
+            // the device's matrix: measured to 2.6e-7.
+            if !within(edit_error, 1.0e-6) {
+                eprintln!("the handoff's edit lane books another energy than the handoff moved");
+            }
             expected.failed = !within(q_error, 3.0e-5)
                 || !within(b_error, 3.0e-5)
                 || !within(auxiliary_error, 2.0e-5)
-                || !within(absolute_error, 2.0e-5);
+                || !within(absolute_error, 2.0e-5)
+                || !within(edit_error, 1.0e-6);
             expected.phase = Phase::Done;
         }
         _ => {}
