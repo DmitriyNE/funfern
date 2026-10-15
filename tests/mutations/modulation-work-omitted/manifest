@@ -1,0 +1,4 @@
+about: the time-driven step books only the primary row's pump work, leaving the complementary row's out of the temporal-work lane, so a pumped stiffness in Mechanical or a pumped density in TE reads no work and the splitting residual takes all of it
+test: cargo test --release -p funfern-app --lib -- every_channel_books_what_its_law_puts_in_or_takes_out
+expect: pump: .* falls at order
+needs: cpu

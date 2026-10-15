@@ -548,6 +548,48 @@ energy to 4e-7 and 5e-9, a compatible share of 3e-10 and 5e-12, and gives
 the field 1e-10 of its energy
 (`edits_the_field_cannot_tell_leave_it_as_the_mesh_allows_and_a_static_flux_static`).
 
+PH-17 holds the energy ledger to the physics rather than to itself. On
+PH-01's box, started from three modes with `Q` and `b` both nonzero, each
+channel's power is written in the test from the authored law - a flux-rate
+loss `γ` takes `γ · flux · field`, a drive `m(t)` on the coefficient an
+energy sits over moves it at `−(∂m/∂t)/m` of itself, a volume source puts
+its nodal rate times the field in, a harmonic source's rate being the
+integral of its signal - and integrated by the trapezoid over the run's own
+states, never read from the solver's lanes or compiled rates. In each skin
+thirteen configurations - electric, magnetic and spatially rising loss, a
+driven loss, constant loss in a Kerr medium, a pump on either row, a time
+crystal, a travelling modulation, a volume source, a thin gap, all of them
+together, and van der Pol either side of its threshold - run three seconds
+at the production step, its half and its quarter: the stored energy less
+every channel's integral, and each lane less its channel, fall at second
+order to under 2e-4 of the energy (measured to 6e-5), or stand at roundoff
+where the solver books by the oracle's own quadrature. Van der Pol's gain
+lane carries the law's sign, and what it leaves of the oracle settles to a
+dissipation, the self-oscillating elements' short-wave viscosity, which the
+oracle leaves out: 9e-3 to 1e-2 of the energy below the threshold, 1e-3
+above. A gap's jumps are the time integral of the field's difference across
+it, to second order, and its springs total the authored ratio of the wave
+stiffness beside it - `k`, `1/μ`, `1/ε` - over its length, less the lumps at
+its closed tips (`every_channel_books_what_its_law_puts_in_or_takes_out`,
+27 s). With the electric and magnetic rates equal the loss is `−γ` times the
+identity in energy-normalized coordinates, so every field decays as
+`e^{−2γt}`: met to 6e-7 and 1e-6 at the quarter step
+(`matched_loss_decays_every_field_as_its_closed_form`). A linear medium,
+Kerr and Klein-Gordon keep their energy within an excursion that falls four
+times over the halving under either integrator: the fourth-order step is
+fourth order in phase, and its energy breathes at the leapfrog's second
+order (`conservative_media_keep_their_energy_to_their_integrators_order`).
+The composition with a gap, both losses and a source, remeshed halfway from
+edge 0.25 to 0.18 through the maps the runtime prepares and handed over by
+`CanonicalWaveState::handed_over`, books its own change of the stored energy
+in the edit lane, 4e-4 to 7e-4 of it, and with that the whole run's ledger
+closes at second order
+(`a_remesh_books_its_own_energy_change_and_the_ledger_closes_across_it`).
+The mutations `loss-lanes-crossed`, `modulation-work-omitted` and
+`edit-exchange-dropped` each break one of them; `pump-rate-before-loss`
+restores the defect PH-17 found, a pumped complementary row with its own
+loss booking its pump work at first order.
+
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
 reflecting-box problem. It crosses the driven constitutive row against the

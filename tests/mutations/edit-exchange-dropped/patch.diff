@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+index c262149..fb988a2 100644
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -2371,7 +2371,6 @@ impl CanonicalWaveState {
+             handed,
+             CanonicalStepAccounting {
+                 prescribed_exchange,
+-                edit_exchange,
+                 ..CanonicalStepAccounting::default()
+             },
+         ))

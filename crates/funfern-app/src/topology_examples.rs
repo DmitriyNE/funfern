@@ -12617,4 +12617,1117 @@ mod tests {
             assert!(lines.at(CHOPPER_HZ + side) > 0.5 * lines.at(CHOPPER_HZ));
         }
     }
+
+    // -----------------------------------------------------------------------
+    // PH-17: energy accounting. Each channel's power is written here from the
+    // authored law and integrated over the run's own states; nothing is read
+    // from the solver's ledger or its compiled rates, and the ledger is held
+    // to what this finds.
+    // -----------------------------------------------------------------------
+
+    /// A loss channel's rate, as authored and as the oracle reads it: per
+    /// unit time, on the magnitude `f` of the channel's own physical field.
+    /// A passive rate that follows the field is not executable yet (gate C),
+    /// so the field enters only through van der Pol.
+    #[derive(Clone, Copy, Debug)]
+    enum LossRate {
+        /// `γ`.
+        Constant(f64),
+        /// `γ (1 + x/2)`, rising across the box.
+        Rising(f64),
+        /// `γ (1 + depth cos 2πνt)`.
+        Driven { rate: f64, depth: f64, hz: f64 },
+        /// `γ (f²/f₀² − 1)`: gain below the threshold `f₀`, loss above it.
+        VanDerPol { rate: f64, threshold: f64 },
+    }
+
+    impl LossRate {
+        fn channel(self) -> LossChannel {
+            let constant = ScalarField::constant;
+            let (base_rate, rate, drive) = match self {
+                Self::Constant(rate) => (constant(rate), RateLaw::Constant, TimeDrive::None),
+                Self::Rising(rate) => (
+                    ScalarField::formula(format!("{rate} * (1 + x / 2)")).unwrap(),
+                    RateLaw::Constant,
+                    TimeDrive::None,
+                ),
+                Self::Driven { rate, depth, hz } => (
+                    constant(rate),
+                    RateLaw::Constant,
+                    TimeDrive::ParametricPump {
+                        depth: constant(depth),
+                        frequency_hz: constant(hz),
+                        phase_radians: constant(0.0),
+                    },
+                ),
+                Self::VanDerPol { rate, threshold } => (
+                    constant(rate),
+                    RateLaw::VanDerPol {
+                        threshold: constant(threshold),
+                        amplitude_bound: constant(4.0 * threshold.max(1.0)),
+                    },
+                    TimeDrive::None,
+                ),
+            };
+            LossChannel {
+                base_rate,
+                law: DampingLaw {
+                    rate,
+                    drive,
+                    gate: None,
+                },
+            }
+        }
+
+        /// The rate at `point` on a field of magnitude `field` at `time`.
+        fn at(self, point: Point2, field: f64, time: f64) -> f64 {
+            match self {
+                Self::Constant(rate) => rate,
+                Self::Rising(rate) => rate * (1.0 + 0.5 * point.x),
+                Self::Driven { rate, depth, hz } => {
+                    rate * (1.0 + depth * (std::f64::consts::TAU * hz * time).cos())
+                }
+                Self::VanDerPol { rate, threshold } => rate * ((field / threshold).powi(2) - 1.0),
+            }
+        }
+
+        /// Whether the channel can put energy in: what it moves is gain.
+        fn active(self) -> bool {
+            matches!(self, Self::VanDerPol { .. })
+        }
+    }
+
+    /// A drive on a constitutive row, as authored and as the oracle reads it:
+    /// the row's coefficient is multiplied by `m(x, t)`.
+    #[derive(Clone, Copy, Debug)]
+    enum RowDrive {
+        /// `1 + depth cos θ`, `θ = 2πνt + φ`.
+        Pump { depth: f64, hz: f64, phase: f64 },
+        /// `1 + depth tanh(σ cos θ) / tanh σ`.
+        Crystal {
+            depth: f64,
+            hz: f64,
+            phase: f64,
+            sharpness: f64,
+        },
+        /// `1 + depth cos(θ − q·x)`, `q` of magnitude `wavenumber` along
+        /// `angle`.
+        Travelling {
+            depth: f64,
+            hz: f64,
+            phase: f64,
+            wavenumber: f64,
+            angle: f64,
+        },
+    }
+
+    impl RowDrive {
+        fn drive(self) -> TimeDrive {
+            let constant = ScalarField::constant;
+            match self {
+                Self::Pump { depth, hz, phase } => TimeDrive::ParametricPump {
+                    depth: constant(depth),
+                    frequency_hz: constant(hz),
+                    phase_radians: constant(phase),
+                },
+                Self::Crystal {
+                    depth,
+                    hz,
+                    phase,
+                    sharpness,
+                } => TimeDrive::TimeCrystal {
+                    depth: constant(depth),
+                    frequency_hz: constant(hz),
+                    phase_radians: constant(phase),
+                    sharpness: constant(sharpness),
+                },
+                Self::Travelling {
+                    depth,
+                    hz,
+                    phase,
+                    wavenumber,
+                    angle,
+                } => TimeDrive::TravellingModulation {
+                    depth: constant(depth),
+                    frequency_hz: constant(hz),
+                    phase_radians: constant(phase),
+                    wavenumber: constant(wavenumber),
+                    angle_radians: constant(angle),
+                },
+            }
+        }
+
+        /// The factor `m` and its rate `∂m/∂t` at `point` and `time`.
+        fn factor_and_rate(self, point: Point2, time: f64) -> (f64, f64) {
+            let omega = |hz: f64| std::f64::consts::TAU * hz;
+            match self {
+                Self::Pump { depth, hz, phase } => {
+                    let angle = omega(hz) * time + phase;
+                    (1.0 + depth * angle.cos(), -depth * omega(hz) * angle.sin())
+                }
+                Self::Crystal {
+                    depth,
+                    hz,
+                    phase,
+                    sharpness,
+                } => {
+                    let angle = omega(hz) * time + phase;
+                    let level = (sharpness * angle.cos()).tanh();
+                    let scale = depth / sharpness.tanh();
+                    (
+                        1.0 + scale * level,
+                        -scale * (1.0 - level * level) * sharpness * angle.sin() * omega(hz),
+                    )
+                }
+                Self::Travelling {
+                    depth,
+                    hz,
+                    phase,
+                    wavenumber,
+                    angle,
+                } => {
+                    let along = point.x * angle.cos() + point.y * angle.sin();
+                    let angle = omega(hz) * time - wavenumber * along + phase;
+                    (1.0 + depth * angle.cos(), -depth * omega(hz) * angle.sin())
+                }
+            }
+        }
+    }
+
+    /// One PH-17 configuration of PH-01's box: what its material and scene
+    /// carry beyond the plain medium.
+    #[derive(Clone, Copy, Debug)]
+    struct Ledgered {
+        name: &'static str,
+        physics: PhysicsModel,
+        electric: Option<LossRate>,
+        magnetic: Option<LossRate>,
+        mass: Option<RowDrive>,
+        stiffness: Option<RowDrive>,
+        /// A harmonic volume source over the box, `(amplitude, hz)`, on the
+        /// profile `1 − x²/4`.
+        source: Option<(f64, f64)>,
+        /// A thin gap across the box, at this stiffness ratio.
+        gap: Option<f64>,
+        /// Kerr on the density row, `1 + χ₂ f²`.
+        kerr: Option<f64>,
+        /// Klein-Gordon's restoring force at this cutoff `ω₀`.
+        restoring: Option<f64>,
+    }
+
+    impl Ledgered {
+        const fn plain(name: &'static str, physics: PhysicsModel) -> Self {
+            Self {
+                name,
+                physics,
+                electric: None,
+                magnetic: None,
+                mass: None,
+                stiffness: None,
+                source: None,
+                gap: None,
+                kerr: None,
+                restoring: None,
+            }
+        }
+    }
+
+    const LEDGER_TM: PhysicsModel = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+    const LEDGER_TE: PhysicsModel = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Te,
+    };
+
+    /// Where each physical field lives on the canonical core, from the
+    /// physics: TM's electric field is the nodal scalar `E_z` and its
+    /// magnetic field the in-plane vector; TE is the other way round, and
+    /// Mechanical runs on TE's core with its velocity in the magnetic place.
+    /// The density row (`ε`, `ρ`) holds the electric energy in the EM skins
+    /// and the kinetic energy in Mechanical.
+    fn electric_is_primary(physics: PhysicsModel) -> bool {
+        physics == LEDGER_TM
+    }
+
+    fn density_row_is_primary(physics: PhysicsModel) -> bool {
+        physics != LEDGER_TE
+    }
+
+    /// PH-01's 2 × 1.4 box of PH-01's medium in `config`'s skin, every side
+    /// reflecting, with what `config` adds, meshed at `edge` on the
+    /// application's path. The scene's point source is off.
+    fn ledger_box(config: &Ledgered, edge: f64) -> Arc<crate::topology_runtime::PreparedTopology> {
+        prepare(&ledger_document(config), edge)
+    }
+
+    fn ledger_document(config: &Ledgered) -> TopologyDocument {
+        let medium = BoxMedium::ph01(config.physics);
+        let mut builder = Builder::new();
+        builder.scene.physics = config.physics;
+        builder.scene.geometry.domain = DomainRect {
+            min_x: -1.0,
+            max_x: 1.0,
+            min_y: -0.7,
+            max_y: 0.7,
+        };
+        builder.scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        let material = &mut builder.scene.materials[0];
+        material.mass_density = ScalarField::constant(medium.mass);
+        material.stiffness = ScalarField::constant(medium.stiffness);
+        material.electric_loss = config.electric.map(LossRate::channel);
+        material.magnetic_loss = config.magnetic.map(LossRate::channel);
+        if let Some(drive) = config.mass {
+            material.mass_law.drive = drive.drive();
+        }
+        if let Some(drive) = config.stiffness {
+            material.stiffness_law.drive = drive.drive();
+        }
+        if let Some(chi2) = config.kerr {
+            material.mass_law.field = FieldLaw::Polynomial {
+                chi1: ScalarField::constant(0.0),
+                chi2: ScalarField::constant(chi2),
+                amplitude_bound: Some(ScalarField::constant(4.0)),
+            };
+        }
+        if let Some(omega0) = config.restoring {
+            material.restoring = RestoringLaw::KleinGordon {
+                omega0: ScalarField::constant(omega0),
+            };
+        }
+        if let Some((amplitude, hz)) = config.source {
+            let region = builder.scene.regions[0].id;
+            builder.scene.volume_sources.push(VolumeSource {
+                region,
+                enabled: true,
+                profile: ScalarField::formula("1 - x * x / 4").unwrap(),
+                parameters: vec![],
+                signal: TimeSignal::harmonic(0.0, amplitude, hz, 0.0),
+            });
+        }
+        if let Some(stiffness_ratio) = config.gap {
+            let spline =
+                OpenCubicSpline::polyline(vec![Point2::new(-0.6, 0.1), Point2::new(0.6, 0.1)])
+                    .unwrap();
+            let gap = SpanBehavior::Separated {
+                left: FaceBoundaryCondition::Reflecting,
+                right: FaceBoundaryCondition::Reflecting,
+                coupling: InternalBoundaryCoupling::ThinGap { stiffness_ratio },
+            };
+            let behaviors = vec![gap; spline.intervals().len()];
+            builder.open_curve(spline, &behaviors);
+        }
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        document
+    }
+
+    /// The modes PH-17 starts from, with both `Q` and `b` nonzero.
+    const LEDGER_MODES: [(BoxMode, f64); 3] = [
+        (BoxMode::ph01(1, 0), 1.0),
+        (BoxMode::ph01(0, 1), 0.6),
+        (BoxMode::ph01(1, 2), 0.4),
+    ];
+
+    /// What a run's state holds at one instant, as the oracle reads it.
+    struct LedgerInstant {
+        time: f64,
+        energy: f64,
+        primary: Vec<f64>,
+        field: Vec<f64>,
+        flux: Vec<Point2>,
+        vector: Vec<Point2>,
+        jumps: Vec<f64>,
+    }
+
+    /// Energy by channel over a run, or its rate at an instant: what the
+    /// source, the pumps and a gain put in, and what each loss takes out,
+    /// each positive in its own direction.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct Ledger {
+        source: f64,
+        pump: f64,
+        gain: f64,
+        primary_loss: f64,
+        complementary_loss: f64,
+    }
+
+    impl Ledger {
+        fn net(self) -> f64 {
+            self.source + self.pump + self.gain - self.primary_loss - self.complementary_loss
+        }
+
+        fn lanes(self) -> [(&'static str, f64); 5] {
+            [
+                ("source", self.source),
+                ("pump", self.pump),
+                ("gain", self.gain),
+                ("primary loss", self.primary_loss),
+                ("complementary loss", self.complementary_loss),
+            ]
+        }
+
+        fn add_scaled(&mut self, other: Self, scale: f64) {
+            self.source += scale * other.source;
+            self.pump += scale * other.pump;
+            self.gain += scale * other.gain;
+            self.primary_loss += scale * other.primary_loss;
+            self.complementary_loss += scale * other.complementary_loss;
+        }
+    }
+
+    /// A PH-17 run on whichever path the application takes the generation
+    /// on: the fixed one for a linear, time-invariant medium, the
+    /// time-driven one otherwise.
+    enum LedgerRun<'a> {
+        Fixed(&'a CanonicalWaveOperator, CanonicalWaveState),
+        Driven(
+            &'a CanonicalTemporalWaveOperator,
+            CanonicalTemporalWaveState,
+        ),
+    }
+
+    impl<'a> LedgerRun<'a> {
+        fn new(
+            prepared: &'a crate::topology_runtime::PreparedTopology,
+            physics: PhysicsModel,
+            integrator: CanonicalIntegrator,
+            dt: f64,
+        ) -> Self {
+            let fixed = mode_state(
+                prepared,
+                BoxMedium::ph01(physics),
+                &LEDGER_MODES,
+                0.0,
+                integrator,
+                dt,
+            );
+            match prepared.canonical_temporal_operator.as_deref() {
+                None => Self::Fixed(&prepared.canonical_operator, fixed),
+                Some(operator) => Self::Driven(
+                    operator,
+                    CanonicalTemporalWaveState::new(
+                        operator,
+                        dt,
+                        fixed.primary_flux().to_vec(),
+                        fixed.complementary_flux().to_vec(),
+                    )
+                    .unwrap()
+                    .with_integrator(integrator),
+                ),
+            }
+        }
+
+        /// Steps once and returns the solver's own ledger for the step.
+        fn step(&mut self, forcing: &CanonicalForcing) -> Ledger {
+            match self {
+                Self::Fixed(operator, state) => {
+                    let step = state.step_with_forcing(operator, forcing).unwrap();
+                    assert_eq!(step.prescribed_exchange, 0.0);
+                    assert_eq!(step.boundary_loss, 0.0);
+                    Ledger {
+                        source: step.source_work,
+                        primary_loss: step.primary_loss,
+                        complementary_loss: step.complementary_loss,
+                        ..Ledger::default()
+                    }
+                }
+                Self::Driven(operator, state) => {
+                    let step = state.step_with_forcing(operator, forcing).unwrap();
+                    assert_eq!(step.prescribed_exchange, 0.0);
+                    assert_eq!(step.boundary_loss, 0.0);
+                    assert_eq!(step.short_wave_loss, 0.0);
+                    Ledger {
+                        source: step.source_work,
+                        pump: step.temporal_work,
+                        gain: step.active_gain,
+                        primary_loss: step.primary_loss,
+                        complementary_loss: step.complementary_loss,
+                    }
+                }
+            }
+        }
+
+        fn instant(&self) -> LedgerInstant {
+            match self {
+                Self::Fixed(operator, state) => LedgerInstant {
+                    time: state.time(),
+                    energy: state.energy(operator).unwrap(),
+                    primary: state.primary_flux().to_vec(),
+                    field: state.primary_field(operator).unwrap(),
+                    flux: state.complementary_flux().to_vec(),
+                    vector: state.complementary_field(operator).unwrap(),
+                    jumps: match state.auxiliaries() {
+                        CanonicalAuxiliaryState::Linear(auxiliaries) => {
+                            auxiliaries.thin_gap_jump().to_vec()
+                        }
+                        _ => Vec::new(),
+                    },
+                },
+                Self::Driven(operator, state) => {
+                    let time = state.time();
+                    LedgerInstant {
+                        time,
+                        energy: state.energy(operator).unwrap(),
+                        primary: state.primary_flux().to_vec(),
+                        field: operator
+                            .primary_field_at(state.primary_flux(), time, state.runtime())
+                            .unwrap(),
+                        flux: state.complementary_flux().to_vec(),
+                        vector: operator
+                            .complementary_field_at(
+                                state.complementary_flux(),
+                                time,
+                                state.runtime(),
+                            )
+                            .unwrap(),
+                        jumps: state.thin_gap_jump().to_vec(),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Each channel's power at `instant`, from `config`'s authored laws on
+    /// the state's own fields: a flux-rate loss `γ` on a flux takes
+    /// `γ · flux · field`, a drive `m(t)` on the coefficient an energy
+    /// `flux · field / 2` sits over moves it at `−(∂m/∂t)/m` of itself, and a
+    /// source puts its nodal rate times the field in. A harmonic source's
+    /// signal is the version-22 acceleration: the rate it drives is its
+    /// integral from the generation's start.
+    fn ledger_powers(
+        config: &Ledgered,
+        prepared: &crate::topology_runtime::PreparedTopology,
+        instant: &LedgerInstant,
+    ) -> Ledger {
+        let operator = &prepared.canonical_operator;
+        let time = instant.time;
+        let (primary_rate, complementary_rate) = if electric_is_primary(config.physics) {
+            (config.electric, config.magnetic)
+        } else {
+            (config.magnetic, config.electric)
+        };
+        let (primary_drive, complementary_drive) = if density_row_is_primary(config.physics) {
+            (config.mass, config.stiffness)
+        } else {
+            (config.stiffness, config.mass)
+        };
+        let mut powers = Ledger::default();
+        let mut lose = |rate: LossRate, power: f64, primary: bool| {
+            if rate.active() {
+                powers.gain -= power;
+            } else if primary {
+                powers.primary_loss += power;
+            } else {
+                powers.complementary_loss += power;
+            }
+        };
+        let mut pump = 0.0;
+        for (node, point) in operator.node_points().iter().enumerate() {
+            let product = instant.primary[node] * instant.field[node];
+            if let Some(rate) = primary_rate {
+                let field = instant.field[node].abs();
+                lose(rate, rate.at(*point, field, time) * product, true);
+            }
+            if let Some(drive) = primary_drive {
+                let (factor, rate) = drive.factor_and_rate(*point, time);
+                pump -= rate / factor * 0.5 * product;
+            }
+        }
+        for (sample, (flux, vector)) in operator
+            .constitutive_samples()
+            .iter()
+            .zip(instant.flux.iter().zip(&instant.vector))
+        {
+            let product = sample.integration_weight * flux.dot(*vector);
+            if let Some(rate) = complementary_rate {
+                lose(
+                    rate,
+                    rate.at(sample.point, vector.norm(), time) * product,
+                    false,
+                );
+            }
+            if let Some(drive) = complementary_drive {
+                let (factor, rate) = drive.factor_and_rate(sample.point, time);
+                pump -= rate / factor * 0.5 * product;
+            }
+        }
+        powers.pump = pump;
+        if let Some((amplitude, hz)) = config.source {
+            let omega = std::f64::consts::TAU * hz;
+            let rate = amplitude / omega * (1.0 - (omega * time).cos());
+            for source in prepared.canonical_forcing.sources() {
+                powers.source += rate
+                    * source
+                        .weights()
+                        .iter()
+                        .zip(&instant.field)
+                        .map(|(weight, field)| weight * field)
+                        .sum::<f64>();
+            }
+        }
+        powers
+    }
+
+    /// One run of a PH-17 configuration at one step.
+    struct LedgerLevel {
+        dt: f64,
+        /// The stored energy at the start.
+        start: f64,
+        /// The stored energy's change less every channel's independent
+        /// integral.
+        residual: f64,
+        /// The solver's ledger over the run.
+        lanes: Ledger,
+        /// The oracle's integral of each channel's power, by the trapezoid
+        /// over the run's own states.
+        oracle: Ledger,
+        /// Each gap sample's jump against the trapezoid of the field's
+        /// difference across it: the largest gap over the largest jump the
+        /// run reached.
+        jump_error: f64,
+        /// The stored energy at the end.
+        end: f64,
+        /// The stored energy's largest departure from its start.
+        excursion: f64,
+    }
+
+    fn ledger_level(
+        config: &Ledgered,
+        prepared: &crate::topology_runtime::PreparedTopology,
+        integrator: CanonicalIntegrator,
+        dt: f64,
+        duration: f64,
+    ) -> LedgerLevel {
+        let mut run = LedgerRun::new(prepared, config.physics, integrator, dt);
+        let steps = (duration / dt).round() as usize;
+        let forcing = &prepared.canonical_forcing;
+        let gaps = prepared.canonical_operator.thin_gap_samples();
+        let mut before = run.instant();
+        let start = before.energy;
+        let first_jumps = before.jumps.clone();
+        let mut integrated_jumps = vec![0.0; gaps.len()];
+        let mut powers_before = ledger_powers(config, prepared, &before);
+        let mut lanes = Ledger::default();
+        let mut oracle = Ledger::default();
+        let mut excursion = 0.0_f64;
+        let mut largest_jump = 0.0_f64;
+        for _ in 0..steps {
+            lanes.add_scaled(run.step(forcing), 1.0);
+            let now = run.instant();
+            let powers_now = ledger_powers(config, prepared, &now);
+            oracle.add_scaled(powers_before, 0.5 * dt);
+            oracle.add_scaled(powers_now, 0.5 * dt);
+            for (integral, gap) in integrated_jumps.iter_mut().zip(gaps) {
+                let difference = |instant: &LedgerInstant| {
+                    instant.field[gap.left_node as usize] - instant.field[gap.right_node as usize]
+                };
+                *integral += 0.5 * dt * (difference(&before) + difference(&now));
+            }
+            excursion = excursion.max((now.energy - start).abs());
+            largest_jump = now
+                .jumps
+                .iter()
+                .fold(largest_jump, |largest, jump| largest.max(jump.abs()));
+            before = now;
+            powers_before = powers_now;
+        }
+        let jump_error = before
+            .jumps
+            .iter()
+            .zip(&first_jumps)
+            .zip(&integrated_jumps)
+            .fold(0.0_f64, |error, ((last, first), integral)| {
+                error.max((last - first - integral).abs())
+            })
+            / largest_jump.max(f64::MIN_POSITIVE);
+        LedgerLevel {
+            dt,
+            start,
+            residual: before.energy - start - oracle.net(),
+            lanes,
+            oracle,
+            jump_error,
+            end: before.energy,
+            excursion,
+        }
+    }
+
+    /// Values as `1.234e-5, ...`, for the reports.
+    fn scientific(values: &[f64]) -> String {
+        values
+            .iter()
+            .map(|value| format!("{value:.3e}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The order a quantity falls at between two steps a factor two apart.
+    fn halving_order(coarse: f64, fine: f64) -> f64 {
+        (coarse.abs() / fine.abs()).log2()
+    }
+
+    /// Runs `config` for `duration` at the production step, half and a
+    /// quarter of it, and reports what each level's ledger and residual are.
+    fn ledger_study(
+        config: &Ledgered,
+        integrator: CanonicalIntegrator,
+        edge: f64,
+        duration: f64,
+    ) -> Vec<LedgerLevel> {
+        let prepared = ledger_box(config, edge);
+        // The production step is the default integrator's; another takes its
+        // own share of the same ceiling.
+        let production = prepared.recommended_time_step() * integrator.recommended()
+            / CanonicalIntegrator::default().recommended();
+        let levels = [1.0, 0.5, 0.25]
+            .map(|refinement| {
+                let steps = (duration / (production * refinement)).ceil();
+                ledger_level(config, &prepared, integrator, duration / steps, duration)
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        for level in &levels {
+            let lanes = level
+                .lanes
+                .lanes()
+                .iter()
+                .zip(level.oracle.lanes())
+                .filter(|((_, lane), (_, oracle))| *lane != 0.0 || *oracle != 0.0)
+                .map(|((name, lane), (_, oracle))| {
+                    format!(
+                        "{name} {lane:.4e} off {:.2e}",
+                        (lane - oracle) / level.start
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "{:?} {} dt {:.3e}: residual {:.3e} of {:.4e}; {lanes}; jumps {:.2e}",
+                config.physics,
+                config.name,
+                level.dt,
+                level.residual / level.start,
+                level.start,
+                level.jump_error,
+            );
+        }
+        levels
+    }
+
+    /// The configurations every channel is read in, alone and together.
+    fn ledger_configurations() -> Vec<Ledgered> {
+        let mut configurations = Vec::new();
+        for physics in [PhysicsModel::Mechanical, LEDGER_TM, LEDGER_TE] {
+            let plain = |name| Ledgered::plain(name, physics);
+            configurations.extend([
+                Ledgered {
+                    electric: Some(LossRate::Constant(0.3)),
+                    ..plain("electric loss")
+                },
+                Ledgered {
+                    magnetic: Some(LossRate::Constant(0.2)),
+                    ..plain("magnetic loss")
+                },
+                Ledgered {
+                    electric: Some(LossRate::Rising(0.3)),
+                    magnetic: Some(LossRate::Rising(0.2)),
+                    ..plain("rising loss")
+                },
+                Ledgered {
+                    mass: Some(RowDrive::Pump {
+                        depth: 0.2,
+                        hz: 0.7,
+                        phase: 0.3,
+                    }),
+                    ..plain("pumped density")
+                },
+                Ledgered {
+                    stiffness: Some(RowDrive::Pump {
+                        depth: 0.2,
+                        hz: 0.9,
+                        phase: 0.0,
+                    }),
+                    ..plain("pumped stiffness")
+                },
+                Ledgered {
+                    source: Some((1.5, 0.6)),
+                    ..plain("source")
+                },
+                Ledgered {
+                    electric: Some(LossRate::Constant(0.3)),
+                    magnetic: Some(LossRate::Constant(0.2)),
+                    kerr: Some(0.5),
+                    ..plain("lossy Kerr")
+                },
+                Ledgered {
+                    magnetic: Some(LossRate::Driven {
+                        rate: 0.3,
+                        depth: 0.8,
+                        hz: 0.8,
+                    }),
+                    ..plain("driven loss")
+                },
+                Ledgered {
+                    mass: Some(RowDrive::Crystal {
+                        depth: 0.15,
+                        hz: 0.5,
+                        phase: 0.4,
+                        sharpness: 3.0,
+                    }),
+                    ..plain("time crystal")
+                },
+                Ledgered {
+                    stiffness: Some(RowDrive::Travelling {
+                        depth: 0.15,
+                        hz: 0.6,
+                        phase: 0.2,
+                        wavenumber: 2.0,
+                        angle: 0.5,
+                    }),
+                    ..plain("travelling modulation")
+                },
+                Ledgered {
+                    gap: Some(40.0),
+                    ..plain("gap")
+                },
+                Ledgered {
+                    electric: Some(LossRate::Constant(0.3)),
+                    magnetic: Some(LossRate::Rising(0.2)),
+                    mass: Some(RowDrive::Pump {
+                        depth: 0.2,
+                        hz: 0.7,
+                        phase: 0.3,
+                    }),
+                    source: Some((1.5, 0.6)),
+                    gap: Some(40.0),
+                    ..plain("everything")
+                },
+            ]);
+            // Above the threshold the rate reaches `γ (u²/f₀² − 1)`, 24 times
+            // the base on a unit field at 0.2: a base of 0.1 keeps it in the
+            // step's asymptotic range at the production step.
+            let primary_gain = |name, rate, threshold| {
+                let gain = Some(LossRate::VanDerPol { rate, threshold });
+                if electric_is_primary(physics) {
+                    Ledgered {
+                        electric: gain,
+                        ..plain(name)
+                    }
+                } else {
+                    Ledgered {
+                        magnetic: gain,
+                        ..plain(name)
+                    }
+                }
+            };
+            configurations.extend([
+                primary_gain("van der Pol below", 0.3, 3.0),
+                primary_gain("van der Pol above", 0.1, 0.2),
+            ]);
+        }
+        configurations
+    }
+
+    /// The share of the starting energy each level's residual and each lane's
+    /// distance from its channel may keep at the quarter step.
+    const LEDGER_BOUND: f64 = 2.0e-4;
+
+    /// The order the finest pair of levels must show, or the value it must
+    /// stand under as roundoff: a lane the solver books by the oracle's own
+    /// quadrature meets it there.
+    fn second_order(what: &str, values: [f64; 3], start: f64) {
+        let roundoff = 1.0e-12 * start;
+        if values[2].abs() < roundoff {
+            return;
+        }
+        let order = halving_order(values[1], values[2]);
+        assert!(
+            order > 1.7,
+            "{what}: {:.3e}, {:.3e}, {:.3e} falls at order {order:.2}",
+            values[0],
+            values[1],
+            values[2]
+        );
+        assert!(
+            values[2].abs() < LEDGER_BOUND * start,
+            "{what}: {:.3e} of {start:.3e} at the quarter step",
+            values[2]
+        );
+    }
+
+    /// A passive or driven configuration: its residual and each lane fall at
+    /// second order under the bound.
+    fn hold_ledger(config: &Ledgered, levels: &[LedgerLevel]) {
+        let what = format!("{:?} {}", config.physics, config.name);
+        let start = levels[0].start;
+        second_order(
+            &format!("{what} residual"),
+            [0, 1, 2].map(|index| levels[index].residual),
+            start,
+        );
+        for lane in 0..5 {
+            let (name, _) = levels[0].lanes.lanes()[lane];
+            second_order(
+                &format!("{what} {name}"),
+                [0, 1, 2].map(|index| {
+                    levels[index].lanes.lanes()[lane].1 - levels[index].oracle.lanes()[lane].1
+                }),
+                start,
+            );
+        }
+    }
+
+    /// Van der Pol: the gain lane has the law's sign - gain below the
+    /// threshold, loss above it - and what the lane leaves of the oracle's
+    /// gain converges to a dissipation, the self-oscillating elements'
+    /// short-wave viscosity, which the oracle leaves out.
+    fn hold_active(config: &Ledgered, levels: &[LedgerLevel], below: bool) {
+        let what = format!("{:?} {}", config.physics, config.name);
+        for level in levels {
+            assert_eq!(level.lanes.gain > 0.0, below, "{what}: {:?}", level.lanes);
+        }
+        let residuals = [0, 1, 2].map(|index| levels[index].residual);
+        let order = halving_order(residuals[1] - residuals[0], residuals[2] - residuals[1]);
+        let limit = residuals[2] + (residuals[2] - residuals[1]) / 3.0;
+        eprintln!(
+            "{what}: the viscosity takes {:.3e} of the energy",
+            limit / levels[0].start
+        );
+        assert!(
+            order > 1.7,
+            "{what}: residuals {} settle at order {order:.2}",
+            scientific(&residuals)
+        );
+        assert!(limit < 0.0, "{what}: the viscosity cannot add {limit:.3e}");
+    }
+
+    /// A gap's jumps are the time integral of the field's difference across
+    /// it, and its springs carry the authored ratio of the wave stiffness
+    /// beside it - `k` in Mechanical, `1/μ` in TM and `1/ε` in TE - over the
+    /// gap's length, lumped by Simpson's weights on each quadratic edge, less
+    /// the lumps at its two tips, where the sides meet and nothing opens.
+    fn hold_gap(config: &Ledgered, levels: &[LedgerLevel], ratio: f64) {
+        let what = format!("{:?} {}", config.physics, config.name);
+        let errors = [0, 1, 2].map(|index| levels[index].jump_error);
+        let order = halving_order(errors[1], errors[2]);
+        assert!(
+            order > 1.7,
+            "{what}: jumps {} fall at order {order:.2}",
+            scientific(&errors)
+        );
+        let medium = BoxMedium::ph01(config.physics);
+        let wave_stiffness = match config.physics {
+            PhysicsModel::Mechanical => medium.stiffness,
+            physics if physics == LEDGER_TM => 1.0 / medium.stiffness,
+            _ => 1.0 / medium.mass,
+        };
+        let prepared = ledger_box(config, 0.25);
+        let operator = &prepared.canonical_operator;
+        let samples = operator.thin_gap_samples();
+        let springs = samples.iter().map(|sample| sample.stiffness).sum::<f64>();
+        // The gap runs straight from x = -0.6 to 0.6; the trace nodes nearest
+        // its tips are the midpoints of its end edges.
+        let along = samples
+            .iter()
+            .map(|sample| operator.node_points()[sample.left_node as usize].x);
+        let first = 2.0 * (along.clone().fold(f64::INFINITY, f64::min) + 0.6);
+        let last = 2.0 * (0.6 - along.fold(f64::NEG_INFINITY, f64::max));
+        let expected = ratio * wave_stiffness * (1.2 - (first + last) / 6.0);
+        assert!(
+            (springs / expected - 1.0).abs() < 1.0e-9,
+            "{what}: springs {springs} against {expected}"
+        );
+    }
+
+    /// PH-17: every channel's lane against the power its authored law gives
+    /// on the run's own states, alone and together, in each skin, at the
+    /// production step, its half and its quarter.
+    #[test]
+    fn every_channel_books_what_its_law_puts_in_or_takes_out() {
+        for config in ledger_configurations() {
+            let levels = ledger_study(&config, CanonicalIntegrator::default(), 0.25, 3.0);
+            match config.electric.or(config.magnetic) {
+                Some(LossRate::VanDerPol { threshold, .. }) => {
+                    hold_active(&config, &levels, threshold > 1.0)
+                }
+                _ => hold_ledger(&config, &levels),
+            }
+            if let Some(ratio) = config.gap {
+                hold_gap(&config, &levels, ratio);
+            }
+        }
+    }
+
+    /// PH-17's constant loss in closed form: with the electric and magnetic
+    /// rates equal, the losses are `−γ` times the identity in
+    /// energy-normalized coordinates and the coupling is skew, so every
+    /// field's energy decays as `e^{−2γt}`, whatever modes it holds.
+    #[test]
+    fn matched_loss_decays_every_field_as_its_closed_form() {
+        let rate = 0.4;
+        for physics in [PhysicsModel::Mechanical, LEDGER_TM, LEDGER_TE] {
+            let config = Ledgered {
+                electric: Some(LossRate::Constant(rate)),
+                magnetic: Some(LossRate::Constant(rate)),
+                ..Ledgered::plain("matched loss", physics)
+            };
+            let levels = ledger_study(&config, CanonicalIntegrator::default(), 0.25, 3.0);
+            let exact = (-2.0 * rate * 3.0_f64).exp();
+            let errors = [0, 1, 2].map(|index| levels[index].end / levels[index].start - exact);
+            eprintln!(
+                "{physics:?} matched loss: E(T)/E(0) off e^(-2γT) by {}",
+                scientific(&errors)
+            );
+            second_order(&format!("{physics:?} matched loss"), errors, 1.0);
+        }
+    }
+
+    /// PH-17's conservative rows: a linear medium, Kerr and Klein-Gordon keep
+    /// their stored energy, its excursion falling four times over the
+    /// halving under either integrator: the fourth-order step is fourth order
+    /// in phase, and its energy breathes about its conserved store at the
+    /// leapfrog's second order (`docs/spikes/funfern-fourth-order-step.md`).
+    #[test]
+    fn conservative_media_keep_their_energy_to_their_integrators_order() {
+        let configurations = [
+            Ledgered::plain("linear", PhysicsModel::Mechanical),
+            Ledgered {
+                kerr: Some(0.5),
+                ..Ledgered::plain("Kerr", LEDGER_TM)
+            },
+            Ledgered {
+                restoring: Some(1.5),
+                ..Ledgered::plain("Klein-Gordon", LEDGER_TE)
+            },
+        ];
+        for config in configurations {
+            for integrator in [
+                CanonicalIntegrator::Leapfrog,
+                CanonicalIntegrator::FourthOrder,
+            ] {
+                let levels = ledger_study(&config, integrator, 0.25, 3.0);
+                let excursions =
+                    [0, 1, 2].map(|index| levels[index].excursion / levels[index].start);
+                let order = halving_order(excursions[1], excursions[2]);
+                eprintln!(
+                    "{:?} {} {integrator:?}: excursion {}, order {order:.2}",
+                    config.physics,
+                    config.name,
+                    scientific(&excursions)
+                );
+                assert!(
+                    order > 1.7,
+                    "{:?} {} {integrator:?}: {} at order {order:.2}",
+                    config.physics,
+                    config.name,
+                    scientific(&excursions)
+                );
+            }
+        }
+    }
+
+    /// One remeshed run: the composition on edge 0.25 for half the run, then
+    /// handed to the same scene meshed at 0.18 as the device hands it,
+    /// component totals where the runtime transfer puts them, and on. Returns
+    /// the starting energy, the residual of the whole run against the
+    /// oracle's channels and the handoff's booked edit, and that edit.
+    fn remesh_level(config: &Ledgered, refinement: f64, duration: f64) -> (f64, f64, f64) {
+        let document = ledger_document(config);
+        let mut runtime = TopologyRuntime::default();
+        let (coarse, _) = prepare_on(&mut runtime, &document, 1, 0.25);
+        let (fine, maps) = prepare_on(&mut runtime, &document, 2, 0.18);
+        let maps = maps.expect("a remesh carries its maps");
+        let production = coarse
+            .recommended_time_step()
+            .min(fine.recommended_time_step());
+        let steps = (duration / (production * refinement)).ceil() as usize;
+        let dt = duration / steps as f64;
+        let mut lanes = Ledger::default();
+        let mut oracle = Ledger::default();
+        let mut stage = |run: &mut LedgerRun<'_>,
+                         prepared: &crate::topology_runtime::PreparedTopology,
+                         count: usize| {
+            let mut before = run.instant();
+            let mut powers_before = ledger_powers(config, prepared, &before);
+            for _ in 0..count {
+                lanes.add_scaled(run.step(&prepared.canonical_forcing), 1.0);
+                let now = run.instant();
+                let powers_now = ledger_powers(config, prepared, &now);
+                oracle.add_scaled(powers_before, 0.5 * dt);
+                oracle.add_scaled(powers_now, 0.5 * dt);
+                before = now;
+                powers_before = powers_now;
+            }
+            before.energy
+        };
+        let mut run = LedgerRun::new(&coarse, config.physics, CanonicalIntegrator::default(), dt);
+        let start = run.instant().energy;
+        stage(&mut run, &coarse, steps / 2);
+        let LedgerRun::Fixed(source, state) = run else {
+            panic!("the remeshed composition runs on the fixed path");
+        };
+        let target = &fine.canonical_operator;
+        let desired = crate::canonical_gpu::CanonicalGpuRuntimeTransfer::from_primary_transfer(
+            source,
+            target,
+            &coarse.canonical_forcing,
+            &fine.canonical_forcing,
+            &maps.primary,
+            [0; 4],
+        )
+        .unwrap()
+        .desired_totals(source, state.primary_flux());
+        let (handed, accounting) = state
+            .handed_over(
+                source,
+                target,
+                &fine.canonical_forcing,
+                CanonicalHandoffMaps {
+                    primary: &maps.primary,
+                    complementary: &maps.complementary,
+                    thin_gap: &maps.thin_gap,
+                    outgoing: &maps.outgoing,
+                },
+                &desired,
+                dt,
+            )
+            .unwrap();
+        assert_eq!(accounting.prescribed_exchange, 0.0);
+        let mut run = LedgerRun::Fixed(target, handed);
+        let end = stage(&mut run, &fine, steps - steps / 2);
+        (
+            start,
+            end - start - oracle.net() - accounting.edit_exchange,
+            accounting.edit_exchange,
+        )
+    }
+
+    /// PH-17's remesh row: a remesh's own change of the stored energy is
+    /// booked as the edit lane, and with it the run's whole ledger closes at
+    /// second order against the oracle's channels on either generation. The
+    /// edit itself is the transfer's error, a small share of the energy.
+    #[test]
+    fn a_remesh_books_its_own_energy_change_and_the_ledger_closes_across_it() {
+        let config = Ledgered {
+            electric: Some(LossRate::Constant(0.3)),
+            magnetic: Some(LossRate::Constant(0.2)),
+            source: Some((1.5, 0.6)),
+            gap: Some(40.0),
+            ..Ledgered::plain("remeshed", PhysicsModel::Mechanical)
+        };
+        let levels = [1.0, 0.5, 0.25].map(|refinement| remesh_level(&config, refinement, 3.0));
+        for (start, residual, edit) in &levels {
+            eprintln!(
+                "remeshed: residual {:.3e}, edit {:.3e}, of {start:.4e}",
+                residual / start,
+                edit / start
+            );
+        }
+        let start = levels[0].0;
+        second_order("remeshed residual", levels.map(|level| level.1), start);
+        for (_, _, edit) in levels {
+            assert!(edit != 0.0 && edit.abs() < 1.0e-2 * start, "edit {edit:e}");
+        }
+    }
 }

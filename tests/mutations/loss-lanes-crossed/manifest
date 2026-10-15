@@ -1,0 +1,4 @@
+about: the fixed path books what its primary loss removes in the complementary lane and the other way round, so the energy still balances while each lane reports the other channel's dissipation
+test: cargo test --release -p funfern-app --lib -- every_channel_books_what_its_law_puts_in_or_takes_out
+expect: loss: .* falls at order
+needs: cpu

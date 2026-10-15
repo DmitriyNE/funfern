@@ -1,0 +1,4 @@
+about: a CPU handoff books no edit exchange, so a remesh's own change of the stored energy goes unrecorded and the run's ledger stops closing across it
+test: cargo test --release -p funfern-app --lib -- a_remesh_books_its_own_energy_change_and_the_ledger_closes_across_it
+expect: remeshed residual: .* falls at order
+needs: cpu

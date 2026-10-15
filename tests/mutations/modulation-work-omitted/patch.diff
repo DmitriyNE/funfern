@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/canonical_temporal.rs b/crates/funfern-core/src/canonical_temporal.rs
+index ed40f64..cfc695a 100644
+--- a/crates/funfern-core/src/canonical_temporal.rs
++++ b/crates/funfern-core/src/canonical_temporal.rs
+@@ -4529,7 +4529,7 @@ impl CanonicalTemporalWaveState {
+         let after = operator.energy_at(&primary, &complementary, end_time, &self.runtime)?
+             + history_energy_of(operator, &gap_jump, &outgoing_z, &integrated);
+         let temporal_work = duration
+-            * (0.5 * complementary_rate_start + primary_rate_middle + 0.5 * complementary_rate_end);
++            * primary_rate_middle;
+         let energy_change = after - before;
+         let accounting = CanonicalTemporalStepAccounting {
+             temporal_work,

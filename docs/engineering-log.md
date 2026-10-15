@@ -24214,3 +24214,70 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-15 — PH-17: the energy ledger against an oracle of its own
+
+- **What it adds.** The solver's ledger was checked against itself: its
+  lanes add up to the energy's change at second order. That cannot see a
+  lane wrong in step with the energy - a loss applied and booked twice, an
+  electric rate on the magnetic field. PH-17's oracle writes each channel's
+  power in the test from the authored law, integrates it by the trapezoid
+  over the run's own states, and never reads the solver's lanes or compiled
+  rates: a flux-rate loss `γ` takes `γ · flux · field`; a drive `m(t)` on
+  the coefficient an energy sits over moves it at `−(∂m/∂t)/m` of itself,
+  the density row holding the electric energy in the EM skins and the
+  kinetic in Mechanical, so TE's sits on the vector; a volume source puts
+  its nodal rate times the field in, a harmonic source's rate being its
+  signal's integral from the generation's start (version 22's
+  acceleration).
+- **Configurations.** PH-01's 2 × 1.4 box at edge 0.25, three modes with
+  `Q` and `b` both nonzero, three seconds at the production step, its half
+  and its quarter, in each skin: electric, magnetic and rising loss, a
+  driven loss, constant loss in a Kerr medium, a pumped density, a pumped
+  stiffness, a time crystal, a travelling modulation, a volume source, a
+  thin gap, all of them together, and van der Pol below and above its
+  threshold. A passive rate that follows the field is gated (C) and does
+  not run, so the field enters the loss only through van der Pol.
+- **Measured.** Every residual and every lane falls four times over each
+  halving: at the quarter step the residual stands at 1.1e-6 to 6.4e-5 of
+  the energy and the lanes within 7.0e-5 of their channels, both held to
+  2e-4. The complementary row's pump lanes match the oracle to roundoff:
+  the solver books them by the same endpoint quadrature.
+- **Found:** a pumped complementary row with its own loss booked its pump
+  work at first order (fixed in 3d561a9, logged above).
+- **Van der Pol** came out 1% short of the oracle's gain below the
+  threshold, at every step: self-oscillating elements carry a short-wave
+  viscosity by design, booked in the gain lane, and the oracle leaves the
+  short-wave stress out. Its row holds the gain's sign and the gap's
+  convergence to a dissipation: 9.3e-3 to 1.0e-2 of the energy below the
+  threshold, 9.3e-4 to 1.1e-3 above, at a base rate of 0.1 there, since 0.3
+  put the rate's `γ dt` at 0.4 at the production step, outside the
+  asymptotic range.
+- **The gap's** jumps are the time integral of the field's difference
+  across it, to second order (5e-3 to 1.4e-2 of the largest jump at the
+  quarter step), and its springs total the authored ratio of the wave
+  stiffness - `k`, `1/μ`, `1/ε` - over its length less the Simpson lumps at
+  its two tips, where the sides meet: 22.4 for 24 over the full length.
+- **Matched loss.** With the two rates equal the loss is `−γ` times the
+  identity in energy-normalized coordinates and every field decays as
+  `e^{−2γt}`: `E(T)/E(0)` met to 6.0e-7 in Mechanical and 1.0e-6 in TM and
+  TE at the quarter step, second order.
+- **Conservative rows.** Linear, Kerr and Klein-Gordon: the energy's
+  excursion falls at order 2.00 under both integrators, 2e-5 at the quarter
+  step. The plan asked the fourth-order step for order 4; its spike measured
+  the energy breathing at the leapfrog's second order about its conserved
+  store (`funfern-fourth-order-step.md`), and that is what holds.
+- **Remesh.** Gap, both losses and a source, edge 0.25 to 0.18 halfway,
+  through the maps the runtime prepares and `handed_over`: the edit lane
+  books 4e-4 to 7e-4 of the energy, and with it the run's ledger closes at
+  -5.8e-5, -2.1e-5 and -5.8e-6.
+- **Tests,** in the gate: `every_channel_books_what_its_law_puts_in_or_takes_out`
+  (27 s), `matched_loss_decays_every_field_as_its_closed_form`,
+  `conservative_media_keep_their_energy_to_their_integrators_order`,
+  `a_remesh_books_its_own_energy_change_and_the_ledger_closes_across_it`.
+  **Mutations:** `loss-lanes-crossed` (the fixed path's loss lanes
+  swapped), `modulation-work-omitted` (the complementary row's pump work
+  dropped), `edit-exchange-dropped`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

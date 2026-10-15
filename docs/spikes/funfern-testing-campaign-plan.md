@@ -426,16 +426,42 @@ three levels, references offline, sweeps as scripts under `experiments/`
 with their reports in `docs/spikes/`.
 
 - **B, physical subsystems:** PH-05 wall passivity across material laws
+  and PH-17 energy accounting, together as stage B1 (section 6a)
   (PH-06 and PH-07 moved to stage A3), PH-08 rectangular radiation as a one-off experiment
   rather than a regression test, since no nonlocal operator is planned,
   PH-09 transient DtN against the Laplace-domain kernel, PH-11 Fresnel,
   PH-12 cylinder scattering, PH-13 thin gaps, PH-14 and PH-15 temporal and
-  modulated materials, PH-16 nonlinear laws, PH-17 energy accounting, PH-18
+  modulated materials, PH-16 nonlinear laws, PH-18
   probes and observables, PH-19 manufactured solutions.
 - **C, invariants and stress:** IV-01 to IV-13, AMR-01 to AMR-04, RT-01 to
   RT-08, the numerical edge cases, long runs and resource lifecycle. The
   metamorphic tests and the real-device fuzzing need none of the reference
   machinery and can start whenever a stage leaves room.
+
+## 6a. Stage B1: energy accounting and wall passivity
+
+**PH-17 and PH-05**, planned together on 2026-10-15. The solver's ledger
+was already checked against itself - its lanes add up to the energy's change
+at second order - which cannot see a lane that is wrong in step with the
+energy, a loss applied and booked twice. Both fixtures hold the ledger to an
+oracle instead: each channel's power written in the test from the authored
+law and integrated over the run's own states, lane by lane, at three steps.
+PH-05 adds the walls: the test assembles the trace's damping and tangential
+stiffness itself, diagonalizes them with its own solver and integrates the
+second-order law's three-state equations from
+`docs/spikes/funfern-boundary-auxiliary-spike.md` on the solver's trace
+field, for the power into the wall, its stored energy and its dissipation,
+beside every medium the wall can meet and near the law's awkward
+frequencies. The short-wave loss stays out of the oracle. A remesh's own
+energy change, which the device books and the CPU did not, comes through a
+CPU handoff built for it (cf9ec40). Then a device half and the long runs.
+
+**PH-17 done on 2026-10-15** (`docs/engineering-log.md`): thirteen
+configurations in each skin, the matched loss's closed-form decay, the
+conservative rows and the remesh row, in the gate. It found a pumped
+complementary row with its own loss booking its pump work at first order
+(fixed in 3d561a9); its mutations `loss-lanes-crossed`,
+`modulation-work-omitted` and `edit-exchange-dropped`.
 
 ## 7. Infrastructure
 
@@ -479,6 +505,10 @@ with their reports in `docs/spikes/`.
   on a circle within their budgets and converge where the discretization
   error stands above the method's floor, the DtN gap reported, every hole
   passive.
+- **B1:** every energy channel's lane meets an oracle written from its law,
+  at second order, in each skin; the walls' power, storage and dissipation
+  meet the law's own equations beside every medium; a remesh's energy is
+  booked and the ledger closes across it, on the CPU and on the device.
 - **B and C:** as the 11 October plan states per fixture, under the three
   rules of section 6.
 
