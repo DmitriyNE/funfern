@@ -24281,3 +24281,44 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-15 — A source on a wall booked its work at first order
+
+- **Found** by PH-05's wall oracle, on a slow source beside the second-order
+  wall: the source lane stood off the trapezoid of `Σ f u` by 2.0e-4, 9.3e-5
+  and 4.6e-5 of the energy at the production step, its half and its
+  quarter, where the wall's own lane and the field's balance were second
+  order. Isolated on PH-01's box in Mechanical with a source over the whole
+  box: 3.6e-3, 1.6e-3 and 7.3e-4 under either wall order, on the fixed path
+  and on a pumped one; 1.1e-3, 2.8e-4 and 7.0e-5 with reflecting sides; and
+  a source kept off the wall, second order beside it.
+- **Cause.** The trapezoid wall step's second kick runs the plain kick, which
+  books the source's work at the midpoint of the flux it starts and ends
+  with, and then the walls' implicit half, which moves the wall's nodes on.
+  At those nodes the source was charged at a field the node never reached,
+  `O(dt²)` a step. The first kick folds the walls' explicit half into the
+  plain kick's update, so it was consistent. The fixed path, the driven path
+  and the device all did the same.
+- **Fix.** The second kick books the source's work to the field the node
+  ends the kick with: at a linear node half the kick's source times the
+  field the walls' half moved it by (`wall_moved_source_work`), at a
+  nonlinear one the discrete gradient across the whole kick in place of the
+  plain kick's. On the device a first-order wall's node has its half in the
+  same kernel, both kick kernels charge the work to its end, and a trace
+  node's solve ends in `boundary_finalize`, which adds the trace's share.
+- **The device suite holds the two together**, not either to the law:
+  `canonical_gpu_temporal_forced` puts a source on every node and holds the
+  device's source lane to the reference's within 1e-4. With the reference
+  fixed and the device not, the first-order wall read 1.6e-4 and the
+  second-order wall 1.6e-4; with both, 6.2e-8 and 3.5e-8. The trace's share
+  is charged before the finalize writes the solve's end into the candidate,
+  while the candidate still holds the plain kick's flux; charged after, it
+  read the end against itself and added nothing.
+- **Test:** `a_source_on_a_wall_books_its_work_at_second_order`, under both
+  wall orders on the fixed path, a pumped medium and a Kerr one; without the
+  fixed path's half it reads 4.7e-4, 2.4e-4 and 1.2e-4, order 1.00, and
+  without the driven path's half it fails there too. **Mutation:**
+  `wall-source-work-before-its-half`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs; the device suite, 88 of 88.

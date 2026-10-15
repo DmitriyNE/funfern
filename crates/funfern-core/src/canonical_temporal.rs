@@ -5694,7 +5694,8 @@ fn trapezoid_forced_second_kick(
 ) -> Result<(f64, f64, f64), WaveError> {
     let base = operator.base();
     let no_rate = vec![0.0; primary.len()];
-    let (source_work, prescribed_exchange) = plain_forced_kick(
+    let entered = primary.to_vec();
+    let (mut source_work, prescribed_exchange) = plain_forced_kick(
         operator,
         primary,
         force,
@@ -5705,6 +5706,7 @@ fn trapezoid_forced_second_kick(
         target_time,
         runtime,
     )?;
+    let kicked = primary.to_vec();
     let mass = operator.primary_mass_at(target_time, runtime)?;
     let nonlinear = if operator.has_field_laws {
         Some(operator.primary_terms_at(target_time, runtime)?.0)
@@ -5767,6 +5769,42 @@ fn trapezoid_forced_second_kick(
         )?;
     }
     validate_finite(primary)?;
+    // The plain kick charged the source at the field it left; the walls'
+    // implicit half then moved their nodes on, and the source works over the
+    // whole kick, to the field the node ends it with: at a linear node half
+    // the kick's source times the field the half moved it by, at a nonlinear
+    // one the discrete gradient across the whole kick in place of the plain
+    // kick's (PH-05, 2026-10-15).
+    for node in 0..primary.len() {
+        if primary[node] == kicked[node] || source[node] == 0.0 {
+            continue;
+        }
+        source_work += match nonlinear.as_deref() {
+            Some(terms)
+                if !ConstitutiveSite::new(&terms[operator.primary_range(node)]).is_linear() =>
+            {
+                let (whole, _) = operator.primary_discrete_gradient(
+                    terms,
+                    node,
+                    entered[node],
+                    primary[node],
+                    runtime,
+                )?;
+                let (plain, _) = operator.primary_discrete_gradient(
+                    terms,
+                    node,
+                    entered[node],
+                    kicked[node],
+                    runtime,
+                )?;
+                duration * source[node] * (whole - plain)
+            }
+            _ => 0.5 * duration * source[node] * (primary[node] - kicked[node]) / mass[node],
+        };
+    }
+    if !source_work.is_finite() {
+        return Err(WaveError::InvalidState);
+    }
     Ok((source_work, prescribed_exchange, 0.0))
 }
 
@@ -10367,6 +10405,124 @@ mod tests {
         OuterBoundaryCondition::FirstOrderOutgoing,
         OuterBoundaryCondition::SecondOrderOutgoing,
     ];
+
+    /// A source on a wall's trace: the trapezoid wall step's second kick
+    /// books the source's work to the field the walls' implicit half leaves,
+    /// not the one the plain kick left, so the source lane meets the
+    /// trapezoid of `Σ f u` over the run's states at second order, under
+    /// either wall, on the fixed path and the driven one, at a linear site and
+    /// a nonlinear one. Charged at the plain kick's field it was first order:
+    /// 3.6e-3 of the energy off over three seconds at the production step
+    /// (PH-05, 2026-10-15).
+    #[test]
+    fn a_source_on_a_wall_books_its_work_at_second_order() {
+        let mut pumped = Scene::default();
+        pumped.materials[0].mass_law.drive = pump(0.25, 1.3, 0.2);
+        let mut nonlinear = Scene::default();
+        nonlinear.materials[0].mass_law.field = kerr(0.8);
+        for condition in WALLS {
+            for (label, scene) in [
+                ("fixed", Scene::default()),
+                ("pumped", pumped.clone()),
+                ("Kerr", nonlinear.clone()),
+            ] {
+                let operator = walled(condition, &scene);
+                let base = operator.base();
+                let mut forcing = CanonicalForcing::none(base);
+                let weights = base
+                    .node_points()
+                    .iter()
+                    .zip(base.primary_mass())
+                    .map(|(point, mass)| mass * (1.0 + 0.3 * point.x))
+                    .collect::<Vec<_>>();
+                forcing
+                    .push_source(
+                        CanonicalSource::direct(
+                            base,
+                            weights,
+                            TimeSignal::harmonic(0.2, 0.9, 1.1, 0.4),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                let target = 0.6;
+                let mut offs = Vec::new();
+                for refinement in [1.0, 0.5, 0.25] {
+                    let steps = (target / (0.4 * operator.maximum_time_step() * refinement)).ceil();
+                    let time_step = target / steps;
+                    let primary = base
+                        .node_points()
+                        .iter()
+                        .zip(base.primary_mass())
+                        .map(|(point, mass)| 0.3 * mass * (1.4 * point.x - 0.9 * point.y).sin())
+                        .collect::<Vec<_>>();
+                    let potential = base
+                        .node_points()
+                        .iter()
+                        .map(|point| 0.2 * (0.8 * point.x + 1.2 * point.y).cos())
+                        .collect::<Vec<_>>();
+                    let complementary = base.compatible_flux(&potential).unwrap();
+                    // Each path's state, stepped, and the source's power on it:
+                    // its nodal rate times the field.
+                    let power = |time: f64, field: &[f64]| {
+                        forcing
+                            .integrated_rate(time)
+                            .unwrap()
+                            .iter()
+                            .zip(field)
+                            .map(|(rate, field)| rate * field)
+                            .sum::<f64>()
+                    };
+                    let (mut lane, mut oracle) = (0.0, 0.0);
+                    if label == "fixed" {
+                        let mut state =
+                            CanonicalWaveState::new(base, time_step, primary, complementary)
+                                .unwrap();
+                        let mut before = power(state.time(), &state.primary_field(base).unwrap());
+                        for _ in 0..steps as usize {
+                            lane += state.step_with_forcing(base, &forcing).unwrap().source_work;
+                            let now = power(state.time(), &state.primary_field(base).unwrap());
+                            oracle += 0.5 * time_step * (before + now);
+                            before = now;
+                        }
+                    } else {
+                        let mut state = CanonicalTemporalWaveState::new(
+                            &operator,
+                            time_step,
+                            primary,
+                            complementary,
+                        )
+                        .unwrap();
+                        let field = |state: &CanonicalTemporalWaveState| {
+                            operator
+                                .primary_field_at(
+                                    state.primary_flux(),
+                                    state.time(),
+                                    state.runtime(),
+                                )
+                                .unwrap()
+                        };
+                        let mut before = power(state.time(), &field(&state));
+                        for _ in 0..steps as usize {
+                            lane += state
+                                .step_with_forcing(&operator, &forcing)
+                                .unwrap()
+                                .source_work;
+                            let now = power(state.time(), &field(&state));
+                            oracle += 0.5 * time_step * (before + now);
+                            before = now;
+                        }
+                    }
+                    offs.push(lane - oracle);
+                }
+                let order = (offs[1].abs() / offs[2].abs()).log2();
+                assert!(
+                    order > 1.7,
+                    "{condition:?} {label}: the source lane stands {offs:?} off, order {order:.2}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_zero_response_on_a_wall_kicks_as_the_linear_wall_does() {

@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -3095,7 +3095,7 @@
+         // the whole kick, to the field the node ends it with. Charged at the
+         // plain kick's alone, a source on a wall was booked at first order
+         // (PH-05, 2026-10-15).
+-        source_work += wall_moved_source_work(&kicked, &self.primary_flux, source, mass, duration);
++        let _ = (&kicked, wall_moved_source_work);
+         Ok((source_work, 0.0, prescribed_exchange))
+     }
+ 

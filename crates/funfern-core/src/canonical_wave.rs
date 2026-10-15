@@ -3048,7 +3048,7 @@ impl CanonicalWaveState {
         operator.validate_primary(force)?;
         operator.validate_primary(source)?;
         let no_rate = vec![0.0; self.primary_flux.len()];
-        let (source_work, prescribed_exchange) = self.plain_kick(
+        let (mut source_work, prescribed_exchange) = self.plain_kick(
             operator,
             force,
             source,
@@ -3057,6 +3057,7 @@ impl CanonicalWaveState {
             forcing,
             target_time,
         )?;
+        let kicked = self.primary_flux.clone();
         let mass = operator.primary_mass();
         let on_trace = operator.trace_flags();
         for (node, flux) in self.primary_flux.iter_mut().enumerate() {
@@ -3089,6 +3090,12 @@ impl CanonicalWaveState {
             self.outgoing_z_mut().copy_from_slice(&outgoing_z);
         }
         operator.validate_primary(&self.primary_flux)?;
+        // The plain kick charged the source at the field it left; the walls'
+        // implicit half then moved their nodes on, and the source works over
+        // the whole kick, to the field the node ends it with. Charged at the
+        // plain kick's alone, a source on a wall was booked at first order
+        // (PH-05, 2026-10-15).
+        source_work += wall_moved_source_work(&kicked, &self.primary_flux, source, mass, duration);
         Ok((source_work, 0.0, prescribed_exchange))
     }
 
@@ -3692,6 +3699,25 @@ pub(crate) fn trapezoid_trace_implicit_half(
     outgoing_z.copy_from_slice(&solution[trace_count..]);
     finite_values(primary_flux)?;
     finite_values(outgoing_z)
+}
+
+/// The source's work over the part of a trapezoid wall step's second kick
+/// that the walls' implicit half takes: at a linear node, half the kick's
+/// source times the field the half moved it by. A node the walls leave alone,
+/// a pin among them, adds nothing.
+pub(crate) fn wall_moved_source_work(
+    kicked: &[f64],
+    ended: &[f64],
+    source: &[f64],
+    mass: &[f64],
+    duration: f64,
+) -> f64 {
+    kicked
+        .iter()
+        .zip(ended)
+        .zip(source.iter().zip(mass))
+        .map(|((kicked, ended), (source, mass))| 0.5 * duration * source * (ended - kicked) / mass)
+        .sum()
 }
 
 /// The trapezoid wall step's loss: the trapezoid of the walls' dissipation

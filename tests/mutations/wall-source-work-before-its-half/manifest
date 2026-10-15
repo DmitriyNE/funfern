@@ -1,0 +1,4 @@
+about: the fixed path's trapezoid wall step books its second kick's source work at the field the plain kick leaves, before the walls' implicit half moves their nodes on, so a source on a wall books its work at first order
+test: cargo test --release -p funfern-core --lib -- a_source_on_a_wall_books_its_work_at_second_order
+expect: the source lane stands .* order
+needs: cpu

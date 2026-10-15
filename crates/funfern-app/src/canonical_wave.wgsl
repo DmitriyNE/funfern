@@ -2565,7 +2565,11 @@ fn kick_trapezoid_node(
         next = kicked / (1.0 + duration * damping * inverse_mass);
     }
     let midpoint = 0.5 * (old + kicked) * inverse_mass;
-    let source_work = duration * midpoint * source;
+    // The source works over the whole kick, to the flux the node ends it
+    // with: a first-order wall's implicit half moves it on after the plain
+    // kick here, and a trace node's solve does in the finalize, which charges
+    // its share there (the reference's `wall_moved_source_work`).
+    let source_work = duration * 0.5 * (old + next) * inverse_mass * source;
     let force_work = duration * midpoint * held_force;
     // The walls' dissipation at this kick's end of the step: the start's
     // field on the first, the end's on the second. A driven pin's is its
@@ -2674,7 +2678,10 @@ fn kick_trapezoid_nonlinear_node(
     if pinned {
         work_field = prescribed_value(node, target_time);
     } else if source != 0.0 {
-        work_field = temporal_primary_field(node, 0.5 * (old + kicked), target_time);
+        // To the flux the node ends the kick with, as the linear kick: a
+        // first-order wall's half has moved it here, a trace's solve charges
+        // its share in the finalize.
+        work_field = temporal_primary_field(node, 0.5 * (old + next), target_time);
     }
     let source_work = duration * work_field * source;
     let force_work = duration * work_field * held_force;
@@ -3185,6 +3192,22 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
                 reject(STATUS_INVERSE_CONVERGENCE);
             }
             field = temporal_primary_field(node, next, boundary_instant(true));
+        }
+        if second {
+            // The plain kick charged the source at the field it left the node
+            // with, which the candidate holds until the solve's end is written
+            // below; the solve moved it on, and the source works to the end:
+            // half the kick's source times the field the solve moved it by. A
+            // pin holds its row, and its work is the pins pass's.
+            let source = step_source(node, control.clock_f32.y + control.clock_f32.x);
+            if source != 0.0 && nodes[node].boundary.z == 0u {
+                let entry = trace_entry_flux(node, true);
+                var entry_field = entry * inverse_mass;
+                if nonlinear_trace() {
+                    entry_field = temporal_primary_field(node, entry, boundary_instant(true));
+                }
+                scratch[node].values.x += 0.5 * duration * source * (field - entry_field);
+            }
         }
         set_candidate_q(node, next);
         scratch[node].values.w += 0.5 * control.clock_f32.x * damping * field * field;
