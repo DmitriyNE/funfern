@@ -24415,3 +24415,33 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs; the device suite, 88 of 88.
+
+## 2026-10-15 — The longest end-to-end fixture outgrew two nightly deadlines
+
+- **Seen** in the first two nightlies after `handoff-memory-running` joined
+  the suite. On 14 October the full SwiftShader run timed it out, "did not
+  finish in time, at running to the next stop"; on the 15th it did again,
+  every other page passing, and the mutation job reported
+  `drive-phase-reset-on-handoff` "not detected: the test does not pass before
+  the patch", the same fixture on lavapipe. The push CI's lavapipe job
+  passes it, 68 s on its runner.
+- **Not a race.** The fixture exposed one on lavapipe before (ec2b734), so
+  it ran ten times in the CI image (Colima, amd64, lavapipe) through
+  `scripts/e2e-lavapipe.sh`: ten passes, 257 to 401 s each.
+- **Lavapipe.** The driver's own deadline is 120 s unless the run sets one.
+  `scripts/e2e-lavapipe.sh` sets 600 inside its 900 and says why;
+  `scripts/e2e-fixture.sh`, which the mutation job runs its device mutations
+  through, set none. In the CI image the fixture through it failed "did not
+  finish in time"; with the driver given a minute inside the script's outer
+  limit, 540 s, it passed in 336 s.
+- **SwiftShader.** Every page of the full run has 1500 s. The other handoff
+  fixtures step to 384 and take 19 to 25 minutes there; this one steps to
+  768, about twice that. `browser-tests/e2e.spec.mjs` now gives a fixture
+  that runs longer the deadline in proportion - twice for this one - and the
+  rest keep theirs, so a page that hangs is still caught at 1500 s. Run
+  locally on hardware Chrome, the page was asked for twice the base and the
+  cavity for the base, both passing; on SwiftShader it is the next nightly's
+  to show, about twenty minutes longer than before.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

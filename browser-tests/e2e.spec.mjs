@@ -26,6 +26,12 @@ if (unknown.length > 0) {
 }
 const fixtures = named.length > 0 ? named : allFixtures;
 const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
+// A fixture that runs longer than the rest takes the deadline in proportion:
+// handoff-memory-running steps to 768 where the other handoff fixtures stop at
+// 384, which take 19 to 25 minutes on SwiftShader against the full run's
+// 1500 s, and it timed out there each night. The rest keep theirs, so a page
+// that hangs is still caught at it.
+const runLength = { "handoff-memory-running": 2 };
 // How the bundle is hosted: `isolated`, the test server sending the headers that
 // isolate the page; `pages`, as GitHub Pages serves the site - no headers, so the
 // page installs coi-serviceworker.js and reloads itself once; or
@@ -82,8 +88,9 @@ const expectedAdapter =
 
 for (const fixture of fixtures) {
   test(`${fixture} holds in the browser`, async ({ page }) => {
+    const pageDeadline = deadline * (runLength[fixture] ?? 1);
     // A start on Pages runs the fixture twice, cold and warm.
-    test.setTimeout((viaPages ? 2 : 1) * (deadline + 90) * 1000);
+    test.setTimeout((viaPages ? 2 : 1) * (pageDeadline + 90) * 1000);
     const fatal = [];
     const lines = [];
     // A lost device or a render error stops the app before the driver can
@@ -127,7 +134,7 @@ for (const fixture of fixtures) {
       const outcome = await Promise.race([
         expect(root)
           .toHaveAttribute("data-funfern-e2e", /^(pass|fail)$/, {
-            timeout: (deadline + 60) * 1000,
+            timeout: (pageDeadline + 60) * 1000,
           })
           .then(() => null),
         stopping,
@@ -182,7 +189,7 @@ for (const fixture of fixtures) {
       }
     };
 
-    await page.goto(`./?e2e=${fixture}&e2e-deadline=${deadline}${query}`);
+    await page.goto(`./?e2e=${fixture}&e2e-deadline=${pageDeadline}${query}`);
     // Navigations of the main frame on a cold start: the one asked for; on
     // Pages the reload once the service worker controls the page; refused,
     // the reload marked `isolation=off` and then the same-document one that

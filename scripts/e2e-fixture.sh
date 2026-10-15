@@ -44,7 +44,14 @@ if [[ $(uname -s) == Linux ]]; then
     echo "lavapipe's ICD is not installed (mesa-vulkan-drivers)" >&2
     exit 1
   fi
+  # The driver's own deadline, 120 s unless set, is for a GPU: on lavapipe
+  # handoff-memory-running takes 68 s on a good runner and four to seven
+  # minutes in the CI image under emulation, so the nightly's mutation job
+  # read it as failing before its patch. A minute inside the outer limit, so
+  # the driver says where it stood before `timeout` would stop it, as
+  # scripts/e2e-lavapipe.sh gives it 600 inside its 900.
   env HOME="$home" VK_ICD_FILENAMES="$icd" WGPU_BACKEND=vulkan ${environment[@]+"${environment[@]}"} \
+    FUNFERN_E2E_DEADLINE="${FUNFERN_E2E_DEADLINE:-$((limit - 60))}" \
     timeout "$limit" xvfb-run -a -s "-screen 0 1280x800x24" "$binary" "$@" 2>&1 | tee "$log"
   status=${PIPESTATUS[0]}
   if ! grep -q 'AdapterInfo { name: "llvmpipe' "$log"; then
