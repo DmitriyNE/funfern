@@ -1,0 +1,4 @@
+about: the second-order wall's zero pole leaks at a twentieth of its mode's decay rate, so the memory a pulse leaves fades and the wall drifts from its law
+test: cargo test --release -p funfern-app --lib -- separated_pulses_meet_the_planar_law_through_the_walls_memory
+expect: separated pulses on 0\.1: second-order wall .* off its law
+needs: cpu

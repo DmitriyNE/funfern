@@ -1,0 +1,31 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+index ff37410..3769edc 100644
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -4069,7 +4069,7 @@ impl CanonicalOutgoingMidpointFactor {
+                     let generator = (0..3)
+                         .map(|pole| {
+                             transform_row[pole]
+-                                * (-mode.decay * pole as f64)
++                                * (-mode.decay * if pole == 0 { 0.05 } else { pole as f64 })
+                                 * inverse_energy_transform[pole][column]
+                         })
+                         .sum::<f64>();
+@@ -5253,7 +5253,7 @@ fn outgoing_generator(
+                 generator[z_row * dimension + trace_count + offset + auxiliary_column] += (0..3)
+                     .map(|pole| {
+                         transform_row[pole]
+-                            * (-mode.decay * pole as f64)
++                            * (-mode.decay * if pole == 0 { 0.05 } else { pole as f64 })
+                             * inverse_energy_transform[pole][auxiliary_column]
+                     })
+                     .sum::<f64>();
+@@ -5322,7 +5322,7 @@ pub(crate) fn apply_outgoing_generator(
+             derivative[z_row] += input_gain * modal_field;
+             derivative[z_row] += (0..3)
+                 .map(|pole| {
+-                    let raw_decay = -mode.decay * pole as f64;
++                    let raw_decay = -mode.decay * if pole == 0 { 0.05 } else { pole as f64 };
+                     (0..3)
+                         .map(|column| {
+                             transform_row[pole]

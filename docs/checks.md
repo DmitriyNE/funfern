@@ -473,6 +473,39 @@ both laws, kR 5 and 10 on edges 0.1, 0.07 and 0.05: within
 weighs most; orders 0 to 2 at kR 10 falling 7.5 to 13.6 times over the
 halving; every hole passive. The mutation `curve-wall-stiffness-doubled`
 puts the hole's second-order order 2 5.4e-2 off its law.
+PH-09 reads the same laws through a pulse, at every frequency it carries.
+In PH-04's channel, the reflecting and pinned walls' spectra at the nine
+points give the incident field and a unit reflection, and each wall's
+spectrum is read against `U_inc + R_law U_unit`: an RMS over the band, the
+bins above `1.02 nπ` and over 1e-3 of the peak, in units of the unit
+reflection. On the circle, a disk whose circle is the wall, rung from a
+ring at `r = 0.35`: the wall's records projected on `cos mθ` stand between
+two walls in the ratio `(J′ − iY_r J) / (J′ − iY_t J)` at `kR = ω`, `J` from
+`tests/physics/references/cylinder-hankel-dense.json`, the second-order
+wall read against a `Y = 1` wall (its law) and a `Y = 2` wall against the
+same (the method's own check). In the gate,
+`separated_pulses_meet_the_planar_law_through_the_walls_memory`, 17 s: two
+broadband pulses in mode 1, the second launched after the first has ended
+and while its slow part still reaches the wall, held to 1e-3 on edge 0.1
+(measured 5.7e-4 and 6.3e-4); and
+`a_disk_rung_in_two_orders_at_once_meets_its_wall_law`, 75 s: orders 0 and 2
+on 0.1, held to 3e-5 (measured 1.1e-5 and 1.2e-5). Nightly, the job
+`transient-walls` (seventeen minutes on the M1 Max): the separated pulses on
+edges 0.1, 0.07 and 0.05 falling at order 2.5 then 2.1 to 1.1e-4 and
+1.3e-4, and 2.8 to 3.0 times at half the step on 0.07; a narrow pulse in
+mode 2 at PH-04's 45° falling at order 2.7 and 3.1; the late tail, a pulse
+just above mode 1's cutoff weighted 1, −2, 1 at 2 s spacing so its sum
+vanishes doubly at the cutoff itself, which would ring past any record,
+read over 60 s in a channel twice as long, falling at order 1.9 and 1.5 to
+8.1e-5 and 7.0e-5, its records ending at 3.8e-4 of their peak. The circle in
+order 0 broadband and low (`kR` from 1.5), order 2 narrow and the two orders
+at once, on 0.1 and the two orders on 0.07 too: the law 3.7e-6 to 1.3e-5 and
+the method 2.8e-5 to 6.4e-5, alike on both meshes, held to 3e-5 and 1.5e-4.
+That floor is the drawn circle's: its wall nodes sit 9.5e-6 inside the unit
+circle on average, so the circle cannot show convergence and the channel
+does. The mutation `wall-memory-leaks`, the zero pole leaking a twentieth of
+its mode's decay rate, puts the separated pulses' second-order wall 2.9e-3
+off its law and the disk's order 2 2.7e-3.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

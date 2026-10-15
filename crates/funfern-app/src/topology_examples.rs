@@ -9967,7 +9967,42 @@ mod tests {
         } else {
             FaceBoundaryCondition::Impedance { ratio: 1.0 }
         };
-        let half = if case.hole() { 2.6 } else { 1.2 };
+        let period = std::f64::consts::TAU / case.kr;
+        let signal = TimeSignal::pulsed(
+            [0.0, 1.0, case.kr / std::f64::consts::TAU, 0.0],
+            PulseEnvelope::FlatTop {
+                duration: 2.0 * held,
+                edge: 2.0 * period,
+            },
+            0.0,
+            0.0,
+        );
+        let inner = (0.75 * f64::from(case.m) / case.kr).clamp(0.25, 0.6);
+        circle_scene(
+            case.hole(),
+            angular_profile(case.m),
+            inner,
+            law,
+            signal,
+            edge,
+        )
+    }
+
+    /// The circular walls' scene: PH-06's circle of radius one whose inner
+    /// side is `wall`, with a source ring from `inner` to `inner + 1/20`, or
+    /// PH-07's hole of radius one whose outer side is `wall`, in a square of
+    /// side 5.2 absorbing to first order, with a ring from 2 to 2.15. The
+    /// ring drives `profile` under `signal`; meshed at `edge` and
+    /// `CIRCULAR_TOLERANCE`.
+    fn circle_scene(
+        hole: bool,
+        profile: &str,
+        inner: f64,
+        law: FaceBoundaryCondition,
+        signal: TimeSignal,
+        edge: f64,
+    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let half = if hole { 2.6 } else { 1.2 };
         let mut builder = Builder::new();
         builder.scene.geometry.domain = DomainRect {
             min_x: -half,
@@ -9975,13 +10010,13 @@ mod tests {
             min_y: -half,
             max_y: half,
         };
-        builder.scene.outer_boundaries = OuterBoundaryConditions::uniform(if case.hole() {
+        builder.scene.outer_boundaries = OuterBoundaryConditions::uniform(if hole {
             OuterBoundaryCondition::FirstOrderOutgoing
         } else {
             OuterBoundaryCondition::Reflecting
         });
         let material = Some((builder.scene.regions[0].material, MaterialFrame::world()));
-        let ring = if case.hole() {
+        let ring = if hole {
             let (_, ring) =
                 builder.closed(round_circle(2.15, 64), SpanBehavior::Transmitting, material);
             builder.closed(round_circle(2.0, 64), SpanBehavior::Transmitting, material);
@@ -10005,7 +10040,6 @@ mod tests {
                 },
                 material,
             );
-            let inner = (0.75 * f64::from(case.m) / case.kr).clamp(0.25, 0.6);
             let (_, ring) = builder.closed(
                 round_circle(inner + 0.05, 64),
                 SpanBehavior::Transmitting,
@@ -10018,21 +10052,12 @@ mod tests {
             );
             ring
         };
-        let period = std::f64::consts::TAU / case.kr;
         builder.scene.volume_sources.push(VolumeSource {
             region: ring.unwrap(),
             enabled: true,
-            profile: ScalarField::formula(angular_profile(case.m)).unwrap(),
+            profile: ScalarField::formula(profile).unwrap(),
             parameters: vec![],
-            signal: TimeSignal::pulsed(
-                [0.0, 1.0, case.kr / std::f64::consts::TAU, 0.0],
-                PulseEnvelope::FlatTop {
-                    duration: 2.0 * held,
-                    edge: 2.0 * period,
-                },
-                0.0,
-                0.0,
-            ),
+            signal,
         });
         let mut document = builder.document();
         document.model.source.enabled = false;
@@ -14459,6 +14484,691 @@ mod tests {
         second_order("remeshed residual", levels.map(|level| level.1), start);
         for (_, _, edit) in levels {
             assert!(edit != 0.0 && edit.abs() < 1.0e-2 * start, "edit {edit:e}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PH-09: the walls' transient response against their law.
+    // -----------------------------------------------------------------------
+
+    /// A wall on PH-06's circle, by its admittance `Y` in the `e^{−iωt}`
+    /// convention: a constant impedance wall, or the second-order law at
+    /// `s = −iω` with `d = √(7/8) m` for angular order `m` on the unit
+    /// circle.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum CircleWall {
+        Impedance(f64),
+        Second,
+    }
+
+    impl CircleWall {
+        fn face(self) -> FaceBoundaryCondition {
+            match self {
+                Self::Impedance(ratio) => FaceBoundaryCondition::Impedance { ratio },
+                Self::Second => FaceBoundaryCondition::SecondOrderOutgoing,
+            }
+        }
+
+        fn admittance(self, m: u32, omega: f64) -> Phasor {
+            match self {
+                Self::Impedance(ratio) => Phasor::new(ratio, 0.0),
+                Self::Second => {
+                    let mut admittance = Phasor::new(1.0, 0.0);
+                    if m > 0 {
+                        let d = (7.0f64 / 8.0).sqrt() * f64::from(m);
+                        let s = Phasor::new(0.0, -omega);
+                        for (pole, residue) in
+                            [(0.0, 6.0 / 7.0), (d, -8.0 / 7.0), (2.0 * d, 2.0 / 7.0)]
+                        {
+                            admittance = admittance
+                                + Phasor::new(residue * d, 0.0) / (s + Phasor::new(pole, 0.0));
+                        }
+                    }
+                    admittance
+                }
+            }
+        }
+    }
+
+    /// What `tested`'s record of order `m` on the disk's wall is to
+    /// `reference`'s at angular frequency `omega`, in the FFT's `e^{+iωt}`
+    /// bins. Inside a disk driven from a ring, order `m` meets the wall of
+    /// admittance `Y` - `∂_r u = iωY u` in `e^{−iωt}` - as `u = C J_m(kr)`
+    /// outside the ring's reach of `J`, and the ring's jump fixes `C` against
+    /// `k J′ − iωY J` at the wall: `u(R) ∝ J(kR) / (J′(kR) − iY J(kR))`, the
+    /// factor every wall shares left out. So two walls' records stand in the
+    /// ratio `(J′ − iY_r J) / (J′ − iY_t J)` at `kR = ω`, whatever the ring and
+    /// however long the disk rings; `J` is the dense table's real part. The
+    /// FFT's bins are the conjugate convention.
+    fn disk_ratio(m: u32, omega: f64, tested: CircleWall, reference: CircleWall) -> Phasor {
+        let (h, dh) = wall_hankel(m, omega);
+        let (j, dj) = (Phasor::new(h.re, 0.0), Phasor::new(dh.re, 0.0));
+        let i = Phasor::new(0.0, 1.0);
+        let stands = |wall: CircleWall| dj - i * wall.admittance(m, omega) * j;
+        (stands(reference) / stands(tested)).conj()
+    }
+
+    /// The disk's wall nodes on its own side, by angle, each with half the
+    /// angle to its two neighbours: the trapezoid's weights for `∫ u cos mθ
+    /// dθ` around the circle.
+    fn disk_wall_nodes(
+        prepared: &crate::topology_runtime::PreparedTopology,
+    ) -> Vec<(usize, f64, f64)> {
+        let operator = &prepared.canonical_operator;
+        let points = operator.node_points();
+        let centre = (0..points.len())
+            .min_by(|a, b| points[*a].norm().total_cmp(&points[*b].norm()))
+            .unwrap();
+        let disk = operator.component_labels()[centre];
+        let mut nodes = (0..points.len())
+            .filter(|node| {
+                (points[*node].norm() - 1.0).abs() < 1.0e-3
+                    && operator.component_labels()[*node] == disk
+            })
+            .map(|node| (node, points[node].y.atan2(points[node].x)))
+            .collect::<Vec<_>>();
+        nodes.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let count = nodes.len();
+        assert!(count > 64, "{count} wall nodes");
+        let tau = std::f64::consts::TAU;
+        (0..count)
+            .map(|index| {
+                let previous = nodes[(index + count - 1) % count].1;
+                let next = nodes[(index + 1) % count].1;
+                let spread = (next - previous).rem_euclid(tau);
+                (nodes[index].0, nodes[index].1, 0.5 * spread)
+            })
+            .collect()
+    }
+
+    /// Each order's `cos mθ` projection of the disk's wall field after each
+    /// of `steps` steps of `dt`.
+    fn disk_wall_records(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        orders: &[u32],
+        dt: f64,
+        steps: usize,
+    ) -> Vec<Vec<f64>> {
+        let nodes = disk_wall_nodes(prepared);
+        let operator = &prepared.canonical_operator;
+        let mut state = CanonicalWaveState::zero(operator, dt).unwrap();
+        let mut records = vec![Vec::with_capacity(steps); orders.len()];
+        for _ in 0..steps {
+            state
+                .step_with_forcing(operator, &prepared.canonical_forcing)
+                .unwrap();
+            let field = state.primary_field(operator).unwrap();
+            for (record, m) in records.iter_mut().zip(orders) {
+                record.push(
+                    nodes
+                        .iter()
+                        .map(|(node, angle, weight)| {
+                            weight * field[*node] * (f64::from(*m) * angle).cos()
+                        })
+                        .sum(),
+                );
+            }
+        }
+        records
+    }
+
+    /// A record's spectrum, zero-padded to `length`, in the FFT's bins:
+    /// `X_k = Σ x_n e^{−iω_k t_n}`.
+    fn record_spectrum(record: &[f64], length: usize) -> Vec<Phasor> {
+        let mut re = record.to_vec();
+        re.resize(length, 0.0);
+        let mut im = vec![0.0; length];
+        funfern_core::fft(&mut re, &mut im).unwrap();
+        re.into_iter()
+            .zip(im)
+            .map(|(re, im)| Phasor::new(re, im))
+            .collect()
+    }
+
+    /// One disk comparison: how far `tested`'s spectrum stands from
+    /// `reference`'s times their ratio, relative, over the band the pulse
+    /// carries, and how far the records had decayed by their end.
+    #[derive(Clone, Copy, Debug)]
+    struct DiskReading {
+        error: f64,
+        decayed: f64,
+        band: (f64, f64),
+    }
+
+    fn disk_compare(
+        m: u32,
+        tested: (&[f64], CircleWall),
+        reference: (&[f64], CircleWall),
+        dt: f64,
+    ) -> DiskReading {
+        let length = (4 * tested.0.len()).next_power_of_two();
+        let (spectrum_t, spectrum_r) = (
+            record_spectrum(tested.0, length),
+            record_spectrum(reference.0, length),
+        );
+        let resolution = std::f64::consts::TAU / (length as f64 * dt);
+        let lowest = f64::from(m).max(1.5);
+        let peak = spectrum_r[..length / 2]
+            .iter()
+            .map(|value| value.norm())
+            .fold(0.0, f64::max);
+        let (mut difference, mut total) = (0.0, 0.0);
+        let mut band = (f64::INFINITY, 0.0_f64);
+        for bin in 1..length / 2 {
+            let omega = resolution * bin as f64;
+            if omega < lowest || omega > 14.0 || spectrum_r[bin].norm() < 1.0e-3 * peak {
+                continue;
+            }
+            band = (band.0.min(omega), band.1.max(omega));
+            let predicted = disk_ratio(m, omega, tested.1, reference.1) * spectrum_r[bin];
+            difference += (spectrum_t[bin] - predicted).norm().powi(2);
+            total += spectrum_t[bin].norm().powi(2);
+        }
+        let scale = |record: &[f64]| record.iter().fold(0.0_f64, |s, v| s.max(v.abs()));
+        let tail = |record: &[f64]| {
+            record[record.len() - record.len() / 20..]
+                .iter()
+                .fold(0.0_f64, |s, v| s.max(v.abs()))
+        };
+        DiskReading {
+            error: (difference / total).sqrt(),
+            decayed: (tail(tested.0) / scale(tested.0)).max(tail(reference.0) / scale(reference.0)),
+            band,
+        }
+    }
+
+    /// The disk's floors. The drawn circle is a polygon whose wall nodes sit
+    /// 9.5e-6 inside the unit circle on average and 1.9e-5 at most, the same
+    /// on every mesh at PH-06's curve tolerance, and the readings stop there:
+    /// the second-order wall 3.7e-6 to 1.3e-5 off its law, the `Y = 2` wall
+    /// 2.8e-5 to 6.4e-5 off the method's ratio, alike on edges 0.1 and 0.07
+    /// and at half the step. Read on a circle of radius `1 − 1e-5` the method
+    /// comes 3.2e-5 to 4.9e-5 off, so the floor is the circle's, and the
+    /// circle cannot show convergence; the channel does.
+    const DISK_LAW_BOUND: f64 = 3.0e-5;
+    const DISK_METHOD_BOUND: f64 = 1.5e-4;
+
+    /// Orders 0 and 2 driven at once.
+    const DISK_TWO_ORDERS: &str = "1 + (x^2 - y^2) / (x^2 + y^2)";
+
+    /// One disk study: the second-order wall's records against the `Y = 1`
+    /// wall's - its law - and, with `method`, the `Y = 2` wall's - the
+    /// method's own check, which wants twice the record, since the weaker wall
+    /// rings longer.
+    #[derive(Clone, Copy, Debug)]
+    struct DiskStudy {
+        law: DiskReading,
+        method: Option<DiskReading>,
+    }
+
+    /// The disk rung by a Gaussian pulse at `k0` of `width` seconds driving
+    /// `profile` on the ring at `r = 0.35`, on `edge` for `duration` seconds,
+    /// read in each of `orders`.
+    fn disk_study(
+        profile: &str,
+        orders: &[u32],
+        (k0, width): (f64, f64),
+        edge: f64,
+        duration: f64,
+        method: bool,
+    ) -> Vec<DiskStudy> {
+        let mut walls = vec![CircleWall::Impedance(1.0), CircleWall::Second];
+        if method {
+            walls.push(CircleWall::Impedance(2.0));
+        }
+        let signal = TimeSignal::pulsed(
+            [0.0, 1.0, k0 / std::f64::consts::TAU, 0.0],
+            PulseEnvelope::Gaussian { width },
+            0.0,
+            0.0,
+        );
+        let prepared = walls
+            .iter()
+            .map(|wall| circle_scene(false, profile, 0.35, wall.face(), signal, edge))
+            .collect::<Vec<_>>();
+        let dt = prepared
+            .iter()
+            .map(|prepared| prepared.recommended_time_step())
+            .fold(f64::INFINITY, f64::min);
+        let steps = (duration / dt).ceil() as usize;
+        let records = std::thread::scope(|scope| {
+            prepared
+                .iter()
+                .map(|prepared| scope.spawn(move || disk_wall_records(prepared, orders, dt, steps)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        orders
+            .iter()
+            .enumerate()
+            .map(|(index, m)| {
+                let record = |wall: usize| (&records[wall][index][..], walls[wall]);
+                DiskStudy {
+                    law: disk_compare(*m, record(1), record(0), dt),
+                    method: method.then(|| disk_compare(*m, record(2), record(0), dt)),
+                }
+            })
+            .collect()
+    }
+
+    fn disk_holds(name: &str, orders: &[u32], studies: &[DiskStudy]) {
+        for (m, study) in orders.iter().zip(studies) {
+            for (what, reading, bound) in [
+                ("law", Some(study.law), DISK_LAW_BOUND),
+                ("method", study.method, DISK_METHOD_BOUND),
+            ] {
+                let Some(reading) = reading else {
+                    continue;
+                };
+                eprintln!(
+                    "{name}, order {m}: {what} {:.3e} over {:.2}..{:.2}, decayed to {:.1e}",
+                    reading.error, reading.band.0, reading.band.1, reading.decayed
+                );
+                assert!(
+                    reading.decayed < 1.0e-4,
+                    "{name}, order {m}: the records end at {:e} of their peak",
+                    reading.decayed
+                );
+                assert!(
+                    reading.error < bound,
+                    "{name}, order {m}: {what} {:e} off",
+                    reading.error
+                );
+            }
+        }
+    }
+
+    /// PH-09 in the gate: a disk rung in orders 0 and 2 at once, its
+    /// second-order wall's records against a `Y = 1` wall's on the coarsest
+    /// mesh, 15 s. Order 2 carries the wall's memory; a zero pole leaking a
+    /// twentieth of its rate reads 2.7e-3.
+    #[test]
+    fn a_disk_rung_in_two_orders_at_once_meets_its_wall_law() {
+        let studies = disk_study(DISK_TWO_ORDERS, &[0, 2], (6.5, 0.6), 0.1, 15.0, false);
+        disk_holds("two orders on 0.1", &[0, 2], &studies);
+    }
+
+    /// PH-09's circle (`docs/spikes/funfern-testing-campaign-plan.md`): a
+    /// broadband pulse in order 0, a low one (`k0 = 3`, down to the table's
+    /// `kR = 1.5`), a narrow one in order 2, and orders 0 and 2 at once, on
+    /// edge 0.1, and the two orders on 0.07 as well; the walls `Y = 1`,
+    /// `Y = 2` and second order, 30 s, 40 s for the longer pulses. About 15
+    /// minutes on an M1 Max.
+    #[test]
+    #[ignore = "PH-09's circle, about 15 minutes; run in the nightly"]
+    fn transient_circle_walls_meet_their_law_in_every_case() {
+        for (name, profile, orders, pulse, edge, duration) in [
+            (
+                "broadband",
+                angular_profile(0),
+                &[0][..],
+                (6.0, 0.6),
+                0.1,
+                30.0,
+            ),
+            ("low", angular_profile(0), &[0], (3.0, 1.0), 0.1, 40.0),
+            ("narrow", angular_profile(2), &[2], (7.0, 2.5), 0.1, 40.0),
+            (
+                "two orders",
+                DISK_TWO_ORDERS,
+                &[0, 2],
+                (6.5, 0.6),
+                0.1,
+                30.0,
+            ),
+            (
+                "two orders",
+                DISK_TWO_ORDERS,
+                &[0, 2],
+                (6.5, 0.6),
+                0.07,
+                30.0,
+            ),
+        ] {
+            let studies = disk_study(profile, orders, pulse, edge, duration, true);
+            disk_holds(&format!("{name} on {edge}"), orders, &studies);
+        }
+    }
+
+    /// PH-09's channel: PH-04's reflecting channel one unit high, from
+    /// `x = −length` to the wall at `x = 1`, its far end second-order
+    /// outgoing, launcher strips from `x = −0.7` leftward 0.2 apart, each
+    /// driving `profile` under one of `signals` (a region holds one source),
+    /// and a sponge in the damping rising smoothly from nothing at
+    /// `x = −sponge` to 1 at the far end, slowly enough to return little.
+    fn pulse_channel(
+        wall: OuterBoundaryCondition,
+        profile: &str,
+        signals: &[TimeSignal],
+        edge: f64,
+        length: f64,
+        sponge: f64,
+    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let mut builder = Builder::new();
+        builder.scene.geometry.domain = DomainRect {
+            min_x: -length,
+            max_x: 1.0,
+            min_y: -0.5,
+            max_y: 0.5,
+        };
+        builder.scene.face_assignments[0].anchor = FaceAnchor::Outer {
+            side: OuterSide::Bottom,
+            fraction: length / (length + 1.0),
+        };
+        builder.scene.materials[0].damping =
+            ScalarField::formula(format!("smoothstep({sponge}, {length}, -x)")).unwrap();
+        let mut boundaries = channel();
+        boundaries.sides[OuterSide::Right.index()] = wall;
+        builder.scene.outer_boundaries = boundaries;
+        for (index, signal) in signals.iter().enumerate() {
+            let assigned = builder.scene.face_assignments.len();
+            builder.launcher(-0.7 - 0.2 * index as f64, INTERFACE_HZ, 1.0);
+            let launcher = builder.scene.volume_sources.last_mut().unwrap();
+            launcher.profile = ScalarField::formula(profile).unwrap();
+            launcher.signal = *signal;
+            // A strip names the outer left face as the one behind it, so
+            // the strip before this one takes the face just left of its own
+            // divider instead.
+            if index > 0 {
+                let FaceAnchor::Curve { curve, span, .. } =
+                    builder.scene.face_assignments[assigned - 1].anchor
+                else {
+                    unreachable!("a strip's own face hangs on its divider");
+                };
+                builder.scene.face_assignments[assigned - 2].anchor = FaceAnchor::Curve {
+                    curve,
+                    span,
+                    side: CurveTraceSide::Left,
+                    parameter: 0.5,
+                };
+            }
+        }
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        prepare(&document, edge)
+    }
+
+    /// The implemented law's reflection of channel mode `n` at angular
+    /// frequency `omega` (PH-04's `planar_law`, in the FFT's `e^{+iωt}`
+    /// bins): `cos θ = √(1 − (nπ/ω)²)` above the mode's cutoff.
+    fn channel_law(n: u32, omega: f64, second: bool) -> Phasor {
+        let tangential = f64::from(n) * std::f64::consts::PI;
+        let cos = (1.0 - (tangential / omega).powi(2)).sqrt();
+        planar_law(cos, omega, tangential, second)
+    }
+
+    /// One planar transient: each wall's spectrum at the points against
+    /// `U_inc + R U_unit` from the reflecting and pinned runs, in units of
+    /// the unit reflection - an RMS over the band the pulse carries of
+    /// `|R_read − R_law|`, as PH-04 reads one frequency - for the first-
+    /// and second-order walls, and how far the records had fallen by their
+    /// end.
+    #[derive(Clone, Copy, Debug)]
+    struct ChannelReading {
+        first: f64,
+        second: f64,
+        quiet: f64,
+        band: (f64, f64),
+    }
+
+    fn channel_transient(
+        n: u32,
+        signals: &[TimeSignal],
+        edge: f64,
+        fraction: f64,
+        duration: f64,
+        sponge: f64,
+    ) -> ChannelReading {
+        let walls = [
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            OuterBoundaryCondition::Reflecting,
+            OuterBoundaryCondition::Dirichlet {
+                signal: TimeSignal::ZERO,
+            },
+        ];
+        let profile = if n == 0 {
+            "1".to_owned()
+        } else {
+            format!("cos({n} * pi * (y + 0.5))")
+        };
+        let length = 2.0 * sponge;
+        let prepared =
+            walls.map(|wall| pulse_channel(wall, &profile, signals, edge, length, sponge));
+        let dt = fraction
+            * prepared
+                .iter()
+                .map(|prepared| prepared.recommended_time_step())
+                .fold(f64::INFINITY, f64::min);
+        let steps = (duration / dt).ceil() as usize;
+        let quarter = 0.25 / f64::from(n.max(2));
+        let points = [0.3, 0.5, 0.7]
+            .into_iter()
+            .flat_map(|x| [quarter, -quarter, 3.0 * quarter].map(|y| Point2::new(x, y)))
+            .collect::<Vec<_>>();
+        let traces = std::thread::scope(|scope| {
+            prepared
+                .iter()
+                .map(|prepared| {
+                    let points = &points;
+                    scope.spawn(move || {
+                        wall_traces(prepared, dt, steps, points, CanonicalWallStep::default())
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let length = (4 * steps).next_power_of_two();
+        let resolution = std::f64::consts::TAU / (length as f64 * dt);
+        let spectra = traces
+            .iter()
+            .map(|run| {
+                run.iter()
+                    .map(|trace| record_spectrum(trace, length))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let lowest = 1.02 * f64::from(n) * std::f64::consts::PI;
+        let peak = spectra[2]
+            .iter()
+            .flat_map(|spectrum| spectrum[..length / 2].iter().map(|value| value.norm()))
+            .fold(0.0, f64::max);
+        let (mut errors, mut unit) = ([0.0; 2], 0.0);
+        let mut band = (f64::INFINITY, 0.0_f64);
+        for bin in 1..length / 2 {
+            let omega = resolution * bin as f64;
+            if omega < lowest
+                || spectra[2]
+                    .iter()
+                    .all(|spectrum| spectrum[bin].norm() < 1.0e-3 * peak)
+            {
+                continue;
+            }
+            band = (band.0.min(omega), band.1.max(omega));
+            for (point, (open, pinned)) in spectra[2].iter().zip(&spectra[3]).enumerate() {
+                let (open, pinned) = (open[bin], pinned[bin]);
+                let inc = (open + pinned).scale(0.5);
+                let unit_part = (open - pinned).scale(0.5);
+                unit += unit_part.norm().powi(2);
+                for (index, second) in [false, true].into_iter().enumerate() {
+                    let tested = spectra[index][point][bin];
+                    let predicted = inc + channel_law(n, omega, second) * unit_part;
+                    errors[index] += (tested - predicted).norm().powi(2);
+                }
+            }
+        }
+        let quiet = traces
+            .iter()
+            .flat_map(|run| run.iter())
+            .map(|trace| {
+                let scale = trace.iter().fold(0.0_f64, |s, v| s.max(v.abs()));
+                trace[trace.len() - trace.len() / 20..]
+                    .iter()
+                    .fold(0.0_f64, |s, v| s.max(v.abs()))
+                    / scale
+            })
+            .fold(0.0, f64::max);
+        ChannelReading {
+            first: (errors[0] / unit).sqrt(),
+            second: (errors[1] / unit).sqrt(),
+            quiet,
+            band,
+        }
+    }
+
+    /// The walls on edge 0.1 at the production step: 5.3e-4 to 6.8e-4 in
+    /// every case.
+    const CHANNEL_BOUND: f64 = 1.0e-3;
+
+    /// A Gaussian pulse of `width` seconds carrying `omega`, `amplitude`
+    /// high, starting at `start`.
+    fn channel_pulse(omega: f64, width: f64, start: f64, amplitude: f64) -> TimeSignal {
+        TimeSignal::pulsed(
+            [0.0, amplitude, omega / std::f64::consts::TAU, 0.0],
+            PulseEnvelope::Gaussian { width },
+            start,
+            0.0,
+        )
+    }
+
+    /// Two broadband pulses in mode 1, the second launched 2 s after the
+    /// first has ended, while the first's slow part is still reaching the
+    /// wall: a wall that loses or resets its memory between them is caught.
+    fn separated_pulses() -> [TimeSignal; 2] {
+        [
+            channel_pulse(8.0, 1.0, 0.0, 1.0),
+            channel_pulse(8.0, 1.0, 10.0, 1.0),
+        ]
+    }
+
+    fn channel_holds(name: &str, reading: ChannelReading, bound: f64) {
+        eprintln!(
+            "{name}: first order {:.3e}, second order {:.3e} over {:.2}..{:.2}, quiet to {:.1e}",
+            reading.first, reading.second, reading.band.0, reading.band.1, reading.quiet
+        );
+        assert!(
+            reading.quiet < 2.0e-3,
+            "{name}: the records end at {:e} of their peak",
+            reading.quiet
+        );
+        for (order, error) in [("first", reading.first), ("second", reading.second)] {
+            assert!(
+                error < bound,
+                "{name}: {order}-order wall {error:e} off its law"
+            );
+        }
+    }
+
+    /// Successive meshes' errors falling at `least` order or faster.
+    fn channel_converges(name: &str, edges: &[f64], errors: &[f64], least: f64) {
+        for pair in 0..edges.len() - 1 {
+            let order =
+                (errors[pair] / errors[pair + 1]).ln() / (edges[pair] / edges[pair + 1]).ln();
+            assert!(
+                order > least,
+                "{name}: {errors:?} on {edges:?}, order {order:.2} from edge {}",
+                edges[pair]
+            );
+        }
+    }
+
+    /// PH-09 in the gate: separated pulses against the planar law on the
+    /// coarsest mesh, 34 s. A zero pole leaking a twentieth of its rate
+    /// reads 2.9e-3 (the mutation `wall-memory-leaks`).
+    #[test]
+    fn separated_pulses_meet_the_planar_law_through_the_walls_memory() {
+        let reading = channel_transient(1, &separated_pulses(), 0.1, 1.0, 34.0, 8.0);
+        channel_holds("separated pulses on 0.1", reading, CHANNEL_BOUND);
+    }
+
+    /// PH-09's channel (`docs/spikes/funfern-testing-campaign-plan.md`):
+    /// separated pulses on edges 0.1, 0.07 and 0.05 at the production step
+    /// and on 0.07 at half of it; a narrow pulse in mode 2 at PH-04's 45°,
+    /// `2π√2`, 2.5 s wide, 40 s; and the late tail, a pulse in mode 1 just
+    /// above its cutoff `π`, as copies weighted 1, −2 and 1 two seconds
+    /// apart, whose sum has a double zero at `π`: what sits at the cutoff
+    /// never leaves the launcher and would ring past any record, and what is
+    /// just above crawls to the wall, a fifth of the wave speed at `1.02π`;
+    /// in a channel twice as long, so what its sponge returns of that comes
+    /// after the 60 s record. The tail's errors, 1.2e-4 and 7.0e-5, fall at
+    /// order 1.5 to 1.9 against the others' 2 to 3: its records end at 3.9e-4
+    /// of their peak. About 15 minutes on an M1 Max.
+    #[test]
+    #[ignore = "PH-09's channel, about 15 minutes; run in the nightly"]
+    fn transient_planar_walls_converge_to_their_law() {
+        let edges = [0.1, 0.07, 0.05];
+        let readings = edges.map(|edge| {
+            let reading = channel_transient(1, &separated_pulses(), edge, 1.0, 34.0, 8.0);
+            channel_holds(
+                &format!("separated pulses on {edge}"),
+                reading,
+                CHANNEL_BOUND,
+            );
+            reading
+        });
+        let half = channel_transient(1, &separated_pulses(), 0.07, 0.5, 34.0, 8.0);
+        channel_holds(
+            "separated pulses on 0.07 at half the step",
+            half,
+            CHANNEL_BOUND,
+        );
+        for (order, errors, halved) in [
+            ("first", readings.map(|reading| reading.first), half.first),
+            (
+                "second",
+                readings.map(|reading| reading.second),
+                half.second,
+            ),
+        ] {
+            channel_converges(
+                &format!("separated pulses, {order} order"),
+                &edges,
+                &errors,
+                1.7,
+            );
+            assert!(
+                errors[1] > 2.0 * halved,
+                "separated pulses, {order} order: {:.3e} on 0.07, {halved:.3e} at half the step",
+                errors[1]
+            );
+        }
+        let narrow = [channel_pulse(
+            2.0 * std::f64::consts::PI / std::f64::consts::FRAC_1_SQRT_2,
+            2.5,
+            0.0,
+            1.0,
+        )];
+        let tail = [
+            channel_pulse(4.5, 1.5, 0.0, 1.0),
+            channel_pulse(4.5, 1.5, 2.0, -2.0),
+            channel_pulse(4.5, 1.5, 4.0, 1.0),
+        ];
+        for (name, n, signals, duration, sponge, least) in [
+            ("narrow", 2, &narrow[..], 40.0, 8.0, 1.7),
+            ("late tail", 1, &tail[..], 60.0, 16.0, 1.3),
+        ] {
+            let edges = [0.1, 0.07];
+            let readings = edges.map(|edge| {
+                let reading = channel_transient(n, signals, edge, 1.0, duration, sponge);
+                channel_holds(&format!("{name} on {edge}"), reading, CHANNEL_BOUND);
+                reading
+            });
+            channel_converges(
+                &format!("{name}, first order"),
+                &edges,
+                &readings.map(|reading| reading.first),
+                least,
+            );
+            channel_converges(
+                &format!("{name}, second order"),
+                &edges,
+                &readings.map(|reading| reading.second),
+                least,
+            );
         }
     }
 }

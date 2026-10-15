@@ -355,6 +355,53 @@ jobs:
           cargo test --release -p funfern-app --lib --locked --
           --ignored --nocapture absorbing_holes_converge_to_their_law
 
+  # Nightly: PH-09, the walls' transient response, the channel's pulses on
+  # three meshes and the circle's in every case; seventeen minutes on an M1
+  # Max, the two side by side (topology_examples.rs, transient_*).
+  transient-walls:
+    name: Transient walls, PH-09
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal \
+            --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Transient walls, PH-09
+        run: >-
+          cargo test --release -p funfern-app --lib --locked --
+          --ignored --nocapture transient_
+
   # Nightly: the mutations, one deliberate defect each, applied and reverted
   # by scripts/mutations.sh; each must be caught by the test its manifest
   # names, at the check it targets. The device ones run their fixture on

@@ -24502,3 +24502,93 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-15 — PH-09: the walls' transient response against their law
+
+- **Reading.** The 11 October plan reads the walls under pulses against the
+  exact kernel `Tₘ(s)`. The walls implement a rational law, three poles a
+  tangential mode, whose distance from the exact DtN PH-04 and PH-06 report
+  at steady state; read against the exact kernel, a pulse would show that
+  distance again. PH-09 reads each wall against its own law at every
+  frequency its pulse carries, so what it tests is the history: the poles'
+  states, updated every step, that a single frequency at steady state only
+  sees settled.
+- **Channel.** PH-04's channel, mode `n` launched from strips at `x = −0.7`
+  leftward, a sponge rising smoothly from `x = −8` to the far end at −16.
+  The reflecting and pinned walls' spectra at the nine points give `U_inc`
+  and `U_unit`, and each wall's spectrum is read against
+  `U_inc + R_law(ω) U_unit`, `R_law` PH-04's closed form at
+  `cos θ = √(1 − (nπ/ω)²)`: an RMS over the bins above `1.02 nπ` and over
+  1e-3 of the peak, in units of the unit reflection.
+- **Circle.** A disk whose circle is the wall, rung from a ring at
+  `r = 0.35`, the wall's records projected on `cos mθ`. Inside, order `m` is
+  `C J_m(kr)` and the ring's jump fixes `C` against the wall, so two walls'
+  records stand in `(J′ − iY_r J) / (J′ − iY_t J)` at `kR = ω` whatever the
+  ring, `J` from the dense table. The reference is a `Y = 1` wall, not the
+  reflecting one: a reflecting disk rings forever and no record would end.
+  The second-order wall against it reads the law; a `Y = 2` wall against it
+  reads the method, which has no law to get wrong.
+- **What the sizing taught.**
+  - A pulse at `ω₀ = 7`, width 0.7, put 2.7% of its amplitude at mode 1's
+    cutoff `π`; there a mode does not propagate, it stays and rings. Its
+    records stood at 2.2e-2 of their peak after 20 s and both walls read
+    3.5e-3 to 4.4e-3 on edges 0.1 and 0.07 alike. At `ω₀ = 8`, width 1
+    (7e-6 at the cutoff): 6.1e-4 and 2.2e-4.
+  - The circle stops at a floor. On edges 0.1 and 0.07, at the production
+    step and half of it, over 30 or 60 s, at curve tolerance 5e-5 or 2e-5,
+    order 0 read the law 8.0e-6 and the method 4.0e-5 to 5.1e-5, order 2
+    1.24e-5 and 6.4e-5 to 6.7e-5. The wall nodes sit 9.5e-6 inside the unit
+    circle on average, 1.9e-5 at most; read at `R = 1 − 1e-5`, the method
+    falls to 3.2e-5 to 4.9e-5 and the law barely moves. The drawn polygon is
+    the floor, the same on every mesh, so the circle is held to it and the
+    channel shows the convergence.
+  - A region holds one volume source, so each pulse has its own strip, 0.2
+    apart. The strip builder names the outer left face as the face behind
+    each strip, so with two the earlier strip's rear face is re-anchored to
+    the left of its own divider.
+  - Two pulses 2 s apart overlap: a Gaussian of width 1 is cut 4 widths
+    either side, 8 s. The repeated case launches the second at 10 s, after
+    the first has ended and while its slow part still reaches the wall:
+    6.3e-4 and 5.7e-4 on 0.1, as a single pulse.
+  - Near the cutoff, a single pulse at 4.5, width 1.5, read 1.5e-2 to
+    1.9e-2, its records at 0.13 of their peak after 40 s. The same pulse and
+    its negative 2 s later, whose sum vanishes at `π`: 6.2e-4 to 8.4e-4 on
+    both meshes. Weights 1, −2, 1, a double zero: 2.8e-4 at 40 s, but 5.2e-4
+    at 60 s, as the slow band's return from the sponge at −8 arrives, about
+    43 s at `1.1π` by its group velocity. In a channel twice as long, 60 s: 1.2e-4 and 7.0e-5 on
+    0.1 and 0.07; at 80 s, 1.5e-4 as that return arrives again.
+- **Tests.** In the gate,
+  `separated_pulses_meet_the_planar_law_through_the_walls_memory` (17 s;
+  held to 1e-3, measured 6.3e-4 and 5.7e-4) and
+  `a_disk_rung_in_two_orders_at_once_meets_its_wall_law` (orders 0 and 2
+  from one ring, 15 s of record against the `Y = 1` wall alone, both
+  rung down to 2.4e-7 by then; 75 s; held to 3e-5, measured 1.05e-5 and
+  1.18e-5). Nightly, the job `transient-walls`, seventeen minutes:
+  `transient_planar_walls_converge_to_their_law`, the separated pulses on
+  0.1, 0.07 and 0.05 (first-order wall 6.3e-4, 2.6e-4, 1.3e-4; second
+  5.7e-4, 2.2e-4, 1.1e-4; orders 2.5 to 2.6 then 2.1, held above 1.7) and on
+  0.07 at half the step (8.5e-5 and 8.0e-5, 3.0 and 2.8 times less, held
+  above 2); a narrow pulse in mode 2 at PH-04's 45°, `2π√2`, width 2.5, 40 s
+  (6.3e-4 and 5.3e-4 to 2.4e-4 and 1.8e-4, orders 2.7 and 3.1); the late
+  tail (1.6e-4 and 1.2e-4 to 8.1e-5 and 7.0e-5, orders 1.9 and 1.5, held
+  above 1.3; its records end at 3.9e-4 of their peak); every reading under
+  1e-3, every record ending under 2e-3 of its peak.
+  `transient_circle_walls_meet_their_law_in_every_case`: order 0 broadband
+  (`k0 = 6`) and low (`k0 = 3`, down to the table's `kR = 1.5`), order 2
+  narrow (width 2.5), the two orders at once, all on 0.1 and the two orders
+  on 0.07 too, 30 s, 40 s for the long pulses: the law 3.7e-6 to 1.3e-5,
+  held to 3e-5, the method 2.8e-5 to 6.4e-5, held to 1.5e-4, every record
+  rung down under 1e-4.
+- **Mutation.** `wall-memory-leaks`: the zero pole of each mode's three
+  leaks at a twentieth of the mode's decay rate, in the midpoint factor and
+  both generators alike, so nothing but the physics can see it. The
+  separated pulses' second-order wall reads 2.9e-3 (the first-order wall,
+  which has no poles, 6.3e-4 as before); the disk's order 2 2.7e-3, its
+  order 0, which has none, unchanged; the late tail, near grazing where the
+  memory weighs most, 1.3e-2.
+- **Also.** `circle_scene` takes PH-06's circle with any face law, ring
+  profile and signal; `circular_scene` is it with PH-06's. PH-06's gate test
+  reads as before (6.9e-6 to 7.5e-5).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

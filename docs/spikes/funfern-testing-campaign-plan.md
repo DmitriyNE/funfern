@@ -429,7 +429,7 @@ with their reports in `docs/spikes/`.
   and PH-17 energy accounting, together as stage B1 (section 6a)
   (PH-06 and PH-07 moved to stage A3), PH-08 rectangular radiation as a one-off experiment
   rather than a regression test, since no nonlocal operator is planned,
-  PH-09 transient DtN against the Laplace-domain kernel, PH-11 Fresnel,
+  PH-09 the walls' transient response (section 6b), PH-11 Fresnel,
   PH-12 cylinder scattering, PH-13 thin gaps, PH-14 and PH-15 temporal and
   modulated materials, PH-16 nonlinear laws, PH-18
   probes and observables, PH-19 manufactured solutions.
@@ -479,6 +479,30 @@ conservative media's energy to its band over a thousand seconds, the passive
 media's and the walls' envelope to never rising over four hundred, the slow
 near field's ledger over twenty periods, and a Kerr medium's known drift
 under the splitting to where it stands. With these, stage B1 is done.
+
+## 6b. PH-09: the walls' transient response
+
+**Planned on 2026-10-15.** The 11 October plan reads the walls under pulses
+against the exact kernel's causal response. The walls implement a rational
+law whose distance from the exact DtN PH-04 and PH-06 already report, so
+PH-09 reads each wall's transient against its own law at every frequency
+its pulse carries, where PH-04 and PH-06 read one: what is under test is the
+history, the poles' states the law keeps between steps. Two geometries.
+PH-04's channel, where a mode's pulse meets the wall at every angle its band
+spans and the reflecting and pinned walls give the incident field and a
+unit reflection. And the circle, its curved trace the more bug-prone: a disk
+whose circle is the wall, rung from a ring, where two walls' records stand
+in a ratio of Bessel functions read from the dense Hankel table (bf01fbe),
+whatever the ring and however long the disk rings.
+
+**Done on 2026-10-15** (`docs/engineering-log.md`): broadband, separated,
+narrow and near-cutoff pulses in the channel, broadband, low, narrow and two
+orders at once on the circle. The channel converges at second order or
+better; the circle stops at the drawn polygon's floor, which no mesh
+lowers, and is held there. In the gate, separated pulses in the channel and
+two orders on the circle; the nightly job `transient-walls` runs the rest.
+The mutation `wall-memory-leaks`, the second-order wall's zero pole
+leaking, is caught by both gate tests. No defect found.
 
 ## 7. Infrastructure
 
