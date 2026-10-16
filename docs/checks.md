@@ -584,13 +584,14 @@ the field 1e-10 of its energy
 PH-17 holds the energy ledger to the physics rather than to itself. On
 PH-01's box, started from three modes with `Q` and `b` both nonzero, each
 channel's power is written in the test from the authored law - a flux-rate
-loss `γ` takes `γ · flux · field`, a drive `m(t)` on the coefficient an
-energy sits over moves it at `−(∂m/∂t)/m` of itself, a volume source puts
+loss `γ` takes `γ · flux · field`, a drive `m(t)` on a coefficient moves
+the energy over it at `−(∂m/∂t) M Φ(u)`, `Φ = ∫ u g(u) du` under the row's
+law `Q = m M g(u) u` - half of `Q u` on a linear row - a volume source puts
 its nodal rate times the field in, a harmonic source's rate being the
 integral of its signal - and integrated by the trapezoid over the run's own
 states, never read from the solver's lanes or compiled rates. In each skin
-thirteen configurations - electric, magnetic and spatially rising loss, a
-driven loss, constant loss in a Kerr medium, a pump on either row, a time
+fourteen configurations - electric, magnetic and spatially rising loss, a
+driven loss, constant loss in a Kerr medium, a pump in a Kerr medium, a pump on either row, a time
 crystal, a travelling modulation, a volume source, a thin gap, all of them
 together, and van der Pol either side of its threshold - run three seconds
 at the production step, its half and its quarter: the stored energy less
@@ -617,7 +618,15 @@ edge 0.25 to 0.18 through the maps the runtime prepares and handed over by
 `CanonicalWaveState::handed_over`, books its own change of the stored energy
 in the edit lane, 4e-4 to 7e-4 of it, and with that the whole run's ledger
 closes at second order
-(`a_remesh_books_its_own_energy_change_and_the_ledger_closes_across_it`).
+(`a_remesh_books_its_own_energy_change_and_the_ledger_closes_across_it`). The
+same on the driven path, by the time-driven handoff, and across handoffs that
+change what a generation runs: a pump, Klein-Gordon's `r`, and a pump beside
+a second-order wall and a gap, each remeshed (edits 3e-4 to 7e-4 of the
+energy); a pump handed a Kerr law (an edit of 5e-2, the law's own energy); a
+pump switched on, from the fixed path (−8e-2), and off, back to it (+9e-2).
+Every run's ledger closes at second order, to 9e-6 at the quarter step, the
+wall's loss read from the run's lane, which PH-05 holds to its law
+(`driven_handoffs_book_their_edit_and_the_ledger_closes_across_them`).
 The mutations `loss-lanes-crossed`, `modulation-work-omitted` and
 `edit-exchange-dropped` each break one of them; `pump-rate-before-loss`
 restores the defect PH-17 found, a pumped complementary row with its own

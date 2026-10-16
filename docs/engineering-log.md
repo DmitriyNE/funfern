@@ -24725,3 +24725,41 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-16 — PH-17's handoff rows on the driven path, and a pump on Kerr
+
+- **What.** `remesh_level` hands over on whichever path each generation runs
+  - fixed to fixed, fixed to driven, driven to driven, driven to fixed - by
+  the CPU handoffs of 951b425, with the component totals the runtime
+  transfer names; the target may be another composition, a law added or
+  taken away. `driven_handoffs_book_their_edit_and_the_ledger_closes_across_them`,
+  six rows on Mechanical's box with both losses, a source and a gap, three
+  steps each, the residual of the whole run against the oracle with the edit
+  lane in it, of the energy:
+  - a pump remeshed: 9.2e-5, 2.5e-5, 6.1e-6, edits −5.4e-4 to 4.6e-4;
+  - Klein-Gordon remeshed: 1.1e-4, 3.3e-5, 8.9e-6, edits −3.4e-4 to 6.7e-4;
+  - a pump beside a second-order wall, remeshed: 7.5e-5, 1.7e-5, 4.3e-6,
+    edits −5.1e-4 to 7.4e-4, the wall's loss read from the run's lane, which
+    PH-05 holds to its law;
+  - a pump handed a Kerr law: 7.9e-5, 2.5e-5, 6.0e-6, the edit −5.1e-2, the
+    law's own energy;
+  - a pump switched on, fixed to driven: 9.9e-5, 3.2e-5, 8.7e-6, edit
+    −8.3e-2 to −8.5e-2;
+  - switched off, driven to fixed: 5.5e-5, 1.5e-5, 3.8e-6, edit +8.7e-2.
+- **Found: the oracle's pump power held on a linear row only.** PH-17 wrote a
+  drive's power as `−(ṁ/m)` times half of `Q u`. At fixed flux under a row
+  law `Q = m M g(u) u` it is `−ṁ M Φ(u)`, `Φ = ∫ u g(u) du`: half of `Q u`
+  when `g = 1`, and on Kerr's density row, `g = 1 + χu²`,
+  `(½ + χu²/4)/(1 + χu²)` of it. No configuration paired a pump with Kerr,
+  so nothing had read it; the first one, a pumped Kerr medium remeshed onto
+  itself, stood 1.4e-2 of the energy off at every step, while the solver's
+  own lanes closed against its energy to 5.4e-5, 1.3e-5 and 3.3e-6. With the
+  law's `Φ`, the oracle's pump meets the solver's lane at second order. The
+  solver was right; its pumped Kerr work had never been held to anything
+  outside it, and now is: a pumped Kerr configuration joins the others in
+  each skin, its pump lane off the oracle by 2.2e-4, 5.7e-5, 1.4e-5 in
+  Mechanical, 5.1e-5 to 3.2e-6 in TM, roundoff in TE, where the density row
+  is read at the oracle's own samples, as for the pumped density already.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

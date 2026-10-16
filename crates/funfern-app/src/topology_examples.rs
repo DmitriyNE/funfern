@@ -13303,6 +13303,14 @@ mod tests {
                 powers.complementary_loss += power;
             }
         };
+        // A drive's power at fixed flux is `−(ṁ/m) M Φ(u)`, `Φ = ∫ u g(u) du`
+        // under the row's own law `Q = m M g(u) u`: half of `Q u` on a linear
+        // row, and on Kerr's density row `(½ + χu²/4)/(1 + χu²)` of it.
+        let density_primary = density_row_is_primary(config.physics);
+        let share = |density: bool, field: f64| match config.kerr.filter(|_| density) {
+            Some(chi) => (0.5 + 0.25 * chi * field * field) / (1.0 + chi * field * field),
+            None => 0.5,
+        };
         let mut pump = 0.0;
         for (node, point) in operator.node_points().iter().enumerate() {
             let product = instant.primary[node] * instant.field[node];
@@ -13312,7 +13320,7 @@ mod tests {
             }
             if let Some(drive) = primary_drive {
                 let (factor, rate) = drive.factor_and_rate(*point, time);
-                pump -= rate / factor * 0.5 * product;
+                pump -= rate / factor * share(density_primary, instant.field[node].abs()) * product;
             }
         }
         for (sample, (flux, vector)) in operator
@@ -13330,7 +13338,7 @@ mod tests {
             }
             if let Some(drive) = complementary_drive {
                 let (factor, rate) = drive.factor_and_rate(sample.point, time);
-                pump -= rate / factor * 0.5 * product;
+                pump -= rate / factor * share(!density_primary, vector.norm()) * product;
             }
         }
         powers.pump = pump;
@@ -13808,6 +13816,15 @@ mod tests {
                     magnetic: Some(LossRate::Constant(0.2)),
                     kerr: Some(0.5),
                     ..plain("lossy Kerr")
+                },
+                Ledgered {
+                    mass: Some(RowDrive::Pump {
+                        depth: 0.2,
+                        hz: 0.7,
+                        phase: 0.3,
+                    }),
+                    kerr: Some(0.5),
+                    ..plain("pumped Kerr")
                 },
                 Ledgered {
                     magnetic: Some(LossRate::Driven {
@@ -14382,16 +14399,23 @@ mod tests {
         }
     }
 
-    /// One remeshed run: the composition on edge 0.25 for half the run, then
-    /// handed to the same scene meshed at 0.18 as the device hands it,
-    /// component totals where the runtime transfer puts them, and on. Returns
-    /// the starting energy, the residual of the whole run against the
-    /// oracle's channels and the handoff's booked edit, and that edit.
-    fn remesh_level(config: &Ledgered, refinement: f64, duration: f64) -> (f64, f64, f64) {
-        let document = ledger_document(config);
+    /// One remeshed run: `config` on edge 0.25 for half the run, then handed
+    /// to `target` - the same composition, or one with a law added or taken
+    /// away - meshed at 0.18, as the device hands it, component totals where
+    /// the runtime transfer puts them, and on, on whichever path each
+    /// generation runs. Returns the starting energy, the residual of the
+    /// whole run against the oracle's channels and the handoff's booked edit,
+    /// and that edit. A wall's loss is read from the run's own lane, which
+    /// PH-05 holds to the wall's law.
+    fn remesh_level(
+        config: &Ledgered,
+        target: &Ledgered,
+        refinement: f64,
+        duration: f64,
+    ) -> (f64, f64, f64) {
         let mut runtime = TopologyRuntime::default();
-        let (coarse, _) = prepare_on(&mut runtime, &document, 1, 0.25);
-        let (fine, maps) = prepare_on(&mut runtime, &document, 2, 0.18);
+        let (coarse, _) = prepare_on(&mut runtime, &ledger_document(config), 1, 0.25);
+        let (fine, maps) = prepare_on(&mut runtime, &ledger_document(target), 2, 0.18);
         let maps = maps.expect("a remesh carries its maps");
         let production = coarse
             .recommended_time_step()
@@ -14402,11 +14426,14 @@ mod tests {
         let mut oracle = Ledger::default();
         let mut stage = |run: &mut LedgerRun<'_>,
                          prepared: &crate::topology_runtime::PreparedTopology,
+                         config: &Ledgered,
                          count: usize| {
             let mut before = run.instant();
             let mut powers_before = ledger_powers(config, prepared, &before);
             for _ in 0..count {
-                lanes.add_scaled(run.step(&prepared.canonical_forcing), 1.0);
+                let step = run.step(&prepared.canonical_forcing);
+                oracle.wall_loss += step.wall_loss;
+                lanes.add_scaled(step, 1.0);
                 let now = run.instant();
                 let powers_now = ledger_powers(config, prepared, &now);
                 oracle.add_scaled(powers_before, 0.5 * dt);
@@ -14418,44 +14445,99 @@ mod tests {
         };
         let mut run = LedgerRun::new(&coarse, config.physics, CanonicalIntegrator::default(), dt);
         let start = run.instant().energy;
-        stage(&mut run, &coarse, steps / 2);
-        let LedgerRun::Fixed(source, state) = run else {
-            panic!("the remeshed composition runs on the fixed path");
-        };
-        let target = &fine.canonical_operator;
-        let desired = crate::canonical_gpu::CanonicalGpuRuntimeTransfer::from_primary_transfer(
-            source,
-            target,
-            &coarse.canonical_forcing,
-            &fine.canonical_forcing,
-            &maps.primary,
-            [0; 4],
-        )
-        .unwrap()
-        .desired_totals(source, state.primary_flux());
-        let (handed, accounting) = state
-            .handed_over(
+        stage(&mut run, &coarse, config, steps / 2);
+        let desired = |source: &CanonicalWaveOperator, primary: &[f64]| {
+            crate::canonical_gpu::CanonicalGpuRuntimeTransfer::from_primary_transfer(
                 source,
-                target,
+                &fine.canonical_operator,
+                &coarse.canonical_forcing,
                 &fine.canonical_forcing,
-                CanonicalHandoffMaps {
-                    primary: &maps.primary,
-                    complementary: &maps.complementary,
-                    thin_gap: &maps.thin_gap,
-                    outgoing: &maps.outgoing,
-                },
-                &desired,
-                dt,
+                &maps.primary,
+                [0; 4],
             )
-            .unwrap();
-        assert_eq!(accounting.prescribed_exchange, 0.0);
-        let mut run = LedgerRun::Fixed(target, handed);
-        let end = stage(&mut run, &fine, steps - steps / 2);
-        (
-            start,
-            end - start - oracle.net() - accounting.edit_exchange,
-            accounting.edit_exchange,
-        )
+            .unwrap()
+            .desired_totals(source, primary)
+        };
+        let handoff_maps = CanonicalHandoffMaps {
+            primary: &maps.primary,
+            complementary: &maps.complementary,
+            thin_gap: &maps.thin_gap,
+            outgoing: &maps.outgoing,
+        };
+        let forcing = &fine.canonical_forcing;
+        let (mut run, edit, prescribed) = match (run, fine.canonical_temporal_operator.as_deref()) {
+            (LedgerRun::Fixed(source, state), None) => {
+                let (handed, accounting) = state
+                    .handed_over(
+                        source,
+                        &fine.canonical_operator,
+                        forcing,
+                        handoff_maps,
+                        &desired(source, state.primary_flux()),
+                        dt,
+                    )
+                    .unwrap();
+                (
+                    LedgerRun::Fixed(&fine.canonical_operator, handed),
+                    accounting.edit_exchange,
+                    accounting.prescribed_exchange,
+                )
+            }
+            (LedgerRun::Fixed(source, state), Some(target)) => {
+                let handoff = CanonicalTemporalWaveState::handed_from_fixed(
+                    &state,
+                    source,
+                    target,
+                    forcing,
+                    handoff_maps,
+                    &desired(source, state.primary_flux()),
+                    dt,
+                )
+                .unwrap();
+                (
+                    LedgerRun::Driven(target, handoff.state),
+                    handoff.accounting.edit_exchange,
+                    handoff.accounting.prescribed_exchange,
+                )
+            }
+            (LedgerRun::Driven(source, state), Some(target)) => {
+                let handoff = state
+                    .handed_over(
+                        source,
+                        target,
+                        forcing,
+                        handoff_maps,
+                        &desired(source.base(), state.primary_flux()),
+                        dt,
+                    )
+                    .unwrap();
+                (
+                    LedgerRun::Driven(target, handoff.state),
+                    handoff.accounting.edit_exchange,
+                    handoff.accounting.prescribed_exchange,
+                )
+            }
+            (LedgerRun::Driven(source, state), None) => {
+                let (handed, accounting, _) = CanonicalWaveState::handed_from_driven(
+                    &state,
+                    source,
+                    &fine.canonical_operator,
+                    forcing,
+                    handoff_maps,
+                    &desired(source.base(), state.primary_flux()),
+                    dt,
+                )
+                .unwrap();
+                (
+                    LedgerRun::Fixed(&fine.canonical_operator, handed),
+                    accounting.edit_exchange,
+                    accounting.prescribed_exchange,
+                )
+            }
+        };
+        assert_eq!(prescribed, 0.0);
+        let end = stage(&mut run, &fine, target, steps - steps / 2);
+        (start, end - start - oracle.net() - edit, edit)
     }
 
     /// PH-17's remesh row: a remesh's own change of the stored energy is
@@ -14471,18 +14553,89 @@ mod tests {
             gap: Some(40.0),
             ..Ledgered::plain("remeshed", PhysicsModel::Mechanical)
         };
-        let levels = [1.0, 0.5, 0.25].map(|refinement| remesh_level(&config, refinement, 3.0));
+        remeshes_close(&config, &config, true);
+    }
+
+    /// The remesh rows on the driven path, and across the handoffs that
+    /// change what a generation runs: a pump, Klein-Gordon's `r`, a pump
+    /// beside a second-order wall and a gap, each remeshed; a pumped medium
+    /// handed a Kerr law; and a pump switched on, from the fixed path, and
+    /// off, back to it. Every run's ledger closes at second order with the
+    /// edit lane in it; a remesh's edit is its transfer's error, a small share
+    /// of the energy, and a law's change books what it changes.
+    #[test]
+    fn driven_handoffs_book_their_edit_and_the_ledger_closes_across_them() {
+        let lossy = Ledgered {
+            electric: Some(LossRate::Constant(0.3)),
+            magnetic: Some(LossRate::Constant(0.2)),
+            source: Some((1.5, 0.6)),
+            gap: Some(40.0),
+            ..Ledgered::plain("lossy", PhysicsModel::Mechanical)
+        };
+        let pumped = Ledgered {
+            name: "pumped",
+            mass: Some(RowDrive::Pump {
+                depth: 0.2,
+                hz: 0.7,
+                phase: 0.3,
+            }),
+            ..lossy
+        };
+        let oscillator = Ledgered {
+            name: "Klein-Gordon",
+            restoring: Some(2.0),
+            ..lossy
+        };
+        let walled = Ledgered {
+            name: "walled pump",
+            wall: Some(OuterBoundaryCondition::SecondOrderOutgoing),
+            ..pumped
+        };
+        let kerr = Ledgered {
+            name: "pumped Kerr",
+            kerr: Some(0.5),
+            ..pumped
+        };
+        let rows = [
+            (pumped, pumped, true),
+            (oscillator, oscillator, true),
+            (walled, walled, true),
+            (pumped, kerr, false),
+            (lossy, pumped, false),
+            (pumped, lossy, false),
+        ];
+        std::thread::scope(|scope| {
+            for (config, target, remesh) in &rows {
+                scope.spawn(move || remeshes_close(config, target, *remesh));
+            }
+        });
+    }
+
+    /// `config` handed to `target` at three steps: the residual falls at
+    /// second order, and the edit is booked - within a hundredth of the
+    /// energy where the handoff only remeshes.
+    fn remeshes_close(config: &Ledgered, target: &Ledgered, remesh: bool) {
+        let levels =
+            [1.0, 0.5, 0.25].map(|refinement| remesh_level(config, target, refinement, 3.0));
+        let name = format!("{} to {}", config.name, target.name);
         for (start, residual, edit) in &levels {
             eprintln!(
-                "remeshed: residual {:.3e}, edit {:.3e}, of {start:.4e}",
+                "{name}: residual {:.3e}, edit {:.3e}, of {start:.4e}",
                 residual / start,
                 edit / start
             );
         }
         let start = levels[0].0;
-        second_order("remeshed residual", levels.map(|level| level.1), start);
+        second_order(
+            &format!("{name} residual"),
+            levels.map(|level| level.1),
+            start,
+        );
         for (_, _, edit) in levels {
-            assert!(edit != 0.0 && edit.abs() < 1.0e-2 * start, "edit {edit:e}");
+            assert!(edit != 0.0, "{name}: no edit booked");
+            if remesh {
+                assert!(edit.abs() < 1.0e-2 * start, "{name}: edit {edit:e}");
+            }
         }
     }
 
