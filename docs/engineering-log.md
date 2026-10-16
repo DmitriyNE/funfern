@@ -24592,3 +24592,34 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-16 — The handoff's material-runtime rule moves into core
+
+- **Why.** The time-driven CPU handoff that comes next carries each
+  material's runtime as the device does. The rule lived in the device's
+  transfer builder (`with_temporal_material_runtime_of`), so a host twin
+  would have been a second copy of it, free to drift from the first.
+- **What.** `CanonicalRuntimeLayout` in core: each runtime record's material
+  and the drive each of its four lanes carries, known by its
+  `CanonicalDriveSignature`, the drive's kind and authored phase. The phase
+  is held in `f32`, as the device packs it, because the device reads the
+  candidate's drives back from its packed plan and the running generation's
+  from its operators, and the two must name the same drives; the existing
+  `a_skin_change_carries_each_drives_phase_into_its_new_lane` holds them
+  equal. `carries_to` is the rule: a target record carries on from the
+  source's record of the same material, its Switch and, lane by lane, the
+  carrier of the lane holding the same drive; anything else starts from the
+  target's own anchors. The device's `CanonicalGpuGenerationLayout` holds the
+  core layout and writes its mapping words from the rule; its own signature
+  helpers are gone.
+- **Behaviour.** The words are as before. The errors a malformed layout
+  raises come through as core errors (`CanonicalGpuBuildError::Core`) with
+  the same text, where they were layout errors.
+- **Test.** `a_handoff_carries_each_drive_from_the_lane_that_holds_it`: the
+  same generation carries every lane its own; a skin change's swapped rows
+  carry crosswise; a frequency edit keeps its carrier, a phase edit does not,
+  a new material carries nothing; a fixed generation has no records; a lane
+  named twice must be named alike. Device suite 88 of 88.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

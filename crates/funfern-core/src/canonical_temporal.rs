@@ -257,6 +257,202 @@ impl CanonicalMaterialRuntimeState {
     }
 }
 
+/// A drive's kind, as a handoff tells drives apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanonicalDriveKind {
+    None,
+    ParametricPump,
+    TimeCrystal,
+    TravellingModulation,
+}
+
+/// What a handoff knows a drive by: its kind and its authored phase. A
+/// frequency edit keeps both, and the carrier runs on from where it had got
+/// to; a phase edit, or another kind of drive, starts from its own anchors.
+/// The phase is held as the device packs it, in `f32`, so that the device,
+/// which reads a candidate's drives back from its packed plan, and the host
+/// match the same drives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalDriveSignature {
+    kind: CanonicalDriveKind,
+    phase_bits: u32,
+}
+
+impl CanonicalDriveSignature {
+    pub fn new(kind: CanonicalDriveKind, phase_radians: f32) -> Result<Self, WaveError> {
+        phase_radians
+            .is_finite()
+            .then_some(Self {
+                kind,
+                phase_bits: phase_radians.to_bits(),
+            })
+            .ok_or(WaveError::InvalidState)
+    }
+
+    pub fn of(drive: TimeDriveValues) -> Result<Self, WaveError> {
+        let kind = match drive {
+            TimeDriveValues::None => CanonicalDriveKind::None,
+            TimeDriveValues::ParametricPump { .. } => CanonicalDriveKind::ParametricPump,
+            TimeDriveValues::TimeCrystal { .. } => CanonicalDriveKind::TimeCrystal,
+            TimeDriveValues::TravellingModulation { .. } => {
+                CanonicalDriveKind::TravellingModulation
+            }
+        };
+        let phase = drive.authored_phase_radians();
+        if !phase.is_finite() || phase.abs() > f64::from(f32::MAX) {
+            return Err(WaveError::Unsupported(
+                "a drive's authored phase does not fit the device's precision",
+            ));
+        }
+        Self::new(kind, phase as f32)
+    }
+
+    pub fn kind(self) -> CanonicalDriveKind {
+        self.kind
+    }
+
+    pub fn phase_radians(self) -> f32 {
+        f32::from_bits(self.phase_bits)
+    }
+}
+
+/// One material runtime record as a handoff matches it: its material and the
+/// drive each of its lanes carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalRuntimeRecordLayout {
+    pub material: MaterialId,
+    pub drives: [Option<CanonicalDriveSignature>; CanonicalMaterialDrive::COUNT],
+}
+
+/// A generation's material runtime as a handoff matches it, in its records'
+/// order; a fixed generation holds none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CanonicalRuntimeLayout {
+    records: Vec<CanonicalRuntimeRecordLayout>,
+}
+
+/// How a handoff carries one target record: from the source record of the
+/// same material, if the source has one, and per lane the source lane that
+/// holds the same drive, whose carrier the lane keeps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CanonicalRuntimeCarry {
+    pub source: Option<usize>,
+    pub lanes: [Option<usize>; CanonicalMaterialDrive::COUNT],
+}
+
+impl CanonicalRuntimeLayout {
+    /// The layout of a generation, driven when `temporal` is present.
+    pub fn of(temporal: Option<&CanonicalTemporalWaveOperator>) -> Result<Self, WaveError> {
+        let Some(temporal) = temporal else {
+            return Ok(Self::default());
+        };
+        let mut layout = Self::with_materials(
+            temporal
+                .initial_runtime()
+                .records()
+                .iter()
+                .map(CanonicalMaterialRuntimeRecord::material),
+        );
+        for sample in temporal
+            .primary_coefficient_samples()
+            .chain(temporal.complementary_coefficient_samples())
+        {
+            let record = layout
+                .records
+                .iter()
+                .position(|record| record.material == sample.material)
+                .ok_or(WaveError::Unsupported(
+                    "a temporal coefficient has no material runtime record",
+                ))?;
+            layout.set_drive(
+                record,
+                sample.drive.index(),
+                CanonicalDriveSignature::of(sample.law.drive)?,
+            )?;
+        }
+        Ok(layout)
+    }
+
+    /// Records for `materials` with no drive yet, which [`Self::set_drive`]
+    /// fills: how a layout read from somewhere other than an operator is
+    /// built.
+    pub fn with_materials(materials: impl IntoIterator<Item = MaterialId>) -> Self {
+        Self {
+            records: materials
+                .into_iter()
+                .map(|material| CanonicalRuntimeRecordLayout {
+                    material,
+                    drives: [None; CanonicalMaterialDrive::COUNT],
+                })
+                .collect(),
+        }
+    }
+
+    /// Names the drive on `record`'s `lane`. Every coefficient on a lane
+    /// names it, so a lane named twice must be named alike.
+    pub fn set_drive(
+        &mut self,
+        record: usize,
+        lane: usize,
+        signature: CanonicalDriveSignature,
+    ) -> Result<(), WaveError> {
+        let slot = self
+            .records
+            .get_mut(record)
+            .and_then(|record| record.drives.get_mut(lane))
+            .ok_or(WaveError::Unsupported(
+                "a temporal coefficient names an invalid runtime drive",
+            ))?;
+        if slot.is_some_and(|existing| existing != signature) {
+            return Err(WaveError::Unsupported(
+                "one material runtime lane has inconsistent drive metadata",
+            ));
+        }
+        *slot = Some(signature);
+        Ok(())
+    }
+
+    pub fn records(&self) -> &[CanonicalRuntimeRecordLayout] {
+        &self.records
+    }
+
+    /// The handoff's rule, on the device and the host alike: each of
+    /// `target`'s records carries on from this layout's record of the same
+    /// material, its Switch and, lane by lane, the carrier of the lane that
+    /// holds the same drive. A carrier follows its own drive, not the lane it
+    /// used to sit in: a physics skin change moves one, the mass and stiffness
+    /// rows swapping when `k` and `ε` exchange places, so the lane a pump
+    /// occupies changes while the pump does not. Two lanes that share a
+    /// signature cannot be told apart by phase either, so taking the first
+    /// gives the same carrier, and without a move each lane reads its own. A
+    /// record or lane with nothing to carry starts from the target's own
+    /// authored anchors, as a drive just switched on should.
+    pub fn carries_to(&self, target: &Self) -> Vec<CanonicalRuntimeCarry> {
+        target
+            .records
+            .iter()
+            .map(|record| {
+                let Some(source) = self
+                    .records
+                    .iter()
+                    .position(|candidate| candidate.material == record.material)
+                else {
+                    return CanonicalRuntimeCarry::default();
+                };
+                let drives = &self.records[source].drives;
+                CanonicalRuntimeCarry {
+                    source: Some(source),
+                    lanes: record.drives.map(|signature| {
+                        signature.and_then(|signature| {
+                            drives.iter().position(|drive| *drive == Some(signature))
+                        })
+                    }),
+                }
+            })
+            .collect()
+    }
+}
+
 /// Probe and area consumers interpolate linear maps. On a field-dependent
 /// medium they would read the wrong field without a word, so they refuse
 /// until they are ported onto the solver-site inverses.
@@ -14765,6 +14961,101 @@ mod tests {
         }
         assert_eq!(handed.integrated_field(), state.integrated_field());
         assert_eq!(handed.primary_flux(), state.primary_flux());
+    }
+
+    fn pump_signature(frequency_hz: f64, phase_radians: f64) -> CanonicalDriveSignature {
+        CanonicalDriveSignature::of(TimeDriveValues::ParametricPump {
+            depth: 0.2,
+            frequency_hz,
+            phase_radians,
+        })
+        .unwrap()
+    }
+
+    fn runtime_layout(
+        records: &[(u64, [Option<CanonicalDriveSignature>; 4])],
+    ) -> CanonicalRuntimeLayout {
+        let mut layout =
+            CanonicalRuntimeLayout::with_materials(records.iter().map(|(id, _)| MaterialId(*id)));
+        for (record, (_, drives)) in records.iter().enumerate() {
+            for (lane, drive) in drives.iter().enumerate() {
+                if let Some(drive) = drive {
+                    layout.set_drive(record, lane, *drive).unwrap();
+                }
+            }
+        }
+        layout
+    }
+
+    /// The handoff's runtime rule: a record carries on from its material's,
+    /// in whatever order the generations list them, and a lane keeps the
+    /// carrier of the lane holding its drive; a frequency edit keeps the
+    /// drive, a phase edit or a new kind does not, and a material new to the
+    /// target carries nothing.
+    #[test]
+    fn a_handoff_carries_each_drive_from_the_lane_that_holds_it() {
+        let crystal = CanonicalDriveSignature::of(TimeDriveValues::TimeCrystal {
+            depth: 0.1,
+            frequency_hz: 1.0,
+            phase_radians: 0.3,
+            sharpness: 1.0,
+        })
+        .unwrap();
+        assert_eq!(pump_signature(1.0, 0.3), pump_signature(2.5, 0.3));
+        assert_ne!(pump_signature(1.0, 0.3), pump_signature(1.0, 0.4));
+        assert_ne!(pump_signature(1.0, 0.3), crystal);
+        let source = runtime_layout(&[
+            (
+                1,
+                [Some(pump_signature(1.0, 0.3)), Some(crystal), None, None],
+            ),
+            (4, [None, Some(pump_signature(1.0, 0.0)), None, None]),
+        ]);
+
+        // The same generation: every lane its own.
+        let carries = source.carries_to(&source);
+        assert_eq!(carries[0].source, Some(0));
+        assert_eq!(carries[0].lanes, [Some(0), Some(1), None, None]);
+        assert_eq!(carries[1].lanes, [None, Some(1), None, None]);
+
+        // A skin change swaps the rows, the pump's frequency was edited, the
+        // second material's phase was, and a third material is new.
+        let target = runtime_layout(&[
+            (2, [Some(pump_signature(1.0, 0.0)), None, None, None]),
+            (4, [None, Some(pump_signature(1.0, 0.5)), None, None]),
+            (
+                1,
+                [Some(crystal), Some(pump_signature(3.0, 0.3)), None, None],
+            ),
+        ]);
+        let carries = source.carries_to(&target);
+        assert_eq!(carries[0], CanonicalRuntimeCarry::default());
+        assert_eq!(carries[1].source, Some(1));
+        assert_eq!(carries[1].lanes, [None; 4]);
+        assert_eq!(carries[2].source, Some(0));
+        assert_eq!(carries[2].lanes, [Some(1), Some(0), None, None]);
+
+        // A fixed generation holds no records.
+        assert!(
+            CanonicalRuntimeLayout::of(None)
+                .unwrap()
+                .records()
+                .is_empty()
+        );
+        assert!(
+            CanonicalRuntimeLayout::default()
+                .carries_to(&target)
+                .iter()
+                .all(|carry| *carry == CanonicalRuntimeCarry::default())
+        );
+        let mut inconsistent = source.clone();
+        assert!(
+            inconsistent
+                .set_drive(0, 0, pump_signature(1.0, 0.3))
+                .is_ok()
+        );
+        assert!(inconsistent.set_drive(0, 0, crystal).is_err());
+        assert!(inconsistent.set_drive(2, 0, crystal).is_err());
     }
 
     /// A generation without `r` hands a restoring target zero, which it

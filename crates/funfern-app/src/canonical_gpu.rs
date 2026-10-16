@@ -31,16 +31,18 @@ use bevy::{
     },
 };
 use funfern_core::{
-    CANONICAL_GRID_FILTER_STRENGTH, CanonicalAuxiliaryState, CanonicalForcing, CanonicalIntegrator,
-    CanonicalMaterialDrive, CanonicalMaterialRuntimeState, CanonicalOutgoingHistoryTransferMap,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalAuxiliaryState, CanonicalDriveKind,
+    CanonicalDriveSignature, CanonicalForcing, CanonicalIntegrator, CanonicalMaterialDrive,
+    CanonicalMaterialRuntimeState, CanonicalOutgoingHistoryTransferMap,
     CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
-    CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalTemporalCoefficientSample,
-    CanonicalTemporalLossSample, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWallStep,
-    CanonicalWaveOperator, CanonicalWaveState, CoefficientLawValues, FieldLawValues,
-    FourthOrderForm, GRID_SCALE_FILTER_CADENCE, GRID_SCALE_FILTER_LIMIT, LinearPrimaryContribution,
-    MaterialId, MaterialSwitchRuntime, Point2, PulseEnvelope, PulseTrain, QuadraticWaveOperator,
-    RateLawValues, RestoringLawValues, TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
+    CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalRuntimeLayout,
+    CanonicalTemporalCoefficientSample, CanonicalTemporalLossSample, CanonicalTemporalWaveOperator,
+    CanonicalTemporalWaveState, CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap,
+    CanonicalWallStep, CanonicalWaveOperator, CanonicalWaveState, CoefficientLawValues,
+    FieldLawValues, FourthOrderForm, GRID_SCALE_FILTER_CADENCE, GRID_SCALE_FILTER_LIMIT,
+    LinearPrimaryContribution, MaterialId, MaterialSwitchRuntime, Point2, PulseEnvelope,
+    PulseTrain, QuadraticWaveOperator, RateLawValues, RestoringLawValues, TimeDriveRuntime,
+    TimeDriveValues, TimeSignal, WaveError,
 };
 
 use crate::drawn_pacing::{DrawnFrame, DrawnPacingTrace, PacingNote};
@@ -3084,8 +3086,8 @@ impl CanonicalGpuTransferPlan {
         // was just switched on should begin from - so the two generations still
         // share everything that exists in both, and the field crosses rather
         // than being thrown away.
-        let source_records = source.runtime_materials.len();
-        let target_records = target.runtime_materials.len();
+        let source_records = source.runtime.records().len();
+        let target_records = target.runtime.records().len();
         if source.node_count != self.source_node_count
             || source.sample_count != self.source_sample_count
             || target.node_count != self.target_node_count
@@ -3097,41 +3099,19 @@ impl CanonicalGpuTransferPlan {
             ));
         }
 
-        let source_signatures = &source.drive_signatures;
-        let target_signatures = &target.drive_signatures;
-        let source_indices = source
-            .runtime_materials
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, material)| (material, index))
-            .collect::<BTreeMap<_, _>>();
-
         // Remove receipt padding before extending the immutable map payload.
         self.words.truncate(self.manifest.word_count);
         let mapping_offset = self.words.len();
-        for (target_index, material) in target.runtime_materials.iter().enumerate() {
-            let Some(&source_index) = source_indices.get(material) else {
+        // The rule is the host's too (`CanonicalRuntimeLayout::carries_to`).
+        for carry in source.runtime.carries_to(&target.runtime) {
+            let Some(source_index) = carry.source else {
                 self.words.push(transfer_word(NO_INDEX, 0, 0, 0));
                 continue;
             };
-            // A carrier follows its own drive, not the lane the drive used to
-            // sit in. A physics skin change moves one: the mass and stiffness
-            // rows swap when `k` and `ε` exchange places, so the lane a pump
-            // occupies changes while the pump does not. Matching on the drive
-            // signature is unambiguous - two lanes that share a signature
-            // cannot be told apart by phase either, so either pairing gives
-            // the same carrier - and it reduces to the old lane-for-lane test
-            // whenever nothing moved.
             let mut preserve_carrier = 0_u32;
             let mut carrier_source = 0_u32;
-            for (lane, target) in target_signatures[target_index].iter().enumerate() {
-                let Some(signature) = *target else {
-                    continue;
-                };
-                let Some(source_lane) = (0..4).find(|candidate: &usize| {
-                    source_signatures[source_index][*candidate] == Some(signature)
-                }) else {
+            for (lane, source_lane) in carry.lanes.iter().enumerate() {
+                let Some(source_lane) = *source_lane else {
                     continue;
                 };
                 preserve_carrier |= 1 << lane;
@@ -3163,8 +3143,6 @@ impl CanonicalGpuTransferPlan {
     }
 }
 
-type TemporalDriveSignature = Option<(u32, u32)>;
-
 /// What a handoff's transfer reads of the generation on either side: its
 /// counts, its material runtime records, and the drive each record's lanes
 /// carry, as kind and authored phase. A packed plan yields it, and so does
@@ -3177,8 +3155,7 @@ pub struct CanonicalGpuGenerationLayout {
     node_count: usize,
     sample_count: usize,
     integrated_count: usize,
-    runtime_materials: Vec<MaterialId>,
-    drive_signatures: Vec<[TemporalDriveSignature; 4]>,
+    runtime: CanonicalRuntimeLayout,
 }
 
 impl CanonicalGpuGenerationLayout {
@@ -3190,58 +3167,15 @@ impl CanonicalGpuGenerationLayout {
     ) -> Result<Self, CanonicalGpuBuildError> {
         let node_count = base.degrees_of_freedom();
         let sample_count = base.constitutive_samples().len();
-        let Some(temporal) = temporal else {
-            return Ok(Self {
-                node_count,
-                sample_count,
-                integrated_count: 0,
-                runtime_materials: Vec::new(),
-                drive_signatures: Vec::new(),
-            });
-        };
-        let runtime_materials = temporal
-            .initial_runtime()
-            .records()
-            .iter()
-            .map(|record| record.material())
-            .collect::<Vec<_>>();
-        let indices = runtime_materials
-            .iter()
-            .enumerate()
-            .map(|(index, material)| (*material, index))
-            .collect::<BTreeMap<_, _>>();
-        let mut drive_signatures = vec![[None; 4]; runtime_materials.len()];
-        for sample in temporal
-            .primary_coefficient_samples()
-            .chain(temporal.complementary_coefficient_samples())
-        {
-            let runtime =
-                *indices
-                    .get(&sample.material)
-                    .ok_or(CanonicalGpuBuildError::InvalidLayout(
-                        "a temporal coefficient has no material runtime record",
-                    ))?;
-            let phase = finite_f32(
-                sample.law.drive.authored_phase_radians(),
-                "temporal coefficient",
-            )?;
-            record_drive_signature(
-                &mut drive_signatures,
-                runtime,
-                temporal_drive_index(sample.drive) as usize,
-                (temporal_drive_kind(sample.law.drive), phase.to_bits()),
-            )?;
-        }
         Ok(Self {
             node_count,
             sample_count,
-            integrated_count: if temporal.has_restoring() {
+            integrated_count: if temporal.is_some_and(|temporal| temporal.has_restoring()) {
                 node_count
             } else {
                 0
             },
-            runtime_materials,
-            drive_signatures,
+            runtime: CanonicalRuntimeLayout::of(temporal)?,
         })
     }
 
@@ -3268,33 +3202,12 @@ impl CanonicalGpuPlan {
             node_count: self.node_count,
             sample_count: self.sample_count,
             integrated_count: self.integrated_count,
-            runtime_materials: self.temporal_runtime_materials.clone(),
-            drive_signatures: match self.manifest.temporal {
-                Some(_) => temporal_drive_signatures(self)?,
-                None => Vec::new(),
+            runtime: match self.manifest.temporal {
+                Some(_) => packed_runtime_layout(self)?,
+                None => CanonicalRuntimeLayout::default(),
             },
         })
     }
-}
-
-fn record_drive_signature(
-    signatures: &mut [[TemporalDriveSignature; 4]],
-    runtime: usize,
-    lane: usize,
-    signature: (u32, u32),
-) -> Result<(), CanonicalGpuBuildError> {
-    if runtime >= signatures.len() || lane >= 4 || signature.0 > TEMPORAL_DRIVE_TRAVELLING {
-        return Err(CanonicalGpuBuildError::InvalidLayout(
-            "a temporal coefficient names an invalid runtime drive",
-        ));
-    }
-    if signatures[runtime][lane].is_some_and(|existing| existing != signature) {
-        return Err(CanonicalGpuBuildError::InvalidLayout(
-            "one material runtime lane has inconsistent drive metadata",
-        ));
-    }
-    signatures[runtime][lane] = Some(signature);
-    Ok(())
 }
 
 /// Appends one entry list a node in slices of `ENTRY_SLICE` nodes, entry `k`
@@ -3323,9 +3236,12 @@ fn pack_entry_slices(
     Ok(ranges)
 }
 
-fn temporal_drive_signatures(
+/// The runtime layout a packed plan holds, read back from its temporal
+/// coefficient records: each names its record, its lane, its drive's kind
+/// and its authored phase.
+fn packed_runtime_layout(
     plan: &CanonicalGpuPlan,
-) -> Result<Vec<[TemporalDriveSignature; 4]>, CanonicalGpuBuildError> {
+) -> Result<CanonicalRuntimeLayout, CanonicalGpuBuildError> {
     let manifest = plan
         .manifest
         .temporal
@@ -3333,7 +3249,8 @@ fn temporal_drive_signatures(
             "a temporal runtime signature requires a temporal generation",
         ))?;
     let header = plan.tables[manifest.header_offset].data;
-    let mut signatures = vec![[None; 4]; manifest.runtime_record_count];
+    let mut layout =
+        CanonicalRuntimeLayout::with_materials(plan.temporal_runtime_materials.iter().copied());
     let ranges = [
         (header.x as usize, manifest.primary_record_count),
         (header.z as usize, manifest.complementary_record_count),
@@ -3341,15 +3258,16 @@ fn temporal_drive_signatures(
     for (start, count) in ranges {
         for record in temporal_coefficient_range(plan, start, count)? {
             let metadata = record[0].data;
-            record_drive_signature(
-                &mut signatures,
-                metadata.x as usize,
-                metadata.y as usize,
-                (metadata.z, record[2].data.z),
+            let kind = temporal_drive_kind_of_code(metadata.z).ok_or(
+                CanonicalGpuBuildError::InvalidLayout(
+                    "a temporal coefficient names an invalid runtime drive",
+                ),
             )?;
+            let signature = CanonicalDriveSignature::new(kind, f32::from_bits(record[2].data.z))?;
+            layout.set_drive(metadata.x as usize, metadata.y as usize, signature)?;
         }
     }
-    Ok(signatures)
+    Ok(layout)
 }
 
 fn transfer_word(x: u32, y: u32, z: u32, w: u32) -> GpuCanonicalTransferWord {
@@ -3828,6 +3746,16 @@ fn temporal_drive_kind(drive: TimeDriveValues) -> u32 {
         TimeDriveValues::ParametricPump { .. } => TEMPORAL_DRIVE_PUMP,
         TimeDriveValues::TimeCrystal { .. } => TEMPORAL_DRIVE_CRYSTAL,
         TimeDriveValues::TravellingModulation { .. } => TEMPORAL_DRIVE_TRAVELLING,
+    }
+}
+
+fn temporal_drive_kind_of_code(code: u32) -> Option<CanonicalDriveKind> {
+    match code {
+        TEMPORAL_DRIVE_NONE => Some(CanonicalDriveKind::None),
+        TEMPORAL_DRIVE_PUMP => Some(CanonicalDriveKind::ParametricPump),
+        TEMPORAL_DRIVE_CRYSTAL => Some(CanonicalDriveKind::TimeCrystal),
+        TEMPORAL_DRIVE_TRAVELLING => Some(CanonicalDriveKind::TravellingModulation),
+        _ => None,
     }
 }
 
