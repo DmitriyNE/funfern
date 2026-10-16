@@ -24623,3 +24623,58 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-16 — Time-driven handoffs on the CPU
+
+- **Why.** The device hands time-driven states over, between driven
+  generations and between fixed and driven ones either way, and the CPU had
+  no twin: the device examples built their expected handoff by hand, four
+  of them, the time-driven ledger had no edit lane, and PH-17's remesh row
+  ran only on the fixed path. The CPU handoff of 15 October (cf9ec40) stayed
+  linear while the device's time-driven valuation was in doubt; with that
+  fixed (da83bc0) and the runtime rule in core (aaab74e) it can follow.
+- **What.** `CanonicalTemporalWaveState::handed_over` (driven to driven),
+  `CanonicalTemporalWaveState::handed_from_fixed` and
+  `CanonicalWaveState::handed_from_driven`. All of them, and the linear
+  `handed_over`, carry the fields through one path, `hand_fields`: `Q`
+  through the primary map with the component totals the runtime transfer
+  names and the pins left to their signals; `r` through the quadratic
+  interpolation onto a target that keeps one, started from zero or dropped
+  as `transfer_integrated_field` reports; `b` through its map, rebuilt about
+  the target's `r` where both keep one (`transfer_oscillator_flux`); the
+  gaps' jumps and the walls' memory through theirs. The material runtime
+  goes through `CanonicalMaterialRuntimeState::carried_onto`, by the rule in
+  core: a record's Switch from its material's record, a lane's carrier from
+  the lane holding its drive, re-anchored at the handoff with the phase it
+  had reached (`preserving_carrier_from`, what the device's
+  `transfer_runtime` computes in `f32`), the rest from the target's own
+  anchors. Gates need nothing; the CPU reads them in absolute time. The
+  target's pins are then held (`pinned`), and what that moved is booked as
+  `prescribed_exchange`. `edit_exchange`, new on
+  `CanonicalTemporalStepAccounting` and zero on a step, books every other
+  change, each side valued under its own law and runtime. A fixed target
+  inverts its trace, as `CanonicalWaveState::new` does.
+- **Left out.** A source's or a pin's signal edited at the handoff: the
+  device keeps its phase running, and the CPU's forcing reads signals in
+  absolute time. The linear handoff leaves it out the same way.
+- **Tests.** On `gapped_scene` (a thin gap, second-order walls), its density
+  pumped, a Switch begun partway and still ramping, Klein-Gordon's `r`, and
+  the pump's carrier re-anchored early on by a frequency edit, so its
+  anchors are not the authored ones:
+  `a_driven_handoff_onto_its_own_generation_runs_on_as_the_run_it_left`
+  (books under 1e-12 of the energy, then `Q`, `b`, `r`, the gap and the
+  walls within 1e-11 of the uninterrupted run over 30 steps);
+  `a_driven_remesh_books_its_carry_and_keeps_the_drives_where_they_were`
+  (edge 0.15 to 0.1: the edit is the energy's change, under 1e-2 of it,
+  the totals kept, the Switch carried and the pump's carrier phase the
+  source's at the handoff and 0.7 s on);
+  `handoffs_between_fixed_and_driven_generations_start_or_drop_what_one_lacks`
+  (fixed to driven starts `r` at zero and the runtime as authored, driven
+  to fixed drops both and says so, each books its change, and on one mesh
+  the round trip returns every field). The temporal tests' hand-built
+  `hand_off` now calls `handed_over`, and their `r` tests pass unchanged.
+  With the carriers restarted at the handoff, the identity books an edit
+  of 6.1e-3 and the remesh's carrier stands 0.10 rad off.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

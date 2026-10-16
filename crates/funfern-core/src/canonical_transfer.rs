@@ -1944,6 +1944,85 @@ pub struct CanonicalHandoffMaps<'a> {
     pub outgoing: &'a CanonicalOutgoingNormalizedTransfer,
 }
 
+/// What a generation handoff reads of the state it carries, fixed or driven.
+pub(crate) struct HandoffSource<'a> {
+    pub operator: &'a CanonicalWaveOperator,
+    pub primary_flux: &'a [f64],
+    pub complementary_flux: &'a [Point2],
+    /// `r`, empty without a restoring law.
+    pub integrated_field: &'a [f64],
+    pub thin_gaps: Vec<CanonicalThinGapMemory>,
+    pub outgoing_z: &'a [f64],
+}
+
+/// What a handoff carries onto its target, before it is made a state there.
+pub(crate) struct HandedFields {
+    pub primary_flux: Vec<f64>,
+    pub complementary_flux: Vec<Point2>,
+    pub integrated: CanonicalIntegratedFieldTransfer,
+    pub thin_gaps: Vec<CanonicalThinGapMemory>,
+    pub outgoing_z: Vec<f64>,
+}
+
+/// The fields a generation handoff carries, as the device carries them,
+/// whichever path either side runs: `Q` through the primary map with each
+/// component's total where `desired_totals` puts it and the target's
+/// `prescribed` nodes left to their signals, `r` through `interpolation` onto
+/// a target that keeps one ([`transfer_integrated_field`]), `b` through its
+/// map - rebuilt about the target's `r` where both sides carry one
+/// ([`transfer_oscillator_flux`]) - and the gaps' jumps and the wall's memory
+/// through theirs. `target_temporal` is the target's driven operator, absent
+/// on a fixed generation, which keeps no `r`.
+pub(crate) fn hand_fields(
+    source: &HandoffSource<'_>,
+    target: &CanonicalWaveOperator,
+    target_temporal: Option<&CanonicalTemporalWaveOperator>,
+    prescribed: &[bool],
+    maps: CanonicalHandoffMaps<'_>,
+    interpolation: Option<&QuadraticTransferMap>,
+    desired_totals: &[Option<f64>],
+) -> Result<HandedFields, WaveError> {
+    let (primary_flux, _) =
+        maps.primary
+            .transfer(source.primary_flux, desired_totals, prescribed)?;
+    let integrated = match target_temporal.filter(|temporal| temporal.has_restoring()) {
+        Some(temporal) => transfer_integrated_field(
+            interpolation.ok_or(WaveError::Unsupported(
+                "a handoff onto a restoring law needs the interpolation its `r` crosses on",
+            ))?,
+            maps.primary,
+            source.integrated_field,
+            temporal,
+        )?,
+        None => CanonicalIntegratedFieldTransfer {
+            discarded: !source.integrated_field.is_empty(),
+            ..CanonicalIntegratedFieldTransfer::default()
+        },
+    };
+    let complementary_flux = if source.integrated_field.is_empty() || integrated.field.is_empty() {
+        maps.complementary.transfer(source.complementary_flux)?.0
+    } else {
+        transfer_oscillator_flux(
+            maps.complementary,
+            source.operator,
+            source.complementary_flux,
+            source.integrated_field,
+            target,
+            &integrated.field,
+        )?
+        .0
+    };
+    let (thin_gaps, _) = maps.thin_gap.transfer(&source.thin_gaps)?;
+    let outgoing_z = maps.outgoing.apply(source.outgoing_z)?;
+    Ok(HandedFields {
+        primary_flux,
+        complementary_flux,
+        integrated,
+        thin_gaps,
+        outgoing_z,
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CanonicalOutgoingNormalizedTransferPhase {
     Validate,
@@ -2540,9 +2619,10 @@ mod tests {
     use super::*;
     use crate::{
         BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalAuxiliaryState, CanonicalForcing,
-        CanonicalStepAccounting, CanonicalWaveOperator, CanonicalWaveState, InternalBoundaryId,
-        MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, OuterBoundaryCondition, OuterSide,
-        QuadraticWaveOperator, Scene, TimeSignal, mesh_scene,
+        CanonicalStepAccounting, CanonicalTemporalWaveState, CanonicalWaveOperator,
+        CanonicalWaveState, DrivenHandoff, InternalBoundaryId, MeshQuality, MeshTriangle,
+        MeshVertex, MeshingOptions, OuterBoundaryCondition, OuterSide, QuadraticWaveOperator,
+        Scene, TimeDriveValues, TimeSignal, mesh_scene,
     };
 
     fn mesh(revision: u64, points: &[[f64; 2]], triangles: &[[usize; 3]]) -> TriMesh {
@@ -3859,6 +3939,7 @@ mod tests {
     /// The maps a handoff from one compiled generation to another carries its
     /// state through, prepared as the topology transaction prepares them.
     struct Handoff {
+        interpolation: QuadraticTransferMap,
         primary: CanonicalPrimaryTransferMap,
         complementary: CanonicalVectorTransferMap,
         thin_gap: CanonicalThinGapHistoryTransferMap,
@@ -3895,6 +3976,7 @@ mod tests {
                 .unwrap()
                 .normalized_matrix(source.2, target.2)
                 .unwrap(),
+                interpolation,
             }
         }
 
@@ -3914,6 +3996,322 @@ mod tests {
             totals[*label as usize] += value;
         }
         totals
+    }
+
+    /// `scene`'s driven generation on `edge`, meshed and assembled as the
+    /// topology runtime does it: on the scene with its temporal laws
+    /// stripped, the driven operator compiled from the authored one.
+    fn compile_driven_at_edge(
+        scene: &Scene,
+        edge: f64,
+    ) -> (
+        TriMesh,
+        QuadraticWaveOperator,
+        CanonicalTemporalWaveOperator,
+    ) {
+        let mut base = scene.clone();
+        crate::canonical_temporal::strip_temporal_laws(&mut base.materials);
+        let (mesh, quadratic, _) = compile_at_edge(&base, edge);
+        let temporal =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap();
+        (mesh, quadratic, temporal)
+    }
+
+    /// `gapped_scene` with everything a driven generation carries: its
+    /// density pumped, its stiffness switching to one and a half times over
+    /// a second and a half, and Klein-Gordon's restoring force.
+    fn driven_scene() -> Scene {
+        let mut scene = gapped_scene();
+        let material = &mut scene.materials[0];
+        material.mass_law.drive = crate::TimeDrive::ParametricPump {
+            depth: crate::ScalarField::constant(0.2),
+            frequency_hz: crate::ScalarField::constant(1.3),
+            phase_radians: crate::ScalarField::constant(0.4),
+        };
+        material.stiffness_law.alternate = Some(crate::ScalarField::constant(1.5));
+        material.switch_ramp = 1.5;
+        material.restoring = crate::RestoringLaw::KleinGordon {
+            omega0: crate::ScalarField::constant(1.5),
+        };
+        scene
+    }
+
+    /// `running_state`'s field on a driven generation, run until the gap,
+    /// the walls and `r` hold memory, with the Switch begun partway and
+    /// still ramping, and the pump's carrier re-anchored early on as a
+    /// frequency edit from 0.9 Hz leaves it, so its anchors are no longer
+    /// the ones the scene authored.
+    fn running_driven(operator: &CanonicalTemporalWaveOperator) -> CanonicalTemporalWaveState {
+        let fixed = running_state(operator.base());
+        let mut state = CanonicalTemporalWaveState::new(
+            operator,
+            fixed.time_step(),
+            fixed.primary_flux().to_vec(),
+            fixed.complementary_flux().to_vec(),
+        )
+        .unwrap();
+        let material = operator.initial_runtime().records()[0].material();
+        for step in 0..40 {
+            if step == 10 {
+                let now = state.time();
+                state
+                    .runtime_mut()
+                    .preserve_carrier(
+                        material,
+                        crate::CanonicalMaterialDrive::MassCoefficient,
+                        TimeDriveValues::ParametricPump {
+                            depth: 0.2,
+                            frequency_hz: 0.9,
+                            phase_radians: 0.4,
+                        },
+                        now,
+                    )
+                    .unwrap();
+            }
+            if step == 25 {
+                let now = state.time();
+                state
+                    .runtime_mut()
+                    .begin_switch(material, true, now, 1.5)
+                    .unwrap();
+            }
+            state.step(operator).unwrap();
+        }
+        assert!(state.thin_gap_jump().iter().any(|jump| *jump != 0.0));
+        assert!(state.outgoing_pole_currents().iter().any(|z| *z != 0.0));
+        assert!(state.integrated_field().iter().any(|r| *r != 0.0));
+        state
+    }
+
+    /// The largest difference between two records, relative to the first's
+    /// largest value.
+    fn apart(left: &[f64], right: &[f64]) -> f64 {
+        assert_eq!(left.len(), right.len());
+        let scale = left.iter().fold(0.0_f64, |m, value| m.max(value.abs()));
+        left.iter()
+            .zip(right)
+            .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()))
+            / scale.max(f64::MIN_POSITIVE)
+    }
+
+    fn flattened(flux: &[Point2]) -> Vec<f64> {
+        flux.iter().flat_map(|value| [value.x, value.y]).collect()
+    }
+
+    /// A driven state handed onto its own generation, mid-pump, mid-Switch,
+    /// with `r`, the gap's jumps and the walls' memory, books nothing and
+    /// runs on as the run it left, to the roundoff of re-anchoring its
+    /// carrier at the handoff.
+    #[test]
+    fn a_driven_handoff_onto_its_own_generation_runs_on_as_the_run_it_left() {
+        let scene = driven_scene();
+        let (mesh, quadratic, operator) = compile_driven_at_edge(&scene, 0.15);
+        let mut running = running_driven(&operator);
+        let handoff = Handoff::prepare(
+            (&mesh, &quadratic, operator.base()),
+            (&mesh, &quadratic, operator.base()),
+        );
+        let energy = running.energy(&operator).unwrap();
+        let DrivenHandoff {
+            state: mut handed,
+            accounting,
+            integrated,
+        } = running
+            .handed_over(
+                &operator,
+                &operator,
+                &CanonicalForcing::none(operator.base()),
+                handoff.maps(),
+                &handoff.interpolation,
+                &vec![None; operator.base().component_count()],
+                running.time_step(),
+            )
+            .unwrap();
+        assert!(
+            accounting.edit_exchange.abs() < 1.0e-12 * energy,
+            "{accounting:?}"
+        );
+        assert_eq!(accounting.prescribed_exchange, 0.0);
+        assert!(!integrated.discarded && !integrated.started_at_zero);
+        assert_eq!(handed.time(), running.time());
+        assert_eq!(
+            handed.runtime().records()[0].switch(),
+            running.runtime().records()[0].switch()
+        );
+        for _ in 0..30 {
+            running.step(&operator).unwrap();
+            handed.step(&operator).unwrap();
+        }
+        for (what, distance) in [
+            ("Q", apart(running.primary_flux(), handed.primary_flux())),
+            (
+                "b",
+                apart(
+                    &flattened(running.complementary_flux()),
+                    &flattened(handed.complementary_flux()),
+                ),
+            ),
+            (
+                "r",
+                apart(running.integrated_field(), handed.integrated_field()),
+            ),
+            (
+                "gap",
+                apart(running.thin_gap_jump(), handed.thin_gap_jump()),
+            ),
+            (
+                "wall",
+                apart(
+                    running.outgoing_pole_currents(),
+                    handed.outgoing_pole_currents(),
+                ),
+            ),
+        ] {
+            assert!(distance < 1.0e-11, "{what}: {distance:e}");
+        }
+    }
+
+    /// Across a remesh the driven handoff books what its carry changed the
+    /// stored energy by, each side valued under its own runtime, keeps the
+    /// pump's carrier where it had got to and the Switch where it was in its
+    /// ramp.
+    #[test]
+    fn a_driven_remesh_books_its_carry_and_keeps_the_drives_where_they_were() {
+        let scene = driven_scene();
+        let coarse = compile_driven_at_edge(&scene, 0.15);
+        let fine = compile_driven_at_edge(&scene, 0.1);
+        let running = running_driven(&coarse.2);
+        let handoff = Handoff::prepare(
+            (&coarse.0, &coarse.1, coarse.2.base()),
+            (&fine.0, &fine.1, fine.2.base()),
+        );
+        let desired = component_totals(coarse.2.base(), running.primary_flux())
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let before = running.energy(&coarse.2).unwrap();
+        let handoff = running
+            .handed_over(
+                &coarse.2,
+                &fine.2,
+                &CanonicalForcing::none(fine.2.base()),
+                handoff.maps(),
+                &handoff.interpolation,
+                &desired,
+                0.4 * fine.2.maximum_time_step(),
+            )
+            .unwrap();
+        let after = handoff.state.energy(&fine.2).unwrap();
+        assert!(
+            (handoff.accounting.edit_exchange - (after - before)).abs() < 1.0e-12 * before,
+            "{:?}",
+            handoff.accounting
+        );
+        assert!(
+            handoff.accounting.edit_exchange.abs() < 1.0e-2 * before,
+            "{} of {before}",
+            handoff.accounting.edit_exchange
+        );
+        for (total, desired) in component_totals(fine.2.base(), handoff.state.primary_flux())
+            .into_iter()
+            .zip(&desired)
+        {
+            let desired = desired.unwrap();
+            assert!(
+                (total - desired).abs() < 1.0e-12 * desired.abs(),
+                "{total} {desired}"
+            );
+        }
+        let (old, new) = (
+            &running.runtime().records()[0],
+            &handoff.state.runtime().records()[0],
+        );
+        assert_eq!(new.switch(), old.switch());
+        let pump = scene.materials[0]
+            .mass_law
+            .drive
+            .evaluate(&scene.materials[0].parameters)
+            .unwrap();
+        let time = running.time();
+        let phase = |record: &crate::CanonicalMaterialRuntimeRecord, at: f64| {
+            record
+                .drive(crate::CanonicalMaterialDrive::MassCoefficient)
+                .carrier_phase(pump, at)
+                .unwrap()
+        };
+        for at in [time, time + 0.7] {
+            assert!((phase(new, at) - phase(old, at)).abs() < 1.0e-12, "{at}");
+        }
+    }
+
+    /// A fixed generation handed to a driven one starts its runtime as the
+    /// target authored it and `r` from zero, and back again drops both: each
+    /// says so, books its change of the stored energy, and on one mesh the
+    /// round trip returns every field it carried.
+    #[test]
+    fn handoffs_between_fixed_and_driven_generations_start_or_drop_what_one_lacks() {
+        let scene = driven_scene();
+        let (mesh, quadratic, driven) = compile_driven_at_edge(&scene, 0.15);
+        let fixed = driven.base();
+        let state = running_state(fixed);
+        let handoff = Handoff::prepare((&mesh, &quadratic, fixed), (&mesh, &quadratic, fixed));
+        let totals = vec![None; fixed.component_count()];
+        let before = state.energy(fixed).unwrap();
+        let onward = CanonicalTemporalWaveState::handed_from_fixed(
+            &state,
+            fixed,
+            &driven,
+            &CanonicalForcing::none(fixed),
+            handoff.maps(),
+            &handoff.interpolation,
+            &totals,
+            state.time_step(),
+        )
+        .unwrap();
+        assert!(onward.integrated.started_at_zero && !onward.integrated.discarded);
+        assert!(onward.state.integrated_field().iter().all(|r| *r == 0.0));
+        assert_eq!(onward.state.runtime(), &driven.initial_runtime());
+        let carried = onward.state.energy(&driven).unwrap();
+        assert!((onward.accounting.edit_exchange - (carried - before)).abs() < 1.0e-12 * before);
+
+        let mut moved = onward.state.clone();
+        for _ in 0..10 {
+            moved.step(&driven).unwrap();
+        }
+        let driven_energy = moved.energy(&driven).unwrap();
+        let (back, accounting, integrated) = CanonicalWaveState::handed_from_driven(
+            &moved,
+            &driven,
+            fixed,
+            &CanonicalForcing::none(fixed),
+            handoff.maps(),
+            &totals,
+            moved.time_step(),
+        )
+        .unwrap();
+        assert!(integrated.discarded && !integrated.started_at_zero);
+        assert_eq!(back.time(), moved.time());
+        let fixed_energy = back.energy(fixed).unwrap();
+        assert!(
+            (accounting.edit_exchange - (fixed_energy - driven_energy)).abs()
+                < 1.0e-12 * driven_energy
+        );
+        assert_eq!(back.primary_flux(), moved.primary_flux());
+        assert_eq!(back.complementary_flux(), moved.complementary_flux());
+
+        let (returned, _, _) = CanonicalWaveState::handed_from_driven(
+            &onward.state,
+            &driven,
+            fixed,
+            &CanonicalForcing::none(fixed),
+            handoff.maps(),
+            &totals,
+            state.time_step(),
+        )
+        .unwrap();
+        assert_eq!(returned.primary_flux(), state.primary_flux());
+        assert_eq!(returned.complementary_flux(), state.complementary_flux());
+        assert_eq!(returned.auxiliaries(), state.auxiliaries());
     }
 
     /// Handed onto its own generation, a running state comes across bit for

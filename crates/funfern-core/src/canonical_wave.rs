@@ -2320,50 +2320,118 @@ impl CanonicalWaveState {
         desired_totals: &[Option<f64>],
         time_step: f64,
     ) -> Result<(Self, CanonicalStepAccounting), WaveError> {
-        if target_forcing.prescribed.len() != target.degrees_of_freedom() {
-            return Err(WaveError::InvalidState);
-        }
         let before = self.energy(source)?;
-        let prescribed = target_forcing
-            .prescribed
-            .iter()
-            .map(Option::is_some)
-            .collect::<Vec<_>>();
-        let (primary, _) =
-            maps.primary
-                .transfer(&self.primary_flux, desired_totals, &prescribed)?;
-        let (complementary, _) = maps.complementary.transfer(&self.complementary_flux)?;
-        validate_time_step(target, time_step, self.integrator)?;
-        target.validate_primary(&primary)?;
-        target.validate_complementary(&complementary)?;
+        let fields = crate::canonical_transfer::hand_fields(
+            &crate::canonical_transfer::HandoffSource {
+                operator: source,
+                primary_flux: &self.primary_flux,
+                complementary_flux: &self.complementary_flux,
+                integrated_field: &[],
+                thin_gaps: self.thin_gap_memory(source)?,
+                outgoing_z: self.outgoing_z(),
+            },
+            target,
+            None,
+            &prescribed_nodes(target, target_forcing)?,
+            maps,
+            None,
+            desired_totals,
+        )?;
         // A generation keeps its backend: the trace's inverse lane stays where
         // the source had it.
+        let carried = Carried {
+            time: self.time(),
+            integrator: self.integrator,
+            wall_step: self.wall_step,
+            inverted_trace: self.inverted_trace,
+        };
+        Self::from_handed(target, target_forcing, fields, carried, time_step, before)
+    }
+
+    /// The state a driven generation hands a fixed one, as the device hands
+    /// it: what [`Self::handed_over`] carries, from `state` on `source`. The
+    /// material runtime has nowhere to go and `r` no law to keep it, which
+    /// the report says; the edit lane books what leaving them costs, the
+    /// source valued under its own law and runtime. A fixed generation's
+    /// backend applies the trace's inverse.
+    #[allow(clippy::too_many_arguments)]
+    pub fn handed_from_driven(
+        state: &crate::CanonicalTemporalWaveState,
+        source: &crate::CanonicalTemporalWaveOperator,
+        target: &CanonicalWaveOperator,
+        target_forcing: &CanonicalForcing,
+        maps: crate::CanonicalHandoffMaps<'_>,
+        desired_totals: &[Option<f64>],
+        time_step: f64,
+    ) -> Result<
+        (
+            Self,
+            CanonicalStepAccounting,
+            crate::CanonicalIntegratedFieldTransfer,
+        ),
+        WaveError,
+    > {
+        let before = state.energy(source)?;
+        let fields = crate::canonical_transfer::hand_fields(
+            &state.handoff_source(source)?,
+            target,
+            None,
+            &prescribed_nodes(target, target_forcing)?,
+            maps,
+            None,
+            desired_totals,
+        )?;
+        let integrated = fields.integrated.clone();
+        let carried = Carried {
+            time: state.time(),
+            integrator: state.integrator(),
+            wall_step: state.wall_step(),
+            inverted_trace: true,
+        };
+        let (handed, accounting) =
+            Self::from_handed(target, target_forcing, fields, carried, time_step, before)?;
+        Ok((handed, accounting, integrated))
+    }
+
+    /// A handoff's fields made a state on `target`, its prescribed nodes then
+    /// held at their signals: what holding them exchanged is booked as
+    /// `prescribed_exchange`, and every other change from the source's
+    /// energy `before` as `edit_exchange`.
+    fn from_handed(
+        target: &CanonicalWaveOperator,
+        target_forcing: &CanonicalForcing,
+        fields: crate::canonical_transfer::HandedFields,
+        carried: Carried,
+        time_step: f64,
+        before: f64,
+    ) -> Result<(Self, CanonicalStepAccounting), WaveError> {
+        validate_time_step(target, time_step, carried.integrator)?;
+        target.validate_primary(&fields.primary_flux)?;
+        target.validate_complementary(&fields.complementary_flux)?;
         let mut handed = Self::assemble(
             target,
             time_step,
-            primary,
-            complementary,
-            self.inverted_trace,
+            fields.primary_flux,
+            fields.complementary_flux,
+            carried.inverted_trace,
         )?
-        .with_time_origin(self.time())?
-        .with_integrator(self.integrator)
-        .with_wall_step(target, self.wall_step)?;
-        let (gaps, _) = maps.thin_gap.transfer(&self.thin_gap_memory(source)?)?;
-        handed.set_thin_gap_memory(target, &gaps, 1.0)?;
-        let memory = maps.outgoing.apply(self.outgoing_z())?;
-        if !memory.is_empty() {
+        .with_time_origin(carried.time)?
+        .with_integrator(carried.integrator)
+        .with_wall_step(target, carried.wall_step)?;
+        handed.set_thin_gap_memory(target, &fields.thin_gaps, 1.0)?;
+        if !fields.outgoing_z.is_empty() {
             let CanonicalAuxiliaryState::Linear(auxiliaries) = &mut handed.auxiliaries else {
                 return Err(WaveError::InvalidState);
             };
-            if auxiliaries.outgoing_z.len() != memory.len() {
+            if auxiliaries.outgoing_z.len() != fields.outgoing_z.len() {
                 return Err(WaveError::InvalidState);
             }
-            auxiliaries.outgoing_z = memory;
+            auxiliaries.outgoing_z = fields.outgoing_z;
         }
-        let carried = handed.energy(target)?;
+        let energy = handed.energy(target)?;
         let prescribed_exchange =
             handed.enforce_prescribed(target, target_forcing, handed.time())?;
-        let edit_exchange = carried - before;
+        let edit_exchange = energy - before;
         if !edit_exchange.is_finite() {
             return Err(WaveError::InvalidState);
         }
@@ -2958,7 +3026,7 @@ impl CanonicalWaveState {
         result
     }
 
-    fn outgoing_z(&self) -> &[f64] {
+    pub(crate) fn outgoing_z(&self) -> &[f64] {
         match &self.auxiliaries {
             CanonicalAuxiliaryState::Linear(auxiliaries) => &auxiliaries.outgoing_z,
             CanonicalAuxiliaryState::None => &[],
@@ -6025,6 +6093,27 @@ fn inverse_tensor(tensor: SymmetricTensor2) -> Option<SymmetricTensor2> {
 /// A state is built under the production integrator's ceiling and steps
 /// under its own, so a leapfrog state past the leapfrog's bound fails its
 /// first step.
+/// What a handed state keeps of the one it came from besides its fields.
+#[derive(Clone, Copy)]
+struct Carried {
+    time: f64,
+    integrator: CanonicalIntegrator,
+    wall_step: CanonicalWallStep,
+    inverted_trace: bool,
+}
+
+/// Which of `target`'s nodes `forcing` prescribes, which a handoff leaves to
+/// their signals.
+pub(crate) fn prescribed_nodes(
+    target: &CanonicalWaveOperator,
+    forcing: &CanonicalForcing,
+) -> Result<Vec<bool>, WaveError> {
+    if forcing.prescribed.len() != target.degrees_of_freedom() {
+        return Err(WaveError::InvalidState);
+    }
+    Ok(forcing.prescribed.iter().map(Option::is_some).collect())
+}
+
 fn validate_time_step(
     operator: &CanonicalWaveOperator,
     time_step: f64,

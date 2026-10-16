@@ -213,6 +213,66 @@ impl CanonicalMaterialRuntimeState {
         Ok(())
     }
 
+    /// The runtime `target` runs on with after a handoff at `time` from this
+    /// one, `source`'s, by the rule [`CanonicalRuntimeLayout::carries_to`]
+    /// states: a record's Switch from its material's record, a lane's carrier
+    /// from the lane holding its drive, re-anchored at `time` with the phase
+    /// it had reached, so a frequency edit keeps its phase as the device's
+    /// does; anything else as `target` authored it.
+    pub fn carried_onto(
+        &self,
+        source: &CanonicalTemporalWaveOperator,
+        target: &CanonicalTemporalWaveOperator,
+        time: f64,
+    ) -> Result<Self, WaveError> {
+        let source_layout = CanonicalRuntimeLayout::of(Some(source))?;
+        if source_layout.records().len() != self.records.len()
+            || source_layout
+                .records()
+                .iter()
+                .zip(&self.records)
+                .any(|(layout, record)| layout.material != record.material)
+        {
+            return Err(WaveError::InvalidState);
+        }
+        let mut drives = vec![[None; CanonicalMaterialDrive::COUNT]; self.records.len()];
+        for sample in source
+            .primary_coefficient_samples()
+            .chain(source.complementary_coefficient_samples())
+        {
+            let record = self.record_index(sample.material)?;
+            drives[record][sample.drive.index()] = Some(sample.law.drive);
+        }
+        let mut carried = target.initial_runtime();
+        for (record, carry) in carried
+            .records
+            .iter_mut()
+            .zip(source_layout.carries_to(&CanonicalRuntimeLayout::of(Some(target))?))
+        {
+            let Some(from) = carry.source else {
+                continue;
+            };
+            let old = &self.records[from];
+            record.switch = old.switch;
+            for (lane, source_lane) in carry.lanes.into_iter().enumerate() {
+                let Some(source_lane) = source_lane else {
+                    continue;
+                };
+                let drive = drives[from][source_lane].ok_or(WaveError::InvalidState)?;
+                record.drives[lane] =
+                    TimeDriveRuntime::preserving_carrier_from(drive, old.drives[source_lane], time)
+                        .map_err(|_| WaveError::InvalidState)?;
+            }
+        }
+        Ok(carried)
+    }
+
+    fn record_index(&self, material: MaterialId) -> Result<usize, WaveError> {
+        self.records
+            .binary_search_by_key(&material, |record| record.material)
+            .map_err(|_| WaveError::InvalidState)
+    }
+
     /// The instantaneous factor one authored coefficient law reaches under
     /// this runtime.
     ///
@@ -3688,10 +3748,24 @@ pub struct CanonicalTemporalStepAccounting {
     /// than the dissipation itself. Where it acts on a van der Pol node it is
     /// counted in `active_gain` instead, as the passive channels there are.
     pub short_wave_loss: f64,
+    /// The change a generation handoff made to the stored energy, either
+    /// sign, each side valued under its own law and runtime: the transfer's
+    /// error, and what a target that keeps less - no `r`, no drive - leaves
+    /// behind. Zero on a step.
+    pub edit_exchange: f64,
     pub energy_change: f64,
     /// What the lanes above fail to account for. The splitting's own error
     /// and nothing else.
     pub splitting_residual: f64,
+}
+
+/// A driven generation's handoff: the state it carries on, what it booked,
+/// and what became of `r`.
+#[derive(Clone, Debug)]
+pub struct DrivenHandoff {
+    pub state: CanonicalTemporalWaveState,
+    pub accounting: CanonicalTemporalStepAccounting,
+    pub integrated: crate::CanonicalIntegratedFieldTransfer,
 }
 
 /// Dormant Stage 7 CPU oracle for the exact bulk kick/drift subflows. The
@@ -3938,6 +4012,193 @@ impl CanonicalTemporalWaveState {
 
     pub fn outgoing_pole_currents(&self) -> &[f64] {
         &self.outgoing_z
+    }
+
+    /// The gaps' jumps keyed by their trace, as a handoff's map reads them.
+    fn thin_gap_memory(
+        &self,
+        operator: &CanonicalTemporalWaveOperator,
+    ) -> Result<Vec<crate::CanonicalThinGapMemory>, WaveError> {
+        let samples = operator.base().thin_gap_samples();
+        if self.thin_gap_jump.len() != samples.len() {
+            return Err(WaveError::InvalidState);
+        }
+        Ok(samples
+            .iter()
+            .zip(&self.thin_gap_jump)
+            .map(|(sample, jump)| crate::CanonicalThinGapMemory {
+                key: sample.key,
+                jump: *jump,
+            })
+            .collect())
+    }
+
+    pub(crate) fn handoff_source<'a>(
+        &'a self,
+        operator: &'a CanonicalTemporalWaveOperator,
+    ) -> Result<crate::canonical_transfer::HandoffSource<'a>, WaveError> {
+        Ok(crate::canonical_transfer::HandoffSource {
+            operator: operator.base(),
+            primary_flux: &self.primary_flux,
+            complementary_flux: &self.complementary_flux,
+            integrated_field: &self.integrated_field,
+            thin_gaps: self.thin_gap_memory(operator)?,
+            outgoing_z: &self.outgoing_z,
+        })
+    }
+
+    /// The state carried onto `target` as the device carries it at a
+    /// generation handoff, the driven counterpart of
+    /// [`crate::CanonicalWaveState::handed_over`]: its fields as that carries them,
+    /// with `r` through `interpolation` - started from zero on a target that
+    /// gains a restoring law, dropped from one that loses it, as the report
+    /// says - and `b` about the target's `r` where both keep one; the clock
+    /// running on from the time this state reached, at the step `time_step`;
+    /// the material runtime by [`CanonicalMaterialRuntimeState::carried_onto`].
+    /// The target's prescribed nodes are then held at their signals. The
+    /// accounting books what holding them exchanged as `prescribed_exchange`
+    /// and every other change of the stored energy as `edit_exchange`, each
+    /// side valued under its own law and runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub fn handed_over(
+        &self,
+        source: &CanonicalTemporalWaveOperator,
+        target: &CanonicalTemporalWaveOperator,
+        target_forcing: &CanonicalForcing,
+        maps: crate::CanonicalHandoffMaps<'_>,
+        interpolation: &crate::QuadraticTransferMap,
+        desired_totals: &[Option<f64>],
+        time_step: f64,
+    ) -> Result<DrivenHandoff, WaveError> {
+        let before = self.energy(source)?;
+        let fields = crate::canonical_transfer::hand_fields(
+            &self.handoff_source(source)?,
+            target.base(),
+            Some(target),
+            &crate::canonical_wave::prescribed_nodes(target.base(), target_forcing)?,
+            maps,
+            Some(interpolation),
+            desired_totals,
+        )?;
+        let runtime = self.runtime.carried_onto(source, target, self.time)?;
+        let carried = (self.time, self.integrator, self.wall_step);
+        Self::from_handed(
+            target,
+            target_forcing,
+            fields,
+            runtime,
+            carried,
+            time_step,
+            before,
+        )
+    }
+
+    /// The state a fixed generation hands a driven one, as the device hands
+    /// it: [`Self::handed_over`]'s fields from `state` on `source`, the
+    /// target's runtime as it authored it - nothing was running to carry -
+    /// and `r` from zero where the target keeps one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn handed_from_fixed(
+        state: &crate::CanonicalWaveState,
+        source: &CanonicalWaveOperator,
+        target: &CanonicalTemporalWaveOperator,
+        target_forcing: &CanonicalForcing,
+        maps: crate::CanonicalHandoffMaps<'_>,
+        interpolation: &crate::QuadraticTransferMap,
+        desired_totals: &[Option<f64>],
+        time_step: f64,
+    ) -> Result<DrivenHandoff, WaveError> {
+        let before = state.energy(source)?;
+        let fields = crate::canonical_transfer::hand_fields(
+            &crate::canonical_transfer::HandoffSource {
+                operator: source,
+                primary_flux: state.primary_flux(),
+                complementary_flux: state.complementary_flux(),
+                integrated_field: &[],
+                thin_gaps: state.thin_gap_memory(source)?,
+                outgoing_z: state.outgoing_z(),
+            },
+            target.base(),
+            Some(target),
+            &crate::canonical_wave::prescribed_nodes(target.base(), target_forcing)?,
+            maps,
+            Some(interpolation),
+            desired_totals,
+        )?;
+        let carried = (state.time(), state.integrator(), state.wall_step());
+        Self::from_handed(
+            target,
+            target_forcing,
+            fields,
+            target.initial_runtime(),
+            carried,
+            time_step,
+            before,
+        )
+    }
+
+    fn from_handed(
+        target: &CanonicalTemporalWaveOperator,
+        target_forcing: &CanonicalForcing,
+        fields: crate::canonical_transfer::HandedFields,
+        runtime: CanonicalMaterialRuntimeState,
+        (time, integrator, wall_step): (f64, CanonicalIntegrator, CanonicalWallStep),
+        time_step: f64,
+        before: f64,
+    ) -> Result<DrivenHandoff, WaveError> {
+        let maximum = integrator.ceiling() * target.maximum_time_step();
+        if time_step > maximum {
+            return Err(WaveError::InvalidTimeStep {
+                requested: time_step,
+                maximum,
+            });
+        }
+        let mut handed = Self::new_at(
+            target,
+            time_step,
+            fields.primary_flux,
+            fields.complementary_flux,
+            time,
+        )?
+        .with_integrator(integrator)
+        .with_wall_step(wall_step);
+        handed.runtime = runtime;
+        if !fields.integrated.field.is_empty() {
+            handed = handed.with_integrated_field(target, fields.integrated.field.clone())?;
+        }
+        for (jump, sample) in handed
+            .thin_gap_jump
+            .iter_mut()
+            .zip(target.base().thin_gap_samples())
+        {
+            *jump = fields
+                .thin_gaps
+                .iter()
+                .find(|entry| entry.key == sample.key)
+                .map_or(0.0, |entry| entry.jump);
+        }
+        if !fields.outgoing_z.is_empty() {
+            if handed.outgoing_z.len() != fields.outgoing_z.len() {
+                return Err(WaveError::InvalidState);
+            }
+            handed.outgoing_z = fields.outgoing_z;
+        }
+        let energy = handed.energy(target)?;
+        let handed = handed.pinned(target, target_forcing)?;
+        let prescribed_exchange = handed.energy(target)? - energy;
+        let edit_exchange = energy - before;
+        if !edit_exchange.is_finite() || !prescribed_exchange.is_finite() {
+            return Err(WaveError::InvalidState);
+        }
+        Ok(DrivenHandoff {
+            state: handed,
+            accounting: CanonicalTemporalStepAccounting {
+                prescribed_exchange,
+                edit_exchange,
+                ..CanonicalTemporalStepAccounting::default()
+            },
+            integrated: fields.integrated,
+        })
     }
 
     pub fn energy(&self, operator: &CanonicalTemporalWaveOperator) -> Result<f64, WaveError> {
@@ -4736,6 +4997,7 @@ impl CanonicalTemporalWaveState {
             prescribed_exchange,
             active_gain,
             short_wave_loss,
+            edit_exchange: 0.0,
             energy_change,
             splitting_residual: energy_change
                 - temporal_work
@@ -14844,8 +15106,7 @@ mod tests {
     }
 
     /// Hands a state to a new generation the way a topology transaction
-    /// does: `Q` conservatively, `b` by its vector reconstruction, `r` by
-    /// interpolation.
+    /// does, through [`CanonicalTemporalWaveState::handed_over`].
     fn hand_off(
         source: &(
             TriMesh,
@@ -14870,61 +15131,46 @@ mod tests {
         }
         .unwrap();
         let (source_base, target_base) = (source.2.base(), target.2.base());
-        let primary_map =
+        let primary =
             crate::CanonicalPrimaryTransferMap::prepare(&interpolation, source_base, target_base)
                 .unwrap();
-        let primary = primary_map
-            .transfer(
-                state.primary_flux(),
-                &vec![None; target_base.component_count()],
-                &vec![false; target_base.degrees_of_freedom()],
-            )
-            .unwrap()
-            .0;
-        let vector = crate::CanonicalVectorTransferMap::prepare(
+        let complementary = crate::CanonicalVectorTransferMap::prepare(
             &source.0,
             source_base,
             &target.0,
             target_base,
         )
         .unwrap();
-        let transfer = crate::transfer_integrated_field(
+        let thin_gap = crate::CanonicalThinGapHistoryTransferMap::prepare(
+            source_base.thin_gap_samples(),
+            target_base.thin_gap_samples(),
+        )
+        .unwrap();
+        let outgoing = crate::CanonicalOutgoingHistoryTransferMap::prepare(
             &interpolation,
-            &primary_map,
-            state.integrated_field(),
-            &target.2,
+            source_base,
+            target_base,
         )
+        .unwrap()
+        .normalized_matrix(source_base, target_base)
         .unwrap();
-        // Between two generations with `r`, the invariant `b − ηC r` crosses
-        // and `b` is rebuilt about the target's `r`.
-        let complementary = if state.integrated_field().is_empty() || transfer.field.is_empty() {
-            vector.transfer(state.complementary_flux()).unwrap().0
-        } else {
-            crate::transfer_oscillator_flux(
-                &vector,
-                source_base,
-                state.complementary_flux(),
-                state.integrated_field(),
-                target_base,
-                &transfer.field,
+        let handoff = state
+            .handed_over(
+                &source.2,
+                &target.2,
+                &CanonicalForcing::none(target_base),
+                crate::CanonicalHandoffMaps {
+                    primary: &primary,
+                    complementary: &complementary,
+                    thin_gap: &thin_gap,
+                    outgoing: &outgoing,
+                },
+                &interpolation,
+                &vec![None; target_base.component_count()],
+                state.time_step().min(0.4 * target.2.maximum_time_step()),
             )
-            .unwrap()
-            .0
-        };
-        let mut handed = CanonicalTemporalWaveState::new_at(
-            &target.2,
-            state.time_step().min(0.4 * target.2.maximum_time_step()),
-            primary,
-            complementary,
-            state.time(),
-        )
-        .unwrap();
-        if !transfer.field.is_empty() {
-            handed = handed
-                .with_integrated_field(&target.2, transfer.field.clone())
-                .unwrap();
-        }
-        (handed, transfer)
+            .unwrap();
+        (handoff.state, handoff.integrated)
     }
 
     /// An identity handoff copies `r` exactly and the run goes on as if
