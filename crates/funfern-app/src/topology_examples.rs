@@ -15323,4 +15323,316 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // PH-08: the rectangle's walls against exact multipoles, a one-off
+    // experiment (`experiments/rectangular-radiation`).
+    // -----------------------------------------------------------------------
+
+    /// PH-08's box: `[-1, 1]²` of a unit medium, `c = Z = 1`, every side
+    /// `wall`, with `sources` over it.
+    fn radiation_box(wall: OuterBoundaryCondition, sources: Vec<VolumeSource>) -> TopologyDocument {
+        let mut builder = Builder::new();
+        builder.scene.volume_sources = sources;
+        builder.scene.physics = PhysicsModel::Mechanical;
+        builder.scene.geometry.domain = DomainRect {
+            min_x: -1.0,
+            max_x: 1.0,
+            min_y: -1.0,
+            max_y: 1.0,
+        };
+        builder.scene.outer_boundaries = OuterBoundaryConditions::uniform(wall);
+        let material = &mut builder.scene.materials[0];
+        material.mass_density = ScalarField::constant(1.0);
+        material.stiffness = ScalarField::constant(1.0);
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        document
+    }
+
+    /// PH-08, the boundary operator: each wall's trace as production
+    /// assembles it on the box, for `boundary.py` - the trace nodes, their
+    /// first-order damping, and the second-order wall's modes, each its decay
+    /// and its row of `T`.
+    #[test]
+    #[ignore = "PH-08's experiment: experiments/rectangular-radiation/run.sh"]
+    fn export_the_rectangles_wall_traces() {
+        let out = std::path::PathBuf::from(
+            std::env::var("FUNFERN_PH08_OUT").expect("FUNFERN_PH08_OUT names the output directory"),
+        );
+        std::fs::create_dir_all(&out).unwrap();
+        for (name, wall) in [
+            ("first", OuterBoundaryCondition::FirstOrderOutgoing),
+            ("second", OuterBoundaryCondition::SecondOrderOutgoing),
+        ] {
+            for edge in [0.1, 0.07, 0.05] {
+                let prepared = prepare(&radiation_box(wall, Vec::new()), edge);
+                let operator = &prepared.canonical_operator;
+                let points = operator.node_points();
+                let damping = operator.first_order_boundary_damping();
+                let (trace, modes) = match operator.outgoing_boundary() {
+                    Some(boundary) => (
+                        boundary
+                            .trace_nodes()
+                            .iter()
+                            .map(|node| *node as usize)
+                            .collect::<Vec<_>>(),
+                        boundary
+                            .modes()
+                            .iter()
+                            .map(|mode| serde_json::json!({ "decay": mode.decay, "trace": mode.trace() }))
+                            .collect::<Vec<_>>(),
+                    ),
+                    None => (
+                        (0..points.len()).filter(|node| damping[*node] > 0.0).collect(),
+                        Vec::new(),
+                    ),
+                };
+                let record = serde_json::json!({
+                    "wall": name,
+                    "edge": edge,
+                    "nodes": trace.iter().map(|node| [points[*node].x, points[*node].y]).collect::<Vec<_>>(),
+                    "first_order_damping": trace.iter().map(|node| damping[*node]).collect::<Vec<_>>(),
+                    "modes": modes,
+                });
+                std::fs::write(
+                    out.join(format!("trace-{name}-{edge}.json")),
+                    serde_json::to_string(&record).unwrap(),
+                )
+                .unwrap();
+                eprintln!("{name} on {edge}: {} trace nodes", trace.len());
+            }
+        }
+    }
+
+    /// One source of PH-08's harmonic runs: order `m` about `centre`, of
+    /// `amplitude`.
+    #[derive(Clone, Copy, Debug)]
+    struct Multipole {
+        order: u32,
+        centre: (f64, f64),
+        amplitude: f64,
+    }
+
+    /// PH-08's sources' width: their profile is `(r/σ)ᵐ e^{−r²/σ²} cos mθ`
+    /// about each centre, so that orders of one amplitude radiate alike.
+    const RADIATION_SIGMA: f64 = 0.1;
+
+    /// The profile of `sources`, summed, as a formula in `x` and `y`.
+    fn multipole_profile(sources: &[Multipole]) -> String {
+        sources
+            .iter()
+            .map(|source| {
+                let (x0, y0) = source.centre;
+                let (x, y) = (format!("(x - ({x0}))"), format!("(y - ({y0}))"));
+                let sigma2 = RADIATION_SIGMA * RADIATION_SIGMA;
+                let angular = match source.order {
+                    0 => "1".to_owned(),
+                    1 => format!("{x} / {RADIATION_SIGMA}"),
+                    2 => format!("({x}^2 - {y}^2) / {sigma2}"),
+                    order => panic!("no profile for order {order}"),
+                };
+                format!(
+                    "{} * {angular} * exp(-({x}^2 + {y}^2) / {sigma2})",
+                    source.amplitude
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" + ")
+    }
+
+    /// PH-08, the full solver: the box walled by `wall`, driven at `k` by
+    /// `sources` switched on over two periods, held to steady state for 15 s
+    /// and two periods, then every node's `e^{−iωt}` phasor of the primary
+    /// field by a Blackman-Harris lock-in over six periods, with the wall's
+    /// and the source's time-averaged power over the same window.
+    fn harmonic_box_run(
+        wall: OuterBoundaryCondition,
+        edge: f64,
+        k: f64,
+        sources: &[Multipole],
+    ) -> serde_json::Value {
+        let tau = std::f64::consts::TAU;
+        let (omega, period) = (k, tau / k);
+        let (settle, window) = (15.0 + 2.0 * period, 6.0 * period);
+        let held = 2.0 * period + settle + window;
+        let source = VolumeSource {
+            region: BACKGROUND_REGION,
+            enabled: true,
+            profile: ScalarField::formula(multipole_profile(sources)).unwrap(),
+            parameters: vec![],
+            signal: TimeSignal::pulsed(
+                [0.0, 1.0, omega / tau, 0.0],
+                PulseEnvelope::FlatTop {
+                    duration: 2.0 * held,
+                    edge: 2.0 * period,
+                },
+                0.0,
+                0.0,
+            ),
+        };
+        let document = radiation_box(wall, vec![source]);
+        let prepared = prepare(&document, edge);
+        let operator = &prepared.canonical_operator;
+        let dt = prepared.recommended_time_step();
+        let steps = (held / dt).ceil() as usize;
+        let span = (window / dt).round() as usize;
+        let first = steps - span;
+        let mut state = CanonicalWaveState::zero(operator, dt).unwrap();
+        let nodes = operator.degrees_of_freedom();
+        let (mut re, mut im) = (vec![0.0; nodes], vec![0.0; nodes]);
+        let (mut total, mut wall_energy, mut source_energy) = (0.0, 0.0, 0.0);
+        for step in 0..steps {
+            let accounting = state
+                .step_with_forcing(operator, &prepared.canonical_forcing)
+                .unwrap();
+            if step < first {
+                continue;
+            }
+            wall_energy += accounting.boundary_loss;
+            source_energy += accounting.source_work;
+            let x = tau * (step - first) as f64 / span as f64;
+            let weight =
+                0.35875 - 0.48829 * x.cos() + 0.14128 * (2.0 * x).cos() - 0.01168 * (3.0 * x).cos();
+            let (sin, cos) = (omega * (step + 1) as f64 * dt).sin_cos();
+            let field = state.primary_field(operator).unwrap();
+            for (node, value) in field.iter().enumerate() {
+                re[node] += weight * cos * value;
+                im[node] += weight * sin * value;
+            }
+            total += weight;
+        }
+        // `u = Re(U e^{−iωt})` gives `Σ w u e^{iωt} = U/2 Σ w`.
+        let scale = 2.0 / total;
+        let duration = span as f64 * dt;
+        let points = operator.node_points();
+        serde_json::json!({
+            "wall": if wall == OuterBoundaryCondition::FirstOrderOutgoing { "first" } else { "second" },
+            "edge": edge,
+            "k": k,
+            "sigma": RADIATION_SIGMA,
+            "sources": sources.iter().map(|source| [f64::from(source.order), source.centre.0, source.centre.1, source.amplitude]).collect::<Vec<_>>(),
+            // The carrier is `sin ω(t − t_c)`, counted from the envelope's centre.
+            "carrier_centre": held,
+            "dt": dt,
+            "window": duration,
+            "nodes": points.iter().map(|point| [point.x, point.y]).collect::<Vec<_>>(),
+            "mass": operator.primary_mass(),
+            "phasor_re": re.iter().map(|value| value * scale).collect::<Vec<_>>(),
+            "phasor_im": im.iter().map(|value| value * scale).collect::<Vec<_>>(),
+            "wall_power": wall_energy / duration,
+            "source_power": source_energy / duration,
+        })
+    }
+
+    /// PH-08, the full solver: the harmonic runs `harmonic.py` reads, each
+    /// wall at edges 0.1 and 0.07, and 0.05 for the centred and the corner
+    /// monopoles; `k` 2, 5 and 10; orders 0 to 2 at the centre, off it, 0.3
+    /// from an edge and 0.35 from two, and two sources at once, radiating
+    /// alike.
+    #[test]
+    #[ignore = "PH-08's experiment: experiments/rectangular-radiation/run.sh"]
+    fn export_the_rectangles_harmonic_fields() {
+        let out = std::path::PathBuf::from(
+            std::env::var("FUNFERN_PH08_OUT").expect("FUNFERN_PH08_OUT names the output directory"),
+        );
+        std::fs::create_dir_all(&out).unwrap();
+        let positions = [
+            ("centre", (0.0, 0.0)),
+            ("off-centre", (0.4, 0.2)),
+            ("edge", (0.7, 0.0)),
+            ("corner", (0.65, 0.65)),
+        ];
+        let mut runs = Vec::new();
+        for wall in [
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        ] {
+            for k in [2.0, 5.0, 10.0] {
+                for (name, centre) in positions {
+                    for order in 0..=2_u32 {
+                        let source = Multipole {
+                            order,
+                            centre,
+                            amplitude: 1.0,
+                        };
+                        let edges: &[f64] = if order == 0 && (name == "centre" || name == "corner")
+                        {
+                            &[0.1, 0.07, 0.05]
+                        } else {
+                            &[0.1, 0.07]
+                        };
+                        for edge in edges {
+                            runs.push((wall, *edge, k, format!("m{order}-{name}"), vec![source]));
+                        }
+                    }
+                }
+                let both = vec![
+                    Multipole {
+                        order: 0,
+                        centre: (0.4, 0.2),
+                        amplitude: 1.0,
+                    },
+                    // A Gaussian multipole radiates as `∫ J_m g r dr =
+                    // (σ²/2)(kσ/2)ᵐ e^{−(kσ)²/4}`, so the second source is
+                    // scaled to send out as much as the first.
+                    Multipole {
+                        order: 2,
+                        centre: (-0.3, -0.5),
+                        amplitude: 0.7 * (2.0 / (k * RADIATION_SIGMA)).powi(2),
+                    },
+                ];
+                for edge in [0.1, 0.07] {
+                    runs.push((wall, edge, k, "two".to_owned(), both.clone()));
+                }
+            }
+        }
+        let wall_name = |wall: &OuterBoundaryCondition| {
+            if *wall == OuterBoundaryCondition::FirstOrderOutgoing {
+                "first"
+            } else {
+                "second"
+            }
+        };
+        let file = |(wall, edge, k, name, _): &(
+            OuterBoundaryCondition,
+            f64,
+            f64,
+            String,
+            Vec<Multipole>,
+        )| { format!("field-{}-{edge}-k{k}-{name}.json", wall_name(wall)) };
+        // `FUNFERN_PH08_ONLY` keeps the runs whose file name holds it.
+        if let Ok(only) = std::env::var("FUNFERN_PH08_ONLY") {
+            runs.retain(|run| file(run).contains(&only));
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(run) = runs.get(index) else {
+                            break;
+                        };
+                        let (wall, edge, k, _, sources) = run;
+                        let clock = std::time::Instant::now();
+                        let record = harmonic_box_run(*wall, *edge, *k, sources);
+                        std::fs::write(
+                            out.join(file(run)),
+                            serde_json::to_string(&record).unwrap(),
+                        )
+                        .unwrap();
+                        eprintln!(
+                            "{}: {:.0} s, wall {:.4e}, source {:.4e}",
+                            file(run),
+                            clock.elapsed().as_secs_f64(),
+                            record["wall_power"].as_f64().unwrap(),
+                            record["source_power"].as_f64().unwrap()
+                        );
+                    }
+                });
+            }
+        });
+    }
 }

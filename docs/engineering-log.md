@@ -24781,3 +24781,46 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-17 — PH-08: the rectangle's walls against exact multipoles
+
+- **What.** The 11 October plan's PH-08 as a one-off experiment, its rule in
+  the campaign plan, since no nonlocal radiation operator is planned:
+  `experiments/rectangular-radiation/` and the report
+  `docs/spikes/funfern-rectangular-radiation.md`. Two ignored exports in
+  `topology_examples.rs` - each wall's trace as production assembles it on
+  the box `[-1, 1]²` of a unit medium, and 168 harmonic runs of the walled
+  box driven by Gaussian multipoles - read by two Python scripts against
+  exact fields, scipy's Hankel functions checked against mpmath (9.2e-16).
+  No gate test, no nightly job.
+- **The boundary operator.** On the exact outgoing multipole's boundary
+  values, the wall's weak flux `−Tᵀ diag(Y) T U` from production's modes
+  against `(i/ω) ∫ φ ∂_n u`; production's damping meets Simpson's lumps of
+  `Z ℓ` to 1e-10 on either wall, `Tᵀ T = D`. The second-order wall's flux
+  error is 14–43% for sources at the centre and off it, unchanged by the
+  mesh to 0.8% up to order two; for those orders its square lies 46–97%
+  within 0.25 of a corner, a quarter of the boundary, 78–97% for the
+  monopole. The first-order wall's error is 16–118%.
+- **The full solver.** The source `(r/σ)ᵐ e^{−r²/σ²} cos mθ`, σ = 0.1, its
+  free-space field exact by a Hankel transform whose limit meets the closed
+  form `(σ²/2)(kσ/2)ᵐ e^{−(kσ)²/4}` to 5e-10, and the solver read against
+  it after a lock-in over six periods. The second-order wall returns 6.5–21%
+  of the field for monopoles and dipoles, the first-order 5.4–27%; a centred
+  quadrupole, whose standing field vanishes at the corners, 1.0–1.6% from
+  the second-order wall. The first-order wall returns less for a centred
+  monopole at every `k` and a centred dipole at `k ≥ 5`. The wall's power
+  meets the source's to 2e-3 in every run; at `k ≥ 5` monopoles and dipoles
+  send within 5% of their free-space power into either wall, and
+  quadrupoles 0.3 from an edge or 0.35 from a corner at `k = 2` up to 2.4
+  times into the second-order wall, 11.9 into the first-order.
+- **What the sizing taught.** The two-source run first read like its
+  monopole alone: an order-`m` Gaussian source radiates as
+  `(kσ/2)ᵐ e^{−(kσ)²/4}`, and at σ = 0.1 and `kσ = 0.2` the quadrupole beside
+  the monopole sent out a hundredth of what it did. The profile is now in
+  `r/σ`, and the second source is scaled by `(2/kσ)²`. In the boundary
+  operator, orders one and up 0.05 from a wall are not resolved on edge
+  0.05, the exact pair's own power off its analytic `2/ω` by 0.1% to 10⁷,
+  and their powers are not read.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

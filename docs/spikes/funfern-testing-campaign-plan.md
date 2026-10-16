@@ -428,7 +428,8 @@ with their reports in `docs/spikes/`.
 - **B, physical subsystems:** PH-05 wall passivity across material laws
   and PH-17 energy accounting, together as stage B1 (section 6a)
   (PH-06 and PH-07 moved to stage A3), PH-08 rectangular radiation as a one-off experiment
-  rather than a regression test, since no nonlocal operator is planned,
+  rather than a regression test, since no nonlocal operator is planned
+  (done on 2026-10-17, `funfern-rectangular-radiation.md`),
   PH-09 the walls' transient response (section 6b), PH-11 Fresnel,
   PH-12 cylinder scattering, PH-13 thin gaps, PH-14 and PH-15 temporal and
   modulated materials, PH-16 nonlinear laws, PH-18
