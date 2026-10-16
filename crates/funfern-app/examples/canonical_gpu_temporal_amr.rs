@@ -40,13 +40,14 @@ use funfern_app::canonical_gpu::{
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
-    CanonicalForcing, CanonicalIndicatorSnapshot, CanonicalMaterialRuntimeState,
-    CanonicalOutgoingHistoryTransferMap, CanonicalPrimaryTransferMap,
-    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferMap, CanonicalWallStep, CoefficientLaw, DampingLaw, LossChannel,
-    MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshSizeField, MeshingOptions,
-    OuterBoundaryCondition, OuterBoundaryConditions, Point2, QuadraticSolutionSnapshot,
-    QuadraticTransferMap, QuadraticWaveOperator, RateLaw, ScalarField, Scene, SolutionIndicatorJob,
+    CanonicalForcing, CanonicalHandoffMaps, CanonicalIndicatorSnapshot,
+    CanonicalMaterialRuntimeState, CanonicalOutgoingHistoryTransferMap,
+    CanonicalPrimaryTransferMap, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
+    CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWallStep,
+    CoefficientLaw, DampingLaw, LossChannel, MeshAdaptationJob, MeshAdaptationOptions,
+    MeshAdaptationState, MeshSizeField, MeshingOptions, OuterBoundaryCondition,
+    OuterBoundaryConditions, Point2, QuadraticSolutionSnapshot, QuadraticTransferMap,
+    QuadraticWaveOperator, RateLaw, ScalarField, Scene, SolutionIndicatorJob,
     SolutionIndicatorOptions, SolutionIndicatorResult, TimeDrive, TriMesh,
     canonical_temporal_indicator_supplement, canonical_temporal_primary_rate, mesh_scene,
 };
@@ -319,44 +320,44 @@ fn main() -> AppExit {
         target_operator.base(),
     )
     .expect("temporal AMR outgoing map");
-    let prescribed = vec![false; primary_map.target_node_count()];
-    let components = primary_map.target_component_count();
-    let labels = operator.base().component_labels().to_vec();
-    // Interpolating a field onto another mesh must not create or destroy any
-    // of it, so each isolated component's total is carried across. This is the
-    // transfer the device performs; asking for the free one instead moves the
-    // state by 2e-4 and was the first version of this oracle's mistake.
-    let move_primary = |flux: &[f64]| {
-        let mut totals = vec![0.0; components];
-        for (value, label) in flux.iter().zip(&labels) {
-            totals[*label as usize] += value;
-        }
-        let totals = totals.into_iter().map(Some).collect::<Vec<_>>();
-        primary_map
-            .transfer(flux, &totals, &prescribed)
-            .expect("temporal AMR primary transfer")
-            .0
-    };
-    let move_complementary = |flux: &[Point2]| {
-        vector_map
-            .transfer(flux)
-            .expect("temporal AMR vector transfer")
-            .0
-    };
-    let target_primary = move_primary(oracle_state.primary_flux());
-    let target_complementary = move_complementary(oracle_state.complementary_flux());
-    // The runtime is keyed by material, not by mesh, and both generations
-    // compile the same materials, so the accepted one carries over as is.
-    let mut target_state = CanonicalTemporalWaveState::new_at(
-        &target_operator,
-        time_step,
-        target_primary.clone(),
-        target_complementary.clone(),
-        oracle_state.time(),
+    // The reference is the CPU's handoff through the same maps: each
+    // component's total where the runtime transfer puts it - interpolating a
+    // field onto another mesh must neither create nor destroy any of it,
+    // and the free transfer moved the state by 2e-4 - the walls' memory
+    // carried, and the runtime by material, as the device carries it.
+    let source_forcing = CanonicalForcing::none(operator.base());
+    let target_forcing = CanonicalForcing::none(target_operator.base());
+    // A genuine refinement changes the node layout, so runtime ownership has
+    // to be rebuilt from the primary transfer rather than carried across.
+    let runtime_transfer = CanonicalGpuRuntimeTransfer::from_primary_transfer(
+        operator.base(),
+        target_operator.base(),
+        &source_forcing,
+        &target_forcing,
+        &primary_map,
+        [0; 4],
     )
-    .expect("target temporal oracle state")
-    .with_wall_step(wall_step);
-    *target_state.runtime_mut() = oracle_state.runtime().clone();
+    .expect("temporal AMR runtime ownership");
+    let outgoing = outgoing_map
+        .normalized_matrix(operator.base(), target_operator.base())
+        .expect("temporal AMR normalized outgoing map");
+    let mut target_state = oracle_state
+        .handed_over(
+            &operator,
+            &target_operator,
+            &target_forcing,
+            CanonicalHandoffMaps {
+                primary: &primary_map,
+                complementary: &vector_map,
+                thin_gap: &gap_map,
+                outgoing: &outgoing,
+            },
+            &interpolation,
+            &runtime_transfer.desired_totals(operator.base(), oracle_state.primary_flux()),
+            time_step,
+        )
+        .expect("target temporal oracle state")
+        .state;
     let mut target_previous_primary = target_state.primary_flux().to_vec();
     let mut target_previous_complementary = target_state.complementary_flux().to_vec();
     for _ in 0..SETTLE_STEPS {
@@ -395,19 +396,6 @@ fn main() -> AppExit {
     let target_plan =
         CanonicalGpuPlan::compile_temporal_bulk(&target_operator, &target_placeholder, clock)
             .expect("target temporal GPU plan");
-    let source_forcing = CanonicalForcing::none(operator.base());
-    let target_forcing = CanonicalForcing::none(target_operator.base());
-    // A genuine refinement changes the node layout, so runtime ownership has
-    // to be rebuilt from the primary transfer rather than carried across.
-    let runtime_transfer = CanonicalGpuRuntimeTransfer::from_primary_transfer(
-        operator.base(),
-        target_operator.base(),
-        &source_forcing,
-        &target_forcing,
-        &primary_map,
-        [0; 4],
-    )
-    .expect("temporal AMR runtime ownership");
     let transfer = CanonicalGpuTransferPlan::compile(
         operator.base(),
         target_operator.base(),

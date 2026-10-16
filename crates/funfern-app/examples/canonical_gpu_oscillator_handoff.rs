@@ -49,12 +49,12 @@ use funfern_app::canonical_gpu::{
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
-    CanonicalForcing, CanonicalOutgoingHistoryTransferMap, CanonicalPrimaryTransferMap,
-    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferMap, CoefficientLaw, MeshingOptions, Obstacle, ObstacleId,
-    OuterBoundaryCondition, PeriodicCubicSpline, Point2, QuadraticTransferMap,
-    QuadraticWaveOperator, RestoringLaw, ScalarField, Scene, TriMesh, mesh_scene,
-    transfer_integrated_field, transfer_oscillator_flux,
+    CanonicalForcing, CanonicalHandoffMaps, CanonicalOutgoingHistoryTransferMap,
+    CanonicalPrimaryTransferMap, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
+    CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CoefficientLaw, MeshingOptions,
+    Obstacle, ObstacleId, OuterBoundaryCondition, PeriodicCubicSpline, Point2,
+    QuadraticTransferMap, QuadraticWaveOperator, RestoringLaw, ScalarField, Scene, TriMesh,
+    mesh_scene,
 };
 
 const WARMUP_STEPS: u64 = 60;
@@ -310,135 +310,6 @@ fn main() -> AppExit {
         CanonicalOutgoingHistoryTransferMap::prepare(&interpolation, source_base, target_base)
             .expect("outgoing map");
 
-    // The host oracle: `Q` with each component's total carried, as the
-    // device does, `b` reconstructed, `r` interpolated.
-    let labels = source_base.component_labels();
-    let mut totals = vec![0.0; primary_map.target_component_count()];
-    for (value, label) in source_state.primary_flux().iter().zip(labels) {
-        totals[*label as usize] += value;
-    }
-    let totals = totals.into_iter().map(Some).collect::<Vec<_>>();
-    let target_primary = primary_map
-        .transfer(
-            source_state.primary_flux(),
-            &totals,
-            &vec![false; target_base.degrees_of_freedom()],
-        )
-        .expect("primary transfer")
-        .0;
-    let integrated = transfer_integrated_field(
-        &interpolation,
-        &primary_map,
-        source_state.integrated_field(),
-        &target.operator,
-    )
-    .expect("integrated transfer");
-    // Between two generations with `r`, the invariant `b − ηC r` crosses and
-    // `b` is rebuilt about the target's `r`; otherwise `b` itself crosses.
-    let rebuilt_b = !source_state.integrated_field().is_empty() && !integrated.field.is_empty();
-    let target_complementary = if !rebuilt_b {
-        vector_map
-            .transfer(source_state.complementary_flux())
-            .expect("vector transfer")
-            .0
-    } else {
-        let flux = transfer_oscillator_flux(
-            &vector_map,
-            source_base,
-            source_state.complementary_flux(),
-            source_state.integrated_field(),
-            target_base,
-            &integrated.field,
-        )
-        .expect("oscillator flux transfer")
-        .0;
-        let rebuilt = target_base
-            .compatible_flux(&integrated.field)
-            .expect("target compatible flux");
-        let offset = flux
-            .iter()
-            .zip(&rebuilt)
-            .map(|(b, p)| (*b - *p).norm().powi(2))
-            .sum::<f64>()
-            .sqrt()
-            / flux
-                .iter()
-                .map(|b| b.norm().powi(2))
-                .sum::<f64>()
-                .sqrt()
-                .max(1.0e-300);
-        println!("target b − ηC r relative to b: {offset:.3e}");
-        flux
-    };
-    println!(
-        "uncovered target nodes: {} extended from their neighbours, {} at r = 0",
-        integrated.extended_nodes, integrated.exposed_nodes
-    );
-    if mode == "opened" {
-        assert!(
-            integrated.extended_nodes > 0,
-            "the moved hole uncovered nothing"
-        );
-    }
-    println!(
-        "oscillator handoff ({mode}): {} → {} nodes; r {}{}{}",
-        source_base.degrees_of_freedom(),
-        target_base.degrees_of_freedom(),
-        if integrated.discarded { "dropped" } else { "" },
-        if integrated.started_at_zero {
-            "started at zero"
-        } else {
-            ""
-        },
-        if !integrated.discarded && !integrated.started_at_zero {
-            "interpolated"
-        } else {
-            ""
-        },
-    );
-    let target_state = CanonicalTemporalWaveState::new_at(
-        &target.operator,
-        time_step,
-        target_primary,
-        target_complementary,
-        source_state.time(),
-    )
-    .expect("target oracle state");
-    let target_state = if integrated.field.is_empty() {
-        Ok(target_state)
-    } else {
-        target_state.with_integrated_field(&target.operator, integrated.field.clone())
-    };
-    if reject {
-        assert!(
-            target_state.is_err(),
-            "the fixture must pass the target's bound"
-        );
-    }
-    let mut target_state = match target_state {
-        Ok(state) => state,
-        Err(_) => CanonicalTemporalWaveState::zero(&target.operator, time_step)
-            .expect("placeholder for the rejected target"),
-    };
-    let handoff_energy = source_state
-        .energy(&source.operator)
-        .expect("source energy at the handoff");
-    let edit = if reject {
-        0.0
-    } else {
-        target_state
-            .energy(&target.operator)
-            .expect("target energy at the handoff")
-            - handoff_energy
-    };
-    if !reject {
-        for _ in 0..TARGET_STEPS {
-            target_state
-                .step(&target.operator)
-                .expect("target oracle step");
-        }
-    }
-
     let placeholder =
         CanonicalTemporalWaveState::zero(&target.operator, time_step).expect("target placeholder");
     let target_plan =
@@ -453,6 +324,107 @@ fn main() -> AppExit {
         [0; 4],
     )
     .expect("runtime ownership");
+
+    // The host oracle is the CPU's handoff through the same maps: `Q` with
+    // the totals the runtime transfer names, `r` interpolated, `b` rebuilt
+    // about the target's `r` where both keep one.
+    let outgoing = outgoing_map
+        .normalized_matrix(source_base, target_base)
+        .expect("normalized outgoing map");
+    let handoff_energy = source_state
+        .energy(&source.operator)
+        .expect("source energy at the handoff");
+    let handed = source_state.handed_over(
+        &source.operator,
+        &target.operator,
+        &target_forcing,
+        CanonicalHandoffMaps {
+            primary: &primary_map,
+            complementary: &vector_map,
+            thin_gap: &gap_map,
+            outgoing: &outgoing,
+        },
+        &interpolation,
+        &runtime.desired_totals(source_base, source_state.primary_flux()),
+        time_step,
+    );
+    assert_eq!(
+        handed.is_err(),
+        reject,
+        "the fixture must pass the target's bound when, and only when, it rejects"
+    );
+    let (mut target_state, edit, handed_integrated, rebuilt_b) = match handed {
+        Ok(handoff) => {
+            let integrated = &handoff.integrated;
+            // Between two generations with `r`, the invariant `b − ηC r`
+            // crosses and `b` is rebuilt about the target's `r`.
+            let rebuilt_b =
+                !source_state.integrated_field().is_empty() && !integrated.field.is_empty();
+            if rebuilt_b {
+                let flux = handoff.state.complementary_flux();
+                let rebuilt = target_base
+                    .compatible_flux(&integrated.field)
+                    .expect("target compatible flux");
+                let offset = flux
+                    .iter()
+                    .zip(&rebuilt)
+                    .map(|(b, p)| (*b - *p).norm().powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+                    / flux
+                        .iter()
+                        .map(|b| b.norm().powi(2))
+                        .sum::<f64>()
+                        .sqrt()
+                        .max(1.0e-300);
+                println!("target b − ηC r relative to b: {offset:.3e}");
+            }
+            println!(
+                "uncovered target nodes: {} extended from their neighbours, {} at r = 0",
+                integrated.extended_nodes, integrated.exposed_nodes
+            );
+            if mode == "opened" {
+                assert!(
+                    integrated.extended_nodes > 0,
+                    "the moved hole uncovered nothing"
+                );
+            }
+            println!(
+                "oscillator handoff ({mode}): {} → {} nodes; r {}",
+                source_base.degrees_of_freedom(),
+                target_base.degrees_of_freedom(),
+                if integrated.discarded {
+                    "dropped"
+                } else if integrated.started_at_zero {
+                    "started at zero"
+                } else {
+                    "interpolated"
+                },
+            );
+            let handed_integrated = integrated.field.clone();
+            (
+                handoff.state,
+                handoff.accounting.edit_exchange,
+                handed_integrated,
+                rebuilt_b,
+            )
+        }
+        Err(_) => (
+            CanonicalTemporalWaveState::zero(&target.operator, time_step)
+                .expect("placeholder for the rejected target"),
+            0.0,
+            Vec::new(),
+            !source_state.integrated_field().is_empty() && target.operator.has_restoring(),
+        ),
+    };
+    if !reject {
+        for _ in 0..TARGET_STEPS {
+            target_state
+                .step(&target.operator)
+                .expect("target oracle step");
+        }
+    }
+
     let transfer = CanonicalGpuTransferPlan::compile(
         source_base,
         target_base,
@@ -488,7 +460,7 @@ fn main() -> AppExit {
         transfer: Some(transfer),
     })
     .insert_resource(Expected {
-        handed_integrated: integrated.field.clone(),
+        handed_integrated,
         complementary_bound: if rebuilt_b { 1.0e-4 } else { 3.0e-5 },
         primary: target_state.primary_flux().to_vec(),
         complementary: target_state.complementary_flux().to_vec(),

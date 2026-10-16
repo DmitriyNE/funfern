@@ -24678,3 +24678,28 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-16 — The time-driven handoff examples read the CPU's handoff
+
+- **What.** `canonical_gpu_temporal_handoff`,
+  `canonical_gpu_oscillator_handoff` and `canonical_gpu_temporal_amr` built
+  the state the device is held to by hand: `new_at` with the carried fluxes,
+  the Switch begun again and the pump's carrier preserved by name, `r` and
+  `b` through `transfer_integrated_field` and `transfer_oscillator_flux`,
+  every component's total carried whether or not the runtime transfer names
+  it, and on the AMR example the walls' memory left at zero. Each now takes
+  `handed_over` through the maps it hands the device, with the totals its
+  runtime transfer names (`desired_totals`), and holds the device's edit
+  lane to that handoff's. `canonical_gpu_temporal` stays as it is: its
+  frequency change is a live law patch on one generation, not a handoff.
+- **Measured.** The device suite's six runs of the three pass, and every mode
+  the suite does not run passes by hand. Oscillator: `identity`,
+  `from-linear` (edit 0), `to-linear` (−10.74 met to 1.9e-8 of the energy),
+  `opened` (−2.386e-3 to 2.0e-8), `reject` (refused, the source stepping
+  on). Temporal handoff: `HANDOFF_NONLINEAR` (−2.209e-4 to 7.8e-8),
+  `HANDOFF_GATED` (−4.093e-5 to 3.0e-8), `HANDOFF_REJECT` (refused). The AMR
+  runs read the same digits as before: their walls carry no pole memory
+  the old reference missed.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

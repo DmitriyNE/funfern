@@ -19,7 +19,7 @@ use funfern_app::canonical_gpu::{
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
-    CanonicalForcing, CanonicalMaterialDrive, CanonicalOutgoingHistoryTransferMap,
+    CanonicalForcing, CanonicalHandoffMaps, CanonicalOutgoingHistoryTransferMap,
     CanonicalPrimaryTransferMap, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
     CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CoefficientLaw, MeshingOptions,
     OuterBoundaryCondition, PulseEnvelope, PulseTrain, QuadraticTransferMap, QuadraticWaveOperator,
@@ -226,66 +226,6 @@ fn main() -> AppExit {
             .step(&source_operator)
             .expect("source temporal oracle step");
     }
-    let handoff_time = source_state.time();
-    let old_mass_drive = source_scene.materials[0]
-        .mass_law
-        .drive
-        .evaluate(&source_scene.materials[0].parameters)
-        .expect("source mass drive");
-    let target_state = CanonicalTemporalWaveState::new_at(
-        &target_operator,
-        time_step,
-        source_state.primary_flux().to_vec(),
-        source_state.complementary_flux().to_vec(),
-        handoff_time,
-    );
-    if reject {
-        // The reference refuses the same state, which is what the device
-        // is held to.
-        assert!(
-            target_state.is_err(),
-            "the fixture must leave the target's domain"
-        );
-    }
-    let mut target_state = if reject {
-        CanonicalTemporalWaveState::zero(&target_operator, time_step)
-            .expect("placeholder for the rejected target")
-    } else {
-        target_state.expect("target temporal oracle state")
-    };
-    target_state
-        .runtime_mut()
-        .begin_switch(material_id, true, 0.0, 1.4)
-        .expect("preserved target Switch");
-    target_state
-        .runtime_mut()
-        .preserve_carrier(
-            material_id,
-            CanonicalMaterialDrive::MassCoefficient,
-            old_mass_drive,
-            handoff_time,
-        )
-        .expect("preserved target mass carrier");
-    let handoff_energy = source_state
-        .energy(&source_operator)
-        .expect("source energy at the handoff");
-    let edit = if reject {
-        0.0
-    } else {
-        target_state
-            .energy(&target_operator)
-            .expect("target energy at the handoff")
-            - handoff_energy
-    };
-    for _ in 0..TARGET_STEPS {
-        if reject {
-            break;
-        }
-        target_state
-            .step(&target_operator)
-            .expect("target temporal oracle step");
-    }
-
     let target_placeholder = CanonicalTemporalWaveState::zero(&target_operator, time_step)
         .expect("target temporal placeholder");
     let target_plan = CanonicalGpuPlan::compile_temporal_bulk(
@@ -330,6 +270,54 @@ fn main() -> AppExit {
         &target_forcing,
     )
     .expect("temporal stable runtime ownership");
+
+    // The reference is the CPU's handoff through the same maps and rules:
+    // the pump keeps its carrier, its phase unchanged, and the crystal,
+    // whose phase moved, starts from its own anchors.
+    let outgoing = outgoing_map
+        .normalized_matrix(source_operator.base(), target_operator.base())
+        .expect("temporal normalized outgoing map");
+    let handoff_energy = source_state
+        .energy(&source_operator)
+        .expect("source energy at the handoff");
+    let handed = source_state.handed_over(
+        &source_operator,
+        &target_operator,
+        &target_forcing,
+        CanonicalHandoffMaps {
+            primary: &primary_map,
+            complementary: &vector_map,
+            thin_gap: &gap_map,
+            outgoing: &outgoing,
+        },
+        &interpolation,
+        &runtime.desired_totals(source_operator.base(), source_state.primary_flux()),
+        time_step,
+    );
+    // The reference refuses the same state, which is what the device is held
+    // to.
+    assert_eq!(
+        handed.is_err(),
+        reject,
+        "the fixture must leave the target's domain when, and only when, it rejects"
+    );
+    let (mut target_state, edit) = match handed {
+        Ok(handoff) => (handoff.state, handoff.accounting.edit_exchange),
+        Err(_) => (
+            CanonicalTemporalWaveState::zero(&target_operator, time_step)
+                .expect("placeholder for the rejected target"),
+            0.0,
+        ),
+    };
+    for _ in 0..TARGET_STEPS {
+        if reject {
+            break;
+        }
+        target_state
+            .step(&target_operator)
+            .expect("target temporal oracle step");
+    }
+
     let transfer = CanonicalGpuTransferPlan::compile(
         source_operator.base(),
         target_operator.base(),
