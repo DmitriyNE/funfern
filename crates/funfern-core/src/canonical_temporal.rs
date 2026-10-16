@@ -4050,9 +4050,9 @@ impl CanonicalTemporalWaveState {
     /// The state carried onto `target` as the device carries it at a
     /// generation handoff, the driven counterpart of
     /// [`crate::CanonicalWaveState::handed_over`]: its fields as that carries them,
-    /// with `r` through `interpolation` - started from zero on a target that
-    /// gains a restoring law, dropped from one that loses it, as the report
-    /// says - and `b` about the target's `r` where both keep one; the clock
+    /// with `r` on the primary map's rows - started from zero on a target
+    /// that gains a restoring law, dropped from one that loses it, as the
+    /// report says - and `b` about the target's `r` where both keep one; the clock
     /// running on from the time this state reached, at the step `time_step`;
     /// the material runtime by [`CanonicalMaterialRuntimeState::carried_onto`].
     /// The target's prescribed nodes are then held at their signals. The
@@ -4066,7 +4066,6 @@ impl CanonicalTemporalWaveState {
         target: &CanonicalTemporalWaveOperator,
         target_forcing: &CanonicalForcing,
         maps: crate::CanonicalHandoffMaps<'_>,
-        interpolation: &crate::QuadraticTransferMap,
         desired_totals: &[Option<f64>],
         time_step: f64,
     ) -> Result<DrivenHandoff, WaveError> {
@@ -4077,7 +4076,6 @@ impl CanonicalTemporalWaveState {
             Some(target),
             &crate::canonical_wave::prescribed_nodes(target.base(), target_forcing)?,
             maps,
-            Some(interpolation),
             desired_totals,
         )?;
         let runtime = self.runtime.carried_onto(source, target, self.time)?;
@@ -4104,7 +4102,6 @@ impl CanonicalTemporalWaveState {
         target: &CanonicalTemporalWaveOperator,
         target_forcing: &CanonicalForcing,
         maps: crate::CanonicalHandoffMaps<'_>,
-        interpolation: &crate::QuadraticTransferMap,
         desired_totals: &[Option<f64>],
         time_step: f64,
     ) -> Result<DrivenHandoff, WaveError> {
@@ -4122,7 +4119,6 @@ impl CanonicalTemporalWaveState {
             Some(target),
             &crate::canonical_wave::prescribed_nodes(target.base(), target_forcing)?,
             maps,
-            Some(interpolation),
             desired_totals,
         )?;
         let carried = (state.time(), state.integrator(), state.wall_step());
@@ -15165,7 +15161,6 @@ mod tests {
                     thin_gap: &thin_gap,
                     outgoing: &outgoing,
                 },
-                &interpolation,
                 &vec![None; target_base.component_count()],
                 state.time_step().min(0.4 * target.2.maximum_time_step()),
             )

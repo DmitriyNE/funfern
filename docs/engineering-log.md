@@ -24703,3 +24703,25 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-16 — The CPU's handoff carries `r` on the primary map's rows
+
+- **Found** by PH-17's remesh rows, the first caller of the time-driven
+  handoff that runs on the topology runtime: the runtime releases the
+  quadratic interpolation when it commits a generation, and the handoff of
+  951b425 took it as a parameter to carry `r`. The device never needed it:
+  `with_integrated_field_of` writes `r`'s rows from the primary map, which
+  keeps the interpolation rows it was prepared from
+  (`CanonicalPrimaryTransferMap::interpolation_samples`).
+- **What.** `transfer_integrated_field` reads `r` on those rows, an identity
+  map copying it and an uncovered node taking `Q`'s extension donors as
+  before, and the handoffs drop the parameter. The device's
+  `canonical_gpu_temporal_handoff`, `canonical_gpu_oscillator_handoff` and
+  `canonical_gpu_temporal_amr`, the dragged φ⁴ wall
+  (`a_domain_wall_settles_at_the_waist_and_follows_it_when_dragged`) and
+  the core's `r` tests read the same digits as on the interpolation.
+- **Verified.** Core 539 tests; device suite 14 of 14 on the oscillator and
+  handoff runs, and every handoff mode the suite does not run, by hand.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

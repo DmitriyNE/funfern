@@ -290,7 +290,6 @@ fn main() -> AppExit {
             thin_gap: &gap_map,
             outgoing: &outgoing,
         },
-        &interpolation,
         &runtime.desired_totals(source_operator.base(), source_state.primary_flux()),
         time_step,
     );

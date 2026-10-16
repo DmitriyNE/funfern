@@ -352,7 +352,6 @@ fn main() -> AppExit {
                 thin_gap: &gap_map,
                 outgoing: &outgoing,
             },
-            &interpolation,
             &runtime_transfer.desired_totals(operator.base(), oracle_state.primary_flux()),
             time_step,
         )

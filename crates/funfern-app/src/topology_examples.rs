@@ -7335,7 +7335,6 @@ mod tests {
                 .0;
 
             let integrated = transfer_integrated_field(
-                next.transfer.as_ref().unwrap(),
                 &transfer.primary,
                 self.state.integrated_field(),
                 &target,

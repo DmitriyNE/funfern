@@ -2334,7 +2334,6 @@ impl CanonicalWaveState {
             None,
             &prescribed_nodes(target, target_forcing)?,
             maps,
-            None,
             desired_totals,
         )?;
         // A generation keeps its backend: the trace's inverse lane stays where
@@ -2378,7 +2377,6 @@ impl CanonicalWaveState {
             None,
             &prescribed_nodes(target, target_forcing)?,
             maps,
-            None,
             desired_totals,
         )?;
         let integrated = fields.integrated.clone();

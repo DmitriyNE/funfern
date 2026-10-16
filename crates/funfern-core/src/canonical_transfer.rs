@@ -1967,8 +1967,8 @@ pub(crate) struct HandedFields {
 /// The fields a generation handoff carries, as the device carries them,
 /// whichever path either side runs: `Q` through the primary map with each
 /// component's total where `desired_totals` puts it and the target's
-/// `prescribed` nodes left to their signals, `r` through `interpolation` onto
-/// a target that keeps one ([`transfer_integrated_field`]), `b` through its
+/// `prescribed` nodes left to their signals, `r` on the primary map's rows
+/// onto a target that keeps one ([`transfer_integrated_field`]), `b` through its
 /// map - rebuilt about the target's `r` where both sides carry one
 /// ([`transfer_oscillator_flux`]) - and the gaps' jumps and the wall's memory
 /// through theirs. `target_temporal` is the target's driven operator, absent
@@ -1979,21 +1979,15 @@ pub(crate) fn hand_fields(
     target_temporal: Option<&CanonicalTemporalWaveOperator>,
     prescribed: &[bool],
     maps: CanonicalHandoffMaps<'_>,
-    interpolation: Option<&QuadraticTransferMap>,
     desired_totals: &[Option<f64>],
 ) -> Result<HandedFields, WaveError> {
     let (primary_flux, _) =
         maps.primary
             .transfer(source.primary_flux, desired_totals, prescribed)?;
     let integrated = match target_temporal.filter(|temporal| temporal.has_restoring()) {
-        Some(temporal) => transfer_integrated_field(
-            interpolation.ok_or(WaveError::Unsupported(
-                "a handoff onto a restoring law needs the interpolation its `r` crosses on",
-            ))?,
-            maps.primary,
-            source.integrated_field,
-            temporal,
-        )?,
+        Some(temporal) => {
+            transfer_integrated_field(maps.primary, source.integrated_field, temporal)?
+        }
         None => CanonicalIntegratedFieldTransfer {
             discarded: !source.integrated_field.is_empty(),
             ..CanonicalIntegratedFieldTransfer::default()
@@ -2495,17 +2489,15 @@ pub struct CanonicalIntegratedFieldTransfer {
 /// when a target drops an `r` it has no law for, and when one starts from
 /// zero because its source had none.
 pub fn transfer_integrated_field(
-    interpolation: &QuadraticTransferMap,
     primary: &CanonicalPrimaryTransferMap,
     source_field: &[f64],
     target: &CanonicalTemporalWaveOperator,
 ) -> Result<CanonicalIntegratedFieldTransfer, WaveError> {
     let target_nodes = target.base().degrees_of_freedom();
-    if interpolation.samples().len() != target_nodes || primary.target_node_count() != target_nodes
-    {
+    if primary.target_node_count() != target_nodes {
         return Err(WaveError::SizeMismatch {
             expected: target_nodes,
-            actual: interpolation.samples().len(),
+            actual: primary.target_node_count(),
         });
     }
     if !target.has_restoring() {
@@ -2521,8 +2513,7 @@ pub fn transfer_integrated_field(
             ..CanonicalIntegratedFieldTransfer::default()
         });
     }
-    let (field, extended_nodes, exposed_nodes) =
-        integrated_field_values(interpolation, primary, source_field)?;
+    let (field, extended_nodes, exposed_nodes) = integrated_field_values(primary, source_field)?;
     Ok(CanonicalIntegratedFieldTransfer {
         field,
         extended_nodes,
@@ -2580,23 +2571,35 @@ pub fn transfer_oscillator_flux(
 /// `r` on the target nodes: interpolated where the source covers them, the
 /// plain average of the extension donors where it does not, and zero beyond
 /// their reach; with the counts of the last two.
+/// `r` on the primary map's own interpolation rows, which is how the device
+/// carries it: an identity map copies it, and a target node no row covers
+/// takes the average of `Q`'s extension donors, or zero beyond their reach.
 fn integrated_field_values(
-    interpolation: &QuadraticTransferMap,
     primary: &CanonicalPrimaryTransferMap,
     source_field: &[f64],
 ) -> Result<(Vec<f64>, usize, usize), WaveError> {
-    if source_field.len() != interpolation.source_dofs() {
+    if source_field.len() != primary.source_support().len() {
         return Err(WaveError::SizeMismatch {
-            expected: interpolation.source_dofs(),
+            expected: primary.source_support().len(),
             actual: source_field.len(),
         });
     }
-    let mut field = interpolation
-        .interpolate(source_field, 0.0)
-        .map_err(|_| WaveError::InvalidState)?;
+    if source_field.iter().any(|value| !value.is_finite()) {
+        return Err(WaveError::InvalidState);
+    }
+    let Some(samples) = primary.interpolation_samples() else {
+        return Ok((source_field.to_vec(), 0, 0));
+    };
+    let mut field = vec![0.0; samples.len()];
     let (mut extended, mut exposed) = (0, 0);
-    for (node, sample) in interpolation.samples().iter().enumerate() {
-        if sample.is_some() {
+    for (node, sample) in samples.iter().enumerate() {
+        if let Some(sample) = sample {
+            field[node] = sample
+                .nodes
+                .iter()
+                .zip(sample.weights)
+                .map(|(&index, weight)| source_field[index as usize] * weight)
+                .sum();
             continue;
         }
         match primary.extension(node) {
@@ -3043,8 +3046,7 @@ mod tests {
         // The integrated field runs on into the connected new support from
         // the same neighbours, and only the island starts at zero.
         let source_r = vec![0.7; source.degrees_of_freedom()];
-        let (target_r, extended, exposed) =
-            integrated_field_values(&interpolation, &transfer, &source_r).unwrap();
+        let (target_r, extended, exposed) = integrated_field_values(&transfer, &source_r).unwrap();
         assert!(
             extended > 0 && exposed > 0,
             "{extended} extended, {exposed} exposed"
@@ -3117,8 +3119,7 @@ mod tests {
             .iter()
             .map(|point| 0.8 + 1.3 * point.x - 0.6 * point.y * point.y)
             .collect::<Vec<_>>();
-        let (target_r, _, _) =
-            integrated_field_values(&interpolation, &primary, &source_r).unwrap();
+        let (target_r, _, _) = integrated_field_values(&primary, &source_r).unwrap();
         let invariant = |operator: &CanonicalWaveOperator, flux: &[Point2], field: &[f64]| {
             flux.iter()
                 .zip(operator.compatible_flux(field).unwrap())
@@ -3939,7 +3940,6 @@ mod tests {
     /// The maps a handoff from one compiled generation to another carries its
     /// state through, prepared as the topology transaction prepares them.
     struct Handoff {
-        interpolation: QuadraticTransferMap,
         primary: CanonicalPrimaryTransferMap,
         complementary: CanonicalVectorTransferMap,
         thin_gap: CanonicalThinGapHistoryTransferMap,
@@ -3976,7 +3976,6 @@ mod tests {
                 .unwrap()
                 .normalized_matrix(source.2, target.2)
                 .unwrap(),
-                interpolation,
             }
         }
 
@@ -4122,7 +4121,6 @@ mod tests {
                 &operator,
                 &CanonicalForcing::none(operator.base()),
                 handoff.maps(),
-                &handoff.interpolation,
                 &vec![None; operator.base().component_count()],
                 running.time_step(),
             )
@@ -4196,7 +4194,6 @@ mod tests {
                 &fine.2,
                 &CanonicalForcing::none(fine.2.base()),
                 handoff.maps(),
-                &handoff.interpolation,
                 &desired,
                 0.4 * fine.2.maximum_time_step(),
             )
@@ -4263,7 +4260,6 @@ mod tests {
             &driven,
             &CanonicalForcing::none(fixed),
             handoff.maps(),
-            &handoff.interpolation,
             &totals,
             state.time_step(),
         )

@@ -3,7 +3,7 @@
 //!
 //! `r = ∫u dt` is a nodal field, not a conserved one, so a handoff
 //! interpolates it on the primary map's rows while `Q` is conserved and `b`
-//! reconstructed. The host does the same through `transfer_integrated_field`,
+//! reconstructed. The host does the same through its own handoff,
 //! steps both generations in f64, and the device is held to it.
 //!
 //! `OSCILLATOR_HANDOFF` picks the handoff:
@@ -344,7 +344,6 @@ fn main() -> AppExit {
             thin_gap: &gap_map,
             outgoing: &outgoing,
         },
-        &interpolation,
         &runtime.desired_totals(source_base, source_state.primary_flux()),
         time_step,
     );
