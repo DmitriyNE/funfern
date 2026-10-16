@@ -1,0 +1,4 @@
+about: the CPU's time-driven handoff starts every carried drive from the target's authored anchors, so a carrier a frequency edit had re-anchored jumps in phase at the handoff
+test: cargo test --release -p funfern-core --lib -- a_driven_handoff_onto_its_own_generation_runs_on_as_the_run_it_left
+expect: ^CanonicalTemporalStepAccounting \{ temporal_work
+needs: cpu

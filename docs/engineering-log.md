@@ -24763,3 +24763,21 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-16 — Mutations for the time-driven handoff
+
+- `carrier-restarted-on-handoff`: `carried_onto` leaves every drive at the
+  target's authored anchors, so a carrier a frequency edit had re-anchored
+  jumps in phase at the handoff.
+- `driven-edit-valued-authored`: the handed state is valued under the
+  target's authored runtime rather than the one it carries on, the CPU form
+  of what da83bc0 fixed on the device.
+- Both caught by
+  `a_driven_handoff_onto_its_own_generation_runs_on_as_the_run_it_left`, the
+  identity handoff mid-Switch with a re-anchored pump, booking an edit of
+  6.1e-3 where it books under 1e-12 of the energy. PH-17's rows cannot see
+  the second: their runtimes are the authored ones throughout, with no
+  Switch and no edit, so the two valuations agree there.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

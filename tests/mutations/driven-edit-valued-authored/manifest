@@ -1,0 +1,4 @@
+about: the CPU's time-driven handoff values the handed state under the target's authored runtime, not the one it carries on, as the device did before da83bc0, so a handoff mid-Switch books energy that never moved
+test: cargo test --release -p funfern-core --lib -- a_driven_handoff_onto_its_own_generation_runs_on_as_the_run_it_left
+expect: ^CanonicalTemporalStepAccounting \{ temporal_work
+needs: cpu

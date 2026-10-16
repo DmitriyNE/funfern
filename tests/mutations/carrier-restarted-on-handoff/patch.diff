@@ -1,0 +1,13 @@
+--- a/crates/funfern-core/src/canonical_temporal.rs
++++ b/crates/funfern-core/src/canonical_temporal.rs
+@@ -259,9 +259,7 @@
+                     continue;
+                 };
+                 let drive = drives[from][source_lane].ok_or(WaveError::InvalidState)?;
+-                record.drives[lane] =
+-                    TimeDriveRuntime::preserving_carrier_from(drive, old.drives[source_lane], time)
+-                        .map_err(|_| WaveError::InvalidState)?;
++                let _ = (lane, drive);
+             }
+         }
+         Ok(carried)

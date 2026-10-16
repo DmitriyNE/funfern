@@ -1,0 +1,13 @@
+--- a/crates/funfern-core/src/canonical_temporal.rs
++++ b/crates/funfern-core/src/canonical_temporal.rs
+@@ -4179,7 +4179,9 @@
+             }
+             handed.outgoing_z = fields.outgoing_z;
+         }
+-        let energy = handed.energy(target)?;
++        let mut authored = handed.clone();
++        authored.runtime = target.initial_runtime();
++        let energy = authored.energy(target)?;
+         let handed = handed.pinned(target, target_forcing)?;
+         let prescribed_exchange = handed.energy(target)? - energy;
+         let edit_exchange = energy - before;

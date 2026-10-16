@@ -480,6 +480,18 @@ media's and the walls' envelope to never rising over four hundred, the slow
 near field's ledger over twenty periods, and a Kerr medium's known drift
 under the splitting to where it stands. With these, stage B1 is done.
 
+**Time-driven CPU handoff done on 2026-10-16.** B1's CPU handoff stayed
+linear while the device's time-driven valuation was in doubt; with that
+fixed it followed. The runtime rule moved into core, the device's transfer
+table built from it (aaab74e); the CPU hands driven states over, and between
+fixed and driven generations either way (951b425), carrying `r` on the
+primary map's rows as the device does (9344c76); the time-driven handoff
+examples hold the device to it (1052cce); and PH-17's handoff rows run on
+every path (d5c163c). Those rows found PH-17's oracle valuing a pump at half
+of `Q u`, which holds on a linear row only; on Kerr it is the law's own
+`Φ(u)`, and a pump on Kerr joined PH-17's configurations. The mutations
+`carrier-restarted-on-handoff` and `driven-edit-valued-authored`.
+
 ## 6b. PH-09: the walls' transient response
 
 **Planned on 2026-10-15.** The 11 October plan reads the walls under pulses
