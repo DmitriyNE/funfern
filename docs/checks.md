@@ -541,6 +541,45 @@ on every mesh, under 3e-3 (1.9e-3); a case of each kind on 0.05 under 1e-3
 measurement's floor of 1e-4; and at half the step the readings do not move.
 The mutation `frame-rotation-dropped`, a frame's angle never reaching its
 tensor, turns the layer across the channel into one along it.
+PH-12 holds cylinders to the partial-wave series. A cylinder of radius 0.5
+in the box `[−2, 2]²` of a unit medium, second-order walls all round, is lit
+by a band source; held to steady state, the field at 64 angles on five
+circles from 0.6 to 1 about it is read by a lock-in, and each order's
+coefficient fitted to `α_n J_n(kr) + c_n H_n(kr)`, so that whatever the walls
+return is one more regular field. `c_n/α_n` is held to the ratio `S_n` of
+`tests/physics/references/cylinder-scattering.json`, with the scattered
+field's error on the inner circle, each measurable order's and its balance
+`|1 + 2 S_n| = 1`, the optical theorem order by order; each skin's medium
+maps through its physical fields to the nodal field's index and stiffness
+ratio. The mesh draws the rim as a polygon inscribed in the circle, 128
+vertices at the default curve tolerance and 256 at PH-06's (the topology's
+own curve sampling caps it there), and the polygon scatters, to first order,
+as the circle of its area, 2.0e-4 and 5.0e-5 short in radius as measured on
+the mesh: that moved the readings by up to 8e-4, eight times the solver's
+own error. So the solver is read against `S_n − k a δ S_n'`, the slope
+tabulated beside the ratio, and the true circle's ratios read the geometry
+with it. Cases: holes at `k a` 0.5, 2 and 5 and pinned cylinders at 2 and 5;
+in TM and TE `ε = 4` at 0.5 and 2, `ε = 2` at 2 and 5, `ε = 10` at 0.5 and
+`μ = 2` at 2; in Mechanical `ρ = 4` with `k` 1 and 2 and a hole; three off
+centre, lit from below and at 30°. A switch-on rings the cylinder's
+resonances: switched on over two periods, `ε = 4`'s third order, 0.8 rad/s
+from the drive and inside the lock-in's main lobe, still read 5e-5 after the
+settle, so the source switches on over 20 s; index 2 at `k a = 5` and `√10`
+at 2 keep resonances that ring for 25 to 400 s and are left out. In the
+gate, `cylinders_scatter_as_the_partial_waves_say` (89 s): a hole, a pinned
+cylinder, `ε = 4` in TM and off centre in TE and Mechanical's stiffer
+inclusion at `k a = 2` on edge 0.1, the solver's error under 2e-4 (measured
+1.2e-4 at worst) and the circle's under 1.2e-3 (7.8e-4); and `ε = 4` in TE
+at PH-06's tolerance, under 4e-4 off the circle (1.5e-4). Nightly, the job
+`cylinder-scattering` (23 minutes on the M1 Max): every case on 0.1,
+the solver's error under 2e-4 up to `k a = 2` and under 5e-3 (2.6e-3) at 5,
+four to six elements to the wavelength; on 0.07 under 8e-5 (4.6e-5) and 2e-3
+(1.1e-3); a subset on 0.05 under 2.5e-5 (1.2e-5) and 4e-4 (2.0e-4), falling
+2.4 to 3 times from 0.07; at PH-06's tolerance the error against the circle
+falls 3.3 to 4.9 times, to under 4e-4 (2.2e-4); half the step moves nothing.
+The mutation `curve-sampling-coarsened`, the topology sampling curves to
+four times its tolerance, leaves the rim 128 vertices at any tolerance and
+puts `ε = 4` in TE 7.3e-4 off the circle.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

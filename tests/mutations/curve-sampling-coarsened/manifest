@@ -1,0 +1,4 @@
+about: the topology job samples curves to four times its tolerance, so a circle's rim keeps half its vertices however tight the mesher's curve tolerance, and a cylinder scatters as the smaller polygon
+test: cargo test --release -p funfern-app --lib -- cylinders_scatter_as_the_partial_waves_say
+expect: TE ε 4, ka 2 on 0\.1 at 5e-5 and 1: .* off the circle
+needs: cpu

@@ -432,9 +432,10 @@ with their reports in `docs/spikes/`.
   (done on 2026-10-17, `funfern-rectangular-radiation.md`),
   PH-09 the walls' transient response (section 6b), PH-11 Fresnel (done
   on 2026-10-17, section 6c),
-  PH-12 cylinder scattering, PH-13 thin gaps, PH-14 and PH-15 temporal and
-  modulated materials, PH-16 nonlinear laws, PH-18
-  probes and observables, PH-19 manufactured solutions.
+  PH-12 cylinder scattering (done on 2026-10-17, section 6d), PH-13 thin
+  gaps, PH-14 and PH-15 temporal and modulated materials, PH-16 nonlinear
+  laws, PH-18 probes and observables, with PH-12's far field, PH-19
+  manufactured solutions.
 - **C, invariants and stress:** IV-01 to IV-13, AMR-01 to AMR-04, RT-01 to
   RT-08, the numerical edge cases, long runs and resource lifecycle. The
   metamorphic tests and the real-device fuzzing need none of the reference
@@ -531,6 +532,26 @@ fourth order to 1e-5 to 4e-4 on edge 0.05. The gate holds eight cases on
 edge 0.1; the nightly job `fresnel-interfaces` the rest on three meshes. The
 mutation `frame-rotation-dropped`. No defect found; the sizing taught the
 measurement its spacing, its timing beside a cutoff and its frames.
+
+## 6d. PH-12: cylinder scattering
+
+**Done on 2026-10-17** (`docs/engineering-log.md`). A cylinder in a box of
+second-order walls, lit by a band source; the field on five circles about it
+is split into orders and each fitted to a regular and an outgoing Bessel
+wave, so that what the walls return is one more regular field, and the
+outgoing over the regular held to the partial-wave ratio from an mpmath
+table, with each order's balance, the optical theorem order by order.
+Reflecting holes, pinned cylinders and inclusions of index `√2` to `√10`,
+`k a` from 0.5 to 5, in Mechanical, TM and TE, three off centre. The mesh's
+rim is a polygon inscribed in the circle, which scatters as the circle of
+its area, 2e-4 short in radius at the default curve tolerance; the solver is
+read against that circle's ratios, through their tabulated slope, and the
+geometry against the true circle's. The solver's error falls 2.4 to 3 times
+from edge 0.07 to 0.05, to 1.2e-5 at `k a = 2` and 2e-4 at 5; the geometry's
+is 8e-4 at the default tolerance and 2e-4 at PH-06's. The gate holds six
+cases on edge 0.1; the nightly job `cylinder-scattering` every case on
+three meshes and two tolerances. The mutation `curve-sampling-coarsened`.
+No defect found; the far field moves to PH-18, as agreed.
 
 ## 7. Infrastructure
 

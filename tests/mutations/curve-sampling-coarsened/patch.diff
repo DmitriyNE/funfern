@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/topology.rs b/crates/funfern-core/src/topology.rs
+index f5ec63b..03ecf54 100644
+--- a/crates/funfern-core/src/topology.rs
++++ b/crates/funfern-core/src/topology.rs
+@@ -731,7 +731,7 @@ impl TopologyJob {
+             geometry,
+             revision,
+             SamplingOptions {
+-                tolerance: tolerance * 0.25,
++                tolerance,
+                 ..SamplingOptions::default()
+             },
+         )

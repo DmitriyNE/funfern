@@ -16481,4 +16481,771 @@ mod tests {
         let errors = fresnel_levels(std::slice::from_ref(&halved), &[(0.07, 0.5)])[0][0];
         fresnel_holds(&halved, 0.07, 0.5, errors, FRESNEL_MIDDLE);
     }
+
+    // -----------------------------------------------------------------------
+    // PH-12: cylinder scattering against the partial-wave series.
+    // -----------------------------------------------------------------------
+
+    /// PH-12's reference (`tests/physics/references/cylinder-scattering.json`,
+    /// from `cylinder_scattering.py`): for each case the scattering ratio
+    /// `S_n` of every order it scatters measurably, its slope `dS_n/d(ka)`
+    /// at a fixed index and stiffness ratio, and `H1_n(k r)` at the radii
+    /// the test fits at, 1.2 to 2 times the cylinder's.
+    #[derive(serde::Deserialize)]
+    struct ScatteringTable {
+        radius: f64,
+        cases: Vec<ScatteringEntry>,
+    }
+
+    #[derive(Clone, serde::Deserialize)]
+    struct ScatteringEntry {
+        ka: f64,
+        kind: String,
+        index: Option<f64>,
+        stiffness_ratio: Option<f64>,
+        orders: Vec<ScatteringOrder>,
+    }
+
+    #[derive(Clone, serde::Deserialize)]
+    struct ScatteringOrder {
+        ratio: [f64; 2],
+        slope: [f64; 2],
+        radii: Vec<ScatteringRadius>,
+    }
+
+    #[derive(Clone, serde::Deserialize)]
+    struct ScatteringRadius {
+        radius: f64,
+        h: [f64; 2],
+    }
+
+    fn scattering_table() -> &'static ScatteringTable {
+        static TABLE: std::sync::OnceLock<ScatteringTable> = std::sync::OnceLock::new();
+        TABLE.get_or_init(|| {
+            let path = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/physics/references/cylinder-scattering.json"
+            );
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        })
+    }
+
+    /// A PH-12 cylinder: a hole whose rim reflects, one whose rim is pinned,
+    /// or an inclusion of a layer.
+    #[derive(Clone, Copy, Debug)]
+    enum Cylinder {
+        Hole,
+        Pinned,
+        Inclusion(Layer),
+    }
+
+    /// One PH-12 case: the skin, the cylinder, its size `k a` in the unit
+    /// medium around it, its centre, and the direction the band source's
+    /// wave runs, from the `x` axis.
+    #[derive(Clone, Debug)]
+    struct ScatteringCase {
+        name: String,
+        physics: PhysicsModel,
+        cylinder: Cylinder,
+        ka: f64,
+        centre: Point2,
+        incidence: f64,
+    }
+
+    impl ScatteringCase {
+        fn k(&self) -> f64 {
+            self.ka / scattering_table().radius
+        }
+
+        /// The table's entry: by kind and size, and an inclusion by the
+        /// index and the stiffness ratio its skin gives its layer.
+        fn entry(&self) -> &'static ScatteringEntry {
+            let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1.0e-9);
+            scattering_table()
+                .cases
+                .iter()
+                .find(|entry| {
+                    entry.ka == self.ka
+                        && match self.cylinder {
+                            Cylinder::Hole => entry.kind == "hole",
+                            Cylinder::Pinned => entry.kind == "pinned",
+                            Cylinder::Inclusion(layer) => {
+                                let (mass, sx, _) = layer.physical(self.physics);
+                                entry.kind == "penetrable"
+                                    && close(entry.index, (mass / sx).sqrt())
+                                    && close(entry.stiffness_ratio, sx)
+                            }
+                        }
+                })
+                .unwrap_or_else(|| panic!("no table entry for {}", self.name))
+        }
+    }
+
+    /// `round_circle`'s circle of `radius`, about `centre`.
+    fn circle_at(centre: Point2, radius: f64) -> PeriodicCubicSpline {
+        let around = round_circle(radius, 64);
+        PeriodicCubicSpline::uniform(
+            around
+                .controls()
+                .iter()
+                .map(|point| centre + (*point - Point2::default()))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    /// PH-12's scene: the box `[-2, 2]²` of a unit medium, every side a
+    /// second-order wall, the cylinder meshed at `tolerance`, and a band
+    /// source `e^{-((x cos φ + y sin φ + 1.6)/0.08)²}` across the
+    /// background, whose wave runs along `φ`; switched on over `ramp` and
+    /// held to `held`. What the walls return meets the cylinder too, and
+    /// changes nothing the test reads.
+    fn scattering_scene(
+        case: &ScatteringCase,
+        ramp: f64,
+        held: f64,
+        edge: f64,
+        tolerance: f64,
+    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let half = 2.0;
+        let mut builder = Builder::new();
+        builder.scene.physics = case.physics;
+        builder.scene.geometry.domain = DomainRect {
+            min_x: -half,
+            max_x: half,
+            min_y: -half,
+            max_y: half,
+        };
+        builder.scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::SecondOrderOutgoing);
+        let background = &mut builder.scene.materials[0];
+        background.mass_density = ScalarField::constant(1.0);
+        background.stiffness = ScalarField::constant(1.0);
+        let circle = circle_at(case.centre, scattering_table().radius);
+        let rim = |law| SpanBehavior::Separated {
+            left: FaceBoundaryCondition::Reflecting,
+            right: law,
+            coupling: InternalBoundaryCoupling::Independent,
+        };
+        match case.cylinder {
+            Cylinder::Hole => {
+                builder.closed(circle, rim(FaceBoundaryCondition::Reflecting), None);
+            }
+            Cylinder::Pinned => {
+                builder.closed(
+                    circle,
+                    rim(FaceBoundaryCondition::Dirichlet {
+                        signal: TimeSignal::ZERO,
+                    }),
+                    None,
+                );
+            }
+            Cylinder::Inclusion(layer) => {
+                assert!(layer.axis_ratio == 1.0);
+                builder.scene.materials.push(Material {
+                    id: MaterialId(2),
+                    name: "Cylinder".into(),
+                    mass_density: ScalarField::constant(layer.mass),
+                    stiffness: ScalarField::constant(layer.stiffness),
+                    ..Material::default_medium()
+                });
+                builder.closed(
+                    circle,
+                    SpanBehavior::Transmitting,
+                    Some((MaterialId(2), MaterialFrame::world())),
+                );
+            }
+        }
+        let omega = case.k();
+        let (cos, sin) = (case.incidence.cos(), case.incidence.sin());
+        builder.scene.volume_sources.push(VolumeSource {
+            region: BACKGROUND_REGION,
+            enabled: true,
+            profile: ScalarField::formula(format!(
+                "exp(-((x * ({cos}) + y * ({sin}) + 1.6) / 0.08)^2)"
+            ))
+            .unwrap(),
+            parameters: vec![],
+            signal: TimeSignal::pulsed(
+                [0.0, 1.0, omega / std::f64::consts::TAU, 0.0],
+                PulseEnvelope::FlatTop {
+                    duration: 2.0 * held,
+                    edge: ramp,
+                },
+                0.0,
+                0.0,
+            ),
+        });
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        let editor = TopologyEditor::from_document(document.clone()).unwrap();
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                1,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                MeshingOptions {
+                    target_edge_length: edge,
+                    curve_tolerance: tolerance,
+                    ..MeshingOptions::default()
+                }
+                .sized_for_area(4.0 * half * half),
+                true,
+            )
+            .unwrap();
+        loop {
+            if let Some(result) = runtime.advance(1 << 16) {
+                result.unwrap();
+                break;
+            }
+        }
+        runtime.commit_ready(token).unwrap()
+    }
+
+    /// What a PH-12 run reads. The mesh's rim is a polygon inscribed in the
+    /// circle, which scatters, to first order, as the circle of its area:
+    /// `deficit` is that circle's radius short of the cylinder's, relative,
+    /// and `S_n − k a · deficit · S_n'` its ratios. Against them, the
+    /// solver's own error: the scattered field's against the ratio times the
+    /// regular field each order met, on the inner fit circle, relative to
+    /// it; each order's `|S_read − S_n|` where the order met a measurable
+    /// field, the worst of them; the worst `| |1 + 2 S_read| − 1 |` there,
+    /// energy's balance order by order; and the radial fits' largest
+    /// misfit. Against the circle's own ratios, `circle`, the field's error
+    /// with the polygon's.
+    #[derive(Clone, Copy, Debug)]
+    struct ScatteringReading {
+        circle: f64,
+        field: f64,
+        order: f64,
+        unitarity: f64,
+        misfit: f64,
+        deficit: f64,
+    }
+
+    /// The relative deficit of the radius of the circle with the area of
+    /// the polygon the mesh draws the cylinder's rim with, its vertices those
+    /// on the rim, ordered by angle about `centre`.
+    fn rim_deficit(mesh: &funfern_core::TriMesh, centre: Point2, radius: f64) -> f64 {
+        let mut rim = mesh
+            .vertices
+            .iter()
+            .map(|vertex| vertex.point - centre)
+            .filter(|offset| (offset.norm() - radius).abs() < 1.0e-5 * radius)
+            .collect::<Vec<_>>();
+        assert!(rim.len() >= 64, "{} vertices on the rim", rim.len());
+        rim.sort_by(|a, b| a.y.atan2(a.x).total_cmp(&b.y.atan2(b.x)));
+        let area = (0..rim.len())
+            .map(|index| {
+                let (a, b) = (rim[index], rim[(index + 1) % rim.len()]);
+                0.5 * (a.x * b.y - a.y * b.x)
+            })
+            .sum::<f64>();
+        1.0 - (area / std::f64::consts::PI).sqrt() / radius
+    }
+
+    /// One PH-12 run on `edge` at the curve `tolerance` and `fraction` of
+    /// the production step. The source switches on over 20 s, or two periods
+    /// where longer: a switch-on rings the cylinder's resonances, and over
+    /// two periods `ε = 4`'s third order, 0.8 rad/s from the drive and inside
+    /// the lock-in's main lobe, still read 5e-5 after the settle. Held 25 s
+    /// more, the field at 64 angles on each fit circle about the cylinder is
+    /// read by a Blackman-Harris lock-in over eight periods, and each order's
+    /// Fourier coefficient at every radius fitted in least squares to
+    /// `α_n J_n(k r) + c_n H_n(k r)`, `e^{−iωt}`.
+    fn scattering_run(
+        case: &ScatteringCase,
+        edge: f64,
+        tolerance: f64,
+        fraction: f64,
+    ) -> ScatteringReading {
+        let tau = std::f64::consts::TAU;
+        let omega = case.k();
+        let period = tau / omega;
+        let (ramp, settle, window) = (f64::max(20.0, 2.0 * period), 25.0, 8.0 * period);
+        let held = ramp + settle + window;
+        let prepared = scattering_scene(case, ramp, held, edge, tolerance);
+        let entry = case.entry();
+        let deficit = rim_deficit(&prepared.mesh, case.centre, scattering_table().radius);
+        let radii = entry.orders[0]
+            .radii
+            .iter()
+            .map(|radius| radius.radius)
+            .collect::<Vec<_>>();
+        let angles = 64_usize;
+        let points = radii
+            .iter()
+            .flat_map(|radius| {
+                (0..angles)
+                    .map(move |j| case.centre + direction(j as f64 * tau / angles as f64) * *radius)
+            })
+            .collect::<Vec<_>>();
+        let dt = fraction * prepared.recommended_time_step();
+        let steps = (held / dt).ceil() as usize;
+        let traces = wall_traces(&prepared, dt, steps, &points, CanonicalWallStep::default());
+        let span = (window / dt).round() as usize;
+        // e^{−iωt} phasors: u = Re(U e^{−iωt}) gives Σ w u e^{iωt} = U/2 Σ w.
+        let lock_in = |trace: &[f64]| {
+            let start = steps - span;
+            let (mut sum, mut total) = (Phasor::default(), 0.0);
+            for (step, value) in trace.iter().enumerate().skip(start) {
+                let x = tau * (step - start) as f64 / span as f64;
+                let weight = 0.35875 - 0.48829 * x.cos() + 0.14128 * (2.0 * x).cos()
+                    - 0.01168 * (3.0 * x).cos();
+                let phase = omega * (step + 1) as f64 * dt;
+                sum = sum + Phasor::new(phase.cos(), phase.sin()).scale(weight * value);
+                total += weight;
+            }
+            sum.scale(2.0 / total)
+        };
+        let phasors = traces
+            .iter()
+            .map(|trace| lock_in(trace))
+            .collect::<Vec<_>>();
+        let largest = entry.orders.len() as i32 - 1;
+        let mut fits = Vec::new();
+        for n in -largest..=largest {
+            let order = &entry.orders[n.unsigned_abs() as usize];
+            let sign = if n < 0 && n % 2 != 0 { -1.0 } else { 1.0 };
+            let coefficients = (0..radii.len())
+                .map(|ring| {
+                    (0..angles)
+                        .fold(Phasor::default(), |sum, j| {
+                            let angle = -f64::from(n) * j as f64 * tau / angles as f64;
+                            sum + phasors[ring * angles + j] * Phasor::new(angle.cos(), angle.sin())
+                        })
+                        .scale(1.0 / angles as f64)
+                })
+                .collect::<Vec<_>>();
+            let basis = |ring: usize| {
+                let [j, y] = order.radii[ring].h;
+                [Phasor::new(sign * j, 0.0), Phasor::new(sign * j, sign * y)]
+            };
+            let mut gram = vec![vec![Phasor::default(); 2]; 2];
+            let mut rhs = vec![Phasor::default(); 2];
+            for (ring, value) in coefficients.iter().enumerate() {
+                let functions = basis(ring);
+                for row in 0..2 {
+                    for column in 0..2 {
+                        gram[row][column] =
+                            gram[row][column] + functions[row].conj() * functions[column];
+                    }
+                    rhs[row] = rhs[row] + functions[row].conj() * *value;
+                }
+            }
+            let fitted = solve_phasors(gram, rhs);
+            let (mut residual, mut size) = (0.0_f64, 0.0_f64);
+            for (ring, value) in coefficients.iter().enumerate() {
+                let functions = basis(ring);
+                let model = fitted[0] * functions[0] + fitted[1] * functions[1];
+                residual = residual.max((model - *value).norm());
+                size = size.max(value.norm());
+            }
+            let misfit = residual / size.max(f64::MIN_POSITIVE);
+            let ratio = Phasor::new(order.ratio[0], order.ratio[1]);
+            let polygon =
+                ratio - Phasor::new(order.slope[0], order.slope[1]).scale(case.ka * deficit);
+            let inner = basis(0)[1].norm();
+            fits.push((fitted[0], fitted[1], ratio, polygon, inner, misfit));
+        }
+        let (mut circle, mut error, mut scattered) = (0.0, 0.0, 0.0);
+        let met = fits
+            .iter()
+            .map(|(regular, _, _, _, inner, _)| regular.norm() * inner)
+            .fold(0.0, f64::max);
+        let (mut order_error, mut unitarity, mut misfit) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for (regular, outgoing, ratio, polygon, inner, fit) in &fits {
+            circle += ((*outgoing - *ratio * *regular).norm() * inner).powi(2);
+            let predicted = *polygon * *regular;
+            error += ((*outgoing - predicted).norm() * inner).powi(2);
+            scattered += (predicted.norm() * inner).powi(2);
+            // An order that met a field a hundredth of the strongest's has
+            // its own ratio and fit read.
+            if regular.norm() * inner > 1.0e-2 * met {
+                misfit = misfit.max(*fit);
+                let read = *outgoing / *regular;
+                order_error = order_error.max((read - *polygon).norm());
+                unitarity =
+                    unitarity.max(((Phasor::new(1.0, 0.0) + read.scale(2.0)).norm() - 1.0).abs());
+            }
+        }
+        ScatteringReading {
+            circle: (circle / scattered).sqrt(),
+            field: (error / scattered).sqrt(),
+            order: order_error,
+            unitarity,
+            misfit,
+            deficit,
+        }
+    }
+
+    /// PH-12's cases: holes at `k a` 0.5, 2 and 5 and pinned cylinders at
+    /// 2 and 5 in TM; in TM and TE, `ε = 4` at 0.5 and 2, `ε = 2` at 2 and
+    /// 5, `ε = 10` at 0.5 and `μ = 2` at 2; in Mechanical `ρ = 4` with `k`
+    /// 1 and 2, and a hole, at 2; and three at `(0.4, −0.3)`, lit from below
+    /// and at 30°. Index 2 at 5 and `√10` at 2 keep whispering-gallery
+    /// resonances that ring for 25 to 400 s, longer than a run can wait.
+    fn scattering_cases() -> Vec<ScatteringCase> {
+        let origin = Point2::default();
+        let off = Point2::new(0.4, -0.3);
+        let mut cases = Vec::new();
+        let mut add = |name: &str, physics, cylinder, ka, centre, incidence: f64| {
+            cases.push(ScatteringCase {
+                name: name.to_owned(),
+                physics,
+                cylinder,
+                ka,
+                centre,
+                incidence: incidence.to_radians(),
+            });
+        };
+        for ka in [0.5, 2.0, 5.0] {
+            add(
+                &format!("TM hole, ka {ka}"),
+                LEDGER_TM,
+                Cylinder::Hole,
+                ka,
+                origin,
+                0.0,
+            );
+        }
+        for ka in [2.0, 5.0] {
+            add(
+                &format!("TM pinned, ka {ka}"),
+                LEDGER_TM,
+                Cylinder::Pinned,
+                ka,
+                origin,
+                0.0,
+            );
+        }
+        for (skin, physics) in [("TM", LEDGER_TM), ("TE", LEDGER_TE)] {
+            for ka in [0.5, 2.0] {
+                add(
+                    &format!("{skin} ε 4, ka {ka}"),
+                    physics,
+                    Cylinder::Inclusion(Layer::of(4.0, 1.0)),
+                    ka,
+                    origin,
+                    0.0,
+                );
+            }
+            for ka in [2.0, 5.0] {
+                add(
+                    &format!("{skin} ε 2, ka {ka}"),
+                    physics,
+                    Cylinder::Inclusion(Layer::of(2.0, 1.0)),
+                    ka,
+                    origin,
+                    0.0,
+                );
+            }
+            add(
+                &format!("{skin} ε 10, ka 0.5"),
+                physics,
+                Cylinder::Inclusion(Layer::of(10.0, 1.0)),
+                0.5,
+                origin,
+                0.0,
+            );
+            add(
+                &format!("{skin} μ 2, ka 2"),
+                physics,
+                Cylinder::Inclusion(Layer::of(1.0, 2.0)),
+                2.0,
+                origin,
+                0.0,
+            );
+        }
+        add(
+            "Mechanical ρ 4, ka 2",
+            PhysicsModel::Mechanical,
+            Cylinder::Inclusion(Layer::of(4.0, 1.0)),
+            2.0,
+            origin,
+            0.0,
+        );
+        add(
+            "Mechanical ρ 4, k 2, ka 2",
+            PhysicsModel::Mechanical,
+            Cylinder::Inclusion(Layer::of(4.0, 2.0)),
+            2.0,
+            origin,
+            0.0,
+        );
+        add(
+            "Mechanical hole, ka 2",
+            PhysicsModel::Mechanical,
+            Cylinder::Hole,
+            2.0,
+            origin,
+            0.0,
+        );
+        add(
+            "TM ε 4, ka 2, off centre from below",
+            LEDGER_TM,
+            Cylinder::Inclusion(Layer::of(4.0, 1.0)),
+            2.0,
+            off,
+            90.0,
+        );
+        add(
+            "TE ε 4, ka 2, off centre at 30°",
+            LEDGER_TE,
+            Cylinder::Inclusion(Layer::of(4.0, 1.0)),
+            2.0,
+            off,
+            30.0,
+        );
+        add(
+            "TM hole, ka 2, off centre at 30°",
+            LEDGER_TM,
+            Cylinder::Hole,
+            2.0,
+            off,
+            30.0,
+        );
+        cases
+    }
+
+    /// What a PH-12 reading is held to: against the polygon's ratios, the
+    /// solver's error, field, orders and balance alike; the radial fits'
+    /// misfit, which reads the point stencil at single points, an error the
+    /// fit and the angular sum average away; and against the circle's own
+    /// ratios, the field's error with the polygon's.
+    #[derive(Clone, Copy, Debug)]
+    struct ScatteringBounds {
+        solver: f64,
+        misfit: f64,
+        circle: f64,
+    }
+
+    /// A PH-12 run's edge, curve tolerance and fraction of the production
+    /// step.
+    type ScatteringLevel = (f64, f64, f64);
+
+    /// Prints a PH-12 reading and holds it to `bounds`.
+    fn scattering_holds(
+        case: &ScatteringCase,
+        (edge, tolerance, fraction): ScatteringLevel,
+        reading: ScatteringReading,
+        bounds: ScatteringBounds,
+    ) {
+        let at = format!("{} on {edge} at {tolerance:e} and {fraction}", case.name);
+        eprintln!(
+            "{at}: field {:.2e}, order {:.2e}, unitarity {:.1e}, misfit {:.1e}; circle {:.2e}, deficit {:.2e}",
+            reading.field,
+            reading.order,
+            reading.unitarity,
+            reading.misfit,
+            reading.circle,
+            reading.deficit
+        );
+        for (what, error) in [
+            ("field", reading.field),
+            ("order", reading.order),
+            ("unitarity", reading.unitarity),
+        ] {
+            assert!(error < bounds.solver, "{at}: {what} {error:e} off");
+        }
+        assert!(
+            reading.misfit < bounds.misfit,
+            "{at}: misfit {:e}",
+            reading.misfit
+        );
+        assert!(
+            reading.circle < bounds.circle,
+            "{at}: {:e} off the circle",
+            reading.circle
+        );
+    }
+
+    /// Runs each case at its level, side by side, and returns the readings in
+    /// order.
+    fn scattering_runs(jobs: &[(&ScatteringCase, ScatteringLevel)]) -> Vec<ScatteringReading> {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let results = std::sync::Mutex::new(vec![None; jobs.len()]);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let job = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((case, (edge, tolerance, fraction))) = jobs.get(job) else {
+                            break;
+                        };
+                        let reading = scattering_run(case, *edge, *tolerance, *fraction);
+                        results.lock().unwrap()[job] = Some(reading);
+                    }
+                });
+            }
+        });
+        results
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|reading| reading.unwrap())
+            .collect()
+    }
+
+    /// PH-12's bounds for a case of size `ka` on `edge`, at the default
+    /// curve tolerance or, `rim`, at PH-06's. Measured up to `k a = 2` on
+    /// 0.1, 0.07 and 0.05: the solver's error 1.2e-4, 4.6e-5 and 1.2e-5 at
+    /// worst, the misfit 2.3e-3, 3.6e-4 and 2.0e-4, the circle's 8.3e-4
+    /// throughout, the rim's polygon short 2.0e-4; at PH-06's tolerance on
+    /// 0.1, 1.4e-4, 1.2e-3 and 2.2e-4, short 5.0e-5. At `k a = 5`, four to
+    /// six elements to the wavelength on 0.1, 2.6e-3, 1.1e-3 and 2.0e-4, the
+    /// misfit 1.6e-3, 4.4e-4 and 1.9e-4, the circle's 2.2e-3, 1.3e-3 and
+    /// 1.2e-3.
+    fn scattering_bounds(ka: f64, edge: f64, rim: bool) -> ScatteringBounds {
+        let large = ka > 2.0;
+        let (solver, misfit, circle) = if rim {
+            assert!(!large && edge == 0.1);
+            (2.5e-4, 2.5e-3, 4.0e-4)
+        } else if edge >= 0.1 {
+            if large {
+                (5.0e-3, 3.0e-3, 4.0e-3)
+            } else {
+                (2.0e-4, 4.0e-3, 1.2e-3)
+            }
+        } else if edge >= 0.07 {
+            if large {
+                (2.0e-3, 8.0e-4, 2.5e-3)
+            } else {
+                (8.0e-5, 8.0e-4, 1.2e-3)
+            }
+        } else if large {
+            (4.0e-4, 4.0e-4, 2.5e-3)
+        } else {
+            (2.5e-5, 4.0e-4, 1.2e-3)
+        };
+        ScatteringBounds {
+            solver,
+            misfit,
+            circle,
+        }
+    }
+
+    /// PH-12 in the gate, at `k a = 2` on edge 0.1: a reflecting hole and a
+    /// pinned cylinder in TM, `ε = 4` in TM and off centre at 30° in TE,
+    /// and Mechanical's stiffer inclusion at the default curve tolerance;
+    /// `ε = 4` in TE at PH-06's, where the circle's own ratios hold the rim
+    /// to its 256 vertices.
+    #[test]
+    fn cylinders_scatter_as_the_partial_waves_say() {
+        let default = MeshingOptions::default().curve_tolerance;
+        let cases = scattering_cases();
+        let named = |name: &str| cases.iter().find(|case| case.name == name).unwrap();
+        let jobs = [
+            (named("TM hole, ka 2"), (0.1, default, 1.0)),
+            (named("TM pinned, ka 2"), (0.1, default, 1.0)),
+            (named("TM ε 4, ka 2"), (0.1, default, 1.0)),
+            (
+                named("TE ε 4, ka 2, off centre at 30°"),
+                (0.1, default, 1.0),
+            ),
+            (named("Mechanical ρ 4, k 2, ka 2"), (0.1, default, 1.0)),
+            (named("TE ε 4, ka 2"), (0.1, CIRCULAR_TOLERANCE, 1.0)),
+        ];
+        for ((case, level), reading) in jobs.iter().zip(scattering_runs(&jobs)) {
+            let bounds = scattering_bounds(case.ka, level.0, level.1 < default);
+            scattering_holds(case, *level, reading, bounds);
+        }
+    }
+
+    /// PH-12 (`docs/spikes/funfern-testing-campaign-plan.md`, section 6d):
+    /// every case on edge 0.1 at the default curve tolerance; on 0.07 every
+    /// case but the four whose twin in another skin reads alike to the
+    /// digit; those up to `k a = 2` on 0.1 at PH-06's tolerance as well,
+    /// where the rim's polygon has twice the vertices and the field's error
+    /// against the circle falls under half; a subset on 0.05, the solver's
+    /// error there under half its reading on 0.07 wherever that stands above
+    /// 1e-5; and one at half the step, which moves it under 5%.
+    #[test]
+    #[ignore = "PH-12, about twenty minutes; run in the nightly"]
+    fn cylinders_converge_to_the_partial_waves() {
+        let default = MeshingOptions::default().curve_tolerance;
+        let cases = scattering_cases();
+        let twins = [
+            "Mechanical hole, ka 2",
+            "Mechanical ρ 4, ka 2",
+            "TE μ 2, ka 2",
+            "TM μ 2, ka 2",
+        ];
+        let fine = [
+            "TM pinned, ka 2",
+            "TM ε 4, ka 2",
+            "TE ε 4, ka 2",
+            "TE ε 4, ka 2, off centre at 30°",
+            "TM ε 4, ka 0.5",
+            "TM hole, ka 5",
+            "TM ε 2, ka 5",
+            "TE ε 2, ka 5",
+        ];
+        let mut jobs = Vec::new();
+        for case in &cases {
+            jobs.push((case, (0.1, default, 1.0)));
+            if !twins.contains(&case.name.as_str()) {
+                jobs.push((case, (0.07, default, 1.0)));
+                if case.ka <= 2.0 {
+                    jobs.push((case, (0.1, CIRCULAR_TOLERANCE, 1.0)));
+                }
+            }
+            if fine.contains(&case.name.as_str()) {
+                jobs.push((case, (0.05, default, 1.0)));
+            }
+        }
+        let halved = cases
+            .iter()
+            .find(|case| case.name == "TM ε 4, ka 2")
+            .unwrap();
+        jobs.push((halved, (0.07, default, 0.5)));
+        assert_eq!(
+            jobs.iter().filter(|(_, level)| level.0 == 0.05).count(),
+            fine.len()
+        );
+        let readings = scattering_runs(&jobs);
+        let reading_of = |name: &str, level: ScatteringLevel| {
+            jobs.iter()
+                .zip(&readings)
+                .find(|((case, at), _)| case.name == name && *at == level)
+                .map(|(_, reading)| *reading)
+                .unwrap()
+        };
+        for ((case, level), reading) in jobs.iter().zip(&readings) {
+            let (edge, tolerance, _) = *level;
+            let bounds = scattering_bounds(case.ka, edge, tolerance < default);
+            scattering_holds(case, *level, *reading, bounds);
+            if tolerance < default {
+                let coarser = reading_of(&case.name, (0.1, default, 1.0));
+                assert!(
+                    reading.circle < 0.5 * coarser.circle,
+                    "{}: {:.2e} off the circle at {default:e}, {:.2e} at {tolerance:e}",
+                    case.name,
+                    coarser.circle,
+                    reading.circle
+                );
+            }
+            if edge == 0.05 {
+                let coarser = reading_of(&case.name, (0.07, default, 1.0));
+                assert!(
+                    coarser.field < 1.0e-5 || reading.field < 0.5 * coarser.field,
+                    "{}: field {:.2e} on 0.07, {:.2e} on 0.05",
+                    case.name,
+                    coarser.field,
+                    reading.field
+                );
+            }
+        }
+        let full = reading_of(&halved.name, (0.07, default, 1.0));
+        let half = reading_of(&halved.name, (0.07, default, 0.5));
+        assert!(
+            (half.field - full.field).abs() < 0.05 * full.field,
+            "{}: field {:.2e} at the step, {:.2e} at half",
+            halved.name,
+            full.field,
+            half.field
+        );
+    }
 }

@@ -19,3 +19,10 @@ tables.
   each from `max(3/2, m)` to 14, for PH-09's pulses, which the test
   interpolates by cubic Hermite. Checked by the Wronskian, at twice the
   precision, and by that interpolation at every midpoint to 1e-9.
+- `cylinder-scattering.json`, from `cylinder_scattering.py` (mpmath): PH-12's
+  scattering ratios `S_n` for reflecting holes, pinned cylinders and
+  penetrable ones, by size `k a`, index and the nodal field's stiffness
+  ratio, with each ratio's slope in `k a` and `J_n`, `H1_n` at the radii the
+  test fits at. Checked by the Wronskian, at twice the precision, every
+  ratio by unitarity, `|1 + 2 S_n| = 1`, and every slope along it and by
+  carrying its ratio to a circle 2e-4 smaller to 1e-5.

@@ -24907,3 +24907,69 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-17 — PH-12: cylinder scattering against the partial-wave series
+
+- **What.** A cylinder of radius 0.5 in the box `[−2, 2]²` of a unit medium,
+  second-order walls all round, lit by a band source
+  `e^{−((x cos φ + y sin φ + 1.6)/0.08)²}`: a reflecting hole, a pinned one
+  or an inclusion. Held to steady state, the field at 64 angles on five
+  circles from 0.6 to 1 about it is read by a Blackman-Harris lock-in, and
+  each order's coefficient fitted in least squares to
+  `α_n J_n(kr) + c_n H_n(kr)`, so that what the walls return is one more
+  regular field. `c_n/α_n` is held to the ratio `S_n`: the scattered field's
+  error on the inner circle, each order's that met a measurable field, and
+  `|1 + 2 S_n| = 1`, the optical theorem order by order.
+- **Reference.** `tests/physics/references/cylinder_scattering.py` (mpmath)
+  writes `S_n`, its slope in `k a` and `J_n`, `H1_n` at the fit's radii,
+  checked by the Wronskian, at twice the precision, by unitarity and its
+  slope, and by the slope carrying `S_n` across the largest shift the test
+  meets to 1e-5. scipy agrees to 1e-16.
+- **Cases**, each skin's medium mapped through its physical fields to the
+  nodal field's index and stiffness ratio: holes at `k a` 0.5, 2 and 5,
+  pinned cylinders at 2 and 5; in TM and TE `ε = 4` at 0.5 and 2, `ε = 2` at
+  2 and 5, `ε = 10` at 0.5 and `μ = 2` at 2; in Mechanical `ρ = 4` with `k`
+  1 and 2 and a hole; three at `(0.4, −0.3)`, lit from below and at 30°.
+- **What the sizing taught.**
+  - The rim is a polygon inscribed in the circle, and it scatters as the
+    circle of its area. At PH-06's tolerance it has 256 vertices, 5.0e-5
+    short in radius: predicted 1.1e-4 to 2.1e-4 of error at `k a = 2`,
+    measured 1.0e-4 to 2.2e-4 on two meshes. At the default, 128, 2.0e-4
+    short: predicted 5.3e-4 and 7.3e-4, measured 5.7e-4 and 7.3e-4. Tighter
+    tolerances build the same 256, since the topology job samples curves to
+    a quarter of 1e-4 of the domain's size. The test measures the polygon's
+    area on the mesh and reads the solver against `S_n − k a δ S_n'`.
+  - mpmath's `diff` stepped under the precision the ratio rounds its
+    argument to and returned zero slopes, which agreed with themselves at
+    twice the precision. A central difference replaces it, and the check that
+    the slope carries the ratio would have caught it. A reflecting hole's
+    slope does vanish at `k a = n`, where `J''Y' − J'Y''` does.
+  - Index `√10` at `k a = 2` read 0.44 off on both meshes: whispering-gallery
+    resonances of Q 229 and 922 ring for 116 and 390 s. Index 2 at 5 has
+    them too (Q 72 to 468). Those sizes are out; `√10` runs at 0.5.
+  - Switched on over two periods, `ε = 4`'s third order, at
+    `k a = 2.384 − 0.122i`, 0.8 rad/s from the drive, rang inside the
+    lock-in's main lobe: orders ±3 read 4.9e-5 off at one phase on every mesh
+    and tolerance, and stalled the case at 5.6e-5 on 0.05. A 60 s settle
+    took them under 7e-6, and so does switching on over 20 s.
+  - Nothing else moved with the settle (60 and 120 s against 25) or the
+    step (half of production's fourth-order step).
+- **Results.** In the gate, `cylinders_scatter_as_the_partial_waves_say`
+  (89 s): a hole, a pinned cylinder, `ε = 4` in TM and off centre in TE and
+  Mechanical's stiffer inclusion at `k a = 2` on edge 0.1, the solver's
+  error under 2e-4 (1.2e-4 at worst) and the circle's under 1.2e-3
+  (7.8e-4); `ε = 4` in TE at PH-06's tolerance under 4e-4 off the circle
+  (1.5e-4). Nightly, `cylinders_converge_to_the_partial_waves` (job
+  `cylinder-scattering`, 23 minutes): every case on 0.1, the solver's
+  error under 2e-4 up to `k a = 2` and 5e-3 (2.6e-3) at 5, four to six
+  elements to the wavelength; on 0.07 under 8e-5 (4.6e-5) and 2e-3 (1.1e-3); a subset
+  on 0.05 under 2.5e-5 (1.2e-5) and 4e-4 (2.0e-4), falling 2.4 to 3 times
+  from 0.07; at PH-06's tolerance the error against the circle falls 3.3 to
+  4.9 times, under 4e-4 (2.2e-4); half the step moves nothing.
+- **Mutation.** `curve-sampling-coarsened`: `TopologyJob::new` samples
+  curves to its tolerance rather than a quarter of it, and the rim keeps 128
+  vertices at any curve tolerance. `ε = 4` in TE at PH-06's reads 7.3e-4 off
+  the circle; its solver error stays at 9.3e-5.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
