@@ -506,6 +506,41 @@ circle on average, so the circle cannot show convergence and the channel
 does. The mutation `wall-memory-leaks`, the zero pole leaking a twentieth of
 its mode's decay rate, puts the separated pulses' second-order wall 2.9e-3
 off its law and the disk's order 2 2.7e-3.
+PH-11 holds planar interfaces to Fresnel. A channel one unit high from
+`x = −8` to 8, reflecting floor and ceiling, sponges of equal electric and
+magnetic loss at both ends, which absorb without an impedance step, and
+layers meeting at vertical interfaces: a channel mode meets them at an exact
+angle, its tangential wavenumber `nπ` in every layer, and nothing converts it
+to another. Held to steady state, the field at eight heights every 0.11, on
+three units either side, is read by a lock-in and projected on the mode, and
+each outer layer's projections are fitted to a forward and a backward wave of
+the layer's exact wavenumber. The four amplitudes are held to the stack's
+exact scattering matrix, `B = R A + T′ D` and `C = T A + R′ D`, `R′` and `T′`
+the mirrored stack's, so that whatever the ends return is one more incident
+wave; with them the power balance and, across one interface, the jumps of the
+field and of its flux. Fresnel is written from the physical fields - TM's
+`E_z` over `1/μ`, TE's `H_z` over `1/ε`, Mechanical's displacement over `k`
+- through a transfer matrix in the test, with `ε ≠ μ` so that a slot mixed up
+shows. In each skin: normal incidence, 30° and 60°, an impedance-matched
+layer, contrast 25, total internal reflection at 45° and 60° from index 2,
+and a slab at and off its resonance; in Mechanical a layer of axis ratio 2
+along and across the channel (a frame turned otherwise couples the channel's
+walls to the mode, which is then no longer one). A switch-on rings at every
+layer's cutoff, where the mode stands still, so the drive's switch-on and the
+lock-in are sized from its distance `Δω` to the nearest: with the lock-in
+`30/Δω` long, total reflection at 60°, 7% above cutoff, read 1.7e-3 on every
+mesh; at `90/Δω`, 2e-5. In the gate,
+`planar_interfaces_scatter_as_fresnel_says` (106 s): normal incidence and 30°
+in TM and TE, total reflection at 45°, the two anisotropic layers and the
+resonant slab on edge 0.1, every reading under 8e-3 (measured 4.2e-3 at
+worst). Nightly, the job `fresnel-interfaces` (42 minutes on the
+M1 Max): every case on 0.1 under 1.5e-2 (7.5e-3, contrast 25 in TE on four
+elements to its wavelength); on 0.07 all but the six at 60°, which read alike
+on every mesh, under 3e-3 (1.9e-3); a case of each kind on 0.05 under 1e-3
+(3.8e-4), falling about fourth order, twofold or more wherever above the
+measurement's floor of 1e-4; and at half the step the readings do not move.
+The mutation `frame-rotation-dropped`, a frame's angle never reaching its
+tensor, turns the layer across the channel into one along it.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

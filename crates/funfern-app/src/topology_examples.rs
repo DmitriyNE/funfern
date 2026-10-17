@@ -15635,4 +15635,850 @@ mod tests {
             }
         });
     }
+
+    // -----------------------------------------------------------------------
+    // PH-11: planar material interfaces against Fresnel.
+    // -----------------------------------------------------------------------
+
+    /// One layer of PH-11's channel, as authored: its mass and stiffness
+    /// slots - `ρ` and `k` in Mechanical, `ε` and `μ` in TM and TE - and its
+    /// axis ratio, along the channel or, with `across`, its frame turned a
+    /// quarter turn.
+    #[derive(Clone, Copy, Debug)]
+    struct Layer {
+        mass: f64,
+        stiffness: f64,
+        axis_ratio: f64,
+        across: bool,
+    }
+
+    impl Layer {
+        const fn of(mass: f64, stiffness: f64) -> Self {
+            Self {
+                mass,
+                stiffness,
+                axis_ratio: 1.0,
+                across: false,
+            }
+        }
+
+        /// The layer's mass and its stiffness along `x` and `y` for the
+        /// skin's nodal field, from the physics, not the solver's slots:
+        /// Mechanical's displacement, `ρ ü = ∇·(k ∇u)`; TM's `E_z`, `ε` over
+        /// `1/μ`; TE's `H_z`, `μ` over `1/ε`. An axis ratio `a` is the ratio
+        /// of the wave speeds along its frame's axes, the stiffness `a` times
+        /// along it and `1/a` across.
+        fn physical(self, physics: PhysicsModel) -> (f64, f64, f64) {
+            let (mass, stiffness) = match physics {
+                PhysicsModel::Mechanical => (self.mass, self.stiffness),
+                physics if physics == LEDGER_TM => (self.mass, 1.0 / self.stiffness),
+                _ => (self.stiffness, 1.0 / self.mass),
+            };
+            let (along, across) = (self.axis_ratio, 1.0 / self.axis_ratio);
+            if self.across {
+                (mass, stiffness * across, stiffness * along)
+            } else {
+                (mass, stiffness * along, stiffness * across)
+            }
+        }
+    }
+
+    /// The `x` wavenumber of the channel mode of tangential wavenumber `kt`
+    /// in a layer of `mass` and stiffnesses `sx`, `sy` at `omega`: real for a
+    /// wave that runs, `−iκ` for one that decays, so that `e^{−ik(x − x₀)}`
+    /// runs or falls towards `+x`, `e^{iωt}` in time.
+    fn layer_wavenumber(mass: f64, sx: f64, sy: f64, omega: f64, kt: f64) -> Phasor {
+        let square = (mass * omega * omega - sy * kt * kt) / sx;
+        if square >= 0.0 {
+            Phasor::new(square.sqrt(), 0.0)
+        } else {
+            Phasor::new(0.0, -(-square).sqrt())
+        }
+    }
+
+    /// `e^{∓ik d}`, the forward wave with `−` and the backward with `+`.
+    fn wave(k: Phasor, distance: f64, forward: bool) -> Phasor {
+        let sign = if forward { -1.0 } else { 1.0 };
+        // ±i k d = ±(i k_re d − k_im d).
+        let exponent = Phasor::new(-sign * k.im * distance, sign * k.re * distance);
+        let size = exponent.re.exp();
+        Phasor::new(size * exponent.im.cos(), size * exponent.im.sin())
+    }
+
+    /// Solves `matrix x = rhs` by elimination with partial pivoting.
+    fn solve_phasors(mut matrix: Vec<Vec<Phasor>>, mut rhs: Vec<Phasor>) -> Vec<Phasor> {
+        let n = rhs.len();
+        for column in 0..n {
+            let pivot = (column..n)
+                .max_by(|a, b| {
+                    matrix[*a][column]
+                        .norm()
+                        .total_cmp(&matrix[*b][column].norm())
+                })
+                .unwrap();
+            matrix.swap(column, pivot);
+            rhs.swap(column, pivot);
+            for row in column + 1..n {
+                let factor = matrix[row][column] / matrix[column][column];
+                let pivot_row = matrix[column].clone();
+                for (entry, value) in matrix[row].iter_mut().zip(&pivot_row).skip(column) {
+                    *entry = *entry - factor * *value;
+                }
+                let value = rhs[column];
+                rhs[row] = rhs[row] - factor * value;
+            }
+        }
+        let mut solution = vec![Phasor::default(); n];
+        for row in (0..n).rev() {
+            let mut sum = rhs[row];
+            for column in row + 1..n {
+                sum = sum - matrix[row][column] * solution[column];
+            }
+            solution[row] = sum / matrix[row][row];
+        }
+        solution
+    }
+
+    /// The exact reflection and transmission of the channel mode `kt` through
+    /// `layers` meeting at `interfaces`: in each layer `a e^{−ik(x − x₀)} + b
+    /// e^{ik(x − x₀)}`, `x₀` the layer's left interface (the first one for
+    /// the first layer), the field and its flux `s_x ∂_x u` continuous at
+    /// every interface, a unit wave in and nothing coming back from the far
+    /// side. `R` is the first layer's `b`, `T` the last layer's `a`.
+    fn layered_response(
+        physics: PhysicsModel,
+        layers: &[Layer],
+        interfaces: &[f64],
+        omega: f64,
+        kt: f64,
+    ) -> (Phasor, Phasor) {
+        let count = interfaces.len();
+        assert_eq!(layers.len(), count + 1);
+        let properties = layers
+            .iter()
+            .map(|layer| {
+                let (mass, sx, sy) = layer.physical(physics);
+                (layer_wavenumber(mass, sx, sy, omega, kt), sx)
+            })
+            .collect::<Vec<_>>();
+        let reference = |layer: usize| interfaces[layer.max(1) - 1];
+        // Unknowns: R, then each inner layer's a and b, then T.
+        let unknowns = 2 * count;
+        let index_a = |layer: usize| (layer > 0).then(|| 2 * layer - 1);
+        let index_b = |layer: usize| {
+            if layer == 0 {
+                Some(0)
+            } else if layer == count {
+                None
+            } else {
+                Some(2 * layer)
+            }
+        };
+        let mut matrix = vec![vec![Phasor::default(); unknowns]; unknowns];
+        let mut rhs = vec![Phasor::default(); unknowns];
+        let one = Phasor::new(1.0, 0.0);
+        for interface in 1..=count {
+            let x = interfaces[interface - 1];
+            for (side, layer) in [(1.0, interface - 1), (-1.0, interface)] {
+                let (k, stiffness) = properties[layer];
+                let distance = x - reference(layer);
+                let forward = wave(k, distance, true);
+                let backward = wave(k, distance, false);
+                // The flux of a e^{∓ik(x − x₀)} is ∓i k s_x times it.
+                let flux = (Phasor::new(0.0, -1.0) * k).scale(stiffness);
+                let rows = [(2 * (interface - 1), one), (2 * (interface - 1) + 1, flux)];
+                for (row, factor) in rows {
+                    let forward_term = (factor * forward).scale(side);
+                    let backward_term =
+                        (factor * backward).scale(if row % 2 == 0 { side } else { -side });
+                    match index_a(layer) {
+                        Some(column) => matrix[row][column] = matrix[row][column] + forward_term,
+                        None => rhs[row] = rhs[row] - forward_term,
+                    }
+                    if let Some(column) = index_b(layer) {
+                        matrix[row][column] = matrix[row][column] + backward_term;
+                    }
+                }
+            }
+        }
+        let solution = solve_phasors(matrix, rhs);
+        (solution[0], solution[unknowns - 1])
+    }
+
+    /// PH-11's channel: one unit high from `x = −8` to 8, reflecting floor
+    /// and ceiling, second-order walls at both ends behind sponges of equal
+    /// electric and magnetic loss rising smoothly from `|x| = 4` to 2 at the
+    /// ends, which absorb without an impedance step; `layers[0]` up to the
+    /// first of `interfaces`, each next layer from its interface on; the
+    /// launcher at `x = −3.5` driving channel mode `mode` at `omega`, switched
+    /// on over `ramp` and held to `held`.
+    #[allow(clippy::too_many_arguments)]
+    fn interface_channel(
+        physics: PhysicsModel,
+        layers: &[Layer],
+        interfaces: &[f64],
+        mode: u32,
+        omega: f64,
+        ramp: f64,
+        held: f64,
+        edge: f64,
+    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let mut builder = Builder::new();
+        builder.scene.physics = physics;
+        builder.scene.geometry.domain = DomainRect {
+            min_x: -8.0,
+            max_x: 8.0,
+            min_y: -0.5,
+            max_y: 0.5,
+        };
+        // The background, the first layer, between the launcher and the first
+        // interface.
+        builder.scene.face_assignments[0].anchor = FaceAnchor::Outer {
+            side: OuterSide::Bottom,
+            fraction: (8.0 - 1.5) / 16.0,
+        };
+        let mut boundaries = channel();
+        boundaries.sides[OuterSide::Left.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
+        boundaries.sides[OuterSide::Right.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
+        builder.scene.outer_boundaries = boundaries;
+        // A loss rate is read in its region's frame: a quarter turn puts the
+        // channel's x on the frame's y.
+        let sponge = |across: bool| LossChannel {
+            base_rate: ScalarField::formula(if across {
+                "2 * smoothstep(4, 8, abs(y))"
+            } else {
+                "2 * smoothstep(4, 8, abs(x))"
+            })
+            .unwrap(),
+            law: DampingLaw {
+                rate: RateLaw::Constant,
+                drive: TimeDrive::None,
+                gate: None,
+            },
+        };
+        let author = |material: &mut Material, layer: Layer| {
+            material.mass_density = ScalarField::constant(layer.mass);
+            material.stiffness = ScalarField::constant(layer.stiffness);
+            material.axis_ratio = ScalarField::constant(layer.axis_ratio);
+            material.electric_loss = Some(sponge(layer.across));
+            material.magnetic_loss = Some(sponge(layer.across));
+        };
+        assert!(!layers[0].across && layers[0].axis_ratio == 1.0);
+        author(&mut builder.scene.materials[0], layers[0]);
+        for (index, (layer, x)) in layers[1..].iter().zip(interfaces).enumerate() {
+            let material = MaterialId(10 + index as u64);
+            let mut authored = Material {
+                id: material,
+                name: format!("Layer {}", index + 2),
+                ..Material::default_medium()
+            };
+            author(&mut authored, *layer);
+            builder.scene.materials.push(authored);
+            let (curve, span) = builder.divider(*x);
+            let region = RegionId(builder.next_region);
+            builder.next_region += 1;
+            builder.scene.regions.push(Region {
+                id: region,
+                material,
+                frame: MaterialFrame {
+                    angle_radians: if layer.across {
+                        std::f64::consts::FRAC_PI_2
+                    } else {
+                        0.0
+                    },
+                    ..MaterialFrame::world()
+                },
+            });
+            // Running upwards, the divider's right is towards +x.
+            builder.scene.face_assignments.push(AuthoredFaceAssignment {
+                anchor: FaceAnchor::Curve {
+                    curve,
+                    span,
+                    side: CurveTraceSide::Right,
+                    parameter: 0.5,
+                },
+                region: Some(region),
+            });
+        }
+        builder.launcher(-3.5, INTERFACE_HZ, 1.0);
+        let launcher = builder.scene.volume_sources.last_mut().unwrap();
+        launcher.signal = TimeSignal::pulsed(
+            [0.0, 1.0, omega / std::f64::consts::TAU, 0.0],
+            PulseEnvelope::FlatTop {
+                duration: 2.0 * held,
+                edge: ramp,
+            },
+            0.0,
+            0.0,
+        );
+        launcher.profile = ScalarField::formula(if mode == 0 {
+            "1".to_owned()
+        } else {
+            format!("cos({mode} * pi * (y + 0.5))")
+        })
+        .unwrap();
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        prepare(&document, edge)
+    }
+
+    /// What one Fresnel run reads: the first layer's forward and backward
+    /// waves `A` and `B`, phases at the first interface, the last layer's
+    /// `C` and `D` at the last, and the largest share of the mode's amplitude
+    /// either side's two-wave fit leaves unexplained.
+    #[derive(Clone, Copy, Debug)]
+    struct InterfaceReading {
+        incident: Phasor,
+        reflected: Phasor,
+        forward: Phasor,
+        returned: Phasor,
+        misfit: f64,
+    }
+
+    /// One PH-11 run on `edge` at `fraction` of the production step: held to
+    /// steady state, the field at eight heights across the channel every
+    /// quarter unit from 0.25 off each outer interface to 3 away, read by a
+    /// Blackman-Harris lock-in over eight periods and projected on the mode;
+    /// on the first and the last layer the projections are fitted in least
+    /// squares to a forward and a backward wave of the layer's exact
+    /// wavenumber.
+    #[allow(clippy::too_many_arguments)]
+    fn fresnel_run(
+        physics: PhysicsModel,
+        layers: &[Layer],
+        interfaces: &[f64],
+        mode: u32,
+        omega: f64,
+        edge: f64,
+        fraction: f64,
+    ) -> InterfaceReading {
+        let tau = std::f64::consts::TAU;
+        let kt = f64::from(mode) * std::f64::consts::PI;
+        // A switch-on rings at each layer's cutoff `kt √(s_y/m)`, where the
+        // mode stands still: the drive's own switch-on is made slow beside
+        // that frequency, and the lock-in long enough to keep it four
+        // Blackman-Harris bins away. A slow mode takes long to cross.
+        let properties = layers
+            .iter()
+            .map(|layer| layer.physical(physics))
+            .collect::<Vec<_>>();
+        let beside = properties
+            .iter()
+            .map(|(mass, _, sy)| (omega - kt * (sy / mass).sqrt()).abs())
+            .filter(|gap| kt > 0.0 && *gap > 0.0)
+            .fold(f64::INFINITY, f64::min);
+        let slowest = [properties[0], *properties.last().unwrap()]
+            .iter()
+            .filter_map(|(mass, sx, sy)| {
+                let k = layer_wavenumber(*mass, *sx, *sy, omega, kt);
+                (k.im == 0.0).then(|| sx * k.re / (mass * omega))
+            })
+            .fold(f64::INFINITY, f64::min);
+        let ramp = (16.0 / beside).max(4.0);
+        let window = (90.0 / beside).max(8.0 * tau / omega);
+        let settle = 10.0 + 14.0 / slowest;
+        let held = ramp + settle + window;
+        let prepared =
+            interface_channel(physics, layers, interfaces, mode, omega, ramp, held, edge);
+        let heights = 8;
+        let first = interfaces[0];
+        let last = *interfaces.last().unwrap();
+        // Every 0.11, which no wavenumber here turns into a multiple of π,
+        // where a forward and a backward wave would sample alike.
+        let before = (0..)
+            .map(|i| -3.0 + 0.11 * f64::from(i))
+            .take_while(|x| *x <= first - 0.25 + 1.0e-9)
+            .collect::<Vec<_>>();
+        let after = (0..)
+            .map(|i| last + 0.25 + 0.11 * f64::from(i))
+            .take_while(|x| *x <= 3.0 + 1.0e-9)
+            .collect::<Vec<_>>();
+        let points = before
+            .iter()
+            .chain(&after)
+            .flat_map(|x| {
+                (0..heights)
+                    .map(move |j| Point2::new(*x, -0.5 + (f64::from(j) + 0.5) / f64::from(heights)))
+            })
+            .collect::<Vec<_>>();
+        let dt = fraction * prepared.recommended_time_step();
+        let steps = (held / dt).ceil() as usize;
+        let traces = wall_traces(&prepared, dt, steps, &points, CanonicalWallStep::default());
+        let span = (window / dt).round() as usize;
+        let lock_in = |trace: &[f64]| {
+            let start = steps - span;
+            let (mut sum, mut total) = (Phasor::default(), 0.0);
+            for (step, value) in trace.iter().enumerate().skip(start) {
+                let x = tau * (step - start) as f64 / span as f64;
+                let weight = 0.35875 - 0.48829 * x.cos() + 0.14128 * (2.0 * x).cos()
+                    - 0.01168 * (3.0 * x).cos();
+                let phase = omega * (step + 1) as f64 * dt;
+                sum = sum + Phasor::new(phase.cos(), -phase.sin()).scale(weight * value);
+                total += weight;
+            }
+            sum.scale(1.0 / total)
+        };
+        let weight = if mode == 0 { 1.0 } else { 2.0 } / f64::from(heights);
+        let projections = traces
+            .chunks(heights as usize)
+            .map(|column| {
+                column
+                    .iter()
+                    .zip(0..heights)
+                    .fold(Phasor::default(), |sum, (trace, j)| {
+                        let y = -0.5 + (f64::from(j) + 0.5) / f64::from(heights);
+                        sum + lock_in(trace).scale(weight * (kt * (y + 0.5)).cos())
+                    })
+            })
+            .collect::<Vec<_>>();
+        let fit = |xs: &[f64], values: &[Phasor], layer: Layer, reference: f64| {
+            let (mass, sx, sy) = layer.physical(physics);
+            let k = layer_wavenumber(mass, sx, sy, omega, kt);
+            let basis = |x: f64| [wave(k, x - reference, true), wave(k, x - reference, false)];
+            let mut gram = vec![vec![Phasor::default(); 2]; 2];
+            let mut rhs = vec![Phasor::default(); 2];
+            for (x, value) in xs.iter().zip(values) {
+                let functions = basis(*x);
+                for row in 0..2 {
+                    for column in 0..2 {
+                        gram[row][column] =
+                            gram[row][column] + functions[row].conj() * functions[column];
+                    }
+                    rhs[row] = rhs[row] + functions[row].conj() * *value;
+                }
+            }
+            let amplitudes = solve_phasors(gram, rhs);
+            let (mut residual, mut size) = (0.0_f64, 0.0_f64);
+            for (x, value) in xs.iter().zip(values) {
+                let functions = basis(*x);
+                let model = amplitudes[0] * functions[0] + amplitudes[1] * functions[1];
+                residual = residual.max((model - *value).norm());
+                size = size.max(value.norm());
+            }
+            (amplitudes[0], amplitudes[1], residual / size)
+        };
+        let (incident, reflected, misfit_before) =
+            fit(&before, &projections[..before.len()], layers[0], first);
+        let (forward, backward, misfit_after) = fit(
+            &after,
+            &projections[before.len()..],
+            *layers.last().unwrap(),
+            last,
+        );
+        InterfaceReading {
+            incident,
+            reflected,
+            forward,
+            returned: backward,
+            misfit: misfit_before.max(misfit_after),
+        }
+    }
+
+    /// One of PH-11's cases: the skin, the layers and their interfaces, the
+    /// channel mode and the frequency.
+    #[derive(Clone, Debug)]
+    struct FresnelCase {
+        name: String,
+        physics: PhysicsModel,
+        layers: Vec<Layer>,
+        interfaces: Vec<f64>,
+        mode: u32,
+        omega: f64,
+    }
+
+    /// How far a reading stands from the exact scattering: `B` against
+    /// `R A + T′ D` and `C` against `T A + R′ D`, relative to `A`; the power
+    /// balance's defect; across a single interface, how far the field and
+    /// its flux `s_x ∂_x u` jump there; and the reading's own misfit, which
+    /// also carries the discrete wave's small error in wavenumber over the
+    /// three units read.
+    #[derive(Clone, Copy, Debug)]
+    struct FresnelErrors {
+        reflection: f64,
+        transmission: f64,
+        power: f64,
+        field_jump: Option<f64>,
+        flux_jump: Option<f64>,
+        misfit: f64,
+    }
+
+    impl FresnelCase {
+        fn kt(&self) -> f64 {
+            f64::from(self.mode) * std::f64::consts::PI
+        }
+
+        fn exact(&self) -> (Phasor, Phasor) {
+            layered_response(
+                self.physics,
+                &self.layers,
+                &self.interfaces,
+                self.omega,
+                self.kt(),
+            )
+        }
+
+        /// `R′` and `T′`, the stack met from the right: the mirrored stack met
+        /// from the left, whose phases sit at the same interfaces.
+        fn exact_from_the_right(&self) -> (Phasor, Phasor) {
+            let layers = self.layers.iter().rev().copied().collect::<Vec<_>>();
+            let interfaces = self.interfaces.iter().rev().map(|x| -x).collect::<Vec<_>>();
+            layered_response(self.physics, &layers, &interfaces, self.omega, self.kt())
+        }
+
+        /// A layer's wavenumber and flux stiffness `s_x`.
+        fn layer(&self, layer: Layer) -> (Phasor, f64) {
+            let (mass, sx, sy) = layer.physical(self.physics);
+            (layer_wavenumber(mass, sx, sy, self.omega, self.kt()), sx)
+        }
+
+        fn errors(&self, reading: InterfaceReading) -> FresnelErrors {
+            let (r, t) = self.exact();
+            let (r_back, t_back) = self.exact_from_the_right();
+            let a = reading.incident;
+            let scale = a.norm();
+            let reflection = (reading.reflected - r * a - t_back * reading.returned).norm() / scale;
+            let transmission = (reading.forward - t * a - r_back * reading.returned).norm() / scale;
+            let (k_first, s_first) = self.layer(self.layers[0]);
+            let (k_last, s_last) = self.layer(*self.layers.last().unwrap());
+            let into = s_first * k_first.re * (a.norm().powi(2) - reading.reflected.norm().powi(2));
+            let out = if k_last.im == 0.0 {
+                s_last
+                    * k_last.re
+                    * (reading.forward.norm().powi(2) - reading.returned.norm().powi(2))
+            } else {
+                0.0
+            };
+            let power = (into - out).abs() / (s_first * k_first.re * scale * scale);
+            let single = self.interfaces.len() == 1;
+            let flux = |k: Phasor, s: f64, forward: Phasor, backward: Phasor| {
+                (Phasor::new(0.0, -1.0) * k * (forward - backward)).scale(s)
+            };
+            FresnelErrors {
+                reflection,
+                transmission,
+                power,
+                field_jump: single.then(|| {
+                    ((a + reading.reflected) - (reading.forward + reading.returned)).norm() / scale
+                }),
+                flux_jump: single.then(|| {
+                    (flux(k_first, s_first, a, reading.reflected)
+                        - flux(k_last, s_last, reading.forward, reading.returned))
+                    .norm()
+                        / (s_first * k_first.norm() * scale)
+                }),
+                misfit: reading.misfit,
+            }
+        }
+
+        fn run(&self, edge: f64, fraction: f64) -> InterfaceReading {
+            fresnel_run(
+                self.physics,
+                &self.layers,
+                &self.interfaces,
+                self.mode,
+                self.omega,
+                edge,
+                fraction,
+            )
+        }
+    }
+
+    /// PH-11's cases, in each skin.
+    fn interface_cases() -> Vec<FresnelCase> {
+        let pi = std::f64::consts::PI;
+        let tau = std::f64::consts::TAU;
+        // The mode at `degrees` in a layer of index `n`: `sin θ = nπ/(n ω)`.
+        let at = |degrees: f64, index: f64| pi / (index * degrees.to_radians().sin());
+        let mut cases = Vec::new();
+        for (skin, physics) in [
+            ("Mechanical", PhysicsModel::Mechanical),
+            ("TM", LEDGER_TM),
+            ("TE", LEDGER_TE),
+        ] {
+            let mechanical = physics == PhysicsModel::Mechanical;
+            // A matched layer twice as slow: `ε = μ = 2`, or `ρ = 2, k = 1/2`.
+            let matched = if mechanical {
+                Layer::of(2.0, 0.5)
+            } else {
+                Layer::of(2.0, 2.0)
+            };
+            let one = Layer::of(1.0, 1.0);
+            let mut add = |name: &str, layers: Vec<Layer>, interfaces: Vec<f64>, mode, omega| {
+                cases.push(FresnelCase {
+                    name: format!("{skin} {name}"),
+                    physics,
+                    layers,
+                    interfaces,
+                    mode,
+                    omega,
+                });
+            };
+            add(
+                "normal, 4 and 1",
+                vec![one, Layer::of(4.0, 1.0)],
+                vec![0.0],
+                0,
+                tau,
+            );
+            add(
+                "normal, 2 and 3",
+                vec![one, Layer::of(2.0, 3.0)],
+                vec![0.0],
+                0,
+                tau,
+            );
+            add(
+                "30°, 2 and 3",
+                vec![one, Layer::of(2.0, 3.0)],
+                vec![0.0],
+                1,
+                at(30.0, 1.0),
+            );
+            add(
+                "60°, 2 and 3",
+                vec![one, Layer::of(2.0, 3.0)],
+                vec![0.0],
+                1,
+                at(60.0, 1.0),
+            );
+            add("matched, normal", vec![one, matched], vec![0.0], 0, tau);
+            add(
+                "matched, 30°",
+                vec![one, matched],
+                vec![0.0],
+                1,
+                at(30.0, 1.0),
+            );
+            add(
+                "contrast 25",
+                vec![one, Layer::of(25.0, 1.0)],
+                vec![0.0],
+                0,
+                pi,
+            );
+            let dense = Layer::of(4.0, 1.0);
+            // Index 2 in every skin: `ε = 4` over `μ = 1`, or `ρ = 4` over `k = 1`.
+            let dense_index = 2.0;
+            add(
+                "total reflection, 45°",
+                vec![dense, one],
+                vec![0.0],
+                1,
+                at(45.0, dense_index),
+            );
+            add(
+                "total reflection, 60°",
+                vec![dense, one],
+                vec![0.0],
+                1,
+                at(60.0, dense_index),
+            );
+            add(
+                "slab, resonant",
+                vec![one, Layer::of(4.0, 1.0), one],
+                vec![0.0, 0.5],
+                0,
+                tau,
+            );
+            add(
+                "slab, off resonance",
+                vec![one, Layer::of(4.0, 1.0), one],
+                vec![0.0, 0.375],
+                0,
+                tau,
+            );
+            if mechanical {
+                for across in [false, true] {
+                    let crystal = Layer {
+                        axis_ratio: 2.0,
+                        across,
+                        ..Layer::of(1.0, 1.0)
+                    };
+                    let name = if across {
+                        "axis across, 30°"
+                    } else {
+                        "axis along, 30°"
+                    };
+                    add(name, vec![one, crystal], vec![0.0], 1, at(30.0, 1.0));
+                }
+            }
+        }
+        cases
+    }
+
+    /// Prints a PH-11 reading and holds it: the scattering, the power and,
+    /// across a single interface, the field's and the flux's jumps, all
+    /// under `bound`.
+    fn fresnel_holds(
+        case: &FresnelCase,
+        edge: f64,
+        fraction: f64,
+        errors: FresnelErrors,
+        bound: f64,
+    ) {
+        eprintln!(
+            "{} on {edge} at {fraction}: R {:.2e}, T {:.2e}, power {:.1e}, jumps {:.1e} {:.1e}, misfit {:.1e}",
+            case.name,
+            errors.reflection,
+            errors.transmission,
+            errors.power,
+            errors.field_jump.unwrap_or(0.0),
+            errors.flux_jump.unwrap_or(0.0),
+            errors.misfit
+        );
+        assert!(
+            errors.misfit < 2.0 * bound,
+            "{} on {edge} at {fraction}: misfit {:e}",
+            case.name,
+            errors.misfit
+        );
+        for (what, error) in [
+            ("R", errors.reflection),
+            ("T", errors.transmission),
+            ("power", errors.power),
+            ("field jump", errors.field_jump.unwrap_or(0.0)),
+            ("flux jump", errors.flux_jump.unwrap_or(0.0)),
+        ] {
+            assert!(
+                error < bound,
+                "{} on {edge} at {fraction}: {what} {error:e} off",
+                case.name
+            );
+        }
+    }
+
+    /// Runs `cases` on `levels` of edge and step, side by side, and returns
+    /// each case's errors at each level.
+    fn fresnel_levels(cases: &[FresnelCase], levels: &[(f64, f64)]) -> Vec<Vec<FresnelErrors>> {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let jobs = cases.len() * levels.len();
+        let results = std::sync::Mutex::new(vec![None; jobs]);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let job = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if job >= jobs {
+                            break;
+                        }
+                        let (case, (edge, fraction)) =
+                            (&cases[job / levels.len()], levels[job % levels.len()]);
+                        let errors = case.errors(case.run(edge, fraction));
+                        results.lock().unwrap()[job] = Some(errors);
+                    }
+                });
+            }
+        });
+        let results = results.into_inner().unwrap();
+        results
+            .chunks(levels.len())
+            .map(|chunk| chunk.iter().map(|errors| errors.unwrap()).collect())
+            .collect()
+    }
+
+    /// PH-11's bounds. On edge 0.1 the gate's cases read 4.2e-3 at worst, a
+    /// field jump at 30° in TM, and every case 7.5e-3, contrast 25 in TE on
+    /// four elements to its wavelength; on 0.07 every case 1.9e-3; on 0.05
+    /// the subset 3.8e-4.
+    const FRESNEL_GATE: f64 = 8.0e-3;
+    const FRESNEL_COARSE: f64 = 1.5e-2;
+    const FRESNEL_MIDDLE: f64 = 3.0e-3;
+    const FRESNEL_FINE: f64 = 1.0e-3;
+
+    /// PH-11 in the gate: normal incidence on `ε = 2, μ = 3` and 30° in TM
+    /// and TE, total internal reflection at 45°, an anisotropic layer with
+    /// its axis along and across the channel, and a resonant slab, on edge
+    /// 0.1 at the production step.
+    #[test]
+    fn planar_interfaces_scatter_as_fresnel_says() {
+        let names = [
+            "TM normal, 2 and 3",
+            "TE normal, 2 and 3",
+            "TM 30°, 2 and 3",
+            "TE 30°, 2 and 3",
+            "TM total reflection, 45°",
+            "Mechanical axis along, 30°",
+            "Mechanical axis across, 30°",
+            "TM slab, resonant",
+        ];
+        let cases = interface_cases()
+            .into_iter()
+            .filter(|case| names.contains(&case.name.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(cases.len(), names.len());
+        let levels = fresnel_levels(&cases, &[(0.1, 1.0)]);
+        for (case, errors) in cases.iter().zip(levels) {
+            fresnel_holds(case, 0.1, 1.0, errors[0], FRESNEL_GATE);
+        }
+    }
+
+    /// PH-11 (`docs/spikes/funfern-testing-campaign-plan.md`): every case on
+    /// edge 0.1; on 0.07 every case but the six at 60°, which sit near their
+    /// mode's cutoff, take the longest lock-in and read alike on every mesh;
+    /// a case of each kind on 0.05 as well, each error there under
+    /// `FRESNEL_FINE` and, where it stands above 1e-4, the measurement's own
+    /// floor, under half its reading on 0.07; and one at half the step,
+    /// where the step's own error does not show.
+    #[test]
+    #[ignore = "PH-11, about half an hour; run in the nightly"]
+    fn planar_interfaces_converge_to_fresnel() {
+        let cases = interface_cases();
+        let coarse = fresnel_levels(&cases, &[(0.1, 1.0)]);
+        for (case, errors) in cases.iter().zip(&coarse) {
+            fresnel_holds(case, 0.1, 1.0, errors[0], FRESNEL_COARSE);
+        }
+        let cases = cases
+            .into_iter()
+            .filter(|case| !case.name.contains("60°"))
+            .collect::<Vec<_>>();
+        let levels = fresnel_levels(&cases, &[(0.07, 1.0)]);
+        for (case, errors) in cases.iter().zip(&levels) {
+            fresnel_holds(case, 0.07, 1.0, errors[0], FRESNEL_MIDDLE);
+        }
+        let fine = [
+            "TM normal, 2 and 3",
+            "TE 30°, 2 and 3",
+            "TM contrast 25",
+            "TE contrast 25",
+            "TM matched, 30°",
+            "TM slab, off resonance",
+            "TM total reflection, 45°",
+            "Mechanical axis across, 30°",
+        ];
+        let subset = cases
+            .iter()
+            .zip(&levels)
+            .filter(|(case, _)| fine.contains(&case.name.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(subset.len(), fine.len());
+        let finer = fresnel_levels(
+            &subset
+                .iter()
+                .map(|(case, _)| (*case).clone())
+                .collect::<Vec<_>>(),
+            &[(0.05, 1.0)],
+        );
+        for ((case, coarser), errors) in subset.iter().zip(finer) {
+            let errors = errors[0];
+            fresnel_holds(case, 0.05, 1.0, errors, FRESNEL_FINE);
+            for (what, at, before) in [
+                ("R", errors.reflection, coarser[0].reflection),
+                ("T", errors.transmission, coarser[0].transmission),
+            ] {
+                assert!(
+                    at < 1.0e-4 || at < 0.5 * before,
+                    "{}: {what} {before:.2e} on 0.07, {at:.2e} on 0.05",
+                    case.name
+                );
+            }
+        }
+        let halved = cases
+            .iter()
+            .find(|case| case.name == "TM 30°, 2 and 3")
+            .unwrap()
+            .clone();
+        let errors = fresnel_levels(std::slice::from_ref(&halved), &[(0.07, 0.5)])[0][0];
+        fresnel_holds(&halved, 0.07, 0.5, errors, FRESNEL_MIDDLE);
+    }
 }

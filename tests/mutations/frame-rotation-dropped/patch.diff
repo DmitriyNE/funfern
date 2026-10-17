@@ -1,0 +1,11 @@
+--- a/crates/funfern-core/src/material.rs
++++ b/crates/funfern-core/src/material.rs
+@@ -107,7 +107,7 @@
+ 
+     /// Rotates a tensor expressed in this frame's local axes into world axes.
+     pub fn tensor_from_local(self, x: f64, y: f64) -> SymmetricTensor2 {
+-        SymmetricTensor2::from_principal(x, y, self.angle_radians)
++        SymmetricTensor2::from_principal(x, y, 0.0)
+     }
+ }
+ 

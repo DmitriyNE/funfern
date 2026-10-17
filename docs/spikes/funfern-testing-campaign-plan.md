@@ -430,7 +430,8 @@ with their reports in `docs/spikes/`.
   (PH-06 and PH-07 moved to stage A3), PH-08 rectangular radiation as a one-off experiment
   rather than a regression test, since no nonlocal operator is planned
   (done on 2026-10-17, `funfern-rectangular-radiation.md`),
-  PH-09 the walls' transient response (section 6b), PH-11 Fresnel,
+  PH-09 the walls' transient response (section 6b), PH-11 Fresnel (done
+  on 2026-10-17, section 6c),
   PH-12 cylinder scattering, PH-13 thin gaps, PH-14 and PH-15 temporal and
   modulated materials, PH-16 nonlinear laws, PH-18
   probes and observables, PH-19 manufactured solutions.
@@ -516,6 +517,20 @@ lowers, and is held there. In the gate, separated pulses in the channel and
 two orders on the circle; the nightly job `transient-walls` runs the rest.
 The mutation `wall-memory-leaks`, the second-order wall's zero pole
 leaking, is caught by both gate tests. No defect found.
+
+## 6c. PH-11: planar interfaces
+
+**Done on 2026-10-17** (`docs/engineering-log.md`). A channel's mode meets
+planar interfaces at an exact angle in every layer; the field either side is
+fitted to a forward and a backward wave, and the four amplitudes held to the
+stack's exact scattering matrix, written from the physical fields in each
+skin, so that what the ends return is one more incident wave. Normal and
+oblique incidence, a matched layer, contrast 25, total internal reflection,
+a slab and an anisotropic layer, in Mechanical, TM and TE; errors fall about
+fourth order to 1e-5 to 4e-4 on edge 0.05. The gate holds eight cases on
+edge 0.1; the nightly job `fresnel-interfaces` the rest on three meshes. The
+mutation `frame-rotation-dropped`. No defect found; the sizing taught the
+measurement its spacing, its timing beside a cutoff and its frames.
 
 ## 7. Infrastructure
 

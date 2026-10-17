@@ -24856,3 +24856,54 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-17 — PH-11: planar interfaces against Fresnel
+
+- **What.** A channel one unit high from `x = −8` to 8, reflecting floor and
+  ceiling, sponges of equal electric and magnetic loss at both ends, layers
+  meeting at vertical interfaces. A channel mode meets them at an exact
+  angle, `k_t = nπ` in every layer, and converts to no other. Held to steady
+  state, the field at eight heights every 0.11 on three units either side is
+  read by a lock-in, projected on the mode and fitted, on each outer layer,
+  to a forward and a backward wave of its exact wavenumber. The four
+  amplitudes are held to the stack's exact scattering matrix, written from
+  the physical fields in each skin through a transfer matrix in the test:
+  `B = R A + T′ D`, `C = T A + R′ D`, with the power balance and, across one
+  interface, the jumps of the field and its flux.
+- **Cases**, in Mechanical, TM and TE: normal incidence (`ε = 4, μ = 1` and
+  `ε = 2, μ = 3`), 30° and 60°, a matched layer, contrast 25, total internal
+  reflection at 45° and 60° from index 2, a slab at and off resonance; in
+  Mechanical a layer of axis ratio 2 along and across the channel. A frame
+  turned otherwise couples the channel's walls to the mode, which is then no
+  longer one.
+- **What the sizing taught.**
+  - Points every 0.25 sample `e^{∓ikx}` alike when `k·0.25 = π`: medium 2 at
+    `k = 4π` read `T` at 10¹¹. Every 0.11, no wavenumber here does.
+  - A switch-on rings at every layer's cutoff, where the mode stands still,
+    and an eight-period lock-in did not part it from the drive: 60° read
+    1e-1. The drive's switch-on and the lock-in now follow its distance `Δω`
+    to the nearest cutoff. With the lock-in `30/Δω` long, total reflection at
+    60°, 7% above cutoff, read 1.7e-3 on every mesh and step; at `90/Δω`,
+    2e-5.
+  - A loss rate is read in its region's frame: the quarter-turned layer's
+    sponge, `abs(x)`, read the channel's height, never reached 4, and its far
+    end returned 7%. That layer's sponge is written in `y`.
+  - What the far ends return, 1e-5 to 2e-3 of the mode, set the floor of `R`
+    and `T` read alone. Held to the scattering matrix with `D` measured, it
+    is one more incident wave.
+- **Results.** In the gate, `planar_interfaces_scatter_as_fresnel_says`
+  (106 s): normal incidence and 30° in TM and TE, total reflection at 45°,
+  both anisotropic layers and the resonant slab on edge 0.1, every reading
+  under 8e-3 (4.2e-3 at worst). Nightly, `planar_interfaces_converge_to_fresnel`
+  (job `fresnel-interfaces`, 42 minutes): every case on 0.1 under 1.5e-2
+  (7.5e-3, contrast 25 in TE on four elements to its wavelength); all but the
+  six at 60° on 0.07 under 3e-3 (1.9e-3); a case of each kind on 0.05 under
+  1e-3 (3.8e-4), falling 2.3 to 7 times from 0.07 - about fourth order -
+  wherever above the measurement's floor of 1e-4; half the step moves
+  nothing.
+- **Mutation.** `frame-rotation-dropped`: `tensor_from_local` ignores the
+  frame's angle, and the layer across the channel reads as one along it,
+  its fit missing by 1.06.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

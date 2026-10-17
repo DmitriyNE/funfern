@@ -402,6 +402,53 @@ jobs:
           cargo test --release -p funfern-app --lib --locked --
           --ignored --nocapture transient_
 
+  # Nightly: PH-11, planar interfaces against Fresnel in every skin, on
+  # three meshes; forty-two minutes on an M1 Max (topology_examples.rs,
+  # planar_interfaces_converge_to_fresnel).
+  fresnel-interfaces:
+    name: Fresnel interfaces, PH-11
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal \
+            --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Fresnel interfaces, PH-11
+        run: >-
+          cargo test --release -p funfern-app --lib --locked --
+          --ignored --nocapture planar_interfaces_converge_to_fresnel
+
   # Nightly: the mutations, one deliberate defect each, applied and reverted
   # by scripts/mutations.sh; each must be caught by the test its manifest
   # names, at the check it targets. The device ones run their fixture on
