@@ -433,9 +433,10 @@ with their reports in `docs/spikes/`.
   PH-09 the walls' transient response (section 6b), PH-11 Fresnel (done
   on 2026-10-17, section 6c),
   PH-12 cylinder scattering (done on 2026-10-17, section 6d), PH-13 thin
-  gaps (done on 2026-10-17, section 6e), PH-14 and PH-15 temporal and
-  modulated materials, PH-16 nonlinear laws, PH-18 probes and observables,
-  with PH-12's far field, PH-19 manufactured solutions.
+  gaps (done on 2026-10-17, section 6e), PH-14 temporal interfaces (done on
+  2026-10-18, section 6f), PH-15 modulated materials, PH-16 nonlinear laws,
+  PH-18 probes and observables, with PH-12's far field, PH-19 manufactured
+  solutions.
 - **C, invariants and stress:** IV-01 to IV-13, AMR-01 to AMR-04, RT-01 to
   RT-08, the numerical edge cases, long runs and resource lifecycle. The
   metamorphic tests and the real-device fuzzing need none of the reference
@@ -571,6 +572,25 @@ stand. The gate holds three cases and the handoff; the nightly job
 mutation `gap-history-dropped-on-handoff`. A dissipative gap is not
 implemented (`architecture.md`); the impedance faces it would stand for
 are PH-04's, PH-06's and PH-09's. No defect found.
+
+## 6f. PH-14: temporal interfaces
+
+**Done on 2026-10-18** (`docs/engineering-log.md`). A uniform medium's mode
+evolves alone by `d/dt(m β̇) = −k² s β`, so a box started in one mode is held
+through every change to that ODE, integrated in the test from the laws'
+definitions; an instant change keeps `B` and `D`, the ratio of the
+time-reflected to the transmitted part meets the temporal Fresnel one, and a
+slow ramp keeps `E/ω`. Switches on either slot, the impedance kept, both
+slots at once, ramps from a tenth of a period to four, slabs and a train of
+them, and a gate's slab, in each skin, each at two phases a quarter period
+apart, which fix the time-reflection ratio. The field, the stored energy,
+the modulation's work and the frequency after the change agree to the
+step's second-order offset, 1e-3 at the production step and four times
+less at each halving. The gate holds every case; the nightly job
+`temporal-interfaces` half and a quarter of the step and a finer mesh. The
+mutation `switch-ramp-work-dropped`. No defect found; the oracle first read
+Mechanical's stiffness laws as acting on `k`, which they divide, acting on
+`s₀ = 1/k₀` (`architecture.md`). Periodic modulation is PH-15's.
 
 ## 7. Infrastructure
 

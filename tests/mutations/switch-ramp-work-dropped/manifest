@@ -1,0 +1,4 @@
+about: a coefficient's rate leaves out its Switch's ramp, so the work a ramped Switch does goes unbooked though the field follows the ramp
+test: cargo test --release -p funfern-app --lib -- temporal_interfaces_meet_the_modal_law
+expect: over a tenth of period.* modulation .* off
+needs: cpu

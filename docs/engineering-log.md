@@ -25035,3 +25035,60 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-18 — PH-14: temporal interfaces against the modal law
+
+- **What.** In a uniform medium every mode evolves alone,
+  `d/dt(m β̇) = −k² s β`, with `m` and `s` the nodal mass and stiffness
+  through the physical fields (TM `ε` over `1/μ`, TE `μ` over `1/ε`,
+  Mechanical `ρ` over `1/s₀`), each times the law's factor: a Switch's
+  smootherstep blend or a gate's Hann edges. The test integrates that ODE by
+  RK4 in `(β, m β̇)`, split at every event, so an instant change keeps `B`
+  and `D` by construction. The unit box, reflecting, starts in its mode
+  `cos π(x + ½) cos π(y + ½)` on the driven path, the Switch thrown between
+  steps. Read: the field projected on the mode against the ODE over the run;
+  the stored energy and the modulation's energy (the work lane plus the
+  stored energy's jump at an instant throw) against the ODE's change; the
+  frequency after the change, the lock-in's peak; and, from each pair of
+  runs a quarter period apart, the map `c₂ = A c₁ + B c̄₁` of the mode's
+  amplitude and its time-reflection ratio `|B/A|`.
+- **Oracle.** `the_modal_ode_meets_the_temporal_closed_forms`: an instant
+  change gives `|B/A| = (1 − r)/(1 + r)`, `r = m₁ω₁/(m₂ω₂)` - 1/3 for the
+  mass times 4, 0 with the impedance kept, where `E/ω` holds exactly; a
+  forty-period ramp keeps `E/ω` to 1e-3; halving the ODE's step moves it
+  under 1e-10.
+- **Cases**, in each skin and at both phases: the mass slot times 4 and a
+  quarter, the stiffness slot times 4, both doubled, mass doubled with
+  stiffness tripled; the mass slot times 4 over a tenth of a period, one and
+  four; slabs a quarter and half the switched period long and three
+  quarter-period slabs; a gate's two-period slab at 1.75.
+- **What the sizing taught.**
+  - The run records each step before a throw at its end; the ODE read just
+    after one put a whole jump, 0.75, into the trace at that sample. It is
+    read just before.
+  - Mechanical's stiffness laws act on the reciprocal stiffness `s₀ = 1/k₀`
+    and so divide `k` (`architecture.md`, the material-laws plan): a switch
+    of 4 on that row quarters `k`. The oracle had first multiplied `k`, and
+    read the solver's halved frequency as 2.0 off.
+  - Every reading but the frequency is the step's and second order: the
+    worst 5.9e-4, 1.2e-3, 9.0e-4 and 9.6e-5 (trace, energy, modulation,
+    `|B/A|`) at the step, 1.6e-4, 3.0e-4, 2.3e-4 and 2.4e-5 at its half, and
+    6.2e-5, 7.5e-5, 5.7e-5 and 6.0e-6 at its quarter - the fourth-order
+    step's bounded kicked-drifted offset, which a change of medium makes
+    part of the trajectory. Edge 0.05 at its own step, half 0.1's, reads as
+    0.1 at half the step. Under it the trace stands on the mesh's 5.2e-5 on
+    0.1 (3.3e-6 on 0.05), a smooth gate's energies near 1e-5, and `|B/A|`
+    near the lock-in's 1e-6; the convergence checks start above those.
+- **Results.** In the gate, `temporal_interfaces_meet_the_modal_law` (31 s):
+  every case at the production step on edge 0.1, the trace under 1.2e-3,
+  the energies under 2.5e-3, the frequency under 3e-5 (1.1e-5), `|B/A|`
+  within 2e-4. Nightly, `temporal_interfaces_converge_to_the_modal_law` (job
+  `temporal-interfaces`, 8 minutes): half the step under a quarter of those
+  and falling under 0.35 of the step's readings above the floors, a quarter
+  of the step held as at half, edge 0.05 at its own step.
+- **Mutation.** `switch-ramp-work-dropped`: a coefficient's rate leaves out
+  its Switch's ramp, and a tenth-period ramp's work goes unbooked, 0.71 of
+  the energy, the field unchanged.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

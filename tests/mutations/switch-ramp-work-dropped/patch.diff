@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/material_law.rs b/crates/funfern-core/src/material_law.rs
+index e14f121..a52a492 100644
+--- a/crates/funfern-core/src/material_law.rs
++++ b/crates/funfern-core/src/material_law.rs
+@@ -1911,7 +1911,7 @@ impl CoefficientLawValues {
+             .alternate
+             .map_or(0.0, |alternate| blend_rate * (alternate - 1.0));
+         let product = finite_positive(drive * switch)?;
+-        let product_rate = drive_rate * switch + drive * switch_rate;
++        let product_rate = drive_rate * switch;
+         if !product_rate.is_finite() {
+             return Err(MaterialError::InvalidValue);
+         }

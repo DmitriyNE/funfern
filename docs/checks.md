@@ -617,6 +617,44 @@ meshes, its memory carried to 4e-4. The mutation
 `gap-history-dropped-on-handoff`, a handoff carrying no gap history,
 restarts the springs unstretched, the memory 0.69 of the jump off, its
 value at that instant.
+PH-14 holds temporal interfaces to the modal law. In a uniform medium every
+mode evolves alone, `d/dt(m β̇) = −k² s β`, `m` and `s` the nodal mass and
+stiffness through the physical fields - TM's `ε` over `1/μ`, TE's `μ` over
+`1/ε`, Mechanical's `ρ` over `1/s₀`, the reciprocal stiffness its laws act
+on - each times the law's factor, a Switch's smootherstep blend or a gate's
+Hann edges. An instant change keeps `β` and `m β̇`, `B` and `D`; the test
+integrates the ODE by RK4 split at every event, halving its own step moving
+nothing, and it meets the temporal Fresnel ratio `(1 − r)/(1 + r)`,
+`r = m₁ω₁/(m₂ω₂)`, and keeps `E/ω` where the impedance is kept and over a
+forty-period ramp (`the_modal_ode_meets_the_temporal_closed_forms`). The unit
+box, reflecting, starts in its mode `cos π(x + ½) cos π(y + ½)` and changes
+after two periods, or a quarter period later when the field's energy has
+moved to the other lane. The field projected on the mode is held to the ODE
+over the run, and so are the stored energy, the modulation's energy - the
+work lane, with the stored energy's jump at an instant throw - and the
+frequency after; each pair a quarter period apart fixes the map
+`c₂ = A c₁ + B c̄₁` of the mode's amplitude, and its time-reflection ratio
+`|B/A|` is held to the ODE's. In each skin: the mass slot times 4 and a
+quarter and the stiffness slot times 4 at once, both slots doubled (the
+impedance kept, `|B/A| = 0`), the mass slot doubled with the stiffness slot
+tripled, the mass slot times 4 over a tenth of a period, one and four
+(`|B/A|` 0.33, 0.066 and 0.001, towards the adiabatic limit), slabs of it a
+quarter and half the switched period long (0.6 and 0) and three
+quarter-period slabs, and a gate's two-period slab. In the gate,
+`temporal_interfaces_meet_the_modal_law` (31 s), every case at the
+production step on edge 0.1: the trace under 1.2e-3 (5.9e-4), the energies
+under 2.5e-3 (1.2e-3), the frequency under 3e-5 (1.1e-5), `|B/A|` within
+2e-4 (9.6e-5). Every reading but the frequency, the lock-in's own, is the
+step's and second order: half the step reads 1.6e-4, 3.0e-4 and 2.4e-5, a
+quarter 6.2e-5, 7.5e-5 and 6.0e-6, the trace then on the mesh's 5.2e-5 - the
+fourth-order step's bounded offset between its kicked and drifted variables
+(`funfern-fourth-order-step.md`). Nightly, the job `temporal-interfaces`
+(8 minutes on the M1 Max): half the step under a quarter of the bounds and
+falling under 0.35 of the step's readings wherever those stand above the
+step's floor, a quarter of the step held as at half, and edge 0.05 at its
+own step. The mutation `switch-ramp-work-dropped`, a coefficient's rate
+leaving out its Switch's ramp, leaves a ramp's work unbooked, 0.71 of the
+energy, while the field follows the ramp.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

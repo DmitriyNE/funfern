@@ -18092,4 +18092,851 @@ mod tests {
             half.field
         );
     }
+
+    // -----------------------------------------------------------------------
+    // PH-14: temporal material interfaces against the modal ODE.
+    // -----------------------------------------------------------------------
+
+    /// How a PH-14 case changes its medium after two periods: Switches
+    /// ramped over `ramp` seconds by the law's smootherstep, thrown
+    /// `toggles` times `hold` seconds apart, on and off in turn; or one pulse
+    /// of a gate `duration` long with Hann edges `edge` long, over which a
+    /// zero-frequency pump of `depth` multiplies the mass slot by
+    /// `1 + depth`.
+    #[derive(Clone, Copy, Debug)]
+    enum TemporalChange {
+        Switches {
+            ramp: f64,
+            toggles: u32,
+            hold: f64,
+        },
+        Gate {
+            depth: f64,
+            duration: f64,
+            edge: f64,
+        },
+    }
+
+    /// One PH-14 case: the skin, what a Switch multiplies the mass slot
+    /// (`ρ` or `ε`) and the stiffness slot (`μ`, or Mechanical's reciprocal
+    /// stiffness `s₀ = 1/k`, which its laws act on) by, the change, and
+    /// whether it comes a quarter period late, when the field's energy has
+    /// moved from the primary lane to the other.
+    #[derive(Clone, Debug)]
+    struct TemporalCase {
+        name: String,
+        physics: PhysicsModel,
+        mass: f64,
+        stiffness: f64,
+        change: TemporalChange,
+        quarter: bool,
+    }
+
+    /// PH-14's mode, `cos π(x + ½) cos π(y + ½)` in the unit box, and its
+    /// wavenumber squared.
+    const TEMPORAL_K2: f64 = 2.0 * std::f64::consts::PI * std::f64::consts::PI;
+
+    fn temporal_mode(point: Point2) -> f64 {
+        let pi = std::f64::consts::PI;
+        (pi * (point.x + 0.5)).cos() * (pi * (point.y + 0.5)).cos()
+    }
+
+    /// The smootherstep a Switch's blend follows, `z³(10 − 15z + 6z²)`.
+    fn smootherstep_of(z: f64) -> f64 {
+        let z = z.clamp(0.0, 1.0);
+        z * z * z * (z * (z * 6.0 - 15.0) + 10.0)
+    }
+
+    impl TemporalCase {
+        /// The period before the change.
+        fn first_period(&self) -> f64 {
+            std::f64::consts::TAU / TEMPORAL_K2.sqrt()
+        }
+
+        /// When the change begins: two periods in, or a quarter later.
+        fn start(&self, dt: f64) -> f64 {
+            let periods = if self.quarter { 2.25 } else { 2.0 };
+            (periods * self.first_period() / dt).round() * dt
+        }
+
+        /// The Switches' throws: each one's time and whether it switches on.
+        fn throws(&self, dt: f64) -> Vec<(f64, bool)> {
+            match self.change {
+                TemporalChange::Switches { toggles, hold, .. } => (0..toggles)
+                    .map(|index| {
+                        let time = self.start(dt) + (f64::from(index) * hold / dt).round() * dt;
+                        (time, index % 2 == 0)
+                    })
+                    .collect(),
+                TemporalChange::Gate { .. } => Vec::new(),
+            }
+        }
+
+        /// When the last change ends.
+        fn settled(&self, dt: f64) -> f64 {
+            match self.change {
+                TemporalChange::Switches { ramp, .. } => {
+                    self.throws(dt).last().map_or(0.0, |(time, _)| *time) + ramp
+                }
+                TemporalChange::Gate { duration, .. } => self.start(dt) + duration,
+            }
+        }
+
+        /// The times at which the law's coefficients stop being smooth.
+        fn events(&self, dt: f64) -> Vec<f64> {
+            match self.change {
+                TemporalChange::Switches { ramp, .. } => self
+                    .throws(dt)
+                    .iter()
+                    .flat_map(|(time, _)| [*time, *time + ramp])
+                    .collect(),
+                TemporalChange::Gate { duration, edge, .. } => {
+                    let start = self.start(dt);
+                    vec![
+                        start,
+                        start + edge,
+                        start + duration - edge,
+                        start + duration,
+                    ]
+                }
+            }
+        }
+
+        /// The factor each slot carries at `t` - the mass slot's, then the
+        /// stiffness slot's - from the law's definitions: a Switch's blend
+        /// runs by smootherstep from where it stands to its target, and the
+        /// coefficient is `1 + blend (alternate − 1)` times it; a gate's
+        /// envelope rises and falls as a Hann half over its edges.
+        fn slot_factors(&self, t: f64, dt: f64) -> (f64, f64) {
+            match self.change {
+                TemporalChange::Switches { ramp, .. } => {
+                    let mut blend = 0.0;
+                    for (time, on) in self.throws(dt) {
+                        if t < time {
+                            break;
+                        }
+                        let target = if on { 1.0 } else { 0.0 };
+                        let from = blend;
+                        blend = if ramp == 0.0 {
+                            target
+                        } else {
+                            from + (target - from) * smootherstep_of((t - time) / ramp)
+                        };
+                        // A ramp ends before the next throw.
+                        if ramp > 0.0 && t >= time + ramp {
+                            blend = target;
+                        }
+                    }
+                    (
+                        1.0 + blend * (self.mass - 1.0),
+                        1.0 + blend * (self.stiffness - 1.0),
+                    )
+                }
+                TemporalChange::Gate {
+                    depth,
+                    duration,
+                    edge,
+                } => {
+                    let since = t - self.start(dt);
+                    let envelope = if since <= 0.0 || since >= duration {
+                        0.0
+                    } else {
+                        let inside = since.min(duration - since);
+                        if inside >= edge {
+                            1.0
+                        } else {
+                            0.5 * (1.0 - (std::f64::consts::PI * inside / edge).cos())
+                        }
+                    };
+                    (1.0 + envelope * depth, 1.0)
+                }
+            }
+        }
+
+        /// The nodal field's mass and stiffness at `t`, from the physics:
+        /// Mechanical's `ρ` over `k = 1/s₀`, TM's `ε` over `1/μ`, TE's `μ`
+        /// over `1/ε`, each slot times its factor - a law on Mechanical's
+        /// stiffness row multiplies `s₀` and so divides `k`
+        /// (`architecture.md`).
+        fn nodal(&self, t: f64, dt: f64) -> (f64, f64) {
+            let (mass, stiffness) = self.slot_factors(t, dt);
+            if self.physics == LEDGER_TE {
+                (stiffness, 1.0 / mass)
+            } else {
+                (mass, 1.0 / stiffness)
+            }
+        }
+
+        /// The mode's frequency once the change has settled.
+        fn final_frequency(&self, dt: f64) -> f64 {
+            let (mass, stiffness) = self.nodal(self.settled(dt) + 1.0, dt);
+            (TEMPORAL_K2 * stiffness / mass).sqrt()
+        }
+
+        /// The mode's own law, `d/dt (m β̇) = −k² s β`, from `β = 0` and
+        /// `β̇ = 1`, by RK4 in `(β, p = m β̇)` with `substeps` steps to each of
+        /// the run's steps of `dt`, split at every event: `β` and `p` - `B`
+        /// and `D` in TM - carry through an instant change untouched. Returns
+        /// `β̇` and the energy `½ p²/m + ½ k² s β²` after each of `steps`
+        /// steps, and at the start.
+        fn exact(&self, dt: f64, steps: usize, substeps: usize) -> (Vec<f64>, Vec<f64>) {
+            let events = self.events(dt);
+            let rate = |t: f64, (beta, p): (f64, f64)| {
+                let (mass, stiffness) = self.nodal(t, dt);
+                (p / mass, -TEMPORAL_K2 * stiffness * beta)
+            };
+            let (mass, _) = self.nodal(0.0, dt);
+            let mut state = (0.0, mass);
+            let record = |t: f64, (beta, p): (f64, f64)| {
+                let (mass, stiffness) = self.nodal(t, dt);
+                (
+                    p / mass,
+                    0.5 * p * p / mass + 0.5 * TEMPORAL_K2 * stiffness * beta * beta,
+                )
+            };
+            // The run records each step before a throw at its end, so the
+            // ODE is read just before; it integrates just after.
+            let after = |t: f64| t + 1.0e-12 * dt;
+            let before = |t: f64| t - 1.0e-12 * dt;
+            let (mut fields, mut energies) = (Vec::with_capacity(steps + 1), Vec::new());
+            let (field, energy) = record(after(0.0), state);
+            fields.push(field);
+            energies.push(energy);
+            for step in 0..steps {
+                let (from, to) = (step as f64 * dt, (step + 1) as f64 * dt);
+                let mut cuts = vec![from];
+                // An event within rounding of a step is on it.
+                cuts.extend(
+                    events
+                        .iter()
+                        .copied()
+                        .filter(|t| *t > from + 1.0e-9 * dt && *t < to - 1.0e-9 * dt),
+                );
+                cuts.push(to);
+                for pair in cuts.windows(2) {
+                    let h = (pair[1] - pair[0]) / substeps as f64;
+                    for index in 0..substeps {
+                        // Evaluated inside the piece, never on its ends, where
+                        // an instant change would be ambiguous.
+                        let t = pair[0] + index as f64 * h;
+                        let inner = |offset: f64| {
+                            (t + offset).clamp(after(pair[0]), pair[1] - 1.0e-12 * dt)
+                        };
+                        let k1 = rate(inner(0.0), state);
+                        let k2 = rate(
+                            inner(0.5 * h),
+                            (state.0 + 0.5 * h * k1.0, state.1 + 0.5 * h * k1.1),
+                        );
+                        let k3 = rate(
+                            inner(0.5 * h),
+                            (state.0 + 0.5 * h * k2.0, state.1 + 0.5 * h * k2.1),
+                        );
+                        let k4 = rate(inner(h), (state.0 + h * k3.0, state.1 + h * k3.1));
+                        state = (
+                            state.0 + h / 6.0 * (k1.0 + 2.0 * k2.0 + 2.0 * k3.0 + k4.0),
+                            state.1 + h / 6.0 * (k1.1 + 2.0 * k2.1 + 2.0 * k3.1 + k4.1),
+                        );
+                    }
+                }
+                let (field, energy) = record(before(to), state);
+                fields.push(field);
+                energies.push(energy);
+            }
+            (fields, energies)
+        }
+    }
+
+    /// What one PH-14 run records after each step and at the start: the
+    /// field projected on the mode by the base masses, the stored energy,
+    /// the modulation's energy so far - the work lane's sum, with the jump
+    /// of the stored energy at every instant throw - and the step.
+    #[derive(Clone, Debug)]
+    struct TemporalRun {
+        fields: Vec<f64>,
+        energies: Vec<f64>,
+        modulation: Vec<f64>,
+        dt: f64,
+    }
+
+    /// PH-14's scene for `case`: the unit box, reflecting all round, a unit
+    /// medium carrying the case's law.
+    fn temporal_document(case: &TemporalCase) -> TopologyDocument {
+        let mut builder = Builder::new();
+        builder.scene.physics = case.physics;
+        builder.scene.geometry.domain = DomainRect {
+            min_x: -0.5,
+            max_x: 0.5,
+            min_y: -0.5,
+            max_y: 0.5,
+        };
+        builder.scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        let material = &mut builder.scene.materials[0];
+        material.mass_density = ScalarField::constant(1.0);
+        material.stiffness = ScalarField::constant(1.0);
+        match case.change {
+            TemporalChange::Switches { ramp, .. } => {
+                material.switch_ramp = ramp;
+                if case.mass != 1.0 {
+                    material.mass_law.alternate = Some(ScalarField::constant(case.mass));
+                }
+                if case.stiffness != 1.0 {
+                    material.stiffness_law.alternate = Some(ScalarField::constant(case.stiffness));
+                }
+            }
+            TemporalChange::Gate {
+                depth,
+                duration,
+                edge,
+            } => {
+                material.mass_law.drive = TimeDrive::ParametricPump {
+                    depth: ScalarField::constant(depth),
+                    frequency_hz: ScalarField::constant(0.0),
+                    phase_radians: ScalarField::constant(0.0),
+                };
+                // The gate's start is fixed when the run's step is known.
+                material.mass_law.gate = Some(PulseTrain {
+                    envelope: PulseEnvelope::FlatTop { duration, edge },
+                    start: 0.0,
+                    repeat: 0.0,
+                });
+            }
+        }
+        let mut document = builder.document();
+        document.model.source.enabled = false;
+        document
+    }
+
+    /// One PH-14 run on `edge` at `fraction` of the production step, which
+    /// is shortened to divide the first period into a whole number of
+    /// quarters, so that the change starts on a step: started in the mode
+    /// with all its energy in the primary lane, the Switch thrown at each of
+    /// the case's throws between steps, and run six periods of the final
+    /// medium past the change.
+    fn temporal_run(case: &TemporalCase, edge: f64, fraction: f64) -> TemporalRun {
+        let period = case.first_period();
+        let quarters = (period
+            / (4.0 * fraction * {
+                let document = temporal_document(case);
+                prepare(&document, edge).recommended_time_step()
+            }))
+        .ceil();
+        let dt = period / (4.0 * quarters);
+        let mut document = temporal_document(case);
+        if let TemporalChange::Gate { .. } = case.change {
+            let material = &mut document.model.accepted.materials[0];
+            material.mass_law.gate.as_mut().unwrap().start = case.start(dt);
+        }
+        let prepared = prepare(&document, edge);
+        let operator = prepared
+            .canonical_temporal_operator
+            .as_ref()
+            .expect("a law-carrying medium runs on the driven path");
+        let base = operator.base();
+        let points = base.node_points();
+        let masses = base.primary_mass();
+        let mode = points
+            .iter()
+            .map(|point| temporal_mode(*point))
+            .collect::<Vec<_>>();
+        let norm = mode
+            .iter()
+            .zip(masses)
+            .map(|(phi, mass)| mass * phi * phi)
+            .sum::<f64>();
+        let primary = mode
+            .iter()
+            .zip(masses)
+            .map(|(phi, mass)| mass * phi)
+            .collect();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let mut state =
+            CanonicalTemporalWaveState::new(operator, dt, primary, complementary).unwrap();
+        let material = document.model.accepted.materials[0].id;
+        let ramp = match case.change {
+            TemporalChange::Switches { ramp, .. } => ramp,
+            TemporalChange::Gate { .. } => 0.0,
+        };
+        let final_period = std::f64::consts::TAU / case.final_frequency(dt);
+        let steps = ((case.settled(dt) + 6.0 * final_period) / dt).ceil() as usize;
+        let throws = case.throws(dt);
+        let project = |state: &CanonicalTemporalWaveState| {
+            let field = operator
+                .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                .unwrap();
+            field
+                .iter()
+                .zip(&mode)
+                .zip(masses)
+                .map(|((u, phi), mass)| mass * u * phi)
+                .sum::<f64>()
+                / norm
+        };
+        let mut run = TemporalRun {
+            fields: vec![project(&state)],
+            energies: vec![state.energy(operator).unwrap()],
+            modulation: vec![0.0],
+            dt,
+        };
+        let mut modulation = 0.0;
+        for step in 0..steps {
+            let now = step as f64 * dt;
+            for (time, on) in &throws {
+                if (time - now).abs() < 0.5 * dt {
+                    let before = state.energy(operator).unwrap();
+                    let at = state.time();
+                    state
+                        .runtime_mut()
+                        .begin_switch(material, *on, at, ramp)
+                        .unwrap();
+                    modulation += state.energy(operator).unwrap() - before;
+                }
+            }
+            if step == 0 {
+                // An instant change at the start is not a case.
+                run.energies[0] = state.energy(operator).unwrap();
+            }
+            modulation += state.step(operator).unwrap().temporal_work;
+            run.fields.push(project(&state));
+            run.energies.push(state.energy(operator).unwrap());
+            run.modulation.push(modulation);
+        }
+        run
+    }
+
+    /// A Blackman-Harris lock-in of `trace`, sampled every `dt` from 0, over
+    /// `[from, to)` at `omega`: the complex amplitude `c` of
+    /// `Re(c e^{iω(t − reference)})`.
+    fn temporal_lock_in(
+        trace: &[f64],
+        dt: f64,
+        (from, to): (f64, f64),
+        omega: f64,
+        reference: f64,
+    ) -> Phasor {
+        let tau = std::f64::consts::TAU;
+        let (first, last) = ((from / dt).ceil() as usize, (to / dt).floor() as usize);
+        let span = (last - first) as f64;
+        let (mut sum, mut total) = (Phasor::default(), 0.0);
+        for (index, value) in trace.iter().enumerate().take(last).skip(first) {
+            let x = tau * (index - first) as f64 / span;
+            let weight =
+                0.35875 - 0.48829 * x.cos() + 0.14128 * (2.0 * x).cos() - 0.01168 * (3.0 * x).cos();
+            let phase = -omega * (index as f64 * dt - reference);
+            sum = sum + Phasor::new(phase.cos(), phase.sin()).scale(weight * value);
+            total += weight;
+        }
+        sum.scale(2.0 / total)
+    }
+
+    /// What a PH-14 run reads against the mode's ODE: the trace's largest
+    /// difference relative to the field's largest value; the stored energy's
+    /// and the modulation's energy at the end, relative to the start's; the
+    /// frequency after the change, the lock-in's peak, relative; and the
+    /// amplitudes before the change at the first frequency and after it at
+    /// the final one, both phased from the change's start, the run's and the
+    /// ODE's.
+    #[derive(Clone, Copy, Debug)]
+    struct TemporalReading {
+        trace: f64,
+        energy: f64,
+        modulation: f64,
+        frequency: f64,
+        amplitudes: [Phasor; 2],
+        exact_amplitudes: [Phasor; 2],
+    }
+
+    impl TemporalCase {
+        fn read(&self, run: &TemporalRun) -> TemporalReading {
+            let dt = run.dt;
+            let steps = run.fields.len() - 1;
+            let (fields, energies) = self.exact(dt, steps, 20);
+            let largest = fields.iter().fold(0.0_f64, |m, f| m.max(f.abs()));
+            let trace = run
+                .fields
+                .iter()
+                .zip(&fields)
+                .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()))
+                / largest;
+            let relative = |values: &[f64]| (values[steps] - values[0]) / values[0];
+            let exact_change = relative(&energies);
+            let energy = (relative(&run.energies) - exact_change).abs();
+            let modulation = (run.modulation[steps] / run.energies[0] - exact_change).abs();
+            let (first, last) = (TEMPORAL_K2.sqrt(), self.final_frequency(dt));
+            let start = self.start(dt);
+            let before = (start - 2.0 * self.first_period(), start);
+            let after = (
+                self.settled(dt) + std::f64::consts::TAU / last,
+                steps as f64 * dt,
+            );
+            let amplitudes = |trace: &[f64]| {
+                [
+                    temporal_lock_in(trace, dt, before, first, start),
+                    temporal_lock_in(trace, dt, after, last, start),
+                ]
+            };
+            // The peak of the lock-in's magnitude, by golden section within
+            // 5% of the final frequency.
+            let size = |omega: f64| temporal_lock_in(&run.fields, dt, after, omega, start).norm();
+            let golden = (5.0_f64.sqrt() - 1.0) / 2.0;
+            let (mut low, mut high) = (0.95 * last, 1.05 * last);
+            while high - low > 1.0e-10 * last {
+                let (a, b) = (high - golden * (high - low), low + golden * (high - low));
+                if size(a) > size(b) {
+                    high = b;
+                } else {
+                    low = a;
+                }
+            }
+            TemporalReading {
+                trace,
+                energy,
+                modulation,
+                frequency: (0.5 * (low + high) / last - 1.0).abs(),
+                amplitudes: amplitudes(&run.fields),
+                exact_amplitudes: amplitudes(&fields),
+            }
+        }
+    }
+
+    /// The time-reflection ratio `|B/A|` a pair of runs of one change reads,
+    /// the second a quarter period later: after the change the mode's
+    /// amplitude is `A c₁ + B c̄₁`, `c₁` its amplitude before, so the two
+    /// runs fix `A` and `B`. For an instant change `A = (m₁/m₂ + ω₂/ω₁)/2`
+    /// and `B = (m₁/m₂ − ω₂/ω₁)/2`, and `|B/A|` is the temporal Fresnel
+    /// ratio `(1 − r)/(1 + r)`, `r = m₁ω₁/(m₂ω₂)`.
+    fn reflection_ratio(first: [Phasor; 2], second: [Phasor; 2]) -> f64 {
+        let [c1, c2] = first;
+        let [d1, d2] = second;
+        let coefficients =
+            solve_phasors(vec![vec![c1, c1.conj()], vec![d1, d1.conj()]], vec![c2, d2]);
+        (coefficients[1] / coefficients[0]).norm()
+    }
+
+    /// PH-14's changes in `physics`, each at both phases: the mass slot (`ρ`
+    /// or `ε`) times 4 and a quarter and the stiffness slot (`s₀` or `μ`)
+    /// times 4 at once; the impedance kept, both slots doubled, and the mass
+    /// slot doubled with the stiffness slot tripled; the mass
+    /// slot times 4 over a tenth of a period, one and four; a slab of it a
+    /// quarter and a half of the switched medium's period long, and three
+    /// quarter-period slabs; and a gate's slab two periods long, doubling it
+    /// all but a quarter over half-period Hann edges.
+    fn temporal_cases(physics: PhysicsModel) -> Vec<TemporalCase> {
+        let (skin, mass, stiffness) = match physics {
+            PhysicsModel::Mechanical => ("Mechanical", "ρ", "s₀"),
+            physics if physics == LEDGER_TM => ("TM", "ε", "μ"),
+            _ => ("TE", "ε", "μ"),
+        };
+        let period = std::f64::consts::TAU / TEMPORAL_K2.sqrt();
+        let instant = |toggles, hold| TemporalChange::Switches {
+            ramp: 0.0,
+            toggles,
+            hold,
+        };
+        let matched = (2.0, 2.0);
+        // The mass slot times 4 halves the frequency in every skin.
+        let switched = 2.0 * period;
+        let mut changes = vec![
+            (format!("{mass} × 4"), (4.0, 1.0), instant(1, 0.0)),
+            (format!("{mass} × ¼"), (0.25, 1.0), instant(1, 0.0)),
+            (format!("{stiffness} × 4"), (1.0, 4.0), instant(1, 0.0)),
+            (
+                format!("{mass} × 2, {stiffness} × 2"),
+                matched,
+                instant(1, 0.0),
+            ),
+            (
+                format!("{mass} × 2, {stiffness} × 3"),
+                (2.0, 3.0),
+                instant(1, 0.0),
+            ),
+        ];
+        for (name, ramp) in [("a tenth of", 0.1), ("one", 1.0), ("four", 4.0)] {
+            changes.push((
+                format!("{mass} × 4 over {name} period"),
+                (4.0, 1.0),
+                TemporalChange::Switches {
+                    ramp: ramp * period,
+                    toggles: 1,
+                    hold: 0.0,
+                },
+            ));
+        }
+        changes.push((
+            format!("{mass} × 4 for a quarter period"),
+            (4.0, 1.0),
+            instant(2, 0.25 * switched),
+        ));
+        changes.push((
+            format!("{mass} × 4 for half a period"),
+            (4.0, 1.0),
+            instant(2, 0.5 * switched),
+        ));
+        changes.push((
+            format!("{mass} × 4, three quarter-period slabs"),
+            (4.0, 1.0),
+            instant(6, 0.25 * switched),
+        ));
+        changes.push((
+            format!("{mass} × 1.75 gated"),
+            (1.0, 1.0),
+            TemporalChange::Gate {
+                depth: 0.75,
+                duration: 2.0 * period,
+                edge: 0.5 * period,
+            },
+        ));
+        changes
+            .into_iter()
+            .flat_map(|(name, (mass, stiffness), change)| {
+                [false, true].map(|quarter| TemporalCase {
+                    name: format!(
+                        "{skin} {name}{}",
+                        if quarter { ", a quarter later" } else { "" }
+                    ),
+                    physics,
+                    mass,
+                    stiffness,
+                    change,
+                    quarter,
+                })
+            })
+            .collect()
+    }
+
+    /// The mode's ODE meets the closed forms: an instant change maps the
+    /// amplitude by `A` and `B`, its ratio the temporal Fresnel one, `1/3`
+    /// for the mass times 4 and 0 when the impedance is kept, where `E/ω`
+    /// is kept too; a change over forty periods keeps `E/ω`, the adiabatic
+    /// invariant; and halving the ODE's own step moves nothing.
+    #[test]
+    fn the_modal_ode_meets_the_temporal_closed_forms() {
+        let dt = std::f64::consts::TAU / TEMPORAL_K2.sqrt() / 400.0;
+        let pair = |mass: f64, stiffness: f64, change: TemporalChange| {
+            [false, true].map(|quarter| TemporalCase {
+                name: String::new(),
+                physics: LEDGER_TM,
+                mass,
+                stiffness,
+                change,
+                quarter,
+            })
+        };
+        let instant = TemporalChange::Switches {
+            ramp: 0.0,
+            toggles: 1,
+            hold: 0.0,
+        };
+        let reading = |case: &TemporalCase| {
+            let steps = ((case.settled(dt)
+                + 6.0 * std::f64::consts::TAU / case.final_frequency(dt))
+                / dt) as usize;
+            let (fields, energies) = case.exact(dt, steps, 4);
+            let (finer, _) = case.exact(dt, steps, 8);
+            let drift = fields
+                .iter()
+                .zip(&finer)
+                .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+            assert!(drift < 1.0e-10, "the ODE moves {drift:e} with its step");
+            let run = TemporalRun {
+                modulation: vec![0.0; fields.len()],
+                fields,
+                energies,
+                dt,
+            };
+            (case.read(&run), run)
+        };
+        for ((mass, stiffness), expected) in [
+            ((4.0, 1.0), 1.0 / 3.0),
+            ((2.0, 2.0), 0.0),
+            ((1.0, 4.0), 1.0 / 3.0),
+        ] {
+            let [first, second] = pair(mass, stiffness, instant);
+            let ((a, run), (b, _)) = (reading(&first), reading(&second));
+            let ratio = reflection_ratio(a.exact_amplitudes, b.exact_amplitudes);
+            assert!(
+                (ratio - expected).abs() < 1.0e-6,
+                "{mass} {stiffness}: {ratio}"
+            );
+            // E/ω across the change, at the start of the run and its end.
+            let steps = run.energies.len() - 1;
+            let action = |energy: f64, omega: f64| energy / omega;
+            let kept = action(run.energies[steps], first.final_frequency(dt))
+                / action(run.energies[0], TEMPORAL_K2.sqrt());
+            if expected == 0.0 {
+                assert!((kept - 1.0).abs() < 1.0e-9, "matched: E/ω moves to {kept}");
+            }
+        }
+        let slow = TemporalCase {
+            name: String::new(),
+            physics: LEDGER_TM,
+            mass: 4.0,
+            stiffness: 1.0,
+            change: TemporalChange::Switches {
+                ramp: 40.0 * std::f64::consts::TAU / TEMPORAL_K2.sqrt(),
+                toggles: 1,
+                hold: 0.0,
+            },
+            quarter: false,
+        };
+        let (_, run) = reading(&slow);
+        let steps = run.energies.len() - 1;
+        let kept = (run.energies[steps] / slow.final_frequency(dt))
+            / (run.energies[0] / TEMPORAL_K2.sqrt());
+        assert!(
+            (kept - 1.0).abs() < 1.0e-3,
+            "adiabatic: E/ω moves to {kept}"
+        );
+    }
+
+    /// PH-14's bounds at the production step on edge 0.1, about twice the
+    /// worst reading: the trace 5.9e-4, a tenth-period ramp in TE thrown a
+    /// quarter period late; the stored energy 1.2e-3 and the modulation's
+    /// 9.0e-4, a quarter-period slab; the frequency 1.1e-5, the lock-in's
+    /// own; and `|B/A|` 9.6e-5 off the ODE's. Every one but the frequency is
+    /// the step's: half the step reads 1.6e-4, 3.0e-4, 2.3e-4 and 2.4e-5,
+    /// and so does edge 0.05 at its own step, half this one. Under the step's
+    /// part the trace stands on the mesh's, 5.2e-5 on 0.1 and 3.3e-6 on
+    /// 0.05, the mode's discrete frequency over the run.
+    const TEMPORAL_TRACE: f64 = 1.2e-3;
+    const TEMPORAL_ENERGY: f64 = 2.5e-3;
+    const TEMPORAL_FREQUENCY: f64 = 3.0e-5;
+    const TEMPORAL_REFLECTION: f64 = 2.0e-4;
+
+    /// Runs `cases` on `edge` at `fraction` of the production step, side by
+    /// side, and reads each against its ODE.
+    fn temporal_readings(cases: &[TemporalCase], edge: f64, fraction: f64) -> Vec<TemporalReading> {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let results = std::sync::Mutex::new(vec![None; cases.len()]);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let job = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(case) = cases.get(job) else {
+                            break;
+                        };
+                        let reading = case.read(&temporal_run(case, edge, fraction));
+                        results.lock().unwrap()[job] = Some(reading);
+                    }
+                });
+            }
+        });
+        results
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|reading| reading.unwrap())
+            .collect()
+    }
+
+    /// Prints PH-14's readings for `cases`, in pairs a quarter period
+    /// apart, and holds each run's and each pair's to the bounds, those the
+    /// step sets times `scale`, the trace's no lower than the mesh's `floor`;
+    /// returns each pair's `|B/A|` error.
+    fn temporal_holds(
+        cases: &[TemporalCase],
+        readings: &[TemporalReading],
+        (edge, fraction): (f64, f64),
+        scale: f64,
+        floor: f64,
+    ) -> Vec<f64> {
+        let mut ratios = Vec::new();
+        for (pair, readings) in cases.chunks(2).zip(readings.chunks(2)) {
+            for (case, reading) in pair.iter().zip(readings) {
+                let at = format!("{} on {edge} at {fraction} of the step", case.name);
+                eprintln!(
+                    "{at}: trace {:.2e}, energy {:.2e}, modulation {:.2e}, frequency {:.1e}",
+                    reading.trace, reading.energy, reading.modulation, reading.frequency
+                );
+                for (what, error, bound) in [
+                    ("trace", reading.trace, (scale * TEMPORAL_TRACE).max(floor)),
+                    ("energy", reading.energy, scale * TEMPORAL_ENERGY),
+                    ("modulation", reading.modulation, scale * TEMPORAL_ENERGY),
+                    ("frequency", reading.frequency, TEMPORAL_FREQUENCY),
+                ] {
+                    assert!(error < bound, "{at}: {what} {error:e} off");
+                }
+            }
+            let read = reflection_ratio(readings[0].amplitudes, readings[1].amplitudes);
+            let exact =
+                reflection_ratio(readings[0].exact_amplitudes, readings[1].exact_amplitudes);
+            let error = (read - exact).abs();
+            eprintln!(
+                "  {}: |B/A| {read:.5} against {exact:.5}, {error:.2e} off",
+                pair[0].name
+            );
+            assert!(
+                error < scale * TEMPORAL_REFLECTION,
+                "{} on {edge} at {fraction} of the step: |B/A| {read} against {exact}",
+                pair[0].name
+            );
+            ratios.push(error);
+        }
+        ratios
+    }
+
+    /// PH-14 in the gate: every change in each skin, at both phases, on
+    /// edge 0.1 at the production step, against the mode's ODE.
+    #[test]
+    fn temporal_interfaces_meet_the_modal_law() {
+        for physics in [LEDGER_TM, LEDGER_TE, PhysicsModel::Mechanical] {
+            let cases = temporal_cases(physics);
+            let readings = temporal_readings(&cases, 0.1, 1.0);
+            temporal_holds(&cases, &readings, (0.1, 1.0), 1.0, 0.0);
+        }
+    }
+
+    /// PH-14 (`docs/spikes/funfern-testing-campaign-plan.md`, section 6f):
+    /// every change on edge 0.1 at half the production step, each reading
+    /// under the gate's bounds times a quarter, the trace's no lower than
+    /// the mesh's 1e-4, and falling from the step's - the energies and
+    /// `|B/A|` under 0.35 of it wherever it stands above 3e-5 and 1e-5,
+    /// where the step's part ends, the trace under 0.6 wherever above the
+    /// mesh's 1e-4: second order; at a quarter of the step every reading
+    /// held as at half, nothing growing; and every change on edge 0.05 at
+    /// its own step, about half 0.1's, under the same bounds, the trace's
+    /// floor 2e-5.
+    #[test]
+    #[ignore = "PH-14, about eight minutes; run in the nightly"]
+    fn temporal_interfaces_converge_to_the_modal_law() {
+        for physics in [LEDGER_TM, LEDGER_TE, PhysicsModel::Mechanical] {
+            let cases = temporal_cases(physics);
+            let finer = temporal_readings(&cases, 0.05, 1.0);
+            temporal_holds(&cases, &finer, (0.05, 1.0), 0.25, 2.0e-5);
+            let full = temporal_readings(&cases, 0.1, 1.0);
+            let full_ratios = temporal_holds(&cases, &full, (0.1, 1.0), 1.0, 0.0);
+            let half = temporal_readings(&cases, 0.1, 0.5);
+            let half_ratios = temporal_holds(&cases, &half, (0.1, 0.5), 0.25, 1.0e-4);
+            for ((case, now), before) in cases.iter().zip(&half).zip(&full) {
+                for (what, at, coarser, factor, floor) in [
+                    ("energy", now.energy, before.energy, 0.35, 3.0e-5),
+                    (
+                        "modulation",
+                        now.modulation,
+                        before.modulation,
+                        0.35,
+                        3.0e-5,
+                    ),
+                    ("trace", now.trace, before.trace, 0.6, 1.0e-4),
+                ] {
+                    assert!(
+                        coarser < floor || at < factor * coarser,
+                        "{} at half the step: {what} {at:.2e} from {coarser:.2e}",
+                        case.name
+                    );
+                }
+            }
+            for ((pair, now), before) in cases.chunks(2).zip(&half_ratios).zip(&full_ratios) {
+                assert!(
+                    *before < 1.0e-5 || *now < 0.35 * before,
+                    "{} at half the step: |B/A| {now:.2e} off from {before:.2e}",
+                    pair[0].name
+                );
+            }
+            let quarter = temporal_readings(&cases, 0.1, 0.25);
+            temporal_holds(&cases, &quarter, (0.1, 0.25), 0.25, 1.0e-4);
+        }
+    }
 }
