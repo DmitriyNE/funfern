@@ -43,7 +43,7 @@ use funfern_core::{
     OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, Point2,
 };
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// The relative L2 error b may reach on the device against the f64
 /// reference, as the end-to-end fixtures hold it.
@@ -590,7 +590,7 @@ fn main() -> AppExit {
         baffle,
         budget: remesh.then_some(carries[0].budget),
         started: Instant::now(),
-        deadline: Instant::now() + Duration::from_secs(300),
+        deadline: check::deadline(300),
         finished: false,
         failed: false,
     })

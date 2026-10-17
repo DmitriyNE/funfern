@@ -56,7 +56,9 @@
 //! lanes, so a change meant to leave the arithmetic alone can be held to the
 //! same bits on every fixture above.
 
-use std::time::{Duration, Instant};
+#[path = "support/check.rs"]
+mod check;
+use std::time::Instant;
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
@@ -280,7 +282,7 @@ fn main() -> AppExit {
         nodes: base.degrees_of_freedom(),
         time_step,
         started: None,
-        deadline: Instant::now() + Duration::from_secs(300),
+        deadline: check::deadline(300),
         finished: false,
         failed: false,
     })

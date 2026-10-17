@@ -211,7 +211,7 @@ fn main() -> AppExit {
         last_observed_serial: 0,
         settle_after: None,
         failed: false,
-        deadline: Instant::now() + Duration::from_secs(90),
+        deadline: check::deadline(90),
     };
 
     let mut app = App::new();

@@ -19,7 +19,7 @@
 #[path = "support/check.rs"]
 mod check;
 use check::within;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
@@ -163,7 +163,7 @@ fn main() -> AppExit {
         primary: oracle.primary_flux().to_vec(),
         complementary: oracle.complementary_flux().to_vec(),
         started: Instant::now(),
-        deadline: Instant::now() + Duration::from_secs(120),
+        deadline: check::deadline(120),
         finished: false,
         failed: false,
     })

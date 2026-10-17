@@ -22,7 +22,7 @@
 #[path = "support/check.rs"]
 mod check;
 use check::within;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
@@ -263,7 +263,7 @@ fn main() -> AppExit {
         escaped,
         injected,
         started: Instant::now(),
-        deadline: Instant::now() + Duration::from_secs(120),
+        deadline: check::deadline(120),
         finished: false,
         failed: false,
     })

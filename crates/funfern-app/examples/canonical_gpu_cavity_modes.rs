@@ -30,7 +30,7 @@ use funfern_core::{
     ScalarField,
 };
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// How far the device's series may stand from the reference's, over the
 /// series' largest value, as the end-to-end fixtures hold the field.
@@ -392,7 +392,7 @@ fn main() -> AppExit {
         series: Vec::new(),
         done: Vec::new(),
         started: Instant::now(),
-        deadline: Instant::now() + Duration::from_secs(600),
+        deadline: check::deadline(600),
         finished: false,
         failed: false,
     })

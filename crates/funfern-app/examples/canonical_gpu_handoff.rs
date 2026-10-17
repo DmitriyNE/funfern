@@ -661,7 +661,7 @@ fn main() -> AppExit {
         inject_failure,
         rollback_snapshot: None,
         source_generation: 0,
-        deadline: Instant::now() + Duration::from_secs(90),
+        deadline: check::deadline(90),
     };
     println!(
         "prepared handoff {}→{} Q, {}→{} b, {} components, {}→{} gap, {}→{} outgoing, {} transfer words ({:.2} MiB source + {:.2} MiB target + {:.2} MiB map = {:.2} MiB peak)",

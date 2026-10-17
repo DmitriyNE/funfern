@@ -24824,3 +24824,35 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-17 — The device examples' deadline follows the fixture runner's
+
+- **Found** by the nightly of 16 October: the mutation job missed
+  `handoff-store-authored`, its test not passing before the patch, and
+  `clock-forgotten-on-handoff`, failing for another reason than its own.
+  Both run `canonical_gpu_temporal_handoff` on lavapipe through
+  `scripts/e2e-fixture.sh`.
+- **Reproduced** in the Colima amd64 container: five runs of five end "timed
+  out or failed". Patched in the container to say where, the run stood 160 s
+  in with no failure status and no step accepted; given 900 s, it took its
+  first step 155 s in, its own work took 27 s more, and every check held, the
+  edit lane to 2.6e-8 of the energy.
+- **Cause.** A device example's clock starts when its host side has built
+  what the device is held to, before the app: its deadline counts the
+  device's start and its pipelines' compilation, which on lavapipe take
+  minutes. On the runner this example sits near its 90 s, passing one run of
+  the night and failing the other; da83bc0 gave it two more pipelines.
+- **Fix.** `check::deadline(seconds)` in the examples' shared
+  `support/check.rs` reads `FUNFERN_E2E_DEADLINE`, which `e2e-fixture.sh`
+  already sets on Linux a minute inside its own limit (6b2afd8, for the
+  fixtures), and keeps the example's own seconds otherwise. All 24 device
+  examples take their deadline from it; `canonical_gpu_temporal_timing` now
+  includes the module.
+- **Verified.** In the container, through `mutations.sh`: both mutations
+  detected, each run before its patch holding the edit lane to 2.6e-8 and
+  each after failing at its own check (`clock-forgotten-on-handoff` 3.9e-5
+  off, `handoff-store-authored` an edit of 0 for −3.04e-5). Locally: the
+  device suite 88 of 88.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

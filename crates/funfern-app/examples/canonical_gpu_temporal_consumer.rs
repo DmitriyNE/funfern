@@ -10,7 +10,7 @@
 #[path = "support/check.rs"]
 mod check;
 use check::{within, worse};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::{
@@ -337,7 +337,7 @@ fn main() -> AppExit {
         area_checked: area_sample.is_some(),
         arrows,
         started: Instant::now(),
-        deadline: Instant::now() + Duration::from_secs(60),
+        deadline: check::deadline(60),
         finished: false,
         failed: false,
     };

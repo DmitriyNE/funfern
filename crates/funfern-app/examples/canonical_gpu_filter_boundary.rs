@@ -16,7 +16,7 @@
 #[path = "support/check.rs"]
 mod check;
 use check::within;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::{
@@ -192,7 +192,7 @@ fn main() -> AppExit {
         primary_rate,
         collapsed_rate,
         started: Instant::now(),
-        deadline: Instant::now() + Duration::from_secs(60),
+        deadline: check::deadline(60),
         finished: false,
         failed: false,
     })

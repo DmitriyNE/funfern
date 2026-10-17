@@ -476,7 +476,7 @@ fn main() -> AppExit {
         completed_elapsed: None,
         finished: false,
         failed: false,
-        deadline: Instant::now() + Duration::from_secs(90),
+        deadline: check::deadline(90),
     };
     println!(
         "prepared {} Q, {} b, {} auxiliary values in {:.2} ms; {:.2} MiB steady (state {:.2}, nodes {:.2}, samples {:.2}, tables {:.2}, scratch {:.2}, boundary {:.2}), {:.2} MiB accepted physical state, {} dispatches/step, {} event dispatches ({event})",

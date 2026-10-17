@@ -16,7 +16,7 @@
 #[path = "support/check.rs"]
 mod check;
 use check::within;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
@@ -249,7 +249,7 @@ fn main() -> AppExit {
         initial_step: clock.step_in_epoch as u64,
         steps,
         time_step,
-        deadline: Instant::now() + Duration::from_secs(90),
+        deadline: check::deadline(90),
         finished: false,
         failed: false,
     };

@@ -58,7 +58,7 @@ use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
     CanonicalTemporalWaveState, CanonicalWallStep, CanonicalWaveState, MeshingOptions, Point2,
 };
-use std::time::{Duration, Instant};
+use std::time::Instant;
 fn steps() -> u64 {
     std::env::var("LONG_RUN_STEPS")
         .ok()
@@ -256,7 +256,7 @@ fn main() -> AppExit {
         complementary,
         peak,
         started: Instant::now(),
-        deadline: Instant::now() + Duration::from_secs(300),
+        deadline: check::deadline(300),
         finished: false,
         failed: false,
     })

@@ -30,7 +30,7 @@
 mod check;
 use check::{within, worse};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
@@ -472,7 +472,7 @@ fn main() -> AppExit {
         time_step,
         phase: Phase::Evolve,
         started: Instant::now(),
-        deadline: Instant::now() + Duration::from_secs(180),
+        deadline: check::deadline(180),
         failed: false,
     })
     .add_systems(Startup, install)

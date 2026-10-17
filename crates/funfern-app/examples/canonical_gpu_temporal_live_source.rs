@@ -25,10 +25,7 @@
 #[path = "support/check.rs"]
 mod check;
 use check::within;
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, time::Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
@@ -268,7 +265,7 @@ fn main() -> AppExit {
         last_observed_serial: 0,
         settle_after: None,
         failed: false,
-        deadline: Instant::now() + Duration::from_secs(90),
+        deadline: check::deadline(90),
     };
 
     let mut app = App::new();
