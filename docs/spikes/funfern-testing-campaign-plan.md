@@ -434,9 +434,9 @@ with their reports in `docs/spikes/`.
   on 2026-10-17, section 6c),
   PH-12 cylinder scattering (done on 2026-10-17, section 6d), PH-13 thin
   gaps (done on 2026-10-17, section 6e), PH-14 temporal interfaces (done on
-  2026-10-18, section 6f), PH-15 modulated materials, PH-16 nonlinear laws,
-  PH-18 probes and observables, with PH-12's far field, PH-19 manufactured
-  solutions.
+  2026-10-18, section 6f), PH-15 modulated materials (done on 2026-10-18,
+  section 6g), PH-16 nonlinear laws, PH-18 probes and observables, with
+  PH-12's far field, PH-19 manufactured solutions.
 - **C, invariants and stress:** IV-01 to IV-13, AMR-01 to AMR-04, RT-01 to
   RT-08, the numerical edge cases, long runs and resource lifecycle. The
   metamorphic tests and the real-device fuzzing need none of the reference
@@ -591,6 +591,24 @@ less at each halving. The gate holds every case; the nightly job
 mutation `switch-ramp-work-dropped`. No defect found; the oracle first read
 Mechanical's stiffness laws as acting on `k`, which they divide, acting on
 `s₀ = 1/k₀` (`architecture.md`). Periodic modulation is PH-15's.
+
+## 6g. PH-15: modulated media
+
+**Done on 2026-10-18** (`docs/engineering-log.md`). PH-14's mode equation
+with a periodic coefficient is a Hill equation; its monodromy over a
+modulation period gives Floquet's multipliers, growth and frequency, and
+the box mode under a pump is held to them and to the ODE itself: the trace,
+the growth exponent, the energy supplied, the main line and the sidebands.
+Mass-side, stiffness-side and both-slot pumps, which keep the impedance and
+never grow, parametric amplification at twice the mode's frequency, the
+first tongue's edge from inside and outside, the second tongue - closed for
+the plain slots, open for a divided stiffness slot - and time crystals, in
+each skin. Growth meets Floquet's to 1e-7 of the mode's frequency on the
+mass side; the stiffness side carries five times the step's second-order
+error. The gate holds every case; the nightly job `modulated-media` half and
+a quarter of the step and a finer mesh. The mutation `pump-carrier-turned`.
+No defect found. Travelling modulation, not homogeneous, stays with the
+gallery's directional test.
 
 ## 7. Infrastructure
 

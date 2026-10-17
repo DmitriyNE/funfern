@@ -655,6 +655,41 @@ step's floor, a quarter of the step held as at half, and edge 0.05 at its
 own step. The mutation `switch-ramp-work-dropped`, a coefficient's rate
 leaving out its Switch's ramp, leaves a ramp's work unbooked, 0.71 of the
 energy, while the field follows the ramp.
+PH-15 holds periodically modulated media to Floquet theory. PH-14's mode
+equation with a periodic coefficient is a Hill equation, and its monodromy
+over one modulation period gives the Floquet multipliers: whether the mode
+grows, at what exponent, and the Floquet frequency of a stable one. The
+oracle keeps area (`det = 1`), grows at `d ω/4` for a small pump at twice
+the mode's frequency, keeps a pump of both slots - the impedance kept - on
+the unit circle at any frequency, and near the mode's own frequency has the
+second tongue closed for a slot that multiplies the mass or divides the
+stiffness, the trace touching 2 and never passing it, and open for a divided
+stiffness slot, Mathieu's form (`the_hill_equation_meets_floquet`). The box
+mode runs with the pump on from the start. Read: the trace against the ODE,
+relative to the field's largest so far; the growth exponent from the stored
+energy at the start of every modulation period, against the ODE's by the
+same fit, which meets Floquet's to 2%; the energy the work lane says the
+modulation supplied; and for stable modes with their lines apart, the main
+line against Floquet's frequency and the sidebands `ω_F + nΩ`, `n` from −2
+to 2, against the ODE's. In each skin, depth 0.2 unless named: the mass
+slot, the stiffness slot and a time crystal at 0.6 of the mode's frequency;
+both slots at twice it, which never grows; the mass slot at twice it, inside
+the tongue's edge by a tenth of its half-width and outside it; the stiffness
+slot divided, depth 0.4, at the second tongue's centre; and a time crystal at
+twice it. In the gate, `modulated_media_meet_floquet` (32 s), every case on
+edge 0.1 at the production step: the trace under 1.5e-2 (7.0e-3), the energy
+supplied under 3e-2 (1.4e-2), the growth exponent within `1.5e-4 ω` of the
+ODE's (`6.7e-5 ω`; a mass-side pump at twice the frequency reads 0.22299
+against Floquet's 0.22299), the main line within 5e-6 of
+Floquet's (1.8e-6) and the sidebands within 4e-4 of the ODE's (1.9e-4). The
+worst are stiffness-side pumps, TE's `ε`, whose second-order error the step
+sets five times a mass-side one's; half the step reads 1.5e-3, 3.0e-3 and
+1.3e-5. Nightly, the job `modulated-media` (8 minutes on the M1 Max):
+half the step under a quarter of the bounds, the trace and the growth's
+error falling under 0.35 where above the mesh's floor, a quarter of the step
+and edge 0.05 held so. The mutation `pump-carrier-turned`, every drive's
+carrier advanced a quarter turn, puts the mass pump at 0.6 0.47 off its
+trace while the Floquet multipliers stand.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

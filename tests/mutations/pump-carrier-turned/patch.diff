@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/material_law.rs b/crates/funfern-core/src/material_law.rs
+index e14f121..9f3528c 100644
+--- a/crates/funfern-core/src/material_law.rs
++++ b/crates/funfern-core/src/material_law.rs
+@@ -1771,6 +1771,7 @@ impl TimeDriveValues {
+         carrier_phase: f64,
+         coordinates: MaterialCoordinates,
+     ) -> Result<(f64, f64), MaterialError> {
++        let carrier_phase = carrier_phase + std::f64::consts::FRAC_PI_2;
+         let angular_frequency = std::f64::consts::TAU * self.frequency_hz();
+         match self {
+             Self::None => Ok((1.0, 0.0)),

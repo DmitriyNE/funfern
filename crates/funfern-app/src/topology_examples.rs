@@ -18102,7 +18102,11 @@ mod tests {
     /// `toggles` times `hold` seconds apart, on and off in turn; or one pulse
     /// of a gate `duration` long with Hann edges `edge` long, over which a
     /// zero-frequency pump of `depth` multiplies the mass slot by
-    /// `1 + depth`.
+    /// `1 + depth`. Or PH-15's modulation, from the start: each slot times
+    /// `1 + depth cos(2π f t + phase)`, its own depth, or with `sharpness`
+    /// the time crystal's smoothed square `tanh(s cos)/tanh(s)` in place of
+    /// the cosine; with `divide`, each modulated slot divided by it instead,
+    /// the law's divide option.
     #[derive(Clone, Copy, Debug)]
     enum TemporalChange {
         Switches {
@@ -18114,6 +18118,14 @@ mod tests {
             depth: f64,
             duration: f64,
             edge: f64,
+        },
+        Modulation {
+            mass: f64,
+            stiffness: f64,
+            frequency: f64,
+            phase: f64,
+            sharpness: Option<f64>,
+            divide: bool,
         },
     }
 
@@ -18168,7 +18180,7 @@ mod tests {
                         (time, index % 2 == 0)
                     })
                     .collect(),
-                TemporalChange::Gate { .. } => Vec::new(),
+                TemporalChange::Gate { .. } | TemporalChange::Modulation { .. } => Vec::new(),
             }
         }
 
@@ -18179,6 +18191,29 @@ mod tests {
                     self.throws(dt).last().map_or(0.0, |(time, _)| *time) + ramp
                 }
                 TemporalChange::Gate { duration, .. } => self.start(dt) + duration,
+                TemporalChange::Modulation { .. } => 0.0,
+            }
+        }
+
+        /// The period a run's step divides: a quarter of the mode's for a
+        /// change, so it starts on a step; a modulation's own, so that every
+        /// period starts on one.
+        fn timing(&self) -> f64 {
+            match self.change {
+                TemporalChange::Modulation { frequency, .. } => 1.0 / frequency,
+                _ => 0.25 * self.first_period(),
+            }
+        }
+
+        /// How long a run lasts: six periods of the final medium past the
+        /// change, or thirty of the mode's under a modulation, in whole
+        /// modulation periods.
+        fn duration(&self, dt: f64) -> f64 {
+            match self.change {
+                TemporalChange::Modulation { frequency, .. } => {
+                    (30.0 * self.first_period() * frequency).ceil() / frequency
+                }
+                _ => self.settled(dt) + 6.0 * std::f64::consts::TAU / self.final_frequency(dt),
             }
         }
 
@@ -18199,6 +18234,7 @@ mod tests {
                         start + duration,
                     ]
                 }
+                TemporalChange::Modulation { .. } => Vec::new(),
             }
         }
 
@@ -18250,6 +18286,23 @@ mod tests {
                     };
                     (1.0 + envelope * depth, 1.0)
                 }
+                TemporalChange::Modulation {
+                    mass,
+                    stiffness,
+                    frequency,
+                    phase,
+                    sharpness,
+                    divide,
+                } => {
+                    let carrier = (std::f64::consts::TAU * frequency * t + phase).cos();
+                    let shape =
+                        sharpness.map_or(carrier, |sharp| (sharp * carrier).tanh() / sharp.tanh());
+                    let factor = |depth: f64| {
+                        let factor = 1.0 + depth * shape;
+                        if divide { 1.0 / factor } else { factor }
+                    };
+                    (factor(mass), factor(stiffness))
+                }
             }
         }
 
@@ -18274,7 +18327,7 @@ mod tests {
         }
 
         /// The mode's own law, `d/dt (m β̇) = −k² s β`, from `β = 0` and
-        /// `β̇ = 1`, by RK4 in `(β, p = m β̇)` with `substeps` steps to each of
+        /// `p = 1`, by RK4 in `(β, p = m β̇)` with `substeps` steps to each of
         /// the run's steps of `dt`, split at every event: `β` and `p` - `B`
         /// and `D` in TM - carry through an instant change untouched. Returns
         /// `β̇` and the energy `½ p²/m + ½ k² s β²` after each of `steps`
@@ -18285,8 +18338,9 @@ mod tests {
                 let (mass, stiffness) = self.nodal(t, dt);
                 (p / mass, -TEMPORAL_K2 * stiffness * beta)
             };
-            let (mass, _) = self.nodal(0.0, dt);
-            let mut state = (0.0, mass);
+            // The run starts from `Q = M₀ φ`, the base mass's, so `p = 1`
+            // whatever the mass is at the start.
+            let mut state = (0.0, 1.0);
             let record = |t: f64, (beta, p): (f64, f64)| {
                 let (mass, stiffness) = self.nodal(t, dt);
                 (
@@ -18401,27 +18455,57 @@ mod tests {
                     repeat: 0.0,
                 });
             }
+            TemporalChange::Modulation {
+                mass,
+                stiffness,
+                frequency,
+                phase,
+                sharpness,
+                divide,
+            } => {
+                let drive = |depth: f64| match sharpness {
+                    None => TimeDrive::ParametricPump {
+                        depth: ScalarField::constant(depth),
+                        frequency_hz: ScalarField::constant(frequency),
+                        phase_radians: ScalarField::constant(phase),
+                    },
+                    Some(sharp) => TimeDrive::TimeCrystal {
+                        depth: ScalarField::constant(depth),
+                        frequency_hz: ScalarField::constant(frequency),
+                        phase_radians: ScalarField::constant(phase),
+                        sharpness: ScalarField::constant(sharp),
+                    },
+                };
+                if mass > 0.0 {
+                    material.mass_law.drive = drive(mass);
+                    material.mass_law.inverted = divide;
+                }
+                if stiffness > 0.0 {
+                    material.stiffness_law.drive = drive(stiffness);
+                    material.stiffness_law.inverted = divide;
+                }
+            }
         }
         let mut document = builder.document();
         document.model.source.enabled = false;
         document
     }
 
-    /// One PH-14 run on `edge` at `fraction` of the production step, which
-    /// is shortened to divide the first period into a whole number of
-    /// quarters, so that the change starts on a step: started in the mode
-    /// with all its energy in the primary lane, the Switch thrown at each of
-    /// the case's throws between steps, and run six periods of the final
-    /// medium past the change.
+    /// One PH-14 or PH-15 run on `edge` at `fraction` of the production
+    /// step, which is shortened to divide the case's timing period, so that
+    /// a change starts on a step and every modulation period does: started
+    /// in the mode with all its energy in the primary lane, the Switch thrown
+    /// at each of the case's throws between steps, and run for the case's
+    /// duration.
     fn temporal_run(case: &TemporalCase, edge: f64, fraction: f64) -> TemporalRun {
-        let period = case.first_period();
-        let quarters = (period
-            / (4.0 * fraction * {
+        let period = case.timing();
+        let pieces = (period
+            / (fraction * {
                 let document = temporal_document(case);
                 prepare(&document, edge).recommended_time_step()
             }))
         .ceil();
-        let dt = period / (4.0 * quarters);
+        let dt = period / pieces;
         let mut document = temporal_document(case);
         if let TemporalChange::Gate { .. } = case.change {
             let material = &mut document.model.accepted.materials[0];
@@ -18455,10 +18539,10 @@ mod tests {
         let material = document.model.accepted.materials[0].id;
         let ramp = match case.change {
             TemporalChange::Switches { ramp, .. } => ramp,
-            TemporalChange::Gate { .. } => 0.0,
+            TemporalChange::Gate { .. } | TemporalChange::Modulation { .. } => 0.0,
         };
-        let final_period = std::f64::consts::TAU / case.final_frequency(dt);
-        let steps = ((case.settled(dt) + 6.0 * final_period) / dt).ceil() as usize;
+        // Whole modulation periods are whole steps, give or take rounding.
+        let steps = (case.duration(dt) / dt - 1.0e-9).ceil() as usize;
         let throws = case.throws(dt);
         let project = |state: &CanonicalTemporalWaveState| {
             let field = operator
@@ -18937,6 +19021,623 @@ mod tests {
             }
             let quarter = temporal_readings(&cases, 0.1, 0.25);
             temporal_holds(&cases, &quarter, (0.1, 0.25), 0.25, 1.0e-4);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PH-15: periodically modulated media against Floquet.
+    // -----------------------------------------------------------------------
+
+    /// What Floquet theory says of a modulated mode: the growth exponent
+    /// `μ = ln|λ|/T` of its larger multiplier, zero on the unit circle; the
+    /// Floquet frequency there, the one of `(±θ + 2πn)/T` nearest the
+    /// unmodulated mode's; and the monodromy's trace.
+    #[derive(Clone, Copy, Debug)]
+    struct Floquet {
+        growth: f64,
+        frequency: Option<f64>,
+        trace: f64,
+    }
+
+    impl TemporalCase {
+        /// `(β, p = m β̇)` carried from `from` to `to` by the mode's law, in
+        /// `steps` RK4 steps; for smooth coefficients.
+        fn propagate(&self, state: (f64, f64), (from, to): (f64, f64), steps: usize) -> (f64, f64) {
+            let rate = |t: f64, (beta, p): (f64, f64)| {
+                let (mass, stiffness) = self.nodal(t, 1.0);
+                (p / mass, -TEMPORAL_K2 * stiffness * beta)
+            };
+            let h = (to - from) / steps as f64;
+            let mut state = state;
+            for index in 0..steps {
+                let t = from + index as f64 * h;
+                let k1 = rate(t, state);
+                let k2 = rate(
+                    t + 0.5 * h,
+                    (state.0 + 0.5 * h * k1.0, state.1 + 0.5 * h * k1.1),
+                );
+                let k3 = rate(
+                    t + 0.5 * h,
+                    (state.0 + 0.5 * h * k2.0, state.1 + 0.5 * h * k2.1),
+                );
+                let k4 = rate(t + h, (state.0 + h * k3.0, state.1 + h * k3.1));
+                state = (
+                    state.0 + h / 6.0 * (k1.0 + 2.0 * k2.0 + 2.0 * k3.0 + k4.0),
+                    state.1 + h / 6.0 * (k1.1 + 2.0 * k2.1 + 2.0 * k3.1 + k4.1),
+                );
+            }
+            state
+        }
+
+        /// The monodromy matrix over one modulation period, in `(β, p)`,
+        /// and Floquet's reading of it.
+        fn floquet(&self, steps: usize) -> (Floquet, [[f64; 2]; 2]) {
+            let period = self.timing();
+            let first = self.propagate((1.0, 0.0), (0.0, period), steps);
+            let second = self.propagate((0.0, 1.0), (0.0, period), steps);
+            let monodromy = [[first.0, second.0], [first.1, second.1]];
+            let trace = first.0 + second.1;
+            let floquet = if trace.abs() <= 2.0 {
+                let theta = (0.5 * trace).acos();
+                let omega = TEMPORAL_K2.sqrt();
+                let tau = std::f64::consts::TAU;
+                let turns = (omega * period / tau).round();
+                let frequency = [-1.0, 0.0, 1.0]
+                    .iter()
+                    .flat_map(|shift| {
+                        let n = turns + shift;
+                        [(theta + tau * n) / period, (-theta + tau * n) / period]
+                    })
+                    .filter(|candidate| *candidate > 0.0)
+                    .min_by(|a, b| (a - omega).abs().total_cmp(&(b - omega).abs()));
+                Floquet {
+                    growth: 0.0,
+                    frequency,
+                    trace,
+                }
+            } else {
+                let larger = 0.5 * (trace.abs() + (trace * trace - 4.0).sqrt());
+                Floquet {
+                    growth: larger.ln() / period,
+                    frequency: None,
+                    trace,
+                }
+            };
+            (floquet, monodromy)
+        }
+
+        /// The growth exponent a run's stored energy reads: `ln E` at the
+        /// start of every modulation period over the run's last 60%, fitted
+        /// to a line, half its slope.
+        fn growth_of(&self, energies: &[f64], dt: f64) -> f64 {
+            let stride = (self.timing() / dt).round() as usize;
+            let samples = (0..energies.len())
+                .step_by(stride)
+                .map(|index| (index as f64 * dt, energies[index].ln()))
+                .collect::<Vec<_>>();
+            let tail = &samples[samples.len() * 2 / 5..];
+            let count = tail.len() as f64;
+            let (mean_t, mean_y) = tail.iter().fold((0.0, 0.0), |(t, y), sample| {
+                (t + sample.0 / count, y + sample.1 / count)
+            });
+            let (covariance, variance) = tail.iter().fold((0.0, 0.0), |(c, v), (t, y)| {
+                (
+                    c + (t - mean_t) * (y - mean_y),
+                    v + (t - mean_t) * (t - mean_t),
+                )
+            });
+            0.5 * covariance / variance
+        }
+    }
+
+    /// What a PH-15 run reads against the mode's ODE and Floquet: the trace's
+    /// largest difference relative to the field's largest so far; the growth
+    /// exponent its stored energy reads, against the one the ODE's reads by
+    /// the same fit, relative to the mode's frequency, both printed with
+    /// Floquet's; the energy the modulation supplied, the work lane's sum,
+    /// against the ODE's change, relative to the larger of the start's
+    /// energy and the end's; and where the mode is stable and its lines
+    /// apart, the frequency of the main line against Floquet's, relative,
+    /// and its sidebands `ω_F + nΩ`, `n` from −2 to 2, against the ODE's,
+    /// relative to the ODE's main line.
+    #[derive(Clone, Copy, Debug)]
+    struct ModulatedReading {
+        trace: f64,
+        growth: f64,
+        growths: [f64; 3],
+        energy: f64,
+        frequency: Option<f64>,
+        sidebands: Option<f64>,
+    }
+
+    impl TemporalCase {
+        fn read_modulated(&self, run: &TemporalRun, spectral: bool) -> ModulatedReading {
+            let dt = run.dt;
+            let steps = run.fields.len() - 1;
+            let (fields, energies) = self.exact(dt, steps, 20);
+            let (mut largest, mut trace) = (0.0_f64, 0.0_f64);
+            for (read, exact) in run.fields.iter().zip(&fields) {
+                largest = largest.max(exact.abs());
+                trace = trace.max((read - exact).abs() / largest);
+            }
+            let (floquet, _) = self.floquet(4000);
+            let (read_growth, exact_growth) = (
+                self.growth_of(&run.energies, dt),
+                self.growth_of(&energies, dt),
+            );
+            let omega = TEMPORAL_K2.sqrt();
+            let exact_change = energies[steps] / energies[0] - 1.0;
+            let energy = (run.modulation[steps] / run.energies[0] - exact_change).abs()
+                / (energies[steps] / energies[0]).max(1.0);
+            let (frequency, sidebands) = match (spectral, floquet.frequency) {
+                (true, Some(main)) => {
+                    let TemporalChange::Modulation { frequency, .. } = self.change else {
+                        unreachable!()
+                    };
+                    let pump = std::f64::consts::TAU * frequency;
+                    let window = (4.0 * self.timing(), steps as f64 * dt);
+                    let line =
+                        |trace: &[f64], at: f64| temporal_lock_in(trace, dt, window, at, 0.0);
+                    let size = |at: f64| line(&run.fields, at).norm();
+                    let golden = (5.0_f64.sqrt() - 1.0) / 2.0;
+                    let (mut low, mut high) = (0.98 * main, 1.02 * main);
+                    while high - low > 1.0e-10 * main {
+                        let (a, b) = (high - golden * (high - low), low + golden * (high - low));
+                        if size(a) > size(b) {
+                            high = b;
+                        } else {
+                            low = a;
+                        }
+                    }
+                    let reference = line(&fields, main).norm();
+                    let worst = (-2..=2)
+                        .map(|n| {
+                            let at = (main + f64::from(n) * pump).abs();
+                            (line(&run.fields, at) - line(&fields, at)).norm() / reference
+                        })
+                        .fold(0.0_f64, f64::max);
+                    (Some((0.5 * (low + high) / main - 1.0).abs()), Some(worst))
+                }
+                _ => (None, None),
+            };
+            ModulatedReading {
+                trace,
+                growth: (read_growth - exact_growth).abs() / omega,
+                growths: [read_growth, exact_growth, floquet.growth],
+                energy,
+                frequency,
+                sidebands,
+            }
+        }
+    }
+
+    /// The pump frequency at the edge of the first instability tongue above
+    /// twice the mode's frequency, for a mass-side pump of `depth` in
+    /// `physics`: where the monodromy's trace crosses −2, by bisection.
+    fn tongue_edge(physics: PhysicsModel, depth: f64) -> f64 {
+        let omega = TEMPORAL_K2.sqrt();
+        let trace = |pump: f64| {
+            TemporalCase {
+                name: String::new(),
+                physics,
+                mass: 1.0,
+                stiffness: 1.0,
+                change: TemporalChange::Modulation {
+                    mass: depth,
+                    stiffness: 0.0,
+                    frequency: pump / std::f64::consts::TAU,
+                    phase: 0.0,
+                    sharpness: None,
+                    divide: false,
+                },
+                quarter: false,
+            }
+            .floquet(2000)
+            .0
+            .trace
+        };
+        let (mut inside, mut outside) = (2.0 * omega, 2.6 * omega);
+        assert!(trace(inside) < -2.0 && trace(outside) > -2.0);
+        for _ in 0..60 {
+            let middle = 0.5 * (inside + outside);
+            if trace(middle) < -2.0 {
+                inside = middle;
+            } else {
+                outside = middle;
+            }
+        }
+        0.5 * (inside + outside)
+    }
+
+    /// The pump frequency near the mode's own where the monodromy's trace
+    /// peaks, the second tongue's centre, for a pump of `depth` on the
+    /// stiffness slot divided, in `physics`: by golden section.
+    fn second_tongue(physics: PhysicsModel, depth: f64) -> f64 {
+        let omega = TEMPORAL_K2.sqrt();
+        let trace = |pump: f64| {
+            TemporalCase {
+                name: String::new(),
+                physics,
+                mass: 1.0,
+                stiffness: 1.0,
+                change: TemporalChange::Modulation {
+                    mass: 0.0,
+                    stiffness: depth,
+                    frequency: pump / std::f64::consts::TAU,
+                    phase: 0.0,
+                    sharpness: None,
+                    divide: true,
+                },
+                quarter: false,
+            }
+            .floquet(2000)
+            .0
+            .trace
+        };
+        let golden = (5.0_f64.sqrt() - 1.0) / 2.0;
+        let (mut low, mut high) = (0.9 * omega, 1.2 * omega);
+        while high - low > 1.0e-10 * omega {
+            let (a, b) = (high - golden * (high - low), low + golden * (high - low));
+            if trace(a) > trace(b) {
+                high = b;
+            } else {
+                low = a;
+            }
+        }
+        let centre = 0.5 * (low + high);
+        assert!(trace(centre) > 2.0, "no second tongue");
+        centre
+    }
+
+    /// PH-15's modulations in `physics`, each with whether its lines stand
+    /// apart to be read and whether Floquet has it grow, depth 0.2 unless
+    /// named, the mode started at rest in its other lane: on the mass slot (`ρ` or `ε`), the
+    /// stiffness slot (`s₀` or `μ`) and a time crystal of sharpness 3 at 0.6
+    /// of the mode's frequency, stable, whose lines stand apart; both slots
+    /// at once at twice it, the impedance kept, which no pump amplifies; the
+    /// mass slot at twice it, in the first tongue; at a tenth of the
+    /// tongue's half-width inside its edge and outside it; the stiffness slot
+    /// divided, depth 0.4, at the second tongue's strongest, near the mode's
+    /// own frequency; and a time crystal at twice it.
+    fn modulated_cases(physics: PhysicsModel) -> Vec<(TemporalCase, bool, bool)> {
+        let (skin, mass, stiffness) = match physics {
+            PhysicsModel::Mechanical => ("Mechanical", "ρ", "s₀"),
+            physics if physics == LEDGER_TM => ("TM", "ε", "μ"),
+            _ => ("TE", "ε", "μ"),
+        };
+        let omega = TEMPORAL_K2.sqrt();
+        let tau = std::f64::consts::TAU;
+        let modulation =
+            |mass: f64, stiffness: f64, pump: f64, sharpness, divide| TemporalChange::Modulation {
+                mass,
+                stiffness,
+                frequency: pump / tau,
+                phase: 0.0,
+                sharpness,
+                divide,
+            };
+        let case = |name: String, change: TemporalChange| TemporalCase {
+            name: format!("{skin} {name}"),
+            physics,
+            mass: 1.0,
+            stiffness: 1.0,
+            change,
+            quarter: false,
+        };
+        let edge = tongue_edge(physics, 0.2);
+        let half_width = edge - 2.0 * omega;
+        // The second tongue's centre, near the mode's own frequency, where
+        // the monodromy's trace peaks: open for the divided stiffness slot,
+        // Mathieu's `s = 1 + d cos Ωt` or its dual, and closed for a slot
+        // that multiplies the mass or divides the stiffness.
+        let second = second_tongue(physics, 0.4);
+        vec![
+            (
+                case(
+                    format!("{mass} pumped at 0.6"),
+                    modulation(0.2, 0.0, 0.6 * omega, None, false),
+                ),
+                true,
+                false,
+            ),
+            (
+                case(
+                    format!("{stiffness} pumped at 0.6"),
+                    modulation(0.0, 0.2, 0.6 * omega, None, false),
+                ),
+                true,
+                false,
+            ),
+            (
+                case(
+                    format!("{mass} time crystal at 0.6"),
+                    modulation(0.2, 0.0, 0.6 * omega, Some(3.0), false),
+                ),
+                true,
+                false,
+            ),
+            (
+                case(
+                    format!("{mass} and {stiffness} pumped at 2"),
+                    modulation(0.2, 0.2, 2.0 * omega, None, false),
+                ),
+                false,
+                false,
+            ),
+            (
+                case(
+                    format!("{mass} pumped at 2"),
+                    modulation(0.2, 0.0, 2.0 * omega, None, false),
+                ),
+                false,
+                true,
+            ),
+            (
+                case(
+                    format!("{mass} pumped inside the tongue's edge"),
+                    modulation(0.2, 0.0, edge - 0.1 * half_width, None, false),
+                ),
+                false,
+                true,
+            ),
+            (
+                case(
+                    format!("{mass} pumped outside the tongue's edge"),
+                    modulation(0.2, 0.0, edge + 0.1 * half_width, None, false),
+                ),
+                false,
+                false,
+            ),
+            (
+                case(
+                    format!("{stiffness} divided, pumped in the second tongue"),
+                    modulation(0.0, 0.4, second, None, true),
+                ),
+                false,
+                true,
+            ),
+            (
+                case(
+                    format!("{mass} time crystal at 2"),
+                    modulation(0.2, 0.0, 2.0 * omega, Some(3.0), false),
+                ),
+                false,
+                true,
+            ),
+        ]
+    }
+
+    /// The mode's Hill equation meets Floquet theory: its monodromy keeps
+    /// area, `det = 1`; a pump of depth 0.02 at twice the mode's frequency
+    /// grows at `d ω/4` to its next order; a pump of both slots keeps the
+    /// impedance and the mode on the unit circle at any frequency; near the
+    /// mode's own frequency the second tongue is closed for a slot that
+    /// multiplies the mass or divides the stiffness - the trace touches 2
+    /// and never passes it - and open for a divided stiffness slot; the
+    /// tongue's edges bracket the cases outside and inside it; and the
+    /// growth a run's energy reads on the ODE meets Floquet's.
+    #[test]
+    fn the_hill_equation_meets_floquet() {
+        let omega = TEMPORAL_K2.sqrt();
+        let tau = std::f64::consts::TAU;
+        for physics in [LEDGER_TM, LEDGER_TE, PhysicsModel::Mechanical] {
+            let pumped = |mass: f64, stiffness: f64, pump: f64| TemporalCase {
+                name: String::new(),
+                physics,
+                mass: 1.0,
+                stiffness: 1.0,
+                change: TemporalChange::Modulation {
+                    mass,
+                    stiffness,
+                    frequency: pump / tau,
+                    phase: 0.0,
+                    sharpness: None,
+                    divide: false,
+                },
+                quarter: false,
+            };
+            for (mass, stiffness) in [(0.4, 0.0), (0.0, 0.4)] {
+                let largest = (0..=300)
+                    .map(|index| {
+                        let pump = omega * (0.95 + 0.001 * f64::from(index));
+                        pumped(mass, stiffness, pump).floquet(2000).0.trace
+                    })
+                    .fold(f64::NEG_INFINITY, f64::max);
+                assert!(
+                    largest < 2.0 + 1.0e-9,
+                    "{physics:?}: the second tongue opens to a trace of {largest}"
+                );
+            }
+            let open = TemporalCase {
+                change: TemporalChange::Modulation {
+                    mass: 0.0,
+                    stiffness: 0.4,
+                    frequency: second_tongue(physics, 0.4) / tau,
+                    phase: 0.0,
+                    sharpness: None,
+                    divide: true,
+                },
+                ..pumped(0.0, 0.0, omega)
+            };
+            assert!(open.floquet(4000).0.growth > 1.0e-3 * omega);
+            let (floquet, monodromy) = pumped(0.02, 0.0, 2.0 * omega).floquet(4000);
+            let det = monodromy[0][0] * monodromy[1][1] - monodromy[0][1] * monodromy[1][0];
+            assert!((det - 1.0).abs() < 1.0e-10, "{physics:?}: det {det}");
+            let (finer, _) = pumped(0.02, 0.0, 2.0 * omega).floquet(8000);
+            assert!((floquet.growth - finer.growth).abs() < 1.0e-12 * omega);
+            let small = 0.02 * omega / 4.0;
+            assert!(
+                (floquet.growth / small - 1.0).abs() < 2.0e-2,
+                "{physics:?}: {} against d ω/4 = {small}",
+                floquet.growth
+            );
+            for pump in [0.6, 1.0, 2.0, 3.3] {
+                let (matched, monodromy) = pumped(0.3, 0.3, pump * omega).floquet(4000);
+                let det = monodromy[0][0] * monodromy[1][1] - monodromy[0][1] * monodromy[1][0];
+                assert!(
+                    matched.growth == 0.0 && (det - 1.0).abs() < 1.0e-10,
+                    "{physics:?}: the matched pump at {pump} grows at {}",
+                    matched.growth
+                );
+            }
+            for (case, _, grows) in modulated_cases(physics) {
+                let (floquet, _) = case.floquet(4000);
+                assert!(
+                    (floquet.growth > 0.0) == grows,
+                    "{}: grows at {}",
+                    case.name,
+                    floquet.growth
+                );
+                // The run's own estimate, on the ODE, against Floquet's.
+                let dt = case.timing() / 200.0;
+                let steps = (case.duration(dt) / dt - 1.0e-9).ceil() as usize;
+                let (_, energies) = case.exact(dt, steps, 4);
+                let read = case.growth_of(&energies, dt);
+                if floquet.growth > 0.0 {
+                    assert!(
+                        (read / floquet.growth - 1.0).abs() < 2.0e-2,
+                        "{}: the fit reads {read} against Floquet's {}",
+                        case.name,
+                        floquet.growth
+                    );
+                }
+            }
+        }
+    }
+
+    /// PH-15's bounds at the production step on edge 0.1, about twice the
+    /// worst reading: the trace 7.0e-3 and the energy supplied 1.4e-2, TE's
+    /// `ε` pumped inside the tongue's edge - a stiffness-side pump, whose
+    /// error the step sets at five times a mass-side one's; the growth 6.7e-5
+    /// of the mode's frequency off the ODE's, the same pump outside the
+    /// edge; the main line 1.8e-6 off Floquet's and the sidebands 1.9e-4 off
+    /// the ODE's, the lock-in's and the mesh's, which the step does not
+    /// move. At half the step the first three read 1.5e-3, 3.0e-3 and
+    /// 1.3e-5: second order.
+    const MODULATED_TRACE: f64 = 1.5e-2;
+    const MODULATED_ENERGY: f64 = 3.0e-2;
+    const MODULATED_GROWTH: f64 = 1.5e-4;
+    const MODULATED_FREQUENCY: f64 = 5.0e-6;
+    const MODULATED_SIDEBANDS: f64 = 4.0e-4;
+
+    /// Runs PH-15's `cases` on `edge` at `fraction` of the production step,
+    /// side by side.
+    fn modulated_readings(
+        cases: &[(TemporalCase, bool, bool)],
+        edge: f64,
+        fraction: f64,
+    ) -> Vec<ModulatedReading> {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let results = std::sync::Mutex::new(vec![None; cases.len()]);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let job = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((case, spectral, _)) = cases.get(job) else {
+                            break;
+                        };
+                        let reading =
+                            case.read_modulated(&temporal_run(case, edge, fraction), *spectral);
+                        results.lock().unwrap()[job] = Some(reading);
+                    }
+                });
+            }
+        });
+        results
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|reading| reading.unwrap())
+            .collect()
+    }
+
+    /// Prints PH-15's readings and holds them to the bounds, those the step
+    /// sets times `scale`.
+    fn modulated_holds(
+        cases: &[(TemporalCase, bool, bool)],
+        readings: &[ModulatedReading],
+        (edge, fraction): (f64, f64),
+        scale: f64,
+    ) {
+        for ((case, _, _), reading) in cases.iter().zip(readings) {
+            let at = format!("{} on {edge} at {fraction} of the step", case.name);
+            let [read, exact, floquet] = reading.growths;
+            eprintln!(
+                "{at}: trace {:.2e}, energy {:.2e}, growth {read:.5e} against {exact:.5e} (Floquet {floquet:.5e}){}",
+                reading.trace,
+                reading.energy,
+                match (reading.frequency, reading.sidebands) {
+                    (Some(frequency), Some(sidebands)) => {
+                        format!(", frequency {frequency:.1e}, sidebands {sidebands:.2e}")
+                    }
+                    _ => String::new(),
+                }
+            );
+            for (what, error, bound) in [
+                ("trace", reading.trace, scale * MODULATED_TRACE),
+                ("energy", reading.energy, scale * MODULATED_ENERGY),
+                ("growth", reading.growth, scale * MODULATED_GROWTH),
+                (
+                    "frequency",
+                    reading.frequency.unwrap_or(0.0),
+                    MODULATED_FREQUENCY,
+                ),
+                (
+                    "sidebands",
+                    reading.sidebands.unwrap_or(0.0),
+                    MODULATED_SIDEBANDS,
+                ),
+            ] {
+                assert!(error < bound, "{at}: {what} {error:e} off");
+            }
+        }
+    }
+
+    /// PH-15 in the gate: every modulation in each skin on edge 0.1 at the
+    /// production step, against the mode's ODE and Floquet.
+    #[test]
+    fn modulated_media_meet_floquet() {
+        for physics in [LEDGER_TM, LEDGER_TE, PhysicsModel::Mechanical] {
+            let cases = modulated_cases(physics);
+            let readings = modulated_readings(&cases, 0.1, 1.0);
+            modulated_holds(&cases, &readings, (0.1, 1.0), 1.0);
+        }
+    }
+
+    /// PH-15 (`docs/spikes/funfern-testing-campaign-plan.md`, section 6g):
+    /// every modulation on edge 0.1 at half the production step, under the
+    /// gate's bounds times a quarter, the trace under 0.35 of the step's
+    /// wherever that stands above 1e-3 and the growth's error wherever above
+    /// 5e-6, the mesh's floor below them: second order; at a quarter of the
+    /// step held as at half; and on edge 0.05 at its own step, half 0.1's,
+    /// held so too.
+    #[test]
+    #[ignore = "PH-15, about eight minutes; run in the nightly"]
+    fn modulated_media_converge_to_floquet() {
+        for physics in [LEDGER_TM, LEDGER_TE, PhysicsModel::Mechanical] {
+            let cases = modulated_cases(physics);
+            let full = modulated_readings(&cases, 0.1, 1.0);
+            modulated_holds(&cases, &full, (0.1, 1.0), 1.0);
+            let half = modulated_readings(&cases, 0.1, 0.5);
+            modulated_holds(&cases, &half, (0.1, 0.5), 0.25);
+            for (((case, _, _), now), before) in cases.iter().zip(&half).zip(&full) {
+                for (what, at, coarser, floor) in [
+                    ("trace", now.trace, before.trace, 1.0e-3),
+                    ("growth", now.growth, before.growth, 5.0e-6),
+                ] {
+                    assert!(
+                        coarser < floor || at < 0.35 * coarser,
+                        "{} at half the step: {what} {at:.2e} from {coarser:.2e}",
+                        case.name
+                    );
+                }
+            }
+            let quarter = modulated_readings(&cases, 0.1, 0.25);
+            modulated_holds(&cases, &quarter, (0.1, 0.25), 0.25);
+            let finer = modulated_readings(&cases, 0.05, 1.0);
+            modulated_holds(&cases, &finer, (0.05, 1.0), 0.25);
         }
     }
 }

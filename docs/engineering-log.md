@@ -25092,3 +25092,63 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-18 — PH-15: modulated media against Floquet
+
+- **What.** PH-14's mode equation `d/dt(m β̇) = −k² s β` with a periodic
+  coefficient is a Hill equation. The test integrates its monodromy over one
+  modulation period by RK4 and reads Floquet's multipliers: growth
+  `μ = ln|λ|/T`, or on the unit circle the Floquet frequency. The box mode
+  runs with a pump `1 + d cos(Ωt)` (or a time crystal's smoothed square) on
+  a slot from the start, the step dividing the modulation period. Read: the
+  trace against the ODE, relative to the field's largest so far; the growth
+  exponent from the stored energy at every period's start over the run's
+  last 60%, against the ODE's by the same fit; the energy the work lane says
+  the modulation supplied; and for stable modes whose lines stand apart, the
+  main line against Floquet's frequency and the sidebands `ω_F + nΩ`
+  against the ODE's.
+- **Oracle.** `the_hill_equation_meets_floquet`: `det = 1`; a pump of depth
+  0.02 at twice the mode's frequency grows at `d ω/4` to 2%; a pump of both
+  slots stays on the unit circle at 0.6, 1, 2 and 3.3 times it; near the
+  mode's own frequency the second tongue is closed for a slot that
+  multiplies the mass or divides the stiffness and open for a divided
+  stiffness slot; every case's stability is as named; the growth fit on the
+  ODE meets Floquet's to 2%.
+- **Cases**, in each skin, depth 0.2 unless named: mass slot, stiffness slot
+  and time crystal (sharpness 3) at 0.6 of the mode's frequency; both slots
+  at twice it; the mass slot at twice it, a tenth of the tongue's half-width
+  inside its edge and outside; the stiffness slot divided, depth 0.4, at the
+  second tongue's centre; a time crystal at twice it.
+- **What the sizing taught.**
+  - The second instability zone of a pump that multiplies the mass, or
+    divides the stiffness, has no width: the monodromy's trace touches 2 at
+    its centre (1.029 of the mode's frequency at depth 0.4) and never
+    passes it, at every depth. Every slot does one or the other unless its
+    law divides, so the second-tongue case divides the stiffness slot,
+    Mathieu's `s = 1 + d cos Ωt`, which opens it.
+  - The run starts from `Q = M₀ φ`, so `p = 1` whatever the mass is at
+    `t = 0`; the ODE first started from `β̇ = 1` and read every mass-side
+    pump 1/6 off.
+  - A stiffness-side pump's second-order error is about five times a
+    mass-side one's: at twice the frequency TE's `ε` grows 8e-5 per second
+    faster than the ODE, TM's `ε` 6e-7, and half the step takes the former
+    down four times - the fourth-order step's spike found the same order
+    (pumped stiffness 4.4e-4 against pumped mass 2.7e-4).
+  - The main line stands 1.2e-6 to 1.8e-6 off Floquet's and the sidebands
+    1.1e-4 to 1.9e-4 off the ODE's at every step: the lock-in's and the
+    mesh's.
+- **Results.** In the gate, `modulated_media_meet_floquet` (32 s): every case
+  at the production step on edge 0.1, the trace under 1.5e-2 (7.0e-3), the
+  energy supplied under 3e-2 (1.4e-2), the growth exponent within
+  `1.5e-4 ω` of the ODE's (`6.7e-5 ω`), the main line within 5e-6 of
+  Floquet's, the sidebands within 4e-4 of the ODE's. Nightly,
+  `modulated_media_converge_to_floquet` (job `modulated-media`, 8
+  minutes): half the step under a quarter of those (1.5e-3, 3.0e-3, 1.3e-5),
+  the trace and the growth's error falling under 0.35 above the mesh's
+  floor; a quarter of the step and edge 0.05 held so.
+- **Mutation.** `pump-carrier-turned`: every drive's carrier advanced a
+  quarter turn, and the mass pump at 0.6 reads 0.47 off its trace; Floquet's
+  multipliers do not see a pump's phase.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

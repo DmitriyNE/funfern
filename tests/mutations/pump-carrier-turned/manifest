@@ -1,0 +1,4 @@
+about: every material drive's carrier runs a quarter turn ahead of its authored phase, so a pumped mode follows the wrong trajectory and its sidebands the wrong phases, though its Floquet multipliers do not move
+test: cargo test --release -p funfern-app --lib -- modulated_media_meet_floquet
+expect: pumped at 0\.6 on 0\.1 at 1 of the step: trace .* off
+needs: cpu
