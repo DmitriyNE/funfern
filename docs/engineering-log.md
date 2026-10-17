@@ -25027,7 +25027,9 @@ Measured again first, then made quadratic in the trace.
   energy's offset under 0.4 of the step's; the half gap at 30° remeshed and
   read on both meshes, its memory carried to 4.0e-4.
 - **Mutation.** `gap-history-dropped-on-handoff`: `hand_fields` carries no
-  gap history, and the springs restart unstretched.
+  gap history, and the springs restart unstretched: the memory right after
+  the handoff reads 0.69 of the jump's amplitude off, its value at that
+  instant.
 - **Not tested here.** A dissipative gap is not implemented; the impedance
   faces are PH-04's, PH-06's and PH-09's (a ratio-2 wall against its law).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),

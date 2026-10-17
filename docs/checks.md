@@ -615,7 +615,8 @@ half the step the stored energy's offset under 0.4 of the step's; and the
 half gap at 30°, its jump varying along the gap, remeshed and read on both
 meshes, its memory carried to 4e-4. The mutation
 `gap-history-dropped-on-handoff`, a handoff carrying no gap history,
-restarts the springs unstretched, the memory a whole jump off.
+restarts the springs unstretched, the memory 0.69 of the jump off, its
+value at that instant.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

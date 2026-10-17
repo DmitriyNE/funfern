@@ -17004,7 +17004,8 @@ mod tests {
     /// carries its bounded second-order offset, which sets its readings
     /// from 0.07 down: 1e-3, 4e-4 and 2.4e-4 of the stored energy. Right
     /// after a handoff the memory stands 8.8e-4 of the jump from the coarse
-    /// run's harmonic at that instant, with the gap carried, and 1 without.
+    /// run's harmonic at that instant, with the gap carried, and 0.69
+    /// without, the jump's own value at that instant.
     const GAP_COARSE: f64 = 5.0e-3;
     const GAP_MIDDLE: f64 = 2.0e-3;
     const GAP_FINE: f64 = 5.0e-4;
