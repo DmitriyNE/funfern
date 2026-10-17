@@ -657,17 +657,32 @@ impl Builder {
     /// A transmitting line across the domain at `x`, from the floor to the
     /// ceiling and attached to both.
     fn divider(&mut self, x: f64) -> (CurveId, CurveSpanId) {
+        self.divider_as(x, SpanBehavior::Transmitting, false)
+    }
+
+    /// A divider at `x` from the floor to the ceiling, or from the ceiling
+    /// down with `downward`, its one span `behavior`, welded to the outer
+    /// vertices at both ends.
+    fn divider_as(
+        &mut self,
+        x: f64,
+        behavior: SpanBehavior,
+        downward: bool,
+    ) -> (CurveId, CurveSpanId) {
         let domain = self.scene.geometry.domain;
         let bottom = self.outer_vertex(OuterSide::Bottom, (x - domain.min_x) / domain.width());
         let top = self.outer_vertex(OuterSide::Top, (domain.max_x - x) / domain.width());
         let span = CurveSpanId(self.next_span);
+        let mut ends = [
+            (Point2::new(x, domain.min_y), bottom),
+            (Point2::new(x, domain.max_y), top),
+        ];
+        if downward {
+            ends.reverse();
+        }
         let curve = self.open_curve(
-            OpenCubicSpline::polyline(vec![
-                Point2::new(x, domain.min_y),
-                Point2::new(x, domain.max_y),
-            ])
-            .unwrap(),
-            &[SpanBehavior::Transmitting],
+            OpenCubicSpline::polyline(ends.iter().map(|(point, _)| *point).collect()).unwrap(),
+            &[behavior],
         );
         let authored = self
             .scene
@@ -676,8 +691,8 @@ impl Builder {
             .iter_mut()
             .find(|candidate| candidate.id == curve)
             .unwrap();
-        authored.nodes[0].vertex = Some(bottom);
-        authored.nodes[1].vertex = Some(top);
+        authored.nodes[0].vertex = Some(ends[0].1);
+        authored.nodes[1].vertex = Some(ends[1].1);
         (curve, span)
     }
 
@@ -9210,7 +9225,36 @@ mod tests {
         points: &[Point2],
         wall_step: CanonicalWallStep,
     ) -> Vec<Vec<f64>> {
-        let stencils = points
+        field_and_gap_traces(prepared, dt, steps, points, wall_step).0
+    }
+
+    /// `wall_traces`, and each thin-gap sample's jump memory after each step.
+    fn field_and_gap_traces(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        dt: f64,
+        steps: usize,
+        points: &[Point2],
+        wall_step: CanonicalWallStep,
+    ) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        let operator = &prepared.canonical_operator;
+        let mut state = CanonicalWaveState::zero(operator, dt)
+            .unwrap()
+            .with_wall_step(operator, wall_step)
+            .unwrap();
+        record_steps(
+            &mut state,
+            prepared,
+            steps,
+            &point_stencils(prepared, points),
+        )
+    }
+
+    /// The quadratic stencils that read the primary field at `points`.
+    fn point_stencils(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        points: &[Point2],
+    ) -> Vec<QuadraticPointStencil> {
+        points
             .iter()
             .map(|point| {
                 QuadraticPointStencil::build_topology(
@@ -9222,19 +9266,32 @@ mod tests {
                 )
                 .unwrap()
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    /// Steps `state` on `prepared` `steps` times, recording the primary field
+    /// through `stencils` and each thin-gap sample's jump memory after each.
+    fn record_steps(
+        state: &mut CanonicalWaveState,
+        prepared: &crate::topology_runtime::PreparedTopology,
+        steps: usize,
+        stencils: &[QuadraticPointStencil],
+    ) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
         let operator = &prepared.canonical_operator;
-        let mut state = CanonicalWaveState::zero(operator, dt)
-            .unwrap()
-            .with_wall_step(operator, wall_step)
-            .unwrap();
-        let mut traces = vec![Vec::with_capacity(steps); points.len()];
+        let mut traces = vec![Vec::with_capacity(steps); stencils.len()];
+        let mut gaps = vec![Vec::with_capacity(steps); operator.thin_gap_samples().len()];
         for _ in 0..steps {
             state
                 .step_with_forcing(operator, &prepared.canonical_forcing)
                 .unwrap();
+            for (trace, memory) in gaps
+                .iter_mut()
+                .zip(state.thin_gap_memory(operator).unwrap())
+            {
+                trace.push(memory.jump);
+            }
             let field = state.primary_field(operator).unwrap();
-            for (trace, stencil) in traces.iter_mut().zip(&stencils) {
+            for (trace, stencil) in traces.iter_mut().zip(stencils) {
                 trace.push(
                     stencil
                         .nodes
@@ -9245,7 +9302,7 @@ mod tests {
                 );
             }
         }
-        traces
+        (traces, gaps)
     }
 
     /// The primary field at `points` after each of `steps` steps of `dt` on a
@@ -15739,26 +15796,64 @@ mod tests {
         solution
     }
 
-    /// The exact reflection and transmission of the channel mode `kt` through
-    /// `layers` meeting at `interfaces`: in each layer `a e^{−ik(x − x₀)} + b
-    /// e^{ik(x − x₀)}`, `x₀` the layer's left interface (the first one for
-    /// the first layer), the field and its flux `s_x ∂_x u` continuous at
-    /// every interface, a unit wave in and nothing coming back from the far
-    /// side. `R` is the first layer's `b`, `T` the last layer's `a`.
-    fn layered_response(
+    /// How two of the channel's layers meet: welded, the field continuous;
+    /// across a thin gap of `ratio` (PH-13), its divider drawn upwards or,
+    /// with `downward`, from the ceiling down; or cut, two reflecting faces
+    /// with nothing between them, the gap's limit as its spring vanishes.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Joint {
+        Welded,
+        Gap { ratio: f64, downward: bool },
+        Cut,
+    }
+
+    impl Joint {
+        /// The spring per unit length between layers of nodal stiffness
+        /// tensors `(sx, sy)` either side: a gap's ratio times the geometric
+        /// mean of the two sides' geometric means, as the gap's law scales
+        /// it; none for a weld, and nothing for a cut.
+        fn spring(self, left: (f64, f64), right: (f64, f64)) -> Option<f64> {
+            match self {
+                Self::Welded => None,
+                Self::Gap { ratio, .. } => {
+                    Some(ratio * ((left.0 * left.1).sqrt() * (right.0 * right.1).sqrt()).sqrt())
+                }
+                Self::Cut => Some(0.0),
+            }
+        }
+    }
+
+    /// The exact channel mode `kt` through `layers` meeting at `interfaces`
+    /// by `joints`: in each layer `a e^{−ik(x − x₀)} + b e^{ik(x − x₀)}`, `x₀`
+    /// the layer's left interface (the first one for the first layer), the
+    /// flux `s_x ∂_x u` continuous at every interface and the field too where
+    /// it is welded; across a spring `K` the flux is its tension,
+    /// `K (u_right − u_left) = s_x ∂_x u`, which a cut's `K = 0` makes free.
+    /// A unit wave in and nothing coming back from the far side; returns each
+    /// layer's `(a, b)` and each interface's jump `u_right − u_left`.
+    fn layered_amplitudes(
         physics: PhysicsModel,
         layers: &[Layer],
         interfaces: &[f64],
+        joints: &[Joint],
         omega: f64,
         kt: f64,
-    ) -> (Phasor, Phasor) {
+    ) -> (Vec<(Phasor, Phasor)>, Vec<Phasor>) {
         let count = interfaces.len();
         assert_eq!(layers.len(), count + 1);
+        assert_eq!(joints.len(), count);
         let properties = layers
             .iter()
             .map(|layer| {
                 let (mass, sx, sy) = layer.physical(physics);
-                (layer_wavenumber(mass, sx, sy, omega, kt), sx)
+                (layer_wavenumber(mass, sx, sy, omega, kt), sx, sy)
+            })
+            .collect::<Vec<_>>();
+        let springs = (0..count)
+            .map(|interface| {
+                let (_, lx, ly) = properties[interface];
+                let (_, rx, ry) = properties[interface + 1];
+                joints[interface].spring((lx, ly), (rx, ry))
             })
             .collect::<Vec<_>>();
         let reference = |layer: usize| interfaces[layer.max(1) - 1];
@@ -15777,20 +15872,45 @@ mod tests {
         let mut matrix = vec![vec![Phasor::default(); unknowns]; unknowns];
         let mut rhs = vec![Phasor::default(); unknowns];
         let one = Phasor::new(1.0, 0.0);
+        // The flux of a e^{∓ik(x − x₀)} is ∓i k s_x times it.
+        let flux_factor = |layer: usize| {
+            let (k, sx, _) = properties[layer];
+            (Phasor::new(0.0, -1.0) * k).scale(sx)
+        };
         for interface in 1..=count {
             let x = interfaces[interface - 1];
+            // The field row reads `u_left − u_right` where welded, and
+            // `K (u_left − u_right) + s_x ∂_x u_left` across a spring.
+            let (weight, tension) =
+                springs[interface - 1].map_or((1.0, 0.0), |spring| (spring, 1.0));
             for (side, layer) in [(1.0, interface - 1), (-1.0, interface)] {
-                let (k, stiffness) = properties[layer];
+                let (k, _, _) = properties[layer];
                 let distance = x - reference(layer);
                 let forward = wave(k, distance, true);
                 let backward = wave(k, distance, false);
-                // The flux of a e^{∓ik(x − x₀)} is ∓i k s_x times it.
-                let flux = (Phasor::new(0.0, -1.0) * k).scale(stiffness);
-                let rows = [(2 * (interface - 1), one), (2 * (interface - 1) + 1, flux)];
-                for (row, factor) in rows {
-                    let forward_term = (factor * forward).scale(side);
-                    let backward_term =
-                        (factor * backward).scale(if row % 2 == 0 { side } else { -side });
+                let flux = flux_factor(layer);
+                let (field, field_backward) = if side > 0.0 {
+                    (
+                        Phasor::new(weight, 0.0) + flux.scale(tension),
+                        Phasor::new(weight, 0.0) - flux.scale(tension),
+                    )
+                } else {
+                    (Phasor::new(weight, 0.0), Phasor::new(weight, 0.0))
+                };
+                let row = 2 * (interface - 1);
+                let terms = [
+                    (
+                        row,
+                        (field * forward).scale(side),
+                        (field_backward * backward).scale(side),
+                    ),
+                    (
+                        row + 1,
+                        (flux * forward).scale(side),
+                        (flux * backward).scale(-side),
+                    ),
+                ];
+                for (row, forward_term, backward_term) in terms {
                     match index_a(layer) {
                         Some(column) => matrix[row][column] = matrix[row][column] + forward_term,
                         None => rhs[row] = rhs[row] - forward_term,
@@ -15802,27 +15922,62 @@ mod tests {
             }
         }
         let solution = solve_phasors(matrix, rhs);
-        (solution[0], solution[unknowns - 1])
+        let amplitudes = (0..=count)
+            .map(|layer| {
+                let a = index_a(layer).map_or(one, |column| solution[column]);
+                let b = index_b(layer).map_or(Phasor::default(), |column| solution[column]);
+                (a, b)
+            })
+            .collect::<Vec<_>>();
+        let field = |layer: usize, x: f64| {
+            let (k, _, _) = properties[layer];
+            let (a, b) = amplitudes[layer];
+            a * wave(k, x - reference(layer), true) + b * wave(k, x - reference(layer), false)
+        };
+        let jumps = (1..=count)
+            .map(|interface| {
+                let x = interfaces[interface - 1];
+                field(interface, x) - field(interface - 1, x)
+            })
+            .collect();
+        (amplitudes, jumps)
     }
 
-    /// PH-11's channel: one unit high from `x = −8` to 8, reflecting floor
-    /// and ceiling, second-order walls at both ends behind sponges of equal
-    /// electric and magnetic loss rising smoothly from `|x| = 4` to 2 at the
-    /// ends, which absorb without an impedance step; `layers[0]` up to the
-    /// first of `interfaces`, each next layer from its interface on; the
-    /// launcher at `x = −3.5` driving channel mode `mode` at `omega`, switched
-    /// on over `ramp` and held to `held`.
-    #[allow(clippy::too_many_arguments)]
-    fn interface_channel(
+    /// The exact reflection and transmission of the channel mode `kt` through
+    /// `layers` meeting at `interfaces` by `joints`: the first layer's `b`
+    /// and the last layer's `a` of `layered_amplitudes`.
+    fn layered_response(
         physics: PhysicsModel,
         layers: &[Layer],
         interfaces: &[f64],
-        mode: u32,
+        joints: &[Joint],
         omega: f64,
-        ramp: f64,
-        held: f64,
-        edge: f64,
-    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        kt: f64,
+    ) -> (Phasor, Phasor) {
+        let (amplitudes, _) = layered_amplitudes(physics, layers, interfaces, joints, omega, kt);
+        (amplitudes[0].1, amplitudes.last().unwrap().0)
+    }
+
+    /// PH-11's channel for `case`: one unit high from `x = −8` to 8,
+    /// reflecting floor and ceiling, second-order walls at both ends behind
+    /// sponges of equal electric and magnetic loss rising smoothly from
+    /// `|x| = 4` to 2 at the ends, which absorb without an impedance step;
+    /// the first layer up to the first interface, each next layer from its
+    /// interface on, a welded one transmitting and a gap's divider separated
+    /// with its reflecting faces coupled; the launcher at `x = −3.5` driving
+    /// the case's mode at its frequency, switched on over `ramp` and held to
+    /// `held`.
+    fn interface_document(case: &FresnelCase, ramp: f64, held: f64) -> TopologyDocument {
+        let FresnelCase {
+            physics,
+            layers,
+            interfaces,
+            joints,
+            mode,
+            omega,
+            ..
+        } = case;
+        let (physics, mode, omega) = (*physics, *mode, *omega);
         let mut builder = Builder::new();
         builder.scene.physics = physics;
         builder.scene.geometry.domain = DomainRect {
@@ -15865,7 +16020,9 @@ mod tests {
         };
         assert!(!layers[0].across && layers[0].axis_ratio == 1.0);
         author(&mut builder.scene.materials[0], layers[0]);
-        for (index, (layer, x)) in layers[1..].iter().zip(interfaces).enumerate() {
+        for (index, ((layer, x), joint)) in
+            layers[1..].iter().zip(interfaces).zip(joints).enumerate()
+        {
             let material = MaterialId(10 + index as u64);
             let mut authored = Material {
                 id: material,
@@ -15874,7 +16031,30 @@ mod tests {
             };
             author(&mut authored, *layer);
             builder.scene.materials.push(authored);
-            let (curve, span) = builder.divider(*x);
+            let (curve, span) = match *joint {
+                Joint::Welded => builder.divider(*x),
+                Joint::Gap { ratio, downward } => builder.divider_as(
+                    *x,
+                    SpanBehavior::Separated {
+                        left: FaceBoundaryCondition::Reflecting,
+                        right: FaceBoundaryCondition::Reflecting,
+                        coupling: InternalBoundaryCoupling::ThinGap {
+                            stiffness_ratio: ratio,
+                        },
+                    },
+                    downward,
+                ),
+                Joint::Cut => builder.divider_as(
+                    *x,
+                    SpanBehavior::Separated {
+                        left: FaceBoundaryCondition::Reflecting,
+                        right: FaceBoundaryCondition::Reflecting,
+                        coupling: InternalBoundaryCoupling::Independent,
+                    },
+                    false,
+                ),
+            };
+            let downward = matches!(joint, Joint::Gap { downward: true, .. });
             let region = RegionId(builder.next_region);
             builder.next_region += 1;
             builder.scene.regions.push(Region {
@@ -15889,12 +16069,17 @@ mod tests {
                     ..MaterialFrame::world()
                 },
             });
-            // Running upwards, the divider's right is towards +x.
+            // Running upwards, the divider's right is towards +x; running
+            // down, its left.
             builder.scene.face_assignments.push(AuthoredFaceAssignment {
                 anchor: FaceAnchor::Curve {
                     curve,
                     span,
-                    side: CurveTraceSide::Right,
+                    side: if downward {
+                        CurveTraceSide::Left
+                    } else {
+                        CurveTraceSide::Right
+                    },
                     parameter: 0.5,
                 },
                 region: Some(region),
@@ -15919,48 +16104,47 @@ mod tests {
         .unwrap();
         let mut document = builder.document();
         document.model.source.enabled = false;
-        prepare(&document, edge)
+        document
     }
 
     /// What one Fresnel run reads: the first layer's forward and backward
     /// waves `A` and `B`, phases at the first interface, the last layer's
     /// `C` and `D` at the last, and the largest share of the mode's amplitude
-    /// either side's two-wave fit leaves unexplained.
-    #[derive(Clone, Copy, Debug)]
+    /// either side's two-wave fit leaves unexplained; at each gap, what its
+    /// memory reads.
+    #[derive(Clone, Debug)]
     struct InterfaceReading {
         incident: Phasor,
         reflected: Phasor,
         forward: Phasor,
         returned: Phasor,
         misfit: f64,
+        gaps: Vec<GapReading>,
     }
 
-    /// One PH-11 run on `edge` at `fraction` of the production step: held to
-    /// steady state, the field at eight heights across the channel every
-    /// quarter unit from 0.25 off each outer interface to 3 away, read by a
-    /// Blackman-Harris lock-in over eight periods and projected on the mode;
-    /// on the first and the last layer the projections are fitted in least
-    /// squares to a forward and a backward wave of the layer's exact
-    /// wavenumber.
-    #[allow(clippy::too_many_arguments)]
-    fn fresnel_run(
-        physics: PhysicsModel,
-        layers: &[Layer],
-        interfaces: &[f64],
-        mode: u32,
-        omega: f64,
-        edge: f64,
-        fraction: f64,
-    ) -> InterfaceReading {
+    /// A gap's memory, the jump `ψ_left − ψ_right` of the field's time
+    /// integral at each of its samples, read as the projections are: its
+    /// lock-in phasors fitted to the mode's profile along the gap, weighted
+    /// by the samples' springs; and the springs' energy `½ Σ K_i j_i²`
+    /// averaged over the lock-in's window by its weights.
+    #[derive(Clone, Copy, Debug)]
+    struct GapReading {
+        jump: Phasor,
+        energy: f64,
+    }
+
+    /// The timing of a run of `case`: a switch-on rings at each layer's
+    /// cutoff `kt √(s_y/m)`, where the mode stands still, so the drive's own
+    /// switch-on is made slow beside that frequency, and the lock-in long
+    /// enough to keep it four Blackman-Harris bins away; a slow mode takes
+    /// long to cross. Returns the switch-on, the settle and the window.
+    fn fresnel_timing(case: &FresnelCase) -> (f64, f64, f64) {
         let tau = std::f64::consts::TAU;
-        let kt = f64::from(mode) * std::f64::consts::PI;
-        // A switch-on rings at each layer's cutoff `kt √(s_y/m)`, where the
-        // mode stands still: the drive's own switch-on is made slow beside
-        // that frequency, and the lock-in long enough to keep it four
-        // Blackman-Harris bins away. A slow mode takes long to cross.
-        let properties = layers
+        let (omega, kt) = (case.omega, case.kt());
+        let properties = case
+            .layers
             .iter()
-            .map(|layer| layer.physical(physics))
+            .map(|layer| layer.physical(case.physics))
             .collect::<Vec<_>>();
         let beside = properties
             .iter()
@@ -15977,14 +16161,18 @@ mod tests {
         let ramp = (16.0 / beside).max(4.0);
         let window = (90.0 / beside).max(8.0 * tau / omega);
         let settle = 10.0 + 14.0 / slowest;
-        let held = ramp + settle + window;
-        let prepared =
-            interface_channel(physics, layers, interfaces, mode, omega, ramp, held, edge);
+        (ramp, settle, window)
+    }
+
+    /// Where a run of `case` reads: every 0.11, which no wavenumber here
+    /// turns into a multiple of π, where a forward and a backward wave would
+    /// sample alike, from 0.25 off each outer interface to 3 away, at eight
+    /// heights. Returns the positions before the first interface and after
+    /// the last, and the points.
+    fn fresnel_points(case: &FresnelCase) -> (Vec<f64>, Vec<f64>, Vec<Point2>) {
         let heights = 8;
-        let first = interfaces[0];
-        let last = *interfaces.last().unwrap();
-        // Every 0.11, which no wavenumber here turns into a multiple of π,
-        // where a forward and a backward wave would sample alike.
+        let first = case.interfaces[0];
+        let last = *case.interfaces.last().unwrap();
         let before = (0..)
             .map(|i| -3.0 + 0.11 * f64::from(i))
             .take_while(|x| *x <= first - 0.25 + 1.0e-9)
@@ -16001,23 +16189,114 @@ mod tests {
                     .map(move |j| Point2::new(*x, -0.5 + (f64::from(j) + 0.5) / f64::from(heights)))
             })
             .collect::<Vec<_>>();
+        (before, after, points)
+    }
+
+    /// One PH-11 run on `edge` at `fraction` of the production step: held to
+    /// steady state and read by `fresnel_read`.
+    fn fresnel_run(case: &FresnelCase, edge: f64, fraction: f64) -> InterfaceReading {
+        let (ramp, settle, window) = fresnel_timing(case);
+        let held = ramp + settle + window;
+        let prepared = prepare(&interface_document(case, ramp, held), edge);
+        let (_, _, points) = fresnel_points(case);
         let dt = fraction * prepared.recommended_time_step();
         let steps = (held / dt).ceil() as usize;
-        let traces = wall_traces(&prepared, dt, steps, &points, CanonicalWallStep::default());
+        let (traces, gap_traces) =
+            field_and_gap_traces(&prepared, dt, steps, &points, CanonicalWallStep::default());
+        fresnel_read(
+            case,
+            &prepared.canonical_operator,
+            &traces,
+            &gap_traces,
+            dt,
+            dt,
+            window,
+        )
+    }
+
+    /// Reads `case` from `traces` at its points and `gap_traces` at
+    /// `operator`'s gap samples, recorded every `dt` from `first`: the last
+    /// `window` of each read by a Blackman-Harris lock-in and the field's
+    /// projected on the mode; on the first and the last layer the
+    /// projections are fitted in least squares to a forward and a backward
+    /// wave of the layer's exact wavenumber.
+    fn fresnel_read(
+        case: &FresnelCase,
+        operator: &CanonicalWaveOperator,
+        traces: &[Vec<f64>],
+        gap_traces: &[Vec<f64>],
+        dt: f64,
+        first: f64,
+        window: f64,
+    ) -> InterfaceReading {
+        let FresnelCase {
+            physics,
+            layers,
+            interfaces,
+            mode,
+            omega,
+            ..
+        } = case;
+        let (physics, mode, omega) = (*physics, *mode, *omega);
+        let tau = std::f64::consts::TAU;
+        let kt = case.kt();
+        let heights = 8;
+        let (before, after, _) = fresnel_points(case);
+        let (first_interface, last_interface) = (interfaces[0], *interfaces.last().unwrap());
+        let steps = traces[0].len();
         let span = (window / dt).round() as usize;
+        let start = steps - span;
+        let window_weight = |step: usize| {
+            let x = tau * (step - start) as f64 / span as f64;
+            0.35875 - 0.48829 * x.cos() + 0.14128 * (2.0 * x).cos() - 0.01168 * (3.0 * x).cos()
+        };
         let lock_in = |trace: &[f64]| {
-            let start = steps - span;
             let (mut sum, mut total) = (Phasor::default(), 0.0);
             for (step, value) in trace.iter().enumerate().skip(start) {
-                let x = tau * (step - start) as f64 / span as f64;
-                let weight = 0.35875 - 0.48829 * x.cos() + 0.14128 * (2.0 * x).cos()
-                    - 0.01168 * (3.0 * x).cos();
-                let phase = omega * (step + 1) as f64 * dt;
+                let weight = window_weight(step);
+                let phase = omega * (first + step as f64 * dt);
                 sum = sum + Phasor::new(phase.cos(), -phase.sin()).scale(weight * value);
                 total += weight;
             }
             sum.scale(1.0 / total)
         };
+        let gaps = interfaces
+            .iter()
+            .zip(&case.joints)
+            .filter(|(_, joint)| matches!(joint, Joint::Gap { .. }))
+            .map(|(x, _)| {
+                let samples = operator
+                    .thin_gap_samples()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, sample)| {
+                        (operator.node_points()[sample.left_node as usize].x - x).abs() < 1.0e-9
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!samples.is_empty(), "no gap samples at {x}");
+                let (mut along, mut norm) = (Phasor::default(), 0.0);
+                for (index, sample) in &samples {
+                    let y = operator.node_points()[sample.left_node as usize].y;
+                    let profile = (kt * (y + 0.5)).cos();
+                    along = along + lock_in(&gap_traces[*index]).scale(sample.stiffness * profile);
+                    norm += sample.stiffness * profile * profile;
+                }
+                let (energy, total) = (start..steps).fold((0.0, 0.0), |(energy, total), step| {
+                    let weight = window_weight(step);
+                    let stored = samples
+                        .iter()
+                        .map(|(index, sample)| {
+                            0.5 * sample.stiffness * gap_traces[*index][step].powi(2)
+                        })
+                        .sum::<f64>();
+                    (energy + weight * stored, total + weight)
+                });
+                GapReading {
+                    jump: along.scale(1.0 / norm),
+                    energy: energy / total,
+                }
+            })
+            .collect();
         let weight = if mode == 0 { 1.0 } else { 2.0 } / f64::from(heights);
         let projections = traces
             .chunks(heights as usize)
@@ -16057,13 +16336,17 @@ mod tests {
             }
             (amplitudes[0], amplitudes[1], residual / size)
         };
-        let (incident, reflected, misfit_before) =
-            fit(&before, &projections[..before.len()], layers[0], first);
+        let (incident, reflected, misfit_before) = fit(
+            &before,
+            &projections[..before.len()],
+            layers[0],
+            first_interface,
+        );
         let (forward, backward, misfit_after) = fit(
             &after,
             &projections[before.len()..],
             *layers.last().unwrap(),
-            last,
+            last_interface,
         );
         InterfaceReading {
             incident,
@@ -16071,17 +16354,20 @@ mod tests {
             forward,
             returned: backward,
             misfit: misfit_before.max(misfit_after),
+            gaps,
         }
     }
 
-    /// One of PH-11's cases: the skin, the layers and their interfaces, the
-    /// channel mode and the frequency.
+    /// One of PH-11's or PH-13's cases: the skin, the layers, their
+    /// interfaces and how each joins its layers, the channel mode and the
+    /// frequency.
     #[derive(Clone, Debug)]
     struct FresnelCase {
         name: String,
         physics: PhysicsModel,
         layers: Vec<Layer>,
         interfaces: Vec<f64>,
+        joints: Vec<Joint>,
         mode: u32,
         omega: f64,
     }
@@ -16089,9 +16375,12 @@ mod tests {
     /// How far a reading stands from the exact scattering: `B` against
     /// `R A + T′ D` and `C` against `T A + R′ D`, relative to `A`; the power
     /// balance's defect; across a single interface, how far the field and
-    /// its flux `s_x ∂_x u` jump there; and the reading's own misfit, which
-    /// also carries the discrete wave's small error in wavenumber over the
-    /// three units read.
+    /// its flux `s_x ∂_x u` jump there beside the joint's law, the field's
+    /// jump the flux over the spring across a gap; the reading's own misfit,
+    /// which also carries the discrete wave's small error in wavenumber over
+    /// the three units read; and at the worst gap, its memory's jump against
+    /// the exact one the measured `A` and `D` drive, relative to `A/ω`, and
+    /// its springs' energy against that jump's, relative.
     #[derive(Clone, Copy, Debug)]
     struct FresnelErrors {
         reflection: f64,
@@ -16100,6 +16389,8 @@ mod tests {
         field_jump: Option<f64>,
         flux_jump: Option<f64>,
         misfit: f64,
+        gap_jump: Option<f64>,
+        gap_energy: Option<f64>,
     }
 
     impl FresnelCase {
@@ -16112,23 +16403,62 @@ mod tests {
                 self.physics,
                 &self.layers,
                 &self.interfaces,
+                &self.joints,
                 self.omega,
                 self.kt(),
             )
         }
 
-        /// `R′` and `T′`, the stack met from the right: the mirrored stack met
-        /// from the left, whose phases sit at the same interfaces.
+        /// The stack mirrored, `x` to `−x`: met from the left, it is the stack
+        /// met from the right, its phases at the same interfaces.
+        fn mirrored(&self) -> (Vec<Layer>, Vec<f64>, Vec<Joint>) {
+            (
+                self.layers.iter().rev().copied().collect(),
+                self.interfaces.iter().rev().map(|x| -x).collect(),
+                self.joints.iter().rev().copied().collect(),
+            )
+        }
+
+        /// `R′` and `T′`, the stack met from the right.
         fn exact_from_the_right(&self) -> (Phasor, Phasor) {
-            let layers = self.layers.iter().rev().copied().collect::<Vec<_>>();
-            let interfaces = self.interfaces.iter().rev().map(|x| -x).collect::<Vec<_>>();
-            layered_response(self.physics, &layers, &interfaces, self.omega, self.kt())
+            let (layers, interfaces, joints) = self.mirrored();
+            layered_response(
+                self.physics,
+                &layers,
+                &interfaces,
+                &joints,
+                self.omega,
+                self.kt(),
+            )
         }
 
         /// A layer's wavenumber and flux stiffness `s_x`.
         fn layer(&self, layer: Layer) -> (Phasor, f64) {
             let (mass, sx, sy) = layer.physical(self.physics);
             (layer_wavenumber(mass, sx, sy, self.omega, self.kt()), sx)
+        }
+
+        /// The exact jumps `u_right − u_left` at every interface that the
+        /// waves `a` in from the left and `d` in from the right drive.
+        fn exact_jumps(&self, a: Phasor, d: Phasor) -> Vec<Phasor> {
+            let kt = self.kt();
+            let (_, from_the_left) = layered_amplitudes(
+                self.physics,
+                &self.layers,
+                &self.interfaces,
+                &self.joints,
+                self.omega,
+                kt,
+            );
+            let (layers, interfaces, joints) = self.mirrored();
+            let (_, mirrored) =
+                layered_amplitudes(self.physics, &layers, &interfaces, &joints, self.omega, kt);
+            // Mirrored, right and left swap and so does the jump's sign.
+            from_the_left
+                .iter()
+                .zip(mirrored.iter().rev())
+                .map(|(left, right)| *left * a - *right * d)
+                .collect()
         }
 
         fn errors(&self, reading: InterfaceReading) -> FresnelErrors {
@@ -16153,12 +16483,40 @@ mod tests {
             let flux = |k: Phasor, s: f64, forward: Phasor, backward: Phasor| {
                 (Phasor::new(0.0, -1.0) * k * (forward - backward)).scale(s)
             };
+            let spring = |interface: usize| {
+                let (_, lx, ly) = self.layers[interface].physical(self.physics);
+                let (_, rx, ry) = self.layers[interface + 1].physical(self.physics);
+                self.joints[interface].spring((lx, ly), (rx, ry))
+            };
+            // The memory reads `ψ_left − ψ_right` of the divider, its left
+            // towards −x running upwards, and `ψ = u/(iω)`.
+            let jumps = self.exact_jumps(a, reading.returned);
+            let (mut gap_jump, mut gap_energy) = (None::<f64>, None::<f64>);
+            let profile = if self.mode == 0 { 1.0 } else { 0.5 };
+            let gaps =
+                (0..self.interfaces.len()).filter_map(|interface| match self.joints[interface] {
+                    Joint::Gap { downward, .. } => Some((interface, downward)),
+                    Joint::Welded | Joint::Cut => None,
+                });
+            for ((interface, downward), read) in gaps.zip(&reading.gaps) {
+                let sign = if downward { 1.0 } else { -1.0 };
+                let exact = (jumps[interface] / Phasor::new(0.0, self.omega)).scale(sign);
+                let error = (read.jump - exact).norm() / (scale / self.omega);
+                gap_jump = Some(gap_jump.map_or(error, |worst| worst.max(error)));
+                let stored = spring(interface).unwrap() * exact.norm().powi(2) * profile;
+                let error = (read.energy - stored).abs() / stored;
+                gap_energy = Some(gap_energy.map_or(error, |worst| worst.max(error)));
+            }
             FresnelErrors {
                 reflection,
                 transmission,
                 power,
-                field_jump: single.then(|| {
-                    ((a + reading.reflected) - (reading.forward + reading.returned)).norm() / scale
+                field_jump: (single && self.joints[0] != Joint::Cut).then(|| {
+                    let law = spring(0).map_or(Phasor::default(), |spring| {
+                        flux(k_first, s_first, a, reading.reflected).scale(1.0 / spring)
+                    });
+                    ((reading.forward + reading.returned) - (a + reading.reflected) - law).norm()
+                        / scale
                 }),
                 flux_jump: single.then(|| {
                     (flux(k_first, s_first, a, reading.reflected)
@@ -16167,19 +16525,13 @@ mod tests {
                         / (s_first * k_first.norm() * scale)
                 }),
                 misfit: reading.misfit,
+                gap_jump,
+                gap_energy,
             }
         }
 
         fn run(&self, edge: f64, fraction: f64) -> InterfaceReading {
-            fresnel_run(
-                self.physics,
-                &self.layers,
-                &self.interfaces,
-                self.mode,
-                self.omega,
-                edge,
-                fraction,
-            )
+            fresnel_run(self, edge, fraction)
         }
     }
 
@@ -16207,6 +16559,7 @@ mod tests {
                 cases.push(FresnelCase {
                     name: format!("{skin} {name}"),
                     physics,
+                    joints: vec![Joint::Welded; interfaces.len()],
                     layers,
                     interfaces,
                     mode,
@@ -16306,6 +16659,488 @@ mod tests {
         cases
     }
 
+    // -----------------------------------------------------------------------
+    // PH-13: thin gaps against their spring law.
+    // -----------------------------------------------------------------------
+
+    /// The ratio at which two gaps `apart` in a unit medium transmit the
+    /// mode at `omega` whole: where `|R|` vanishes, found by golden section
+    /// on the transfer matrix between `low` and `high`, a bracket that holds
+    /// one minimum: `|R|` falls again as the gaps stiffen towards a weld.
+    fn resonant_ratio(apart: f64, omega: f64, low: f64, high: f64) -> f64 {
+        let one = Layer::of(1.0, 1.0);
+        let reflection = |ratio: f64| {
+            let gap = Joint::Gap {
+                ratio,
+                downward: false,
+            };
+            layered_response(LEDGER_TM, &[one; 3], &[0.0, apart], &[gap; 2], omega, 0.0)
+                .0
+                .norm()
+        };
+        let golden = (5.0_f64.sqrt() - 1.0) / 2.0;
+        let (mut low, mut high) = (low, high);
+        while high - low > 1.0e-12 * high {
+            let a = high - golden * (high - low);
+            let b = low + golden * (high - low);
+            if reflection(a) < reflection(b) {
+                high = b;
+            } else {
+                low = a;
+            }
+        }
+        let ratio = 0.5 * (low + high);
+        assert!(
+            reflection(ratio) < 1.0e-8,
+            "no resonance between the bounds"
+        );
+        ratio
+    }
+
+    /// PH-13's cases. A gap of ratio `r` in a unit medium passes
+    /// `|T|² = 1/(1 + (k_x/2r)²)` of the mode, the same in every skin: in
+    /// TM at normal incidence a weak gap passing 1% (`r = 0.3`), one passing
+    /// half (`r = π`) and a stiff one 99% (`r = 30`); the half gap at 30°; the
+    /// cut, the limit as the spring vanishes; and two gaps 0.15 apart at the
+    /// ratio that makes the pair transmit everything, and the same pair 0.25
+    /// apart. Between a unit medium and another the spring is the ratio
+    /// times the two sides' geometric mean: `ε = 4` in TM and TE, `K = r`
+    /// and `r/2`, and `k = 4` in Mechanical, `2r`; the last two drawn either
+    /// way.
+    fn gap_cases() -> Vec<FresnelCase> {
+        let pi = std::f64::consts::PI;
+        let tau = std::f64::consts::TAU;
+        let one = Layer::of(1.0, 1.0);
+        let gap = |ratio: f64| Joint::Gap {
+            ratio,
+            downward: false,
+        };
+        let mut cases = Vec::new();
+        let mut add = |name: &str,
+                       physics,
+                       layers: Vec<Layer>,
+                       interfaces: Vec<f64>,
+                       joints: Vec<Joint>,
+                       mode,
+                       omega| {
+            cases.push(FresnelCase {
+                name: name.to_owned(),
+                physics,
+                layers,
+                interfaces,
+                joints,
+                mode,
+                omega,
+            });
+        };
+        for (name, ratio) in [("weak", 0.3), ("half", pi), ("stiff", 30.0)] {
+            add(
+                &format!("TM gap, {name}"),
+                LEDGER_TM,
+                vec![one, one],
+                vec![0.0],
+                vec![gap(ratio)],
+                0,
+                tau,
+            );
+        }
+        // Mode 1 at 30° in a unit medium: `sin θ = π/ω`.
+        add(
+            "TM gap, half, 30°",
+            LEDGER_TM,
+            vec![one, one],
+            vec![0.0],
+            vec![gap(pi)],
+            1,
+            2.0 * pi,
+        );
+        add(
+            "TM cut",
+            LEDGER_TM,
+            vec![one, one],
+            vec![0.0],
+            vec![Joint::Cut],
+            0,
+            tau,
+        );
+        let resonant = resonant_ratio(0.15, tau, 1.0, 8.0);
+        for (name, apart) in [("resonant", 0.15), ("off resonance", 0.25)] {
+            add(
+                &format!("TM gap pair, {name}"),
+                LEDGER_TM,
+                vec![one; 3],
+                vec![0.0, apart],
+                vec![gap(resonant); 2],
+                0,
+                tau,
+            );
+        }
+        for (name, physics, other, downward) in [
+            ("TM gap, 1 and ε 4", LEDGER_TM, Layer::of(4.0, 1.0), false),
+            ("TE gap, 1 and ε 4", LEDGER_TE, Layer::of(4.0, 1.0), false),
+            (
+                "TE gap, 1 and ε 4, drawn down",
+                LEDGER_TE,
+                Layer::of(4.0, 1.0),
+                true,
+            ),
+            (
+                "Mechanical gap, 1 and k 4",
+                PhysicsModel::Mechanical,
+                Layer::of(1.0, 4.0),
+                false,
+            ),
+            (
+                "Mechanical gap, 1 and k 4, drawn down",
+                PhysicsModel::Mechanical,
+                Layer::of(1.0, 4.0),
+                true,
+            ),
+        ] {
+            add(
+                name,
+                physics,
+                vec![one, other],
+                vec![0.0],
+                vec![Joint::Gap {
+                    ratio: pi,
+                    downward,
+                }],
+                0,
+                tau,
+            );
+        }
+        cases
+    }
+
+    /// What PH-13's handoff reads: the case read on the coarse mesh before
+    /// the handoff and, if asked, on the fine one after it; and the gap's
+    /// memory right after it, sample by sample, against the jump the coarse
+    /// run's lock-in reads at that instant and against the exact jump the
+    /// measured waves drive, the worst of each relative to the jump's
+    /// amplitude.
+    #[derive(Clone, Debug)]
+    struct GapHandoff {
+        before: InterfaceReading,
+        after: Option<InterfaceReading>,
+        carried: f64,
+        exact: f64,
+    }
+
+    /// PH-13's handoff: `case`, with one gap, held to steady state on edge
+    /// `coarse` and read; remeshed at `fine` through the maps the runtime
+    /// prepares and handed over by `CanonicalWaveState::handed_over`, the
+    /// gap's memory carried by physical position; then, with `after`,
+    /// settled again and read on the fine mesh. Both run at the finer
+    /// mesh's step.
+    fn gap_handoff(case: &FresnelCase, coarse: f64, fine: f64, after: bool) -> GapHandoff {
+        let (ramp, settle, window) = fresnel_timing(case);
+        let first_leg = ramp + settle + window;
+        let document = interface_document(case, ramp, first_leg + settle + window);
+        let mut runtime = TopologyRuntime::default();
+        let (source, _) = prepare_on(&mut runtime, &document, 1, coarse);
+        let (target, maps) = prepare_on(&mut runtime, &document, 2, fine);
+        let maps = maps.expect("a remesh carries its maps");
+        let dt = source
+            .recommended_time_step()
+            .min(target.recommended_time_step());
+        let (_, _, points) = fresnel_points(case);
+        let (from, to) = (&source.canonical_operator, &target.canonical_operator);
+        let mut state = CanonicalWaveState::zero(from, dt)
+            .unwrap()
+            .with_wall_step(from, CanonicalWallStep::default())
+            .unwrap();
+        let steps = (first_leg / dt).ceil() as usize;
+        let (traces, gaps) = record_steps(
+            &mut state,
+            &source,
+            steps,
+            &point_stencils(&source, &points),
+        );
+        let before = fresnel_read(case, from, &traces, &gaps, dt, dt, window);
+        let desired = crate::canonical_gpu::CanonicalGpuRuntimeTransfer::from_primary_transfer(
+            from,
+            to,
+            &source.canonical_forcing,
+            &target.canonical_forcing,
+            &maps.primary,
+            [0; 4],
+        )
+        .unwrap()
+        .desired_totals(from, state.primary_flux());
+        let (mut state, _) = state
+            .handed_over(
+                from,
+                to,
+                &target.canonical_forcing,
+                CanonicalHandoffMaps {
+                    primary: &maps.primary,
+                    complementary: &maps.complementary,
+                    thin_gap: &maps.thin_gap,
+                    outgoing: &maps.outgoing,
+                },
+                &desired,
+                dt,
+            )
+            .unwrap();
+        // The memory reads `ψ_left − ψ_right`, `ψ = u/(iω)`, and a lock-in
+        // phasor `P` stands for `Re(2 P e^{iωt})`.
+        let time = steps as f64 * dt;
+        let interface = case
+            .joints
+            .iter()
+            .position(|joint| matches!(joint, Joint::Gap { .. }))
+            .unwrap();
+        let Joint::Gap { downward, .. } = case.joints[interface] else {
+            unreachable!()
+        };
+        let sign = if downward { 1.0 } else { -1.0 };
+        let exact = (case.exact_jumps(before.incident, before.returned)[interface]
+            / Phasor::new(0.0, case.omega))
+        .scale(sign);
+        let read = before.gaps[0].jump;
+        let at = |phasor: Phasor, y: f64| {
+            let turn = Phasor::new((case.omega * time).cos(), (case.omega * time).sin());
+            2.0 * (phasor * turn).re * (case.kt() * (y + 0.5)).cos()
+        };
+        let x = case.interfaces[interface];
+        let (mut carried, mut against_exact) = (0.0_f64, 0.0_f64);
+        for (sample, memory) in to
+            .thin_gap_samples()
+            .iter()
+            .zip(state.thin_gap_memory(to).unwrap())
+        {
+            let point = to.node_points()[sample.left_node as usize];
+            if (point.x - x).abs() > 1.0e-9 {
+                continue;
+            }
+            carried = carried.max((memory.jump - at(read, point.y)).abs() / (2.0 * read.norm()));
+            against_exact =
+                against_exact.max((memory.jump - at(exact, point.y)).abs() / (2.0 * exact.norm()));
+        }
+        let after = after.then(|| {
+            let steps = ((settle + window) / dt).ceil() as usize;
+            let (traces, gaps) = record_steps(
+                &mut state,
+                &target,
+                steps,
+                &point_stencils(&target, &points),
+            );
+            fresnel_read(case, to, &traces, &gaps, dt, time + dt, window)
+        });
+        GapHandoff {
+            before,
+            after,
+            carried,
+            exact: against_exact,
+        }
+    }
+
+    /// The transfer matrix meets the gap's closed forms: a gap of ratio `r`
+    /// in a unit medium passes `|T|² = 1/(1 + (k_x/2r)²)` with no loss, its
+    /// jump the flux over the spring; a stiff gap tends to the weld and a
+    /// weak one to the cut; and two gaps `d` apart transmit everything where
+    /// `r = (k/2) tan(k d)`, which the search finds.
+    #[test]
+    fn the_gap_transfer_meets_its_closed_forms() {
+        let tau = std::f64::consts::TAU;
+        let one = Layer::of(1.0, 1.0);
+        let gap = |ratio: f64| Joint::Gap {
+            ratio,
+            downward: false,
+        };
+        for (ratio, kt) in [
+            (0.3, 0.0),
+            (std::f64::consts::PI, 0.0),
+            (30.0, 0.0),
+            (2.0, 3.0),
+        ] {
+            let kx = (tau * tau - kt * kt).sqrt();
+            let (amplitudes, jumps) =
+                layered_amplitudes(LEDGER_TM, &[one, one], &[0.0], &[gap(ratio)], tau, kt);
+            let (r, t) = (amplitudes[0].1, amplitudes[1].0);
+            let passed = 1.0 / (1.0 + (kx / (2.0 * ratio)).powi(2));
+            assert!(
+                (t.norm().powi(2) - passed).abs() < 1.0e-12,
+                "{ratio}: {t:?}"
+            );
+            assert!((r.norm().powi(2) + t.norm().powi(2) - 1.0).abs() < 1.0e-12);
+            // The flux of the transmitted wave over the spring.
+            let flux = Phasor::new(0.0, -kx) * t;
+            assert!((jumps[0] - flux.scale(1.0 / ratio)).norm() < 1.0e-12);
+        }
+        let welded = layered_response(
+            LEDGER_TM,
+            &[one, Layer::of(4.0, 1.0)],
+            &[0.0],
+            &[Joint::Welded],
+            tau,
+            0.0,
+        );
+        let stiff = layered_response(
+            LEDGER_TM,
+            &[one, Layer::of(4.0, 1.0)],
+            &[0.0],
+            &[gap(1.0e9)],
+            tau,
+            0.0,
+        );
+        assert!((welded.0 - stiff.0).norm() < 1.0e-8 && (welded.1 - stiff.1).norm() < 1.0e-8);
+        let cut = layered_response(LEDGER_TM, &[one, one], &[0.0], &[Joint::Cut], tau, 0.0);
+        let weak = layered_response(LEDGER_TM, &[one, one], &[0.0], &[gap(1.0e-9)], tau, 0.0);
+        assert!((cut.0 - weak.0).norm() < 1.0e-8 && cut.1.norm() < 1.0e-12);
+        assert!((cut.0 - Phasor::new(1.0, 0.0)).norm() < 1.0e-12);
+        let apart = 0.15;
+        let closed = 0.5 * tau * (tau * apart).tan();
+        assert!((resonant_ratio(apart, tau, 1.0, 8.0) - closed).abs() < 1.0e-6 * closed);
+    }
+
+    /// PH-13's bounds, every reading of a level under one, the misfit under
+    /// twice it. At the production step on edge 0.1 the worst is 2.4e-3, the
+    /// weak gap's field jump read off the fitted waves, and the misfit
+    /// 3.5e-3 beside `ε = 4` on five elements to its wavelength; on 0.07,
+    /// 9.7e-4 and 1.8e-3; on 0.05, 2.4e-4, the gap's stored energy, and
+    /// 3.0e-4. The gap's memory is a drifted variable of the step and
+    /// carries its bounded second-order offset, which sets its readings
+    /// from 0.07 down: 1e-3, 4e-4 and 2.4e-4 of the stored energy. Right
+    /// after a handoff the memory stands 8.8e-4 of the jump from the coarse
+    /// run's harmonic at that instant, with the gap carried, and 1 without.
+    const GAP_COARSE: f64 = 5.0e-3;
+    const GAP_MIDDLE: f64 = 2.0e-3;
+    const GAP_FINE: f64 = 5.0e-4;
+    const GAP_CARRIED: f64 = 3.0e-3;
+
+    /// Holds a handoff's memory right after it to `GAP_CARRIED`.
+    fn gap_handoff_holds(case: &FresnelCase, handoff: &GapHandoff) {
+        eprintln!(
+            "{} handed over: carried {:.2e}, against the exact jump {:.2e}",
+            case.name, handoff.carried, handoff.exact
+        );
+        for (what, error) in [("carried", handoff.carried), ("exact", handoff.exact)] {
+            assert!(
+                error < GAP_CARRIED,
+                "{} handed over: the memory {error:e} off the {what} jump",
+                case.name
+            );
+        }
+    }
+
+    /// PH-13 in the gate, on edge 0.1 at the production step: the gap that
+    /// passes half the mode, the pair at its resonance, and the gap between
+    /// a unit medium and `ε = 4` in TE drawn down, its spring the two sides'
+    /// geometric mean; and the half gap held to steady state and remeshed
+    /// at 0.07, its memory read right after the handoff.
+    #[test]
+    fn thin_gaps_scatter_as_their_springs_say() {
+        let names = [
+            "TM gap, half",
+            "TM gap pair, resonant",
+            "TE gap, 1 and ε 4, drawn down",
+        ];
+        let cases = gap_cases()
+            .into_iter()
+            .filter(|case| names.contains(&case.name.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(cases.len(), names.len());
+        let (levels, handoff) = std::thread::scope(|scope| {
+            let handoff = scope.spawn(|| gap_handoff(&cases[0], 0.1, 0.07, false));
+            (
+                fresnel_levels(&cases, &[(0.1, 1.0)]),
+                handoff.join().unwrap(),
+            )
+        });
+        for (case, errors) in cases.iter().zip(levels) {
+            fresnel_holds(case, 0.1, 1.0, errors[0], GAP_COARSE);
+        }
+        gap_handoff_holds(&cases[0], &handoff);
+    }
+
+    /// PH-13 (`docs/spikes/funfern-testing-campaign-plan.md`, section 6e):
+    /// every case on edge 0.1 and 0.07; a case of each kind on 0.05, `R` and
+    /// `T` there under 0.6 of their readings on 0.07 wherever those stand
+    /// above 2e-5; the half and the stiff gap at half the step, `R` and `T`
+    /// within 5% of the full step's and the stored energy's offset under
+    /// 0.4 of it; and the half gap at 30°, whose jump varies along the gap,
+    /// remeshed from 0.1 to 0.07 and read on both.
+    #[test]
+    #[ignore = "PH-13, about twelve minutes; run in the nightly"]
+    fn thin_gaps_converge_to_their_springs() {
+        let cases = gap_cases();
+        let fine = [
+            "TM gap, weak",
+            "TM gap, half, 30°",
+            "TM cut",
+            "TM gap pair, resonant",
+            "TE gap, 1 and ε 4",
+            "Mechanical gap, 1 and k 4",
+        ];
+        let stepped = ["TM gap, half", "TM gap, stiff"];
+        let named = |name: &str| cases.iter().find(|case| case.name == name).unwrap().clone();
+        let handed = named("TM gap, half, 30°");
+        let subset = fine.map(named);
+        let halved = stepped.map(named);
+        let (levels, finer, steps, handoff) = std::thread::scope(|scope| {
+            let handoff = scope.spawn(|| gap_handoff(&handed, 0.1, 0.07, true));
+            (
+                fresnel_levels(&cases, &[(0.1, 1.0), (0.07, 1.0)]),
+                fresnel_levels(&subset, &[(0.05, 1.0)]),
+                fresnel_levels(&halved, &[(0.1, 1.0), (0.1, 0.5)]),
+                handoff.join().unwrap(),
+            )
+        });
+        for (case, errors) in cases.iter().zip(&levels) {
+            fresnel_holds(case, 0.1, 1.0, errors[0], GAP_COARSE);
+            fresnel_holds(case, 0.07, 1.0, errors[1], GAP_MIDDLE);
+        }
+        for (case, errors) in subset.iter().zip(finer) {
+            let errors = errors[0];
+            fresnel_holds(case, 0.05, 1.0, errors, GAP_FINE);
+            let coarser = levels[cases
+                .iter()
+                .position(|other| other.name == case.name)
+                .unwrap()][1];
+            for (what, at, before) in [
+                ("R", errors.reflection, coarser.reflection),
+                ("T", errors.transmission, coarser.transmission),
+            ] {
+                assert!(
+                    before < 2.0e-5 || at < 0.6 * before,
+                    "{}: {what} {before:.2e} on 0.07, {at:.2e} on 0.05",
+                    case.name
+                );
+            }
+        }
+        for (case, errors) in halved.iter().zip(steps) {
+            let (full, half) = (errors[0], errors[1]);
+            fresnel_holds(case, 0.1, 0.5, half, GAP_COARSE);
+            for (what, at, before) in [
+                ("R", half.reflection, full.reflection),
+                ("T", half.transmission, full.transmission),
+            ] {
+                assert!(
+                    (at - before).abs() < 0.05 * before,
+                    "{}: {what} {before:.2e} at the step, {at:.2e} at half",
+                    case.name
+                );
+            }
+            let (at, before) = (half.gap_energy.unwrap(), full.gap_energy.unwrap());
+            assert!(
+                at < 0.4 * before,
+                "{}: stored energy {before:.2e} off at the step, {at:.2e} at half",
+                case.name
+            );
+        }
+        gap_handoff_holds(&handed, &handoff);
+        fresnel_holds(&handed, 0.1, 1.0, handed.errors(handoff.before), GAP_COARSE);
+        fresnel_holds(
+            &handed,
+            0.07,
+            1.0,
+            handed.errors(handoff.after.unwrap()),
+            GAP_MIDDLE,
+        );
+    }
+
     /// Prints a PH-11 reading and holds it: the scattering, the power and,
     /// across a single interface, the field's and the flux's jumps, all
     /// under `bound`.
@@ -16316,8 +17151,14 @@ mod tests {
         errors: FresnelErrors,
         bound: f64,
     ) {
+        let gap = errors.gap_jump.map_or(String::new(), |jump| {
+            format!(
+                ", gap {jump:.1e}, stored {:.1e}",
+                errors.gap_energy.unwrap_or(0.0)
+            )
+        });
         eprintln!(
-            "{} on {edge} at {fraction}: R {:.2e}, T {:.2e}, power {:.1e}, jumps {:.1e} {:.1e}, misfit {:.1e}",
+            "{} on {edge} at {fraction}: R {:.2e}, T {:.2e}, power {:.1e}, jumps {:.1e} {:.1e}, misfit {:.1e}{gap}",
             case.name,
             errors.reflection,
             errors.transmission,
@@ -16338,6 +17179,8 @@ mod tests {
             ("power", errors.power),
             ("field jump", errors.field_jump.unwrap_or(0.0)),
             ("flux jump", errors.flux_jump.unwrap_or(0.0)),
+            ("gap's jump", errors.gap_jump.unwrap_or(0.0)),
+            ("gap's energy", errors.gap_energy.unwrap_or(0.0)),
         ] {
             assert!(
                 error < bound,

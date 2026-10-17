@@ -24973,3 +24973,63 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-17 — PH-13: thin gaps against their spring law
+
+- **What.** PH-11's channel with a thin gap at an interface: a divider
+  whose two reflecting faces a spring couples, `K` its ratio times the
+  geometric mean of the stiffness either side (`k`, `1/μ`, `1/ε`). Across it
+  the flux is the spring's tension, `K (u_right − u_left) = s_x ∂_x u`, which
+  the transfer matrix now carries as one more interface condition (a cut is
+  `K = 0`), so PH-11's scattering matrix holds `R` and `T`, the power and,
+  across one gap, the field's jump against the flux over the spring. The
+  run also records the gap's memory, the jump of the field's time integral
+  at each sample: its lock-in along the gap is held to the exact jump the
+  measured waves drive, and the springs' averaged energy to `K |J|²` over
+  the mode. PH-11's run is split into its timing, its points and a reader
+  of recorded traces, which PH-13's handoff reads before and after with.
+- **Oracle.** `the_gap_transfer_meets_its_closed_forms`: a gap of ratio `r`
+  in a unit medium passes `|T|² = 1/(1 + (k_x/2r)²)` without loss, its jump
+  the flux over the spring; a stiff gap tends to the weld and a weak one to
+  the cut; a pair `d` apart transmits everything at `r = (k/2) tan(k d)`,
+  which the golden-section search finds (in a bracket below the weld, where
+  `|R|` falls again).
+- **Cases.** In TM: gaps passing 1%, half and 99% at normal incidence, the
+  half gap at 30°, the cut, a pair 0.15 apart at its resonance and 0.25
+  apart off it. Between a unit medium and `ε = 4` in TM and TE (`K = r` and
+  `r/2`) and `k = 4` in Mechanical (`2r`), the last two drawn either way.
+  Between unit media every skin is the same nodal problem, so the coupling
+  family runs once.
+- **What the sizing taught.**
+  - The gap reaches the floor and the ceiling split: 45 samples on edge
+    0.1, the tips' faces apart, the springs totalling the ratio times its
+    length exactly.
+  - The gap's stored energy read 6.4e-4 to 1.0e-3 off on 0.1 and 4e-4 on
+    0.07 in every case. The fourth-order step drifts the complementary flux
+    and the gap's memory with its corrected field `ũ`, and a drifted
+    variable carries the step's bounded `O(dt²)` offset
+    (`funfern-fourth-order-step.md`): at half and a quarter of the step
+    7.1e-4 fell to 1.5e-4 and 8e-6, 6.4e-4 to 1.7e-4 and 5.8e-5, while `R`
+    and `T` stood to three digits.
+  - A handoff with the second leg costs 150 to 280 s; the gate reads the
+    memory right after it (26 s for the whole test), the nightly also the
+    run after.
+- **Results.** In the gate, `thin_gaps_scatter_as_their_springs_say`
+  (26 s): the half gap, the resonant pair and the TE gap drawn down on edge
+  0.1, every reading under 5e-3 (2.3e-3, the TE gap's field jump); the half
+  gap remeshed at 0.07, its memory 8.8e-4 of the jump from the coarse run's
+  harmonic at that instant and 7.1e-4 from the exact, held to 3e-3.
+  Nightly, `thin_gaps_converge_to_their_springs` (job
+  `thin-gap-interfaces`, 12 minutes): every case on 0.1 and 0.07 under
+  5e-3 and 2e-3 (2.4e-3 and 9.7e-4, the weak gap's field jump); a case of
+  each kind on 0.05 under 5e-4 (2.4e-4), `R` and `T` falling 2.1 to 13
+  times from 0.07; at half the step `R` and `T` within 5% and the stored
+  energy's offset under 0.4 of the step's; the half gap at 30° remeshed and
+  read on both meshes, its memory carried to 4.0e-4.
+- **Mutation.** `gap-history-dropped-on-handoff`: `hand_fields` carries no
+  gap history, and the springs restart unstretched.
+- **Not tested here.** A dissipative gap is not implemented; the impedance
+  faces are PH-04's, PH-06's and PH-09's (a ratio-2 wall against its law).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

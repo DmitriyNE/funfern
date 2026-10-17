@@ -433,9 +433,9 @@ with their reports in `docs/spikes/`.
   PH-09 the walls' transient response (section 6b), PH-11 Fresnel (done
   on 2026-10-17, section 6c),
   PH-12 cylinder scattering (done on 2026-10-17, section 6d), PH-13 thin
-  gaps, PH-14 and PH-15 temporal and modulated materials, PH-16 nonlinear
-  laws, PH-18 probes and observables, with PH-12's far field, PH-19
-  manufactured solutions.
+  gaps (done on 2026-10-17, section 6e), PH-14 and PH-15 temporal and
+  modulated materials, PH-16 nonlinear laws, PH-18 probes and observables,
+  with PH-12's far field, PH-19 manufactured solutions.
 - **C, invariants and stress:** IV-01 to IV-13, AMR-01 to AMR-04, RT-01 to
   RT-08, the numerical edge cases, long runs and resource lifecycle. The
   metamorphic tests and the real-device fuzzing need none of the reference
@@ -552,6 +552,25 @@ is 8e-4 at the default tolerance and 2e-4 at PH-06's. The gate holds six
 cases on edge 0.1; the nightly job `cylinder-scattering` every case on
 three meshes and two tolerances. The mutation `curve-sampling-coarsened`.
 No defect found; the far field moves to PH-18, as agreed.
+
+## 6e. PH-13: thin gaps
+
+**Done on 2026-10-17** (`docs/engineering-log.md`). PH-11's channel with a
+gap at its interface: a spring coupling two reflecting faces, carried into
+the transfer matrix as the flux equal to the spring's tension, so that the
+scattering matrix holds `R` and `T` as for PH-11, and the gap's own memory -
+the jump it stores - and its springs' energy are held to the exact jump.
+Weak, half and stiff coupling, oblique incidence, the cut as the limit, a
+resonant pair and one off it, and two-sided gaps between different media
+in each skin drawn either way. A half gap remeshed with its memory carried
+by the handoff, read right after it and again on the new mesh. The memory
+carries the production step's bounded second-order offset, 7e-4 of the
+stored energy on edge 0.1, which falls with the step while `R` and `T`
+stand. The gate holds three cases and the handoff; the nightly job
+`thin-gap-interfaces` every case on three meshes and at half the step. The
+mutation `gap-history-dropped-on-handoff`. A dissipative gap is not
+implemented (`architecture.md`); the impedance faces it would stand for
+are PH-04's, PH-06's and PH-09's. No defect found.
 
 ## 7. Infrastructure
 

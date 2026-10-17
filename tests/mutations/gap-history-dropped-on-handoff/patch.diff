@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/canonical_transfer.rs b/crates/funfern-core/src/canonical_transfer.rs
+--- a/crates/funfern-core/src/canonical_transfer.rs
++++ b/crates/funfern-core/src/canonical_transfer.rs
+@@ -2012,7 +2012,7 @@
+         primary_flux,
+         complementary_flux,
+         integrated,
+-        thin_gaps,
++        thin_gaps: Vec::new(),
+         outgoing_z,
+     })
+ }

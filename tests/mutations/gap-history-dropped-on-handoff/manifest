@@ -1,0 +1,4 @@
+about: a handoff carries no thin-gap history, so every gap's springs restart unstretched on the new generation and its stored energy and jump are lost
+test: cargo test --release -p funfern-app --lib -- thin_gaps_scatter_as_their_springs_say
+expect: TM gap, half handed over: the memory .* off the (carried|exact) jump
+needs: cpu

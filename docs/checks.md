@@ -580,6 +580,42 @@ falls 3.3 to 4.9 times, to under 4e-4 (2.2e-4); half the step moves nothing.
 The mutation `curve-sampling-coarsened`, the topology sampling curves to
 four times its tolerance, leaves the rim 128 vertices at any tolerance and
 puts `ε = 4` in TE 7.3e-4 off the circle.
+PH-13 holds thin gaps to their spring law in PH-11's channel. A gap is a
+divider whose two reflecting faces a spring couples: the flux across it is
+the spring's tension, `K (u_right − u_left) = s_x ∂_x u`, `K` its ratio times
+the geometric mean of the stiffness either side - `k`, `1/μ`, `1/ε` - so the
+transfer matrix carries it as one more interface condition and PH-11's
+scattering matrix holds `R` and `T`, the power and, across one gap, the
+field's jump against the flux over the spring. The gap's own memory, the
+jump of the field's time integral at each sample, is read by the lock-in
+along the gap and held to the exact jump the measured waves drive, and the
+springs' averaged energy to `K |J|²` over the mode. The transfer matrix
+meets `|T|² = 1/(1 + (k_x/2r)²)`, the weld and the cut as limits and a
+pair's resonance at `r = (k/2) tan(k d)`
+(`the_gap_transfer_meets_its_closed_forms`). Cases: in TM a weak gap passing
+1%, one passing half and a stiff one 99% at normal incidence, the half gap
+at 30°, the cut (two independent reflecting faces, the vanishing spring's
+limit), and a pair 0.15 apart at the ratio where it transmits everything
+and 0.25 apart off it; between a unit medium and `ε = 4` in TM and TE and
+`k = 4` in Mechanical, the last two drawn either way, which read alike. The
+gap reaches the floor and the ceiling split, its springs totalling the ratio
+times its length. Its memory is a drifted variable of the production step
+and carries the step's bounded second-order offset
+(`funfern-fourth-order-step.md`): the stored energy 7e-4 off at the step on
+0.1 and 1.5e-4 at half of it, while `R` and `T` do not move. In the gate,
+`thin_gaps_scatter_as_their_springs_say` (26 s): the half gap, the pair at
+resonance and the two-sided TE gap drawn down on edge 0.1, every reading
+under 5e-3 (2.3e-3 at worst, the TE gap's field jump); and the half gap
+remeshed at 0.07, its memory right after the handoff 8.8e-4 of the jump
+from the coarse run's harmonic at that instant, held to 3e-3. Nightly, the
+job `thin-gap-interfaces` (12 minutes on the M1 Max): every case on 0.1
+and 0.07 under 5e-3 and 2e-3 (2.4e-3 and 9.7e-4); a case of each kind on
+0.05 under 5e-4 (2.4e-4), `R` and `T` falling 2 to 13 times from 0.07; at
+half the step the stored energy's offset under 0.4 of the step's; and the
+half gap at 30°, its jump varying along the gap, remeshed and read on both
+meshes, its memory carried to 4e-4. The mutation
+`gap-history-dropped-on-handoff`, a handoff carrying no gap history,
+restarts the springs unstretched, the memory a whole jump off.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the
