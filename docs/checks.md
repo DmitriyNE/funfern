@@ -119,6 +119,13 @@ each its own bits across batchings, in 80 to 120 s a fixture on the four-core
 runner, the rejection fixture the longest, under a driver deadline the script
 raises to 600 s for the software device; the Pages deploy waits for the job. Lavapipe flushes subnormals to zero, which is how it
 found the nonlinear inverse's relative convergence tests unreachable near zero.
+The f64 inverse on the CPU had the same flaw for subnormal fluxes, which it
+underflows to rather than flushes: a Kerr or saturable target below f64's
+smallest normal could not meet its relative tests, and a Kerr medium started
+from a Gaussian whose tail went subnormal at a node refused to build. Its tests
+now have absolute floors of a few of the smallest subnormal's spacings
+(`a_field_law_inverts_a_subnormal_flux`,
+`a_kerr_state_starts_from_a_subnormal_flux`).
 
 The same fixtures run in the browser from the fixtures binary's bundle,
 `scripts/fixtures-page.sh && scripts/trunk build fixtures.html --release

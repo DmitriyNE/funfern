@@ -16871,4 +16871,65 @@ mod tests {
         assert!(kick.abs() < 3.0e-3, "{kick}");
         assert!(frozen.abs() > 5.0 * kick.abs(), "{frozen} {kick}");
     }
+
+    /// A Kerr medium starts from a field whose flux is subnormal at every
+    /// node, as a Gaussian's tail is far from its centre, and steps on: each
+    /// node's field times its mass is its flux to a few of the smallest
+    /// subnormal's spacings, the law linear down there.
+    #[test]
+    fn a_kerr_state_starts_from_a_subnormal_flux() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.field = crate::FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(0.5),
+            amplitude_bound: None,
+        };
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.4,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let base = operator.base();
+        for size in [1.0e-315, 1.0e-310] {
+            let primary = base.primary_mass().iter().map(|mass| mass * size).collect();
+            let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+            let mut state = CanonicalTemporalWaveState::new(
+                &operator,
+                0.4 * operator.maximum_time_step(),
+                primary,
+                complementary,
+            )
+            .unwrap_or_else(|error| panic!("a flux of {size:e}: {error}"));
+            let field = operator
+                .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                .unwrap();
+            for ((u, mass), flux) in field
+                .iter()
+                .zip(base.primary_mass())
+                .zip(state.primary_flux())
+            {
+                assert!(
+                    (mass * u - flux).abs() <= f64::from_bits(8),
+                    "a flux of {flux:e} at a mass of {mass}: {u:e}"
+                );
+            }
+            for _ in 0..10 {
+                state.step(&operator).unwrap();
+            }
+        }
+    }
 }

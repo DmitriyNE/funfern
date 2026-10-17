@@ -25152,3 +25152,38 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-18 — The f64 constitutive inverse resolves a subnormal flux
+
+- **Found by PH-16's inversion test**, against an independent root: for Kerr
+  and saturable laws `ConstitutiveSite::invert` refused the smallest
+  subnormal target, 1e-315 and 1e-310 as not converged, and met some other
+  subnormals by luck. Its tests were relative - a residual within
+  `8ε·target`, a bracket within `ε·high` - and for a subnormal target both
+  products underflow to zero, so neither could pass and the solve spent its
+  200 iterations. The device had the same flaw where it flushes subnormals,
+  fixed on 2026-10-09 with floors at f32's smallest normal; the f64 solve had
+  none.
+- **Reached in a run.** A Kerr medium in a channel 16 long, started from a
+  Gaussian of width 0.2 at one end, could not build its state: the Gaussian's
+  tail is about 6e-313 at a node 5.4 away (171 nodes subnormal), and the
+  state's first inverse refused it, "the constitutive inverse did not
+  converge". A handoff building a state from transferred fluxes takes the
+  same path. A wavefront running into rest and a field decaying under loss
+  did not reach it: a node with a field already solves from that guess.
+- **Fix.** Each relative test has an absolute floor: the residual four of
+  the smallest subnormal's spacings, the roundings a subnormal map's value
+  carries, the bracket two. A floor at f64's smallest normal, as the device
+  has at f32's, was tried first and accepted the bracket's first midpoint for
+  every subnormal target, off by up to its whole value: f64 underflows
+  gradually, so its resolution down there is the subnormal spacing.
+- **Tests.** `a_field_law_inverts_a_subnormal_flux`: Kerr, saturable and a
+  junction of both at 5e-324, 1e-315, 1e-310 and 1e-300, each root within the
+  residual's floor over the slope and a spacing of `target/Σm`.
+  `a_kerr_state_starts_from_a_subnormal_flux`: a Kerr medium built from a
+  flux of 1e-315 and of 1e-310 at every node, `m·u` within eight spacings of
+  each flux, and stepped. Both failed before the fix; the channel builds and
+  runs 500 steps with it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

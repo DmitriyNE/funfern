@@ -1511,6 +1511,12 @@ impl FieldLawValues {
 /// Relative residual an f64 inverse is accepted at: a few ulps of the target.
 pub const F64_INVERSE_TOLERANCE: f64 = 8.0 * f64::EPSILON;
 
+/// The absolute floors under an f64 inverse's relative tests: a residual of
+/// four of the smallest subnormal's spacings, the roundings a subnormal
+/// map's value carries, and a bracket of two, adjacent floats and one more.
+const SUBNORMAL_RESIDUAL: f64 = f64::from_bits(4);
+const SUBNORMAL_BRACKET: f64 = f64::from_bits(2);
+
 /// The criterion the f32 device port is held to, in the same relative units:
 /// a residual below what one f32 rounding of the conserved variable already
 /// introduces, so an accepted root is indistinguishable from the exact one in
@@ -1630,7 +1636,13 @@ impl<'a> ConstitutiveSite<'a> {
     /// falls back to bisection whenever its step would leave the bracket or
     /// fails to halve it, so the iteration cannot diverge; the cap turns a
     /// pathological case into a detected failure rather than an accepted
-    /// approximation.
+    /// approximation. The residual and the bracket are relative, each with
+    /// an absolute floor of a few of the smallest subnormal's spacings:
+    /// relative to a subnormal target the tests underflow to zero and could
+    /// never pass, and a residual or bracket within those spacings is as
+    /// resolved as f64 holds it. The device, which flushes subnormals, floors
+    /// them at f32's smallest normal instead (`docs/engineering-log.md`,
+    /// 2026-10-09).
     pub fn invert_to(
         &self,
         target: f64,
@@ -1671,7 +1683,7 @@ impl<'a> ConstitutiveSite<'a> {
         };
         for _ in 0..INVERSE_ITERATIONS {
             let residual = self.value(r) - target;
-            if residual.abs() <= tolerance * target {
+            if residual.abs() <= (tolerance * target).max(SUBNORMAL_RESIDUAL) {
                 return Ok(r);
             }
             if residual < 0.0 {
@@ -1679,7 +1691,7 @@ impl<'a> ConstitutiveSite<'a> {
             } else {
                 high = r;
             }
-            if high - low <= f64::EPSILON * high {
+            if high - low <= (f64::EPSILON * high).max(SUBNORMAL_BRACKET) {
                 return Ok(0.5 * (low + high));
             }
             let newton = r - residual / self.tangent(r);
@@ -3480,5 +3492,57 @@ mod tests {
         assert_eq!(number_text(1.0 / 3.0), "0.3333");
         assert_eq!(number_text(-0.0), "0");
         assert_eq!(number_text(0.00001), "0");
+    }
+
+    /// A subnormal target is inverted, not refused: there every law here is
+    /// linear to the last bit, so the root is `target/Σm` within the
+    /// residual's floor over that slope and a spacing. The relative tests
+    /// alone - a residual within 8 ulps of the target, a bracket within one
+    /// of its top - underflow to zero there and could never pass.
+    #[test]
+    fn a_field_law_inverts_a_subnormal_flux() {
+        let kerr = FieldLawValues::Polynomial {
+            chi1: 0.0,
+            chi2: 0.5,
+            amplitude_bound: None,
+        };
+        let saturable = FieldLawValues::Saturable {
+            chi: 0.8,
+            saturation: 0.5,
+        };
+        for terms in [
+            vec![ConstitutiveTerm {
+                coefficient: 1.5,
+                law: kerr,
+            }],
+            vec![ConstitutiveTerm {
+                coefficient: 1.0,
+                law: saturable,
+            }],
+            vec![
+                ConstitutiveTerm {
+                    coefficient: 0.6,
+                    law: kerr,
+                },
+                ConstitutiveTerm {
+                    coefficient: 0.4,
+                    law: saturable,
+                },
+            ],
+        ] {
+            let site = ConstitutiveSite::new(&terms);
+            let slope = site.linear_coefficient();
+            for target in [f64::from_bits(1), 1.0e-315, 1.0e-310, 1.0e-300] {
+                let r = site
+                    .invert(target, f64::NAN)
+                    .unwrap_or_else(|error| panic!("{terms:?} at {target:e}: {error:?}"));
+                let allowed =
+                    (SUBNORMAL_RESIDUAL / slope + f64::from_bits(1)).max(16.0 * f64::EPSILON * r);
+                assert!(
+                    (r - target / slope).abs() <= allowed,
+                    "{terms:?} at {target:e}: {r:e}"
+                );
+            }
+        }
     }
 }
