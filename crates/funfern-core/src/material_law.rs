@@ -3545,4 +3545,272 @@ mod tests {
             }
         }
     }
+
+    /// PH-16's constitutive inversion. `ConstitutiveSite::invert` against an
+    /// independent root - bisection on the law's own definition down to
+    /// adjacent floats, and Cardano for focusing Kerr - for Kerr focusing and
+    /// defocusing, the latter bounded at half its turning point and at 0.99
+    /// of it, where the map's slope falls to 2%; saturable laws of either
+    /// sign; a junction of Kerr and saturable terms; and the linear map. At
+    /// targets from the smallest subnormal through `1e-310`, `1e-200` and
+    /// `1e-8` to 100, cut to what a bound admits, and at the bound's own
+    /// value: a subnormal target's root within the residual's floor of four
+    /// spacings over the slope, and one; otherwise the residual within twice
+    /// the solver's tolerance of 8 ulps, the root within what that residual
+    /// allows over the slope and four ulps, and past `1e-300` the stored
+    /// energy within 1e-12 of `q r − ∫₀ʳ P` by Gauss-Legendre quadrature of
+    /// the definition. A
+    /// target a millionth past a bound is refused as outside the domain;
+    /// and the laws the solver does not run are refused as such - a signed
+    /// polynomial, a defocusing Kerr with no bound or one past its turning
+    /// point, a divided field law.
+    #[test]
+    fn constitutive_inverses_meet_their_roots_and_refuse_past_their_bounds() {
+        let kerr = |chi2: f64, bound: Option<f64>| FieldLawValues::Polynomial {
+            chi1: 0.0,
+            chi2,
+            amplitude_bound: bound,
+        };
+        let saturable = |chi: f64, saturation: f64| FieldLawValues::Saturable { chi, saturation };
+        // The definitions, written here: `P(r) = Σ mᵢ ḡᵢ(r) r`.
+        let multiplier = |law: FieldLawValues, r: f64| match law {
+            FieldLawValues::Linear => 1.0,
+            FieldLawValues::Polynomial { chi2, .. } => 1.0 + chi2 * r * r,
+            FieldLawValues::Saturable { chi, saturation } => {
+                1.0 + chi * r * r / (1.0 + (r / saturation).powi(2))
+            }
+        };
+        let value = |terms: &[ConstitutiveTerm], r: f64| {
+            terms
+                .iter()
+                .map(|term| term.coefficient * multiplier(term.law, r) * r)
+                .sum::<f64>()
+        };
+        let slope = |terms: &[ConstitutiveTerm], r: f64| {
+            let h = 1.0e-6 * r.max(1.0e-3);
+            (value(terms, r + h) - value(terms, (r - h).max(0.0))) / (r + h - (r - h).max(0.0))
+        };
+        let turning = 1.0 / (1.5_f64).sqrt();
+        let cases: Vec<(&str, Vec<ConstitutiveTerm>)> = vec![
+            (
+                "linear",
+                vec![ConstitutiveTerm {
+                    coefficient: 2.0,
+                    law: FieldLawValues::Linear,
+                }],
+            ),
+            (
+                "focusing Kerr",
+                vec![ConstitutiveTerm {
+                    coefficient: 1.5,
+                    law: kerr(0.5, None),
+                }],
+            ),
+            (
+                "defocusing Kerr, bounded at half its turning point",
+                vec![ConstitutiveTerm {
+                    coefficient: 1.0,
+                    law: kerr(-0.5, Some(0.5 * turning)),
+                }],
+            ),
+            (
+                "defocusing Kerr, bounded at 0.99 of its turning point",
+                vec![ConstitutiveTerm {
+                    coefficient: 1.0,
+                    law: kerr(-0.5, Some(0.99 * turning)),
+                }],
+            ),
+            (
+                "saturable",
+                vec![ConstitutiveTerm {
+                    coefficient: 1.0,
+                    law: saturable(0.8, 0.5),
+                }],
+            ),
+            (
+                "saturable, negative",
+                vec![ConstitutiveTerm {
+                    coefficient: 1.0,
+                    law: saturable(-0.5, 1.0),
+                }],
+            ),
+            (
+                "a junction of Kerr and saturable",
+                vec![
+                    ConstitutiveTerm {
+                        coefficient: 0.6,
+                        law: kerr(0.5, None),
+                    },
+                    ConstitutiveTerm {
+                        coefficient: 0.4,
+                        law: saturable(0.8, 0.5),
+                    },
+                ],
+            ),
+        ];
+        // Gauss-Legendre on 10 points, its nodes and weights on [−1, 1].
+        let nodes = [
+            0.148_874_338_981_631_2,
+            0.433_395_394_129_247_2,
+            0.679_409_568_299_024_4,
+            0.865_063_366_688_984_5,
+            0.973_906_528_517_171_7,
+        ];
+        let weights = [
+            0.295_524_224_714_752_9,
+            0.269_266_719_309_996_4,
+            0.219_086_362_515_982,
+            0.149_451_349_150_580_6,
+            0.066_671_344_308_688_14,
+        ];
+        // Fine enough for a saturable law's knee at its saturation, which
+        // the largest targets put a hundred times below their root.
+        let coenergy = |terms: &[ConstitutiveTerm], r: f64| {
+            let panels = 512;
+            let width = r / f64::from(panels);
+            (0..panels)
+                .map(|panel| {
+                    let middle = (f64::from(panel) + 0.5) * width;
+                    nodes
+                        .iter()
+                        .zip(weights)
+                        .map(|(node, weight)| {
+                            0.5 * width
+                                * weight
+                                * (value(terms, middle + 0.5 * width * node)
+                                    + value(terms, middle - 0.5 * width * node))
+                        })
+                        .sum::<f64>()
+                })
+                .sum::<f64>()
+        };
+        for (name, terms) in &cases {
+            assert!(
+                terms.iter().all(|term| term.law.executable(false).is_ok()),
+                "{name}: not run"
+            );
+            let site = ConstitutiveSite::new(terms);
+            let bound = site.amplitude_bound();
+            let ceiling = bound.map_or(f64::INFINITY, |bound| value(terms, bound));
+            let mut targets = vec![
+                f64::from_bits(1),
+                1.0e-310,
+                1.0e-200,
+                1.0e-8,
+                1.0e-3,
+                0.3,
+                1.0,
+                3.0,
+                10.0,
+                100.0,
+            ];
+            targets.retain(|target| *target < ceiling);
+            if ceiling.is_finite() {
+                targets.push(ceiling * (1.0 - 1.0e-12));
+                targets.push(ceiling);
+            }
+            for target in targets {
+                // The reference root, by bisection to adjacent floats.
+                let (mut low, mut high) = (0.0_f64, bound.unwrap_or(1.0));
+                while bound.is_none() && value(terms, high) < target {
+                    high *= 2.0;
+                }
+                loop {
+                    let middle = 0.5 * (low + high);
+                    if middle <= low || middle >= high {
+                        break;
+                    }
+                    if value(terms, middle) < target {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
+                }
+                let exact = if value(terms, high) - target < target - value(terms, low) {
+                    high
+                } else {
+                    low
+                };
+                let r = site
+                    .invert(target, f64::NAN)
+                    .unwrap_or_else(|error| panic!("{name} at {target:e}: {error:?}"));
+                if target < f64::MIN_POSITIVE {
+                    // Subnormal: the root within the residual's floor over
+                    // the slope and a spacing.
+                    let allowed =
+                        SUBNORMAL_RESIDUAL / site.linear_coefficient() + f64::from_bits(1);
+                    assert!(
+                        (r - exact).abs() <= allowed,
+                        "{name} at {target:e}: root {r:e} against {exact:e}"
+                    );
+                    continue;
+                }
+                let residual = (value(terms, r) - target).abs() / target;
+                assert!(
+                    residual <= 2.0 * F64_INVERSE_TOLERANCE,
+                    "{name} at {target:e}: residual {residual:e}"
+                );
+                let allowed = 2.0 * F64_INVERSE_TOLERANCE * target / slope(terms, exact)
+                    + 4.0 * f64::EPSILON * exact;
+                assert!(
+                    (r - exact).abs() <= allowed,
+                    "{name} at {target:e}: root {r:e} against {exact:e}"
+                );
+                if target > 1.0e-300 {
+                    let stored = site.energy(target, r);
+                    let reference = target * exact - coenergy(terms, exact);
+                    assert!(
+                        (stored - reference).abs() <= 1.0e-12 * reference.abs().max(target * exact),
+                        "{name} at {target:e}: energy {stored:e} against {reference:e}"
+                    );
+                }
+            }
+            if ceiling.is_finite() {
+                assert_eq!(
+                    site.invert(ceiling * (1.0 + 1.0e-6), f64::NAN),
+                    Err(ConstitutiveInverseError::OutsideDomain),
+                    "{name}: past its bound"
+                );
+            }
+        }
+        // Cardano for focusing Kerr: `m (r + χ r³) = q`, one real root.
+        let (m, chi) = (1.5, 0.5);
+        let site_terms = [ConstitutiveTerm {
+            coefficient: m,
+            law: kerr(chi, None),
+        }];
+        let site = ConstitutiveSite::new(&site_terms);
+        for target in [1.0e-3, 0.3, 1.0, 3.0, 10.0, 100.0] {
+            let (p, c) = (1.0 / chi, -target / (m * chi));
+            let root = (0.25 * c * c + p * p * p / 27.0).sqrt();
+            let cardano = (-0.5 * c + root).cbrt() + (-0.5 * c - root).cbrt();
+            let r = site.invert(target, f64::NAN).unwrap();
+            assert!(
+                (r - cardano).abs() <= 1.0e-12 * cardano,
+                "Kerr at {target}: {r} against Cardano's {cardano}"
+            );
+        }
+        // The laws the solver does not run.
+        assert_eq!(
+            FieldLawValues::Polynomial {
+                chi1: 0.3,
+                chi2: 0.0,
+                amplitude_bound: None
+            }
+            .executable(false),
+            Err(FieldResponseRefusal::SignedPolynomial)
+        );
+        assert_eq!(
+            kerr(-0.5, None).executable(false),
+            Err(FieldResponseRefusal::NotMonotone)
+        );
+        assert_eq!(
+            kerr(-0.5, Some(1.01 * turning)).executable(false),
+            Err(FieldResponseRefusal::NotMonotone)
+        );
+        assert_eq!(
+            kerr(0.5, None).executable(true),
+            Err(FieldResponseRefusal::Reciprocal)
+        );
+    }
 }

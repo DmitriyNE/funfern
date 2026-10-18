@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/material_law.rs b/crates/funfern-core/src/material_law.rs
+--- a/crates/funfern-core/src/material_law.rs
++++ b/crates/funfern-core/src/material_law.rs
+@@ -2061,7 +2061,7 @@
+         match self {
+             Self::None => 0.0,
+             Self::KleinGordon { omega0 } => omega0 * omega0 * r,
+-            Self::SineGordon { omega0 } => omega0 * omega0 * r.sin(),
++            Self::SineGordon { omega0 } => omega0 * omega0 * r,
+             Self::Phi4 { lambda, .. } => lambda * (r * r * r - r),
+         }
+     }

@@ -435,7 +435,8 @@ with their reports in `docs/spikes/`.
   PH-12 cylinder scattering (done on 2026-10-17, section 6d), PH-13 thin
   gaps (done on 2026-10-17, section 6e), PH-14 temporal interfaces (done on
   2026-10-18, section 6f), PH-15 modulated materials (done on 2026-10-18,
-  section 6g), PH-16 nonlinear laws, PH-18 probes and observables, with
+  section 6g), PH-16 nonlinear laws (done on 2026-10-18, section 6h), PH-18
+  probes and observables, with
   PH-12's far field, PH-19 manufactured solutions.
 - **C, invariants and stress:** IV-01 to IV-13, AMR-01 to AMR-04, RT-01 to
   RT-08, the numerical edge cases, long runs and resource lifecycle. The
@@ -609,6 +610,24 @@ error. The gate holds every case; the nightly job `modulated-media` half and
 a quarter of the step and a finer mesh. The mutation `pump-carrier-turned`.
 No defect found. Travelling modulation, not homogeneous, stays with the
 gallery's directional test.
+
+## 6h. PH-16: nonlinear laws
+
+**Done on 2026-10-18** (`docs/engineering-log.md`). The constitutive inverse
+against an independent root from the smallest subnormal to a declared bound,
+with its stored energy and its refusals; it found the f64 inverse refusing
+subnormal targets, fixed the same day. A uniform field makes every node one
+oscillator, held to RK4 and the closed-form periods at second order in the
+step: sine-Gordon from 1e-3 rad to beside the separatrix and rotating, φ⁴ in
+a well and over the barrier, a saturable mass and a lossy Kerr mass beside
+Klein-Gordon, and van der Pol's cycle from both sides. Klein-Gordon's cutoff
+adds exactly to a box mode. On the CPU the step that carries a field past
+its bound is refused, the one in which the ODE crosses it. All in the gate,
+no nightly; the mutation `sine-gordon-force-linearized`. Saturable
+absorption stays gated (C), so its bleaching is not tested. The planned
+3.1 rad parts the nodes, the uniform swing beside the separatrix being
+unstable to the box's modes, so that case swings to 2.9. CPU against GPU
+through the nonlinear stages stays with the device suite's fixtures.
 
 ## 7. Infrastructure
 

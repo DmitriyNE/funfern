@@ -13753,52 +13753,72 @@ mod tests {
         }
     }
 
-    /// A spatial mode's frequency moves by exactly the cutoff:
-    /// `ω_KG² − ω_linear² = ω₀²`.
+    /// The frequency of the reflecting box's Neumann mode
+    /// `cos(πm(x + 1)/2) cos(πn(y + 1)/2)` under `law` on a mesh of `edge`,
+    /// from the zero crossings of the state's projection on it over eight
+    /// periods: the mesh's other modes barely reach the projection.
+    fn box_mode_frequency(law: crate::RestoringLaw, edge: f64, (m, n): (i32, i32)) -> f64 {
+        let operator = restoring_operator(law, edge);
+        let base = operator.base();
+        let h = 0.3 * operator.maximum_time_step();
+        let half = 0.5 * std::f64::consts::PI;
+        let shape = |point: &Point2| {
+            (half * f64::from(m) * (point.x + 1.0)).cos()
+                * (half * f64::from(n) * (point.y + 1.0)).cos()
+        };
+        let primary = base
+            .node_points()
+            .iter()
+            .zip(base.primary_mass())
+            .map(|(point, mass)| mass * shape(point))
+            .collect::<Vec<_>>();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, h, primary, complementary).unwrap();
+        let projection = |state: &CanonicalTemporalWaveState| {
+            state
+                .primary_flux()
+                .iter()
+                .zip(base.node_points())
+                .map(|(flux, point)| flux * shape(point))
+                .sum::<f64>()
+        };
+        let mut crossings = Vec::new();
+        let mut previous = projection(&state);
+        while crossings.len() < 17 {
+            state.step(&operator).unwrap();
+            let current = projection(&state);
+            if previous.signum() != current.signum() {
+                crossings.push(state.time() - h + previous / (previous - current) * h);
+            }
+            previous = current;
+        }
+        16.0 * std::f64::consts::PI / (crossings[16] - crossings[0])
+    }
+
+    /// A spatial mode's frequency moves by exactly the cutoff,
+    /// `ω_KG² − ω_linear² = ω₀²`, and meets the continuum's `√(k² + ω₀²)`
+    /// (PH-16): the box's modes `(1, 0)` and `(1, 1)`, `k² = π²/4` and
+    /// `π²/2`, at an edge of 0.25 read their shifts 2e-10 and 3e-8 off and
+    /// their frequencies 2e-7 and 9e-7.
     #[test]
     fn klein_gordon_adds_its_cutoff_to_a_modes_frequency() {
         let omega0 = 2.5;
-        let frequency = |law: crate::RestoringLaw| {
-            let operator = restoring_operator(law, 0.25);
-            let base = operator.base();
-            let h = 0.3 * operator.maximum_time_step();
-            // The box's lowest Neumann mode along x.
-            let k = 0.5 * std::f64::consts::PI;
-            let primary = base
-                .node_points()
-                .iter()
-                .zip(base.primary_mass())
-                .map(|(point, mass)| mass * (k * (point.x + 1.0)).cos())
-                .collect::<Vec<_>>();
-            let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
-            let mut state =
-                CanonicalTemporalWaveState::new(&operator, h, primary, complementary).unwrap();
-            let node = base
-                .node_points()
-                .iter()
-                .enumerate()
-                .min_by(|a, b| (a.1.x + 1.0).abs().total_cmp(&(b.1.x + 1.0).abs()))
-                .unwrap()
-                .0;
-            // Zero crossings of the wall node's field over several periods.
-            let mut crossings = Vec::new();
-            let mut previous = state.primary_flux()[node];
-            while crossings.len() < 9 {
-                state.step(&operator).unwrap();
-                let current = state.primary_flux()[node];
-                if previous.signum() != current.signum() {
-                    let fraction = previous / (previous - current);
-                    crossings.push(state.time() - h + fraction * h);
-                }
-                previous = current;
-            }
-            let period = 2.0 * (crossings[8] - crossings[0]) / 8.0;
-            std::f64::consts::TAU / period
-        };
-        let linear = frequency(klein_gordon(0.0));
-        let shifted = frequency(klein_gordon(omega0));
-        let ratio = (shifted * shifted - linear * linear) / (omega0 * omega0);
-        assert!((ratio - 1.0).abs() < 0.02, "ω² moved by {ratio:.4} ω₀²");
+        for mode in [(1, 0), (1, 1)] {
+            let k2 = (0.5 * std::f64::consts::PI).powi(2) * f64::from(mode.0 + mode.1);
+            let linear = box_mode_frequency(klein_gordon(0.0), 0.25, mode);
+            let shifted = box_mode_frequency(klein_gordon(omega0), 0.25, mode);
+            let ratio = (shifted * shifted - linear * linear) / (omega0 * omega0);
+            assert!(
+                (ratio - 1.0).abs() < 1.0e-6,
+                "{mode:?}: ω² moved by {ratio} ω₀²"
+            );
+            let continuum = (k2 + omega0 * omega0).sqrt();
+            assert!(
+                (shifted / continuum - 1.0).abs() < 2.0e-6,
+                "{mode:?}: {shifted} against the continuum's {continuum}"
+            );
+        }
     }
 
     /// Both laws balance at second order, and a step and its inverse return
@@ -16930,6 +16950,721 @@ mod tests {
             for _ in 0..10 {
                 state.step(&operator).unwrap();
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PH-16: nonlinear oscillators against their own laws.
+    // -----------------------------------------------------------------------
+
+    /// PH-16's operator: the reflecting box `[−1, 1]²` meshed at `edge`, its
+    /// one material carrying what `author` gives it.
+    fn law_operator(
+        author: impl FnOnce(&mut Material),
+        edge: f64,
+    ) -> CanonicalTemporalWaveOperator {
+        let mut scene = Scene::default();
+        author(&mut scene.materials[0]);
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: edge,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap()
+    }
+
+    /// One uniform run at step `h` from the integrated field `r0` and the
+    /// flux `q0` per unit lumped mass, at every node: node 0's integrated
+    /// field and field after every step, the stored energy over the lumped
+    /// mass, and the largest spread of `r` across the nodes.
+    struct UniformSeries {
+        r: Vec<f64>,
+        u: Vec<f64>,
+        energy: Vec<f64>,
+        spread: f64,
+    }
+
+    fn uniform_series(
+        operator: &CanonicalTemporalWaveOperator,
+        (r0, q0): (f64, f64),
+        h: f64,
+        seconds: f64,
+    ) -> UniformSeries {
+        let base = operator.base();
+        let masses = base.primary_mass();
+        let total = masses.iter().sum::<f64>();
+        let primary = masses.iter().map(|mass| mass * q0).collect();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let mut state =
+            CanonicalTemporalWaveState::new(operator, h, primary, complementary).unwrap();
+        if r0 != 0.0 {
+            state = state
+                .with_integrated_field(operator, vec![r0; base.degrees_of_freedom()])
+                .unwrap();
+        }
+        let mut series = UniformSeries {
+            r: vec![r0],
+            u: Vec::new(),
+            energy: vec![state.energy(operator).unwrap() / total],
+            spread: 0.0,
+        };
+        let field = |state: &CanonicalTemporalWaveState| {
+            operator
+                .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+                .unwrap()[0]
+        };
+        series.u.push(field(&state));
+        for _ in 0..(seconds / h).ceil() as usize {
+            state.step(operator).unwrap();
+            let r = if operator.has_restoring() {
+                state.integrated_field().to_vec()
+            } else {
+                vec![0.0; base.degrees_of_freedom()]
+            };
+            series.spread = r
+                .iter()
+                .fold(series.spread, |m, value| m.max((value - r[0]).abs()));
+            series.r.push(r[0]);
+            series.u.push(field(&state));
+            series.energy.push(state.energy(operator).unwrap() / total);
+        }
+        series
+    }
+
+    /// RK4 over `(r, q)`, `ṙ = field(q)`, `q̇ = −force(r) − loss(u) q`, from
+    /// `(r0, q0)` in `substeps` steps to each of `h`: `r` and `u` after each
+    /// `h`, and at the start. The reference a uniform mode is read against.
+    fn uniform_reference(
+        field: impl Fn(f64) -> f64,
+        force: impl Fn(f64) -> f64,
+        loss: impl Fn(f64) -> f64,
+        (r0, q0): (f64, f64),
+        h: f64,
+        samples: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let substeps = 64;
+        let rate = |(r, q): (f64, f64)| {
+            let u = field(q);
+            (u, -force(r) - loss(u) * q)
+        };
+        let dt = h / f64::from(substeps);
+        let (mut r, mut q) = (r0, q0);
+        let (mut rs, mut us) = (vec![r0], vec![field(q0)]);
+        for _ in 0..samples {
+            for _ in 0..substeps {
+                let k1 = rate((r, q));
+                let k2 = rate((r + 0.5 * dt * k1.0, q + 0.5 * dt * k1.1));
+                let k3 = rate((r + 0.5 * dt * k2.0, q + 0.5 * dt * k2.1));
+                let k4 = rate((r + dt * k3.0, q + dt * k3.1));
+                r += dt / 6.0 * (k1.0 + 2.0 * k2.0 + 2.0 * k3.0 + k4.0);
+                q += dt / 6.0 * (k1.1 + 2.0 * k2.1 + 2.0 * k3.1 + k4.1);
+            }
+            rs.push(r);
+            us.push(field(q));
+        }
+        (rs, us)
+    }
+
+    /// `q = P(u)`'s inverse by bisection to adjacent floats, `P` increasing.
+    fn bisected(map: impl Fn(f64) -> f64, q: f64) -> f64 {
+        let sign = q.signum();
+        let target = q.abs();
+        let (mut low, mut high) = (0.0_f64, 1.0_f64);
+        while map(high) < target {
+            high *= 2.0;
+        }
+        loop {
+            let middle = 0.5 * (low + high);
+            if middle <= low || middle >= high {
+                break;
+            }
+            if map(middle) < target {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        sign * 0.5 * (low + high)
+    }
+
+    /// The times a series crosses `level` upward, linearly interpolated.
+    fn level_crossings(series: &[f64], h: f64, level: f64) -> Vec<f64> {
+        series
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| pair[0] < level && pair[1] >= level)
+            .map(|(n, pair)| h * (n as f64 + (level - pair[0]) / (pair[1] - pair[0])))
+            .collect()
+    }
+
+    /// The mean period between the first and last upward crossings.
+    fn mean_period(crossings: &[f64]) -> f64 {
+        (crossings[crossings.len() - 1] - crossings[0]) / (crossings.len() - 1) as f64
+    }
+
+    /// `∫_{−π/2}^{π/2} f`, by 64-point Gauss-Legendre in 16 panels.
+    fn quarter_turns(f: impl Fn(f64) -> f64) -> f64 {
+        let nodes = [
+            0.148_874_338_981_631_2,
+            0.433_395_394_129_247_2,
+            0.679_409_568_299_024_4,
+            0.865_063_366_688_984_5,
+            0.973_906_528_517_171_7,
+        ];
+        let weights = [
+            0.295_524_224_714_752_9,
+            0.269_266_719_309_996_4,
+            0.219_086_362_515_982,
+            0.149_451_349_150_580_6,
+            0.066_671_344_308_688_14,
+        ];
+        let panels = 32;
+        let width = std::f64::consts::PI / f64::from(panels);
+        (0..panels)
+            .map(|panel| {
+                let middle = -0.5 * std::f64::consts::PI + (f64::from(panel) + 0.5) * width;
+                nodes
+                    .iter()
+                    .zip(weights)
+                    .map(|(node, weight)| {
+                        0.5 * width
+                            * weight
+                            * (f(middle + 0.5 * width * node) + f(middle - 0.5 * width * node))
+                    })
+                    .sum::<f64>()
+            })
+            .sum()
+    }
+
+    /// What a PH-16 uniform case reads its period against: a closed form
+    /// from `r`'s upward crossings of `level`, for a rotation the times `r`
+    /// passes each multiple of 2π, or RK4's own crossings of `level`.
+    enum OscillatorPeriod {
+        Exact { period: f64, level: f64 },
+        Rotation { period: f64 },
+        Reference { level: f64 },
+    }
+
+    /// One PH-16 uniform case: the laws its medium carries, its start
+    /// `(r₀, u₀)`, how long it runs, its own law - the flux of a field, the
+    /// force and the loss rate - its period, whether it keeps its energy, and
+    /// its bounds at the production step on the trajectory, the field and the
+    /// period, about twice what each read there.
+    struct OscillatorCase {
+        name: String,
+        bounds: [f64; 3],
+        author: Box<dyn Fn(&mut Material)>,
+        start: (f64, f64),
+        seconds: f64,
+        flux: Box<dyn Fn(f64) -> f64>,
+        force: Box<dyn Fn(f64) -> f64>,
+        loss: Box<dyn Fn(f64) -> f64>,
+        period: OscillatorPeriod,
+        conservative: bool,
+    }
+
+    /// What a PH-16 uniform run reads against its law: the integrated
+    /// field's largest difference from RK4's relative to RK4's largest, the
+    /// field's alike, the period's relative error, the stored energy's
+    /// largest drift relative to its start where the law keeps it, the last
+    /// three periods' field amplitude against RK4's, and the nodes' spread.
+    #[derive(Clone, Copy, Debug)]
+    struct OscillatorReading {
+        trajectory: f64,
+        field: f64,
+        period: f64,
+        energy: f64,
+        amplitude: f64,
+        spread: f64,
+    }
+
+    impl OscillatorCase {
+        /// The mean period of `r` sampled every `h`: between its upward
+        /// crossings of the case's level, or for a rotation between its
+        /// passes of each multiple of 2π.
+        fn period_of(&self, r: &[f64], h: f64) -> f64 {
+            match self.period {
+                OscillatorPeriod::Exact { level, .. } | OscillatorPeriod::Reference { level } => {
+                    mean_period(&level_crossings(r, h, level))
+                }
+                OscillatorPeriod::Rotation { .. } => {
+                    let turns = (1..)
+                        .map(|n| std::f64::consts::TAU * f64::from(n))
+                        .take_while(|level| *level < r[r.len() - 1])
+                        .map(|level| level_crossings(r, h, level)[0])
+                        .collect::<Vec<_>>();
+                    mean_period(&turns)
+                }
+            }
+        }
+
+        fn read(&self, operator: &CanonicalTemporalWaveOperator, h: f64) -> OscillatorReading {
+            let (r0, u0) = self.start;
+            let q0 = (self.flux)(u0);
+            let series = uniform_series(operator, (r0, q0), h, self.seconds);
+            let steps = series.r.len() - 1;
+            let field = |q: f64| bisected(|u| (self.flux)(u), q);
+            let (rs, us) = uniform_reference(field, &self.force, &self.loss, (r0, q0), h, steps);
+            let largest = |values: &[f64]| values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            let difference = |a: &[f64], b: &[f64]| {
+                a.iter()
+                    .zip(b)
+                    .fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()))
+            };
+            let trajectory = difference(&series.r, &rs)
+                / largest(&rs).max(
+                    std::f64::consts::TAU
+                        * f64::from(matches!(self.period, OscillatorPeriod::Rotation { .. }) as u8),
+                );
+            let field_error = difference(&series.u, &us) / largest(&us);
+            let read = self.period_of(&series.r, h);
+            let period = match self.period {
+                OscillatorPeriod::Exact { period, .. } | OscillatorPeriod::Rotation { period } => {
+                    (read / period - 1.0).abs()
+                }
+                OscillatorPeriod::Reference { .. } => (read / self.period_of(&rs, h) - 1.0).abs(),
+            };
+            let energy = if self.conservative {
+                let start = series.energy[0];
+                series
+                    .energy
+                    .iter()
+                    .fold(0.0_f64, |m, e| m.max((e - start).abs()))
+                    / start
+            } else {
+                0.0
+            };
+            // The last three periods of the field, read and RK4's, where it
+            // swings through zero that often.
+            let tail = |values: &[f64]| {
+                let crossings = level_crossings(values, h, 0.0);
+                (crossings.len() >= 4).then(|| {
+                    let from = crossings[crossings.len() - 4] / h;
+                    largest(&values[from as usize..])
+                })
+            };
+            let amplitude = match (tail(&series.u), tail(&us)) {
+                (Some(read), Some(exact)) => (read / exact - 1.0).abs(),
+                _ => 0.0,
+            };
+            OscillatorReading {
+                trajectory,
+                field: field_error,
+                period,
+                energy,
+                amplitude,
+                spread: series.spread,
+            }
+        }
+    }
+
+    /// PH-16's uniform cases, each node of the box the one oscillator.
+    fn oscillator_cases() -> Vec<OscillatorCase> {
+        let omega0 = 3.0_f64;
+        let restoring = |law: crate::RestoringLaw| {
+            move |material: &mut Material| material.restoring = law.clone()
+        };
+        let mut cases = Vec::new();
+        // Beside the separatrix the uniform swing is unstable to the box's
+        // own modes, which each pass near the top amplifies from rounding:
+        // that case runs one period past its first. There too the period
+        // diverges, so the production step's second-order energy breathing,
+        // 3e-3, moves it most: 2.9 rad reads its period 2.6e-2 off.
+        for (amplitude, periods, bounds) in [
+            (1.0e-3_f64, 4.5, [3.0e-3, 3.0e-5, 1.5e-6]),
+            (1.0, 4.5, [1.2e-2, 1.0e-2, 4.0e-4]),
+            (2.5, 4.5, [0.25, 0.18, 7.0e-3]),
+            (2.9, 2.2, [1.1, 0.8, 5.0e-2]),
+        ] {
+            let k = (0.5 * amplitude).sin();
+            let period = 4.0 * complete_elliptic_k(k) / omega0;
+            cases.push(OscillatorCase {
+                name: format!("sine-Gordon swung to {amplitude} rad"),
+                bounds,
+                author: Box::new(restoring(sine_gordon(omega0))),
+                start: (0.0, 2.0 * omega0 * k),
+                seconds: periods * period,
+                flux: Box::new(|u| u),
+                force: Box::new(move |r| omega0 * omega0 * r.sin()),
+                loss: Box::new(|_| 0.0),
+                period: OscillatorPeriod::Exact { period, level: 0.0 },
+                conservative: true,
+            });
+        }
+        let u0 = 2.5 * omega0;
+        let period = 4.0 * complete_elliptic_k(2.0 * omega0 / u0) / u0;
+        cases.push(OscillatorCase {
+            name: "sine-Gordon rotating".into(),
+            bounds: [5.0e-3, 3.5e-2, 4.0e-3],
+            author: Box::new(restoring(sine_gordon(omega0))),
+            start: (0.0, u0),
+            seconds: 6.5 * period,
+            flux: Box::new(|u| u),
+            force: Box::new(move |r| omega0 * omega0 * r.sin()),
+            loss: Box::new(|_| 0.0),
+            period: OscillatorPeriod::Rotation { period },
+            conservative: true,
+        });
+        // φ⁴, `V = λ(r² − 1)²/4`: with `s = √(4E/λ)` the turning points are
+        // `√(1 ± s)` in a well and `±√(1 + s)` over the barrier, and the
+        // period's integral, substituted by a sine between them, is smooth.
+        let lambda = 4.0_f64;
+        let in_well = |energy: f64| {
+            let s = (4.0 * energy / lambda).sqrt();
+            let (r1, r2) = ((1.0 - s).sqrt(), (1.0 + s).sqrt());
+            let (c, d) = (0.5 * (r1 + r2), 0.5 * (r2 - r1));
+            2.0 * quarter_turns(|theta| {
+                let r = c + d * theta.sin();
+                1.0 / (0.5 * lambda * (r2 + r) * (r + r1)).sqrt()
+            })
+        };
+        let over = |energy: f64| {
+            let s = (4.0 * energy / lambda).sqrt();
+            let r2 = (1.0 + s).sqrt();
+            2.0 * quarter_turns(|theta| {
+                let r = r2 * theta.sin();
+                1.0 / (0.5 * lambda * (r * r + s - 1.0)).sqrt()
+            })
+        };
+        for (name, start, period, level, bounds) in [
+            (
+                "φ⁴ in a well, small",
+                (1.0, 0.05),
+                in_well(0.5 * 0.05 * 0.05),
+                1.0,
+                [5.0e-5, 9.0e-5, 3.0e-6],
+            ),
+            (
+                "φ⁴ in a well, near the barrier",
+                (1.0, (2.0 * 0.95 * lambda / 4.0).sqrt()),
+                in_well(0.95 * lambda / 4.0),
+                1.0,
+                [0.23, 0.9, 1.7e-2],
+            ),
+            (
+                "φ⁴ over the barrier",
+                (0.0, 1.0),
+                over(0.5 + lambda / 4.0),
+                0.0,
+                [1.0e-2, 3.6e-2, 6.0e-4],
+            ),
+        ] {
+            cases.push(OscillatorCase {
+                name: name.into(),
+                bounds,
+                author: Box::new(restoring(phi4(lambda, 2.0))),
+                start,
+                seconds: 4.5 * period,
+                flux: Box::new(|u| u),
+                force: Box::new(move |r| lambda * (r * r * r - r)),
+                loss: Box::new(|_| 0.0),
+                period: OscillatorPeriod::Exact { period, level },
+                conservative: true,
+            });
+        }
+        let kerr = |chi2: f64| crate::FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(chi2),
+            amplitude_bound: None,
+        };
+        cases.push(OscillatorCase {
+            name: "a saturable mass with Klein-Gordon".into(),
+            bounds: [1.6e-3, 4.0e-4, 2.5e-5],
+            author: Box::new(move |material: &mut Material| {
+                material.restoring = klein_gordon(omega0);
+                material.mass_law.field = crate::FieldLaw::Saturable {
+                    chi: ScalarField::constant(0.8),
+                    saturation: ScalarField::constant(0.5),
+                };
+            }),
+            start: (0.0, 1.0),
+            seconds: 6.0,
+            flux: Box::new(|u| u * (1.0 + 0.8 * u * u / (1.0 + (u / 0.5).powi(2)))),
+            force: Box::new(move |r| omega0 * omega0 * r),
+            loss: Box::new(|_| 0.0),
+            period: OscillatorPeriod::Reference { level: 0.0 },
+            conservative: true,
+        });
+        // The default skin is Mechanical, whose primary row, the
+        // displacement, loses through the magnetic channel: it maps onto
+        // the TE core, `ρ` on `μ`.
+        let loss = |rate: f64, law: crate::RateLaw| crate::LossChannel {
+            base_rate: ScalarField::constant(rate),
+            law: crate::DampingLaw {
+                rate: law,
+                drive: crate::TimeDrive::None,
+                gate: None,
+            },
+        };
+        cases.push(OscillatorCase {
+            name: "Kerr with Klein-Gordon and a constant loss".into(),
+            bounds: [1.2e-3, 1.6e-3, 7.0e-5],
+            author: Box::new(move |material: &mut Material| {
+                material.restoring = klein_gordon(omega0);
+                material.mass_law.field = kerr(0.5);
+                material.magnetic_loss = Some(loss(0.2, crate::RateLaw::Constant));
+            }),
+            start: (0.0, 1.5),
+            seconds: 8.0,
+            flux: Box::new(|u| u * (1.0 + 0.5 * u * u)),
+            force: Box::new(move |r| omega0 * omega0 * r),
+            loss: Box::new(|_| 0.2),
+            period: OscillatorPeriod::Reference { level: 0.0 },
+            conservative: false,
+        });
+        let threshold = 0.5;
+        for (name, u0, bounds) in [
+            ("from inside", 0.1, [6.0e-3, 6.0e-3, 5.0e-5]),
+            ("from outside", 1.5, [3.0e-3, 3.2e-3, 5.0e-5]),
+        ] {
+            cases.push(OscillatorCase {
+                name: format!("van der Pol with Klein-Gordon, {name}"),
+                bounds,
+                author: Box::new(move |material: &mut Material| {
+                    material.restoring = klein_gordon(omega0);
+                    material.magnetic_loss = Some(loss(
+                        0.5,
+                        crate::RateLaw::VanDerPol {
+                            threshold: ScalarField::constant(threshold),
+                            amplitude_bound: ScalarField::constant(2.0),
+                        },
+                    ));
+                }),
+                start: (0.0, u0),
+                seconds: 40.0,
+                flux: Box::new(|u| u),
+                force: Box::new(move |r| omega0 * omega0 * r),
+                loss: Box::new(move |u| 0.5 * ((u / threshold).powi(2) - 1.0)),
+                period: OscillatorPeriod::Reference { level: 0.0 },
+                conservative: false,
+            });
+        }
+        cases
+    }
+
+    /// PH-16: each node of a reflecting box carrying the same oscillator,
+    /// against RK4 on its own law and its closed-form period where it has
+    /// one. At the production step each case keeps within its bounds, a
+    /// conservative one keeps its energy within 1e-2, a field's last three
+    /// periods keep their amplitude within 2e-3 and the nodes stay together;
+    /// halving the step divides the trajectory's error by at least three, as
+    /// a second-order step does.
+    #[test]
+    fn uniform_oscillators_follow_their_laws_at_second_order() {
+        for case in oscillator_cases() {
+            let operator = law_operator(|material| (case.author)(material), 0.4);
+            let h = operator.recommended_time_step();
+            let reading = case.read(&operator, h);
+            let halved = case.read(&operator, 0.5 * h);
+            let name = &case.name;
+            let [trajectory, field, period] = case.bounds;
+            assert!(
+                reading.trajectory <= trajectory
+                    && reading.field <= field
+                    && reading.period <= period,
+                "{name}: {reading:?} past {:?}",
+                case.bounds
+            );
+            assert!(
+                reading.energy <= 1.0e-2 && reading.amplitude <= 2.0e-3,
+                "{name}: {reading:?}"
+            );
+            assert!(reading.spread <= 1.0e-6, "{name}: {reading:?}");
+            assert!(
+                reading.trajectory >= 3.0 * halved.trajectory,
+                "{name}: halving the step took the trajectory from {:.2e} to {:.2e}",
+                reading.trajectory,
+                halved.trajectory
+            );
+        }
+    }
+
+    /// PH-16's references against each other before they judge the solver:
+    /// RK4's crossings meet each closed-form period, sine-Gordon's elliptic
+    /// ones and φ⁴'s quadratures, within 1e-7. Its van der Pol cycle is the
+    /// same from inside and outside, within what sampling its peak every
+    /// 1e-2 misses, and within 1e-3 of Rayleigh's weak-gain amplitude
+    /// `2a/√3`, which it still meets at `γ₀/ω₀ = 1/6`.
+    #[test]
+    fn the_oscillator_references_agree_with_each_other() {
+        let h = 1.0e-2;
+        let mut cycles = Vec::new();
+        for case in oscillator_cases() {
+            let (r0, u0) = case.start;
+            let q0 = (case.flux)(u0);
+            let field = |q: f64| bisected(|u| (case.flux)(u), q);
+            let samples = (case.seconds / h).ceil() as usize;
+            let (rs, us) = uniform_reference(field, &case.force, &case.loss, (r0, q0), h, samples);
+            if let OscillatorPeriod::Exact { period, .. } | OscillatorPeriod::Rotation { period } =
+                case.period
+            {
+                let error = (case.period_of(&rs, h) / period - 1.0).abs();
+                assert!(
+                    error < 1.0e-7,
+                    "{}: RK4's period {error:.2e} off",
+                    case.name
+                );
+            }
+            if case.name.contains("van der Pol") {
+                let crossings = level_crossings(&us, h, 0.0);
+                let from = (crossings[crossings.len() - 4] / h) as usize;
+                cycles.push(us[from..].iter().fold(0.0_f64, |m, u| m.max(u.abs())));
+            }
+        }
+        // The cases' threshold is 0.5.
+        let weak = 1.0 / 3.0_f64.sqrt();
+        assert!((cycles[0] - cycles[1]).abs() < 1.0e-4, "{cycles:?}");
+        assert!((cycles[0] / weak - 1.0).abs() < 1.0e-3, "{cycles:?}");
+    }
+
+    /// A run's first refused step, which must leave the state as it found
+    /// it: its index, from 0, and the error.
+    fn first_refusal(
+        operator: &CanonicalTemporalWaveOperator,
+        mut state: CanonicalTemporalWaveState,
+        steps: usize,
+    ) -> Option<(usize, WaveError)> {
+        (0..steps).find_map(|n| {
+            let before = state.clone();
+            let error = state.step(operator).err()?;
+            assert_eq!(state, before, "refused step {n} moved the state");
+            Some((n, error))
+        })
+    }
+
+    /// PH-16's domain rejection on the CPU, against the uniform ODE. A
+    /// defocusing Kerr mass bounded at 0.5 beside Klein-Gordon starts from an
+    /// integrated field at rest, and its field peaks where
+    /// `W(u) = u²/2 − 3u⁴/8` holds `ω₀²r₀²/2`, at the bound for `r₀ = 0.150`:
+    /// from 0.12 it runs, and from 0.17 the step that carries the field past
+    /// the bound is refused, where RK4 crosses it, with the inverse's domain
+    /// error. φ⁴'s integrated field swung past its bound is refused alike.
+    /// Van der Pol off the primary row, or driven, does not compile.
+    #[test]
+    fn a_uniform_field_driven_past_its_bound_is_refused_where_its_ode_crosses() {
+        let omega0 = 3.0;
+        let operator = law_operator(
+            |material| {
+                material.restoring = klein_gordon(omega0);
+                material.mass_law.field = crate::FieldLaw::Polynomial {
+                    chi1: ScalarField::constant(0.0),
+                    chi2: ScalarField::constant(-0.5),
+                    amplitude_bound: Some(ScalarField::constant(0.5)),
+                };
+            },
+            0.4,
+        );
+        let base = operator.base();
+        let h = operator.recommended_time_step();
+        let steps = (3.0 / h) as usize;
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let flux = |u: f64| u * (1.0 - 0.5 * u * u);
+        for r0 in [0.12, 0.17] {
+            let state = CanonicalTemporalWaveState::new(
+                &operator,
+                h,
+                vec![0.0; base.degrees_of_freedom()],
+                complementary.clone(),
+            )
+            .unwrap()
+            .with_integrated_field(&operator, vec![r0; base.degrees_of_freedom()])
+            .unwrap();
+            let (_, us) = uniform_reference(
+                |q| bisected(flux, q),
+                |r| omega0 * omega0 * r,
+                |_| 0.0,
+                (r0, 0.0),
+                h,
+                steps,
+            );
+            let crossing = us.iter().position(|u| u.abs() > 0.5);
+            match (crossing, first_refusal(&operator, state, steps)) {
+                (None, None) => {}
+                // Step n carries the state from sample n to n + 1.
+                (Some(crossing), Some((n, error))) => {
+                    assert!(
+                        matches!(
+                            &error,
+                            WaveError::MaterialEvaluation {
+                                coefficient: "field response",
+                                reason,
+                                ..
+                            } if reason.contains("declared amplitude bound")
+                        ),
+                        "{error:?}"
+                    );
+                    assert!((n + 1).abs_diff(crossing) <= 1, "{n} against {crossing}");
+                }
+                (crossing, refusal) => {
+                    panic!("r₀ = {r0}: RK4 crosses at {crossing:?}, the step refused {refusal:?}")
+                }
+            }
+        }
+
+        let operator = law_operator(|material| material.restoring = phi4(4.0, 2.0), 0.4);
+        let base = operator.base();
+        let h = operator.recommended_time_step();
+        let steps = (2.0 / h) as usize;
+        let primary = base.primary_mass().iter().map(|mass| 4.5 * mass).collect();
+        let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+        let state = CanonicalTemporalWaveState::new(&operator, h, primary, complementary).unwrap();
+        let (rs, _) = uniform_reference(
+            |q| q,
+            |r| 4.0 * (r * r * r - r),
+            |_| 0.0,
+            (0.0, 4.5),
+            h,
+            steps,
+        );
+        let crossing = rs.iter().position(|r| r.abs() > 2.0).unwrap();
+        let (n, error) = first_refusal(&operator, state, steps).unwrap();
+        assert!(
+            matches!(
+                error,
+                WaveError::Unsupported(reason) if reason.contains("restoring law's amplitude bound")
+            ),
+            "{error:?}"
+        );
+        assert!((n + 1).abs_diff(crossing) <= 1, "{n} against {crossing}");
+
+        let van_der_pol = |drive: TimeDrive| crate::LossChannel {
+            base_rate: ScalarField::constant(0.5),
+            law: DampingLaw {
+                rate: crate::RateLaw::VanDerPol {
+                    threshold: ScalarField::constant(0.5),
+                    amplitude_bound: ScalarField::constant(2.0),
+                },
+                drive,
+                gate: None,
+            },
+        };
+        let mut off_the_row = Scene::default();
+        off_the_row.materials[0].restoring = klein_gordon(omega0);
+        off_the_row.materials[0].electric_loss = Some(van_der_pol(TimeDrive::None));
+        let mut driven = Scene::default();
+        driven.materials[0].restoring = klein_gordon(omega0);
+        driven.materials[0].magnetic_loss = Some(van_der_pol(pump(0.2, 1.1, 0.0)));
+        for scene in [off_the_row, driven] {
+            assert!(matches!(
+                compile(&scene),
+                Err(WaveError::MaterialEvaluation {
+                    coefficient: "loss law",
+                    reason,
+                    ..
+                }) if reason.contains("primary field only")
+            ));
         }
     }
 }

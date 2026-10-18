@@ -25187,3 +25187,96 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-18 — PH-16: nonlinear laws against their own definitions
+
+- **Constitutive inversion.**
+  `constitutive_inverses_meet_their_roots_and_refuse_past_their_bounds`
+  holds `ConstitutiveSite::invert` to bisection on each law's definition,
+  down to adjacent floats, and to Cardano for focusing Kerr. Laws: the
+  linear map, focusing Kerr, defocusing Kerr bounded at half its turning
+  point and at 0.99 of it (where the map's slope falls to 2%), saturable
+  laws of either sign, and a junction. Targets: the smallest subnormal,
+  1e-310, 1e-200, 1e-8 up to 100, and the bound itself. The residual is
+  within twice the solver's 8 ulps, the root within what that allows, and the
+  stored energy within 1e-12 of a 512-panel Gauss-Legendre quadrature of
+  `q r − ∫P`. A target a millionth past a bound is refused, and so are the
+  laws the solver doesn't run: a signed polynomial (which covers the
+  quadratic law of nonlinear acoustics and the mixed one), a defocusing Kerr
+  with no bound or a bound past its turning point, and a divided field law.
+  This test found the subnormal inverse fixed in the previous entry.
+- **Uniform oscillators.** A uniform field in the reflecting box `[−1, 1]²`
+  at edge 0.4 makes every node one oscillator, `q̇ = −V′(r) − γ(u) q`,
+  `ṙ = u(q)`.
+  - **Oracle:** RK4 on the case's own law at 64 substeps a step, with the
+    field inverted by bisection.
+  - **Readings:** node 0's integrated field and field against RK4, relative
+    to RK4's largest; the mean period from upward crossings, against a
+    closed form or RK4's; the stored energy over the lumped mass; the
+    field's amplitude over its last three periods; and the nodes' spread.
+  - **Cases:**
+    - sine-Gordon (ω₀ = 3) swung to 1e-3, 1, 2.5 and 2.9 rad, against
+      `4K(sin(a/2))/ω₀`, and rotating at `u₀ = 2.5ω₀`, against
+      `4K(2ω₀/u₀)/u₀` per turn;
+    - φ⁴ (λ = 4, bound 2) small in a well, near its barrier (0.95 of it) and
+      over it, against the period of the energy integral, substituted by a
+      sine between the turning points;
+    - a saturable mass (0.8, 0.5) beside Klein-Gordon;
+    - Kerr 0.5 beside Klein-Gordon with a constant loss 0.2;
+    - van der Pol (gain 0.5, threshold 0.5) beside Klein-Gordon over 40 s,
+      from 0.1 and from 1.5.
+- **Oracle checks.** `the_oscillator_references_agree_with_each_other`:
+  - RK4's periods meet every closed form within 1e-7 (4e-8).
+  - Its van der Pol cycle is the same from inside and outside, within the
+    1e-4 that sampling the peak every 1e-2 can miss (6e-6).
+  - That cycle is within 1e-3 of Rayleigh's weak-gain amplitude `2a/√3`
+    (1.4e-4 at `γ₀/ω₀ = 1/6`).
+- **What the sizing taught.**
+  - Mechanical's primary row, the displacement, loses through the magnetic
+    channel; it maps onto TE's core, `ρ` on `μ`. A loss on `electric_loss`
+    acts on the other row, and van der Pol there doesn't compile.
+  - A uniform sine-Gordon swing beside the separatrix is unstable to the
+    box's own modes. At 3.1 rad, as planned, rounding parts the nodes within
+    a period or two. 2.9 rad over 2.2 periods keeps them within 4e-10.
+  - Where the period diverges, the step's second-order energy breathing
+    (3e-3 at the production step) moves it most: the 2.9 rad swing's period
+    reads 2.6e-2 off and φ⁴'s near the barrier 8.3e-3. Both fall four times
+    per halving.
+  - Saturable absorption remains gated (C) and refuses to compile, which a
+    stage-8 test already holds, so its bleaching case went.
+- **Results.** In the gate, `uniform_oscillators_follow_their_laws_at_second_order`
+  (4 s) holds every case at the production step within bounds about twice
+  its reading:
+  - trajectory, field and period per case; the worst away from the
+    separatrix is a period 3.4e-3 off;
+  - a conservative case's energy within 1e-2 (4.5e-3);
+  - the amplitude within 2e-3 (9.7e-4), van der Pol's cycle 7e-5;
+  - the nodes within 1e-6 of one another;
+  - half the step divides each trajectory's error by at least 3 (3.3 to
+    9.7).
+- **Klein-Gordon's dispersion.** `klein_gordon_adds_its_cutoff_to_a_modes_frequency`
+  now reads the mode through its projection, which the mesh's other modes
+  barely reach. It was a wall node's crossings, held to 2%.
+  - Modes (1, 0) and (1, 1) at edge 0.25.
+  - `ω_KG² − ω_linear² = ω₀²` within 1e-6 (2e-10 and 3e-8).
+  - The frequency within 2e-6 of `√(k² + ω₀²)` (2e-7 and 9e-7).
+  - At edge 0.5 the (1, 0) mode happens to read as close as at 0.25, so
+    the test checks no mesh order.
+- **Domain rejection on the CPU.**
+  `a_uniform_field_driven_past_its_bound_is_refused_where_its_ode_crosses`:
+  - **Kerr:** a defocusing Kerr mass (χ₂ −0.5, bound 0.5) beside
+    Klein-Gordon, started from an integrated field at rest. It reaches the
+    bound from `r₀ = 0.150`.
+    - From 0.12 it runs 3 s.
+    - From 0.17 the step is refused with the inverse's domain error, in
+      the very step in which RK4 crosses (step 12, the crossing in sample
+      13). The state is left as it was.
+  - **φ⁴:** swung at 4.5 past its bound of 2, refused alike, with its
+    restoring law's error.
+  - **Van der Pol:** on `electric_loss`, or driven, doesn't compile.
+- **Mutation.** `sine-gordon-force-linearized`: sine-Gordon's force is its
+  small-angle limit `ω₀²r`. The 1 rad swing's period reads 6.2% off, while
+  the 1e-3 rad swing still passes.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

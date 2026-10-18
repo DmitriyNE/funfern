@@ -697,6 +697,43 @@ error falling under 0.35 where above the mesh's floor, a quarter of the step
 and edge 0.05 held so. The mutation `pump-carrier-turned`, every drive's
 carrier advanced a quarter turn, puts the mass pump at 0.6 0.47 off its
 trace while the Floquet multipliers stand.
+PH-16 holds the nonlinear laws to their own definitions. The constitutive
+inverse meets an independent root - bisection on each law's definition to
+adjacent floats, Cardano for focusing Kerr - for the linear map, focusing
+Kerr, defocusing Kerr bounded at half its turning point and at 0.99 of it,
+saturable laws of either sign and a junction, at targets from the smallest
+subnormal to 100 and at a bound, its stored energy against a quadrature of
+the definition; a target past a bound, and the laws the solver does not run,
+are refused (`constitutive_inverses_meet_their_roots_and_refuse_past_their_bounds`).
+A uniform field in a reflecting box makes every node one oscillator, held to
+RK4 on its own law (`uniform_oscillators_follow_their_laws_at_second_order`,
+4 s): sine-Gordon swung to 1e-3, 1, 2.5 and 2.9 rad and rotating, against
+its elliptic periods; φ⁴ in a well, small and near the barrier, and over it,
+against the period of its energy integral; a saturable mass, and Kerr with a
+constant loss, each beside Klein-Gordon; van der Pol beside Klein-Gordon
+from inside and outside its cycle over 40 s. Read at the production step:
+the integrated field's and the field's largest difference from RK4 relative
+to RK4's largest, the period, a conservative case's energy drift, and the
+field's amplitude over its last three periods. Each case keeps within bounds
+about twice its reading - the worst the swing at 2.9 rad, its period 2.6e-2
+off where the period diverges at the separatrix, then φ⁴ near the barrier at
+8.3e-3, everything else under 3.4e-3 - the energy under 1e-2 (4.5e-3), the
+amplitude under 2e-3 (9.7e-4), the nodes together within 1e-6, and half the
+step divides the trajectory's error by at least 3 (3.3 to 9.7). The
+references are checked first (`the_oscillator_references_agree_with_each_other`):
+RK4's periods meet the closed forms within 1e-7 (4e-8), and its van der Pol
+cycle is one from inside and outside and within 1e-3 of the weak-gain
+amplitude `2a/√3` (1.4e-4). Klein-Gordon moves a box mode's `ω²` by exactly
+`ω₀²`, within 1e-6 (3e-8), and meets `√(k² + ω₀²)` within 2e-6 (9e-7) for
+the modes (1, 0) and (1, 1) at edge 0.25
+(`klein_gordon_adds_its_cutoff_to_a_modes_frequency`). A defocusing Kerr
+mass bounded at 0.5 runs below its bound; past it the step is refused, the
+one in which RK4 crosses the bound, and the state is untouched; φ⁴ past its
+bound alike; van der Pol off the primary row, or driven, does not compile
+(`a_uniform_field_driven_past_its_bound_is_refused_where_its_ode_crosses`).
+The mutation `sine-gordon-force-linearized`, sine-Gordon's force its
+small-angle limit, puts the 1 rad swing's period 6.2% off while the 1e-3 rad
+swing still passes.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

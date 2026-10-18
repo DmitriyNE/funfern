@@ -1,0 +1,4 @@
+about: sine-Gordon's force is its small-angle limit ω₀²r, so a uniform swing keeps Klein-Gordon's period at every amplitude; the 1e-3 rad swing still passes, the 1 rad one does not
+test: cargo test --release -p funfern-core --lib -- uniform_oscillators_follow_their_laws_at_second_order
+expect: sine-Gordon swung to 1 rad: .* past
+needs: cpu
