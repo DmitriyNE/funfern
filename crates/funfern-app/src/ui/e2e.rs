@@ -20,6 +20,7 @@
 
 #[path = "../../examples/support/check.rs"]
 mod check;
+pub(crate) mod far_field;
 mod observables;
 
 use super::runtime::pulse_increment;
@@ -73,6 +74,7 @@ pub(crate) fn add(app: &mut App) {
         "rejection" => (Fixture::Rejection, vec![None]),
         "device-loss" => (Fixture::DeviceLoss, vec![None]),
         "observables" => (Fixture::Observables, vec![None, None]),
+        "far-field" => (Fixture::FarField, vec![None, None]),
         _ => {
             let failure = format!("no fixture named {name:?}");
             report(&format!("e2e: {failure}"));
@@ -164,6 +166,12 @@ enum Fixture {
     /// recorded. Then the same run without its probes must end on the same
     /// bits: a probe only reads.
     Observables,
+    /// PH-18: a TM box of outgoing walls with a hole and a source beside it,
+    /// its far field on (`far_field::far_field_document`), run 6.5 s at the
+    /// app's own pacing. Every record the far-field readout draws is held to
+    /// the recorder's f64 twin at the frame it was projected from. Then the
+    /// same run with the far field off must end on the same bits.
+    FarField,
 }
 
 /// How [`Fixture::HandoffMemory`] hands the running field over at step 192.
@@ -204,6 +212,7 @@ const CAVITY_MESH: &str = "fdbd8736b4d960ea/c57811e22d49eb75";
 const DISC_MESH: &str = "abf88c2e20bff3c6/8496257d436c195f";
 const FINER_CAVITY_MESH: &str = "2a08c7884de88562/d105b9149fd88df1";
 const CHANNEL_MESH: &str = "04a488da9d8b2953/5072aa0afe3822b5";
+const HOLE_MESH: &str = "f84998df08704d66/34b4ee47d28f53ae";
 
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
 /// time, a number that divides nothing, half the run, and the whole run.
@@ -255,6 +264,7 @@ impl Fixture {
             // The endpoint is a ceiling the run must not reach.
             Fixture::Rejection => (&[], 4096),
             Fixture::Observables => (&[], observables::OBSERVED_STEPS),
+            Fixture::FarField => (&[], far_field::FAR_FIELD_STEPS),
         }
     }
 
@@ -270,7 +280,10 @@ impl Fixture {
     /// takes none - a pulse's increment is not derived through its nonlinear
     /// map, so the app refuses one - and its fixture is driven by its source.
     fn pulses(self) -> bool {
-        !matches!(self, Fixture::Rejection | Fixture::Observables)
+        !matches!(
+            self,
+            Fixture::Rejection | Fixture::Observables | Fixture::FarField
+        )
     }
 
     /// The relative L2 error Q, b and r may reach. Measured on the M1 Max the
@@ -280,8 +293,9 @@ impl Fixture {
     /// looked at, not given more.
     fn tolerance(self) -> f64 {
         match self {
-            // 1440 steps, not 256: the M1 Max reads 4.4e-6.
-            Fixture::Observables => 2.0e-5,
+            // 1440 and 1150 steps, not 256: the M1 Max reads 4.4e-6 on the
+            // first.
+            Fixture::Observables | Fixture::FarField => 2.0e-5,
             _ => 5.0e-6,
         }
     }
@@ -291,6 +305,7 @@ impl Fixture {
         match self {
             Fixture::Switch => DISC_MESH,
             Fixture::Observables => CHANNEL_MESH,
+            Fixture::FarField => HOLE_MESH,
             _ => CAVITY_MESH,
         }
     }
@@ -305,6 +320,7 @@ impl Fixture {
             | Fixture::DeviceLoss => (cavity_document(), None),
             Fixture::Rejection => (rejection_document(), None),
             Fixture::Observables => (observables::observables_document(), None),
+            Fixture::FarField => (far_field::far_field_document(), None),
             Fixture::HandoffMemory(MemoryHandoff::Running) => (wall_document(false), None),
             Fixture::HandoffMemory(_) => (wall_document(true), None),
             Fixture::Switch => {
@@ -489,6 +505,8 @@ struct Reference {
     /// The recorders' twins, read after every step, where the run's probes
     /// are to be judged.
     twin: Option<observables::Twin>,
+    /// The far-field recorder's twin, where its records are to be judged.
+    far: Option<far_field::FarFieldTwin>,
 }
 
 #[derive(Clone)]
@@ -605,6 +623,9 @@ impl Reference {
                     self.state.complementary(),
                 )?;
             }
+            if let Some(far) = &mut self.far {
+                far.observe(self.steps + 1, self.state.time(), self.state.primary());
+            }
             self.steps += 1;
         }
         Ok(())
@@ -656,10 +677,10 @@ fn drive(
     let verdict = verdict.and_then(|summary| match driver.hashes.as_slice() {
         [(_, first), rest @ ..] if rest.iter().any(|(_, hash)| hash != first) => Err(format!(
             "the endpoint differs {}: {}",
-            if matches!(fixture, Fixture::Observables) {
-                "with the probes off"
-            } else {
-                "with the batching"
+            match fixture {
+                Fixture::Observables => "with the probes off",
+                Fixture::FarField => "with the far field off",
+                _ => "with the batching",
             },
             driver
                 .hashes
@@ -670,6 +691,9 @@ fn drive(
         )),
         [_, _, ..] if matches!(fixture, Fixture::Observables) => Ok(format!(
             "{summary}; the endpoint is the same bits with the probes off"
+        )),
+        [_, _, ..] if matches!(fixture, Fixture::FarField) => Ok(format!(
+            "{summary}; the endpoint is the same bits with the far field off"
         )),
         [_, _, ..] => Ok(format!(
             "the endpoint is the same bits in all {} batchings",
@@ -810,9 +834,13 @@ fn advance(
             state.e2e_steps.batch = None;
             state.wave_running = true;
             let (mut document, material) = driver.fixture.document();
-            if matches!(driver.fixture, Fixture::Observables) && !driver.hashes.is_empty() {
-                // The run again with no probe: a probe only reads.
-                document.model.probes.clear();
+            if !driver.hashes.is_empty() {
+                // The run again with nothing recording: a recorder only reads.
+                match driver.fixture {
+                    Fixture::Observables => document.model.probes.clear(),
+                    Fixture::FarField => document.model.far_field.enabled = false,
+                    _ => {}
+                }
             }
             driver.material = material;
             if let Err(error) = state.set_document(document, false, true) {
@@ -878,6 +906,20 @@ fn advance(
                 } else {
                     None
                 };
+                let far = if matches!(driver.fixture, Fixture::FarField)
+                    && state.editor.document.model.far_field.enabled
+                {
+                    match far_field::FarFieldTwin::new(&active, time_step) {
+                        Ok(far) => Some(far),
+                        Err(error) => {
+                            return Some(Err(format!(
+                                "the far field's twin did not start: {error}"
+                            )));
+                        }
+                    }
+                } else {
+                    None
+                };
                 state.e2e_steps.limit = Some(stop(0));
                 state.e2e_steps.batch = driver.batches.front().copied().flatten();
                 driver.phase = Phase::Run {
@@ -888,6 +930,7 @@ fn advance(
                         steps: 0,
                         carry: None,
                         twin,
+                        far,
                     },
                     next: 0,
                 };
@@ -934,6 +977,7 @@ fn advance(
                     steps: 0,
                     carry: None,
                     twin: None,
+                    far: None,
                 },
                 processed: request.stats().processed_event(),
             };
@@ -1470,7 +1514,7 @@ fn advance(
                 hash: hash(&display.accepted_storage_bits()),
             });
             match run {
-                Ok(run) if reference.twin.is_some() => {
+                Ok(run) if reference.twin.is_some() || reference.far.is_some() => {
                     driver.phase = Phase::Observe {
                         reference,
                         run,
@@ -1508,6 +1552,12 @@ fn advance(
             ]
             .iter()
             .any(|seen| *seen < time - 4.0 * reference.state.time_step());
+            let behind = match &reference.far {
+                // The far field's last record stands its margin and a bucket
+                // or two behind the clock.
+                Some(far) => state.far_field_trace.last_time < time - far.margin() - 0.1,
+                None => behind,
+            };
             if behind && since.elapsed() < std::time::Duration::from_secs(1) {
                 driver.phase = Phase::Observe {
                     reference,
@@ -1516,12 +1566,13 @@ fn advance(
                 };
                 return None;
             }
-            let twin = reference
-                .twin
-                .as_ref()
-                .expect("an observed run has its twins");
-            Some(observables::judge(state, twin, endpoint).map(|probes| Run {
-                summary: format!("{}; {probes}", run.summary),
+            let judged = match (&reference.twin, &reference.far) {
+                (Some(twin), _) => observables::judge(state, twin, endpoint),
+                (None, Some(far)) => far_field::judge(state, far),
+                (None, None) => unreachable!("an observed run has its twins"),
+            };
+            Some(judged.map(|recorded| Run {
+                summary: format!("{}; {recorded}", run.summary),
                 hash: run.hash,
             }))
         }

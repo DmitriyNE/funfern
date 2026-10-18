@@ -1,0 +1,4 @@
+about: the far-field recorder's contour frames stand at the step's end again, the field and its gradient there beside a rate half a step older, as they did before 2026-10-18, so every pattern carries about ωΔt/2 of the contour's far side
+test: scripts/e2e-fixture.sh far-field
+expect: an amplitude reads [0-9.]+e-[0-3], beyond 4e-5
+needs: device

@@ -2979,6 +2979,23 @@ mod tests {
         assert!(shader.contains("bitcast<f32>(0x7fc00000u | (probe & 1u))"));
     }
 
+    /// A frame stands half a step back, the field and its normal gradient
+    /// the mean of the step's two lanes beside their difference, and the
+    /// projection reads from the same time: a rate half a step older than the
+    /// gradient beside it moved a 3 Hz source's pattern by 10%.
+    #[test]
+    fn far_field_frames_are_centred_on_their_step() {
+        let shader = include_str!("canonical_far_field.wgsl");
+        assert!(shader.contains("    return state_time() - 0.5 * control.clock_f32.x;"));
+        assert_eq!(shader.matches("centred_time();").count(), 2);
+        assert!(!shader.contains("let time = state_time();"));
+        assert!(!shader.contains("let now = state_time();"));
+        assert!(shader.contains("let gradient = 0.5 * (current_gradient + previous_gradient);"));
+        assert!(
+            shader.contains("vec4<f32>(0.5 * (primary + previous), rate, normal_gradient, time);")
+        );
+    }
+
     #[test]
     fn far_field_shader_uses_retarded_time_and_huygens_data() {
         let shader = include_str!("canonical_far_field.wgsl");

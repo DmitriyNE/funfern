@@ -19640,4 +19640,274 @@ mod tests {
             modulated_holds(&cases, &finer, (0.05, 1.0), 0.25);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // PH-18: the far field against a line source's pattern.
+    // -----------------------------------------------------------------------
+
+    /// PH-18's reference (`tests/physics/references/cylinder-source.json`,
+    /// from `cylinder_source.py`): `H1_n(kρ)` at the source's distance `ρ`
+    /// from PH-12's cylinder, for each size `k a` it reads.
+    #[derive(serde::Deserialize)]
+    struct SourceTable {
+        source: f64,
+        cases: Vec<SourceEntry>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct SourceEntry {
+        ka: f64,
+        hankel: Vec<[f64; 2]>,
+    }
+
+    fn source_table() -> &'static SourceTable {
+        static TABLE: std::sync::OnceLock<SourceTable> = std::sync::OnceLock::new();
+        TABLE.get_or_init(|| {
+            let path = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/physics/references/cylinder-source.json"
+            );
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        })
+    }
+
+    /// Where PH-18's source sits about the cylinder's centre.
+    const FAR_SOURCE_ANGLE: f64 = 150.0;
+
+    /// PH-18's far-field scene: TM, the box `[−half, half]²` of a unit medium,
+    /// every side first-order outgoing, PH-12's cylinder of size `k a = 2` at
+    /// the origin if any, and the point source 1.1 from it at 150°, width
+    /// 0.15, a sine at `k` under a flat top switched on over half a second.
+    /// The source's Gaussian `e^{−r²/2w²}` is 3.4e-4 of its peak at the rim,
+    /// four widths off, and the far field's contour stands 1.6 from the
+    /// centre, as far past the source's other side. The walls' first return
+    /// reaches the contour after 12.8 s.
+    fn far_field_scene(
+        cylinder: Option<Cylinder>,
+        half: f64,
+        edge: f64,
+    ) -> Arc<crate::topology_runtime::PreparedTopology> {
+        let document = far_field_document(cylinder, half);
+        let editor = TopologyEditor::from_document(document.clone()).unwrap();
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                1,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                MeshingOptions {
+                    target_edge_length: edge,
+                    ..MeshingOptions::default()
+                }
+                .sized_for_area(4.0 * half * half),
+                true,
+            )
+            .unwrap();
+        loop {
+            if let Some(result) = runtime.advance(1 << 16) {
+                result.unwrap();
+                break;
+            }
+        }
+        runtime.commit_ready(token).unwrap()
+    }
+
+    fn far_field_document(cylinder: Option<Cylinder>, half: f64) -> TopologyDocument {
+        let radius = scattering_table().radius;
+        let k = 2.0 / radius;
+        let mut builder = Builder::new();
+        builder.scene.physics = LEDGER_TM;
+        builder.scene.geometry.domain = DomainRect {
+            min_x: -half,
+            max_x: half,
+            min_y: -half,
+            max_y: half,
+        };
+        builder.scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
+        let circle = circle_at(Point2::default(), radius);
+        match cylinder {
+            None => {}
+            Some(Cylinder::Hole) => {
+                let rim = SpanBehavior::Separated {
+                    left: FaceBoundaryCondition::Reflecting,
+                    right: FaceBoundaryCondition::Reflecting,
+                    coupling: InternalBoundaryCoupling::Independent,
+                };
+                builder.closed(circle, rim, None);
+            }
+            Some(Cylinder::Inclusion(layer)) => {
+                builder.scene.materials.push(Material {
+                    id: MaterialId(2),
+                    name: "Cylinder".into(),
+                    mass_density: ScalarField::constant(layer.mass),
+                    stiffness: ScalarField::constant(layer.stiffness),
+                    ..Material::default_medium()
+                });
+                builder.closed(
+                    circle,
+                    SpanBehavior::Transmitting,
+                    Some((MaterialId(2), MaterialFrame::world())),
+                );
+            }
+            Some(Cylinder::Pinned) => unreachable!("PH-18 reads no pinned cylinder"),
+        }
+        let mut document = builder.document();
+        let (sin, cos) = FAR_SOURCE_ANGLE.to_radians().sin_cos();
+        let rho = source_table().source;
+        document.model.source = PointSource {
+            enabled: true,
+            position: Point2::new(rho * cos, rho * sin),
+            width: 0.15,
+            region: BACKGROUND_REGION,
+            signal: TimeSignal::pulsed(
+                [0.0, 1.0, k / std::f64::consts::TAU, 0.0],
+                PulseEnvelope::FlatTop {
+                    duration: 100.0,
+                    edge: 0.5,
+                },
+                0.0,
+                0.0,
+            ),
+        };
+        document.model.far_field = crate::document::FarFieldSettings {
+            enabled: true,
+            inset: half - 1.6,
+        };
+        document
+    }
+
+    /// The analytic pattern `|F(θ)|²`, by the recorder's directions:
+    /// `F = e^{−ikρ cos ψ} + Σₙ (−i)ⁿ Sₙ H1ₙ(kρ) e^{inψ}`, `ψ = θ − φₛ`, with
+    /// `S₋ₙ = Sₙ` and `H₋ₙ = (−1)ⁿ Hₙ`; the first term alone without a
+    /// cylinder.
+    fn line_source_pattern(cylinder: Option<Cylinder>) -> Vec<f64> {
+        let radius = scattering_table().radius;
+        let (k, rho) = (2.0 / radius, source_table().source);
+        let hankel = &source_table()
+            .cases
+            .iter()
+            .find(|entry| entry.ka == 2.0)
+            .unwrap()
+            .hankel;
+        let ratios = cylinder.map(|cylinder| {
+            let case = ScatteringCase {
+                name: "PH-18".into(),
+                physics: LEDGER_TM,
+                cylinder,
+                ka: 2.0,
+                centre: Point2::default(),
+                incidence: 0.0,
+            };
+            case.entry()
+                .orders
+                .iter()
+                .map(|order| order.ratio)
+                .collect::<Vec<_>>()
+        });
+        (0..crate::ui::e2e::far_field::DIRECTIONS)
+            .map(|j| {
+                let theta =
+                    std::f64::consts::TAU * j as f64 / crate::ui::e2e::far_field::DIRECTIONS as f64;
+                let psi = theta - FAR_SOURCE_ANGLE.to_radians();
+                let phase = -k * rho * psi.cos();
+                let (mut re, mut im) = (phase.cos(), phase.sin());
+                for (n, ratio) in ratios.iter().flatten().enumerate() {
+                    let h = hankel[n];
+                    // S_n H_n, times (−i)^n, times e^{inψ} + e^{−inψ} past 0.
+                    let (sh_re, sh_im) = (
+                        ratio[0] * h[0] - ratio[1] * h[1],
+                        ratio[0] * h[1] + ratio[1] * h[0],
+                    );
+                    let (turn_re, turn_im) = match n % 4 {
+                        0 => (1.0, 0.0),
+                        1 => (0.0, -1.0),
+                        2 => (-1.0, 0.0),
+                        _ => (0.0, 1.0),
+                    };
+                    let weight = if n == 0 {
+                        1.0
+                    } else {
+                        2.0 * (n as f64 * psi).cos()
+                    };
+                    re += weight * (sh_re * turn_re - sh_im * turn_im);
+                    im += weight * (sh_re * turn_im + sh_im * turn_re);
+                }
+                re * re + im * im
+            })
+            .collect()
+    }
+
+    /// What PH-18's far field reads of the line source alone or beside a
+    /// cylinder, at `edge`: the time-averaged intensity the twin projects
+    /// over two periods, by direction, against `|F|²`, both relative to
+    /// their peaks; the worst difference.
+    fn line_source_pattern_error(cylinder: Option<Cylinder>, edge: f64) -> f64 {
+        let half = 8.0;
+        let prepared = far_field_scene(cylinder, half, edge);
+        let operator = prepared.canonical_operator.clone();
+        let forcing = prepared.canonical_forcing.clone();
+        let dt = prepared.recommended_time_step();
+        let mut twin = crate::ui::e2e::far_field::FarFieldTwin::new(&prepared, dt).unwrap();
+        let mut state = CanonicalWaveState::zero(&operator, dt).unwrap();
+        let period = std::f64::consts::TAU * scattering_table().radius / 2.0;
+        let (from, to) = (8.0, 8.0 + 2.0 * period);
+        let end = to + twin.margin() + 0.1;
+        for step in 1..=(end / dt).ceil() as u64 {
+            state.step_with_forcing(&operator, &forcing).unwrap();
+            twin.observe(step, state.time(), state.primary_flux());
+        }
+        let mut sum = vec![0.0; crate::ui::e2e::far_field::DIRECTIONS];
+        let mut now = from + twin.margin();
+        while now < to + twin.margin() {
+            let (_, amplitudes) = twin.projection(now).unwrap();
+            for (total, a) in sum.iter_mut().zip(&amplitudes) {
+                *total += a * a;
+            }
+            now += 1.0 / 60.0;
+        }
+        let read_peak = sum.iter().copied().fold(0.0, f64::max);
+        let exact = line_source_pattern(cylinder);
+        let exact_peak = exact.iter().copied().fold(0.0, f64::max);
+        sum.iter()
+            .zip(&exact)
+            .map(|(read, exact)| (read / read_peak - exact / exact_peak).abs())
+            .fold(0.0, f64::max)
+    }
+
+    /// PH-18: the far-field recorder's twin reads a line source's pattern
+    /// flat, as `|F|² = 1` has it, within 5e-2 at an edge of 0.2 (2.3e-2).
+    /// With its frames stamped at the step's end rather than centred on it,
+    /// the twin read 9.9e-2 here.
+    #[test]
+    fn a_line_sources_far_field_reads_flat() {
+        let error = line_source_pattern_error(None, 0.2);
+        assert!(error < 5.0e-2, "the pattern reads {error:.3e} off flat");
+    }
+
+    /// PH-18's nightly: the far-field recorder's twin against the patterns
+    /// of a line source alone and beside PH-12's cylinders of size `k a = 2`,
+    /// at an edge of 0.15: alone within 2e-2 (1.1e-2), beside a hole within
+    /// 1e-2 (4.5e-3), and beside a cylinder of index √2 within 1e-2 (4.6e-3).
+    /// A cylinder of index 2 is left out: its resonance,
+    /// which PH-12 switched on over 20 s, rings past the half second the
+    /// walls' first return leaves room for, and reads 3.2e-2 off at both
+    /// edges.
+    #[test]
+    #[ignore = "nightly: three runs of 120,000 degrees of freedom, three minutes"]
+    fn far_fields_meet_a_line_sources_patterns() {
+        for (name, cylinder, bound) in [
+            ("alone", None, 2.0e-2),
+            ("beside a hole", Some(Cylinder::Hole), 1.0e-2),
+            (
+                "beside a cylinder of index √2",
+                Some(Cylinder::Inclusion(Layer::of(2.0, 1.0))),
+                1.0e-2,
+            ),
+        ] {
+            let error = line_source_pattern_error(cylinder, 0.15);
+            eprintln!("{name}: the pattern reads {error:.3e} off");
+            assert!(error < bound, "{name}: the pattern reads {error:.3e} off");
+        }
+    }
 }

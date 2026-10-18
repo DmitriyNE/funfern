@@ -496,6 +496,13 @@ jobs:
           cargo test --release -p funfern-app --lib --locked --
           --ignored --nocapture cylinders_converge_to_the_partial_waves
 
+      # PH-18: the far-field recorder's twin against a line source's pattern,
+      # alone and beside PH-12's cylinders; three minutes on an M1 Max.
+      - name: Far field of a line source, PH-18
+        run: >-
+          cargo test --release -p funfern-app --lib --locked --
+          --ignored --nocapture far_fields_meet_a_line_sources_patterns
+
   # Nightly: PH-13, thin gaps against their spring law, on three meshes, at
   # half the step and across a handoff; twelve minutes on an M1 Max
   # (topology_examples.rs, thin_gaps_converge_to_their_springs).
@@ -881,7 +888,7 @@ jobs:
         run: scripts/e2e-lavapipe.sh
 
   browser:
-    name: Browser fixtures on SwiftShader (${{ matrix.hosting }}${{ matrix.part == 'observables' && ', observables' || '' }})
+    name: Browser fixtures on SwiftShader (${{ matrix.hosting }}${{ matrix.part == 'recorders' && ', recorders' || '' }})
     # The app's end-to-end fixtures in Chromium on its bundled software WebGPU:
     # the shipped bundle with its fixtures, started in a browser that compiles
     # its shaders through Tint and draws them through its compositor. Every
@@ -889,9 +896,9 @@ jobs:
     # SwiftShader compiles the app's pipelines for a minute a page and runs a
     # few frames a second; nightly, and dispatched with `full`, every fixture
     # runs, isolated and with service workers refused, the two in parallel.
-    # There `observables` is a part of its own: about 75 minutes, which would
-    # carry the slower hosting, at 5 h 47 min without it on 2026-10-17, past
-    # the runner's six hours.
+    # There the recorders' fixtures, `observables` and `far-field`, are a part
+    # of their own: about two hours, which would carry the slower hosting, at
+    # 5 h 47 min without them on 2026-10-17, past the runner's six hours.
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -899,7 +906,7 @@ jobs:
       fail-fast: false
       matrix:
         hosting: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["isolated", "pages-blocked"]' || '["isolated"]') }}
-        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "observables"]' || '["state"]') }}
+        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "recorders"]' || '["state"]') }}
     env:
       FULL: ${{ github.event_name == 'schedule' || inputs.browser == 'full' }}
     steps:
@@ -973,8 +980,8 @@ jobs:
         # and the slowest page, cavity-batches' four runs, 745 s.
         env:
           FUNFERN_EXPECT_BUILD: ${{ github.sha }}
-          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'observables' && 'observables' || '' }}
-          FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables' || '' }}
+          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'recorders' && 'observables,far-field' || '' }}
+          FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables,far-field' || '' }}
           FUNFERN_E2E_DEADLINE: ${{ env.FULL != 'true' && '600' || '1500' }}
           FUNFERN_E2E_HOSTING: ${{ matrix.hosting }}
           FUNFERN_TEST_ISOLATED: ${{ matrix.hosting == 'isolated' && '1' || '0' }}

@@ -120,6 +120,7 @@ RUNS=(
   'FUNFERN_E2E=rejection funfern-fixtures'
   'FUNFERN_E2E=device-loss funfern-fixtures'
   'FUNFERN_E2E=observables funfern-fixtures'
+  'FUNFERN_E2E=far-field funfern-fixtures'
 )
 
 pattern=${1:-}

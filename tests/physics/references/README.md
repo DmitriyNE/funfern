@@ -26,3 +26,8 @@ tables.
   test fits at. Checked by the Wronskian, at twice the precision, every
   ratio by unitarity, `|1 + 2 S_n| = 1`, and every slope along it and by
   carrying its ratio to a circle 2e-4 smaller to 1e-5.
+- `cylinder-source.json`, from `cylinder_source.py` (mpmath): PH-18's
+  `H1_n(kρ)` at a line source's distance from PH-12's cylinder, for the
+  pattern `F(θ) = e^{−ikρ cos ψ} + Σ (−i)ⁿ Sₙ H1ₙ(kρ) e^{inψ}` the far field's
+  test sums with `cylinder-scattering.json`'s ratios. Checked by the
+  Wronskian and at twice the precision.

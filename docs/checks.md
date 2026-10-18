@@ -819,6 +819,38 @@ low half an element in, where the field reads exact, falling four times as
 the edge halves. It is held within 3% and listed as worth checking. The
 mutation `curve-probe-flux-reversed`, the line recorder's normal flux with
 its sign turned, reads the lines 2.1 off.
+
+The far field last, with its twin `FarFieldTwin`
+(`src/ui/e2e/far_field.rs`), the recorder in f64: contour frames centred on
+their step, kept by the shader's bucket rule and projected by its retarded
+interpolation.
+- **The analytic pattern.** A line source's pattern is
+  `F(θ) = e^{−ikρ cos ψ} + Σ (−i)ⁿ Sₙ H1ₙ(kρ) e^{inψ}`, with PH-12's ratios
+  `Sₙ` and `H1ₙ(kρ)` from `cylinder-source.json`. The source sits 1.1 from a
+  cylinder of size `k a = 2`, in a TM box of half-width 8 whose walls'
+  first return reaches the contour only after the read: two periods of
+  time-averaged intensity, relative to its peak.
+  - **Gate:** `a_line_sources_far_field_reads_flat` holds the source alone
+    flat within 5e-2 at an edge of 0.2 (2.3e-2).
+  - **Nightly** (`far_fields_meet_a_line_sources_patterns`, in PH-12's
+    job), at an edge of 0.15:
+
+    | Case | Bound | Read |
+    |---|---|---|
+    | Alone | 2e-2 | 1.1e-2 |
+    | Beside a hole | 1e-2 | 4.5e-3 |
+    | Beside a cylinder of index √2 | 1e-2 | 4.6e-3 |
+
+    The cylinder of index 2 rings in the resonance PH-12 switched on over
+    20 s, and is left out.
+- **The fixture `far-field`.** A TM box of outgoing walls with a hole and a
+  source beside it, its far field on, run 6.5 s. Every record the readout
+  draws stands a bucket apart from the first the delay window lets through,
+  each direction's amplitude within 4e-5 of the twin's largest (8.1e-6), its
+  far time within 2e-6 s (3.8e-7). The run with the far field off ends on
+  the same bits.
+- **Mutation.** `far-field-frame-at-step-end` puts the shader back as it
+  was, and the fixture reads 6.1e-2 off its twin.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

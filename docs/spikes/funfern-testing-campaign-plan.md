@@ -659,8 +659,17 @@ Poynting round a loop, the readouts' spectrum and transfer, and the probes
 off against on. Boundary probes take a drawn curve, not a side of the
 domain, so the boundary recorder reads a transmitting loop and a segment
 reads the wall. The nightly's browser run has `observables` as a part of
-its own. The mutation `curve-probe-flux-reversed`. The transverse field on
+its own, the recorders' part. The mutation `curve-probe-flux-reversed`. The transverse field on
 an outgoing wall's elements is listed as worth checking.
+
+**Part 3 done on 2026-10-18:** the far field. The recorder's twin read a
+line source's pattern 9.9% off flat. Its contour frames paired the gradient
+with a rate half a step older, and centring them on their step fixed it, in
+the shader and the twin. The twin now meets a line source's
+pattern alone and beside PH-12's cylinders within 1.1e-2, in the gate and
+nightly. The fixture `far-field` holds the device's records to it, and the
+browser nightly's recorders part runs it. The mutation
+`far-field-frame-at-step-end`.
 
 ## 7. Infrastructure
 

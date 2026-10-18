@@ -1419,13 +1419,18 @@ contour. Spatial or driven materials remain valid in fully enclosed faces. The
 legacy path checks adaptively subdivided periodic and open spline traces with the
 same fixed world-space margin. Both paths deliberately ignore control polygons
 because their hull may extend beyond a fully enclosed curve.
-For exterior speed `c`, the canonical GPU records direct `u=Q/M`, its accepted
-backward endpoint rate, and `grad(u) dot n` at 60
-samples per simulated second. A second compute dispatch evaluates 96 directions
-with temporal interpolation of the retarded contour data and the directional
-Huygens integrand `grad(u) dot n - (n dot d) u_t / c`. The observation timestamp is
-delayed by the largest contour projection, so every direction refers to the same
-far time. The 512-frame raw ring must span the full propagation-delay range; an
+For exterior speed `c`, the canonical GPU records each contour frame centred on
+the step it is taken over: direct `u=Q/M` and `grad(u) dot n`, each the mean of
+the step's two accepted lanes, and the backward difference of `u` across it, all
+three stamped half a step back, at 60 frames per simulated second. A second
+compute dispatch evaluates 96 directions with temporal interpolation of the
+retarded contour data and the directional Huygens integrand
+`grad(u) dot n - (n dot d) u_t / c`, from the same centred time. The observation
+timestamp is delayed by the largest contour projection, so every direction refers
+to the same far time. Frames stamped at the step's end paired the gradient with
+a rate half a step older, which left an outgoing wave's contribution from the
+contour's far side uncancelled by about `ωΔt/2` and moved a pattern's intensity
+by 4% at 1 Hz and 10% at 3 Hz at the default step (fixed 2026-10-18). The 512-frame raw ring must span the full propagation-delay range; an
 explicit configuration error replaces truncated output when it cannot.
 
 Only the compact 96-direction, 512-frame ring is read back. Its host history stays

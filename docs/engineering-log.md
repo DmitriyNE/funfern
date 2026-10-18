@@ -25451,3 +25451,106 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-18 — PH-18, part 3: the far field, and its frames centred on their step
+
+- **The defect.**
+  - **What it did.** The far-field recorder stored each contour frame at
+    the step's end: the field and its normal gradient there, beside the
+    backward difference of the field across the step, which stands half a
+    step earlier. The projection pairs the gradient with the rate as if
+    simultaneous. For an outgoing wave the contour's far side then stops
+    cancelling, by about `ωΔt/2` of it.
+  - **Found by PH-18's twin.** On a line source alone, far from walls, the
+    twin read the pattern 9.9% off flat. The frequency-domain projection of
+    the same field read 1.1%, and the twin with centred frames 1.5%.
+  - **At the app's defaults** (the unit square, the default inset, edge
+    0.07, a source alone), the lag moved the pattern's intensity by 4.3% at
+    1 Hz and 10% at 3 Hz. Deep minima fill in most. The radiated-power
+    trace moves with it.
+- **The fix** (`canonical_far_field.wgsl`).
+  - **Frames.** A frame is centred on its step: `u` and `grad(u)·n` the
+    mean of the step's two accepted lanes, the rate their difference, all
+    stamped half a step back (`centred_time`). The backward difference is
+    second order there. The previous lane's gradient costs seven more reads
+    per contour point.
+  - **Projection.** It is taken from the same centred time, so a pass that
+    writes a bucket's frame projects from it.
+  - **Record times.** They move half a step earlier.
+  - **Unchanged:** the dispatch cadence, the bucket rule and a filter
+    commit's deferral, which the rate already needed.
+  - `far_field_frames_are_centred_on_their_step` holds the shader's text.
+- **The twin.** `FarFieldTwin` (`src/ui/e2e/far_field.rs`) is the recorder
+  in f64:
+  - frames centred on their step, starting from rest;
+  - kept by the shader's f32 bucket rule;
+  - each retarded time interpolated between the frames about it, as the
+    shader's search finds them;
+  - the frame nearest a record's time stands for it, so a rounding at a
+    bucket's edge cannot pick a neighbour.
+- **The analytic pattern.**
+  - **The formula.** A line source `H1₀(k|r − r_s|)` beside PH-12's
+    cylinder radiates
+    `F(θ) = e^{−ikρ cos ψ} + Σ (−i)ⁿ Sₙ H1ₙ(kρ) e^{inψ}`, `ψ = θ − φₛ`.
+    `Sₙ` comes from PH-12's table; `H1ₙ(kρ)` comes from
+    `cylinder-source.json` (`cylinder_source.py`, mpmath, checked by the
+    Wronskian and at twice the precision).
+  - **Why the source's own shape doesn't matter.** The app's point source is
+    a Gaussian, radially symmetric, so outside it its field is a constant
+    times `H1₀`, and the relative pattern is exact.
+  - **Scene.**
+    - **Source:** 1.1 from a cylinder of radius 0.5 (`k a = 2`), at 150°,
+      width 0.15. Its tail is four widths from the rim and from the
+      contour, which stands 1.6 from the centre.
+    - **Walls:** TM, a box of half-width 8 with first-order outgoing walls,
+      whose first return reaches the contour after 12.8 s.
+    - **Read:** intensity averaged over two periods of far time from 8 s.
+  - **Results:**
+
+    | Case | Edge | Read | Bound |
+    |---|---|---|---|
+    | Alone (gate, `a_line_sources_far_field_reads_flat`, 10 s) | 0.2 | 2.3e-2 | 5e-2 |
+    | Alone (nightly, `far_fields_meet_a_line_sources_patterns`) | 0.15 | 1.1e-2 | 2e-2 |
+    | Beside a hole (nightly) | 0.15 | 4.5e-3 | 1e-2 |
+    | Beside a cylinder of index √2 (nightly) | 0.15 | 4.6e-3 | 1e-2 |
+
+    The nightly test runs in PH-12's job, three minutes on the M1 Max.
+  - **What the sizing taught.**
+    - My first source, width 0.2 at 0.8 from the cylinder's centre, kept
+      32% of its peak at the rim. The cylinder cut it, and the
+      frequency-domain projection itself read the hole's pattern 6% off. The
+      oracle was wrong, not the app.
+    - A cylinder of index 2 reads 3.2e-2 off at both edges: the resonance
+      PH-12 needed a 20 s switch-on for still rings within the half second
+      the walls leave. It is left out; index √2 reads 4.6e-3.
+- **The fixture.**
+  - **Scene.** `far-field` opens a TM box of first-order outgoing walls, a
+    hole of radius 0.25, and a 2 Hz source beside it, its far field on at
+    the default inset. It runs 1150 steps (6.5 s) at the app's pacing, and
+    the reference steps the twin along.
+  - **Judge.** The host's records (those whose 96 directions all read) are
+    held to the twin. The M1 Max: 232 records from far time 1.24 s, a
+    bucket apart; every amplitude within 8.1e-6 of the largest (bound
+    4e-5); far times within 3.8e-7 s (bound 2e-6).
+  - **Far field off.** The same run with the far field off ends on the same
+    bits.
+  - **Where it runs.**
+
+    | Runner | Time | Amplitude |
+    |---|---|---|
+    | Metal, in the device suite | 18 s | 8.1e-6 |
+    | lavapipe, the CI image | 223 s | 7.4e-6 |
+    | Chrome on Metal | | 8.07e-6, the native run's endpoint bits |
+- **Mutation.** `far-field-frame-at-step-end` puts the shader back as it
+  was: the fixture reads 6.1e-2 off its twin, its stamps half a step out.
+- **CI.**
+  - The fixture joins the device suite, and so the per-push lavapipe job.
+  - The nightly browser part of the recorders' fixtures (renamed from
+    `observables`) runs both, with three times the page deadline for
+    `far-field`.
+- **The point probe's rate** keeps its half-step stamp. There it only
+  shifts the plotted rate by half a step; part 4 documents it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. The device suite, since a shader changed:
+  90 of 90.

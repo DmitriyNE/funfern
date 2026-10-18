@@ -1,0 +1,59 @@
+diff --git a/crates/funfern-app/src/canonical_far_field.wgsl b/crates/funfern-app/src/canonical_far_field.wgsl
+index faac50b..6b3d135 100644
+--- a/crates/funfern-app/src/canonical_far_field.wgsl
++++ b/crates/funfern-app/src/canonical_far_field.wgsl
+@@ -47,17 +47,6 @@ fn ring_frame(frame: u32, age: u32, frames: u32) -> u32 {
+ fn state_time() -> f32 {
+     return control.clock_origin.x + control.clock_origin.y + control.clock_f32.y;
+ }
+-// A frame is centred on the step it is taken over: the field and its normal
+-// gradient the mean of the step's two lanes, the rate their difference, all
+-// three half a step back, where the backward difference is second order. A
+-// frame stamped at the step's end paired the gradient with a rate half a step
+-// older, and the contour's far side stopped cancelling an outgoing wave by
+-// about ωΔt/2 of it: a 3 Hz source's pattern moved by 10% at the default
+-// step. The projection is taken from the same time, so a pass that writes a
+-// bucket's frame projects from it.
+-fn centred_time() -> f32 {
+-    return state_time() - 0.5 * control.clock_f32.x;
+-}
+ fn bucket_of(time: f32) -> f32 { return floor(time / far_control.sampling.x); }
+ fn bucket_frame(bucket: f32, frames: u32) -> u32 {
+     let count = f32(frames);
+@@ -72,7 +61,7 @@ fn sample_contour(@builtin(global_invocation_id) invocation: vec3<u32>) {
+     let point = invocation.x;
+     let point_count = u32(far_control.sampling.z);
+     if point >= point_count { return; }
+-    let time = centred_time();
++    let time = state_time();
+     let frames = u32(far_control.sampling.y);
+     let bucket = bucket_of(time);
+     let index = bucket_frame(bucket, frames) * point_count + point;
+@@ -101,16 +90,11 @@ fn sample_contour(@builtin(global_invocation_id) invocation: vec3<u32>) {
+     let primary = dot(current_a, stencil.weights_a) + dot(current_b, stencil.weights_b);
+     let previous = dot(previous_a, stencil.weights_a) + dot(previous_b, stencil.weights_b);
+     let rate = (primary - previous) / control.clock_f32.x;
+-    let current_gradient = vec2<f32>(
++    let gradient = vec2<f32>(
+         dot(current_a, stencil.gradient_x_a) + dot(current_b, stencil.gradient_x_b),
+         dot(current_a, stencil.gradient_y_a) + dot(current_b, stencil.gradient_y_b));
+-    let previous_gradient = vec2<f32>(
+-        dot(previous_a, stencil.gradient_x_a) + dot(previous_b, stencil.gradient_x_b),
+-        dot(previous_a, stencil.gradient_y_a) + dot(previous_b, stencil.gradient_y_b));
+-    let gradient = 0.5 * (current_gradient + previous_gradient);
+     let normal_gradient = dot(gradient, stencil.position_normal.zw);
+-    contour_history[index].values =
+-        vec4<f32>(0.5 * (primary + previous), rate, normal_gradient, time);
++    contour_history[index].values = vec4<f32>(primary, rate, normal_gradient, time);
+ }
+ 
+ // Portable trigonometry: this block is the same in every shader that needs
+@@ -172,7 +156,7 @@ fn project_directions(@builtin(global_invocation_id) invocation: vec3<u32>) {
+     let direction = invocation.x;
+     let direction_count = u32(far_control.sampling.w);
+     if direction >= direction_count { return; }
+-    let now = centred_time();
++    let now = state_time();
+     let frames = u32(far_control.sampling.y);
+     let point_count = u32(far_control.sampling.z);
+     let period = far_control.sampling.x;
