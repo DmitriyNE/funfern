@@ -163,10 +163,10 @@ instead, which the app's handler replaces.
 
 Each fixture also holds its mesh to the one recorded, to the bit: the
 triangles' vertices and regions, and every vertex's coordinates (`CAVITY_MESH`,
-`DISC_MESH` and `FINER_CAVITY_MESH` in `src/ui/e2e.rs`). The mesher decides
-through portable arithmetic, and the M1 Max natively, Chrome's wasm and Linux on
-arm64 build the three meshes alike, the disc's curve included; CI's x86_64
-runner holds them each run. A change to the mesher made on purpose records them
+`DISC_MESH`, `FINER_CAVITY_MESH` and `CHANNEL_MESH` in `src/ui/e2e.rs`). The
+mesher decides through portable arithmetic, and the M1 Max natively, Chrome's
+wasm and Linux build the meshes alike, the disc's and the channel's curves
+included; CI's x86_64 runner holds them each run. A change to the mesher made on purpose records them
 again.
 
 Safari runs them by hand, as no CI browser runs its WebGPU: with remote
@@ -773,6 +773,52 @@ of 0.05 to:
 Each falls at least 2.5 times from an edge of 0.1. The mutation
 `consumer-flow-orientation-dropped`, the flow without its skin's
 orientation, reverses Mechanical's flow (2.0 off).
+
+Then the recorders themselves, through the app: the end-to-end fixture
+`observables` (`src/ui/e2e/observables.rs`). It opens a TM channel whose left
+side drives a 2 Hz burst into a first-order outgoing wall on its right, with:
+- two points;
+- a segment across the channel and one down the wall;
+- a boundary probe on the inside trace of a transmitting circle of the same
+  medium;
+- an area probe of the circle's region, and a disk.
+
+It runs 8 s at the app's own pacing. Every trace the readouts draw is then
+held to the recorders' f64 twins, read off the reference after every step:
+- **Coverage:** each kind's records a stride apart from the run's start to
+  its end, none missing.
+- **Values:** within 1e-4 of their scale. The M1 Max reads 2.2e-5 at worst,
+  a point's; lines 8.6e-6, their readout integrals 7.9e-6, areas 8.7e-7.
+- **Stamps:** within 2e-6 s of the f64 clock (3.9e-7).
+- **Poynting's theorem round the loop:** what leaves it against what the
+  region inside loses, within 1e-2 by a trapezoid over the records' stride
+  (5.4e-3), and within 1e-4 of the twin's (6.4e-6).
+- **The readouts' estimators on the device's records:** the upstream point's
+  spectrum peaks within 1e-2 of the drive's amplitude (0.49787 of 0.5), and
+  the Welch transfer to the downstream point, a pure delay, reads one within
+  2e-3 (0.99951).
+- **The rate:** read within 1e-2 of `u̇` half a step before its stamp
+  (4.2e-3). At the stamp it reads 3.7e-2 off, the half step's `ωΔt/2`.
+
+The same run with no probes then ends on the same bits. It takes 25 s on
+Metal, 290 s on lavapipe and 27 s in Chrome on Metal, which reads what the
+native app reads to every printed digit. In the nightly the fixture is a
+browser part of its own, since about 75 minutes on SwiftShader would carry
+the slower hosting past the runner's six hours.
+
+The twins are held to the wave on the CPU at the same mesh and step
+(`the_twins_meet_the_wave_on_the_observables_channel`):
+- the points' field within 2.5e-3 of an amplitude of 0.5 (1.2e-3), the
+  segment across within 1.5e-3 (7.0e-4), Poynting within 4e-3 (1.8e-3);
+- the wall's ledger booking `2∫g²` within 5e-4 (1.8e-4);
+- the spectrum and the transfer as on the device.
+
+The segment down the wall carries 1.5% more than the ledger books. The
+transverse field on the wall's elements reads 1.5% high at the wall and 0.7%
+low half an element in, where the field reads exact, falling four times as
+the edge halves. It is held within 3% and listed as worth checking. The
+mutation `curve-probe-flux-reversed`, the line recorder's normal flux with
+its sign turned, reads the lines 2.1 off.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

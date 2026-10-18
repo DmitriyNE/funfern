@@ -1,0 +1,11 @@
+diff --git a/crates/funfern-app/src/canonical_curve_probe.wgsl b/crates/funfern-app/src/canonical_curve_probe.wgsl
+--- a/crates/funfern-app/src/canonical_curve_probe.wgsl
++++ b/crates/funfern-app/src/canonical_curve_probe.wgsl
+@@ -521,6 +521,6 @@
+         + complementary_energy(record.point, complement, time);
+     let flow = energy_flow(record.point, primary, complement);
+     output[slot].primary = vec4<f32>(
+-        primary, energy, dot(flow, record.normal_stride_valid.xy), absolute_time());
++        primary, energy, -dot(flow, record.normal_stride_valid.xy), absolute_time());
+     output[slot].secondary = vec4<f32>(length(complement), 0.0, 0.0, 0.0);
+ }

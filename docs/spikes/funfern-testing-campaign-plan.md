@@ -653,6 +653,15 @@ at second order, with each skin's units, the flow along the travel and a
 segment's flux under its left normal. The mutation
 `consumer-flow-orientation-dropped`.
 
+**Part 2 done on 2026-10-18:** the fixture `observables` holds every trace to
+its twin on Metal, lavapipe and Chrome. It also checks coverage, stamps,
+Poynting round a loop, the readouts' spectrum and transfer, and the probes
+off against on. Boundary probes take a drawn curve, not a side of the
+domain, so the boundary recorder reads a transmitting loop and a segment
+reads the wall. The nightly's browser run has `observables` as a part of
+its own. The mutation `curve-probe-flux-reversed`. The transverse field on
+an outgoing wall's elements is listed as worth checking.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

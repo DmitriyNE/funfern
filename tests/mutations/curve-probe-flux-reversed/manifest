@@ -1,0 +1,4 @@
+about: the line and boundary recorder writes each point's normal flux with its sign turned, so every segment and boundary readout reads the power the wrong way while its field, transverse field and energy stand
+test: scripts/e2e-fixture.sh observables
+expect: a line reads [12]\.[0-9]+e0, beyond
+needs: device

@@ -119,6 +119,7 @@ RUNS=(
   'FUNFERN_E2E=handoff-memory-running funfern-fixtures'
   'FUNFERN_E2E=rejection funfern-fixtures'
   'FUNFERN_E2E=device-loss funfern-fixtures'
+  'FUNFERN_E2E=observables funfern-fixtures'
 )
 
 pattern=${1:-}

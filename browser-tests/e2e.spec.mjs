@@ -20,18 +20,29 @@ const named = (process.env.FUNFERN_E2E_FIXTURES ?? "")
   .split(",")
   .map((name) => name.trim())
   .filter(Boolean);
-const unknown = named.filter((name) => !allFixtures.includes(name));
+// And the ones to leave out of all of them, comma-separated: the nightly runs
+// `observables` as a part of its own, since alongside the rest it would
+// carry the slower hosting past the runner's six hours.
+const excluded = (process.env.FUNFERN_E2E_EXCLUDE ?? "")
+  .split(",")
+  .map((name) => name.trim())
+  .filter(Boolean);
+const unknown = [...named, ...excluded].filter((name) => !allFixtures.includes(name));
 if (unknown.length > 0) {
-  throw new Error(`FUNFERN_E2E_FIXTURES names no fixture the device suite runs: ${unknown}`);
+  throw new Error(`FUNFERN_E2E_FIXTURES or _EXCLUDE names no fixture the device suite runs: ${unknown}`);
 }
-const fixtures = named.length > 0 ? named : allFixtures;
+const fixtures = (named.length > 0 ? named : allFixtures).filter(
+  (name) => !excluded.includes(name),
+);
 const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // A fixture that runs longer than the rest takes the deadline in proportion:
 // handoff-memory-running steps to 768 where the other handoff fixtures stop at
 // 384, which take 19 to 25 minutes on SwiftShader against the full run's
 // 1500 s, and it timed out there each night. The rest keep theirs, so a page
 // that hangs is still caught at it.
-const runLength = { "handoff-memory-running": 2 };
+// observables runs 1440 steps twice, its probes recording, where the cavity
+// runs 256 once: about 75 minutes at SwiftShader's 1.2 s a step.
+const runLength = { "handoff-memory-running": 2, observables: 4 };
 // How the bundle is hosted: `isolated`, the test server sending the headers that
 // isolate the page; `pages`, as GitHub Pages serves the site - no headers, so the
 // page installs coi-serviceworker.js and reloads itself once; or

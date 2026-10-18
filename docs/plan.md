@@ -1580,6 +1580,14 @@ is next touched.
   a field past it still steps correctly and the bound is advisory in effect
   (the law editor authors 1e3). Worth deciding whether it should refuse or
   say it is advisory (found by PH-16 on 2026-10-18).
+- The transverse field a probe reconstructs on a first-order outgoing wall's
+  elements is off by a share that falls as the square of the edge: on the
+  `observables` channel at edge 0.07, for a 2 Hz plane wave leaving through
+  the wall, 1.5% high at the wall and 0.7% low half an element in, against
+  0.07% across the channel, while the field reads exact. A segment down the
+  wall reads the power leaving 1.5% high, which the wall's ledger books to
+  1.8e-4. The fixture's CPU test holds it within 3% (found by PH-18 on
+  2026-10-18).
 
 ## Working practice
 

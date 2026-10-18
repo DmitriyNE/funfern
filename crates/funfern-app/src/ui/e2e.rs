@@ -20,6 +20,7 @@
 
 #[path = "../../examples/support/check.rs"]
 mod check;
+mod observables;
 
 use super::runtime::pulse_increment;
 use super::*;
@@ -71,6 +72,7 @@ pub(crate) fn add(app: &mut App) {
         "handoff-memory-running" => (Fixture::HandoffMemory(MemoryHandoff::Running), vec![None]),
         "rejection" => (Fixture::Rejection, vec![None]),
         "device-loss" => (Fixture::DeviceLoss, vec![None]),
+        "observables" => (Fixture::Observables, vec![None, None]),
         _ => {
             let failure = format!("no fixture named {name:?}");
             report(&format!("e2e: {failure}"));
@@ -153,6 +155,15 @@ enum Fixture {
     /// must stop and the app say so within two seconds, with the document,
     /// change included, in the autosave, and nothing left pending.
     DeviceLoss,
+    /// PH-18: a TM channel its left side drives into a matched wall, past
+    /// two points, two segments, a boundary probe, a region and a disk
+    /// (`observables::observables_document`), run 8 s at the app's own
+    /// pacing. Every trace the readouts draw is held to the recorders' f64
+    /// twins at the steps it recorded, none missing, with the readouts'
+    /// spectrum and transfer and Poynting's theorem on what the device
+    /// recorded. Then the same run without its probes must end on the same
+    /// bits: a probe only reads.
+    Observables,
 }
 
 /// How [`Fixture::HandoffMemory`] hands the running field over at step 192.
@@ -192,6 +203,7 @@ enum MemoryHandoff {
 const CAVITY_MESH: &str = "fdbd8736b4d960ea/c57811e22d49eb75";
 const DISC_MESH: &str = "abf88c2e20bff3c6/8496257d436c195f";
 const FINER_CAVITY_MESH: &str = "2a08c7884de88562/d105b9149fd88df1";
+const CHANNEL_MESH: &str = "04a488da9d8b2953/5072aa0afe3822b5";
 
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
 /// time, a number that divides nothing, half the run, and the whole run.
@@ -242,6 +254,7 @@ impl Fixture {
             Fixture::DeviceLoss => (&[(128, Action::LoseDevice)], 256),
             // The endpoint is a ceiling the run must not reach.
             Fixture::Rejection => (&[], 4096),
+            Fixture::Observables => (&[], observables::OBSERVED_STEPS),
         }
     }
 
@@ -257,7 +270,7 @@ impl Fixture {
     /// takes none - a pulse's increment is not derived through its nonlinear
     /// map, so the app refuses one - and its fixture is driven by its source.
     fn pulses(self) -> bool {
-        !matches!(self, Fixture::Rejection)
+        !matches!(self, Fixture::Rejection | Fixture::Observables)
     }
 
     /// The relative L2 error Q, b and r may reach. Measured on the M1 Max the
@@ -266,13 +279,18 @@ impl Fixture {
     /// component totals through at 2.5e-5. A device that reads more is to be
     /// looked at, not given more.
     fn tolerance(self) -> f64 {
-        5.0e-6
+        match self {
+            // 1440 steps, not 256: the M1 Max reads 4.4e-6.
+            Fixture::Observables => 2.0e-5,
+            _ => 5.0e-6,
+        }
     }
 
     /// The mesh the fixture's document must be built on.
     fn mesh(self) -> &'static str {
         match self {
             Fixture::Switch => DISC_MESH,
+            Fixture::Observables => CHANNEL_MESH,
             _ => CAVITY_MESH,
         }
     }
@@ -286,6 +304,7 @@ impl Fixture {
             | Fixture::Remesh
             | Fixture::DeviceLoss => (cavity_document(), None),
             Fixture::Rejection => (rejection_document(), None),
+            Fixture::Observables => (observables::observables_document(), None),
             Fixture::HandoffMemory(MemoryHandoff::Running) => (wall_document(false), None),
             Fixture::HandoffMemory(_) => (wall_document(true), None),
             Fixture::Switch => {
@@ -362,6 +381,12 @@ enum Phase {
         reference: Reference,
         seen: u64,
     },
+    /// The endpoint held, and its probes' last records are on their way.
+    Observe {
+        reference: Reference,
+        run: Run,
+        since: Instant,
+    },
     /// The device refused the step after `step`, with `code`; the app is to
     /// pause on it. `first` is the refused state's hash and summary once its
     /// snapshot is in, and `retried` whether Run has cleared the failure since.
@@ -387,6 +412,7 @@ impl Phase {
             Phase::Losing { .. } => "waiting for the app to stop after the device was lost",
             Phase::Carried { .. } => "waiting for the handoff's snapshot",
             Phase::Snapshot { .. } => "waiting for the endpoint's snapshot",
+            Phase::Observe { .. } => "waiting for the probes' last records",
             Phase::Refused { .. } => "waiting for the app to pause on the refusal",
             Phase::Done => "done",
         }
@@ -460,6 +486,9 @@ struct Reference {
     /// What the wall's memory went through at the last handoff, where the
     /// generation has a wall.
     carry: Option<MemoryCarry>,
+    /// The recorders' twins, read after every step, where the run's probes
+    /// are to be judged.
+    twin: Option<observables::Twin>,
 }
 
 #[derive(Clone)]
@@ -569,6 +598,13 @@ impl Reference {
             if let Some((active, control)) = &mut self.control {
                 control.step(active)?;
             }
+            if let Some(twin) = &mut self.twin {
+                twin.observe(
+                    self.state.time(),
+                    self.state.primary(),
+                    self.state.complementary(),
+                )?;
+            }
             self.steps += 1;
         }
         Ok(())
@@ -619,13 +655,21 @@ fn drive(
     }
     let verdict = verdict.and_then(|summary| match driver.hashes.as_slice() {
         [(_, first), rest @ ..] if rest.iter().any(|(_, hash)| hash != first) => Err(format!(
-            "the endpoint differs with the batching: {}",
+            "the endpoint differs {}: {}",
+            if matches!(fixture, Fixture::Observables) {
+                "with the probes off"
+            } else {
+                "with the batching"
+            },
             driver
                 .hashes
                 .iter()
                 .map(|(batch, hash)| format!("{}: {hash:016x}", batch.unwrap_or(0)))
                 .collect::<Vec<_>>()
                 .join(", ")
+        )),
+        [_, _, ..] if matches!(fixture, Fixture::Observables) => Ok(format!(
+            "{summary}; the endpoint is the same bits with the probes off"
         )),
         [_, _, ..] => Ok(format!(
             "the endpoint is the same bits in all {} batchings",
@@ -765,7 +809,11 @@ fn advance(
             state.e2e_steps.limit = Some(0);
             state.e2e_steps.batch = None;
             state.wave_running = true;
-            let (document, material) = driver.fixture.document();
+            let (mut document, material) = driver.fixture.document();
+            if matches!(driver.fixture, Fixture::Observables) && !driver.hashes.is_empty() {
+                // The run again with no probe: a probe only reads.
+                document.model.probes.clear();
+            }
             driver.material = material;
             if let Err(error) = state.set_document(document, false, true) {
                 return Some(Err(format!("the document did not open: {error}")));
@@ -814,6 +862,22 @@ fn advance(
                     active.canonical_operator.degrees_of_freedom(),
                     mesh_hashes(&active.mesh),
                 ));
+                let twin = if matches!(driver.fixture, Fixture::Observables)
+                    && !state.editor.document.model.probes.is_empty()
+                {
+                    match observables::Twin::new(
+                        &active,
+                        &state.editor.document.model.probes,
+                        time_step,
+                    ) {
+                        Ok(twin) => Some(twin),
+                        Err(error) => {
+                            return Some(Err(format!("the probes' twins did not start: {error}")));
+                        }
+                    }
+                } else {
+                    None
+                };
                 state.e2e_steps.limit = Some(stop(0));
                 state.e2e_steps.batch = driver.batches.front().copied().flatten();
                 driver.phase = Phase::Run {
@@ -823,6 +887,7 @@ fn advance(
                         control: None,
                         steps: 0,
                         carry: None,
+                        twin,
                     },
                     next: 0,
                 };
@@ -868,6 +933,7 @@ fn advance(
                     control: None,
                     steps: 0,
                     carry: None,
+                    twin: None,
                 },
                 processed: request.stats().processed_event(),
             };
@@ -1399,12 +1465,65 @@ fn advance(
                 driver.phase = Phase::Snapshot { reference, seen };
                 return None;
             }
-            Some(
-                compare(&reference, display, driver.fixture, endpoint).map(|summary| Run {
-                    summary,
-                    hash: hash(&display.accepted_storage_bits()),
-                }),
-            )
+            let run = compare(&reference, display, driver.fixture, endpoint).map(|summary| Run {
+                summary,
+                hash: hash(&display.accepted_storage_bits()),
+            });
+            match run {
+                Ok(run) if reference.twin.is_some() => {
+                    driver.phase = Phase::Observe {
+                        reference,
+                        run,
+                        since: Instant::now(),
+                    };
+                    None
+                }
+                run => Some(run),
+            }
+        }
+        Phase::Observe {
+            reference,
+            run,
+            since,
+        } => {
+            // The readbacks that carry the run's last records arrive frames
+            // after its endpoint; a second is many of them.
+            let time = reference.state.time();
+            let last =
+                |times: &mut dyn Iterator<Item = f64>| times.fold(f64::NEG_INFINITY, f64::max);
+            let behind = [
+                last(&mut state.probe_traces.values().map(|trace| trace.last_time)),
+                last(
+                    &mut state
+                        .curve_probe_traces
+                        .values()
+                        .map(|trace| trace.last_time),
+                ),
+                last(
+                    &mut state
+                        .area_probe_traces
+                        .values()
+                        .map(|trace| trace.last_time),
+                ),
+            ]
+            .iter()
+            .any(|seen| *seen < time - 4.0 * reference.state.time_step());
+            if behind && since.elapsed() < std::time::Duration::from_secs(1) {
+                driver.phase = Phase::Observe {
+                    reference,
+                    run,
+                    since,
+                };
+                return None;
+            }
+            let twin = reference
+                .twin
+                .as_ref()
+                .expect("an observed run has its twins");
+            Some(observables::judge(state, twin, endpoint).map(|probes| Run {
+                summary: format!("{}; {probes}", run.summary),
+                hash: run.hash,
+            }))
         }
         Phase::Refused {
             mut reference,

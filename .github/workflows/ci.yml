@@ -881,7 +881,7 @@ jobs:
         run: scripts/e2e-lavapipe.sh
 
   browser:
-    name: Browser fixtures on SwiftShader (${{ matrix.hosting }})
+    name: Browser fixtures on SwiftShader (${{ matrix.hosting }}${{ matrix.part == 'observables' && ', observables' || '' }})
     # The app's end-to-end fixtures in Chromium on its bundled software WebGPU:
     # the shipped bundle with its fixtures, started in a browser that compiles
     # its shaders through Tint and draws them through its compositor. Every
@@ -889,6 +889,9 @@ jobs:
     # SwiftShader compiles the app's pipelines for a minute a page and runs a
     # few frames a second; nightly, and dispatched with `full`, every fixture
     # runs, isolated and with service workers refused, the two in parallel.
+    # There `observables` is a part of its own: about 75 minutes, which would
+    # carry the slower hosting, at 5 h 47 min without it on 2026-10-17, past
+    # the runner's six hours.
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -896,6 +899,7 @@ jobs:
       fail-fast: false
       matrix:
         hosting: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["isolated", "pages-blocked"]' || '["isolated"]') }}
+        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "observables"]' || '["state"]') }}
     env:
       FULL: ${{ github.event_name == 'schedule' || inputs.browser == 'full' }}
     steps:
@@ -969,7 +973,8 @@ jobs:
         # and the slowest page, cavity-batches' four runs, 745 s.
         env:
           FUNFERN_EXPECT_BUILD: ${{ github.sha }}
-          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || '' }}
+          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'observables' && 'observables' || '' }}
+          FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables' || '' }}
           FUNFERN_E2E_DEADLINE: ${{ env.FULL != 'true' && '600' || '1500' }}
           FUNFERN_E2E_HOSTING: ${{ matrix.hosting }}
           FUNFERN_TEST_ISOLATED: ${{ matrix.hosting == 'isolated' && '1' || '0' }}

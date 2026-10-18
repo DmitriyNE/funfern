@@ -25350,3 +25350,104 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-18 — PH-18, part 2: the recorders in the app against their twins
+
+- **The fixture.** `observables`, an end-to-end fixture
+  (`src/ui/e2e/observables.rs`), opens a TM channel, `ε = μ = 1`.
+  - **Walls:** its left side is a Dirichlet drive, a 2 Hz sine of amplitude
+    0.5 under an 8 s flat top with half-second raised-cosine edges; its
+    right side is a first-order outgoing wall; top and bottom reflect. The
+    field is the plane wave `u = g(t − (x + 1))`.
+  - **Probes:**
+    - two points;
+    - a segment across the channel, bottom to top, its left normal against
+      the wave;
+    - a segment down the wall, its left normal out;
+    - a boundary probe on the inside trace of a transmitting circle of the
+      same medium;
+    - an area probe of the circle's region, and a disk.
+  - **Run:** 1440 steps at the app's own pacing.
+- **Why a loop, not a wall.** The plan put a boundary probe on the outgoing
+  wall. Boundary probes attach to drawn curves, and the domain's sides are
+  not curves. So a segment reads the wall, and the boundary recorder reads
+  the loop, where Poynting's theorem against the area inside checks its
+  outward normals.
+- **The twins.** The reference steps with the device, and after every step
+  `Twin` reads it through the recorders' CPU twins:
+  - points through `CanonicalPointStencil`, the rate the backward
+    difference the recorder takes;
+  - lines the same, with the normal the architecture documents (a segment's
+    left normal, a boundary sample's outward one) and the length the readout
+    integrates over;
+  - areas through `sample_canonical_area`.
+- **The judge.** Once the endpoint holds, the driver waits for the probes'
+  last records, then holds every trace the readouts draw to the twin at the
+  step its stamp names.
+
+  | Check | Bound | Metal | lavapipe |
+  |---|---|---|---|
+  | Each kind's records a stride apart, start to end | none missing | | |
+  | Points | 1e-4 of scale | 2.2e-5 | 2.0e-5 |
+  | Lines | 1e-4 | 8.6e-6 | |
+  | Line readout integrals | 1e-4 | 7.9e-6 | |
+  | Areas | 1e-4 | 8.7e-7 | |
+  | Stamps against the f64 clock | 2e-6 s | 3.9e-7 s | |
+  | Poynting round the loop, trapezoid over the records' stride | 1e-2 | 5.4e-3 | |
+  | Poynting against the twin's | 1e-4 | 6.4e-6 | |
+  | Upstream spectrum peak, against the drive's 0.5 | 1e-2 | 0.49787 | |
+  | Welch transfer between the points, against 1 | 2e-3 | 0.99951 | |
+  | The rate, against `u̇` half a step before its stamp | 1e-2 | 4.2e-3 | |
+
+  At its stamp the rate reads 3.7e-2 off, the half step's `ωΔt/2`; part 4
+  takes that up.
+- **Probes on against off.** A second run with no probes must end on the
+  same bits, and it does.
+- **Where it runs.**
+
+  | Runner | Time | Notes |
+  |---|---|---|
+  | Metal | 25 s | |
+  | lavapipe, the CI image under Rosetta | 290 s | adds about 5 minutes to the per-push job |
+  | Chrome on Metal | 27 s | reads what the native app reads to every printed digit, endpoint hash included |
+
+  The endpoint tolerance is 2e-5 for this fixture, against the others' 5e-6:
+  1440 steps leave the state 4.4e-6 off where 256 leave 1e-6.
+- **The browser nightly is split.** Last night's slower hosting spent
+  5 h 47 min running the fixtures, and SwiftShader's 1.2 s a step puts
+  `observables` at about 75 minutes. So the browser job has a second part
+  per hosting that runs it alone (`FUNFERN_E2E_FIXTURES`), the first leaving
+  it out (`FUNFERN_E2E_EXCLUDE`, new). Its page deadline is four times the
+  others'. Per-push runs, the cavity alone, keep their name.
+- **The twins against the wave on the CPU.**
+  `the_twins_meet_the_wave_on_the_observables_channel` runs at the
+  fixture's mesh and step (4 s):
+
+  | Reading | Bound (read) |
+  |---|---|
+  | Points' field, of an amplitude of 0.5 | 2.5e-3 (1.2e-3) |
+  | Their rate, half a step back | 4e-3 (2.1e-3) |
+  | `|c|` | 4e-3 (1.9e-3) |
+  | Density | 2.5e-3 (1.1e-3) |
+  | Flow | 4e-3 (2.1e-3) |
+  | The segment across | 1.5e-3 (7.0e-4) |
+  | Poynting round the loop | 4e-3 (1.8e-3) |
+  | The wall's ledger against `2∫g²` | 5e-4 (1.8e-4) |
+  | Spectrum peak | 1e-2 (4.3e-3) |
+  | Transfer | 2e-3 (5.4e-4) |
+- **Found: the transverse field on the outgoing wall's elements.**
+  - **What.** The segment down the wall carried 1.5% more energy than the
+    ledger booked; the ledger books `2∫g²` to 1.8e-4. At the wall the field
+    reads exact (`u/g` 1.00006). The transverse field reads 1.5% high, 0.7%
+    low half an element in, and 0.07% off across the channel.
+  - **Convergence.** At edges 0.07, 0.05 and 0.035 the over-read is 1.5%,
+    0.8% and 0.38%: second order.
+  - **Handling.** Not a defect of the ledger or the field: the transverse
+    field reconstructed from the wall's elements. The CPU test holds it
+    within 3%, and it is listed under "Worth checking sometime".
+- **Mutation.** `curve-probe-flux-reversed`: the line recorder writes its
+  normal flux with the sign turned. The fixture reads the lines 2.1 off and
+  Poynting 0.74 off; checked on Metal.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
