@@ -671,6 +671,15 @@ nightly. The fixture `far-field` holds the device's records to it, and the
 browser nightly's recorders part runs it. The mutation
 `far-field-frame-at-step-end`.
 
+**Part 4 on 2026-10-18:** the stamps.
+- **The point rate's half step:** documented, not changed.
+- **The recorders' single-f32 stamps:** 1.2e-4 s after an hour, 2e-3 s after
+  ten. The point, line and area records now carry two parts, which the host
+  adds in f64, as the vector overlay does. The mutation
+  `probe-stamps-summed-in-f32`.
+- **The far field's frames,** which the device interpolates in time itself,
+  get a design of their own.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

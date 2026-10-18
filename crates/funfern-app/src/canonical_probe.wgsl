@@ -496,8 +496,14 @@ fn primary_field_and_rate(stencil: PointStencil) -> vec2<f32> {
         + dot(previous_b_values, stencil.primary_b);
     return vec2<f32>(value, (value - old_value) / control.clock_f32.x);
 }
-fn absolute_time() -> f32 {
-    return control.clock_origin.x + control.clock_origin.y + control.clock_f32.y;
+// A record's time as the vector overlay carries its own: the epoch origin's
+// coarse part, and its fine part with the epoch-local time, which the host
+// adds in f64 (`stamp_seconds`). The epoch rebases within 256 s, so the fine
+// part keeps f32's spacing there, 3e-5 s. Summed here into one f32, a stamp
+// kept f32's spacing at the run's absolute time: 2e-3 s after ten hours, 18%
+// of a 120 Hz record's spacing.
+fn stamp() -> vec2<f32> {
+    return vec2<f32>(control.clock_origin.x, control.clock_origin.y + control.clock_f32.y);
 }
 // ---- end shared canonical point reconstruction ----
 
@@ -516,8 +522,9 @@ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
     let stride = u32(probe_control.values.x);
     let frame = (control.clock_u32.w / stride) % u32(probe_control.values.y);
     let index = frame * 16u + probe;
-    output[index].primary = vec4<f32>(primary, energy, absolute_time());
-    output[index].secondary = vec4<f32>(length(complement), length(flow), 0.0, 0.0);
+    let time_pair = stamp();
+    output[index].primary = vec4<f32>(primary, energy, time_pair.x);
+    output[index].secondary = vec4<f32>(length(complement), length(flow), time_pair.y, 0.0);
 }
 
 // This entry point uses the same binding layout as point probes, with binding

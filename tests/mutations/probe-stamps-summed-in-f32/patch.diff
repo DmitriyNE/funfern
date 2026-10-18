@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-app/src/wave_gpu.rs b/crates/funfern-app/src/wave_gpu.rs
+--- a/crates/funfern-app/src/wave_gpu.rs
++++ b/crates/funfern-app/src/wave_gpu.rs
+@@ -1853,7 +1853,7 @@
+ /// with the epoch-local time. Added here in f64, a stamp keeps the fine part's
+ /// precision, 3e-5 s, however long the run.
+ pub(crate) fn stamp_seconds(coarse: f32, fine: f32) -> f64 {
+-    coarse as f64 + fine as f64
++    f64::from(coarse + fine)
+ }
+ 
+ fn receive_probe_readback(

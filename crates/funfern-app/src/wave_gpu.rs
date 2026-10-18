@@ -1848,6 +1848,14 @@ pub(crate) fn differencing_sample_due(completed_step: u64, stride: u64, filterin
             && probe_sample_due(completed_step - 1, stride))
 }
 
+/// A record's time from the two parts the recorders write, as the vector
+/// overlay writes its own: the epoch origin's coarse part, and its fine part
+/// with the epoch-local time. Added here in f64, a stamp keeps the fine part's
+/// precision, 3e-5 s, however long the run.
+pub(crate) fn stamp_seconds(coarse: f32, fine: f32) -> f64 {
+    coarse as f64 + fine as f64
+}
+
 fn receive_probe_readback(
     event: On<PacedReadbackComplete>,
     tags: Query<&ProbeReadbackTag>,
@@ -1861,7 +1869,7 @@ fn receive_probe_readback(
         if primary.is_finite() && secondary.is_finite() {
             records.push(PointProbeRecord {
                 probe_id: tag.ids[slot],
-                time: primary.w as f64,
+                time: stamp_seconds(primary.w, secondary.z),
                 displacement: primary.x as f64,
                 velocity: primary.y as f64,
                 energy_density: primary.z as f64,
@@ -1909,7 +1917,7 @@ fn receive_vector_overlay_readback(
     }
     let completed_steps = samples[0].metadata.x as u64;
     let time_bits = samples[0].metadata.zw();
-    let absolute_time = f32::from_bits(time_bits.x) as f64 + f32::from_bits(time_bits.y) as f64;
+    let absolute_time = stamp_seconds(f32::from_bits(time_bits.x), f32::from_bits(time_bits.y));
     if samples.iter().any(|sample| {
         sample.metadata.y == 0
             || sample.metadata.x as u64 != completed_steps
@@ -1958,14 +1966,14 @@ fn receive_curve_probe_readback(
             };
             let Some(time) = values
                 .iter()
-                .map(|sample| sample.primary.w)
+                .map(|sample| stamp_seconds(sample.primary.w, sample.secondary.y))
                 .find(|time| time.is_finite())
             else {
                 continue;
             };
             records.push(CurveProbeRecord {
                 probe_id: descriptor.id,
-                time: time as f64,
+                time,
                 displacement: values.iter().map(|sample| sample.primary.x).collect(),
                 transverse_magnitude: values.iter().map(|sample| sample.secondary.x).collect(),
                 energy_density: values.iter().map(|sample| sample.primary.y).collect(),
@@ -2007,7 +2015,7 @@ fn receive_area_probe_readback(
             {
                 records.push(AreaProbeRecord {
                     probe_id: id,
-                    time: sample.secondary.w as f64,
+                    time: stamp_seconds(sample.secondary.w, sample.tertiary.y),
                     mean_displacement: sample.primary.x as f64,
                     rms_displacement: sample.primary.y as f64,
                     rms_transverse_magnitude: sample.primary.z as f64,
@@ -2879,6 +2887,82 @@ mod tests {
             + start
             + end_marker.len();
         &source[start..end]
+    }
+
+    /// A record's stamp keeps the epoch-local time's precision however long
+    /// the run, where one f32 summed on the device kept f32's spacing at the
+    /// run's absolute time. The device's arithmetic is reproduced here: the
+    /// origin split into f32 parts, the local time `steps × dt` in f32, the
+    /// fine part their f32 sum. Up to 36 hours in, at the observables
+    /// fixture's step, every stamp is within 2e-5 s of the clock; the single
+    /// f32 was 3.9e-3 s off at 36 hours, 35% of a 120 Hz record's spacing.
+    #[test]
+    fn probe_stamps_keep_their_precision_however_long_the_run() {
+        let dt = 5.5416e-3_f64;
+        let mut single_worst = 0.0_f64;
+        for hours in [0.0, 1.0, 10.0, 18.2, 36.0] {
+            let start = hours * 3600.0;
+            // The epoch the device rebased onto last: its origin is a step
+            // count's time, within 256 s of the clock.
+            let origin = (start / dt).floor() * dt;
+            let (hi, lo) = (origin as f32, (origin - f64::from(origin as f32)) as f32);
+            for step in (0..(256.0 / dt) as u32).step_by(97) {
+                let local = step as f32 * dt as f32;
+                let exact = origin + f64::from(step) * dt;
+                let read = stamp_seconds(hi, lo + local);
+                assert!(
+                    (read - exact).abs() < 2.0e-5,
+                    "{hours} h, step {step}: {read} against {exact}"
+                );
+                let single = f64::from(hi + lo + local);
+                single_worst = single_worst.max((single - exact).abs());
+            }
+        }
+        assert!(
+            single_worst > 3.0e-3,
+            "a single f32 read {single_worst:.2e} off"
+        );
+    }
+
+    /// Every probe recorder writes a record's time as the pair `stamp()`
+    /// forms, into the slots its decoder reads, and none sums it into one f32.
+    #[test]
+    fn probe_recorders_write_their_stamps_as_two_parts() {
+        let pair = "    return vec2<f32>(control.clock_origin.x, control.clock_origin.y + control.clock_f32.y);";
+        for (name, shader, writes) in [
+            (
+                "point",
+                include_str!("canonical_probe.wgsl"),
+                &[
+                    "output[index].primary = vec4<f32>(primary, energy, time_pair.x);",
+                    "vec4<f32>(length(complement), length(flow), time_pair.y, 0.0);",
+                ][..],
+            ),
+            (
+                "curve",
+                include_str!("canonical_curve_probe.wgsl"),
+                &[
+                    "output[slot].primary = vec4<f32>(nan, nan, nan, time_pair.x);",
+                    "output[slot].secondary = vec4<f32>(nan, time_pair.y, nan, nan);",
+                    "primary, energy, dot(flow, record.normal_stride_valid.xy), time_pair.x);",
+                    "vec4<f32>(length(complement), time_pair.y, 0.0, 0.0);",
+                ][..],
+            ),
+            (
+                "area",
+                include_str!("canonical_area_probe.wgsl"),
+                &[
+                    "        time_pair.x);",
+                    "output[output_index].tertiary = vec4<f32>(1.0, time_pair.y, 0.0, 0.0);",
+                ][..],
+            ),
+        ] {
+            assert!(shader.contains(pair), "{name}");
+            assert!(!shader.contains("absolute_time"), "{name}");
+            for write in writes {
+                assert!(shader.contains(write), "{name}: {write}");
+            }
+        }
     }
 
     /// Point and line consumers must reconstruct fields with exactly the same

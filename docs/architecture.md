@@ -105,7 +105,15 @@ transfer share one frequency band the user zooms and pans, as its traces share
 a time window. Clear empties a probe's traces from the current time on: every
 readback carries the device's whole ring, which a trace takes only where it is
 newer than its last time. Probe timestamps come
-directly from the solver's transferred absolute clock. The host handoff offset is
+directly from the solver's transferred absolute clock. A point, line or area
+record carries its time as two f32 parts, the epoch origin's coarse part and its
+fine part plus the epoch-local time, which the host adds in f64
+(`stamp_seconds`), as the vector overlay's readback does; the epoch rebases within
+256 s, so a stamp keeps 3e-5 s however long the run. Summed into one f32 on the
+device, a stamp kept f32's spacing at the run's absolute time: 1.2e-4 s after an
+hour, 2e-3 s after ten, 18% of a 120 Hz record's spacing, which the readouts'
+resampling turned into a spectral floor (fixed 2026-10-18). The far field's frames
+still carry one f32. The host handoff offset is
 only used to map the continuous accepted-step total across timestep changes; a
 fresh install establishes a new rate baseline instead of treating its absolute
 counter value as progress.
@@ -1344,7 +1352,12 @@ or extra storage binding is needed.
 Point probes compile seven-node primary interpolation plus the six independent
 complementary samples of the containing element. A dedicated canonical compute
 pipeline samples `u=Q/M`, its accepted endpoint rate, `c=B^-1 b`, canonical energy
-density and `orientation*u*R*c` flow at uniform accepted-step intervals. Mechanical
+density and `orientation*u*R*c` flow at uniform accepted-step intervals. The rate
+is the backward difference across the step, `(u_n − u_{n−1})/Δt`, which stands half a
+step before the stamp it shares with the field: against `u̇` at that stamp it reads
+`ωΔt/2` off, 3.7e-2 for 2 Hz at the default step, and half a step back within the
+difference's own second-order error. Plotted, the rate is half a step late, under
+the record spacing at every preset. Mechanical
 and EM skins expose the same quantities with presentation-appropriate names. The
 bounded time-stamped ring has its own portable layout. Host history survives an
 ordinary remesh/AMR handoff only when probe identity, skin and canonical semantics

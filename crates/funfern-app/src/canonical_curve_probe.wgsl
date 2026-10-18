@@ -492,8 +492,14 @@ fn primary_field_and_rate(stencil: PointStencil) -> vec2<f32> {
         + dot(previous_b_values, stencil.primary_b);
     return vec2<f32>(value, (value - old_value) / control.clock_f32.x);
 }
-fn absolute_time() -> f32 {
-    return control.clock_origin.x + control.clock_origin.y + control.clock_f32.y;
+// A record's time as the vector overlay carries its own: the epoch origin's
+// coarse part, and its fine part with the epoch-local time, which the host
+// adds in f64 (`stamp_seconds`). The epoch rebases within 256 s, so the fine
+// part keeps f32's spacing there, 3e-5 s. Summed here into one f32, a stamp
+// kept f32's spacing at the run's absolute time: 2e-3 s after ten hours, 18%
+// of a 120 Hz record's spacing.
+fn stamp() -> vec2<f32> {
+    return vec2<f32>(control.clock_origin.x, control.clock_origin.y + control.clock_f32.y);
 }
 // ---- end shared canonical point reconstruction ----
 
@@ -509,8 +515,9 @@ fn sample_curve_probes(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if record.normal_stride_valid.w < 0.5 || record.point.sample_valid.y == 0u
         || (temporal_enabled() && record.point.sample_valid.z == 0u) {
         let nan = bitcast<f32>(0x7fc00000u | (index & 1u));
-        output[slot].primary = vec4<f32>(nan, nan, nan, absolute_time());
-        output[slot].secondary = vec4<f32>(nan);
+        let time_pair = stamp();
+        output[slot].primary = vec4<f32>(nan, nan, nan, time_pair.x);
+        output[slot].secondary = vec4<f32>(nan, time_pair.y, nan, nan);
         return;
     }
     let time = control.clock_f32.y;
@@ -520,7 +527,8 @@ fn sample_curve_probes(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let energy = primary_energy(record.point, primary, time)
         + complementary_energy(record.point, complement, time);
     let flow = energy_flow(record.point, primary, complement);
+    let time_pair = stamp();
     output[slot].primary = vec4<f32>(
-        primary, energy, dot(flow, record.normal_stride_valid.xy), absolute_time());
-    output[slot].secondary = vec4<f32>(length(complement), 0.0, 0.0, 0.0);
+        primary, energy, dot(flow, record.normal_stride_valid.xy), time_pair.x);
+    output[slot].secondary = vec4<f32>(length(complement), time_pair.y, 0.0, 0.0);
 }

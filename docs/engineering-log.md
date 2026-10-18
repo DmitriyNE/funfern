@@ -25554,3 +25554,58 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. The device suite, since a shader changed:
   90 of 90.
+
+## 2026-10-18 — PH-18, part 4: probe stamps in two parts
+
+- **What.** Every recorder stamped its records with
+  `origin.x + origin.y + local` in one f32. The device clock rebases its epoch
+  within 256 s and keeps its precision, but the stamp kept only f32's spacing
+  at the run's absolute time. Reproduced with the device's arithmetic, at the
+  observables channel's step:
+
+  | Run time | Stamp off the clock | Of a 120 Hz record's spacing |
+  |---|---|---|
+  | 1 h | 1.2e-4 s | 1% |
+  | 10 h | 2.0e-3 s | 18% |
+  | 18.2 h | 3.9e-3 s | 35% |
+
+  Past f32's spacing passing the record spacing, about 18 hours at a fine
+  step, two records can share a stamp and the host drops the second as not
+  newer. Before that, the readouts' resampling at the median spacing turns
+  the jitter into a spectral floor: about −56 dB of a 2 Hz line after an
+  hour, −32 dB after ten.
+- **The fix.** Each record carries the pair the vector overlay already
+  carries:
+  - `stamp()` in the shaders: the epoch origin's coarse part, and its fine
+    part plus the epoch-local time;
+  - `stamp_seconds` on the host adds them in f64.
+
+  The slots each shader writes them to:
+
+  | Record | Coarse part | Fine part |
+  |---|---|---|
+  | Point | `primary.w` | `secondary.z` |
+  | Line, both paths | `primary.w` | `secondary.y` |
+  | Area | `secondary.w` | `tertiary.y` |
+
+  The fine part keeps f32's spacing at 256 s, 3e-5 s, however long the
+  run.
+- **Tests.**
+  - `probe_stamps_keep_their_precision_however_long_the_run`: up to 36 hours,
+    every stamp within 2e-5 s of the clock (one f32: 3.9e-3 s).
+  - `probe_recorders_write_their_stamps_as_two_parts`: each shader's slots
+    against its decoder's.
+  - The fixture `observables` reads its stamps within 3.9e-7 s as before.
+- **Mutation.** `probe-stamps-summed-in-f32`: the host sums the parts in f32
+  again, and an hour in the test reads a stamp 3.2e-5 s off.
+- **The point rate's half step,** which part 2 measured, is documented in the
+  architecture rather than changed. Against `u̇` at its stamp the rate reads
+  `ωΔt/2` off, 3.7e-2 for 2 Hz; half a step back, 4.2e-3. Plotted, it is half
+  a step late, under the record spacing at every preset.
+- **Still one f32: the far field.** Its frames are stamped, and interpolated
+  on the device, in one f32. That needs times kept against an origin that
+  moves with its ring, and has a design of its own.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. The device suite, since three shaders
+  changed: 90 of 90.

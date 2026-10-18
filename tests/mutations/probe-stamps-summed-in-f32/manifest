@@ -1,0 +1,4 @@
+about: the host adds a probe record's two stamp parts in f32, so every stamp keeps f32's spacing at the run's absolute time again, 3.9e-3 s at 36 hours
+test: cargo test --release -p funfern-app --lib -- probe_stamps_keep_their_precision_however_long_the_run
+expect: h, step [0-9]+: [0-9.]+ against [0-9.]+
+needs: cpu

@@ -851,6 +851,21 @@ interpolation.
   the same bits.
 - **Mutation.** `far-field-frame-at-step-end` puts the shader back as it
   was, and the fixture reads 6.1e-2 off its twin.
+
+Last, the stamps.
+- **Two-part stamps.** A point, line or area record carries its time as two
+  f32 parts, as the vector overlay does: the epoch origin's coarse part, and
+  its fine part with the epoch-local time. The host adds them in f64.
+- **The test.** `probe_stamps_keep_their_precision_however_long_the_run`
+  reproduces the device's arithmetic up to 36 hours in. Every stamp stands
+  within 2e-5 s of the clock, where one f32 was 3.9e-3 s off.
+  `probe_recorders_write_their_stamps_as_two_parts` holds each shader's slots
+  to its decoder's.
+- **Mutation.** `probe-stamps-summed-in-f32` sums the parts in f32 again; an
+  hour in, it reads 3.2e-5 s off.
+- **The far field's frames** still carry one f32.
+- **The point rate's half step** is documented in the architecture: against
+  `u̇` at its stamp it reads `ωΔt/2` off, as `observables` measures.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

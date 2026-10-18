@@ -53,8 +53,14 @@ fn accepted_b(sample: u32) -> vec2<f32> {
     let value = state[control.counts_a.x + sample].values;
     return select(value.xy, value.zw, (control.event.z & 1u) != 0u);
 }
-fn absolute_time() -> f32 {
-    return control.clock_origin.x + control.clock_origin.y + control.clock_f32.y;
+// A record's time as the vector overlay carries its own: the epoch origin's
+// coarse part, and its fine part with the epoch-local time, which the host
+// adds in f64 (`stamp_seconds`). The epoch rebases within 256 s, so the fine
+// part keeps f32's spacing there, 3e-5 s. Summed here into one f32, a stamp
+// kept f32's spacing at the run's absolute time: 2e-3 s after ten hours, 18%
+// of a 120 Hz record's spacing.
+fn stamp() -> vec2<f32> {
+    return vec2<f32>(control.clock_origin.x, control.clock_origin.y + control.clock_f32.y);
 }
 // Mirrors the shared block in canonical_probe.wgsl. The structures here are
 // the area recorder's own, so the arithmetic is repeated rather than the text
@@ -543,8 +549,9 @@ fn reduce_area_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
         sqrt(max(accumulated.y / covered_area, 0.0)),
         sqrt(max(accumulated.z / covered_area, 0.0)),
         total_energy / covered_area);
+    let time_pair = stamp();
     output[output_index].secondary = vec4<f32>(total_energy, covered_area,
         select(0.0, clamp(covered_area / target_area, 0.0, 1.0), target_area > 0.0),
-        absolute_time());
-    output[output_index].tertiary = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+        time_pair.x);
+    output[output_index].tertiary = vec4<f32>(1.0, time_pair.y, 0.0, 0.0);
 }
