@@ -114,11 +114,26 @@ fn reduced_phase(value: f32) -> f32 {
         fma(-k, 4.0 * TRIG_HALF_PI_2, fma(-k, 4.0 * TRIG_HALF_PI_1, value)));
 }
 // End of the portable trigonometry.
-fn add_compensated(high: f32, low: f32, increment: f32) -> vec2<f32> {
-    let sum = high + increment;
-    let residual = (high - sum) + increment + low;
-    let next_high = sum + residual;
-    return vec2<f32>(next_high, (sum - next_high) + residual);
+// The clock's origin moved on by `increment`, as the clock keeps it: whole
+// seconds in the first part and the fraction, in [0, 1), in the second. The
+// whole seconds add exactly and the fractions stay under two, so nothing here
+// rounds at the absolute time, and nothing recovers a rounding that a compiler
+// could fold away. A compensated sum did that before 2026-10-18: Metal's fast
+// math folded its rounding to zero, and a rebase 36 hours into a run kept only
+// the rounded sum, 3.5e-3 s short; in Chrome's transfer even a guarded one lost
+// it.
+fn advance_origin(high: f32, low: f32, increment: f32) -> vec2<f32> {
+    let whole = floor(increment);
+    let fraction = low + (increment - whole);
+    let carry = floor(fraction);
+    return vec2<f32>(high + (whole + carry), fraction - carry);
+}
+// The square of the solver's orientation, which is ±1: exactly 1, and a value
+// the compiler reads from the control buffer rather than knows. A difference
+// of two times passes its coarse part through it, so that fast math cannot sum
+// the parts first and round at the absolute time.
+fn opaque_one() -> f32 {
+    return old_control.evolution.y * old_control.evolution.y;
 }
 fn sinc(value: f32) -> f32 {
     if abs(value) < 0.0005 {
@@ -262,10 +277,14 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
     if transfer[0].data.x != TRANSFER_LAYOUT_VERSION { reject(STATUS_LAYOUT); return; }
     let target_nodes = transfer[1].data.y;
     let target_drives = transfer[5].data.w;
-    let current_origin = add_compensated(
-        old_control.clock_origin.x, old_control.clock_origin.y, old_control.clock_f32.y);
-    let preparation_delta = (current_origin.x - new_control.clock_origin.x)
-        + (current_origin.y - new_control.clock_origin.y);
+    // The time since the candidate's own origin, part by part and from the
+    // old clock's parts: the coarse origins' difference, which f32 holds
+    // exactly, the fine ones', then the old epoch's local time. Every term is
+    // small, so no order a compiler sums them in can round at the absolute
+    // time.
+    let preparation_delta = ((old_control.clock_origin.x - new_control.clock_origin.x)
+        * opaque_one() + (old_control.clock_origin.y - new_control.clock_origin.y))
+        * opaque_one() + old_control.clock_f32.y;
     if i < target_nodes && new_nodes[i].boundary.z != 0u {
         let mapping = mapped_index(transfer[4].data.z, i);
         let record = new_nodes[i].boundary.z >> PRESCRIBED_RECORD_SHIFT;
@@ -382,7 +401,7 @@ fn transfer_clock(@builtin(global_invocation_id) id: vec3<u32>) {
     if transfer[0].data.x != TRANSFER_LAYOUT_VERSION { reject(STATUS_LAYOUT); return; }
     let source_drives = transfer[5].data.z;
     let material_header = transfer[8].data;
-    let current_origin = add_compensated(
+    let current_origin = advance_origin(
         old_control.clock_origin.x, old_control.clock_origin.y, old_control.clock_f32.y);
     let epoch_low = old_control.clock_u32.x + 1u;
     let epoch_high = old_control.clock_u32.y + select(0u, 1u, epoch_low == 0u);

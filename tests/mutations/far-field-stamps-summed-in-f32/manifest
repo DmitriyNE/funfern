@@ -1,0 +1,4 @@
+about: the far field differences two stamps by summing each into one f32 first, so every time it reads 36 hours in is f32's spacing there off, 7.8e-3 s, and its frames stop standing a period apart
+test: scripts/e2e-fixture.sh far-field-late
+expect: the far field.s records skip from|an amplitude reads [0-9.]+e-[0-3], beyond 5e-4
+needs: device

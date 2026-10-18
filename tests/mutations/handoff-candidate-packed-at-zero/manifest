@@ -1,0 +1,4 @@
+about: a handoff's candidate is packed against a clock at zero again, so a drive the new generation starts moves on by the run's whole age in f32 and lands 0.02 to 0.05 rad off 36 hours in
+test: scripts/e2e-fixture.sh handoff-memory-running-late
+expect: HandoffMemory\(RunningLate\) failed: Q [0-9.]+e-[0-3]
+needs: device

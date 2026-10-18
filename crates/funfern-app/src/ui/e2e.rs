@@ -52,6 +52,33 @@ pub(super) struct E2eSteps {
     pub(super) batch: Option<u64>,
 }
 
+/// Where a fixture starts a fresh generation's clock, if it says: the epoch
+/// origin, and how many steps before the epoch's rebase. The app starts every
+/// fresh generation at zero; `far-field-late` starts 36 hours in.
+static FRESH_CLOCK: std::sync::Mutex<Option<(f64, u32)>> = std::sync::Mutex::new(None);
+
+/// The clock a fresh generation starts at: the fixture's, or zero.
+pub(crate) fn fresh_clock(
+    time_step: f64,
+) -> Result<crate::canonical_gpu::CanonicalGpuClock, String> {
+    let clock = crate::canonical_gpu::CanonicalGpuClock::initial(time_step)
+        .map_err(|error| format!("{error:?}"))?;
+    let Some((origin, before)) = *FRESH_CLOCK.lock().unwrap() else {
+        return Ok(clock);
+    };
+    Ok(crate::canonical_gpu::CanonicalGpuClock {
+        epoch_origin_seconds: origin,
+        step_in_epoch: rebase_step_limit(time_step) - before,
+        ..clock
+    })
+}
+
+/// The steps an epoch holds before the device's encoder rebases it, as the
+/// encoder counts them from the step in f32.
+pub(crate) fn rebase_step_limit(time_step: f64) -> u32 {
+    ((256.0 / f64::from(time_step as f32)).ceil() as u32).min(1 << 16)
+}
+
 /// Adds the driver of the fixture asked for, if one is.
 pub(crate) fn add(app: &mut App) {
     let Some((name, seconds)) = requested() else {
@@ -71,10 +98,15 @@ pub(crate) fn add(app: &mut App) {
         "handoff-memory-edit" => (Fixture::HandoffMemory(MemoryHandoff::Edit), vec![None]),
         "handoff-memory-timestep" => (Fixture::HandoffMemory(MemoryHandoff::Timestep), vec![None]),
         "handoff-memory-running" => (Fixture::HandoffMemory(MemoryHandoff::Running), vec![None]),
+        "handoff-memory-running-late" => (
+            Fixture::HandoffMemory(MemoryHandoff::RunningLate),
+            vec![None],
+        ),
         "rejection" => (Fixture::Rejection, vec![None]),
         "device-loss" => (Fixture::DeviceLoss, vec![None]),
         "observables" => (Fixture::Observables, vec![None, None]),
         "far-field" => (Fixture::FarField, vec![None, None]),
+        "far-field-late" => (Fixture::FarFieldLate, vec![None]),
         _ => {
             let failure = format!("no fixture named {name:?}");
             report(&format!("e2e: {failure}"));
@@ -93,6 +125,8 @@ pub(crate) fn add(app: &mut App) {
         material: None,
         batches: batches.into(),
         hashes: Vec::new(),
+        base: 0,
+        start_time: 0.0,
         deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(120)),
     })
     .add_systems(EguiPrimaryContextPass, drive.before(frame))
@@ -172,6 +206,13 @@ enum Fixture {
     /// the recorder's f64 twin at the frame it was projected from. Then the
     /// same run with the far field off must end on the same bits.
     FarField,
+    /// The far field 36 hours into a run, its clock started 400 steps before
+    /// an epoch's rebase: every stamp and every difference of two the device
+    /// takes at that age, and across the new origin the rebase adds on, held
+    /// to the twin, which forms them as the shader's text does. A fast-math
+    /// compiler that folded a two-part difference back into one f32 would
+    /// read times f32's spacing at 36 hours off, 1.6e-2 s.
+    FarFieldLate,
 }
 
 /// How [`Fixture::HandoffMemory`] hands the running field over at step 192.
@@ -200,6 +241,12 @@ enum MemoryHandoff {
     /// held run has none of that time, and a drive carried from the old
     /// generation takes its phase from the old clock.
     Running,
+    /// `Running` 36 hours into a run, its clock started 300 steps before an
+    /// epoch's rebase: the new generation's origin and the delay that moves a
+    /// drive it starts on are compensated sums at that age, which a fast-math
+    /// compiler that folded them would leave f32's spacing at 36 hours off,
+    /// 1.6e-2 s.
+    RunningLate,
 }
 
 /// The meshes the fixtures run on, as [`mesh_hashes`] reads them: the cavity,
@@ -258,13 +305,15 @@ impl Fixture {
             Fixture::HandoffMemory(MemoryHandoff::Timestep) => (&[(192, Action::Timestep)], 384),
             // The handoff lands wherever the device has got to while the
             // candidate was prepared, and the endpoint must leave it room.
-            Fixture::HandoffMemory(MemoryHandoff::Running) => (&[(192, Action::Drive)], 768),
+            Fixture::HandoffMemory(MemoryHandoff::Running | MemoryHandoff::RunningLate) => {
+                (&[(192, Action::Drive)], 768)
+            }
             // The endpoint is never reached: the device is gone at 128.
             Fixture::DeviceLoss => (&[(128, Action::LoseDevice)], 256),
             // The endpoint is a ceiling the run must not reach.
             Fixture::Rejection => (&[], 4096),
             Fixture::Observables => (&[], observables::OBSERVED_STEPS),
-            Fixture::FarField => (&[], far_field::FAR_FIELD_STEPS),
+            Fixture::FarField | Fixture::FarFieldLate => (&[], far_field::FAR_FIELD_STEPS),
         }
     }
 
@@ -273,7 +322,10 @@ impl Fixture {
     /// while an edit's candidate is prepared, and reads where the handoff
     /// landed from the new generation's clock.
     fn holds(self) -> bool {
-        !matches!(self, Fixture::HandoffMemory(MemoryHandoff::Running))
+        !matches!(
+            self,
+            Fixture::HandoffMemory(MemoryHandoff::Running | MemoryHandoff::RunningLate)
+        )
     }
 
     /// Whether a pulse at step 0 sets the field going. A field-dependent medium
@@ -282,7 +334,7 @@ impl Fixture {
     fn pulses(self) -> bool {
         !matches!(
             self,
-            Fixture::Rejection | Fixture::Observables | Fixture::FarField
+            Fixture::Rejection | Fixture::Observables | Fixture::FarField | Fixture::FarFieldLate
         )
     }
 
@@ -296,6 +348,13 @@ impl Fixture {
             // 1440 and 1150 steps, not 256: the M1 Max reads 4.4e-6 on the
             // first.
             Fixture::Observables | Fixture::FarField => 2.0e-5,
+            // Late in an epoch the local time is one f32 near 256 s, 3e-5 s
+            // apart, and the drives' phases carry 1e-4 rad from it, which a
+            // run early in its epoch never reaches: the M1 Max reads 1.25e-4
+            // 254 s into the epoch, and 2.1e-5 to 3.9e-5 where a handoff starts
+            // a new one, by the step it lands at.
+            Fixture::FarFieldLate => 5.0e-4,
+            Fixture::HandoffMemory(MemoryHandoff::RunningLate) => 2.0e-4,
             _ => 5.0e-6,
         }
     }
@@ -305,7 +364,7 @@ impl Fixture {
         match self {
             Fixture::Switch => DISC_MESH,
             Fixture::Observables => CHANNEL_MESH,
-            Fixture::FarField => HOLE_MESH,
+            Fixture::FarField | Fixture::FarFieldLate => HOLE_MESH,
             _ => CAVITY_MESH,
         }
     }
@@ -320,8 +379,14 @@ impl Fixture {
             | Fixture::DeviceLoss => (cavity_document(), None),
             Fixture::Rejection => (rejection_document(), None),
             Fixture::Observables => (observables::observables_document(), None),
-            Fixture::FarField => (far_field::far_field_document(), None),
-            Fixture::HandoffMemory(MemoryHandoff::Running) => (wall_document(false), None),
+            Fixture::FarField => (far_field::far_field_document(0.0), None),
+            Fixture::FarFieldLate => (
+                far_field::far_field_document(far_field::LATE_ORIGIN + far_field::LATE_DRIVE),
+                None,
+            ),
+            Fixture::HandoffMemory(MemoryHandoff::Running | MemoryHandoff::RunningLate) => {
+                (wall_document(false), None)
+            }
             Fixture::HandoffMemory(_) => (wall_document(true), None),
             Fixture::Switch => {
                 let (document, material) = switch_document();
@@ -342,6 +407,13 @@ pub(crate) struct Driver {
     batches: VecDeque<Option<u64>>,
     /// Each finished run's batch and the hash of its accepted endpoint.
     hashes: Vec<(Option<u64>, u64)>,
+    /// The device's completed-step count when the run's generation was
+    /// installed, which its clock's step in the epoch seeds: zero but where
+    /// the fixture starts its clock late. The script's steps count from it.
+    base: u64,
+    /// The time the run starts at: zero, but where the fixture starts its
+    /// clock late.
+    start_time: f64,
     deadline: Instant,
 }
 
@@ -524,6 +596,18 @@ impl State {
             None => CanonicalWaveState::zero(&active.canonical_operator, time_step)
                 .map(State::Fixed)
                 .map_err(|error| error.to_string()),
+        }
+    }
+
+    /// The state at rest at `time`, where the fixture starts its clock.
+    fn starting_at(self, time: f64) -> Result<Self, String> {
+        match self {
+            State::Fixed(state) => state
+                .with_time_origin(time)
+                .map(State::Fixed)
+                .map_err(|error| error.to_string()),
+            State::Temporal(_) if time == 0.0 => Ok(self),
+            State::Temporal(_) => Err("a time-driven reference starts at zero".into()),
         }
     }
 
@@ -833,6 +917,16 @@ fn advance(
             state.e2e_steps.limit = Some(0);
             state.e2e_steps.batch = None;
             state.wave_running = true;
+            // Every fresh generation starts at zero but this one's.
+            *FRESH_CLOCK.lock().unwrap() = match driver.fixture {
+                Fixture::FarFieldLate => {
+                    Some((far_field::LATE_ORIGIN, far_field::LATE_STEPS_BEFORE_REBASE))
+                }
+                Fixture::HandoffMemory(MemoryHandoff::RunningLate) => {
+                    Some((far_field::LATE_ORIGIN, 300))
+                }
+                _ => None,
+            };
             let (mut document, material) = driver.fixture.document();
             if !driver.hashes.is_empty() {
                 // The run again with nothing recording: a recorder only reads.
@@ -878,7 +972,9 @@ fn advance(
             let time_step = state.coordinator.uploaded_time_step;
             if !driver.fixture.pulses() {
                 // Driven by its source from rest: the run starts at once.
-                let reference = match State::zero(&active, time_step) {
+                let reference = fresh_clock(time_step)
+                    .and_then(|clock| State::zero(&active, time_step)?.starting_at(clock.time()));
+                let reference = match reference {
                     Ok(reference) => reference,
                     Err(error) => {
                         return Some(Err(format!("the reference did not start: {error}")));
@@ -906,10 +1002,20 @@ fn advance(
                 } else {
                     None
                 };
-                let far = if matches!(driver.fixture, Fixture::FarField)
+                let far = if matches!(driver.fixture, Fixture::FarField | Fixture::FarFieldLate)
                     && state.editor.document.model.far_field.enabled
                 {
-                    match far_field::FarFieldTwin::new(&active, time_step) {
+                    let clock = match fresh_clock(time_step) {
+                        Ok(clock) => clock,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    match far_field::FarFieldTwin::with_clock(
+                        &active,
+                        time_step,
+                        clock.epoch_origin_seconds,
+                        clock.step_in_epoch,
+                        rebase_step_limit(time_step),
+                    ) {
                         Ok(far) => Some(far),
                         Err(error) => {
                             return Some(Err(format!(
@@ -920,7 +1026,9 @@ fn advance(
                 } else {
                     None
                 };
-                state.e2e_steps.limit = Some(stop(0));
+                driver.base = request.stats().completed_steps();
+                driver.start_time = reference.time();
+                state.e2e_steps.limit = Some(driver.base + stop(0));
                 state.e2e_steps.batch = driver.batches.front().copied().flatten();
                 driver.phase = Phase::Run {
                     reference: Reference {
@@ -953,7 +1061,8 @@ fn advance(
                 f64::from(state.pulse_width),
             )
             .and_then(|increment| {
-                let mut reference = State::zero(&active, time_step)?;
+                let start = fresh_clock(time_step)?.time();
+                let mut reference = State::zero(&active, time_step)?.starting_at(start)?;
                 reference.pulse(&active, &increment)?;
                 Ok(reference)
             });
@@ -961,6 +1070,8 @@ fn advance(
                 Ok(reference) => reference,
                 Err(error) => return Some(Err(format!("the reference did not start: {error}"))),
             };
+            driver.base = request.stats().completed_steps();
+            driver.start_time = reference.time();
             report(&format!(
                 "e2e {:?}: {} DOFs, step {time_step:.4e}, pulse at ({:.3}, {:.3}), mesh {}",
                 driver.fixture,
@@ -1003,10 +1114,10 @@ fn advance(
                 };
                 return None;
             }
-            if let Err(failure) = taken(request, "the pulse", 0) {
+            if let Err(failure) = taken(request, "the pulse", driver.base) {
                 return Some(Err(failure));
             }
-            state.e2e_steps.limit = Some(stop(0));
+            state.e2e_steps.limit = Some(driver.base + stop(0));
             state.e2e_steps.batch = driver.batches.front().copied().flatten();
             driver.phase = Phase::Run { reference, next: 0 };
             None
@@ -1016,7 +1127,10 @@ fn advance(
             next,
         } => {
             let target = stop(next);
-            let completed = request.stats().completed_steps();
+            let completed = request
+                .stats()
+                .completed_steps()
+                .saturating_sub(driver.base);
             let code = request.stats().failure();
             if code != 0 {
                 if !matches!(driver.fixture, Fixture::Rejection) {
@@ -1099,7 +1213,7 @@ fn advance(
                 }
             }
             if !driver.fixture.holds() {
-                state.e2e_steps.limit = Some(stop(next + 1));
+                state.e2e_steps.limit = Some(driver.base + stop(next + 1));
             }
             driver.phase = Phase::Act {
                 reference,
@@ -1156,7 +1270,13 @@ fn advance(
                 }
             };
             if waiting {
-                if !driver.fixture.holds() && request.stats().completed_steps() >= endpoint {
+                if !driver.fixture.holds()
+                    && request
+                        .stats()
+                        .completed_steps()
+                        .saturating_sub(driver.base)
+                        >= endpoint
+                {
                     return Some(Err(format!(
                         "the device reached the endpoint at {endpoint} before the {action:?} \
                          arrived"
@@ -1187,7 +1307,8 @@ fn advance(
             // the run going on, at the step the new generation's clock
             // origin names, which the reference then steps to.
             let landed = if driver.fixture.holds() {
-                if let Err(failure) = taken(request, &format!("the {action:?}"), step) {
+                if let Err(failure) = taken(request, &format!("the {action:?}"), driver.base + step)
+                {
                     return Some(Err(failure));
                 }
                 step
@@ -1204,8 +1325,9 @@ fn advance(
                     ));
                 };
                 let time_step = reference.state.time_step();
-                let landed = (clock.epoch_origin_seconds / time_step).round() as u64;
-                let off = (landed as f64 * time_step - clock.epoch_origin_seconds).abs();
+                let since = clock.epoch_origin_seconds - driver.start_time;
+                let landed = (since / time_step).round() as u64;
+                let off = (landed as f64 * time_step - since).abs();
                 if !within(off, CLOCK_TOLERANCE) || landed < step || landed >= endpoint {
                     return Some(Err(format!(
                         "the new generation's origin {:.6} s is {off:.1e} s from step {landed} \
@@ -1346,7 +1468,7 @@ fn advance(
                 };
                 return None;
             }
-            state.e2e_steps.limit = Some(stop(next + 1));
+            state.e2e_steps.limit = Some(driver.base + stop(next + 1));
             driver.phase = Phase::Run {
                 reference,
                 next: next + 1,
@@ -1363,7 +1485,9 @@ fn advance(
             // on is read at whatever step its snapshot stamps, the
             // reference stepped to it.
             let holds = driver.fixture.holds();
-            let stamped = display.full_snapshot_completed_steps();
+            let stamped = display
+                .full_snapshot_completed_steps()
+                .saturating_sub(driver.base);
             let arrived = display.full_readbacks > seen
                 && display.generation == request.generation()
                 && if holds {
@@ -1454,7 +1578,7 @@ fn advance(
             if let Some(carry) = &mut reference.carry {
                 carry.at_handoff = [q, b, wall.z, wall.memory];
             }
-            state.e2e_steps.limit = Some(stop(next + 1));
+            state.e2e_steps.limit = Some(driver.base + stop(next + 1));
             driver.phase = Phase::Run {
                 reference,
                 next: next + 1,
@@ -1503,7 +1627,7 @@ fn advance(
             // inside the state it copied, is the endpoint's.
             let arrived = display.full_readbacks > seen
                 && display.generation == request.generation()
-                && display.full_snapshot_completed_steps() == endpoint;
+                && display.full_snapshot_completed_steps() == driver.base + endpoint;
             if !arrived {
                 request.request_full_state_readback();
                 driver.phase = Phase::Snapshot { reference, seen };
@@ -1568,7 +1692,7 @@ fn advance(
             }
             let judged = match (&reference.twin, &reference.far) {
                 (Some(twin), _) => observables::judge(state, twin, endpoint),
-                (None, Some(far)) => far_field::judge(state, far),
+                (None, Some(far)) => far_field::judge(state, far, driver.fixture),
                 (None, None) => unreachable!("an observed run has its twins"),
             };
             Some(judged.map(|recorded| Run {

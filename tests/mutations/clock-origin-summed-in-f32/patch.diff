@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-app/src/canonical_wave.wgsl b/crates/funfern-app/src/canonical_wave.wgsl
+--- a/crates/funfern-app/src/canonical_wave.wgsl
++++ b/crates/funfern-app/src/canonical_wave.wgsl
+@@ -508,7 +508,7 @@
+     let whole = floor(increment);
+     let fraction = low + (increment - whole);
+     let carry = floor(fraction);
+-    return vec2<f32>(high + (whole + carry), fraction - carry);
++    return vec2<f32>(high + low + increment, 0.0);
+ }
+ // The square of the solver's orientation, which is ±1: exactly 1, and a value
+ // the compiler reads from the control buffer rather than knows. A difference

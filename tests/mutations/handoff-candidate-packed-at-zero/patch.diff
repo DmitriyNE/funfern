@@ -1,0 +1,15 @@
+diff --git a/crates/funfern-app/src/ui/workers.rs b/crates/funfern-app/src/ui/workers.rs
+--- a/crates/funfern-app/src/ui/workers.rs
++++ b/crates/funfern-app/src/ui/workers.rs
+@@ -643,10 +643,7 @@
+     let clock = if candidate.fresh || active.is_none() {
+         super::e2e::fresh_clock(time_step)?
+     } else {
+-        CanonicalGpuClock {
+-            epoch_origin_seconds: running_time,
+-            ..CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?
+-        }
++        CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?
+     };
+     let plan = compile_generation_plan(&candidate, time_step, clock)?;
+     if candidate.fresh || active.is_none() {

@@ -1134,6 +1134,13 @@ pub struct CanonicalGpuPlan {
 }
 
 impl CanonicalGpuPlan {
+    /// The epoch origin the plan's clock starts from, in seconds: zero for
+    /// the app's fresh generations, the running time for a handoff's
+    /// candidate.
+    pub fn clock_origin_seconds(&self) -> f64 {
+        f64::from(self.control.clock_origin.x) + f64::from(self.control.clock_origin.y)
+    }
+
     /// The two packers' plans compared, naming each part that differs: the
     /// production packer reads the assembled stiffness rows where the
     /// tests' packer rebuilds them from the samples, and a scene prepared
@@ -4151,8 +4158,16 @@ fn finite_f32(value: f64, name: &'static str) -> Result<f32, CanonicalGpuBuildEr
     }
 }
 
+/// An epoch origin as the device keeps it: whole seconds in the first part,
+/// exact in f32 up to 2^24 s, and the fraction, in [0, 1), in the second, so
+/// that the device moves it on by exact sums (`advance_origin`).
 fn split_f64(value: f64) -> Result<[f32; 2], CanonicalGpuBuildError> {
-    let high = finite_f32(value, "clock epoch origin")?;
+    let whole = value.floor();
+    let high = if whole.abs() < 16_777_216.0 {
+        whole as f32
+    } else {
+        finite_f32(value, "clock epoch origin")?
+    };
     let low = finite_f32(value - high as f64, "clock epoch origin residual")?;
     Ok([high, low])
 }
@@ -7856,9 +7871,13 @@ fn compute_canonical_wave(
                     handles,
                     bind_group,
                     pipeline_cache
+                        .get_compute_pipeline(consumer_pipeline.canonical_far_field_decide),
+                    pipeline_cache
                         .get_compute_pipeline(consumer_pipeline.canonical_far_field_sample),
                     pipeline_cache
                         .get_compute_pipeline(consumer_pipeline.canonical_far_field_project),
+                    pipeline_cache
+                        .get_compute_pipeline(consumer_pipeline.canonical_far_field_advance),
                 )
             })
     });
@@ -8110,14 +8129,22 @@ fn compute_canonical_wave(
             pass.dispatch_workgroups(1, 1, 1);
             pass.set_bind_group(0, &group.bind_group, &[]);
         }
-        if let Some((handles, bind_group, Some(sample), Some(project))) = far_recorder
+        if let Some((handles, bind_group, Some(decide), Some(sample), Some(project), Some(advance))) =
+            far_recorder
             && differencing_sample_due(step_after, handles.sample_stride, resident_filter)
         {
+            // Four dispatches, so that every thread of the middle two reads
+            // the decision and the slot the ring stands at, which one thread
+            // takes before them and moves on after them.
             pass.set_bind_group(0, &bind_group.bind_group, &[]);
+            pass.set_pipeline(decide);
+            pass.dispatch_workgroups(1, 1, 1);
             pass.set_pipeline(sample);
             pass.dispatch_workgroups((FAR_FIELD_CONTOUR_POINTS as u32).div_ceil(64), 1, 1);
             pass.set_pipeline(project);
             pass.dispatch_workgroups((FAR_FIELD_DIRECTIONS as u32).div_ceil(64), 1, 1);
+            pass.set_pipeline(advance);
+            pass.dispatch_workgroups(1, 1, 1);
             pass.set_bind_group(0, &group.bind_group, &[]);
         }
         group.encoded_local_step += 1;

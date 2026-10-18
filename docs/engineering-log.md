@@ -25609,3 +25609,129 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. The device suite, since three shaders
   changed: 90 of 90.
+
+## 2026-10-18 — PH-18, part 5: the clock and the far field exact late into a run
+
+- **The far field's times in two parts** (design D1, agreed).
+  - **The problem.** The far-field recorder stamped its frames with one f32
+    of the absolute time, keyed its ring by `floor(t/period)` of it, and
+    differenced those times to interpolate. So its error grew with the run's
+    age: 2e-3 s after ten hours, and past 36 hours a time could not tell one
+    1/60 s bucket from the next.
+  - **Stamps.** Every far-field time is now a two-part stamp, as the probe
+    records' are, and every difference of two is taken part by part
+    (`stamp_difference`).
+  - **The ring.** Recorder passes come every quarter period, as before. A pass
+    records a frame once its stamp stands a period past the ring's newest
+    frame's, into the slot after it. The ring is keyed to its own count,
+    held with its state in the ring's buffer, so it survives a handoff as the
+    frames do. Four dispatches a pass, so no thread reads a slot while it
+    changes: one thread decides, the samples and the projection follow, and
+    one thread moves the ring on.
+  - **The projection.** It finds each point's retarded time by bisection
+    over the frames by age.
+  - **Directional records.** These carry the amplitude, the far time's stamp
+    and a validity flag. The host forms the intensity, which was only ever
+    A·A.
+  - **A rule I tried first and dropped.** A frame every `ceil(period/dt)`
+    steps, counted on the generation, needed no device-side decision. But at
+    a handoff the count restarts, so the first frame after it could come
+    almost two periods after the last, a hole on every adaptation;
+    `the_far_field_ring_holds_its_frames_in_order_across_a_handoff` caught
+    it.
+  - **Results.**
+    - `far-field` reads within 5.3e-6 of the twin, stamps within 1.4e-7 s,
+      both tighter than before.
+    - The line source's patterns read 2.4e-2 (gate), 1.2e-2, 4.2e-3 and
+      3.7e-3 (nightly).
+- **Late-clock fixtures.**
+  - **A start clock.** `ui::e2e::fresh_clock` gives a fresh install the
+    clock a fixture sets, an epoch origin and its steps before a rebase. The
+    app starts every fresh generation at zero, and only the fixtures set it.
+  - **Step counts.** The device's completed-step count starts at the
+    clock's step in the epoch, so the driver counts its script from that
+    base. It reads where a running handoff landed from the run's start time.
+  - **`far-field-late`.** `far-field` 36 hours in, 400 steps before a
+    rebase. Its twin keeps the device's clock as the device does: the
+    origin pair, `steps × dt` in f32, and the rebase's compensated sum.
+  - **`handoff-memory-running-late`.** `handoff-memory-running` 36 hours in,
+    300 steps before a rebase.
+- **Found: the clock's compensated sums lost their rounding.**
+  - **What.** At a rebase, at most every 256 s, the device added the epoch's
+    local time onto its origin pair with a compensated sum. At a handoff, the
+    transfer did the same for the new generation's origin and for the delay
+    a new drive moves on by.
+  - **Why.** Metal's fast math folded the sum's rounding term,
+    `(high - sum) + increment`, to zero, as it is in exact arithmetic.
+  - **How it showed.** `far-field-late`'s device read 129,860.244815 s after
+    one rebase. The folded arithmetic predicts exactly that; IEEE gives
+    129,860.248340 s, 9e-6 s from the reference. 3.5e-3 s was lost in one
+    rebase: up to half of f32's spacing at the absolute time, every epoch.
+  - **First fix: a guard.** Every rounded result passed through a product
+    with a 1 the compiler cannot see, the square of the solver's orientation
+    (`opaque_one`).
+    - Natively that held, and so did Chrome's rebase and its `transfer_clock`.
+    - Chrome's `transfer_runtime`, the same function in another entry point,
+      still lost the rounding. `handoff-memory-running-late` read the driven
+      wall 6.2e-2 off there, the error depending only on where the handoff
+      landed: two runs with packed origins 0.018 s apart ended on the same
+      numbers.
+    - Computing that delay from small terms made Chrome pass, which isolated
+      it.
+  - **Second fix: whole-second origins**, nothing left to fold.
+    - **Host:** an origin is whole seconds in its first f32 and the fraction,
+      in [0, 1), in its second (`split_f64`).
+    - **Device:** `advance_origin` adds the local time's whole seconds to the
+      whole seconds, exactly, and its fraction to the fraction, `floor`
+      carrying the rest. That's one text in both shaders,
+      `the_clock_origin_moves_on_by_exact_sums`, and `add_compensated` is
+      gone.
+    - **Differences of two times** are taken part by part, every term
+      small: the handoff's delay from the origins' parts and the old local
+      time, a live pulse's start from its pair less the origin's. Their
+      coarse differences pass through `opaque_one`.
+  - **After.** `far-field-late`'s clock reads 9.2e-6 s off, the f32 local
+    time's own share, natively and in Chrome.
+- **Found: handoff candidates packed against a clock at zero.**
+  - **What.** `handoff-memory-running-late` read the field 4.1e-3 off 16
+    steps after the handoff and 2.5e-2 at the end, where the same run from
+    zero reads 4e-7 and 1.5e-6.
+  - **Why.** A handoff's candidate was packed against `CanonicalGpuClock::initial`,
+    so the delay a drive the new generation starts is moved on by was the
+    run's whole age, and its phase step `ω × delay` was formed in f32: 653,000
+    rad at 0.8 Hz, where f32's spacing is 0.06 rad.
+  - **Fix.** `compile_gpu_upload` packs a handoff's candidate against the
+    time the run had reached when it was prepared, `simulated_time()`. The
+    delay becomes the preparation's own, under a second.
+  - **The host's own time.** An install had reset the host's simulated time
+    to zero until the device's clock arrived. In Chrome that clock had not
+    arrived when the candidate was prepared, so the candidate was packed at
+    254 s. The host now starts its time at the installed plan's origin
+    (`CanonicalGpuPlan::clock_origin_seconds`).
+  - **After.** The late fixture reads the field 2.1e-5 to 3.9e-5 off and the
+    clock 4.4e-6 s, natively and in Chrome. The run from zero ends on its old
+    endpoint hash.
+- **Late in an epoch** the local time is one f32 near 256 s, 3e-5 s apart,
+  and drive phases carry about 1e-4 rad from it. `far-field-late`, 254 s into
+  its epoch, reads its state 1.25e-4 off the f64 reference and the far field
+  1.17e-4 off its twin, held within 5e-4. The running handoff starts a new
+  epoch where it lands, about step 205, and reads 2.1e-5 to 3.9e-5 by where
+  that is, held within 2e-4. Listed as worth checking: a shorter epoch would
+  cut it.
+- **Mutations.** Each was checked on Metal by hand; the tree holds other work.
+
+  | Mutation | Fails | Reading |
+  |---|---|---|
+  | `clock-origin-summed-in-f32`, a rebase summing the origin into one f32 | `far-field-late` | its clock off |
+  | `handoff-candidate-packed-at-zero` | `handoff-memory-running-late` | |
+  | `far-field-stamps-summed-in-f32` | `far-field-late` | its records stop standing a period apart |
+- **CI.**
+  - The late fixtures join the device suite, and so the per-push lavapipe
+    job.
+  - The browser nightly's recorders part now holds `observables`,
+    `far-field`, `far-field-late` and `handoff-memory-running-late`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. The device suite, since shaders changed:
+  92 of 92. Chrome on Metal runs `far-field`, `far-field-late` and both running
+  handoffs.

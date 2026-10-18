@@ -678,7 +678,17 @@ browser nightly's recorders part runs it. The mutation
   adds in f64, as the vector overlay does. The mutation
   `probe-stamps-summed-in-f32`.
 - **The far field's frames,** which the device interpolates in time itself,
-  get a design of their own.
+  carry two-part stamps too: every difference is taken part by part, and the
+  ring is keyed to its own count.
+- **Late-clock fixtures.** Fixtures started 36 hours in (`far-field-late`,
+  `handoff-memory-running-late`) found two defects in the clock itself, both
+  fixed:
+  - fast math folding the rounding out of its compensated sums at every
+    rebase and handoff;
+  - handoff candidates packed against a clock at zero.
+
+  The mutations `clock-origin-summed-in-f32`,
+  `handoff-candidate-packed-at-zero` and `far-field-stamps-summed-in-f32`.
 
 ## 7. Infrastructure
 

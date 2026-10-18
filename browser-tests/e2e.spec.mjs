@@ -21,9 +21,9 @@ const named = (process.env.FUNFERN_E2E_FIXTURES ?? "")
   .map((name) => name.trim())
   .filter(Boolean);
 // And the ones to leave out of all of them, comma-separated: the nightly runs
-// the recorders' fixtures, `observables` and `far-field`, as a part of their
-// own, since alongside the rest they would carry the slower hosting past the
-// runner's six hours.
+// the recorders' fixtures and the late clocks' as a part of their own, since
+// alongside the rest they would carry the slower hosting past the runner's six
+// hours.
 const excluded = (process.env.FUNFERN_E2E_EXCLUDE ?? "")
   .split(",")
   .map((name) => name.trim())
@@ -43,8 +43,14 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // that hangs is still caught at it.
 // observables runs 1440 steps twice, its probes recording, where the cavity
 // runs 256 once: about 75 minutes at SwiftShader's 1.2 s a step; far-field
-// runs 1150 twice.
-const runLength = { "handoff-memory-running": 2, observables: 4, "far-field": 3 };
+// runs 1150 twice, and far-field-late once.
+const runLength = {
+  "handoff-memory-running": 2,
+  "handoff-memory-running-late": 2,
+  observables: 4,
+  "far-field": 3,
+  "far-field-late": 2,
+};
 // How the bundle is hosted: `isolated`, the test server sending the headers that
 // isolate the page; `pages`, as GitHub Pages serves the site - no headers, so the
 // page installs coi-serviceworker.js and reloads itself once; or

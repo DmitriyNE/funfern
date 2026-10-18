@@ -250,17 +250,26 @@ impl Playground {
         time_step: f64,
         runtime_serials: [u32; 4],
     ) {
+        let running_time = self.simulated_time();
         #[cfg(test)]
         if self.pack_inline {
             let _ = sender.send(compile_gpu_upload(
                 candidate,
                 active,
                 time_step,
+                running_time,
                 runtime_serials,
             ));
             return;
         }
-        dispatch_gpu_upload_preparation(sender, candidate, active, time_step, runtime_serials);
+        dispatch_gpu_upload_preparation(
+            sender,
+            candidate,
+            active,
+            time_step,
+            running_time,
+            runtime_serials,
+        );
     }
 
     pub(super) fn begin_handoff_timeline(&mut self) {
@@ -591,6 +600,7 @@ impl Playground {
                 self.coordinator.solver_fault = None;
             }
             let mut handed_off = false;
+            let mut installed_origin = 0.0;
             let upload = job.result.take().unwrap().and_then(|prepared| {
                 if let Some(transfer) = prepared.transfer {
                     handed_off = true;
@@ -598,6 +608,7 @@ impl Playground {
                         .begin_handoff(assets, commands, prepared.plan, transfer)
                         .map_err(str::to_owned)
                 } else {
+                    installed_origin = prepared.plan.clock_origin_seconds();
                     request.install(assets, commands, prepared.plan);
                     Ok(())
                 }
@@ -609,8 +620,13 @@ impl Playground {
             });
             match upload {
                 Ok(()) => {
-                    // An install starts its clock at zero, and publishes at
-                    // once: its first steps are the new generation's. A
+                    // An install starts its clock where its plan does, at
+                    // zero but where a fixture starts it late, and its step
+                    // count at the clock's step in the epoch; the host's time
+                    // carries on from that until the device's clock arrives,
+                    // which a handoff prepared before then packs against.
+                    // It publishes at once: its first steps are the new
+                    // generation's. A
                     // handoff's are not until it publishes, and one that is
                     // rejected leaves the accepted generation stepping at its
                     // own step - taking the candidate's here kept it after a
@@ -618,7 +634,7 @@ impl Playground {
                     // ceiling request the rejected revision again.
                     if !handed_off {
                         self.coordinator.uploaded_time_step = dt;
-                        self.sim_time_offset = 0.0;
+                        self.sim_time_offset = installed_origin;
                         self.sim_time_step = dt;
                     }
                     self.handoff_upload = Some(Instant::now());

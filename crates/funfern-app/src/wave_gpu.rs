@@ -154,15 +154,6 @@ pub struct RecorderContext {
     pub history: RecorderHistory,
 }
 
-/// What an unwritten ring frame holds. A recorded time is never negative, and
-/// a comparison against a real number is one no compiler is free to fold away,
-/// which `w != w` is: under the fast-math the Metal backend compiles with, a
-/// NaN test silently becomes `false` and every unwritten frame reads as data.
-/// A billion seconds before the clock starts is below any time it records;
-/// the shaders' own copy must stay under 2^63, which Safari cannot read in the
-/// full digits naga writes an f32 constant in.
-const FAR_FIELD_UNRECORDED: f32 = -1.0e9;
-
 /// The ring is a time series, not a step series: a frame is one bucket of the
 /// wave clock, so a mesh swap that moves the time step neither shifts the write
 /// cursor nor restretches what is already recorded. The period leaves 1/60 s
@@ -179,17 +170,12 @@ fn far_field_period(time_step: f64) -> f64 {
     period
 }
 
-#[cfg(test)]
-fn far_field_bucket(time: f64, period: f64) -> f64 {
-    (time / period).floor()
-}
-
-/// How often to encode a recorder pass. The shader decides what to keep, by
-/// asking the ring whether the bucket it has reached is already recorded, so
-/// this only has to be dense enough to visit every bucket — it cannot skip one,
-/// and it need not track the solver's own clock, which drifts from step times
-/// by more than a step over a long run. The quarter-bucket spacing is what
-/// keeps a recorded sample near the start of its bucket.
+/// How often to encode a recorder pass. A pass records a frame once its time
+/// stands a period past the ring's newest, so this only has to be dense enough
+/// that frames stand little more than a period apart, and it need not track
+/// the solver's own clock, which drifts from step times by more than a step
+/// over a long run. A quarter period between passes keeps a frame within a
+/// quarter period of being due.
 fn far_field_sample_stride(period: f64, time_step: f64) -> u64 {
     if !period.is_finite() || !time_step.is_finite() || period <= 0.0 || time_step <= 0.0 {
         return 1;
@@ -1088,18 +1074,15 @@ impl WaveGpuRequest {
             }
         } else {
             self.clear_far_field_buffers(assets, commands);
+            // Each slot's samples, one header per slot, and the ring's own
+            // state - the next slot, how many frames it holds, whether a
+            // pass records - last, all zero: an empty ring.
             let raw = vec![
-                GpuProbeSample {
-                    values: Vec4::new(0.0, 0.0, 0.0, FAR_FIELD_UNRECORDED),
-                };
-                FAR_FIELD_RING_FRAMES * FAR_FIELD_CONTOUR_POINTS
+                GpuProbeSample::default();
+                FAR_FIELD_RING_FRAMES * (FAR_FIELD_CONTOUR_POINTS + 1) + 1
             ];
-            let output = vec![
-                GpuProbeSample {
-                    values: Vec4::new(0.0, 0.0, FAR_FIELD_UNRECORDED, 0.0),
-                };
-                FAR_FIELD_RING_FRAMES * FAR_FIELD_DIRECTIONS
-            ];
+            let output =
+                vec![GpuProbeSample::default(); FAR_FIELD_RING_FRAMES * FAR_FIELD_DIRECTIONS];
             FarFieldBufferHandles {
                 stencils: assets.add(ShaderBuffer::from(stencils)),
                 control: assets.add(ShaderBuffer::from(control)),
@@ -2061,14 +2044,18 @@ fn receive_far_field_readback(
         {
             continue;
         }
-        let time = row[0].values.z;
+        // The far time is a stamp, as a probe record's is.
+        let time = stamp_seconds(row[0].values.y, row[0].values.z);
         if time < 0.0 || !time.is_finite() {
             continue;
         }
         records.push(FarFieldRecord {
-            time: time as f64,
+            time,
             amplitude: row.iter().map(|sample| sample.values.x).collect(),
-            intensity: row.iter().map(|sample| sample.values.y).collect(),
+            intensity: row
+                .iter()
+                .map(|sample| sample.values.x * sample.values.x)
+                .collect(),
         });
     }
     records.sort_by(|a, b| a.time.total_cmp(&b.time));
@@ -2133,8 +2120,10 @@ pub(crate) struct WavePipeline {
     pub(crate) canonical_curve_probe: CachedComputePipelineId,
     pub(crate) canonical_area_probe_elements: CachedComputePipelineId,
     pub(crate) canonical_area_probe_reduce: CachedComputePipelineId,
+    pub(crate) canonical_far_field_decide: CachedComputePipelineId,
     pub(crate) canonical_far_field_sample: CachedComputePipelineId,
     pub(crate) canonical_far_field_project: CachedComputePipelineId,
+    pub(crate) canonical_far_field_advance: CachedComputePipelineId,
     pub(crate) canonical_vector_overlay: CachedComputePipelineId,
 }
 
@@ -2307,12 +2296,19 @@ fn init_pipeline(
             entry_point: Some(Cow::Borrowed(entry)),
             ..default()
         };
+    let canonical_far_field_decide = pipeline_cache.queue_compute_pipeline(canonical_far_pipeline(
+        "canonical far-field frame decision",
+        "decide_frame",
+    ));
     let canonical_far_field_sample = pipeline_cache.queue_compute_pipeline(canonical_far_pipeline(
         "canonical far-field contour sampler",
         "sample_contour",
     ));
     let canonical_far_field_project = pipeline_cache.queue_compute_pipeline(
         canonical_far_pipeline("canonical far-field projector", "project_directions"),
+    );
+    let canonical_far_field_advance = pipeline_cache.queue_compute_pipeline(
+        canonical_far_pipeline("canonical far-field ring advance", "advance_frame"),
     );
     commands.insert_resource(WavePipeline {
         canonical_probe_layout,
@@ -2325,8 +2321,10 @@ fn init_pipeline(
         canonical_curve_probe,
         canonical_area_probe_elements,
         canonical_area_probe_reduce,
+        canonical_far_field_decide,
         canonical_far_field_sample,
         canonical_far_field_project,
+        canonical_far_field_advance,
         canonical_vector_overlay,
     });
 }
@@ -2718,7 +2716,6 @@ fn prepare_probe_bind_group(
 mod tests {
     use super::*;
     use bevy::ecs::world::CommandQueue;
-    use std::collections::BTreeMap;
 
     use funfern_core::{
         MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, Scene, mesh_scene,
@@ -2924,6 +2921,42 @@ mod tests {
         );
     }
 
+    /// The clock's origin moves on by exact sums: whole seconds added to whole
+    /// seconds, and a fraction to a fraction, `floor` taking the one from the
+    /// other. The solver's and the transfer's copies are one text, and no
+    /// compensated sum is left for a compiler to fold, as Metal folded one at
+    /// every rebase and Chrome folded a guarded one in the transfer. The
+    /// transfer's delay and a live pulse's start are differences taken part by
+    /// part, every term small.
+    #[test]
+    fn the_clock_origin_moves_on_by_exact_sums() {
+        let function = |source: &'static str| {
+            let start = source.find("fn advance_origin(").expect("advance_origin");
+            let end = start + source[start..].find("\n}\n").expect("its end");
+            source[start..end].to_owned()
+        };
+        let wave = include_str!("canonical_wave.wgsl");
+        let transfer = include_str!("canonical_transfer_runtime.wgsl");
+        assert_eq!(function(wave), function(transfer));
+        let body = function(wave);
+        assert!(body.contains("let whole = floor(increment);"));
+        assert!(body.contains("let fraction = low + (increment - whole);"));
+        assert!(body.contains("let carry = floor(fraction);"));
+        assert!(body.contains("return vec2<f32>(high + (whole + carry), fraction - carry);"));
+        for source in [wave, transfer] {
+            assert!(!source.contains("add_compensated"));
+            assert!(source.contains(
+                "advance_origin(\n        control.clock_origin.x, control.clock_origin.y, control.clock_f32.y);"
+            ) || source.contains(
+                "advance_origin(\n        old_control.clock_origin.x, old_control.clock_origin.y, old_control.clock_f32.y);"
+            ));
+        }
+        assert!(transfer.contains(
+            "let preparation_delta = ((old_control.clock_origin.x - new_control.clock_origin.x)"
+        ));
+        assert!(wave.contains("let start = (window.x - control.clock_origin.x) * opaque_one()"));
+    }
+
     /// Every probe recorder writes a record's time as the pair `stamp()`
     /// forms, into the slots its decoder reads, and none sums it into one f32.
     #[test]
@@ -3065,19 +3098,22 @@ mod tests {
 
     /// A frame stands half a step back, the field and its normal gradient
     /// the mean of the step's two lanes beside their difference, and the
-    /// projection reads from the same time: a rate half a step older than the
-    /// gradient beside it moved a 3 Hz source's pattern by 10%.
+    /// projection reads from that frame's own stamp: a rate half a step older
+    /// than the gradient beside it moved a 3 Hz source's pattern by 10%.
     #[test]
     fn far_field_frames_are_centred_on_their_step() {
         let shader = include_str!("canonical_far_field.wgsl");
-        assert!(shader.contains("    return state_time() - 0.5 * control.clock_f32.x;"));
-        assert_eq!(shader.matches("centred_time();").count(), 2);
-        assert!(!shader.contains("let time = state_time();"));
-        assert!(!shader.contains("let now = state_time();"));
+        assert!(shader.contains(
+            "control.clock_origin.y + (control.clock_f32.y - 0.5 * control.clock_f32.x));"
+        ));
         assert!(shader.contains("let gradient = 0.5 * (current_gradient + previous_gradient);"));
         assert!(
-            shader.contains("vec4<f32>(0.5 * (primary + previous), rate, normal_gradient, time);")
+            shader.contains("vec4<f32>(0.5 * (primary + previous), rate, normal_gradient, 0.0);")
         );
+        assert!(shader.contains(
+            "contour_history[header_index(slot)].values = vec4<f32>(centred_stamp(), 0.0, 0.0);"
+        ));
+        assert!(shader.contains("let now = contour_history[header_index(newest)].values.xy;"));
     }
 
     #[test]
@@ -3085,66 +3121,48 @@ mod tests {
         let shader = include_str!("canonical_far_field.wgsl");
         assert!(shader.contains("fn sample_contour"));
         assert!(shader.contains("fn project_directions"));
-        assert!(shader.contains("let age = delay / period;"));
+        assert!(shader.contains("let retarded = dot(ray, position) / wave_speed - margin;"));
         assert!(shader.contains("sample.z - dot(normal, ray) * sample.y / wave_speed"));
-        assert!(shader.contains("amplitude * amplitude"));
+        assert!(shader.contains("fraction = clamp((newer_time - retarded) / span, 0.0, 1.0);"));
     }
 
+    /// The ring knows which frames it holds by its own count, never by a NaN
+    /// test, which fast math folds to `false`, nor by a sentinel time.
     #[test]
     fn far_field_validity_never_rests_on_a_nan_comparison() {
         let shader = include_str!("canonical_far_field.wgsl");
-        // `w != w` is a NaN test, and these shaders compile under fast math,
-        // where it is folded to `false` and every unwritten frame reads as data.
-        assert!(!shader.contains("!= newer.w"));
-        assert!(!shader.contains("!= older.w"));
-        assert!(!shader.contains("recorded == recorded"));
-        assert!(shader.contains("const UNRECORDED: f32 = -1.0e9;"));
-        assert!(shader.contains("if newer.w < 0.0 || older.w < 0.0 {"));
+        assert!(!shader.contains("!= newer"));
+        assert!(!shader.contains("!= older"));
+        assert!(!shader.contains("UNRECORDED"));
+        assert!(shader.contains("let held = min(frames_held() + 1u, frames);"));
+        assert!(shader.contains("if stamp_difference(oldest, now) > retarded {"));
     }
 
+    /// Every time the far field reads is a two-part stamp, and every
+    /// difference of two is taken part by part: summed into one f32, the
+    /// frames' times kept f32's spacing at the run's absolute time, 2e-3 s
+    /// after ten hours. The ring is keyed to its own count, so nothing reads
+    /// the absolute time, which past 36 hours could not tell one 1/60 s
+    /// bucket from the next.
     #[test]
-    fn far_field_shader_keys_its_ring_to_the_solver_clock_and_recorded_times() {
+    fn far_field_shader_keys_its_ring_to_its_count_and_reads_stamps() {
         let shader = include_str!("canonical_far_field.wgsl");
-        // The ring is a function of the clock, not of this generation's steps,
-        // which is what lets a new mesh keep writing into an old ring. That
-        // clock is the transferred one every other probe records against, and
-        // adding an offset of the app's own would count it twice.
+        assert!(!shader.contains("state_time"));
+        assert!(!shader.contains("floor(time"));
+        assert!(!shader.contains("clock_origin.x + control.clock_origin.y"));
         assert!(shader.contains(
-            "    return control.clock_origin.x + control.clock_origin.y + control.clock_f32.y;"
+            "    let coarse = select(a.x - b.x, 0.0, bitcast<u32>(a.x) == bitcast<u32>(b.x));\n    return coarse * one + (a.y - b.y);"
         ));
-        assert!(!shader.contains("control.projection.w"));
-        assert!(!shader.contains("completed % stride"));
-        assert!(!shader.contains("let frame = (completed / stride) % frames;"));
-        // And the projection reads by recorded time, so buckets filled at one
-        // time step still bracket correctly after another one takes over.
-        assert!(shader.contains("if retarded > newer.w && index > 0u {"));
-        assert!(shader.contains("fraction = clamp((newer.w - retarded) / span, 0.0, 1.0);"));
-    }
-
-    /// The recorder in the shader's terms: a dispatched step records the bucket
-    /// its clock has reached, unless the ring frame for that bucket already
-    /// holds a sample of it. Runs of this stand in for what the GPU does, at
-    /// clocks the CPU cannot predict.
-    #[derive(Default)]
-    struct FarFieldRing {
-        frames: usize,
-        recorded: BTreeMap<usize, f64>,
-    }
-
-    impl FarFieldRing {
-        fn record(&mut self, state_time: f64, period: f64) -> Option<f64> {
-            let bucket = far_field_bucket(state_time, period);
-            let frame = bucket.rem_euclid(self.frames as f64) as usize;
-            if self
-                .recorded
-                .get(&frame)
-                .is_some_and(|recorded| far_field_bucket(*recorded, period) == bucket)
-            {
-                return None;
-            }
-            self.recorded.insert(frame, state_time);
-            Some(bucket)
-        }
+        assert!(shader.contains("let slot = next_slot();"));
+        assert!(shader.contains("f32((next_slot() + 1u) % frames),"));
+        assert!(
+            shader.contains(
+                "due = stamp_difference(centred_stamp(), last) >= far_control.sampling.x;"
+            )
+        );
+        assert!(shader.contains(
+            "directional_history[slot].values = vec4<f32>(amplitude, far, select(0.0, 1.0, valid));"
+        ));
     }
 
     #[test]
@@ -3162,48 +3180,37 @@ mod tests {
         }
     }
 
+    /// The ring in the shader's terms: a pass records a frame once its time
+    /// stands a period past the newest frame's. Across a handoff that changes
+    /// the step, with a clock drifting from the step count by more than a
+    /// step, its frames still stand in time order slot by slot, a period and
+    /// at most a pass more apart, none missing at the handoff.
     #[test]
-    fn the_far_field_ring_records_every_bucket_once_across_a_handoff() {
+    fn the_far_field_ring_holds_its_frames_in_order_across_a_handoff() {
         let period = far_field_period(1.0e-3);
-        let mut ring = FarFieldRing {
-            frames: FAR_FIELD_RING_FRAMES,
-            ..FarFieldRing::default()
-        };
-        let mut buckets = Vec::new();
-        // The solver's own clock accumulates a step at a time in f32 and runs
-        // away from any arithmetic done over step counts, so the run below
-        // drifts by more than a step and changes step mid-flight.
+        let mut frames: Vec<(f64, f64)> = Vec::new();
         let mut run = |origin: f64, time_step: f64, steps: u64, drift: f64| {
             let stride = far_field_sample_stride(period, time_step);
             for step in 1..=steps {
-                if !probe_sample_due(step, stride) {
-                    continue;
-                }
-                let state = origin + (step - 1) as f64 * time_step + drift * step as f64;
-                if let Some(bucket) = ring.record(state, period) {
-                    buckets.push(bucket);
+                let time = origin + step as f64 * (time_step + drift);
+                if probe_sample_due(step, stride)
+                    && frames.last().is_none_or(|(last, _)| time - last >= period)
+                {
+                    frames.push((time, stride as f64 * time_step));
                 }
             }
+            origin + steps as f64 * (time_step + drift)
         };
-        let first_step = 1.0 / 700.0;
-        let steps = 4000;
-        run(0.0, first_step, steps, first_step * 0.002);
-        // A finer mesh takes the ring over from where the first one stopped.
-        let handoff = steps as f64 * first_step + first_step * 0.002 * steps as f64;
+        let handoff = run(0.0, 1.0 / 700.0, 4000, 0.002 / 700.0);
         run(handoff, 1.0 / 1100.0, 4000, 0.0);
-
-        assert!(buckets.len() > 300);
-        assert_eq!(buckets[0], 0.0);
-        for pair in buckets.windows(2) {
-            // A hole in the ring is a hole in every projection that reaches back
-            // through it, and a bucket recorded twice is a sample of the wrong
-            // moment standing in for the right one.
-            assert_eq!(
-                pair[1] - pair[0],
-                1.0,
-                "{:?} follows {:?}",
-                pair[1],
-                pair[0]
+        assert!(frames.len() > 300);
+        for pair in frames.windows(2) {
+            let ((before, _), (after, pass)) = (pair[0], pair[1]);
+            // A hole in the ring is a hole in every projection that reaches
+            // back through it, and frames out of order break its bisection.
+            assert!(
+                after - before >= period && after - before <= period + pass + 1.0e-9,
+                "{after} follows {before}"
             );
         }
     }
@@ -3479,18 +3486,19 @@ mod tests {
     }
 
     #[test]
-    fn the_far_field_dispatch_visits_every_bucket_it_has_to_record() {
+    fn the_far_field_passes_come_often_enough_to_keep_frames_a_period_apart() {
         for time_step in [1.0e-4, 1.0 / 700.0, 0.004, 0.02, 0.4] {
             let period = far_field_period(time_step);
             let stride = far_field_sample_stride(period, time_step);
             let spacing = stride as f64 * time_step;
+            // A frame comes at most a pass after it is due.
             assert!(
                 spacing <= period,
-                "{spacing} between passes leaves a bucket of {period} unvisited"
+                "{spacing} between passes for a period of {period}"
             );
-            // Dense enough to land near the start of a bucket, sparse enough
-            // that the projection is not re-run through every step of one.
-            // Rounding a quarter bucket down to whole steps can halve it.
+            // Dense enough to keep frames near a period apart, sparse enough
+            // that the decision is not taken at every step of one. Rounding a
+            // quarter period down to whole steps can halve it.
             assert!(spacing >= period * 0.125 || stride == 1);
         }
     }

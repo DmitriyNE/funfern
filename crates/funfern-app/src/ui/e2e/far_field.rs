@@ -12,11 +12,18 @@ use funfern_core::{
 /// The fixture's run: 6.5 s at the step the app paces its scene at, 5.66e-3.
 pub(super) const FAR_FIELD_STEPS: u64 = 1150;
 
+/// `far-field-late`'s clock: an epoch origin 36 hours in, the run starting
+/// 400 steps before the epoch rebases, 253.7 s past the origin, and the drive
+/// switched on 250 s past it.
+pub(super) const LATE_ORIGIN: f64 = 129_600.0;
+pub(super) const LATE_STEPS_BEFORE_REBASE: u32 = 400;
+pub(super) const LATE_DRIVE: f64 = 250.0;
+
 /// The cavity made a TM box whose every side is a first-order outgoing wall,
 /// with a hole off its centre and the document's point source beside it, a
-/// 2 Hz sine under a flat top switched on over half a second, and its far
-/// field on at the default inset.
-pub(super) fn far_field_document() -> TopologyDocument {
+/// 2 Hz sine under a flat top switched on over half a second from `start`,
+/// and its far field on at the default inset.
+pub(super) fn far_field_document(start: f64) -> TopologyDocument {
     let mut editor = TopologyEditor::from_document(cavity_document()).expect("the cavity opens");
     editor
         .create_closed_curve(
@@ -45,7 +52,7 @@ pub(super) fn far_field_document() -> TopologyDocument {
                 duration: 20.0,
                 edge: 0.5,
             },
-            start: 0.0,
+            start,
             repeat: 0.0,
         },
     };
@@ -57,26 +64,36 @@ pub(super) fn far_field_document() -> TopologyDocument {
 }
 
 /// What the device's far field recorded, held to the twin: the host's
-/// records, every one whose 96 directions all read, must stand a bucket
-/// apart from the first the delay window lets through to the run's end; each
-/// direction's amplitude within `TOLERANCE` of the twin's at the same frame,
-/// relative to the largest the twin reads, f32 against f64 (the M1 Max reads
-/// 8.1e-6); each record's far time within `STAMP` of the twin's (3.8e-7 s).
-pub(super) fn judge(state: &Playground, twin: &FarFieldTwin) -> Result<String, String> {
-    const TOLERANCE: f64 = 4.0e-5;
-    const STAMP: f64 = 2.0e-6;
+/// records, every one whose 96 directions all read, must stand a period and
+/// at most a pass more apart from the first the delay window lets through to
+/// the run's end; each
+/// direction's amplitude within 4e-5 of the twin's at the same frame, relative
+/// to the largest the twin reads, f32 against f64 (the M1 Max reads 5.3e-6);
+/// each record's far time within 2e-6 s of the twin's (1.4e-7 s).
+pub(super) fn judge(
+    state: &Playground,
+    twin: &FarFieldTwin,
+    fixture: Fixture,
+) -> Result<String, String> {
+    // Late, the twin's f64 state and the device's stand 1.25e-4 apart (the
+    // run's own tolerance says why), and the projections with them: the M1
+    // Max reads 1.17e-4.
+    let late = matches!(fixture, Fixture::FarFieldLate);
+    let (tolerance, stamp_bound) = if late {
+        (5.0e-4, 2.0e-6)
+    } else {
+        (4.0e-5, 2.0e-6)
+    };
     let records = &state.far_field_trace.records;
     if records.len() < 60 {
         return Err(format!("the far field holds {} records", records.len()));
     }
     let (mut worst, mut largest, mut stamp) = (0.0_f64, 0.0_f64, 0.0_f64);
-    let mut buckets = Vec::new();
     for record in records {
         let now = record.time + twin.margin();
         let (far, expected) = twin
             .projection(now)
             .ok_or(format!("the twin holds no projection at {now} s"))?;
-        buckets.push(twin.bucket(far + twin.margin()));
         grow(&mut stamp, (record.time - far).abs());
         if record.amplitude.len() != expected.len() {
             return Err(format!(
@@ -89,22 +106,31 @@ pub(super) fn judge(state: &Playground, twin: &FarFieldTwin) -> Result<String, S
             largest = largest.max(exact.abs());
         }
     }
-    if let Some(pair) = buckets.windows(2).find(|pair| pair[1] - pair[0] != 1.0) {
+    let (least, most) = (
+        twin.period - stamp_bound,
+        twin.period + twin.pass() + stamp_bound,
+    );
+    if let Some(pair) = records
+        .iter()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|pair| !(least..=most).contains(&(pair[1].time - pair[0].time)))
+    {
         return Err(format!(
-            "the far field's records skip from bucket {} to {}",
-            pair[0], pair[1]
+            "the far field's records skip from {} s to {} s",
+            pair[0].time, pair[1].time
         ));
     }
     let worst = worst / largest;
     let summary = format!(
-        "{} far-field records from {:.3} s, a bucket apart, amplitude {worst:.2e} of its largest, \
+        "{} far-field records from {:.3} s, a period apart, amplitude {worst:.2e} of its largest, \
          stamps {stamp:.1e} s",
         records.len(),
         records[0].time
     );
     for (what, value, bound) in [
-        ("an amplitude", worst, TOLERANCE),
-        ("a stamp", stamp, STAMP),
+        ("an amplitude", worst, tolerance),
+        ("a stamp", stamp, stamp_bound),
     ] {
         if !within(value, bound) {
             return Err(format!(
@@ -125,9 +151,12 @@ const SAMPLE_RATE: f64 = 60.0;
 /// Its directions, `FAR_FIELD_DIRECTIONS`.
 pub(crate) const DIRECTIONS: usize = 96;
 
-/// One recorded contour frame: its time, and at each contour point the
-/// field, its rate and its normal gradient.
+/// One recorded contour frame: its stamp as the device forms it, the epoch
+/// origin's coarse part and its fine part with the centred local time, the
+/// time they make, and at each contour point the field, its rate and its
+/// normal gradient.
 struct Frame {
+    stamp: (f32, f32),
     time: f64,
     values: Vec<[f64; 3]>,
 }
@@ -136,25 +165,55 @@ struct Frame {
 /// it reads each contour point's field `u = Σ wᵢQᵢ/Mᵢ` through the static
 /// mass and its normal gradient, and centres a frame on the step: their means
 /// over its two ends and the field's difference across it, at half a step
-/// back. It keeps the first frame a recorder pass takes in each bucket of
-/// `period`, by the frame's own time, passes coming every `stride` steps. A
-/// projection at a bucket's frame sums `Δs (∂ₙu − (n·ŝ) u̇/c)` over the
-/// contour, each point at its retarded time `now − margin + ŝ·y/c`, `now` the
-/// frame's time, interpolated between the frames about it.
+/// back. A pass, every `stride` steps, keeps a frame once its stamp stands a
+/// period past the newest frame's, compared part by part in f32 as the shader
+/// compares them. A projection at a frame sums `Δs (∂ₙu − (n·ŝ) u̇/c)` over
+/// the contour, each point at its retarded time `now − margin + ŝ·y/c`, `now`
+/// the frame's time, interpolated between the frames about it. The run starts
+/// at rest, and the twin keeps the device's clock as the device keeps it: an
+/// origin of whole seconds and a fraction, the epoch-local time `steps × dt`
+/// in f32, and a rebase that adds the local time onto the origin by
+/// `advance_origin`.
 pub(crate) struct FarFieldTwin {
     stencil: Arc<QuadraticFarFieldStencil>,
     inverse_mass: Vec<f64>,
     time_step: f64,
-    period: f64,
+    pub(crate) period: f64,
     stride: u64,
     previous: Option<Vec<(f64, f64)>>,
     frames: Vec<Frame>,
+    origin: (f32, f32),
+    epoch_step: u32,
+    rebase_limit: u32,
+    /// The device's completed-step count before the run's first step, which
+    /// the clock's step in the epoch seeds, and which the host counts its
+    /// passes on.
+    first_serial: u64,
 }
 
 impl FarFieldTwin {
-    /// The twin of a run that starts at rest, as the recorder's first pass
-    /// differences its first step against.
+    /// The twin of a run that starts at rest at time zero, as the recorder's
+    /// first pass differences its first step against.
+    #[cfg(test)]
     pub(crate) fn new(active: &PreparedTopology, time_step: f64) -> Result<Self, String> {
+        Self::with_clock(
+            active,
+            time_step,
+            0.0,
+            0,
+            super::rebase_step_limit(time_step),
+        )
+    }
+
+    /// The twin of a run that starts at rest on a clock at `origin`,
+    /// `step_in_epoch` steps into the epoch, which rebases at `rebase_limit`.
+    pub(crate) fn with_clock(
+        active: &PreparedTopology,
+        time_step: f64,
+        origin: f64,
+        step_in_epoch: u32,
+        rebase_limit: u32,
+    ) -> Result<Self, String> {
         let stencil = active
             .far_field
             .as_ref()
@@ -182,6 +241,10 @@ impl FarFieldTwin {
             stride,
             previous: Some(rest),
             frames: Vec::new(),
+            origin: (origin.floor() as f32, (origin - origin.floor()) as f32),
+            epoch_step: step_in_epoch,
+            rebase_limit,
+            first_serial: u64::from(step_in_epoch),
         })
     }
 
@@ -189,15 +252,40 @@ impl FarFieldTwin {
         self.stencil.delay_margin
     }
 
-    /// The bucket a frame's time falls in, as the shader takes it in f32.
-    pub(crate) fn bucket(&self, time: f64) -> f32 {
-        ((time as f32) / (self.period as f32)).floor()
+    /// Seconds between two recorder passes.
+    pub(crate) fn pass(&self) -> f64 {
+        self.stride as f64 * self.time_step
     }
 
-    /// The time a frame taken after the step ending at `time` stands at, as
-    /// the shader takes it in f32: half a step back.
-    fn centred(&self, time: f64) -> f64 {
-        f64::from(time as f32 - 0.5 * self.time_step as f32)
+    /// Moves the clock on a step, as the device does, and answers the stamp
+    /// of a pass after it, as the shader forms it: the origin's coarse part,
+    /// and its fine part with the epoch-local time centred half a step back.
+    /// The encoder rebases before the step that would reach the limit, adding
+    /// the local time onto the origin by `advance_origin`.
+    fn step_clock(&mut self) -> (f32, f32) {
+        let dt = self.time_step as f32;
+        if self.epoch_step + 1 >= self.rebase_limit {
+            let (high, low) = self.origin;
+            let increment = self.epoch_step as f32 * dt;
+            let whole = increment.floor();
+            let fraction = low + (increment - whole);
+            let carry = fraction.floor();
+            self.origin = (high + (whole + carry), fraction - carry);
+            self.epoch_step = 0;
+        }
+        self.epoch_step += 1;
+        let local = self.epoch_step as f32 * dt;
+        (self.origin.0, self.origin.1 + (local - 0.5 * dt))
+    }
+
+    /// `a − b` part by part, as the shader's `stamp_difference`.
+    fn stamp_difference(a: (f32, f32), b: (f32, f32)) -> f32 {
+        let coarse = if a.0.to_bits() == b.0.to_bits() {
+            0.0
+        } else {
+            a.0 - b.0
+        };
+        coarse + (a.1 - b.1)
     }
 
     /// Reads the state after accepted step `step`, at `time`.
@@ -221,21 +309,26 @@ impl FarFieldTwin {
                 (value, gradient.dot(*normal))
             })
             .collect::<Vec<_>>();
+        let stamp = self.step_clock();
         let previous = self.previous.replace(values.clone());
-        let (Some(previous), true) = (previous, step.is_multiple_of(self.stride)) else {
+        let due = (self.first_serial + step).is_multiple_of(self.stride);
+        let (Some(previous), true) = (previous, due) else {
             return;
         };
-        let time = self.centred(time);
-        let bucket = self.bucket(time);
         if self
             .frames
             .last()
-            .is_some_and(|frame| self.bucket(frame.time) >= bucket)
+            .is_some_and(|frame| Self::stamp_difference(stamp, frame.stamp) < self.period as f32)
         {
             return;
         }
+        debug_assert!(
+            (f64::from(stamp.0) + f64::from(stamp.1) - (time - 0.5 * self.time_step)).abs()
+                < 1.0e-3
+        );
         self.frames.push(Frame {
-            time,
+            stamp,
+            time: f64::from(stamp.0) + f64::from(stamp.1),
             values: values
                 .iter()
                 .zip(&previous)

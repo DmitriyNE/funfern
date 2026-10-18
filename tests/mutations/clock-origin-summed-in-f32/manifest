@@ -1,0 +1,4 @@
+about: a rebase sums the clock's origin and its local time into one f32, so the clock drops up to half of f32's spacing at its absolute time each epoch, 3.9e-3 s at 36 hours
+test: scripts/e2e-fixture.sh far-field-late
+expect: from the run's [0-9.]+ s, beyond 2e-5
+needs: device

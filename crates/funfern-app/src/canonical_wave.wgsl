@@ -496,11 +496,26 @@ fn reduced_phase(value: f32) -> f32 {
 }
 // End of the portable trigonometry.
 
-fn add_compensated(high: f32, low: f32, increment: f32) -> vec2<f32> {
-    let sum = high + increment;
-    let residual = (high - sum) + increment + low;
-    let next_high = sum + residual;
-    return vec2<f32>(next_high, (sum - next_high) + residual);
+// The clock's origin moved on by `increment`, as the clock keeps it: whole
+// seconds in the first part and the fraction, in [0, 1), in the second. The
+// whole seconds add exactly and the fractions stay under two, so nothing here
+// rounds at the absolute time, and nothing recovers a rounding that a compiler
+// could fold away. A compensated sum did that before 2026-10-18: Metal's fast
+// math folded its rounding to zero, and a rebase 36 hours into a run kept only
+// the rounded sum, 3.5e-3 s short; in Chrome's transfer even a guarded one lost
+// it.
+fn advance_origin(high: f32, low: f32, increment: f32) -> vec2<f32> {
+    let whole = floor(increment);
+    let fraction = low + (increment - whole);
+    let carry = floor(fraction);
+    return vec2<f32>(high + (whole + carry), fraction - carry);
+}
+// The square of the solver's orientation, which is ±1: exactly 1, and a value
+// the compiler reads from the control buffer rather than knows. A difference
+// of two times passes its coarse part through it, so that fast math cannot sum
+// the parts first and round at the absolute time.
+fn opaque_one() -> f32 {
+    return control.evolution.y * control.evolution.y;
 }
 
 fn table_float(word: u32, lane: u32) -> f32 {
@@ -1569,11 +1584,10 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
         if runtime.x == DRIVE_PULSE {
             // A pulse is a function of absolute time alone and takes effect as
             // authored. The upload is relative to t = 0 with the start as a
-            // compensated pair, which moves here onto the running epoch.
-            let start = add_compensated(
-                window.x, bitcast<f32>(runtime.w), -control.clock_origin.x);
-            window.x = pulse_start_after(
-                vec4<f32>(start.x + (start.y - control.clock_origin.y), window.yzw), 0.0);
+            // pair, which moves here onto the running epoch part by part.
+            let start = (window.x - control.clock_origin.x) * opaque_one()
+                + (bitcast<f32>(runtime.w) - control.clock_origin.y);
+            window.x = pulse_start_after(vec4<f32>(start, window.yzw), 0.0);
             runtime.w = 0u;
         } else {
             let old_parameters = vec4<f32>(
@@ -2431,7 +2445,7 @@ fn rebase_clock_records(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(1)
 fn commit_clock_rebase() {
     if stopped() { return; }
-    let origin = add_compensated(
+    let origin = advance_origin(
         control.clock_origin.x, control.clock_origin.y, control.clock_f32.y);
     let low = control.clock_u32.x + 1u;
     if low == 0u { control.clock_u32.y += 1u; }

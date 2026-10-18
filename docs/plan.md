@@ -1588,6 +1588,12 @@ is next touched.
   wall reads the power leaving 1.5% high, which the wall's ledger books to
   1.8e-4. The fixture's CPU test holds it within 3% (found by PH-18 on
   2026-10-18).
+- Late in an epoch the device's local time is one f32 near 256 s, 3e-5 s
+  apart, and the drives' phases carry about 1e-4 rad from it. 254 s into an
+  epoch, `far-field-late`'s state reads 1.25e-4 off the f64 reference, where a
+  run early in its epoch reads 2e-6. The error is bounded by the epoch's
+  length, which a shorter epoch would cut, at the cost of more rebases (found
+  by PH-18 on 2026-10-18).
 
 ## Working practice
 

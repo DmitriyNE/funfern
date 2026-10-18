@@ -19876,7 +19876,7 @@ mod tests {
     }
 
     /// PH-18: the far-field recorder's twin reads a line source's pattern
-    /// flat, as `|F|² = 1` has it, within 5e-2 at an edge of 0.2 (2.3e-2).
+    /// flat, as `|F|² = 1` has it, within 5e-2 at an edge of 0.2 (2.4e-2).
     /// With its frames stamped at the step's end rather than centred on it,
     /// the twin read 9.9e-2 here.
     #[test]
@@ -19887,8 +19887,8 @@ mod tests {
 
     /// PH-18's nightly: the far-field recorder's twin against the patterns
     /// of a line source alone and beside PH-12's cylinders of size `k a = 2`,
-    /// at an edge of 0.15: alone within 2e-2 (1.1e-2), beside a hole within
-    /// 1e-2 (4.5e-3), and beside a cylinder of index √2 within 1e-2 (4.6e-3).
+    /// at an edge of 0.15: alone within 2e-2 (1.2e-2), beside a hole within
+    /// 1e-2 (4.2e-3), and beside a cylinder of index √2 within 1e-2 (3.7e-3).
     /// A cylinder of index 2 is left out: its resonance,
     /// which PH-12 switched on over 20 s, rings past the half second the
     /// walls' first return leaves room for, and reads 3.2e-2 off at both

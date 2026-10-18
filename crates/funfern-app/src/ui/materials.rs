@@ -3376,6 +3376,7 @@ mod second_preset_reproduction {
             PreparedTopology::clone(&crystal),
             Some(pumped),
             step(&crystal),
+            0.0,
             [0; 4],
         )
         .expect("one driven generation hands off to another");
@@ -3406,6 +3407,7 @@ mod second_preset_reproduction {
             PreparedTopology::clone(&inert),
             Some(crystal),
             step(&inert),
+            0.0,
             [0; 4],
         )
         .expect("undriving a generation still packs");
@@ -3503,6 +3505,7 @@ mod second_preset_reproduction {
             PreparedTopology::clone(&inert),
             Some(pumped),
             candidate_step,
+            0.0,
             [0; 4],
         )
         .expect("switching back to linear must pack at the step the host chose");
@@ -3566,6 +3569,7 @@ mod second_preset_reproduction {
             PreparedTopology::clone(&driven),
             Some(inert),
             driven.recommended_time_step(),
+            0.0,
             [0; 4],
         )
         .expect("enabling a drive still packs");

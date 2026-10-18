@@ -626,13 +626,28 @@ fn corrects_component_totals(candidate: &PreparedTopology, active: &PreparedTopo
     candidate.mesh.geometry_revision == active.mesh.geometry_revision
 }
 
+/// Packs `candidate` for the device. A fresh generation starts its clock at
+/// zero. A handoff's candidate is packed against `running_time`, the time the
+/// run had reached when it was prepared: the device moves every drive the new
+/// generation starts on by the time between that and its arrival, a phase step
+/// `ω × delay` in f32. Packed against zero, the delay was the run's whole age,
+/// and a drive started 36 hours in landed 0.02 to 0.05 rad off; against the
+/// running time it is the preparation's own, a second or less.
 pub(super) fn compile_gpu_upload(
     candidate: PreparedTopology,
     active: Option<Arc<PreparedTopology>>,
     time_step: f64,
+    running_time: f64,
     runtime_serials: [u32; 4],
 ) -> Result<PreparedGpuUpload, String> {
-    let clock = CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?;
+    let clock = if candidate.fresh || active.is_none() {
+        super::e2e::fresh_clock(time_step)?
+    } else {
+        CanonicalGpuClock {
+            epoch_origin_seconds: running_time,
+            ..CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?
+        }
+    };
     let plan = compile_generation_plan(&candidate, time_step, clock)?;
     if candidate.fresh || active.is_none() {
         return Ok(PreparedGpuUpload {
@@ -746,6 +761,7 @@ pub(super) fn dispatch_gpu_upload_preparation(
     candidate: PreparedTopology,
     active: Option<Arc<PreparedTopology>>,
     time_step: f64,
+    running_time: f64,
     runtime_serials: [u32; 4],
 ) {
     let failure_sender = sender.clone();
@@ -756,6 +772,7 @@ pub(super) fn dispatch_gpu_upload_preparation(
                 candidate,
                 active,
                 time_step,
+                running_time,
                 runtime_serials,
             ));
         })
@@ -771,6 +788,7 @@ pub(super) fn dispatch_gpu_upload_preparation(
     candidate: PreparedTopology,
     active: Option<Arc<PreparedTopology>>,
     time_step: f64,
+    running_time: f64,
     runtime_serials: [u32; 4],
 ) {
     if BROWSER_BACKGROUND_POOL_READY.load(Ordering::Acquire) {
@@ -780,6 +798,7 @@ pub(super) fn dispatch_gpu_upload_preparation(
                 candidate,
                 active,
                 time_step,
+                running_time,
                 runtime_serials,
             ));
         });
@@ -788,6 +807,7 @@ pub(super) fn dispatch_gpu_upload_preparation(
             candidate,
             active,
             time_step,
+            running_time,
             runtime_serials,
         ));
     }
@@ -799,12 +819,14 @@ pub(super) fn dispatch_gpu_upload_preparation(
     candidate: PreparedTopology,
     active: Option<Arc<PreparedTopology>>,
     time_step: f64,
+    running_time: f64,
     runtime_serials: [u32; 4],
 ) {
     let _ = sender.send(compile_gpu_upload(
         candidate,
         active,
         time_step,
+        running_time,
         runtime_serials,
     ));
 }

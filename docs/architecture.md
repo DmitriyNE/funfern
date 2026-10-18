@@ -112,8 +112,8 @@ fine part plus the epoch-local time, which the host adds in f64
 256 s, so a stamp keeps 3e-5 s however long the run. Summed into one f32 on the
 device, a stamp kept f32's spacing at the run's absolute time: 1.2e-4 s after an
 hour, 2e-3 s after ten, 18% of a 120 Hz record's spacing, which the readouts'
-resampling turned into a spectral floor (fixed 2026-10-18). The far field's frames
-still carry one f32. The host handoff offset is
+resampling turned into a spectral floor (fixed 2026-10-18). The far field carries
+its times the same way. The host handoff offset is
 only used to map the continuous accepted-step total across timestep changes; a
 fresh install establishes a new rate baseline instead of treating its absolute
 counter value as progress.
@@ -1242,6 +1242,29 @@ generation holding one, and the application takes a new generation for every
 material edit anyway, a Fire included.
 - **Clock:** the epoch-local time is `step count × dt` in f32, formed each
   step, never a running sum.
+  - **Origins in whole seconds.** The epoch origin is whole seconds in its
+    first f32 and the fraction, in [0, 1), in its second (`split_f64`). A
+    rebase, within 256 s, and a handoff move it on by `advance_origin`: the
+    local time's whole seconds added to whole seconds, exactly, and its
+    fraction to the fraction, `floor` carrying the rest.
+  - **Why not a compensated sum.** That replaced a compensated sum, which
+    recovered its rounding by cancellation. Metal's fast math folded the
+    rounding to zero: a rebase 36 hours in kept only the rounded sum, 3.5e-3 s
+    short, and the clock drifted by up to half of f32's spacing at its
+    absolute time each epoch. Guarded by a product with a 1 the compiler could
+    not see, it still lost the rounding in Chrome's transfer (fixed
+    2026-10-18).
+  - **Differences of two times** are taken part by part: the handoff's delay
+    from the origins' parts and the old local time, a live pulse's start from
+    its pair less the origin's. The coarse difference passes through
+    `opaque_one`, so fast math cannot sum the parts first.
+  - **Handoff candidates.** A handoff's candidate is packed against the time
+    the run had reached when it was prepared. The device moves each drive the
+    new generation starts on by the delay since, a phase step `ω × delay` in
+    f32. Packed against zero, the delay was the run's whole age, and a drive
+    started 36 hours in landed 0.02 to 0.05 rad off (fixed 2026-10-18).
+  - **Late in an epoch.** The local time is one f32 near 256 s, 3e-5 s apart,
+    and drive phases carry about 1e-4 rad from it.
 - **Loss:** a lossy time-driven generation carries one loss record per
   coefficient record, in a block of its own. Each loss stage reads the rate at
   its half-interval's midpoint: a node's is its materials' rates weighed by
@@ -1435,15 +1458,31 @@ because their hull may extend beyond a fully enclosed curve.
 For exterior speed `c`, the canonical GPU records each contour frame centred on
 the step it is taken over: direct `u=Q/M` and `grad(u) dot n`, each the mean of
 the step's two accepted lanes, and the backward difference of `u` across it, all
-three stamped half a step back, at 60 frames per simulated second. A second
-compute dispatch evaluates 96 directions with temporal interpolation of the
-retarded contour data and the directional Huygens integrand
-`grad(u) dot n - (n dot d) u_t / c`, from the same centred time. The observation
-timestamp is delayed by the largest contour projection, so every direction refers
-to the same far time. Frames stamped at the step's end paired the gradient with
-a rate half a step older, which left an outgoing wave's contribution from the
-contour's far side uncancelled by about `ωΔt/2` and moved a pattern's intensity
-by 4% at 1 Hz and 10% at 3 Hz at the default step (fixed 2026-10-18). The 512-frame raw ring must span the full propagation-delay range; an
+three stamped half a step back. Frames stamped at the step's end paired the
+gradient with a rate half a step older, which left an outgoing wave's
+contribution from the contour's far side uncancelled by about `ωΔt/2` and moved
+a pattern's intensity by 4% at 1 Hz and 10% at 3 Hz at the default step (fixed
+2026-10-18).
+
+Every far-field time is a stamp in two parts, as a probe record's is, and every
+difference of two is taken part by part, the coarse difference kept apart from
+the fine one. Recorder passes come every quarter period, and a pass records a
+frame once its stamp stands a period, 1/60 s, past the ring's newest frame's, into
+the slot after it. One single-thread dispatch decides and another moves the ring
+on, around the sampling and the projection, so no thread reads a slot while it
+changes. The ring is keyed to its own count, held in its own state, so a new mesh
+or step keeps writing after the frames it inherits, a period on, and nothing reads
+the absolute time. A
+projection evaluates 96 directions from its frame's stamp: each contour point's
+retarded time is found by bisection over the frames by age, and the directional
+Huygens integrand `grad(u) dot n - (n dot d) u_t / c` is interpolated between the
+two about it. A directional record is the amplitude, the far time's stamp and a
+validity flag; the host forms the intensity and the far time in f64. Summed into
+one f32, the stamps and their differences kept f32's spacing at the run's absolute
+time, 2e-3 s after ten hours, and past 36 hours a time could not tell one 1/60 s
+bucket from the next (fixed 2026-10-18). The observation timestamp is delayed by
+the largest contour projection, so every direction refers to the same far time.
+The 512-frame raw ring must span the full propagation-delay range; an
 explicit configuration error replaces truncated output when it cannot.
 
 Only the compact 96-direction, 512-frame ring is read back. Its host history stays

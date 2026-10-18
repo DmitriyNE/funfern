@@ -866,6 +866,40 @@ Last, the stamps.
 - **The far field's frames** still carry one f32.
 - **The point rate's half step** is documented in the architecture: against
   `u̇` at its stamp it reads `ωΔt/2` off, as `observables` measures.
+
+The far field's times, and the clock under them, late into a run.
+- **Two-part far-field times.** The far field carries every time as a two-part
+  stamp and differences two part by part. Its ring records a frame once a
+  pass's stamp stands a period past the newest frame's, into the slot after
+  it, keyed to its own count. Its projection finds each retarded time by
+  bisection over the frames by age.
+  - `far-field` reads within 5.3e-6 of the twin, which mirrors the rule.
+  - The ring's tests hold its order across a handoff that changes the step.
+  - The line source's patterns read 2.4e-2 (gate), 1.2e-2, 4.2e-3 and 3.7e-3
+    (nightly).
+- **Late-clock fixtures.** A start clock, which only the fixtures set, starts
+  two of them 36 hours in, a few hundred steps before an epoch's rebase.
+  - **`far-field-late`:** the clock within 2e-5 s of the f64 reference across
+    the rebase (9.2e-6), the far field within 5e-4 of its twin (1.17e-4), its
+    stamps within 2e-6 s.
+  - **`handoff-memory-running-late`:** the handoff that starts a drive, the
+    clock within 2e-5 s (4.4e-6), the state within 1e-4 (2.1e-5).
+  - **State bounds.** The late runs' state bounds stand above the others'.
+    Late in an epoch the local time is one f32 near 256 s, and drive phases
+    carry 1e-4 rad from it.
+- **Two fixes they found.**
+  - **The compensated sum.** Metal's fast math folded the rounding out of the
+    clock's compensated sum at every rebase and handoff, 3.5e-3 s at 36 hours,
+    and Chrome's transfer folded it even when guarded. The origin is now whole
+    seconds and a fraction, moved on by exact sums
+    (`the_clock_origin_moves_on_by_exact_sums`).
+  - **The candidate's clock.** A handoff's candidate was packed against a
+    clock at zero, so a drive it started moved on by the run's whole age in
+    f32, 0.02 to 0.05 rad off at 36 hours; it is packed against the running
+    time.
+- **Mutations.** `clock-origin-summed-in-f32`,
+  `handoff-candidate-packed-at-zero` and `far-field-stamps-summed-in-f32` each
+  fail their late fixture.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

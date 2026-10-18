@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-app/src/canonical_far_field.wgsl b/crates/funfern-app/src/canonical_far_field.wgsl
+--- a/crates/funfern-app/src/canonical_far_field.wgsl
++++ b/crates/funfern-app/src/canonical_far_field.wgsl
+@@ -81,7 +81,7 @@
+ fn stamp_difference(a: vec2<f32>, b: vec2<f32>) -> f32 {
+     let one = control.evolution.y * control.evolution.y;
+     let coarse = select(a.x - b.x, 0.0, bitcast<u32>(a.x) == bitcast<u32>(b.x));
+-    return coarse * one + (a.y - b.y);
++    return (a.x + a.y) - (b.x + b.y);
+ }
+ 
+ // A pass, every quarter period or so (`far_field_sample_stride`), records a
