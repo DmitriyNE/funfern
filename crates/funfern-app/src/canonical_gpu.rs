@@ -7572,6 +7572,33 @@ fn encode_boundary_kick(
     pass.dispatch_workgroups(handles.trace_count, 1, 1);
 }
 
+/// A time-series recorder as the step dispatch sees it: whether it is set up,
+/// the generation and revision its bind group was built for, the revision it
+/// records, and whether its pipelines have compiled.
+#[derive(Clone, Copy, Debug)]
+struct RecorderReadiness {
+    configured: bool,
+    group: Option<(u64, u64)>,
+    revision: u64,
+    compiled: bool,
+}
+
+/// Whether this frame's steps wait for a recorder. One set up and bound for
+/// the running generation records every step it is due on, so the steps wait
+/// for its pipelines as they wait for their own: Bevy compiles them in the
+/// background, and on lavapipe the first steps ran while the point
+/// recorder's was still compiling, its trace starting at step 8 or 14 with
+/// nothing said. A recorder whose group is of another revision does not hold
+/// them: a dragged probe makes a revision a frame, and as the app's pass and
+/// the asset events are not ordered, its group can come a frame later.
+fn steps_wait_for_recorders(generation: u64, recorders: &[RecorderReadiness]) -> bool {
+    recorders.iter().any(|recorder| {
+        recorder.configured
+            && recorder.group == Some((generation, recorder.revision))
+            && !recorder.compiled
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compute_canonical_wave(
     mut render_context: RenderContext,
@@ -7681,18 +7708,78 @@ fn compute_canonical_wave(
         .map(|id| pipeline_cache.get_compute_pipeline(*id))
         .collect::<Option<Vec<_>>>();
     let Some(pipelines) = pipelines else { return };
+    let recorders_compiling = recorders
+        .as_ref()
+        .zip(consumer_pipeline.as_ref())
+        .is_some_and(|(recorders, consumer)| {
+            let compiled = |ids: &[CachedComputePipelineId]| {
+                ids.iter().all(|id| {
+                    matches!(
+                        pipeline_cache.get_compute_pipeline_state(*id),
+                        CachedPipelineState::Ok(_)
+                    )
+                })
+            };
+            steps_wait_for_recorders(
+                request.generation,
+                &[
+                    RecorderReadiness {
+                        configured: recorders.probes.is_some(),
+                        group: probe_group.as_ref().map(|g| (g.generation, g.revision)),
+                        revision: recorders.probe_revision,
+                        compiled: compiled(&[consumer.canonical_probe]),
+                    },
+                    RecorderReadiness {
+                        configured: recorders.curve_probes.is_some(),
+                        group: curve_probe_group
+                            .as_ref()
+                            .map(|g| (g.generation, g.revision)),
+                        revision: recorders.curve_probe_revision,
+                        compiled: compiled(&[consumer.canonical_curve_probe]),
+                    },
+                    RecorderReadiness {
+                        configured: recorders.area_probes.is_some(),
+                        group: area_probe_group
+                            .as_ref()
+                            .map(|g| (g.generation, g.revision)),
+                        revision: recorders.area_probe_revision,
+                        compiled: compiled(&[
+                            consumer.canonical_area_probe_elements,
+                            consumer.canonical_area_probe_reduce,
+                        ]),
+                    },
+                    RecorderReadiness {
+                        configured: recorders.far_field.is_some(),
+                        group: far_field_group.as_ref().map(|g| (g.generation, g.revision)),
+                        revision: recorders.far_field_revision,
+                        compiled: compiled(&[
+                            consumer.canonical_far_field_decide,
+                            consumer.canonical_far_field_sample,
+                            consumer.canonical_far_field_project,
+                            consumer.canonical_far_field_advance,
+                        ]),
+                    },
+                ],
+            )
+        });
     let encoded_lead = group
         .encoded_steps
         .saturating_sub(request.stats.retired_steps());
-    let pending = request
-        .desired_steps
-        .saturating_sub(group.encoded_steps)
-        .min(MAX_STEPS_PER_FRAME)
-        .min(if request.unfenced_stepping {
-            u64::MAX
-        } else {
-            MAX_ENCODED_STEP_LEAD.saturating_sub(encoded_lead)
-        });
+    // Held, the frame still applies an event and samples the overlay, which
+    // the recorders do not read.
+    let pending = if recorders_compiling {
+        0
+    } else {
+        request
+            .desired_steps
+            .saturating_sub(group.encoded_steps)
+            .min(MAX_STEPS_PER_FRAME)
+            .min(if request.unfenced_stepping {
+                u64::MAX
+            } else {
+                MAX_ENCODED_STEP_LEAD.saturating_sub(encoded_lead)
+            })
+    };
     let live_event = request.live_event.as_ref().filter(|event| {
         event.serial != group.encoded_live_event
             && live_group
@@ -8630,6 +8717,49 @@ mod tests {
         assert_eq!(stats.retired_steps(), 40);
         stats.completed_steps.store(50, Ordering::Relaxed);
         assert_eq!(stats.retired_steps(), 50);
+    }
+
+    /// Reported by the observables fixture on lavapipe: the point recorder's
+    /// pipeline was still compiling when the first seven steps ran, and its
+    /// trace started at step 8. A recorder bound to the running generation
+    /// holds the steps until its pipelines have compiled; one whose group is
+    /// of another revision or generation, or one not set up, does not.
+    #[test]
+    fn the_steps_wait_for_a_bound_recorder_still_compiling() {
+        let recorder = |group: Option<(u64, u64)>, compiled: bool| RecorderReadiness {
+            configured: true,
+            group,
+            revision: 4,
+            compiled,
+        };
+        assert!(steps_wait_for_recorders(
+            1,
+            &[recorder(Some((1, 4)), false)]
+        ));
+        assert!(steps_wait_for_recorders(
+            1,
+            &[recorder(Some((1, 4)), true), recorder(Some((1, 4)), false)]
+        ));
+        assert!(!steps_wait_for_recorders(
+            1,
+            &[recorder(Some((1, 4)), true)]
+        ));
+        // A probe dragged: its group is a revision behind, a frame at most.
+        assert!(!steps_wait_for_recorders(
+            1,
+            &[recorder(Some((1, 3)), false)]
+        ));
+        assert!(!steps_wait_for_recorders(
+            2,
+            &[recorder(Some((1, 4)), false)]
+        ));
+        assert!(!steps_wait_for_recorders(1, &[recorder(None, false)]));
+        let unset = RecorderReadiness {
+            configured: false,
+            ..recorder(Some((1, 4)), false)
+        };
+        assert!(!steps_wait_for_recorders(1, &[unset]));
+        assert!(!steps_wait_for_recorders(1, &[]));
     }
 
     /// Reported: a delayed diagnostic snapshot rewound the painted field. A

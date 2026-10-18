@@ -104,7 +104,10 @@ CPU claims, which measure whole lone pulses exactly. A readout's spectra and
 transfer share one frequency band the user zooms and pans, as its traces share
 a time window. Clear empties a probe's traces from the current time on: every
 readback carries the device's whole ring, which a trace takes only where it is
-newer than its last time. Probe timestamps come
+newer than its last time. A recorder bound to the running generation misses no
+step it is due on: the solver's steps wait for its pipelines as they wait for
+their own, since Bevy compiles them in the background and on a slow device the
+first steps once ran unrecorded (fixed 2026-10-19). Probe timestamps come
 directly from the solver's transferred absolute clock. A point, line or area
 record carries its time as two f32 parts, the epoch origin's coarse part and its
 fine part plus the epoch-local time, which the host adds in f64

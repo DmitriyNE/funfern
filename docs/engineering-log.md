@@ -25735,3 +25735,42 @@ Measured again first, then made quadratic in the trace.
   compile and the protocol proofs. The device suite, since shaders changed:
   92 of 92. Chrome on Metal runs `far-field`, `far-field-late` and both running
   handoffs.
+
+## 2026-10-19 — PH-18, part 6: recorders that miss no step
+
+- **Found by lavapipe.** After part 5, the lavapipe run of every fixture
+  failed `observables` now and then: 3 of 14 runs. In each, a point or area
+  trace started at step 8, 14 or 60 instead of the first stride. CI had
+  passed the fixture on 3e2ced6, and Metal and Chrome never failed it.
+- **Why.** The step dispatch waits for its own pipelines but went on without
+  a recorder's. Bevy compiles pipelines in the background. On lavapipe the
+  point recorder's was still compiling when the run's first steps were
+  encoded, so those steps went unrecorded and nothing said so.
+  - A log line in a scratch copy caught it: the point recorder was skipped
+    from encoded step 0 with 7 steps pending, its bind group current and its
+    pipeline not ready. That run's trace started at step 8.
+  - Nothing was lost on the host: the rings hold the whole run, and every
+    readback carries them whole.
+- **Fix.** `compute_canonical_wave` holds the frame's steps while a
+  time-series recorder (point, line, area or far field) bound to the running
+  generation and revision has a pipeline still compiling
+  (`steps_wait_for_recorders`).
+  - Held, the frame still applies an event and samples the vector overlay.
+  - Every recorder pipeline is queued at startup, so the hold comes only at
+    launch.
+  - Test: `the_steps_wait_for_a_bound_recorder_still_compiling`.
+- **What does not hold the steps.**
+  - A recorder whose bind group is of an older revision. A dragged probe
+    makes a revision a frame. The egui pass and Bevy's asset events both run
+    in `PostUpdate`, unordered, so the new revision's group can come a frame
+    later, and holding there could stop the solver for the whole drag.
+  - The vector overlay, which is not a time series.
+- **No mutation.** The defect needs a compile race, which no patch makes
+  happen on demand.
+- **After.** `observables` passes 8 of 8 on lavapipe, its endpoint hash
+  unchanged (`cd546a2c34e6e702`).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. The device suite, since the runtime
+  changed: 92 of 92. Chrome on Metal runs `observables`, `far-field` and
+  `far-field-late`.
