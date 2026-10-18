@@ -25277,6 +25277,9 @@ Measured again first, then made quadratic in the trace.
 - **Mutation.** `sine-gordon-force-linearized`: sine-Gordon's force is its
   small-angle limit `ω₀²r`. The 1 rad swing's period reads 6.2% off, while
   the 1e-3 rad swing still passes.
+- **Worth checking sometime** (`plan.md`): van der Pol's `amplitude_bound`
+  is checked positive when authored but enforced nowhere, on the CPU or the
+  device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.

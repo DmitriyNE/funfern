@@ -1573,6 +1573,13 @@ is next touched.
   converging, but stays 10 to 11 orders below the estimate, which is the same
   to four digits either way. The driven estimate's trace defect has the same
   omission.
+- `RateLaw::VanDerPol`'s `amplitude_bound`, "the largest `|u|` it is meant
+  to see", is checked positive when authored and enforced nowhere: neither the
+  CPU step nor the device refuses a field past it, as both refuse one past a
+  field law's or φ⁴'s bound. The van der Pol map is solved in closed form, so
+  a field past it still steps correctly and the bound is advisory in effect
+  (the law editor authors 1e3). Worth deciding whether it should refuse or
+  say it is advisory (found by PH-16 on 2026-10-18).
 
 ## Working practice
 
