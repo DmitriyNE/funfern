@@ -25283,3 +25283,70 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-18 — PH-18, part 1: the consumers against analytic fields
+
+- **Why the consumers first.** Every probe number on screen comes from a GPU
+  recorder. The app never calls the CPU samplers; they are the recorders'
+  twins, which the device fixtures compare against. So they are held to
+  analytic fields first, through the same reconstruction the shaders mirror:
+  the inverse at the element's own samples, then interpolation.
+- **Units.** A medium of mass slot 2 and stiffness slot 0.8 makes each skin's
+  `(ρ, A)` in `ρü = ∇·(A∇u)` different: Mechanical's density and modulus,
+  TM's `ε` and `1/μ`, TE's `μ` and `1/ε`. The transverse field is
+  `c = orientation·A·R∇∫u`, the density `ρu²/2 + |c|²/2A`, and the flow
+  `orientation·u·Rc`, so a wave carries its energy along its travel in every
+  skin. Every reading matched in all three, to the same relative error.
+- **The standing mode.** `the_consumers_read_a_standing_mode_in_every_skin`:
+  `φ = cos(π(x + 1)/2) cos(π(y + 1))` in the reflecting box `[−1, 1]²`,
+  started at rest, read at five points off the nodes over 1.3 periods.
+  - **Rate.** The backward difference the recorder takes reads within
+    1.0e-3 of `u̇` half a step before its sample. Against `u̇` at the sample
+    it is 2.4e-2 off at the production step on edge 0.125, which is first
+    order: the recorder stamps the rate half a step late. Part 4 measures
+    what that does on screen.
+  - **Disk.** Mean and RMS stop at 4e-5, the drawn circle's floor. The
+    energy reads 3.5e-3 off the density's integral: it is the lumped energy
+    restricted to the covered elements, as documented.
+  - **Whole box.** Its energy reads `ρ∫φ²/2` within 4e-4.
+- **The packet.** `the_consumers_read_a_travelling_packet_in_every_skin`:
+  `ψ = P(x)` with `u = −c₀P′(x)` moves on unchanged in the channel
+  `[−3, 3] × [−½, ½]`.
+  - **Setup.** The first sizing put the packet's tail at e⁻⁷ by the left
+    wall, which reflected it and stopped the field converging at 5e-4. A
+    narrower packet five widths from both walls converges.
+  - **Segment.** A segment across the channel, sampled at 64 points and
+    summed by the readout's trapezoid, reads the flux negative under its
+    left normal. The energy it carries over the run matches the packet's.
+- **Results.** In the gate (5 s together), with bounds about twice the finer
+  mesh's readings; every pointwise reading falls at least 2.5 times when
+  the edge halves.
+
+  | Reading | Bound (read) |
+  |---|---|
+  | **Standing mode, edge 0.125** | |
+  | Field | 3e-4 (1.5e-4) |
+  | Rate | 2e-3 (1.0e-3) |
+  | Transverse field | 3.2e-3 (1.6e-3) |
+  | Density | 1.7e-3 (8.3e-4) |
+  | Flow | 1.1e-3 (5.5e-4) |
+  | Disk mean and RMS | 1e-4 |
+  | Disk energy | 7e-3 |
+  | Whole box | 1e-3 |
+  | **Packet, edge 0.05** | |
+  | Field | 4e-4 (1.8e-4) |
+  | Transverse field | 4e-3 (1.9e-3) |
+  | Density | 2.2e-3 (1.1e-3) |
+  | Flow | 4e-3 (1.9e-3) |
+  | Segment flux | 1.1e-3 (5.5e-4) |
+  | Carried energy | 1.2e-3 (5.1e-4) |
+- **Mutation.** `consumer-flow-orientation-dropped`: the flow without its
+  skin's orientation reads Mechanical's packet 2.0 off, its flow reversed.
+- **Docs.** The user guide said a line's portions outside the domain or on a
+  two-trace boundary "appear as gaps". A segment compiles whole or not at
+  all: such a line reads red with its reason in the Probes list. The guide
+  and the architecture now say so; the recorder's NaN-gap path stays,
+  unreached.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

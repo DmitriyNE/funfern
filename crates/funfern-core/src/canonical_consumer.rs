@@ -761,4 +761,401 @@ mod tests {
         .unwrap();
         assert!((breakdown.total() - state.energy(&operator).unwrap()).abs() < 1.0e-12);
     }
+
+    // -----------------------------------------------------------------------
+    // PH-18: the consumers against analytic fields.
+    // -----------------------------------------------------------------------
+
+    /// A reflecting box over `domain` meshed at `edge` in `physics`, its one
+    /// medium of mass slot 2 and stiffness slot 0.8.
+    fn analytic_fixture(
+        physics: crate::PhysicsModel,
+        domain: crate::DomainRect,
+        edge: f64,
+    ) -> (TriMesh, QuadraticWaveOperator, CanonicalWaveOperator, Scene) {
+        let mut scene = Scene {
+            domain,
+            physics,
+            ..Scene::default()
+        };
+        scene.materials[0].mass_density = crate::ScalarField::constant(2.0);
+        scene.materials[0].stiffness = crate::ScalarField::constant(0.8);
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: edge,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1).unwrap();
+        (mesh, scalar, canonical, scene)
+    }
+
+    /// The scalar wave `ρ ü = ∇·(A ∇u)` each skin's slots make, as
+    /// `(ρ, A)`: Mechanical's density and modulus, TM's `ε` and `1/μ`, TE's
+    /// `μ` and `1/ε`, the mass slot holding `ε` and the stiffness slot `μ`.
+    fn skin_coefficients(physics: crate::PhysicsModel, mass: f64, stiffness: f64) -> (f64, f64) {
+        match physics {
+            crate::PhysicsModel::Mechanical => (mass, stiffness),
+            crate::PhysicsModel::Electromagnetic {
+                polarization: crate::ElectromagneticPolarization::Tm,
+            } => (mass, 1.0 / stiffness),
+            crate::PhysicsModel::Electromagnetic {
+                polarization: crate::ElectromagneticPolarization::Te,
+            } => (stiffness, 1.0 / mass),
+        }
+    }
+
+    fn skins() -> [crate::PhysicsModel; 3] {
+        [
+            crate::PhysicsModel::Mechanical,
+            crate::PhysicsModel::Electromagnetic {
+                polarization: crate::ElectromagneticPolarization::Tm,
+            },
+            crate::PhysicsModel::Electromagnetic {
+                polarization: crate::ElectromagneticPolarization::Te,
+            },
+        ]
+    }
+
+    /// `∫` over the disk of `radius` about `center`: Gauss-Legendre in the
+    /// radius on 16 panels, the trapezoid rule round it, 256 angles.
+    fn over_disk(f: impl Fn(Point2) -> f64, center: Point2, radius: f64) -> f64 {
+        let nodes = [
+            0.148_874_338_981_631_2,
+            0.433_395_394_129_247_2,
+            0.679_409_568_299_024_4,
+            0.865_063_366_688_984_5,
+            0.973_906_528_517_171_7,
+        ];
+        let weights = [
+            0.295_524_224_714_752_9,
+            0.269_266_719_309_996_4,
+            0.219_086_362_515_982,
+            0.149_451_349_150_580_6,
+            0.066_671_344_308_688_14,
+        ];
+        let (panels, angles) = (16, 256);
+        let width = radius / f64::from(panels);
+        let mut total = 0.0;
+        for panel in 0..panels {
+            let middle = (f64::from(panel) + 0.5) * width;
+            for (node, weight) in nodes.iter().zip(weights) {
+                for r in [middle - 0.5 * width * node, middle + 0.5 * width * node] {
+                    let ring = (0..angles)
+                        .map(|j| {
+                            let theta = std::f64::consts::TAU * f64::from(j) / f64::from(angles);
+                            f(center + Point2::new(r * theta.cos(), r * theta.sin()))
+                        })
+                        .sum::<f64>()
+                        * std::f64::consts::TAU
+                        / f64::from(angles);
+                    total += 0.5 * width * weight * r * ring;
+                }
+            }
+        }
+        total
+    }
+
+    /// PH-18's standing mode, read through the app's consumers in each
+    /// skin: worst errors over a run of 1.3 periods at the production step
+    /// on a mesh of `edge`, against `u = φ cos ωt` in the reflecting box
+    /// `[−1, 1]²`, `φ = cos(π(x + 1)/2) cos(π(y + 1))`, started at rest. Each
+    /// relative to its quantity's scale: the field; its backward difference
+    /// against `u̇` half a step before the sample; the transverse field
+    /// `c = orientation·A·R∇φ sin ωt/ω`; the energy density
+    /// `ρu²/2 + |c|²/2A`; the flow `orientation·u·Rc`; a disk's mean, RMS
+    /// and energy against polar quadratures of the same; and the whole box's
+    /// energy against `ρ∫φ²/2`.
+    fn standing_mode_errors(physics: crate::PhysicsModel, edge: f64) -> [f64; 9] {
+        let points = [
+            Point2::new(0.31, -0.47),
+            Point2::new(-0.62, 0.18),
+            Point2::new(0.05, 0.77),
+            Point2::new(0.83, -0.91),
+            Point2::new(-0.37, -0.29),
+        ];
+        let (kx, ky) = (0.5 * std::f64::consts::PI, std::f64::consts::PI);
+        let (rho, a) = skin_coefficients(physics, 2.0, 0.8);
+        let omega = (a * (kx * kx + ky * ky) / rho).sqrt();
+        let (mesh, scalar, operator, scene) =
+            analytic_fixture(physics, crate::DomainRect::UNIT, edge);
+        let orientation = operator.orientation();
+        let phi = |p: Point2| (kx * (p.x + 1.0)).cos() * (ky * (p.y + 1.0)).cos();
+        let grad = |p: Point2| {
+            Point2::new(
+                -kx * (kx * (p.x + 1.0)).sin() * (ky * (p.y + 1.0)).cos(),
+                -ky * (kx * (p.x + 1.0)).cos() * (ky * (p.y + 1.0)).sin(),
+            )
+        };
+        let primary = operator
+            .node_points()
+            .iter()
+            .map(|p| phi(*p))
+            .collect::<Vec<_>>();
+        let h = operator.recommended_time_step();
+        let mut state = CanonicalWaveState::from_primary_and_potential(
+            &operator,
+            h,
+            &primary,
+            &vec![0.0; primary.len()],
+        )
+        .unwrap();
+        let stencils = points.map(|p| {
+            CanonicalPointStencil::from_quadratic(
+                QuadraticPointStencil::build(&mesh, &scalar, &scene, p).unwrap(),
+                &operator,
+            )
+            .unwrap()
+        });
+        let (center, radius) = (Point2::new(0.2, -0.15), 0.45);
+        let area = |shape| QuadraticAreaStencil::build(&mesh, &scalar, &scene, shape).unwrap();
+        let disk = area(AreaProbeShape::Disk { center, radius });
+        let whole = area(AreaProbeShape::Region(BACKGROUND_REGION));
+        let disk_area = std::f64::consts::PI * radius * radius;
+        let scale_c = a * (kx * kx + ky * ky).sqrt() / omega;
+        let mut worst = [0.0_f64; 9];
+        let steps = (1.3 * std::f64::consts::TAU / omega / h).ceil() as usize;
+        for _ in 0..steps {
+            let previous = state.primary_flux().to_vec();
+            state.step(&operator).unwrap();
+            let t = state.time();
+            let rate = state
+                .primary_flux()
+                .iter()
+                .zip(&previous)
+                .map(|(now, before)| (now - before) / h)
+                .collect::<Vec<_>>();
+            let (cos, sin) = ((omega * t).cos(), (omega * t).sin());
+            let mut errors = Vec::new();
+            for (p, stencil) in points.iter().zip(&stencils) {
+                let sample = stencil
+                    .sample(state.primary_flux(), &rate, state.complementary_flux())
+                    .unwrap();
+                let u = phi(*p) * cos;
+                let rate = -omega * phi(*p) * (omega * (t - 0.5 * h)).sin();
+                let c = Point2::new(-grad(*p).y, grad(*p).x) * (orientation * a * sin / omega);
+                let w = 0.5 * rho * u * u + 0.5 * c.dot(c) / a;
+                let flow = grad(*p) * (-(a / omega) * phi(*p) * cos * sin);
+                errors.push([
+                    (sample.primary - u).abs(),
+                    (sample.primary_rate - rate).abs() / omega,
+                    (sample.complementary - c).norm() / scale_c,
+                    (sample.energy_density - w).abs() / (0.5 * rho),
+                    (sample.energy_flow - flow).norm() / scale_c,
+                ]);
+            }
+            let read = sample_canonical_area(
+                &disk,
+                &operator,
+                state.primary_flux(),
+                state.complementary_flux(),
+            )
+            .unwrap();
+            let mean = over_disk(|p| phi(p) * cos, center, radius) / disk_area;
+            let rms = (over_disk(|p| (phi(p) * cos).powi(2), center, radius) / disk_area).sqrt();
+            let energy = over_disk(
+                |p| {
+                    0.5 * rho * (phi(p) * cos).powi(2)
+                        + 0.5 * a * grad(p).dot(grad(p)) * (sin / omega).powi(2)
+                },
+                center,
+                radius,
+            );
+            let total = sample_canonical_area(
+                &whole,
+                &operator,
+                state.primary_flux(),
+                state.complementary_flux(),
+            )
+            .unwrap()
+            .total_energy;
+            for point in errors {
+                for (slot, error) in point.into_iter().enumerate() {
+                    worst[slot] = worst[slot].max(error);
+                }
+            }
+            for (slot, error) in [
+                (read.mean_primary - mean).abs(),
+                (read.rms_primary - rms).abs(),
+                (read.total_energy - energy).abs() / energy,
+                (total / (0.5 * rho) - 1.0).abs(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                worst[5 + slot] = worst[5 + slot].max(error);
+            }
+        }
+        worst
+    }
+
+    /// PH-18: the consumers read a standing box mode in every skin, its
+    /// slots giving `(ρ, A)` as each skin names them. At an edge of 0.125
+    /// the field reads within 3e-4 (1.5e-4), the rate 2e-3 (1.0e-3), the
+    /// transverse field 3.2e-3 (1.6e-3), the density 1.7e-3 (8.3e-4) and the
+    /// flow 1.1e-3 (5.5e-4), each falling at least 2.5 times from an edge of
+    /// 0.25 (2.9 to 5.3). A disk's mean and RMS read within 1e-4 (4e-5, the
+    /// drawn circle's floor), its energy within 7e-3 (3.5e-3: the solver's
+    /// lumped energy, a clipped element counted by its covered fraction),
+    /// and the whole box's within 1e-3 (4e-4).
+    #[test]
+    fn the_consumers_read_a_standing_mode_in_every_skin() {
+        for physics in skins() {
+            let coarse = standing_mode_errors(physics, 0.25);
+            let fine = standing_mode_errors(physics, 0.125);
+            let bounds = [
+                3.0e-4, 2.0e-3, 3.2e-3, 1.7e-3, 1.1e-3, 1.0e-4, 1.0e-4, 7.0e-3, 1.0e-3,
+            ];
+            for (slot, (read, bound)) in fine.iter().zip(bounds).enumerate() {
+                assert!(
+                    *read <= bound,
+                    "{physics:?}: reading {slot} at {read:.2e}: {fine:?}"
+                );
+            }
+            for slot in 0..5 {
+                assert!(
+                    coarse[slot] >= 2.5 * fine[slot],
+                    "{physics:?}: reading {slot} from {:.2e} to {:.2e}",
+                    coarse[slot],
+                    fine[slot]
+                );
+            }
+        }
+    }
+
+    /// PH-18's travelling packet in the channel `[−3, 3] × [−½, ½]`, read
+    /// through the consumers at the production step on a mesh of `edge`:
+    /// `ψ = P(x)`, `P` a Gaussian of width 0.3 at −1.2 times `sin 2π(x + 1.2)`,
+    /// starts `u = −c₀P′(x)` and moves on unchanged, `u = −c₀P′(x − c₀t)`,
+    /// `c = orientation·A·(0, P′)`, `w = AP′²` and the flow `c₀w` along +x,
+    /// clear of both walls by five widths. Worst errors at a point, each
+    /// relative to its quantity's peak; the flux the readout's trapezoid
+    /// takes over 64 points across the channel at x = 0.2, bottom to top,
+    /// whose left normal is −x, against `−c₀AP′²`; and what that flux carries
+    /// over the run, against the packet's energy `∫AP′²` read along −x.
+    fn travelling_packet_errors(physics: crate::PhysicsModel, edge: f64) -> [f64; 6] {
+        let domain = crate::DomainRect {
+            min_x: -3.0,
+            max_x: 3.0,
+            min_y: -0.5,
+            max_y: 0.5,
+        };
+        let (x0, sigma, k) = (-1.2, 0.3, std::f64::consts::TAU);
+        let envelope = |s: f64| (-(s * s) / (2.0 * sigma * sigma)).exp();
+        let p_of = |x: f64| envelope(x - x0) * (k * (x - x0)).sin();
+        let dp_of = |x: f64| {
+            let s = x - x0;
+            envelope(s) * (k * (k * s).cos() - s / (sigma * sigma) * (k * s).sin())
+        };
+        let (rho, a) = skin_coefficients(physics, 2.0, 0.8);
+        let speed = (a / rho).sqrt();
+        let (mesh, scalar, operator, scene) = analytic_fixture(physics, domain, edge);
+        let orientation = operator.orientation();
+        let field = |p: &Point2| -speed * dp_of(p.x);
+        let primary = operator.node_points().iter().map(field).collect::<Vec<_>>();
+        let potential = operator
+            .node_points()
+            .iter()
+            .map(|p| p_of(p.x))
+            .collect::<Vec<_>>();
+        let h = operator.recommended_time_step();
+        let mut state =
+            CanonicalWaveState::from_primary_and_potential(&operator, h, &primary, &potential)
+                .unwrap();
+        let stencil = |p: Point2| {
+            CanonicalPointStencil::from_quadratic(
+                QuadraticPointStencil::build(&mesh, &scalar, &scene, p).unwrap(),
+                &operator,
+            )
+            .unwrap()
+        };
+        let count = 64;
+        let segment = (0..count)
+            .map(|i| stencil(Point2::new(0.2, -0.5 + f64::from(i) / f64::from(count - 1))))
+            .collect::<Vec<_>>();
+        let point = Point2::new(0.13, 0.21);
+        let probe = stencil(point);
+        let normal = Point2::new(-1.0, 0.0);
+        let peak = a * k * k;
+        let rate = vec![0.0; operator.degrees_of_freedom()];
+        let mut worst = [0.0_f64; 6];
+        let mut carried = 0.0;
+        for _ in 0..(2.6 / speed / h).ceil() as usize {
+            state.step(&operator).unwrap();
+            let t = state.time();
+            let read = |stencil: &CanonicalPointStencil| {
+                stencil
+                    .sample(state.primary_flux(), &rate, state.complementary_flux())
+                    .unwrap()
+            };
+            let sample = read(&probe);
+            let d = dp_of(point.x - speed * t);
+            let w = a * d * d;
+            let flow = Point2::new(speed * w, 0.0);
+            let values = segment
+                .iter()
+                .map(|stencil| read(stencil).energy_flow.dot(normal))
+                .collect::<Vec<_>>();
+            let flux = (values.iter().sum::<f64>() - 0.5 * (values[0] + values[values.len() - 1]))
+                / f64::from(count - 1);
+            let crossing = dp_of(0.2 - speed * t);
+            for (slot, error) in [
+                (sample.primary + speed * d).abs() / (speed * k),
+                (sample.complementary - Point2::new(0.0, orientation * a * d)).norm() / (a * k),
+                (sample.energy_density - w).abs() / peak,
+                (sample.energy_flow - flow).norm() / (speed * peak),
+                (flux + speed * a * crossing * crossing).abs() / (speed * peak),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                worst[slot] = worst[slot].max(error);
+            }
+            carried += flux * h;
+        }
+        let held = (-4000..=4000)
+            .map(|i| a * dp_of(x0 + f64::from(i) * 1.0e-3).powi(2) * 1.0e-3)
+            .sum::<f64>();
+        worst[5] = (carried / -held - 1.0).abs();
+        worst
+    }
+
+    /// PH-18: the consumers read a travelling packet in every skin, its flow
+    /// along its travel and a segment's flux under the left-normal sign. At
+    /// an edge of 0.05 the field reads within 4e-4 (1.8e-4), the transverse
+    /// field 4e-3 (1.9e-3), the density 2.2e-3 (1.1e-3), the flow 4e-3
+    /// (1.9e-3) and the segment's flux 1.1e-3 (5.5e-4), and the energy it
+    /// carries within 1.2e-3 of the packet's (5.1e-4), each falling at least
+    /// 2.5 times from an edge of 0.1 (3.3 to 6.8).
+    #[test]
+    fn the_consumers_read_a_travelling_packet_in_every_skin() {
+        for physics in skins() {
+            let coarse = travelling_packet_errors(physics, 0.1);
+            let fine = travelling_packet_errors(physics, 0.05);
+            let bounds = [4.0e-4, 4.0e-3, 2.2e-3, 4.0e-3, 1.1e-3, 1.2e-3];
+            for (slot, (read, bound)) in fine.iter().zip(bounds).enumerate() {
+                assert!(
+                    *read <= bound,
+                    "{physics:?}: reading {slot} at {read:.2e}: {fine:?}"
+                );
+            }
+            for slot in 0..6 {
+                assert!(
+                    coarse[slot] >= 2.5 * fine[slot],
+                    "{physics:?}: reading {slot} from {:.2e} to {:.2e}",
+                    coarse[slot],
+                    fine[slot]
+                );
+            }
+        }
+    }
 }

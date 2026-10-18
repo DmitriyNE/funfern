@@ -1,0 +1,4 @@
+about: the point consumer's energy flow drops its skin orientation, so Mechanical's and TE's flow runs against the wave while TM's, orientation +1, stays right
+test: cargo test --release -p funfern-core --lib -- the_consumers_read_a_travelling_packet_in_every_skin
+expect: Mechanical: reading 3 at 2\.0
+needs: cpu

@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/canonical_consumer.rs b/crates/funfern-core/src/canonical_consumer.rs
+--- a/crates/funfern-core/src/canonical_consumer.rs
++++ b/crates/funfern-core/src/canonical_consumer.rs
+@@ -142,7 +142,7 @@
+         let energy_density = 0.5
+             * (self.primary_reference * u * u
+                 + self.complementary_reference.quadratic_form(complementary));
+-        let energy_flow = rotate(complementary) * (self.orientation * u);
++        let energy_flow = rotate(complementary) * u;
+         if [u, rate, energy_density, energy_flow.x, energy_flow.y]
+             .into_iter()
+             .all(f64::is_finite)

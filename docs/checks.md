@@ -734,6 +734,45 @@ bound alike; van der Pol off the primary row, or driven, does not compile
 The mutation `sine-gordon-force-linearized`, sine-Gordon's force its
 small-angle limit, puts the 1 rad swing's period 6.2% off while the 1e-3 rad
 swing still passes.
+PH-18 holds what users read to analytic fields. Every probe number on screen
+comes from a GPU recorder whose CPU twin is the canonical consumer:
+`CanonicalPointStencil` for a point or each sample of a line, and
+`sample_canonical_area` for an area. First the consumers, in every skin, on
+a medium of mass slot 2 and stiffness slot 0.8, so that each skin's units
+show: Mechanical's density and modulus, TM's `ε` and `1/μ`, and TE's `μ` and
+`1/ε`, as `(ρ, A)` in `ρü = ∇·(A∇u)`. A standing mode of the reflecting box,
+started at rest (`the_consumers_read_a_standing_mode_in_every_skin`), is held
+at an edge of 0.125 and the production step to:
+- the field within 3e-4 (1.5e-4);
+- the rate, a backward difference, against `u̇` half a step before the
+  sample, within 2e-3 (1.0e-3);
+- the transverse field `c = orientation·A·R∇φ sin ωt/ω` within 3.2e-3
+  (1.6e-3);
+- the energy density within 1.7e-3 (8.3e-4) and the flow
+  `orientation·u·Rc` within 1.1e-3 (5.5e-4).
+
+Each falls at least 2.5 times from an edge of 0.25. A disk's mean and RMS
+read within 1e-4 (4e-5, the drawn circle's floor) of polar quadratures of
+the field, and its energy within 7e-3 (3.5e-3). That energy is the solver's
+lumped energy with a clipped element counted by its covered fraction, as the
+architecture says. The whole box reads `ρ∫φ²/2` within 1e-3 (4e-4).
+
+A packet travelling down a channel, `u = −c₀P′(x − c₀t)` from an integrated
+field `P`, a Gaussian times a sine
+(`the_consumers_read_a_travelling_packet_in_every_skin`), is held at an edge
+of 0.05 to:
+- the field within 4e-4 (1.8e-4) and the transverse field within 4e-3
+  (1.9e-3);
+- the density within 2.2e-3 (1.1e-3) and the flow `c₀w` along its travel
+  within 4e-3 (1.9e-3);
+- the readout's trapezoid over 64 points across the channel within 1.1e-3
+  (5.5e-4), negative under the segment's left normal against the travel;
+- the energy that flux carries over the run within 1.2e-3 of the packet's
+  own (5.1e-4).
+
+Each falls at least 2.5 times from an edge of 0.1. The mutation
+`consumer-flow-orientation-dropped`, the flow without its skin's
+orientation, reverses Mechanical's flow (2.0 off).
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

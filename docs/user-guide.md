@@ -471,8 +471,9 @@ names or with every expression evaluated at the material frame's origin. Each ro
   driven frequency. All
   active views share one time window; drag waterfalls vertically and time traces
   horizontally.
-  Portions outside the simulated domain or on a two-trace boundary appear as gaps;
-  the remaining coverage still contributes to the readout. Average flux reports,
+  A line that leaves the simulated domain or touches a two-trace boundary anywhere
+  records nothing: it reads red, and the Probes list says why under it until it
+  is moved clear. Average flux reports,
   at every recorded instant, the mean of the seconds ending there, so a standing
   wave averages to nothing while a travelling one keeps the power it carries. Its
   window is a slider in the same menu, independent of the visible one so navigating

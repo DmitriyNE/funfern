@@ -1363,8 +1363,11 @@ start-to-end segment for free lines. Boundary probes compile directly from
 mesh boundary labels and parameter intervals, select one explicit physical trace,
 and carry an outward normal per sample. They store a contiguous spline-span run,
 follow topology edits by best-overlap remapping, and retain their probe ID through
-solver handoffs. Invalid points remain NaN gaps. Trapezoidal aggregates
-integrate only adjacent valid samples and report their covered fraction. Line
+solver handoffs. A line compiles whole or not at all: one sample outside the domain
+or on a two-trace boundary fails the probe, which reads red with its reason. The
+recorder and the readouts still carry NaN gaps, the trapezoidal aggregates
+integrating only adjacent valid samples and reporting their covered fraction, but
+no compiled line reaches them today. Line
 definitions survive history, files, links, and recovery while trace data remains
 transient like point-probe history.
 

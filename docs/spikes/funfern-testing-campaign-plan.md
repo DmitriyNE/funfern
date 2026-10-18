@@ -436,7 +436,7 @@ with their reports in `docs/spikes/`.
   gaps (done on 2026-10-17, section 6e), PH-14 temporal interfaces (done on
   2026-10-18, section 6f), PH-15 modulated materials (done on 2026-10-18,
   section 6g), PH-16 nonlinear laws (done on 2026-10-18, section 6h), PH-18
-  probes and observables, with
+  probes and observables (section 6i), with
   PH-12's far field, PH-19 manufactured solutions.
 - **C, invariants and stress:** IV-01 to IV-13, AMR-01 to AMR-04, RT-01 to
   RT-08, the numerical edge cases, long runs and resource lifecycle. The
@@ -628,6 +628,30 @@ absorption stays gated (C), so its bleaching is not tested. The planned
 3.1 rad parts the nodes, the uniform swing beside the separatrix being
 unstable to the box's modes, so that case swings to 2.9. CPU against GPU
 through the nonlinear stages stays with the device suite's fixtures.
+
+## 6i. PH-18: observables
+
+**Planned on 2026-10-18.** Every probe number on screen comes from a GPU
+recorder, and no recorder was held to an analytic field; the far-field
+recorder had run only on dummy stencils. Four parts, each its own commit:
+1. The CPU consumers, the recorders' twins, against a standing mode and a
+   travelling packet in each skin.
+2. An end-to-end fixture `observables`: the shipped app on a channel with a
+   launcher and a matched wall, with two points, a segment, a boundary probe
+   on the wall and a disk. Its host traces are held against the travelling
+   wave, the f64 twin and the energy ledger, with the readouts' spectrum and
+   Welch transfer, the vector overlay, and probes on against off.
+3. The far field: the frequency-domain twin against a lone source, an array
+   and a source beside PH-12's cylinders, then an f64 twin of the shader's
+   time-domain projection, and a `far-field` fixture running the recorder on
+   a real contour. The pattern stays relative.
+4. Timestamps: the rate's half-step lag and the recorders' single-f32 clock,
+   measured and reported.
+
+**Part 1 done on 2026-10-18:** the consumers read both fields in every skin
+at second order, with each skin's units, the flow along the travel and a
+segment's flux under its left normal. The mutation
+`consumer-flow-orientation-dropped`.
 
 ## 7. Infrastructure
 
