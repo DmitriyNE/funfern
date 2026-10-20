@@ -26004,3 +26004,27 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 2: a renumbered trace falls back to its curve side (MESH-1)
+
+- **Found by the review (MESH-1).** A transfer narrows a separated node's
+  source candidates to the triangles on its curve side, intersected with
+  those carrying the target's trace ID. Trace IDs are local to a snapshot and
+  handed out in sequence. So a hole drawn first that gains outline vertices
+  shifts every ID on a wall drawn after it, and the target's ID can name
+  another vertex on the same side.
+  - The intersection was then non-empty but missed the node.
+  - `locate` went straight from it to the unrestricted search, skipping the
+    curve-side set that the comment, the log and the architecture all name as
+    the fallback.
+  - There, either of the wall's coincident copies could answer.
+- **Reproduced.** `a_renumbered_wall_trace_keeps_each_side_its_own_value`
+  draws a reflecting hole and then a reflecting wall, with a field of one
+  inside the wall and zero outside. It grows the hole from 0.12 to 0.3 at edge
+  0.08 and transfers. One of 16,337 nodes took the other side's value.
+- **Fix.** `preferred_trace_triangles` returns its candidate sets narrowest
+  first, the intersection then the curve side, and `locate` tries each before
+  searching every triangle. The test passes, with the 35 other transfer tests.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

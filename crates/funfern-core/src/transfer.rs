@@ -136,16 +136,18 @@ impl TransferMap {
         for (target_index, (vertex, target_group)) in
             target.vertices.iter().zip(target_groups).enumerate()
         {
-            let preferred = trace_restrictions.and_then(|traces| {
-                preferred_trace_triangles(&traces.target[target_index], traces.source)
-            });
+            let preferred = trace_restrictions
+                .map(|traces| {
+                    preferred_trace_triangles(&traces.target[target_index], traces.source)
+                })
+                .unwrap_or_default();
             samples.push(
                 bins.locate(
                     source,
                     vertex.point,
                     *target_group,
                     region_groups,
-                    preferred.as_ref(),
+                    &preferred,
                 )
                 .map(|(triangle, weights)| TransferSample {
                     vertices: source.triangles[triangle as usize]
@@ -227,10 +229,12 @@ impl TransferMap {
     }
 }
 
+/// The source triangles a target node is to be found in, narrowest first:
+/// `locate` tries each in turn before searching every triangle.
 fn preferred_trace_triangles(
     target: &TargetTracePreference,
     source: &SourceTraceTriangles,
-) -> Option<BTreeSet<u32>> {
+) -> Vec<BTreeSet<u32>> {
     let boundary_triangles = target
         .boundaries
         .iter()
@@ -239,12 +243,17 @@ fn preferred_trace_triangles(
         .copied()
         .collect::<BTreeSet<_>>();
     if boundary_triangles.is_empty() {
-        return None;
+        return Vec::new();
     }
 
     // Trace IDs identify a particular angular sector at a junction. They are
     // snapshot-local, so use them only to narrow a stable curve-side match. If
-    // an edit changed trace numbering, the curve side remains the safe lineage.
+    // an edit changed trace numbering, the curve side remains the safe lineage,
+    // tried next whenever the narrowed set does not hold the node: a set that
+    // was not empty but missed it, renumbered onto another vertex on the same
+    // side, went straight to the unrestricted search, where either of a wall's
+    // coincident copies could answer (MESH-1 of the 2026-10-20 review).
+    let mut tiers = Vec::new();
     if let Some(vertex_triangles) = target
         .vertex
         .and_then(|vertex| source.vertices.get(&vertex))
@@ -253,11 +262,12 @@ fn preferred_trace_triangles(
             .intersection(vertex_triangles)
             .copied()
             .collect::<BTreeSet<_>>();
-        if !intersection.is_empty() {
-            return Some(intersection);
+        if !intersection.is_empty() && intersection != boundary_triangles {
+            tiers.push(intersection);
         }
     }
-    Some(boundary_triangles)
+    tiers.push(boundary_triangles);
+    tiers
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -572,7 +582,7 @@ impl QuadraticTransferWork {
                             points[index],
                             self.target_groups[index],
                             self.region_groups.as_ref(),
-                            preferred.as_ref(),
+                            &preferred,
                         )
                         .map(|(triangle, weights)| QuadraticTransferSample {
                             nodes: source_operator.element_nodes()[triangle as usize],
@@ -909,15 +919,15 @@ impl SourceBins {
     }
 
     /// The source triangle containing `point` and its barycentric weights.
-    /// Preferred triangles are tried first, and a region group restricts the
-    /// candidates when the caller supplies one.
+    /// Each preferred set is tried in turn before every triangle is, and a
+    /// region group restricts the candidates when the caller supplies one.
     fn locate(
         &self,
         source: &TriMesh,
         point: Point2,
         target_group: Option<crate::RegionId>,
         region_groups: Option<&BTreeMap<crate::RegionId, crate::RegionId>>,
-        preferred: Option<&BTreeSet<u32>>,
+        preferred: &[BTreeSet<u32>],
     ) -> Option<(u32, [f64; 3])> {
         if point.x < self.minimum.x
             || point.x > self.maximum.x
@@ -927,14 +937,9 @@ impl SourceBins {
             return None;
         }
         let [x, y] = bin_index(point, self.minimum, self.cell, self.dimension);
-        for require_preferred in [true, false] {
-            if require_preferred && preferred.is_none() {
-                continue;
-            }
+        for tier in preferred.iter().map(Some).chain([None]) {
             for &triangle_index in &self.bins[y * self.dimension + x] {
-                if require_preferred
-                    && preferred.is_some_and(|triangles| !triangles.contains(&triangle_index))
-                {
+                if tier.is_some_and(|triangles| !triangles.contains(&triangle_index)) {
                     continue;
                 }
                 let triangle = source.triangles[triangle_index as usize];
@@ -1687,6 +1692,121 @@ mod tests {
         for (point, value) in unsplit_operator.node_points().iter().zip(merged_values) {
             assert!((value - polynomial(*point)).abs() < 3.0e-12);
         }
+    }
+
+    /// Reported by the 2026-10-20 review (MESH-1). Trace IDs are local to a
+    /// snapshot and handed out in sequence, so a hole drawn first that gains
+    /// outline vertices shifts every ID on a wall drawn after it. Narrowed by
+    /// the target's ID, a node's candidates on the wall named another vertex
+    /// on its side; non-empty but missing the node, they went straight to the
+    /// unrestricted search, skipping the curve-side set, and one of the wall's
+    /// two coincident copies took the other side's value. Here the field is
+    /// one inside the wall and zero outside, which every node has to keep.
+    #[test]
+    fn a_renumbered_wall_trace_keeps_each_side_its_own_value() {
+        let reflecting_loop = |id: u64, span_base: u64, center: Point2, radius: f64| {
+            let spline = PeriodicCubicSpline::rounded(center, radius);
+            let spans = (0..spline.intervals().len())
+                .map(|index| CurveSpan {
+                    id: CurveSpanId(span_base + index as u64),
+                    behavior: SpanBehavior::REFLECTING,
+                })
+                .collect();
+            TopologyCurve::new(CurveId(id), CurveSpline::Closed(spline), spans).unwrap()
+        };
+        let wall_center = Point2::new(0.4, 0.0);
+        let mesh_with_hole = |hole_radius: f64, revision: u64| {
+            let geometry = TopologyGeometry {
+                curves: vec![
+                    reflecting_loop(1, 10, Point2::new(-0.5, 0.0), hole_radius),
+                    reflecting_loop(2, 30, wall_center, 0.35),
+                ],
+                ..TopologyGeometry::default()
+            };
+            let topology = compile_topology(&geometry, revision).unwrap();
+            let assignments = topology
+                .faces
+                .iter()
+                .enumerate()
+                .map(|(index, face)| FaceRegionAssignment {
+                    face: face.id,
+                    region: Some(RegionId(index as u64 + 1)),
+                })
+                .collect::<Vec<_>>();
+            let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+            let mesh = mesh_topology_plan(
+                &plan,
+                revision,
+                MeshingOptions {
+                    target_edge_length: 0.08,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap();
+            let regions = (1..=topology.faces.len() as u64)
+                .map(|id| Region {
+                    id: RegionId(id),
+                    material: MaterialId(1),
+                    frame: crate::MaterialFrame::world(),
+                })
+                .collect::<Vec<_>>();
+            let operator = QuadraticWaveOperator::assemble_topology(
+                &mesh,
+                &plan,
+                TopologyWaveModel {
+                    physics: crate::PhysicsModel::Mechanical,
+                    materials: &[Material::default_medium()],
+                    regions: &regions,
+                    outer_boundaries: &OuterBoundaryConditions::default(),
+                },
+            )
+            .unwrap();
+            (mesh, operator)
+        };
+        // One inside the wall, zero everywhere else, node by node from the
+        // element each copy belongs to.
+        let field = |mesh: &TriMesh, operator: &QuadraticWaveOperator| {
+            let inside = mesh
+                .triangles
+                .iter()
+                .find(|triangle| {
+                    barycentric(
+                        wall_center,
+                        triangle.vertices.map(|index| mesh.vertices[index].point),
+                    )
+                    .is_some()
+                })
+                .expect("a triangle holds the wall's centre")
+                .region;
+            let mut values = vec![0.0; operator.degrees_of_freedom()];
+            for (triangle, nodes) in mesh.triangles.iter().zip(operator.element_nodes()) {
+                if triangle.region == inside {
+                    for node in nodes {
+                        values[*node as usize] = 1.0;
+                    }
+                }
+            }
+            values
+        };
+        let (source, source_operator) = mesh_with_hole(0.12, 1);
+        let (target, target_operator) = mesh_with_hole(0.3, 2);
+        let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
+            .unwrap();
+        let transferred = map
+            .interpolate(&field(&source, &source_operator), 0.0)
+            .unwrap();
+        let expected = field(&target, &target_operator);
+        let wrong = transferred
+            .iter()
+            .zip(&expected)
+            .filter(|(actual, expected)| (*actual - *expected).abs() > 1.0e-9)
+            .count();
+        assert_eq!(
+            wrong,
+            0,
+            "{wrong} of {} nodes took the other side's value",
+            expected.len()
+        );
     }
 
     #[test]
