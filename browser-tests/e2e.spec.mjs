@@ -21,9 +21,9 @@ const named = (process.env.FUNFERN_E2E_FIXTURES ?? "")
   .map((name) => name.trim())
   .filter(Boolean);
 // And the ones to leave out of all of them, comma-separated: the nightly runs
-// the recorders' fixtures and the late clocks' as a part of their own, since
-// alongside the rest they would carry the slower hosting past the runner's six
-// hours.
+// the recorders' fixtures and the late clocks', and the newest handoffs, as
+// parts of their own, since alongside the rest they would carry the slower
+// hosting past the runner's six hours.
 const excluded = (process.env.FUNFERN_E2E_EXCLUDE ?? "")
   .split(",")
   .map((name) => name.trim())
@@ -42,12 +42,13 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // 1500 s, and it timed out there each night. The rest keep theirs, so a page
 // that hangs is still caught at it.
 // observables runs 1440 steps twice, its probes recording, where the cavity
-// runs 256 once: about 75 minutes at SwiftShader's 1.2 s a step; far-field
-// runs 1150 twice, and far-field-late once.
+// runs 256 once: 55 to 57 minutes a page on SwiftShader served as Pages, and
+// past its 100 minutes isolated, beside the worker pool, on 2026-10-19 and
+// 2026-10-20 both; far-field runs 1150 twice, and far-field-late once.
 const runLength = {
   "handoff-memory-running": 2,
   "handoff-memory-running-late": 2,
-  observables: 4,
+  observables: 6,
   "far-field": 3,
   "far-field-late": 2,
 };

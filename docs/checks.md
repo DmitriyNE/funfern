@@ -815,9 +815,12 @@ held to the recorders' f64 twins, read off the reference after every step:
 
 The same run with no probes then ends on the same bits. It takes 25 s on
 Metal, 290 s on lavapipe and 27 s in Chrome on Metal, which reads what the
-native app reads to every printed digit. In the nightly the fixture is a
-browser part of its own, since about 75 minutes on SwiftShader would carry
-the slower hosting past the runner's six hours.
+native app reads to every printed digit. In the nightly it runs in the
+browser's recorders part, apart from the state part, which in the slower
+hosting already takes up to 5 h 54 min of the runner's six hours. On
+SwiftShader a page takes 55 to 57 minutes served as Pages, and past 100
+isolated, beside the worker pool, where it ran out of time on 2026-10-19 and
+2026-10-20; it has 150.
 
 The twins are held to the wave on the CPU at the same mesh and step
 (`the_twins_meet_the_wave_on_the_observables_channel`):

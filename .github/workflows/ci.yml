@@ -888,7 +888,7 @@ jobs:
         run: scripts/e2e-lavapipe.sh
 
   browser:
-    name: Browser fixtures on SwiftShader (${{ matrix.hosting }}${{ matrix.part == 'recorders' && ', recorders' || '' }})
+    name: Browser fixtures on SwiftShader (${{ matrix.hosting }}${{ matrix.part != 'state' && format(', {0}', matrix.part) || '' }})
     # The app's end-to-end fixtures in Chromium on its bundled software WebGPU:
     # the shipped bundle with its fixtures, started in a browser that compiles
     # its shaders through Tint and draws them through its compositor. Every
@@ -896,11 +896,15 @@ jobs:
     # SwiftShader compiles the app's pipelines for a minute a page and runs a
     # few frames a second; nightly, and dispatched with `full`, every fixture
     # runs, isolated and with service workers refused, the two in parallel.
-    # There the recorders' fixtures and the late clocks' - `observables`,
-    # `far-field`, `far-field-late` and `handoff-memory-running-late` - are a
-    # part of their own: about three hours, which would carry the slower
-    # hosting, at 5 h 47 min without them on 2026-10-17, past the runner's six
-    # hours.
+    # The fixtures are split into parts that run in parallel, since the slower
+    # hosting's state part alone takes 3 h 52 min to 5 h 54 min (2026-10-17 to
+    # 2026-10-20), close to the runner's six hours:
+    # - recorders: the recorders' fixtures and the late clocks' -
+    #   `observables`, `far-field`, `far-field-late` and
+    #   `handoff-memory-running-late` - about four hours served as Pages;
+    # - handoffs: the handoffs added on 2026-10-20, `handoff-driven` and
+    #   `handoff-memory-flux`;
+    # - state: the rest.
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -908,7 +912,7 @@ jobs:
       fail-fast: false
       matrix:
         hosting: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["isolated", "pages-blocked"]' || '["isolated"]') }}
-        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "recorders"]' || '["state"]') }}
+        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "recorders", "handoffs"]' || '["state"]') }}
     env:
       FULL: ${{ github.event_name == 'schedule' || inputs.browser == 'full' }}
     steps:
@@ -982,8 +986,8 @@ jobs:
         # and the slowest page, cavity-batches' four runs, 745 s.
         env:
           FUNFERN_EXPECT_BUILD: ${{ github.sha }}
-          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'recorders' && 'observables,far-field,far-field-late,handoff-memory-running-late' || '' }}
-          FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables,far-field,far-field-late,handoff-memory-running-late' || '' }}
+          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'recorders' && 'observables,far-field,far-field-late,handoff-memory-running-late' || matrix.part == 'handoffs' && 'handoff-driven,handoff-memory-flux' || '' }}
+          FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables,far-field,far-field-late,handoff-memory-running-late,handoff-driven,handoff-memory-flux' || '' }}
           FUNFERN_E2E_DEADLINE: ${{ env.FULL != 'true' && '600' || '1500' }}
           FUNFERN_E2E_HOSTING: ${{ matrix.hosting }}
           FUNFERN_TEST_ISOLATED: ${{ matrix.hosting == 'isolated' && '1' || '0' }}

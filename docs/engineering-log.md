@@ -25888,3 +25888,22 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. The device suite, since a shader changed:
   94 of 94.
+
+## 2026-10-21 — Step 1: the browser nightly's parts by their time
+
+- **What failed.** The nightly of 2026-10-19 ran `observables` out of its
+  100 minutes on SwiftShader in both hostings. The nightly of 2026-10-20 ran
+  it out in the isolated hosting alone.
+  - Served as Pages it took 55 and 57 minutes a page.
+  - Isolated it is slower. There the worker pool shares the CPU with
+    SwiftShader, and it was mid-way through its second run when time ran out.
+- **Fix.** Its run length goes from 4 to 6: 150 minutes a page.
+- **A third part.** The two handoffs added on 2026-10-20, `handoff-driven`
+  and `handoff-memory-flux`, would have joined the state part. In the slower
+  hosting that part took 3 h 52 min to 5 h 54 min over the last four nights,
+  close to the runner's six hours. With the recorders part they would put it
+  near five hours, on a part that varies by about a quarter. So they are a
+  part of their own, `handoffs`, beside `state` and `recorders`. Parts run in
+  parallel, so the split costs runners, not time.
+- **Checked:** the workflow's expressions read alike for each part. The
+  nightly is the run that will show it.
