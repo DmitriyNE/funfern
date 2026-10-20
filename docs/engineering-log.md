@@ -25855,3 +25855,36 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. The device suite ran once, on the tree of
   this commit and the next (GPU-2) together: 94 of 94.
+
+## 2026-10-20 — Step 1: drives a handoff starts begin at rest (GPU-2)
+
+- **Found by the review (GPU-2).** `start_drive` moves a new harmonic
+  drive's carrier to the handoff and kept the rate anchor the host had
+  packed, the drive's authored integral at the candidate's origin.
+  - Packed at zero before ab17b11, that anchor was 0.
+  - Packed at the running time, it is the integral the run had reached by
+    the candidate's preparation: a steady rate that the walls kept.
+  - The stage-6 report ("a newly added legacy source starts with zero
+    integrated rate at the handoff time") and `start_drive`'s own comment say
+    it starts at rest.
+- **The reference had never stated the rule.** The f64 handoff steps the
+  forcing as prepared, integrated from `SOURCE_ANCHOR_TIME`.
+  `CanonicalForcing::handed_on` now states it:
+  - a channel the handoff starts begins at rest there, its carrier at its own
+    phase;
+  - a channel carried unchanged runs on as it ran;
+  - a harmonic channel carried with new parameters is refused. It is not
+    modelled, and is listed as worth checking.
+  - My first version moved the anchor without the carrier's phase, which
+    restarts the carrier; its test caught that.
+- **Reproduced.** `handoff-memory-flux` is the wall cavity, its top side
+  switched to a 0.8 Hz harmonic Neumann flux at step 192, held. It agreed with
+  the reference to 6.2e-7 at the handoff and stood 0.62 off at step 384.
+- **Fix.** `start_drive` zeroes an integrated drive's rate anchor.
+  `-flux` reads Q 4.9e-7 and b 6.7e-7, and the run without the edit stands 7.8
+  off.
+- **Mutation** `started-drive-keeps-packed-rate` (device): caught by `-flux`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. The device suite, since a shader changed:
+  94 of 94.

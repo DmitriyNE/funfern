@@ -1,0 +1,14 @@
+diff --git a/crates/funfern-app/src/canonical_transfer_runtime.wgsl b/crates/funfern-app/src/canonical_transfer_runtime.wgsl
+index 3a0ea40..8bf7ef1 100644
+--- a/crates/funfern-app/src/canonical_transfer_runtime.wgsl
++++ b/crates/funfern-app/src/canonical_transfer_runtime.wgsl
+@@ -259,9 +259,6 @@ fn start_drive(base: u32, absolute_elapsed: f32) {
+     // candidate, packed against the running time, has nonzero: kept, it was
+     // a steady rate the walls trapped (`handoff-memory-flux`).
+     parameters.w = reduced_phase(parameters.w + parameters.z * absolute_elapsed);
+-    if runtime.x == DRIVE_INTEGRATED {
+-        runtime.y = bitcast<u32>(0.0);
+-    }
+     write_drive(base, parameters, runtime, new_tables[base + 2u].data);
+ }
+ // A pulse is a function of absolute time alone, so whatever it follows, the

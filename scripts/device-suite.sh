@@ -117,6 +117,7 @@ RUNS=(
   'FUNFERN_E2E=handoff-memory-remesh funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-edit funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-timestep funfern-fixtures'
+  'FUNFERN_E2E=handoff-memory-flux funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-running funfern-fixtures'
   'FUNFERN_E2E=rejection funfern-fixtures'
   'FUNFERN_E2E=device-loss funfern-fixtures'

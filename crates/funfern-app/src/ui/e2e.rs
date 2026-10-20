@@ -99,6 +99,7 @@ pub(crate) fn add(app: &mut App) {
         "handoff-memory-remesh" => (Fixture::HandoffMemory(MemoryHandoff::Remesh), vec![None]),
         "handoff-memory-edit" => (Fixture::HandoffMemory(MemoryHandoff::Edit), vec![None]),
         "handoff-memory-timestep" => (Fixture::HandoffMemory(MemoryHandoff::Timestep), vec![None]),
+        "handoff-memory-flux" => (Fixture::HandoffMemory(MemoryHandoff::Flux), vec![None]),
         "handoff-memory-running" => (Fixture::HandoffMemory(MemoryHandoff::Running), vec![None]),
         "handoff-memory-running-late" => (
             Fixture::HandoffMemory(MemoryHandoff::RunningLate),
@@ -240,6 +241,14 @@ enum MemoryHandoff {
     /// The simulation speed halved: the same state stepped on at a shorter
     /// time step from the accepted step, the reference re-stepped at it.
     Timestep,
+    /// The top side's law set to a harmonic Neumann flux: a drive the new
+    /// generation starts, which the device integrates from rest at the
+    /// handoff, the stage-6 rule, and the reference with it
+    /// (`CanonicalForcing::handed_on`). Packed against the running time, the
+    /// device started it at the rate its authored integral had reached by
+    /// the candidate's preparation, a steady flux the walls kept (GPU-2 of
+    /// the 2026-10-20 review).
+    Flux,
     /// The top side's drive switched on, with the run not held: the device
     /// steps on while the candidate is prepared, as it does for a user, and
     /// the handoff lands at whatever step it has reached, read from the new
@@ -292,6 +301,9 @@ enum Action {
     /// The top side's law set to the driven Dirichlet, as the inspector's
     /// picker does: a drive the new generation starts.
     Drive,
+    /// The top side's law set to a harmonic Neumann flux, as the inspector's
+    /// picker does: an integrated drive the new generation starts.
+    Flux,
     /// The view's grid toggled, a change for the autosave to carry, and the
     /// device destroyed.
     LoseDevice,
@@ -312,6 +324,7 @@ impl Fixture {
             Fixture::HandoffMemory(MemoryHandoff::Remesh) => (&[(192, Action::Remesh)], 384),
             Fixture::HandoffMemory(MemoryHandoff::Edit) => (&[(192, Action::Edit)], 384),
             Fixture::HandoffMemory(MemoryHandoff::Timestep) => (&[(192, Action::Timestep)], 384),
+            Fixture::HandoffMemory(MemoryHandoff::Flux) => (&[(192, Action::Flux)], 384),
             // The handoff lands wherever the device has got to while the
             // candidate was prepared, and the endpoint must leave it room.
             Fixture::HandoffMemory(MemoryHandoff::Running | MemoryHandoff::RunningLate) => {
@@ -394,9 +407,9 @@ impl Fixture {
                 far_field::far_field_document(far_field::LATE_ORIGIN + far_field::LATE_DRIVE),
                 None,
             ),
-            Fixture::HandoffMemory(MemoryHandoff::Running | MemoryHandoff::RunningLate) => {
-                (wall_document(false), None)
-            }
+            Fixture::HandoffMemory(
+                MemoryHandoff::Running | MemoryHandoff::RunningLate | MemoryHandoff::Flux,
+            ) => (wall_document(false), None),
             Fixture::HandoffMemory(_) => (wall_document(true), None),
             Fixture::Switch => {
                 let (document, material) = switch_document();
@@ -846,6 +859,10 @@ fn wall_document(driven: bool) -> TopologyDocument {
 /// The driven side's signal: a harmonic at 0.8 Hz from rest, amplitude 0.3.
 const WALL_DRIVE: TimeSignal = TimeSignal::harmonic(0.0, 0.3, 0.8, 0.0);
 
+/// The flux side's signal, the rate of the flux it holds: a harmonic at 0.8 Hz,
+/// amplitude 1.5, a flux of about 0.3.
+const WALL_FLUX: TimeSignal = TimeSignal::harmonic(0.0, 1.5, 0.8, 0.0);
+
 /// The cavity's medium made defocusing Kerr, as the Advanced editor's field
 /// law row authors it - a negative cubic term needs a declared amplitude
 /// bound - and its point source switched on at the (1, 1) mode's frequency,
@@ -1241,6 +1258,15 @@ fn advance(
                         return Some(Err(format!("the drive did not apply: {error}")));
                     }
                 }
+                Action::Flux => {
+                    let driven = state.editor.set_outer_condition(
+                        &BTreeSet::from([OuterSide::Top]),
+                        OuterBoundaryCondition::Neumann { signal: WALL_FLUX },
+                    );
+                    if let Err(error) = driven {
+                        return Some(Err(format!("the flux did not apply: {error}")));
+                    }
+                }
                 Action::LoseDevice => {
                     state.editor.document.presentation.grid =
                         !state.editor.document.presentation.grid;
@@ -1303,7 +1329,8 @@ fn advance(
                 | Action::Remesh
                 | Action::Rebuild
                 | Action::Timestep
-                | Action::Drive => published.is_none(),
+                | Action::Drive
+                | Action::Flux => published.is_none(),
                 // The loss takes its own phase and never waits here.
                 Action::LoseDevice => {
                     return Some(Err("the device's loss is not an action to wait for".into()));
@@ -1423,7 +1450,8 @@ fn advance(
                 | Action::Remesh
                 | Action::Rebuild
                 | Action::Timestep
-                | Action::Drive => {
+                | Action::Drive
+                | Action::Flux => {
                     let target = published.expect("an edit waits for its generation");
                     let (from, to) = (
                         reference.active.canonical_operator.degrees_of_freedom(),
@@ -1859,8 +1887,11 @@ fn advance(
 ///
 /// A driven generation, or one going between fixed and driven, is handed by
 /// the core's handoffs, which the device's transfer table is built from;
-/// no fixture with a wall is driven. The generation returned is the one the
-/// reference steps on.
+/// no fixture with a wall is driven. Either way the target runs its forcing
+/// as the device runs it from the handoff (`CanonicalForcing::handed_on`):
+/// a harmonic channel the handoff starts begins at rest there, and one it
+/// carries runs on as it ran. The generation returned carries that forcing,
+/// for the reference to step on.
 fn hand_off(
     reference: &Reference,
     target: &PreparedTopology,
@@ -1869,7 +1900,14 @@ fn hand_off(
     runtime_serials: [u32; 4],
 ) -> Result<(State, Option<MemoryCarry>, Arc<PreparedTopology>), String> {
     let source = &reference.active;
-    let target = Arc::new(target.clone());
+    let mut handed_target = target.clone();
+    handed_target.canonical_forcing = Arc::new(
+        target
+            .canonical_forcing
+            .handed_on(&source.canonical_forcing, reference.state.time())
+            .map_err(|error| error.to_string())?,
+    );
+    let target = Arc::new(handed_target);
     let maps = &carried.maps;
     let runtime = CanonicalGpuRuntimeTransfer::from_primary_transfer(
         &source.canonical_operator,

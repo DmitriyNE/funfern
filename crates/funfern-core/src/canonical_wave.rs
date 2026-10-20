@@ -310,6 +310,72 @@ impl CanonicalForcing {
         &self.prescribed
     }
 
+    /// This forcing as the device runs it from a handoff at `time` out of a
+    /// generation that ran `previous`, channel by channel, matched by what
+    /// authored it. Authored, a harmonic channel is integrated from
+    /// [`SOURCE_ANCHOR_TIME`], which is not what the device does with one a
+    /// handoff starts or carries:
+    /// - a harmonic channel `previous` ran with the same acceleration carries
+    ///   on as it ran, rate and carrier continuous (the runtime transfer's
+    ///   `retain_drive`);
+    /// - a harmonic channel the handoff starts - one `previous` had no
+    ///   channel for, or ran as a pulse - begins at rest at `time`, its
+    ///   acceleration at its own phase there (`start_drive`; "a newly added
+    ///   legacy source starts with zero integrated rate at the handoff time",
+    ///   the stage-6 report);
+    /// - a pulse, a direct drive and a prescribed signal are functions of
+    ///   absolute time, the same either way.
+    ///
+    /// A harmonic channel carried with a new acceleration takes it with its
+    /// rate and carrier continuous (`replace_drive`), which is not modelled
+    /// here yet, and is refused rather than run from the wrong anchor.
+    pub fn handed_on(&self, previous: &CanonicalForcing, time: f64) -> Result<Self, WaveError> {
+        if !time.is_finite() {
+            return Err(WaveError::InvalidState);
+        }
+        let mut handed = self.clone();
+        for (source, key) in handed.sources.iter_mut().zip(&self.keys) {
+            let CanonicalRateDrive::LegacyIntegratedHarmonic {
+                acceleration,
+                anchor_time,
+                ..
+            } = source.drive
+            else {
+                continue;
+            };
+            // Integrated from `time` at rest, the acceleration's phase counted
+            // from there: the carrier keeps the phase it has at `time`.
+            let started = || {
+                let mut moved = acceleration;
+                let (_, _, frequency_hz, phase) = moved.carrier_mut();
+                *phase = (*phase + std::f64::consts::TAU * *frequency_hz * (time - anchor_time))
+                    .rem_euclid(std::f64::consts::TAU);
+                CanonicalRateDrive::legacy_with_rate_anchor(moved, time, 0.0)
+            };
+            let ran = previous
+                .keys
+                .iter()
+                .position(|candidate| candidate == key)
+                .map(|index| previous.sources[index].drive);
+            source.drive = match ran {
+                None => started()?,
+                Some(CanonicalRateDrive::Direct(signal)) if signal.is_pulsed() => started()?,
+                Some(
+                    running @ CanonicalRateDrive::LegacyIntegratedHarmonic {
+                        acceleration: ran, ..
+                    },
+                ) if ran == acceleration => running,
+                Some(_) => {
+                    return Err(WaveError::Unsupported(
+                        "a harmonic channel carried across a handoff with new parameters is not \
+                         modelled",
+                    ));
+                }
+            };
+        }
+        Ok(handed)
+    }
+
     /// Adds a channel known only by its position.
     pub fn push_source(&mut self, source: CanonicalSource) -> Result<(), WaveError> {
         let position = u32::try_from(self.sources.len()).map_err(|_| WaveError::InvalidState)?;
@@ -7400,6 +7466,93 @@ mod tests {
             .unwrap();
         assert!(accounting.primary_loss > 0.0);
         assert!(accounting.complementary_loss > 0.0);
+    }
+
+    /// The device's rule for the channels a handoff starts and carries, as
+    /// the reference runs it: one carried on keeps the anchor it ran from,
+    /// one started from nothing or from a pulse begins at rest at the handoff
+    /// and is driven by its authored acceleration from there, and one carried
+    /// with new parameters is refused.
+    #[test]
+    fn a_handoff_starts_new_harmonic_channels_at_rest_and_carries_the_rest() {
+        let (_, operator) = compile(&Scene::default());
+        let weights = operator.primary_mass().to_vec();
+        let channel = |drive| CanonicalSource::new(&operator, weights.clone(), drive).unwrap();
+        let harmonic = TimeSignal::harmonic(0.0, 2.0, 0.8, 0.3);
+        let pulse = TimeSignal::pulsed(
+            [0.0, 2.0, 3.0, 0.0],
+            PulseEnvelope::FlatTop {
+                duration: 0.6,
+                edge: 0.2,
+            },
+            0.1,
+            0.0,
+        );
+        let authored = CanonicalRateDrive::authored(harmonic, SOURCE_ANCHOR_TIME).unwrap();
+        // The top side started at an earlier handoff, 1.5 s in; the point
+        // source ran as a pulse.
+        let earlier = CanonicalRateDrive::legacy_with_rate_anchor(harmonic, 1.5, 0.0).unwrap();
+        let mut previous = CanonicalForcing::none(&operator);
+        previous
+            .push_keyed_source(channel(earlier), CanonicalSourceKey::Side(OuterSide::Top))
+            .unwrap();
+        previous
+            .push_keyed_source(
+                channel(CanonicalRateDrive::authored(pulse, SOURCE_ANCHOR_TIME).unwrap()),
+                CanonicalSourceKey::Point,
+            )
+            .unwrap();
+        let mut target = CanonicalForcing::none(&operator);
+        for key in [
+            CanonicalSourceKey::Side(OuterSide::Top),
+            CanonicalSourceKey::Point,
+            CanonicalSourceKey::Side(OuterSide::Bottom),
+        ] {
+            target.push_keyed_source(channel(authored), key).unwrap();
+        }
+
+        let time = 4.25;
+        assert!(
+            authored.value(time).unwrap().abs() > 0.1,
+            "authored, a channel started here would not start at rest"
+        );
+        let handed = target.handed_on(&previous, time).unwrap();
+        let drives = handed
+            .sources()
+            .iter()
+            .map(CanonicalSource::drive)
+            .collect::<Vec<_>>();
+        assert_eq!(drives[0], earlier, "a channel carried on runs as it ran");
+        for started in &drives[1..] {
+            assert_eq!(
+                started.value(time).unwrap(),
+                0.0,
+                "a started channel begins at rest"
+            );
+            for later in [0.01, 0.37, 2.0] {
+                let gained = authored.value(time + later).unwrap() - authored.value(time).unwrap();
+                assert!(
+                    (started.value(time + later).unwrap() - gained).abs() < 1.0e-12,
+                    "a started channel follows its authored acceleration from the handoff"
+                );
+            }
+        }
+        assert_eq!(handed.prescribed(), target.prescribed());
+
+        let mut edited = CanonicalForcing::none(&operator);
+        edited
+            .push_keyed_source(
+                channel(
+                    CanonicalRateDrive::authored(
+                        TimeSignal::harmonic(0.0, 3.0, 0.8, 0.3),
+                        SOURCE_ANCHOR_TIME,
+                    )
+                    .unwrap(),
+                ),
+                CanonicalSourceKey::Side(OuterSide::Top),
+            )
+            .unwrap();
+        assert!(edited.handed_on(&previous, time).is_err());
     }
 
     #[test]

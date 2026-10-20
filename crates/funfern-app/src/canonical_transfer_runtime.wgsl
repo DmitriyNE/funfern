@@ -251,10 +251,17 @@ fn start_drive(base: u32, absolute_elapsed: f32) {
     var parameters = vec4<f32>(
         new_float(base, 0u), new_float(base, 1u),
         new_float(base, 2u), new_float(base, 3u));
-    let runtime = new_tables[base + 1u].data;
+    var runtime = new_tables[base + 1u].data;
     // A genuinely new legacy drive starts with zero integrated rate at the
     // handoff instant; only its acceleration phase advances to that instant.
+    // The host packs a rate anchor for a generation installed afresh, the
+    // drive's authored integral at the candidate's origin, which a handoff's
+    // candidate, packed against the running time, has nonzero: kept, it was
+    // a steady rate the walls trapped (`handoff-memory-flux`).
     parameters.w = reduced_phase(parameters.w + parameters.z * absolute_elapsed);
+    if runtime.x == DRIVE_INTEGRATED {
+        runtime.y = bitcast<u32>(0.0);
+    }
     write_drive(base, parameters, runtime, new_tables[base + 2u].data);
 }
 // A pulse is a function of absolute time alone, so whatever it follows, the

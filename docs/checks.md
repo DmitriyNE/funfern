@@ -76,14 +76,15 @@ handoff once a run had advanced, and the fixture timed out waiting for it.
 `remesh` sets the target edge finer at step 128,
 nothing else changed: the field is interpolated from 11,121 nodes onto 15,349 of
 the same geometry. Q reads `7.7e-7`, and a reference that drops the component
-totals the runtime keeps reads 2.5e-5 and fails. The five `handoff-memory`
-fixtures, `-rebuild`, `-remesh`, `-edit`, `-timestep` and `-running`, give
+totals the runtime keeps reads 2.5e-5 and fails. The six `handoff-memory`
+fixtures, `-rebuild`, `-remesh`, `-edit`, `-timestep`, `-flux` and `-running`, give
 the cavity a second-order outgoing wall on its bottom side and a 0.8 Hz drive
 on its top, run the pulse into the wall, and at step 192, once the wall holds
 6.5e-4 of the field's energy, hand the running field over the way the name
 says: Remesh pressed with nothing changed, the edge set finer, the medium's
-mass density raised, or the speed halved, which shortens the time step, each
-held at the step and run to 384; or, in `-running`, the top side's drive
+mass density raised, the speed halved, which shortens the time step, or the
+top side's law set to a 0.8 Hz harmonic Neumann flux, each held at the step
+and run to 384; or, in `-running`, the top side's drive
 switched on with the run not held, the device stepping on while the candidate
 is prepared, as it does for a user, so the handoff lands where the device has
 got to, step 202 on the M1 Max, read from the new generation's clock origin,
@@ -108,7 +109,12 @@ by the time between the candidate's preparation and its arrival, which the
 runtime transfer computes and a held run has none of: the mutation
 `drive-phase-reset-on-handoff` zeroes it, and `-running` reads Q 1.4 and
 fails where the held fixtures, whose drive is carried from the old
-generation's own clock, do not see it. `rejection` makes the cavity's
+generation's own clock, do not see it. A harmonic flux or source the
+handoff starts is integrated from rest there, the stage-6 rule, and the
+reference runs it that way through `CanonicalForcing::handed_on`, which
+also carries on unchanged what it ran. `-flux` reads Q `4.9e-7`. A device
+that kept the rate anchor it was packed with, the flux's authored integral
+at the candidate's preparation, read 0.62 there (fixed 2026-10-20). `rejection` makes the cavity's
 medium defocusing Kerr with an amplitude bound of 0.2 and drives it with its
 point source at the (1, 1) mode until the field reaches the bound. The device
 refuses the step after 788 with the inverse-domain status, as the reference

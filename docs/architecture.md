@@ -1271,6 +1271,17 @@ material edit anyway, a Fire included.
     state and clock stopped sharing a boundary once the clock started at the
     running time, and every driven handoff was refused once a run had
     advanced (fixed 2026-10-20).
+  - **Drives a handoff starts.** A harmonic source or flux that a handoff
+    starts begins at rest at the handoff instant, its carrier at its own
+    phase there: `start_drive`, the stage-6 rule.
+    - The host packs a rate anchor for a generation installed afresh: the
+      drive's authored integral at the candidate's origin. The transfer drops
+      it for a drive it starts. Kept, a candidate packed against the running
+      time started at the integral reached by its preparation, a steady rate
+      the walls trapped (fixed 2026-10-20).
+    - The f64 side of the rule is `CanonicalForcing::handed_on`. It carries on
+      unchanged what the old generation ran, and refuses a harmonic drive
+      carried with new parameters, the one case it does not model yet.
   - **Late in an epoch.** The local time is one f32 near 256 s, 3e-5 s apart,
     and drive phases carry about 1e-4 rad from it.
 - **Loss:** a lossy time-driven generation carries one loss record per

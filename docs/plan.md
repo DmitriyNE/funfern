@@ -1594,6 +1594,13 @@ is next touched.
   run early in its epoch reads 2e-6. The error is bounded by the epoch's
   length, which a shorter epoch would cut, at the cost of more rebases (found
   by PH-18 on 2026-10-18).
+- `CanonicalForcing::handed_on`, the reference's statement of how the device
+  runs a generation's drives from a handoff, does not model a harmonic source
+  or flux carried across a handoff with new parameters. The device's
+  `replace_drive` keeps the drive's rate and carrier continuous; `handed_on`
+  refuses the case rather than run it from the authored anchor. No fixture
+  edits a harmonic drive through a handoff, so nothing holds the device's rule
+  there (found while fixing GPU-2 of the 2026-10-20 review).
 
 ## Working practice
 

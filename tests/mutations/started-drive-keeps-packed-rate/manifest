@@ -1,0 +1,4 @@
+about: a harmonic drive a handoff starts keeps the rate anchor it was packed with, its authored integral at the candidate's preparation, instead of starting at rest, so the walls keep a steady flux
+test: scripts/e2e-fixture.sh handoff-memory-flux
+expect: HandoffMemory\(Flux\) failed: Q [0-9.]+e-[0-2]
+needs: device
