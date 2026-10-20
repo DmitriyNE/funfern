@@ -25774,3 +25774,24 @@ Measured again first, then made quadratic in the trace.
   compile and the protocol proofs. The device suite, since the runtime
   changed: 92 of 92. Chrome on Metal runs `observables`, `far-field` and
   `far-field-late`.
+
+## 2026-10-20 — A code review before milestone C
+
+- **What.** A read-only review of the whole codebase at 569e56b, in
+  `docs/spikes/funfern-code-review-2026-10-20.md`, which also says how it
+  was made.
+  - 74 units of about 4,000 lines and ten cross-cutting concerns.
+  - Two skeptics per finding, a third on a split, then a completeness
+    critic's gap round.
+- **Result.** 214 confirmed findings: 12 high, 88 medium and 114 low. 70 of
+  them are in the checks themselves. 6 findings were refuted.
+- **Found in PH-18's own commits.**
+  - **RT-1:** since ab17b11, every handoff to a driven or nonlinear
+    generation is refused once the run has advanced.
+  - **GPU-2:** a drive started by a handoff keeps its rate anchor at the
+    preparation time.
+  - **The 2026-10-19 nightly** found five mutation patches that no longer
+    apply, and `observables` out of time on SwiftShader.
+  - These come first, before the other high findings and before milestone C.
+- **Every finding was checked by reading code only.** Each one is to be
+  reproduced before it is fixed.
