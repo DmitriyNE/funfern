@@ -25963,3 +25963,44 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 2: a boundary probe's samples in order, each side its own (PR-1, PR-2)
+
+- **PR-1, found by the review.** The plan stores every Right side's atoms
+  reversed. `compile_boundary_probe` sorted pieces by their first parameter
+  and walked each from its first parameter to its second. So within a span
+  longer than one edge, a Right probe's samples ran backwards atom by atom, and
+  its length summed about 2.4 times over, with every integral read along it.
+  A boundary probe around a hole has only a Right trace.
+- **PR-2, found by the review.** A transmitting span's trace is one, which
+  the mesh labels Left, so the stencil dropped the requested side. Where one
+  region lies both ways (a free separator, or one closing off a face), each edge
+  took its lower-indexed triangle. Left and Right then read the same stencil,
+  and the normal's sign flipped from sample to sample.
+- **They are one change.** Fixing PR-1 alone failed
+  `a_probe_reads_both_sides_of_a_free_separator`. That test had passed only
+  because PR-1 shuffled the Right samples onto other edges, where the
+  lower-indexed triangle happened to lie on the other side.
+- **Reproduced.**
+  - `a_right_boundary_probe_samples_its_curve_in_order`: on a straight
+    two-span baffle, the Right probe's first step went backwards, -0.025
+    against a spacing of 0.025.
+  - The free-separator test, now checking every sample, not the first
+    alone: Left and Right gave identical normals.
+- **Fix.**
+  - Pieces are sorted and walked by their parameters in ascending order
+    (`ascending`).
+  - The stencil takes a transmitting span's requested side and keeps only the
+    adjacent triangle on that side of the curve's direction. The region still
+    has to match, so an interface between two regions is as it was.
+  - Both tests pass, with the 48 other runtime tests. `observables` on Metal
+    reads as before: its loop probe sits on an interface between two regions.
+- **Not added:** a Right-side probe in `observables`. Its records are held to
+  twins built from the same compiled stencils, so a scrambled stencil would
+  agree with its twin.
+- **Seen in passing, PR-7 (medium, step 3).** On a single-span open curve,
+  the stencil's ± period wrap put the last sample on the other tip. It
+  reproduced in the first version of the PR-1 test, which now uses two spans.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

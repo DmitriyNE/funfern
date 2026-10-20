@@ -889,6 +889,7 @@ impl QuadraticBoundaryStencil {
             operator,
             ProbeModel::Scene(scene),
             label,
+            None,
             parameter,
             period,
             region,
@@ -898,6 +899,11 @@ impl QuadraticBoundaryStencil {
     /// Builds a trace-specific boundary stencil from a topology curve label.
     /// The explicit region selects the adjacent face at transmitting interfaces;
     /// separated curves additionally retain their left/right trace identity.
+    /// A transmitting span's trace is one, which the mesh labels Left, so its
+    /// requested side picks the adjacent triangle: on a span with one region
+    /// both ways, a free separator or one closing off a face, the region alone
+    /// cannot, and each edge took its lower-indexed triangle, the normal's sign
+    /// flipping from sample to sample (PR-2 of the 2026-10-20 review).
     pub fn build_topology(
         mesh: &TriMesh,
         operator: &QuadraticWaveOperator,
@@ -919,6 +925,14 @@ impl QuadraticBoundaryStencil {
             },
             label => label,
         };
+        let side = match target.label {
+            BoundaryLabel::Curve {
+                side,
+                separated: false,
+                ..
+            } => Some(side),
+            _ => None,
+        };
         if !(ProbeModel::Topology { plan, model }).contains_boundary_target(
             target.label,
             target.parameter,
@@ -932,17 +946,20 @@ impl QuadraticBoundaryStencil {
             operator,
             ProbeModel::Topology { plan, model },
             mesh_label,
+            side,
             target.parameter,
             target.period,
             target.region,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_with_model(
         mesh: &TriMesh,
         operator: &QuadraticWaveOperator,
         model: ProbeModel<'_>,
         label: BoundaryLabel,
+        side: Option<crate::CurveTraceSide>,
         parameter: f64,
         period: f64,
         region: RegionId,
@@ -1021,6 +1038,10 @@ impl QuadraticBoundaryStencil {
                     tangent = tangent / length;
                     let left = Point2::new(-tangent.y, tangent.x);
                     let centroid = (pa.point + pb.point + pc.point) / 3.0;
+                    let on_left = left.dot(centroid - point) > 0.0;
+                    if side.is_some_and(|side| on_left != (side == crate::CurveTraceSide::Left)) {
+                        continue;
+                    }
                     let outward_normal = if left.dot(centroid - point) <= 0.0 {
                         left
                     } else {

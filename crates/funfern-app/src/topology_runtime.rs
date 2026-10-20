@@ -1794,6 +1794,15 @@ fn compile_probe(
     }
 }
 
+/// A planned atom's parameter interval from its lower end.
+fn ascending([first, second]: [f64; 2]) -> [f64; 2] {
+    if first <= second {
+        [first, second]
+    } else {
+        [second, first]
+    }
+}
+
 fn compile_boundary_probe(
     target: &TopologyBoundaryProbeTarget,
     mesh: &TriMesh,
@@ -1824,7 +1833,12 @@ fn compile_boundary_probe(
             })
             .copied()
             .collect::<Vec<_>>();
-        span_pieces.sort_by(|left, right| left.parameter[0].total_cmp(&right.parameter[0]));
+        // The plan stores a Right side's atoms reversed, so each is taken by
+        // its parameters in ascending order, whatever the side: read as
+        // stored, a Right probe's samples ran backwards within every atom.
+        span_pieces.sort_by(|left, right| {
+            ascending(left.parameter)[0].total_cmp(&ascending(right.parameter)[0])
+        });
         if span_pieces.is_empty() {
             return Err("Boundary probe span has no active trace".into());
         }
@@ -1865,10 +1879,11 @@ fn compile_boundary_probe(
             } else {
                 0.0
             };
+            let [low, high] = ascending(piece.parameter);
             let parameter = if target.reversed {
-                piece.parameter[1] + (piece.parameter[0] - piece.parameter[1]) * fraction
+                high + (low - high) * fraction
             } else {
-                piece.parameter[0] + (piece.parameter[1] - piece.parameter[0]) * fraction
+                low + (high - low) * fraction
             };
             QuadraticBoundaryStencil::build_topology(
                 mesh,
@@ -4858,7 +4873,7 @@ mod tests {
         assert_eq!(prepare(&mut runtime).unwrap(), token);
         let active = runtime.commit_ready(token).unwrap();
 
-        let normals = probes.map(|id| {
+        let sampled = probes.map(|id| {
             let compiled = active
                 .probes
                 .iter()
@@ -4867,19 +4882,144 @@ mod tests {
             match &compiled.result {
                 TopologyProbeCompilation::Ready(stencil) => match stencil.as_ref() {
                     TopologyProbeStencil::Boundary(points) => {
-                        assert!(!points.is_empty(), "{id:?} sampled nothing");
-                        points[0].outward_normal
+                        assert!(points.len() > 2, "{id:?} sampled too little");
+                        points.clone()
                     }
                     other => panic!("{id:?} compiled to {other:?}"),
                 },
                 other => panic!("{id:?} did not compile: {other:?}"),
             }
         });
-        let [left, right] = normals;
-        assert!(
-            (left.x + right.x).abs() < 1.0e-9 && (left.y + right.y).abs() < 1.0e-9,
-            "the two sides face opposite ways: {left:?} {right:?}"
-        );
+        let [left, right] = &sampled;
+        assert_eq!(left.len(), right.len());
+        // Every sample, not the first alone: the side was dropped on a span
+        // with one region both ways, and each edge took the normal of its
+        // lower-indexed triangle, flipping from sample to sample (PR-2 of the
+        // 2026-10-20 review). The left trace's normal leaves the face on the
+        // left, pointing right of the path, at every sample.
+        for index in 0..left.len() {
+            let before = left[index.saturating_sub(1)].point;
+            let after = left[(index + 1).min(left.len() - 1)].point;
+            let tangent = (after - before) / (after - before).norm();
+            let rightward = Point2::new(tangent.y, -tangent.x);
+            let (left, right) = (left[index].outward_normal, right[index].outward_normal);
+            assert!(
+                (left.x + right.x).abs() < 1.0e-9 && (left.y + right.y).abs() < 1.0e-9,
+                "sample {index}: the two sides face opposite ways: {left:?} {right:?}"
+            );
+            assert!(
+                left.dot(rightward) > 0.9,
+                "sample {index}: the left trace's normal {left:?} points right of the path"
+            );
+        }
+    }
+
+    /// Reported by the 2026-10-20 review (PR-1): the plan stores every Right
+    /// side's atoms reversed, and the probe walked each from its first
+    /// parameter to its second, so within a span longer than one edge a Right
+    /// probe's samples ran backwards, atom by atom: 0.08, 0.055, 0.029, 0.16
+    /// along a straight 1.6, its length summed 2.4 times over and every
+    /// integral with it. Along a baffle, which has both traces, the two sides
+    /// must sample the same points in the same order, evenly along the curve.
+    #[test]
+    fn a_right_boundary_probe_samples_its_curve_in_order() {
+        let mut editor = TopologyEditor::default();
+        let baffle = editor
+            .create_open_curve(
+                // Two spans: on one, the period wrap puts an end sample on the
+                // other tip (PR-7), which is not what this reads.
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.8, 0.1),
+                    Point2::new(0.0, 0.1),
+                    Point2::new(0.8, 0.1),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let spans = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(baffle)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<Vec<_>>();
+        let mut probes = Vec::new();
+        for (name, side) in [
+            ("Left", CurveTraceSide::Left),
+            ("Right", CurveTraceSide::Right),
+        ] {
+            probes.push(
+                editor
+                    .create_probe(
+                        name.into(),
+                        [200, 160, 90],
+                        TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                            curve: baffle,
+                            spans: spans.clone(),
+                            side,
+                            reversed: false,
+                            preset: crate::document::ProbeSamplingPreset::default(),
+                        }),
+                    )
+                    .unwrap(),
+            );
+            settle(&mut editor);
+        }
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let active = runtime.commit_ready(token).unwrap();
+        let points = |probe| {
+            let compiled = active
+                .probes
+                .iter()
+                .find(|compiled| compiled.id == probe)
+                .expect("the probe compiled");
+            let TopologyProbeCompilation::Ready(stencil) = &compiled.result else {
+                panic!("the probe did not compile: {:?}", compiled.result);
+            };
+            let TopologyProbeStencil::Boundary(stencils) = stencil.as_ref() else {
+                panic!("a boundary probe compiled to another kind");
+            };
+            stencils
+                .iter()
+                .map(|stencil| stencil.point)
+                .collect::<Vec<_>>()
+        };
+        let (left, right) = (points(probes[0]), points(probes[1]));
+        let spacing = 1.6 / (left.len() - 1) as f64;
+        for (side, samples) in [("left", &left), ("right", &right)] {
+            for (index, pair) in samples.windows(2).enumerate() {
+                let step = pair[1].x - pair[0].x;
+                assert!(
+                    (step - spacing).abs() < 1.0e-9,
+                    "the {side} probe's sample {index} steps {step} along the baffle, not {spacing}"
+                );
+            }
+        }
+        for (index, (left, right)) in left.iter().zip(&right).enumerate() {
+            assert!(
+                (*left - *right).norm() < 1.0e-12,
+                "sample {index}: left {left:?}, right {right:?}"
+            );
+        }
     }
 
     /// The scene draws a boundary probe's band and flux arrow from the sampled
