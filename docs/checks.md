@@ -1284,7 +1284,10 @@ test does not pass before the patch is "not detected". Not in the gate, since
 each rebuilds the tree; the nightly runs all of them on Linux, the device
 ones on lavapipe through `scripts/e2e-fixture.sh`, which runs one fixture on
 this machine's GPU otherwise. `scripts/mutations.sh wall` runs the ones whose
-names match.
+names match. That every patch still applies to the tree, and every manifest
+names its test, failure, needs and purpose, is held in the gate by
+`crates/funfern-app/tests/mutations.rs`, so a patch the code has moved past
+fails the day it moves rather than at the next nightly.
 
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.

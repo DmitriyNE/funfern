@@ -25795,3 +25795,28 @@ Measured again first, then made quadratic in the trace.
   - These come first, before the other high findings and before milestone C.
 - **Every finding was checked by reading code only.** Each one is to be
   reproduced before it is fixed.
+
+## 2026-10-20 — Step 1: the mutation patches against the tree
+
+- **What broke.** The nightly of 2026-10-19 reported five mutations as not
+  detected, because their patches no longer applied:
+  `clock-forgotten-on-handoff`, `component-totals-dropped`,
+  `curve-probe-flux-reversed`, `drive-phase-reset-on-handoff` and
+  `far-field-frame-at-step-end`. PH-18's commits (e0ce86f, ab17b11) rewrote
+  the lines the patches touch, and nothing between the commits and the
+  nightly checked the patches.
+- **Rewritten.** Each patch now plants the same defect in the code as it
+  stands:
+  - The preparation delta is zeroed whole.
+  - The flux's sign is turned in the two-part-stamp line.
+  - The totals switch is forced off.
+  - The far field's frames stand at the step's end again. The stamp loses its
+    half step, and the field and gradient are those at the end of the step.
+  - Their manifests' patterns still match the failures.
+- **The gate holds them.** `crates/funfern-app/tests/mutations.rs` runs
+  `git apply --check` on every patch and checks every manifest's fields. It
+  failed on the old `curve-probe-flux-reversed` patch, naming it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. The five mutations on Metal: 5 of 5
+  detected.

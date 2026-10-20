@@ -1,5 +1,5 @@
 diff --git a/crates/funfern-app/src/ui/workers.rs b/crates/funfern-app/src/ui/workers.rs
-index 7ed4963..9ec576c 100644
+index 4e899ff..47c12a7 100644
 --- a/crates/funfern-app/src/ui/workers.rs
 +++ b/crates/funfern-app/src/ui/workers.rs
 @@ -623,7 +623,7 @@ pub(super) fn spawn_amr_worker(
@@ -10,4 +10,4 @@ index 7ed4963..9ec576c 100644
 +    candidate.mesh.geometry_revision == active.mesh.geometry_revision && false
  }
  
- pub(super) fn compile_gpu_upload(
+ /// Packs `candidate` for the device. A fresh generation starts its clock at

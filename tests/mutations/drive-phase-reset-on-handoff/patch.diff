@@ -1,13 +1,16 @@
+diff --git a/crates/funfern-app/src/canonical_transfer_runtime.wgsl b/crates/funfern-app/src/canonical_transfer_runtime.wgsl
+index 92ac8fe..fa88c4d 100644
 --- a/crates/funfern-app/src/canonical_transfer_runtime.wgsl
 +++ b/crates/funfern-app/src/canonical_transfer_runtime.wgsl
-@@ -265,8 +265,8 @@
-     let target_drives = transfer[5].data.w;
-     let current_origin = add_compensated(
-         old_control.clock_origin.x, old_control.clock_origin.y, old_control.clock_f32.y);
--    let preparation_delta = (current_origin.x - new_control.clock_origin.x)
--        + (current_origin.y - new_control.clock_origin.y);
-+    let preparation_delta = 0.0 * ((current_origin.x - new_control.clock_origin.x)
-+        + (current_origin.y - new_control.clock_origin.y));
+@@ -282,9 +282,9 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
+     // exactly, the fine ones', then the old epoch's local time. Every term is
+     // small, so no order a compiler sums them in can round at the absolute
+     // time.
+-    let preparation_delta = ((old_control.clock_origin.x - new_control.clock_origin.x)
++    let preparation_delta = 0.0 * (((old_control.clock_origin.x - new_control.clock_origin.x)
+         * opaque_one() + (old_control.clock_origin.y - new_control.clock_origin.y))
+-        * opaque_one() + old_control.clock_f32.y;
++        * opaque_one() + old_control.clock_f32.y);
      if i < target_nodes && new_nodes[i].boundary.z != 0u {
          let mapping = mapped_index(transfer[4].data.z, i);
          let record = new_nodes[i].boundary.z >> PRESCRIBED_RECORD_SHIFT;
