@@ -274,9 +274,6 @@ impl Playground {
         if !welded.span_splits.is_empty() {
             parts.push("junction inserted".to_owned());
         }
-        if welded.promoted {
-            parts.push("curve promoted to a baffle".to_owned());
-        }
         if !welded.removed_regions.is_empty() {
             parts.push(format!(
                 "{} subdomain{} merged away",

@@ -396,8 +396,8 @@ impl Playground {
             Err(error) => self.message = error,
         }
     }
-    /// Says what the deletion did beyond the selection: a curve promoted to a
-    /// baffle or a probe dropped is not something to discover later.
+    /// Says what the deletion did beyond the selection: a curve fused or a
+    /// probe dropped is not something to discover later.
     pub(super) fn report_removal(
         &mut self,
         target: &TopologyRemovalTarget,
@@ -407,30 +407,22 @@ impl Playground {
         let pieces = removal.pieces.len();
         let lead = match (curves, pieces) {
             (0 | 1, 0) => "Curve deleted".to_owned(),
-            (0, 1) => "Deleted spans; the rest is a baffle".to_owned(),
-            (0, pieces) => format!("Deleted spans; split into {pieces} baffles"),
+            (0, 1) => "Deleted spans; the rest stays as an open curve".to_owned(),
+            (0, pieces) => format!("Deleted spans; the rest is {pieces} open curves"),
             (curves, 0) => format!("{curves} curves deleted"),
             (curves, pieces) => format!(
-                "{curves} curve{} deleted and one cut, leaving {pieces} baffle{}",
+                "{curves} curve{} deleted and one cut, leaving {pieces} open curve{}",
                 if curves == 1 { "" } else { "s" },
                 if pieces == 1 { "" } else { "s" },
             ),
         };
         let TopologyRemoval {
-            promoted,
             joined,
             removed_probes,
             removed_regions,
             ..
         } = removal;
         let mut parts = vec![lead];
-        if !promoted.is_empty() {
-            parts.push(format!(
-                "{} attached curve{} promoted to baffles",
-                promoted.len(),
-                if promoted.len() == 1 { "" } else { "s" }
-            ));
-        }
         let closed = joined
             .iter()
             .filter(|record| record.survivor == record.absorbed)

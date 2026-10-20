@@ -25907,3 +25907,37 @@ Measured again first, then made quadratic in the trace.
   parallel, so the split costs runners, not time.
 - **Checked:** the workflow's expressions read alike for each part. The
   nightly is the run that will show it.
+
+## 2026-10-21 — Step 2: no edit demotes a curve to a wall (ED-1)
+
+- **Found by the review (ED-1).** Deleting anything ran
+  `promote_freed_curves` over every curve in the scene. It demoted any open
+  curve with a transmitting span at a free tip to a reflecting baffle.
+  - A free baffle switched to Transmit is how a wall is held switched off.
+    Deleting an unrelated hole turned it back into a scatterer far from the
+    edit, reported only as "1 attached curve promoted to baffles".
+  - The premise, that the compiler rejects a transmitting free tip, was
+    removed by 31c0d7e on 2026-09-16. The same premise demoted the pieces a
+    partial deletion leaves and a welded curve.
+- **Reproduced.** `deleting_a_curve_leaves_an_unrelated_transmitting_baffle_alone`
+  deletes a hole beside such a baffle. The deletion promoted it, and it became
+  a wall.
+- **Fix, agreed to go all the way.** No edit changes a span's behaviour as a
+  side effect.
+  - The removal's sweep is gone.
+  - A partial deletion's pieces keep their spans' behaviours.
+  - A weld no longer demotes the curve it welds.
+  - `promote_freed_curves`, `promote_curve_if_freed`,
+    `free_transmitting_end` and the `promoted` fields of `TopologyRemoval`
+    and `TopologyWeld` are gone, with their status-line messages.
+  - A deletion now says the rest "stays as an open curve" rather than "is a
+    baffle".
+- **Tests.** Six editor tests that pinned the demotion now check that every
+  surviving span keeps its behaviour (`behaviours_kept`). They cover a
+  subdomain loop cut down, a separator's middle deleted, a separator freed from
+  a deleted run, the figure-eight's chord after its loop or a run through its
+  junction, and the fused loose ends. The user guide and the architecture say
+  the same.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. No device change.

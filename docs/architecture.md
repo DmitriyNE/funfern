@@ -205,8 +205,8 @@ a separator validates both targets against one compiled draft, requires the same
 active face, attaches both endpoints, then assigns the single new daughter face in
 one document command. Span insertion remaps face anchors and expands boundary-probe
 paths before validation. Removal is planned on a copy: the geometry is cut or
-removed, dangling junctions pruned, curves that lost a junction promoted to
-baffles, and the result compiled; the region merge is then read off that result
+removed, dangling junctions pruned, loose ends left alone at a junction fused,
+and the result compiled; the region merge is then read off that result
 as the regions landing on one face rather than inferred from edge adjacency.
 Several regions landing on one face require an explicit survivor and remove
 probes or sources owned by the dropped regions atomically; regions landing on
@@ -227,9 +227,11 @@ without inserting a span, and a removal that leaves exactly two open-curve ends
 at a junction fuses them in the same command. The arrangement compiler rejects
 coincident endpoints and T-contacts that carry no authored vertex, so an authored
 vertex or a single joined curve is what makes a touch compile, not only what
-keeps it stable under editing. Promotion to a baffle follows the compiler's own
-rule: an open curve is demoted only when a free tip's adjacent span transmits, so
-a curve that keeps a transmitting span between two faces keeps it. A closed
+keeps it stable under editing. No edit changes a span's behaviour as a side
+effect: an open curve may end in open space with a transmitting span, so a
+curve a deletion, a cut or a weld frees keeps every span as it was. Until
+2026-10-20 such curves were demoted to reflecting baffles, everywhere in the
+scene, on a compiler rule 31c0d7e had removed. A closed
 curve's seam is node zero, which the span that ends there reaches at the period
 rather than at zero, so every parameter comparison against a closed curve's nodes
 wraps; without that the seam's junction is invisible from one side and a contact

@@ -237,10 +237,10 @@ running; this file covers using it.
   assignments agree. Shape-preserving insertion copies the split span assignment.
   A complete selected loop or baffle can be deleted with Delete or Backspace.
   Delete also accepts one contiguous run of spans: the run goes and the rest of
-  the curve stays as open baffles with the default wall, because an open curve
-  cannot keep a transmitting end at a free tip. A curve whose junction sat inside
-  the deleted run is promoted the same way and named in the status line, and two
-  loose ends the deletion leaves alone at a junction fuse into one curve.
+  the curve stays as open curves, each span behaving as it did. A curve whose
+  junction sat inside the deleted run keeps its behaviour too: a transmitting
+  separator left with a free end divides nothing, as a switched-off wall does.
+  Two loose ends the deletion leaves alone at a junction fuse into one curve.
   One Delete is one deletion however much it names: any number of curves whole
   and at most one of them cut down to a run, worked out together and applied as
   one history entry, so one undo brings the whole gesture back. Two curves each

@@ -181,7 +181,6 @@ pub struct JoinRecord {
 pub struct TopologyWeld {
     pub curve: CurveId,
     pub seam_control: Option<usize>,
-    pub promoted: bool,
     pub span_splits: Vec<TopologySpanSplit>,
     pub removed_regions: Vec<RegionId>,
     pub region_remaps: Vec<(RegionId, RegionId)>,
@@ -219,13 +218,11 @@ pub struct TopologyCurveEdit {
 
 /// What a deletion changed beyond the spans it named. `pieces` are the curves a
 /// partial cut left behind, in order, the first keeping the original identity;
-/// `promoted` names curves the deletion demoted to baffles because it freed one
-/// of their ends; `joined` records the pairs of loose ends it left at a two-arm
-/// junction and fused.
+/// `joined` records the pairs of loose ends it left at a two-arm junction and
+/// fused.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TopologyRemoval {
     pub pieces: Vec<CurveId>,
-    pub promoted: Vec<CurveId>,
     pub joined: Vec<JoinRecord>,
     pub removed_regions: Vec<RegionId>,
     pub region_remaps: Vec<(RegionId, RegionId)>,
@@ -1406,8 +1403,8 @@ impl TopologyEditor {
                 span_splits = splits;
             }
         }
-        // A join can hand transmitting spans a free tip; the result is a baffle.
-        let promoted = promote_curve_if_freed(&mut candidate.draft.geometry, face_curve);
+        // A join can leave the curve's other end free; a transmitting span
+        // there is as valid as anywhere, so the curve keeps every behaviour.
         let topology = compile_topology(&candidate.draft.geometry, self.revision.wrapping_add(1))
             .map_err(|issue| issue.to_string())?;
         self.assign_new_faces(
@@ -1445,7 +1442,6 @@ impl TopologyEditor {
         Ok(TopologyWeldOutcome::Welded(TopologyWeld {
             curve: face_curve,
             seam_control,
-            promoted,
             span_splits,
             removed_regions: settlement.removed_regions,
             region_remaps: settlement.region_remaps,
@@ -1457,7 +1453,7 @@ impl TopologyEditor {
     /// deletion merges subdomains and the caller must say which survives; a
     /// deletion that would merge subdomains in more than one place is refused
     /// here rather than asked about. The answer comes from compiling the whole
-    /// removal, so it already accounts for curves it promotes or welds.
+    /// removal, so it already accounts for curves it cuts or fuses.
     pub fn removal_choices(&self, target: &TopologyRemovalTarget) -> Result<Vec<RegionId>, String> {
         Ok(self.plan_removal(target)?.landings.choices())
     }
@@ -1661,12 +1657,12 @@ impl TopologyEditor {
     /// Deletes everything the target names as one history entry, resolving any
     /// face merge with `keep_region`.
     ///
-    /// A curve cut in part leaves the spans outside the run as open pieces, and
-    /// every surviving piece becomes a baffle with the default wall, because an
-    /// open curve that kept a transmitting end span with a free tip is rejected
-    /// by the arrangement compiler. Any curve the deletion frees from a junction
-    /// is promoted the same way, and two loose ends left at a junction fuse into
-    /// one curve.
+    /// A curve cut in part leaves the spans outside the run as open pieces, each
+    /// span keeping its behaviour, and two loose ends left at a junction fuse
+    /// into one curve. Nothing is demoted to a wall: an open curve may end in
+    /// open space with a transmitting span (31c0d7e), which is how a wall is
+    /// switched off, and a deletion used to turn every such curve in the scene
+    /// back into one.
     pub fn remove(
         &mut self,
         target: &TopologyRemovalTarget,
@@ -1676,7 +1672,6 @@ impl TopologyEditor {
         let outcome = self.apply_removal(plan, keep_region)?;
         Ok(TopologyRemoval {
             pieces: outcome.pieces,
-            promoted: outcome.promoted,
             joined: outcome.joined,
             removed_regions: outcome.removed_regions,
             region_remaps: outcome.region_remaps,
@@ -1704,7 +1699,7 @@ impl TopologyEditor {
     }
 
     /// Works a removal out on a copy of the document: cuts or removes the
-    /// geometry, prunes and promotes, fuses loose ends the removal leaves at a
+    /// geometry, prunes dangling junctions, fuses loose ends the removal leaves at a
     /// two-arm junction, compiles, and finds where every old face landed. The
     /// editor is untouched and no id is allocated — a second cut piece takes the
     /// next curve id provisionally and `apply_removal` claims it.
@@ -1774,10 +1769,7 @@ impl TopologyEditor {
                 let spans = piece
                     .spans
                     .iter()
-                    .map(|span| CurveSpan {
-                        id: curve.spans[*span].id,
-                        behavior: SpanBehavior::REFLECTING,
-                    })
+                    .map(|span| curve.spans[*span])
                     .collect::<Vec<_>>();
                 let mut built_piece = TopologyCurve::new(id, piece.spline.clone(), spans)
                     .map_err(|issue| issue.to_string())?;
@@ -1852,19 +1844,10 @@ impl TopologyEditor {
             pieces = built.iter().map(|piece| piece.id).collect();
         }
         prune_dangling_junctions(&mut candidate.draft.geometry);
-        let mut promoted = promote_freed_curves(&mut candidate.draft.geometry);
         let joined = join_valence_two_ends(&mut candidate, &touched);
-        if !joined.is_empty() {
-            for record in &joined {
-                reparameterised.insert(record.survivor);
-                reparameterised.insert(record.absorbed);
-            }
-            // A fusion can hand transmitting spans a free tip.
-            for curve in promote_freed_curves(&mut candidate.draft.geometry) {
-                if !promoted.contains(&curve) {
-                    promoted.push(curve);
-                }
-            }
+        for record in &joined {
+            reparameterised.insert(record.survivor);
+            reparameterised.insert(record.absorbed);
         }
         let existing = candidate
             .draft
@@ -1940,7 +1923,6 @@ impl TopologyEditor {
             topology,
             landings,
             pieces,
-            promoted,
             joined,
             removed_probes,
             provisional_curve,
@@ -1969,7 +1951,6 @@ impl TopologyEditor {
             topology,
             landings,
             pieces,
-            promoted,
             joined,
             mut removed_probes,
             provisional_curve,
@@ -1994,7 +1975,6 @@ impl TopologyEditor {
         self.changed();
         Ok(RemovalOutcome {
             pieces,
-            promoted,
             joined,
             removed_regions,
             region_remaps,
@@ -3944,25 +3924,6 @@ fn close_curve_geometry(
     Ok(())
 }
 
-/// Demotes one open curve to a baffle when it holds a transmitting span and a
-/// free tip, which the arrangement compiler would otherwise reject.
-fn promote_curve_if_freed(geometry: &mut TopologyGeometry, curve_id: CurveId) -> bool {
-    let Some(curve) = geometry
-        .curves
-        .iter_mut()
-        .find(|curve| curve.id == curve_id)
-    else {
-        return false;
-    };
-    if !curve.spline.is_open() || !free_transmitting_end(curve) {
-        return false;
-    }
-    for span in &mut curve.spans {
-        span.behavior = SpanBehavior::REFLECTING;
-    }
-    true
-}
-
 fn open_spline_midpoint(spline: &OpenCubicSpline) -> Point2 {
     spline.evaluate(spline.period() * 0.5)
 }
@@ -4654,31 +4615,6 @@ impl CurveCut {
     }
 }
 
-/// Demotes an open curve to a baffle when one of its free tips ends in a
-/// transmitting span, which the arrangement compiler rejects. A mixed curve
-/// whose free tip is already a wall keeps its transmitting spans: they still
-/// separate two faces. Promotion frees no further endpoints, so one pass settles.
-fn promote_freed_curves(geometry: &mut TopologyGeometry) -> Vec<CurveId> {
-    let mut promoted = vec![];
-    for curve in &mut geometry.curves {
-        if curve.spline.is_open() && free_transmitting_end(curve) {
-            for span in &mut curve.spans {
-                span.behavior = SpanBehavior::REFLECTING;
-            }
-            promoted.push(curve.id);
-        }
-    }
-    promoted
-}
-
-/// Whether an open curve has a free tip whose adjacent span transmits.
-fn free_transmitting_end(curve: &TopologyCurve) -> bool {
-    let last = curve.nodes.len() - 1;
-    (curve.nodes[0].vertex.is_none() && curve.spans[0].behavior == SpanBehavior::Transmitting)
-        || (curve.nodes[last].vertex.is_none()
-            && curve.spans[curve.spans.len() - 1].behavior == SpanBehavior::Transmitting)
-}
-
 /// Moves boundary probes onto the surviving piece that keeps more of their path,
 /// mirroring the pre-topology baffle split, and drops the probes that keep
 /// nothing or would no longer describe one contiguous run.
@@ -5036,13 +4972,12 @@ struct MergeSettlement {
 
 /// A removal worked out to the point where only the survivor choice is missing.
 /// Nothing in it has touched the editor: `candidate` is the geometry after the
-/// cut, pruning, promotion, and welding, compiled into `topology`.
+/// cut, pruning and fusing, compiled into `topology`.
 struct RemovalPlan {
     candidate: TopologyDocumentModel,
     topology: TopologySnapshot,
     landings: Landings,
     pieces: Vec<CurveId>,
-    promoted: Vec<CurveId>,
     joined: Vec<JoinRecord>,
     removed_probes: Vec<ProbeId>,
     provisional_curve: bool,
@@ -5050,7 +4985,6 @@ struct RemovalPlan {
 
 struct RemovalOutcome {
     pieces: Vec<CurveId>,
-    promoted: Vec<CurveId>,
     joined: Vec<JoinRecord>,
     removed_regions: Vec<RegionId>,
     region_remaps: Vec<(RegionId, RegionId)>,
@@ -7929,6 +7863,26 @@ mod tests {
             .collect()
     }
 
+    /// A curve's spans, each with its behaviour.
+    fn spans_of(editor: &TopologyEditor, curve: CurveId) -> Vec<CurveSpan> {
+        editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(curve)
+            .unwrap()
+            .spans
+            .clone()
+    }
+
+    /// Whether each of `curve`'s spans still behaves as it did in `before`.
+    fn behaviours_kept(editor: &TopologyEditor, curve: CurveId, before: &[CurveSpan]) -> bool {
+        spans_of(editor, curve)
+            .iter()
+            .all(|span| before.iter().any(|old| old == span))
+    }
+
     fn all_separated(editor: &TopologyEditor, curve: CurveId) -> bool {
         editor
             .document
@@ -8376,7 +8330,7 @@ mod tests {
     /// Deleting part of a closed subdomain opens the loop into a baffle and    /// Deleting part of a closed subdomain opens the loop into a baffle and
     /// merges the interior into its neighbour.
     #[test]
-    fn deleting_part_of_a_closed_subdomain_leaves_one_baffle() {
+    fn deleting_part_of_a_closed_subdomain_leaves_one_open_curve() {
         let mut editor = TopologyEditor::default();
         let curve = editor
             .create_closed_curve(
@@ -8388,6 +8342,7 @@ mod tests {
             .unwrap();
         settle(&mut editor);
         let spans = span_ids(&editor, curve);
+        let before = spans_of(&editor, curve);
         let selected = [spans[2]].into_iter().collect::<BTreeSet<_>>();
         let choices = editor.span_removal_choices(&selected).unwrap();
         assert_eq!(choices.len(), 2, "background and interior both qualify");
@@ -8399,12 +8354,14 @@ mod tests {
         settle(&mut editor);
         assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
         assert_eq!(removal.pieces, vec![curve]);
-        assert!(removal.promoted.is_empty());
 
         let remaining = editor.document.model.draft.geometry.curve(curve).unwrap();
-        assert!(remaining.spline.is_open(), "the loop became a baffle");
+        assert!(remaining.spline.is_open(), "the loop became an open curve");
         assert_eq!(remaining.spans.len(), spans.len() - 1);
-        assert!(all_separated(&editor, curve));
+        assert!(
+            behaviours_kept(&editor, curve, &before),
+            "every span the deletion left keeps its behaviour"
+        );
         let kept = span_ids(&editor, curve)
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -8427,9 +8384,9 @@ mod tests {
     }
 
     /// Deleting the middle of an attached separator leaves two pieces, each still
-    /// attached at its outer end.
+    /// attached at its outer end and transmitting as the separator did.
     #[test]
-    fn deleting_the_middle_of_a_separator_leaves_two_attached_baffles() {
+    fn deleting_the_middle_of_a_separator_leaves_two_attached_pieces() {
         let mut editor = TopologyEditor::default();
         let domain = editor.document.model.draft.geometry.domain;
         let edit = editor
@@ -8458,6 +8415,7 @@ mod tests {
         assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
         let spans = span_ids(&editor, edit.curve);
         assert_eq!(spans.len(), 3);
+        let before = spans_of(&editor, edit.curve);
 
         let selected = [spans[1]].into_iter().collect::<BTreeSet<_>>();
         let choices = editor.span_removal_choices(&selected).unwrap();
@@ -8477,7 +8435,7 @@ mod tests {
             let curve = editor.document.model.draft.geometry.curve(*piece).unwrap();
             assert!(curve.spline.is_open());
             assert_eq!(curve.spans.len(), 1);
-            assert!(all_separated(&editor, *piece));
+            assert!(behaviours_kept(&editor, *piece, &before));
             let attached = [curve.nodes.first(), curve.nodes.last()]
                 .into_iter()
                 .flatten()
@@ -8620,12 +8578,66 @@ mod tests {
         );
     }
 
-    /// A separator attached inside the deleted run would be left transmitting    /// A separator attached inside the deleted run would be left transmitting
-    /// with a free tip, which the compiler rejects, so it is promoted too. The
-    /// host is a baffle with a free end, so only the separator's own two sides
-    /// merge and the two-region cap is not what is under test here.
+    /// A separator attached inside the deleted run would be left transmitting    /// Reported by the 2026-10-20 review (ED-1): a free baffle switched to
+    /// Transmit is how a wall is held switched off without deleting it, and
+    /// deleting a hole elsewhere in the scene turned it back into a wall, a
+    /// scatterer far from the edit, named only as "1 attached curve promoted
+    /// to baffles".
     #[test]
-    fn deleting_a_run_promotes_the_curve_it_frees() {
+    fn deleting_a_curve_leaves_an_unrelated_transmitting_baffle_alone() {
+        let mut editor = TopologyEditor::default();
+        let baffle = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.6, -0.3),
+                    Point2::new(-0.6, 0.0),
+                    Point2::new(-0.6, 0.3),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let spans = span_ids(&editor, baffle)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        editor
+            .set_span_behavior(&spans, SpanBehavior::Transmitting)
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let hole = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.5, 0.0), 0.2),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+
+        editor
+            .remove(&TopologyRemovalTarget::curve(hole), None)
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let kept = editor.document.model.draft.geometry.curve(baffle).unwrap();
+        assert!(
+            kept.spans
+                .iter()
+                .all(|span| span.behavior == SpanBehavior::Transmitting),
+            "the switched-off baffle is a wall again"
+        );
+    }
+
+    /// A separator attached inside the deleted run is left transmitting with a
+    /// free tip, which is valid (31c0d7e): it divides nothing now, and keeps
+    /// its behaviour rather than turning into a wall. The host is a baffle with
+    /// a free end, so only the separator's own two sides merge and the
+    /// two-region cap is not what is under test here.
+    #[test]
+    fn deleting_a_run_leaves_the_curve_it_frees_transmitting() {
         let mut editor = TopologyEditor::default();
         let domain = editor.document.model.draft.geometry.domain;
         let host = editor
@@ -8710,22 +8722,22 @@ mod tests {
         let selected = host_spans[1..3].iter().copied().collect::<BTreeSet<_>>();
         let choices = editor.span_removal_choices(&selected).unwrap();
         assert!(choices.len() <= 2, "expected at most two merging regions");
-        let removal = match editor.remove_spans(&selected, choices.last().copied()) {
-            Ok(removal) => removal,
+        let freed = spans_of(&editor, separator.curve);
+        assert!(!all_separated(&editor, separator.curve));
+        match editor.remove_spans(&selected, choices.last().copied()) {
+            Ok(_) => {}
             Err(error) => panic!("partial deletion refused: {error}"),
-        };
+        }
         settle(&mut editor);
         assert_eq!(
             editor.acceptance,
             TopologyAcceptance::Valid,
-            "a freed transmitting end would have made this invalid"
+            "a transmitting curve with a free end is valid"
         );
         assert!(
-            removal.promoted.contains(&separator.curve),
-            "the freed separator must be reported as promoted, got {:?}",
-            removal.promoted
+            behaviours_kept(&editor, separator.curve, &freed),
+            "the freed separator keeps its behaviour"
         );
-        assert!(all_separated(&editor, separator.curve));
     }
 
     /// A transmitting span with an excluded face on one side has nothing to
@@ -10111,10 +10123,10 @@ mod tests {
     }
 
     /// One contiguous run through a junction node frees the chord and merges
-    /// all three faces; every survivor is a legal answer and the chord becomes
-    /// a baffle.
+    /// all three faces; every survivor is a legal answer and the chord keeps
+    /// its behaviour, a separator that divides nothing now.
     #[test]
-    fn deleting_through_a_junction_offers_three_survivors_and_promotes_the_chord() {
+    fn deleting_through_a_junction_offers_three_survivors_and_keeps_the_chord() {
         let mut editor = TopologyEditor::default();
         let (loop_id, _) = figure_eight(&mut editor);
         let selected = junction_run(&editor, loop_id);
@@ -10124,6 +10136,7 @@ mod tests {
         for index in 0..3 {
             let mut editor = TopologyEditor::default();
             let (loop_id, chord) = figure_eight(&mut editor);
+            let before = spans_of(&editor, chord);
             let selected = junction_run(&editor, loop_id);
             let choices = editor.span_removal_choices(&selected).unwrap();
             let removal = editor
@@ -10131,8 +10144,7 @@ mod tests {
                 .unwrap();
             settle(&mut editor);
             assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
-            assert_eq!(removal.promoted, vec![chord]);
-            assert!(all_separated(&editor, chord));
+            assert!(behaviours_kept(&editor, chord, &before));
             assert_eq!(editor.document.model.draft.regions.len(), 1);
             assert_eq!(removal.removed_regions.len(), 2);
         }
@@ -10241,20 +10253,21 @@ mod tests {
         assert_eq!(editor.curve_removal_choices(up).unwrap().len(), 2);
     }
 
-    /// Removing the loop frees both chord ends: the chord becomes a baffle
-    /// instead of leaving the draft invalid.
+    /// Removing the loop frees both chord ends: the chord keeps its spans as
+    /// they were, a separator that divides nothing, and the draft stays valid.
     #[test]
-    fn removing_the_loop_promotes_the_chord_to_a_baffle() {
+    fn removing_the_loop_leaves_the_chord_as_it_was() {
         let mut editor = TopologyEditor::default();
         let (loop_id, chord) = figure_eight(&mut editor);
+        let before = spans_of(&editor, chord);
+        assert!(!all_separated(&editor, chord));
         assert_eq!(editor.curve_removal_choices(loop_id).unwrap().len(), 3);
-        let removal = editor
+        editor
             .remove_curve(loop_id, Some(BACKGROUND_REGION))
             .unwrap();
         settle(&mut editor);
         assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
-        assert_eq!(removal.promoted, vec![chord]);
-        assert!(all_separated(&editor, chord));
+        assert!(behaviours_kept(&editor, chord, &before));
         assert_eq!(editor.document.model.draft.geometry.curves.len(), 1);
         assert_eq!(editor.document.model.draft.regions.len(), 1);
         assert!(editor.undo());
@@ -11202,7 +11215,6 @@ mod tests {
         assert_eq!(removal.joined.len(), 1);
         let record = removal.joined[0];
         assert_eq!((record.survivor, record.absorbed), (loop_id, chord));
-        assert!(removal.promoted.is_empty());
         let geometry = &editor.document.model.draft.geometry;
         assert!(geometry.curve(chord).is_none());
         assert!(
