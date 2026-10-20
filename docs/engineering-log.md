@@ -25820,3 +25820,38 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. The five mutations on Metal: 5 of 5
   detected.
+
+## 2026-10-20 — Step 1: driven handoffs at a running time (RT-1)
+
+- **Found by the review (RT-1), confirmed by hand.** Since ab17b11 a
+  handoff's candidate is packed against the time the run has reached, but
+  `compile_generation_plan` built a driven candidate's state at zero.
+  `compile_temporal` holds a temporal plan's state and clock to one boundary
+  and refused it. So every edit and AMR adaptation of a pump, time crystal,
+  Kerr, Josephson or Switch scene was refused once the run had advanced.
+- **Why nothing caught it.**
+  - The driven pack tests packed at a running time of zero.
+  - No fixture handed a driven generation off through the app.
+  - The device examples pack their own clocks.
+- **Reproduced.**
+  - The four driven pack tests in `ui::materials` now pack through `pack`, at
+    zero and at 37.25 s. At 37.25 s, both whose target is driven were refused
+    with the boundary error.
+  - The new fixture `handoff-driven` is the cavity with a parametric-pump disc,
+    its default medium's permittivity raised at step 128. It timed out
+    waiting for the handoff.
+- **Fix.** The candidate's state is built at rest at the clock's own time
+  (`new_at`); the transfer replaces it on the device anyway.
+  - The pack tests pass.
+  - `handoff-driven` reads Q 8.5e-7 and b 1.0e-6, and the run without the
+    edit stands 1.6 off. So a driven handoff at a running time is right on the
+    device as well, the pump's runtime carried.
+- **The fixtures' reference** now hands off driven generations, and
+  generations going between fixed and driven, by the core's handoffs
+  (`handed_over`, `handed_from_fixed`, `handed_from_driven`). Until now it
+  refused anything driven.
+- **Mutation** `driven-candidate-at-zero` (cpu): caught by the pack tests.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. The device suite ran once, on the tree of
+  this commit and the next (GPU-2) together: 94 of 94.

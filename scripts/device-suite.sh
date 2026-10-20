@@ -111,6 +111,7 @@ RUNS=(
   'FUNFERN_E2E=cavity-batches funfern-fixtures'
   'FUNFERN_E2E=switch funfern-fixtures'
   'FUNFERN_E2E=handoff funfern-fixtures'
+  'FUNFERN_E2E=handoff-driven funfern-fixtures'
   'FUNFERN_E2E=remesh funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-rebuild funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-remesh funfern-fixtures'

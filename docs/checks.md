@@ -66,7 +66,14 @@ an admitted handoff. The reference carries its own state through the maps the
 candidate was prepared with, taken from it before the runtime drops them, keeps
 each component's total as the device does, and steps on at the step the app
 uploaded. Q reads `9.9e-7`, the run without the edit `1.4` off; a reference left
-on the old step fails at 1.1. `remesh` sets the target edge finer at step 128,
+on the old step fails at 1.1. `handoff-driven` is `handoff` with a disc of the
+parametric pump, a medium driven from the run's start: the same edit hands one
+driven generation to another, its candidate packed against the time the run
+had reached, and the reference carries its state by the core's driven
+handoff, the pump's runtime with it. Q reads `8.5e-7` and b `1.0e-6`, the run
+without the edit `1.6` off. Until 2026-10-20 the app refused every driven
+handoff once a run had advanced, and the fixture timed out waiting for it.
+`remesh` sets the target edge finer at step 128,
 nothing else changed: the field is interpolated from 11,121 nodes onto 15,349 of
 the same geometry. Q reads `7.7e-7`, and a reference that drops the component
 totals the runtime keeps reads 2.5e-5 and fails. The five `handoff-memory`

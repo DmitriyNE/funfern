@@ -1266,6 +1266,11 @@ material edit anyway, a Fire included.
     new generation starts on by the delay since, a phase step `ω × delay` in
     f32. Packed against zero, the delay was the run's whole age, and a drive
     started 36 hours in landed 0.02 to 0.05 rad off (fixed 2026-10-18).
+  - **Driven candidates.** A driven candidate's state is built at rest at its
+    clock's own time, which the transfer then replaces. Built at zero, its
+    state and clock stopped sharing a boundary once the clock started at the
+    running time, and every driven handoff was refused once a run had
+    advanced (fixed 2026-10-20).
   - **Late in an epoch.** The local time is one f32 near 256 s, 3e-5 s apart,
     and drive phases carry about 1e-4 rad from it.
 - **Loss:** a lossy time-driven generation carries one loss record per

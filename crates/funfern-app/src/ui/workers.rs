@@ -733,9 +733,20 @@ fn compile_generation_plan(
     clock: CanonicalGpuClock,
 ) -> Result<CanonicalGpuPlan, String> {
     match &prepared.canonical_temporal_operator {
+        // At rest at the clock's own time: a handoff's candidate starts its
+        // clock where the run is, and its transfer replaces this state on the
+        // device; only a fresh one starts at zero. Built at zero, every driven
+        // handoff was refused as soon as a run had advanced, since a temporal
+        // plan holds its state and clock to one boundary.
         Some(temporal) => {
-            let state = CanonicalTemporalWaveState::zero(temporal, time_step)
-                .map_err(|error| error.to_string())?;
+            let state = CanonicalTemporalWaveState::new_at(
+                temporal,
+                time_step,
+                vec![0.0; temporal.base().degrees_of_freedom()],
+                vec![Point2::default(); temporal.base().complementary_degrees_of_freedom()],
+                clock.time(),
+            )
+            .map_err(|error| error.to_string())?;
             CanonicalGpuPlan::compile_temporal(temporal, &state, &prepared.canonical_forcing, clock)
         }
         // A fixed generation inverts its trace system here, once, so the device

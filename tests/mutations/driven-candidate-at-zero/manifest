@@ -1,0 +1,4 @@
+about: a driven candidate's state is built at zero again while its clock starts at the running time, so every driven handoff is refused once a run has advanced
+test: cargo test -p funfern-app --release --locked --lib second_preset_reproduction
+expect: must share one boundary
+needs: cpu

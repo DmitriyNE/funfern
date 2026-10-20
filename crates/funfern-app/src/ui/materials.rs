@@ -3181,6 +3181,40 @@ mod second_preset_reproduction {
     use super::super::workers::compile_gpu_upload;
     use super::*;
 
+    /// Where a running app's handoff starts. It packs the candidate against
+    /// the time the run has reached (`dispatch_pack`), and every pack below
+    /// is taken there as well as at zero, an edit before the first step: the
+    /// tests packed at zero alone, and every driven handoff was refused once
+    /// a run had advanced (RT-1 of the 2026-10-20 review).
+    const RUNNING_TIME: f64 = 37.25;
+
+    /// `candidate` packed against `active` at zero and at [`RUNNING_TIME`];
+    /// the latter, whose clock starts at the running time.
+    fn pack(
+        candidate: &PreparedTopology,
+        active: &Arc<PreparedTopology>,
+        time_step: f64,
+    ) -> Result<PreparedGpuUpload, String> {
+        let pack_at = |running_time| {
+            compile_gpu_upload(
+                candidate.clone(),
+                Some(active.clone()),
+                time_step,
+                running_time,
+                [0; 4],
+            )
+        };
+        pack_at(0.0).map_err(|error| format!("at zero: {error}"))?;
+        let running =
+            pack_at(RUNNING_TIME).map_err(|error| format!("at {RUNNING_TIME} s: {error}"))?;
+        assert_eq!(
+            running.plan.clock_origin_seconds(),
+            RUNNING_TIME,
+            "a handoff's candidate starts its clock where the run is"
+        );
+        Ok(running)
+    }
+
     /// Reported from the running application: with a driven medium the phase
     /// label churned every frame, adaptation never ran, the frame rate fell and
     /// handoffs piled up - the host was preparing the same generation over and
@@ -3372,14 +3406,8 @@ mod second_preset_reproduction {
 
         let crystal = apply(&mut state, "Time crystal");
         assert!(crystal.driven() && !crystal.fresh);
-        let packed = compile_gpu_upload(
-            PreparedTopology::clone(&crystal),
-            Some(pumped),
-            step(&crystal),
-            0.0,
-            [0; 4],
-        )
-        .expect("one driven generation hands off to another");
+        let packed = pack(&crystal, &pumped, step(&crystal))
+            .expect("one driven generation hands off to another");
         let transfer = packed
             .transfer
             .as_ref()
@@ -3403,14 +3431,8 @@ mod second_preset_reproduction {
         // A medium that stops being driven still shares its field with what
         // came before. Only the runtime bank goes, and a bank with no records
         // to write is nothing to carry, so this hands off like any other edit.
-        let packed = compile_gpu_upload(
-            PreparedTopology::clone(&inert),
-            Some(crystal),
-            step(&inert),
-            0.0,
-            [0; 4],
-        )
-        .expect("undriving a generation still packs");
+        let packed =
+            pack(&inert, &crystal, step(&inert)).expect("undriving a generation still packs");
         let transfer = packed
             .transfer
             .as_ref()
@@ -3501,14 +3523,8 @@ mod second_preset_reproduction {
                 .maximum_time_step()
         );
 
-        compile_gpu_upload(
-            PreparedTopology::clone(&inert),
-            Some(pumped),
-            candidate_step,
-            0.0,
-            [0; 4],
-        )
-        .expect("switching back to linear must pack at the step the host chose");
+        pack(&inert, &pumped, candidate_step)
+            .expect("switching back to linear must pack at the step the host chose");
     }
 
     /// Switching a drive *on* is the direction that was reported: the field
@@ -3565,14 +3581,8 @@ mod second_preset_reproduction {
         let driven = prepare(&mut state);
         assert!(driven.driven() && !driven.fresh);
 
-        let packed = compile_gpu_upload(
-            PreparedTopology::clone(&driven),
-            Some(inert),
-            driven.recommended_time_step(),
-            0.0,
-            [0; 4],
-        )
-        .expect("enabling a drive still packs");
+        let packed = pack(&driven, &inert, driven.recommended_time_step())
+            .expect("enabling a drive still packs");
         let transfer = packed
             .transfer
             .as_ref()

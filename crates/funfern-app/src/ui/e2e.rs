@@ -39,7 +39,8 @@ use bevy::render::{
 use bevy_egui::EguiPrimaryContextPass;
 use check::{within, worse};
 use funfern_core::{
-    CanonicalTemporalWaveState, CanonicalWaveState, OuterBoundaryCondition, OuterBoundaryConditions,
+    CanonicalHandoffMaps, CanonicalTemporalWaveState, CanonicalWaveState, OuterBoundaryCondition,
+    OuterBoundaryConditions,
 };
 use std::collections::{BTreeSet, VecDeque};
 
@@ -92,6 +93,7 @@ pub(crate) fn add(app: &mut App) {
         ),
         "switch" => (Fixture::Switch, vec![None]),
         "handoff" => (Fixture::Handoff, vec![None]),
+        "handoff-driven" => (Fixture::HandoffDriven, vec![None]),
         "remesh" => (Fixture::Remesh, vec![None]),
         "handoff-memory-rebuild" => (Fixture::HandoffMemory(MemoryHandoff::Rebuild), vec![None]),
         "handoff-memory-remesh" => (Fixture::HandoffMemory(MemoryHandoff::Remesh), vec![None]),
@@ -169,6 +171,13 @@ enum Fixture {
     /// The cavity, its medium's permittivity raised at step 128 of 256: a
     /// whole new generation, handed the running field on the same mesh.
     Handoff,
+    /// `Handoff` with a disc of a parametric pump, a medium driven from the
+    /// run's start: a driven generation handed to another, its candidate
+    /// packed against the time the run had reached and the pump's phase
+    /// carried, read against the core's driven handoff. Until 2026-10-20
+    /// every driven handoff was refused once a run had advanced (RT-1 of
+    /// that day's review).
+    HandoffDriven,
     /// The cavity remeshed finer at step 128 of 256, nothing else changed:
     /// the field is interpolated onto another mesh of the same geometry, its
     /// component totals kept.
@@ -294,7 +303,7 @@ impl Fixture {
         match self {
             Fixture::Cavity | Fixture::CavityBatches => (&[], 256),
             Fixture::Switch => (&[(128, Action::Switch)], 256),
-            Fixture::Handoff => (&[(128, Action::Edit)], 256),
+            Fixture::Handoff | Fixture::HandoffDriven => (&[(128, Action::Edit)], 256),
             Fixture::Remesh => (&[(128, Action::Remesh)], 256),
             // The pulse's front reaches the wall near step 150: the handoff
             // comes once the wall holds memory, and the run goes on for as
@@ -362,7 +371,7 @@ impl Fixture {
     /// The mesh the fixture's document must be built on.
     fn mesh(self) -> &'static str {
         match self {
-            Fixture::Switch => DISC_MESH,
+            Fixture::Switch | Fixture::HandoffDriven => DISC_MESH,
             Fixture::Observables => CHANNEL_MESH,
             Fixture::FarField | Fixture::FarFieldLate => HOLE_MESH,
             _ => CAVITY_MESH,
@@ -378,6 +387,7 @@ impl Fixture {
             | Fixture::Remesh
             | Fixture::DeviceLoss => (cavity_document(), None),
             Fixture::Rejection => (rejection_document(), None),
+            Fixture::HandoffDriven => (pump_document(), None),
             Fixture::Observables => (observables::observables_document(), None),
             Fixture::FarField => (far_field::far_field_document(0.0), None),
             Fixture::FarFieldLate => (
@@ -895,6 +905,36 @@ fn switch_document() -> (TopologyDocument, MaterialId) {
     (document, material)
 }
 
+/// The cavity with the switch fixture's disc a parametric pump on its mass
+/// row: a medium driven from the run's start.
+fn pump_document() -> TopologyDocument {
+    let mut editor = TopologyEditor::from_document(cavity_document()).expect("the cavity opens");
+    let material = editor.add_material().expect("a material to pump");
+    let medium = editor
+        .document
+        .model
+        .draft
+        .material(material)
+        .expect("the material added")
+        .clone();
+    let preset = law_presets()
+        .iter()
+        .find(|preset| preset.name == "Parametric pump" && preset.row == LawPresetRow::Mass)
+        .expect("the parametric pump preset");
+    editor
+        .update_material(apply_law_preset(preset, &medium).expect("the preset applies"))
+        .expect("the pumped medium");
+    editor
+        .create_closed_curve(
+            PeriodicCubicSpline::rounded(Point2::new(0.15, -0.1), 0.3),
+            ClosedCurvePurpose::Subdomain { material },
+        )
+        .expect("the disc");
+    let mut document = editor.document;
+    document.model.accepted = document.model.draft.clone();
+    document
+}
+
 /// Advances the fixture a phase; answers a run's verdict once it has one.
 fn advance(
     driver: &mut Driver,
@@ -961,8 +1001,8 @@ fn advance(
                 return Some(Err(failure));
             }
             let temporal = active.canonical_temporal_operator.is_some();
-            let expected =
-                driver.material.is_some() || matches!(driver.fixture, Fixture::Rejection);
+            let expected = driver.material.is_some()
+                || matches!(driver.fixture, Fixture::Rejection | Fixture::HandoffDriven);
             if temporal != expected {
                 return Some(Err(format!(
                     "the document prepared a {} generation",
@@ -1435,7 +1475,7 @@ fn advance(
                         display.runtime_serials,
                     );
                     match handed {
-                        Ok((handed, carry)) => {
+                        Ok((handed, carry, target)) => {
                             reference.state = handed;
                             reference.carry = carry;
                             reference.active = target;
@@ -1816,17 +1856,20 @@ fn advance(
 /// could not hold. The state's clock runs on from the time the run reached,
 /// as the device's clock origin does, so the generation's forcing reads the
 /// phase the signals had got to.
+///
+/// A driven generation, or one going between fixed and driven, is handed by
+/// the core's handoffs, which the device's transfer table is built from;
+/// no fixture with a wall is driven. The generation returned is the one the
+/// reference steps on.
 fn hand_off(
     reference: &Reference,
     target: &PreparedTopology,
     carried: &Carried,
     time_step: f64,
     runtime_serials: [u32; 4],
-) -> Result<(State, Option<MemoryCarry>), String> {
+) -> Result<(State, Option<MemoryCarry>, Arc<PreparedTopology>), String> {
     let source = &reference.active;
-    let State::Fixed(running) = &reference.state else {
-        return Err("a handoff of a time-varying reference".into());
-    };
+    let target = Arc::new(target.clone());
     let maps = &carried.maps;
     let runtime = CanonicalGpuRuntimeTransfer::from_primary_transfer(
         &source.canonical_operator,
@@ -1842,7 +1885,58 @@ fn hand_off(
     } else {
         runtime.without_total_correction()
     };
-    let desired = runtime.desired_totals(&source.canonical_operator, running.primary_flux());
+    let desired = runtime.desired_totals(&source.canonical_operator, reference.state.primary());
+    let handoff_maps = CanonicalHandoffMaps {
+        primary: &maps.primary,
+        complementary: &maps.complementary,
+        thin_gap: &maps.thin_gap,
+        outgoing: &maps.outgoing,
+    };
+    let forcing = &target.canonical_forcing;
+    let driven = match (
+        &reference.state,
+        &source.canonical_temporal_operator,
+        &target.canonical_temporal_operator,
+    ) {
+        (State::Fixed(_), None, None) => None,
+        (State::Temporal(running), Some(from), Some(to)) => Some(
+            running
+                .handed_over(from, to, forcing, handoff_maps, &desired, time_step)
+                .map(|handed| State::Temporal(handed.state)),
+        ),
+        (State::Fixed(running), None, Some(to)) => Some(
+            CanonicalTemporalWaveState::handed_from_fixed(
+                running,
+                &source.canonical_operator,
+                to,
+                forcing,
+                handoff_maps,
+                &desired,
+                time_step,
+            )
+            .map(|handed| State::Temporal(handed.state)),
+        ),
+        (State::Temporal(running), Some(from), None) => Some(
+            CanonicalWaveState::handed_from_driven(
+                running,
+                from,
+                &target.canonical_operator,
+                forcing,
+                handoff_maps,
+                &desired,
+                time_step,
+            )
+            .map(|(handed, _, _)| State::Fixed(handed)),
+        ),
+        _ => return Err("the reference's state and its generation disagree on a drive".into()),
+    };
+    if let Some(handed) = driven {
+        let handed = handed.map_err(|error| error.to_string())?;
+        return Ok((handed, None, target));
+    }
+    let State::Fixed(running) = &reference.state else {
+        unreachable!("a fixed generation's reference is fixed");
+    };
     let prescribed = target
         .canonical_forcing
         .prescribed()
@@ -1917,7 +2011,7 @@ fn hand_off(
             })
         }
     };
-    Ok((State::Fixed(handed), carry))
+    Ok((State::Fixed(handed), carry, target))
 }
 
 /// The energy a state holds, by component.

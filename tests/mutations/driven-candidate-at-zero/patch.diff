@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-app/src/ui/workers.rs b/crates/funfern-app/src/ui/workers.rs
+index afbf8ab..945a8fa 100644
+--- a/crates/funfern-app/src/ui/workers.rs
++++ b/crates/funfern-app/src/ui/workers.rs
+@@ -744,7 +744,7 @@ fn compile_generation_plan(
+                 time_step,
+                 vec![0.0; temporal.base().degrees_of_freedom()],
+                 vec![Point2::default(); temporal.base().complementary_degrees_of_freedom()],
+-                clock.time(),
++                0.0,
+             )
+             .map_err(|error| error.to_string())?;
+             CanonicalGpuPlan::compile_temporal(temporal, &state, &prepared.canonical_forcing, clock)
