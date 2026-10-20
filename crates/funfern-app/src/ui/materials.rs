@@ -347,15 +347,23 @@ impl Playground {
                             .update_while_editing(false),
                     );
                 });
+                // Degrees and back are not the identity on every angle, so
+                // the angle is written only when the field changed it: written
+                // every frame, the round trip committed 1-ulp edits with no
+                // input, which closed a gizmo drag early and undid an Undo.
                 let mut angle = frame.angle_radians.to_degrees();
-                ui.add(
-                    egui::DragValue::new(&mut angle)
-                        .speed(0.5)
-                        .suffix("°")
-                        .prefix("Angle ")
-                        .update_while_editing(false),
-                );
-                frame.angle_radians = angle.to_radians();
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut angle)
+                            .speed(0.5)
+                            .suffix("°")
+                            .prefix("Angle ")
+                            .update_while_editing(false),
+                    )
+                    .changed()
+                {
+                    frame.angle_radians = angle.to_radians();
+                }
                 if region.id != BACKGROUND_REGION {
                     egui::ComboBox::from_label("Attachment")
                         .selected_text(match frame.attachment {
@@ -2353,6 +2361,80 @@ mod tests {
         state.material_session.staged = None;
         state.select_region(region);
         assert_eq!(state.material_session.selection, DEFAULT_MATERIAL);
+    }
+
+    /// Reported by the 2026-10-20 review (UI-1): the panel took the frame's
+    /// angle to degrees for its field and back every frame, which is not the
+    /// identity, and wrote the result whenever it differed. On such an angle
+    /// it committed a 1-ulp edit with no input: a gizmo drag through it
+    /// committed early and could no longer be cancelled, and Undo restored an
+    /// angle the next frame wrote over, clearing Redo.
+    #[test]
+    fn the_frame_angle_is_written_only_when_its_field_changes() {
+        let mut state = Playground::default();
+        let crystal = crate::topology_examples::catalog()
+            .iter()
+            .find(|example| example.name == "Anisotropic crystal")
+            .expect("the gallery's crystal")
+            .document
+            .clone();
+        state.set_document(crystal, false, true).unwrap();
+        let region = state
+            .editor
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .find(|region| {
+                state
+                    .editor
+                    .document
+                    .model
+                    .draft
+                    .material(region.material)
+                    .is_some_and(Material::uses_frame)
+            })
+            .expect("the crystal's region")
+            .id;
+        let angle = (0..100_000)
+            .map(|step| (64.0 + 1.0e-3 * f64::from(step)).to_radians())
+            .find(|angle| angle.to_degrees().to_radians() != *angle)
+            .expect("an angle the round trip moves");
+        let frame_of = |state: &Playground| {
+            state
+                .editor
+                .document
+                .model
+                .draft
+                .regions
+                .iter()
+                .find(|candidate| candidate.id == region)
+                .unwrap()
+                .frame
+        };
+        let mut frame = frame_of(&state);
+        frame.angle_radians = angle;
+        state.editor.set_region_frame(region, frame).unwrap();
+        state.select_region(region);
+        let history = state.editor.history_len();
+
+        let context = egui::Context::default();
+        for _ in 0..4 {
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                state.materials_panel(ui);
+            });
+        }
+        assert_eq!(
+            frame_of(&state).angle_radians,
+            angle,
+            "the panel moved the angle with no input"
+        );
+        assert_eq!(
+            state.editor.history_len(),
+            history,
+            "the panel wrote an edit with no input"
+        );
     }
 
     /// Reported: Apply put a material's old colour back. The picker commits

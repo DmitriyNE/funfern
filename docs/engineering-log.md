@@ -25941,3 +25941,25 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. No device change.
+
+## 2026-10-21 — Step 2: the frame angle is written only when edited (UI-1)
+
+- **Found by the review (UI-1).** The material panel's Profile placement
+  took the region frame's angle to degrees for its field, back to radians,
+  and wrote the frame whenever the result differed from the stored one.
+  Degrees and back is not the identity: 1.1176739463921288 comes back as
+  1.117673946392129. So on such an angle the panel committed a 1-ulp edit
+  every frame with no input.
+  - A gizmo drag through those angles (64 to 115° on the gallery's crystal)
+    committed mid-drag and could no longer be cancelled.
+  - Undo restored an angle the next frame wrote over, clearing Redo.
+  - Each commit revalidated the scene and handed off.
+- **Reproduced.** `the_frame_angle_is_written_only_when_its_field_changes`
+  opens the Anisotropic crystal, sets its region to the first angle past 64°
+  that the round trip moves, and renders the panel four times with no input.
+  The angle moved by one ulp.
+- **Fix.** The angle is written back only when its field reports a change.
+  The test passes, with the other 38 material panel tests.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
