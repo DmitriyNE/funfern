@@ -26028,3 +26028,31 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 2: a pumped lane keeps its own carrier (NUM-1)
+
+- **Found by the review (NUM-1).** At a handoff, `carries_to` gives each of a
+  material's drive lanes the carrier of the first source lane with its
+  signature, the drive's kind and authored phase. The signature leaves the
+  frequency out on purpose, so that a frequency edit keeps its carrier.
+  - Pump a material's mass row at 1 Hz and its stiffness row at 1.5 Hz, both
+    at phase 0. Every handoff, from AMR or any edit, gave the stiffness row
+    the mass row's carrier.
+  - Its modulation jumped by 2π · 0.5 Hz · T, an inversion at T = 1 s.
+  - The device takes the host's mapping, so it jumped with the CPU, and no
+    fixture could see it.
+- **Reproduced.** `a_handoff_keeps_each_pumped_rows_own_carrier` carries such
+  a runtime onto the same generation at 1 s. The stiffness lane's carrier
+  stood at π before and 0 after.
+- **Fix.** A lane whose own index holds its signature in the source reads its
+  own carrier; only a lane whose drive moved searches for it. The test passes,
+  with the 129 other temporal tests, including the skin change that swaps two
+  rows with different signatures.
+- **Still open.** Two lanes with the same signature that swap rows in a skin
+  change are told apart by nothing. That was so before as well.
+- **Not added:** a two-pump variant of `handoff-driven`. Its reference takes
+  the same rule from the core, so it could not see this; the continuity of
+  each carrier is the oracle.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

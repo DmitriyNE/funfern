@@ -482,9 +482,14 @@ impl CanonicalRuntimeLayout {
     /// holds the same drive. A carrier follows its own drive, not the lane it
     /// used to sit in: a physics skin change moves one, the mass and stiffness
     /// rows swapping when `k` and `ε` exchange places, so the lane a pump
-    /// occupies changes while the pump does not. Two lanes that share a
-    /// signature cannot be told apart by phase either, so taking the first
-    /// gives the same carrier, and without a move each lane reads its own. A
+    /// occupies changes while the pump does not. A signature leaves the
+    /// frequency out, so that a frequency edit keeps its carrier, and two
+    /// lanes can share one while running at different frequencies: a lane
+    /// whose own index holds its signature in the source reads its own,
+    /// and only a lane whose drive moved searches for it. Taking the first
+    /// match for every lane gave a stiffness row pumped at 1.5 Hz the mass
+    /// row's 1 Hz carrier at each handoff (NUM-1 of the 2026-10-20 review).
+    /// Two such lanes that swap rows are still told apart by nothing. A
     /// record or lane with nothing to carry starts from the target's own
     /// authored anchors, as a drive just switched on should.
     pub fn carries_to(&self, target: &Self) -> Vec<CanonicalRuntimeCarry> {
@@ -502,10 +507,12 @@ impl CanonicalRuntimeLayout {
                 let drives = &self.records[source].drives;
                 CanonicalRuntimeCarry {
                     source: Some(source),
-                    lanes: record.drives.map(|signature| {
-                        signature.and_then(|signature| {
-                            drives.iter().position(|drive| *drive == Some(signature))
-                        })
+                    lanes: std::array::from_fn(|lane| {
+                        let signature = record.drives[lane]?;
+                        if drives[lane] == Some(signature) {
+                            return Some(lane);
+                        }
+                        drives.iter().position(|drive| *drive == Some(signature))
                     }),
                 }
             })
@@ -15246,6 +15253,51 @@ mod tests {
             }
         }
         layout
+    }
+
+    /// Reported by the 2026-10-20 review (NUM-1): a lane's signature leaves
+    /// its frequency out, so that a frequency edit keeps the carrier, and a
+    /// handoff gave each lane the carrier of the first lane with its
+    /// signature. Pumped on both rows at one phase and two frequencies, the
+    /// stiffness row took the mass row's carrier at every handoff, its
+    /// modulation jumping by 2π · 0.5 Hz · T, an inversion at T = 1 s; the
+    /// device takes the host's mapping, so it jumped with it. Carried onto the
+    /// same generation, every lane keeps the phase it had reached.
+    #[test]
+    fn a_handoff_keeps_each_pumped_rows_own_carrier() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.drive = pump(0.1, 1.0, 0.0);
+        scene.materials[0].stiffness_law.drive = pump(0.1, 1.5, 0.0);
+        let temporal = compile(&scene).unwrap();
+        let runtime = temporal.initial_runtime();
+        let time = 1.0;
+        let carried = runtime.carried_onto(&temporal, &temporal, time).unwrap();
+        let mut drives = [None; CanonicalMaterialDrive::COUNT];
+        for sample in temporal
+            .primary_coefficient_samples()
+            .chain(temporal.complementary_coefficient_samples())
+        {
+            drives[sample.drive.index()] = Some(sample.law.drive);
+        }
+        let mut checked = 0;
+        for (lane, drive) in drives.iter().enumerate() {
+            let Some(drive) = *drive else {
+                continue;
+            };
+            let before = runtime.records[0].drives[lane]
+                .carrier_phase(drive, time)
+                .unwrap();
+            let after = carried.records[0].drives[lane]
+                .carrier_phase(drive, time)
+                .unwrap();
+            let apart = (before - after).rem_euclid(std::f64::consts::TAU);
+            assert!(
+                apart.min(std::f64::consts::TAU - apart) < 1.0e-9,
+                "lane {lane}: its carrier stood at {before} rad before the handoff and {after} after"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 2, "both rows are pumped");
     }
 
     /// The handoff's runtime rule: a record carries on from its material's,
