@@ -1279,6 +1279,12 @@ pub struct PointProbeRecord {
 pub struct CurveProbeRecord {
     pub probe_id: u64,
     pub time: f64,
+    /// The arclength the frame was sampled over: the probe's in the
+    /// generation that recorded it, which ingestion sets. Integrated over one
+    /// length, the document's as it stood, a segment dragged from length 1
+    /// to 2 doubled every frame it had recorded (PR-13 of the 2026-10-20
+    /// review).
+    pub length: f64,
     pub displacement: Vec<f32>,
     pub transverse_magnitude: Vec<f32>,
     pub energy_density: Vec<f32>,
@@ -1993,6 +1999,7 @@ fn receive_curve_probe_readback(
             records.push(CurveProbeRecord {
                 probe_id: descriptor.id,
                 time,
+                length: f64::NAN,
                 displacement: values.iter().map(|sample| sample.primary.x).collect(),
                 transverse_magnitude: values.iter().map(|sample| sample.secondary.x).collect(),
                 energy_density: values.iter().map(|sample| sample.primary.y).collect(),

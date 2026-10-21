@@ -26762,3 +26762,32 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: each line-probe frame keeps the length it was sampled over (PR-13)
+
+- **Found by the review (PR-13).** A line probe's readout integrated every
+  frame of its history over one length, refreshed from the document, and
+  the records did not carry the length they were sampled over. Dragging a
+  segment from length 1 to 2 doubled the whole recorded integral history.
+- **Reproduced by reading:** one `length` was passed to
+  `curve_probe_integral` for every frame.
+- **Not the review's other fix.** Clearing a probe's trace on a geometry
+  edit would clear a boundary probe at every adaptation, since a remesh
+  moves the chords its samples sit on and so its length, unless a threshold
+  were invented. Each frame keeping its own length needs none.
+- **Fix.**
+  - `CurveProbeRecord` carries `length`.
+  - `configure_probes` keeps each line probe's arclength in the generation,
+    by the line recorder's revision, the current and the one before
+    (`line_probe_lengths`). A segment's length runs between its ends in the
+    generation's own definition; a boundary's runs along its stencils'
+    sample points.
+  - Ingestion stamps each frame with its revision's length.
+  - The readout integrates and profiles each frame over its own length, and
+    over the probe's as it stands for a frame ingested without one. The
+    averaged rows carry their frame's length.
+  - Test: `a_line_probes_frames_keep_the_length_they_were_sampled_over`.
+- **Checked on Metal:** the `observables` fixture passes.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

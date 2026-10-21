@@ -548,6 +548,14 @@ impl Playground {
         // A restarted clock disowns the run before it; anything else leaves the
         // last upload addressable, for the readback still on its way here.
         self.probe_upload_previous = (!restarted).then_some(self.probe_upload).flatten();
+        let previous = self
+            .probe_upload_previous
+            .map(|upload| upload.curve_revision);
+        let revision = request.curve_probe_revision();
+        self.curve_probe_lengths
+            .retain(|(kept, _)| Some(*kept) == previous && *kept != revision);
+        self.curve_probe_lengths
+            .push((revision, line_probe_lengths(active)));
         self.probe_upload = Some(ProbeUpload {
             token: active.bundle.token,
             generation: request.generation(),
@@ -747,12 +755,19 @@ impl Playground {
             })
         {
             self.curve_probe_readback = curves.readbacks;
+            let lengths = self
+                .curve_probe_lengths
+                .iter()
+                .find(|(revision, _)| *revision == curves.revision)
+                .map(|(_, lengths)| lengths.clone())
+                .unwrap_or_default();
             for record in &curves.records {
                 let trace = self
                     .curve_probe_traces
                     .entry(ProbeId(record.probe_id))
                     .or_default();
-                let record = record.clone();
+                let mut record = record.clone();
+                record.length = lengths.get(&record.probe_id).copied().unwrap_or(f64::NAN);
                 if record.time > trace.last_time {
                     trace.last_time = record.time;
                     trace.records.push_back(record);
@@ -805,6 +820,39 @@ impl Playground {
     }
 }
 
+/// Each line probe's arclength in `active`: a segment's between its ends, a
+/// boundary's along the points its stencils sample.
+fn line_probe_lengths(active: &PreparedTopology) -> std::collections::BTreeMap<u64, f64> {
+    active
+        .probes
+        .iter()
+        .filter_map(|compiled| {
+            let TopologyProbeCompilation::Ready(stencil) = &compiled.result else {
+                return None;
+            };
+            let length = match stencil.as_ref() {
+                TopologyProbeStencil::Boundary(samples) => samples
+                    .windows(2)
+                    .map(|pair| (pair[1].point - pair[0].point).norm())
+                    .sum(),
+                TopologyProbeStencil::Segment(_) => {
+                    match active
+                        .probe_definitions
+                        .iter()
+                        .find(|probe| probe.id == compiled.id)?
+                        .target
+                    {
+                        TopologyProbeTarget::Segment { start, end, .. } => (end - start).norm(),
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+            Some((compiled.id.0, length))
+        })
+        .collect()
+}
+
 /// A line or boundary probe's recorder input: each sample's stencil and the
 /// unit normal its flux is read along. A segment's positive flux crosses it to
 /// the left of its run from start to end, where the scene draws its arrow, so
@@ -848,7 +896,7 @@ fn line_probe_input(
 mod tests {
     use super::*;
     use crate::topology_editor::ClosedCurvePurpose;
-    use crate::wave_gpu::{FarFieldRecord, PointProbeRecord};
+    use crate::wave_gpu::{CurveProbeRecord, FarFieldRecord, PointProbeRecord};
 
     fn probe_upload(token: TopologyToken, generation: u64, revision: u64) -> ProbeUpload {
         ProbeUpload {
@@ -1281,6 +1329,69 @@ mod tests {
             .unwrap();
         probe.target = segment(end, start);
         assert_eq!(normals(&mut state), before);
+    }
+
+    /// PR-13 of the 2026-10-20 review: a line probe's integral history took
+    /// one length, the document's as it stood, for every frame, so dragging a
+    /// segment from length 1 to 2 doubled all it had recorded. Each frame
+    /// keeps the length its generation sampled it over.
+    #[test]
+    fn a_line_probes_frames_keep_the_length_they_were_sampled_over() {
+        let mut state = Playground::default();
+        let id = state
+            .editor
+            .create_probe(
+                "Line".into(),
+                [1, 2, 3],
+                TopologyProbeTarget::Segment {
+                    start: Point2::new(-0.5, 0.7),
+                    end: Point2::new(0.5, 0.7),
+                    preset: ProbeSamplingPreset::Low,
+                },
+            )
+            .unwrap()
+            .0;
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        assert_eq!(
+            line_probe_lengths(&active),
+            std::collections::BTreeMap::from([(id, 1.0)])
+        );
+
+        let token = active.bundle.token;
+        let ingest = |state: &mut Playground, revision: u64, readbacks: u64, time: f64| {
+            state.ingest_spatial_probes(
+                &CurveProbeDisplay {
+                    generation: 1,
+                    revision,
+                    records: vec![CurveProbeRecord {
+                        probe_id: id,
+                        time,
+                        normal_flux: vec![1.0, 1.0],
+                        ..Default::default()
+                    }],
+                    readbacks,
+                },
+                &AreaProbeDisplay::default(),
+                &FarFieldDisplay::default(),
+            );
+        };
+        state.probe_upload = Some(probe_upload(token, 1, 1));
+        state.curve_probe_lengths = vec![(1, std::collections::BTreeMap::from([(id, 1.0)]))];
+        ingest(&mut state, 1, 1, 0.5);
+        // The segment dragged to twice its length, and published.
+        state.probe_upload_previous = state.probe_upload;
+        state.probe_upload = Some(probe_upload(token, 1, 2));
+        state
+            .curve_probe_lengths
+            .push((2, std::collections::BTreeMap::from([(id, 2.0)])));
+        ingest(&mut state, 2, 2, 0.6);
+        let lengths = state.curve_probe_traces[&ProbeId(id)]
+            .records
+            .iter()
+            .map(|record| record.length)
+            .collect::<Vec<_>>();
+        assert_eq!(lengths, vec![1.0, 2.0]);
     }
 
     #[test]

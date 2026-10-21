@@ -183,6 +183,9 @@ pub struct Playground {
     pub(super) probe_views: BTreeMap<ProbeId, ProbeViewState>,
     pub(super) probe_status: BTreeMap<ProbeId, String>,
     pub(super) probe_metrics: BTreeMap<ProbeId, (f64, bool)>,
+    /// Each line probe's arclength by the line recorder's revision, the
+    /// current and the one before: what each frame is integrated over.
+    pub(super) curve_probe_lengths: Vec<(u64, BTreeMap<u64, f64>)>,
     pub(super) probe_anchors: BTreeMap<ProbeId, Point2>,
     pub(super) probe_metadata_token: Option<(Option<TopologyToken>, u64)>,
     pub(super) probe_name_edit: Option<(ProbeId, String)>,
@@ -448,6 +451,7 @@ impl Default for Playground {
             probe_views: BTreeMap::new(),
             probe_status: BTreeMap::new(),
             probe_metrics: BTreeMap::new(),
+            curve_probe_lengths: Vec::new(),
             probe_anchors: BTreeMap::new(),
             probe_metadata_token: None,
             probe_name_edit: None,

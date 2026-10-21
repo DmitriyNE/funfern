@@ -382,6 +382,7 @@ impl Playground {
             means.push(CurveProbeRecord {
                 probe_id: frame.probe_id,
                 time: frame.time,
+                length: frame.length,
                 normal_flux: flux.mean(covered, &frame.normal_flux),
                 energy_density: energy.mean(covered, &frame.energy_density),
                 ..Default::default()
@@ -918,6 +919,15 @@ impl Playground {
                 .probe_metrics
                 .get(&id)
                 .map_or(0.0, |(length, _)| *length);
+            // Each frame over the length it was sampled over, and the
+            // probe's as it stands for one ingested without it.
+            let length_of = |frame: &CurveProbeRecord| {
+                if frame.length.is_finite() {
+                    frame.length
+                } else {
+                    length
+                }
+            };
             // The averaged flux row can only look back as far as the trace
             // reaches, which at the faster presets is well short of the history
             // slider. Offering more than that would be a setting that shows
@@ -1233,8 +1243,11 @@ impl Playground {
                     }
                     if is_curve {
                         if let Some(frame) = curve_frames.last() {
-                            let (_, coverage) =
-                                Self::curve_probe_integral(frame, length, LineProbeQuantity::Field);
+                            let (_, coverage) = Self::curve_probe_integral(
+                                frame,
+                                length_of(frame),
+                                LineProbeQuantity::Field,
+                            );
                             if coverage < 0.999 {
                                 ui.small(format!("Valid coverage {:.0}%", coverage * 100.0));
                             }
@@ -1280,7 +1293,12 @@ impl Playground {
                                 [quantity.offset() + LineProbeRepresentation::Arclength.offset()]
                             {
                                 Self::curve_probe_profile(
-                                    ui, frames, &view, quantity, length, physics,
+                                    ui,
+                                    frames,
+                                    &view,
+                                    quantity,
+                                    frames.last().map_or(length, length_of),
+                                    physics,
                                 );
                             }
                             if view.readout.line_plots
@@ -1309,7 +1327,9 @@ impl Playground {
                                         probe_id: frame.probe_id,
                                         time: frame.time,
                                         displacement: Self::curve_probe_integral(
-                                            frame, length, quantity,
+                                            frame,
+                                            length_of(frame),
+                                            quantity,
                                         )
                                         .0,
                                         ..Default::default()
