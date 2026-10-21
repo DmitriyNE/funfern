@@ -52,7 +52,7 @@ use crate::picture_playout::{PictureCopy, PicturePlayout};
 use crate::wave_gpu::{
     AreaProbeBindGroup, CurveProbeBindGroup, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS,
     FarFieldBindGroup, ProbeBindGroup, VectorOverlayBindGroup, WaveGpuRequest, WavePipeline,
-    differencing_sample_due, probe_sample_due,
+    device_step, differencing_sample_due, probe_sample_due,
 };
 
 // `ShaderBuffer::from(T)` serializes into an owned byte vector and then copies
@@ -8298,6 +8298,7 @@ fn compute_canonical_wave(
         pass.set_pipeline(pipelines[13]);
         pass.dispatch_workgroups(1, 1, 1);
         let step_after = group.encoded_steps + offset + 1;
+        let recorder_step = device_step(step_after);
         if resident_filter && step_after.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
             if handles.needs_accounting {
                 // Per-step contributions live in a lane-paired scratch bank.
@@ -8328,7 +8329,7 @@ fn compute_canonical_wave(
         // rate, so they step past a filter commit; the others read only the
         // accepted lane and sample on their own cadence.
         if let Some((handles, bind_group, Some(consumer))) = point_recorder
-            && differencing_sample_due(step_after, handles.sample_stride, resident_filter)
+            && differencing_sample_due(recorder_step, handles.sample_stride, resident_filter)
         {
             pass.set_bind_group(0, &bind_group.bind_group, &[]);
             pass.set_pipeline(consumer);
@@ -8339,7 +8340,7 @@ fn compute_canonical_wave(
             && handles
                 .sample_strides
                 .iter()
-                .any(|stride| probe_sample_due(step_after, *stride))
+                .any(|stride| probe_sample_due(recorder_step, *stride))
         {
             pass.set_bind_group(0, &bind_group.bind_group, &[]);
             pass.set_pipeline(consumer);
@@ -8347,7 +8348,7 @@ fn compute_canonical_wave(
             pass.set_bind_group(0, &group.bind_group, &[]);
         }
         if let Some((handles, bind_group, Some(elements), Some(reduce))) = area_recorder
-            && probe_sample_due(step_after, handles.sample_stride)
+            && probe_sample_due(recorder_step, handles.sample_stride)
         {
             if handles.contribution_count > 0 {
                 pass.set_bind_group(0, &bind_group.bind_group, &[]);
@@ -8363,7 +8364,7 @@ fn compute_canonical_wave(
         }
         if let Some((handles, bind_group, Some(decide), Some(sample), Some(project), Some(advance))) =
             far_recorder
-            && differencing_sample_due(step_after, handles.sample_stride, resident_filter)
+            && differencing_sample_due(recorder_step, handles.sample_stride, resident_filter)
         {
             // Four dispatches, so that every thread of the middle two reads
             // the decision and the slot the ring stands at, which one thread

@@ -26614,3 +26614,31 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: the recorders are scheduled on the device's own step count (PR-10)
+
+- **Found by the review (PR-10).** The host chooses each recorder's dispatch
+  steps from its u64 count. The line recorder's shader then tests each
+  probe's stride again against the device's u32 `clock_u32.w`. Past 2^32
+  total steps, where 2^32 mod 36 = 4, no step the host chose for a stride of
+  36 passed that test: the line probe stopped recording, with nothing said,
+  while point and area recorders carried on. RT-12's unwrap does not touch
+  this.
+- **Not the review's first fix.** It suggested removing the shader's own
+  stride test, but each line probe has its own stride. The host dispatches
+  the shader when any probe is due, and the test is what picks the probes
+  due at that step.
+- **Reproduced.** `the_host_chooses_recorder_steps_on_the_devices_count`
+  runs the host's choices across the wrap and asks whether the shader's test
+  passes each. For a stride of 36 it refused them.
+- **Fix.** The host schedules every recorder at `device_step`, its count
+  wrapped onto the device's u32: the point, line, area and far-field
+  decisions alike. Host and shader then agree by construction, and the ring
+  slots, which the shader computes from the same count, follow. The filter
+  cadence of 16 divides 2^32 and is unchanged.
+- **Checked on Metal:** `canonical_gpu_filter_boundary`,
+  `canonical_gpu_temporal_consumer` and the `handoff-memory-running`,
+  `observables` and `far-field` fixtures pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

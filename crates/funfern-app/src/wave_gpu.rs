@@ -1819,6 +1819,15 @@ const fn probe_physics_flag(physics: PhysicsModel) -> f32 {
     }
 }
 
+/// The step the recorders are scheduled at: the device's own count, a u32
+/// the host's u64 one wraps onto. The line recorder tests each probe's stride
+/// on it again, and on the host's count, past 2^32 steps, no step chosen
+/// passed that test unless the stride divides 2^32 (PR-10 of the 2026-10-20
+/// review). The ring slots are the device's arithmetic on it too.
+pub(crate) fn device_step(step: u64) -> u64 {
+    u64::from(step as u32)
+}
+
 pub(crate) fn probe_sample_due(completed_step: u64, stride: u64) -> bool {
     stride > 0 && completed_step.is_multiple_of(stride)
 }
@@ -3309,6 +3318,28 @@ mod tests {
             request.curve_probes.is_none(),
             "the line recorder is cleared"
         );
+    }
+
+    /// PR-10 of the 2026-10-20 review: the line recorder tests each probe's
+    /// stride again on the device's u32 count. The host chose its steps on
+    /// its own u64 count, and past 2^32 steps, where 2^32 mod 36 = 4, no step
+    /// it chose for a stride of 36 passed the shader's test: the probe
+    /// stopped recording, with nothing said. Every step the host chooses is
+    /// one the shader records.
+    #[test]
+    fn the_host_chooses_recorder_steps_on_the_devices_count() {
+        let wrap = 1_u64 << 32;
+        for stride in [36_u64, 16, 1] {
+            let shader_records = |step: u64| (step as u32).is_multiple_of(stride as u32);
+            let chosen = (wrap - 100..wrap + 1000)
+                .filter(|step| probe_sample_due(device_step(*step), stride))
+                .collect::<Vec<_>>();
+            assert!(
+                chosen.iter().all(|step| shader_records(*step)),
+                "stride {stride}: the shader refuses steps the host chose"
+            );
+            assert!(chosen.len() as u64 >= 1100 / stride - 1, "stride {stride}");
+        }
     }
 
     #[test]
